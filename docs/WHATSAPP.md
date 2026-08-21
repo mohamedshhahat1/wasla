@@ -1,15 +1,19 @@
 # WhatsApp Integration
 
-**Status: In Progress** — the inbound webhook (verification, signature checking, parsing, tenant resolution, idempotent storage) and the outbound client are Implemented. The account connection API, media handling and template sync are Planned. See [../TASKS.md](../TASKS.md) phase 3.
+**Status: Implemented** — inbound webhook (verification, signature checking, parsing, tenant resolution, idempotent storage), the account connection API, and the outbound client. Media handling and template sync belong to later phases. See [../TASKS.md](../TASKS.md) phase 3.
 
 ## Endpoints
 
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /api/v1/webhooks/whatsapp` | Subscription verification challenge |
-| `POST /api/v1/webhooks/whatsapp` | Inbound messages and delivery statuses |
+| Endpoint | Auth | Purpose |
+| --- | --- | --- |
+| `GET /api/v1/webhooks/whatsapp` | Meta verify token | Subscription verification challenge |
+| `POST /api/v1/webhooks/whatsapp` | Meta signature | Inbound messages and delivery statuses |
+| `POST /api/v1/whatsapp/accounts` | Owner, admin | Connect a WhatsApp Business number |
+| `GET /api/v1/whatsapp/accounts` | Any member | List connected numbers |
+| `POST /api/v1/whatsapp/accounts/{id}/disable` | Owner, admin | Stop accepting and sending traffic |
+| `POST /api/v1/whatsapp/accounts/{id}/enable` | Owner, admin | Resume traffic |
 
-Both sit under the versioned prefix, so the callback URL configured in the Meta app dashboard is `https://<host>/api/v1/webhooks/whatsapp`.
+The webhook sits under the versioned prefix too, so the callback URL configured in the Meta app dashboard is `https://<host>/api/v1/webhooks/whatsapp`.
 
 ## Configuration
 
@@ -19,6 +23,14 @@ Both sit under the versioned prefix, so the callback URL configured in the Meta 
 | `META_VERIFY_TOKEN` | Shared secret for the subscription challenge |
 | `META_ACCESS_TOKEN` | Platform credential for outbound calls |
 | `META_APP_ID`, `META_API_VERSION` | Graph API target |
+
+## Connecting a number
+
+The identifiers are copied from the Meta app dashboard, so they are stripped on the way in: a trailing space in `phone_number_id` would silently break webhook resolution for every inbound message.
+
+The workspace comes from the access token — these payloads carry no tenant field, and an unknown field is rejected with `422` rather than ignored. `phone_number_id` is unique platform-wide, so a duplicate answers `409` saying only that the number is already connected; naming the workspace that holds it would be a disclosure. Disabling an account owned by another workspace answers `404` through the same scoped lookup that protects every other row.
+
+Disable and enable are named transitions rather than a general `PATCH` on status, because status is the only field with an operational meaning and the named transition keeps the audit trail readable.
 
 ## Subscription verification
 
@@ -37,7 +49,7 @@ When no app secret is configured the behaviour splits deliberately:
 
 ## Status codes
 
-Meta retries any non-2xx response and eventually disables a subscription that keeps failing. The endpoint therefore answers `200` for everything it cannot act on — unparseable bodies, unknown phone numbers, disabled accounts, shapes not yet modelled — and counts and logs each case instead. Only an invalid signature answers `403`, because that request did not come from Meta.
+Meta retries any non-2xx response and eventually disables a subscription that keeps failing. The webhook therefore answers `200` for everything it cannot act on — unparseable bodies, unknown phone numbers, disabled accounts, shapes not yet modelled — and counts and logs each case instead. Only an invalid signature answers `403`, because that request did not come from Meta.
 
 ## Tenant resolution
 
@@ -82,6 +94,7 @@ No AI processing, media downloading, or outbound calls. The request resolves the
 
 ## Planned
 
-- Account connection API (connect, list, disable) for workspace administrators.
 - An outbound send API, which belongs with conversations in phase 4: there is a message to persist and a 24-hour service window to enforce, and a raw send endpoint now would invite bypassing both.
+- Projection of delivery statuses and read receipts onto message rows, which needs the message model from phase 4.
 - Media download and storage (phase 9), template sync and campaigns (phase 11).
+- Per-workspace access tokens, once there is encryption at rest (phase 14).

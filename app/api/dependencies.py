@@ -22,6 +22,7 @@ from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
 from app.services.auth_service import AuthService
 from app.services.invitation_service import InvitationService
+from app.services.whatsapp_account_service import WhatsAppAccountService
 
 # auto_error is off so a missing header raises the same domain error as a bad
 # one, and every failure leaves through the same response envelope.
@@ -50,6 +51,16 @@ def get_invitation_service(session: SessionDep) -> InvitationService:
 
 
 InvitationServiceDep = Annotated[InvitationService, Depends(get_invitation_service)]
+
+
+def get_whatsapp_account_service(session: SessionDep) -> WhatsAppAccountService:
+    return WhatsAppAccountService(session=session)
+
+
+WhatsAppAccountServiceDep = Annotated[
+    WhatsAppAccountService,
+    Depends(get_whatsapp_account_service),
+]
 
 
 @dataclass(frozen=True, slots=True)

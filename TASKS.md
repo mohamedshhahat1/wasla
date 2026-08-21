@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0, 1 and 2 are complete. Phase 3 is nearly complete: the inbound webhook and the outbound client are in place; the account connection API is the remaining item before phase 4 (conversations).
+**Current position:** Phases 0, 1, 2 and 3 are complete. The one Phase 3 item still open is the projection of delivery statuses onto message rows, which cannot be built before the message model exists. Phase 4 (conversations) is next.
 
 ## Phase 0 — Foundation
 
@@ -75,19 +75,21 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] Inbound event persistence
 - [x] Idempotency on WhatsApp event IDs
 - [x] Webhook integration tests
+- [x] Account connection API (connect, list, disable, enable)
 - [x] Outbound client (text, media, location, buttons, lists, templates, read receipts)
 - [x] Outbound retry policy and error mapping
-- [ ] Account connection API (connect, list, disable)
-- [~] Delivery status and read receipts (stored as events; projection onto messages needs phase 4)
+- [~] Delivery status projection onto messages (statuses are stored as events; the projection needs the phase 4 message model)
 
 ## Phase 4 — Conversations
 
 - [ ] Contact model and repository
 - [ ] Conversation model and repository
 - [ ] Message model and repository
+- [ ] Inbound event projection into conversations and messages
+- [ ] Delivery status projection onto messages
 - [ ] Conversation mode (AI / HUMAN)
 - [ ] Assignment and ownership tracking
-- [ ] Outbound send API (with service-window enforcement)
+- [ ] Outbound send API (with 24-hour service window enforcement)
 - [ ] Conversation and message APIs
 
 ## Phase 5 — AI agents
@@ -172,6 +174,7 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] CORS and secure headers (CORS configurable; Nginx security headers in place)
 - [ ] Request size and timeout limits
 - [ ] Retry policies for external calls
+- [ ] Per-workspace credential encryption at rest
 - [ ] Performance review and indexing pass
 
 ## Phase 15 — Delivery
