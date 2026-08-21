@@ -12,10 +12,9 @@ a correctness question there.
 | Failure | Retried | Reason |
 | --- | --- | --- |
 | 429 | yes | Rejected outright; nothing was computed |
-| connection error | yes | No connection, so no request arrived |
-| read timeout | yes | May have completed, but a duplicate is invisible |
+| transport error | yes | Connect, timeout or protocol; a duplicate is invisible |
 | 5xx | yes | Same trade: cost, not customer-visible duplication |
-| 4xx other | no | Our request is wrong; repeating it will not help |
+| other 4xx | no | Our request is wrong; repeating it will not help |
 
 Requests set `store: false` and never use `previous_response_id`. Conversation
 memory is assembled from the workspace's own database, so provider-side state
@@ -147,12 +146,12 @@ class ResponsesClient:
         while True:
             try:
                 response = await self._http.post(url, json=payload, headers=headers)
-            except (httpx.ConnectError, httpx.TimeoutException) as error:
+            except httpx.TransportError as error:
+                # Connect, timeout and protocol failures alike: retrying can at
+                # worst duplicate an inference, which no customer ever sees.
                 if attempt >= self._max_attempts:
                     logger.warning("openai.unreachable", extra={"attempts": attempt})
-                    raise ExternalServiceError(
-                        "The AI provider could not be reached."
-                    ) from error
+                    raise ExternalServiceError("The AI provider could not be reached.") from error
                 await self._backoff(attempt)
                 attempt += 1
                 continue
