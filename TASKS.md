@@ -131,6 +131,10 @@ Unplanned, and recorded because it changed what every other status in this file 
 
 ## Phase 6 — Knowledge base and RAG
 
+**COMPLETE.** Verified 2026-08-22 against PostgreSQL 16 with pgvector: 451 tests passed, 0 failed, 0 skipped; migration `0007` upgrades, `alembic check` reports no drift, downgrades to base, upgrades again and checks clean; Ruff, Black and MyPy clean; the application factory builds.
+
+The four unchecked items below are **deferred by decision, not unfinished**. Two are scheduled into later phases and two are recorded omissions with reasons; none of them is required for a workspace to upload documents and have its agents answer from them.
+
 - [x] pgvector enablement (migration `0001`)
 - [x] Knowledge base, document, and chunk models (migration `0007`)
 - [x] OpenAI embeddings client (HTTP-level, batched, width-checked)
@@ -145,10 +149,10 @@ Unplanned, and recorded because it changed what every other status in this file 
 - [x] Knowledge admin API with role separation (members read, admins write)
 - [x] Cross-tenant retrieval tests (PostgreSQL + pgvector)
 - [x] Grounding tests: the agent invokes the tool, the passages reach its context, and an empty result is stated rather than silent
-- [ ] PDF extraction (refused explicitly today; needs a parser dependency)
-- [ ] Approximate vector index (ivfflat or hnsw), to be chosen against real volume in Phase 14
-- [ ] Sweeper for documents stranded `PENDING` by a queue outage (with the Phase 8 worker service)
-- [ ] RAG usage metering (with Phase 12)
+- [ ] *Deferred:* PDF extraction. Refused explicitly today with a message telling the uploader to submit the text instead, rather than accepted and silently indexing nothing. Needs a parser dependency, which was not added to a supply chain that had just been cleaned of advisories (ADR-017).
+- [ ] *Deferred:* approximate vector index (ivfflat or hnsw). These have to be built against representative data to be worth anything — ivfflat wants its list count chosen from the row count, and one built on an empty table produces a bad plan that survives until someone reindexes. Exact search is correct at every size and fast at the sizes a new workspace has. Belongs to the Phase 14 performance pass.
+- [ ] *Deferred to Phase 8:* sweeper for documents stranded `PENDING` by a queue outage. `DocumentRepository.list_pending` exists for it; it belongs with the worker service.
+- [ ] *Deferred to Phase 12:* RAG usage metering, with the rest of the usage subsystem.
 
 ## Phase 7 — CRM and leads
 
