@@ -2,7 +2,7 @@
 
 Scope: contacts, conversations, human handoff, leads, and follow-ups.
 
-Conversations, contacts and handoff are implemented (Phase 4). Leads are implemented (Phase 7). Follow-ups and sentiment are **Status: Planned** — see [../TASKS.md](../TASKS.md) phases 8 and 10.
+Conversations, contacts and handoff are implemented (Phase 4). Leads are implemented (Phase 7). Follow-ups are implemented (Phase 8). Sentiment is **Status: Planned** — see [../TASKS.md](../TASKS.md) phase 10.
 
 ## Conversations
 
@@ -93,7 +93,41 @@ Listing supports filtering by status, source, assignee, unassigned-only, tag, fr
 
 ## Follow-ups
 
-**Status: Planned.** Soft signals such as "I'll think about it" will schedule a follow-up. Before sending, the system re-checks whether the customer replied; pending follow-ups are cancelled or re-evaluated when they do. Follow-ups will be cancellable, idempotent, and will respect the WhatsApp service window and template rules ([WHATSAPP.md](WHATSAPP.md)).
+A follow-up is a promise to say something later unless the customer speaks first. Soft signals such as "I'll think about it" lead an agent to call `schedule_follow_up`; a person can schedule one over the API.
+
+### Model
+
+`follow_ups` carries `tenant_id`, `conversation_id`, `lead_id`, `scheduled_at`, `status`, `body`, `template_name`, `template_language`, `template_components`, `reason`, `created_by_id`, `created_by_kind`, `attempts`, `last_error`, `sent_at`, `cancelled_at`, `cancelled_reason` and `message_id`.
+
+The row carries both what to say inside the service window (`body`) and which approved template to use outside it, because which one applies is not known until the moment it comes due.
+
+### One pending nudge per conversation
+
+Enforced by a partial unique index. Scheduling again while one waits **reschedules** it rather than adding a second — an agent that decides to follow up on every turn would otherwise stack notifications on one customer's phone. A finished follow-up releases the slot, so a conversation can be followed up again later.
+
+### Cancellation on reply
+
+A customer's reply cancels the waiting nudge, and this happens on the **inbound webhook path**, in the same transaction that stores the message. Leaving it for the worker would allow a sweep between the reply landing and the cancellation being visible. A delivery status is not a reply and cancels nothing.
+
+Cancelling something already sent succeeds and changes nothing: losing that race is not the caller's mistake, and their intent already holds.
+
+### Window and template compliance
+
+| Situation | What happens |
+| --- | --- |
+| Inside the 24-hour window, has a body | Free text is sent |
+| Outside the window, has an approved template | The template is sent |
+| Outside the window, no template | **`SKIPPED`** — not sent, recorded, never retried |
+| Conversation closed before it came due | `SKIPPED` |
+| Send attempted and rejected | Retried with widening backoff, then `FAILED` |
+
+`SKIPPED` and `FAILED` are deliberately different states. `FAILED` means an attempt broke and may work later. `SKIPPED` means Wasla decided not to send because sending would breach WhatsApp's rules — a policy outcome that retrying can never fix, since the window does not reopen on its own. The reason is written to `last_error` either way, so a workspace can see why its nudge never went out.
+
+**Known gap.** There is no template registry until Phase 11, so `template_name` is free text and nothing can confirm Meta has approved it before the send is attempted.
+
+### Delivery
+
+A polling worker sweeps every 30 seconds for rows whose time has come, claiming them with `SELECT ... FOR UPDATE SKIP LOCKED` so two replicas cannot send the same message twice ([ADR-022](../DECISIONS.md)). A follow-up therefore fires within one poll interval of its due time rather than exactly at it.
 
 ## Sentiment and priority
 

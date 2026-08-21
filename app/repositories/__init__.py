@@ -12,6 +12,7 @@ from .conversation_repository import (
     ConversationRepository,
     MessageRepository,
 )
+from .follow_up_repository import DueFollowUpClaim, FollowUpRepository
 from .invitation_repository import InvitationRepository, InvitationTokenRepository
 from .knowledge_repository import (
     DocumentChunkRepository,
@@ -43,6 +44,8 @@ __all__ = [
     "ConversationRepository",
     "DocumentChunkRepository",
     "DocumentRepository",
+    "DueFollowUpClaim",
+    "FollowUpRepository",
     "InvitationRepository",
     "InvitationTokenRepository",
     "KnowledgeBaseRepository",

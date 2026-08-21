@@ -35,6 +35,7 @@ from app.repositories.whatsapp_repository import (
     WhatsAppEventRepository,
 )
 from app.services.conversation_service import ConversationProjectionService
+from app.services.follow_up_service import FollowUpService
 from app.workers.queue import AgentJob, AgentQueue
 
 logger = get_logger(__name__)
@@ -54,6 +55,7 @@ class IngestionOutcome:
     inactive_accounts: int = 0
     ignored: int = 0
     queued: int = 0
+    cancelled_follow_ups: int = 0
 
 
 class WhatsAppIngestionService:
@@ -69,11 +71,12 @@ class WhatsAppIngestionService:
         self._directory = WhatsAppAccountDirectory(session)
         self._repositories: dict[uuid.UUID, WhatsAppEventRepository] = {}
         self._projections: dict[uuid.UUID, ConversationProjectionService] = {}
+        self._follow_ups: dict[uuid.UUID, FollowUpService] = {}
         self._accounts: dict[str, WhatsAppAccount | None] = {}
 
     async def ingest(self, payload: Mapping[str, Any]) -> IngestionOutcome:
         envelope = parse_webhook(payload)
-        stored = duplicates = unknown = inactive = 0
+        stored = duplicates = unknown = inactive = cancelled = 0
         ignored = envelope.ignored
         answering: list[tuple[uuid.UUID, uuid.UUID]] = []
 
@@ -126,6 +129,15 @@ class WhatsAppIngestionService:
             if isinstance(source, InboundMessage):
                 message = await projection.project_message(account_id=account.id, message=source)
                 answering.append((account.tenant_id, message.conversation_id))
+                # The customer has spoken, so any nudge waiting on this
+                # conversation has lost its reason. Cancelled here, on the
+                # inbound path, rather than left for the follow-up worker to
+                # notice: the worker may sweep before this transaction's effects
+                # are visible to it, and a message that talks over someone who
+                # is already talking is exactly what a follow-up must never do.
+                cancelled += await self._follow_up_service(
+                    account.tenant_id
+                ).cancel_for_conversation(conversation_id=message.conversation_id)
             else:
                 # A delivery status tells us about our own message. There is
                 # nothing for an agent to reply to.
@@ -143,6 +155,7 @@ class WhatsAppIngestionService:
             inactive_accounts=inactive,
             ignored=ignored,
             queued=queued,
+            cancelled_follow_ups=cancelled,
         )
 
     async def _enqueue(self, conversations: list[tuple[uuid.UUID, uuid.UUID]]) -> int:
@@ -191,6 +204,19 @@ class WhatsAppIngestionService:
             repository = WhatsAppEventRepository(self._session, tenant_id=tenant_id)
             self._repositories[tenant_id] = repository
         return repository
+
+    def _follow_up_service(self, tenant_id: uuid.UUID) -> FollowUpService:
+        """Cached per tenant, like the projection: one delivery can carry several
+        messages for the same workspace.
+
+        No settings are passed because nothing on this path sends anything - only
+        `dispatch` needs them, and that runs in the worker.
+        """
+        service = self._follow_ups.get(tenant_id)
+        if service is None:
+            service = FollowUpService(session=self._session, tenant_id=tenant_id)
+            self._follow_ups[tenant_id] = service
+        return service
 
     def _projection(self, tenant_id: uuid.UUID) -> ConversationProjectionService:
         projection = self._projections.get(tenant_id)

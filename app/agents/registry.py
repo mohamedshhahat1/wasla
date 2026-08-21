@@ -15,15 +15,18 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Final, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError
+from app.core.exceptions import ConflictError, ValidationError
 from app.core.logging import get_logger
 from app.db.models.conversation import ConversationMode
+from app.db.models.lead import ActorKind
 from app.integrations.openai.embeddings import EmbeddingsClient
 from app.integrations.openai.types import ToolSpec
+from app.services.follow_up_service import MAX_DELAY, MIN_DELAY, FollowUpService
 from app.services.inbox_service import InboxService
 from app.services.lead_service import ExtractedLead, LeadService
 from app.services.retrieval_service import DEFAULT_TOP_K, MAX_TOP_K, RetrievalService
@@ -35,6 +38,7 @@ ParameterType = Literal["string", "integer", "number", "boolean"]
 HANDOFF_TOOL: Final = "request_human_handoff"
 SEARCH_KNOWLEDGE_TOOL: Final = "search_knowledge"
 RECORD_LEAD_TOOL: Final = "record_lead_details"
+SCHEDULE_FOLLOW_UP_TOOL: Final = "schedule_follow_up"
 # Conversation.handoff_reason is String(200); a longer reason would fail at the
 # database rather than at the model.
 MAX_HANDOFF_REASON_LENGTH: Final = 200
@@ -401,6 +405,95 @@ RECORD_LEAD_DEFINITION: Final = ToolDefinition(
 )
 
 
+# Expressed in minutes because that is the unit the model reasons in when a
+# customer says "next week"; the service takes a timedelta.
+MIN_FOLLOW_UP_MINUTES: Final = int(MIN_DELAY.total_seconds() // 60)
+MAX_FOLLOW_UP_MINUTES: Final = int(MAX_DELAY.total_seconds() // 60)
+
+
+async def _schedule_follow_up(context: ToolContext, arguments: dict[str, Any]) -> str:
+    """Arrange to say something later if the customer goes quiet.
+
+    Like the lead tool, this names no record: the follow-up belongs to the
+    conversation the turn is already in. Scheduling twice reschedules rather than
+    queueing a second message, so a model that calls it on every turn cannot
+    stack up notifications on one customer's phone.
+    """
+    minutes = int(arguments["delay_minutes"])
+    message = str(arguments["message"]).strip()
+    reason = _optional_text(arguments.get("reason"))
+
+    service = FollowUpService(session=context.session, tenant_id=context.tenant_id)
+    try:
+        follow_up = await service.schedule(
+            conversation_id=context.conversation_id,
+            delay=timedelta(minutes=minutes),
+            body=message,
+            reason=reason,
+            created_by_kind=ActorKind.AGENT,
+        )
+    except ValidationError as error:
+        # Written for the model to read and correct on the next turn: a delay
+        # outside the bounds, or a conversation that has since been closed.
+        return f"The follow-up was not scheduled: {error}"
+
+    logger.info(
+        "agent.follow_up_scheduled",
+        extra={
+            "conversation_id": str(context.conversation_id),
+            "follow_up_id": str(follow_up.id),
+        },
+    )
+    return (
+        "A follow-up has been scheduled. Do not mention it to the customer as a "
+        "system action; if it is natural to say you will get back to them, say it "
+        "in your own words."
+    )
+
+
+SCHEDULE_FOLLOW_UP_DEFINITION: Final = ToolDefinition(
+    name=SCHEDULE_FOLLOW_UP_TOOL,
+    description=(
+        "Arrange to message the customer again later if they go quiet. Use it "
+        "when they say they will think about it, ask you to check back, or leave "
+        "a question open. Do not use it to send something now - just reply. "
+        "Calling it again replaces the follow-up already waiting rather than "
+        "adding a second, so it is safe to update as the conversation moves on."
+    ),
+    parameters=(
+        ToolParameter(
+            name="delay_minutes",
+            type="integer",
+            description=(
+                "How long to wait before following up, in minutes "
+                f"({MIN_FOLLOW_UP_MINUTES} to {MAX_FOLLOW_UP_MINUTES}). "
+                "Use what the customer asked for: 1440 for tomorrow, 10080 for "
+                "next week."
+            ),
+        ),
+        ToolParameter(
+            name="message",
+            type="string",
+            description=(
+                "What to send when the time comes, written as you would say it "
+                "to the customer, in the language they are using. Make it stand "
+                "on its own - they may not remember this conversation."
+            ),
+        ),
+        ToolParameter(
+            name="reason",
+            type="string",
+            description=(
+                "One short note for the colleague who reviews this later, "
+                "explaining why a follow-up was appropriate."
+            ),
+            required=False,
+        ),
+    ),
+    handler=_schedule_follow_up,
+)
+
+
 class ToolRegistry:
     """The tools this deployment implements.
 
@@ -464,4 +557,5 @@ def build_default_registry() -> ToolRegistry:
     registry.register(HANDOFF_DEFINITION)
     registry.register(SEARCH_KNOWLEDGE_DEFINITION)
     registry.register(RECORD_LEAD_DEFINITION)
+    registry.register(SCHEDULE_FOLLOW_UP_DEFINITION)
     return registry

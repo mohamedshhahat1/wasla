@@ -1,6 +1,6 @@
 # API
 
-**Status: In Progress** — health, authentication, invitations, WhatsApp accounts, the WhatsApp webhook, conversations, the knowledge base and leads are Implemented. Everything else is Planned.
+**Status: In Progress** — health, authentication, invitations, WhatsApp accounts, the WhatsApp webhook, conversations, the knowledge base, leads and follow-ups are Implemented. Everything else is Planned.
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
@@ -153,9 +153,33 @@ Four behaviours worth knowing:
 - **An illegal status move answers `422`.** The permitted transitions are a graph, not a free-for-all — see [CRM.md](CRM.md). Setting the status a lead already has succeeds and changes nothing, so a retry is safe.
 - **`human_verified_fields` is returned on every lead.** It names the fields an agent will not overwrite, so an interface can show which values are pinned.
 
+## Follow-ups
+
+**Status: Implemented.** Full behaviour in [CRM.md](CRM.md).
+
+| Method | Path | Role |
+| --- | --- | --- |
+| GET | `/api/v1/follow-ups` | Any workspace member |
+| POST | `/api/v1/follow-ups` | Any workspace member (`201`) |
+| GET | `/api/v1/follow-ups/{follow_up_id}` | Any workspace member |
+| POST | `/api/v1/follow-ups/{follow_up_id}/cancel` | Any workspace member |
+
+Open to any member on purpose: a follow-up is a message to a customer someone is already handling, and requiring an administrator to stop one would mean the person watching the conversation cannot cancel a nudge they can see has become wrong.
+
+Listing filters by `status` (repeatable), `conversation_id` and `lead_id`, paged by cursor.
+
+Four behaviours worth knowing:
+
+- **Supply exactly one of `delay_minutes` or `scheduled_at`.** Both, or neither, answers `422`. Accepting both would leave the server silently choosing.
+- **Supply a `body`, a template, or both.** A template needs both `template_name` and `template_language`; half a template answers `422`.
+- **Scheduling a second follow-up on one conversation replaces the first.** It answers `201` either way, and there is no route that edits one in place.
+- **Cancelling one already sent or cancelled succeeds and changes nothing.** Losing that race is not the caller's mistake.
+
+There is no endpoint that sends a follow-up now. Sending is the worker's job, and "send this immediately" is just a message — use `POST /conversations/{id}/messages`.
+
 ## Planned tenant endpoints
 
-`/api/v1/contacts`, `/api/v1/follow-ups`, `/api/v1/campaigns`, `/api/v1/analytics`, `/api/v1/usage`, `/api/v1/billing`.
+`/api/v1/contacts`, `/api/v1/campaigns`, `/api/v1/analytics`, `/api/v1/usage`, `/api/v1/billing`.
 
 ## Planned platform endpoints
 

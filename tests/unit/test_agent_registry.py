@@ -5,6 +5,7 @@ import pytest
 from app.agents.registry import (
     HANDOFF_TOOL,
     RECORD_LEAD_TOOL,
+    SCHEDULE_FOLLOW_UP_TOOL,
     SEARCH_KNOWLEDGE_TOOL,
     ToolArgumentError,
     ToolDefinition,
@@ -195,8 +196,32 @@ def test_the_default_registry_offers_the_expected_tools():
     assert registry.knows(HANDOFF_TOOL)
     assert registry.knows(SEARCH_KNOWLEDGE_TOOL)
     assert registry.knows(RECORD_LEAD_TOOL)
+    assert registry.knows(SCHEDULE_FOLLOW_UP_TOOL)
     # `names()` is sorted, so this reads alphabetically rather than by age.
-    assert registry.names() == (RECORD_LEAD_TOOL, HANDOFF_TOOL, SEARCH_KNOWLEDGE_TOOL)
+    assert registry.names() == (
+        RECORD_LEAD_TOOL,
+        HANDOFF_TOOL,
+        SCHEDULE_FOLLOW_UP_TOOL,
+        SEARCH_KNOWLEDGE_TOOL,
+    )
+
+
+def test_the_follow_up_tool_offers_no_way_to_name_a_follow_up():
+    """The nudge belongs to the conversation the turn is already in."""
+    definition = build_default_registry().get(SCHEDULE_FOLLOW_UP_TOOL)
+
+    assert definition is not None
+    names = {parameter.name for parameter in definition.parameters}
+    assert not names & {"follow_up_id", "conversation_id", "tenant_id"}
+
+
+def test_the_follow_up_tool_needs_a_time_and_a_message():
+    """Both required: a nudge with neither is not a nudge."""
+    definition = build_default_registry().get(SCHEDULE_FOLLOW_UP_TOOL)
+
+    assert definition is not None
+    required = set(definition.json_schema()["required"])
+    assert required == {"delay_minutes", "message"}
 
 
 def test_recording_a_lead_asks_for_nothing_in_particular():

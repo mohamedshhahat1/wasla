@@ -11,7 +11,7 @@ Technical source of truth for the current system architecture. Every section car
 
 ## 1. System overview
 
-**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport, conversations, the agent orchestrator with its queue and worker, tenant-scoped knowledge retrieval, and lead management exist. Follow-ups, media, sentiment, campaigns, usage and billing do not.
+**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport, conversations, the agent orchestrator with its queue and worker, tenant-scoped knowledge retrieval, lead management and scheduled follow-ups exist. Media, sentiment, campaigns, usage and billing do not.
 
 Wasla is an API-first, multi-tenant backend. A business (tenant) connects one or more WhatsApp Business phone numbers. Inbound customer messages arrive as Meta webhooks, are resolved to a tenant, persisted, and queued for asynchronous AI processing. An agent orchestrator loads the conversation, retrieves tenant-scoped knowledge, calls the OpenAI Responses API with a controlled tool set, and replies through the WhatsApp Cloud API.
 
@@ -157,7 +157,7 @@ The cursor is opaque by construction rather than by obfuscation. It carries noth
 
 ## 6. AI agent flow
 
-**Status: In Progress** — configuration, memory, tools, orchestration, the queue and the worker are Implemented, as are the knowledge-search and lead-capture tools. Usage recording (Phase 12) and a process for the worker to run in (Phase 8) are not.
+**Status: In Progress** — configuration, memory, tools, orchestration, the queue and the worker are Implemented, as are the knowledge-search, lead-capture and follow-up tools. Usage recording (Phase 12) is not.
 
 ```
 Enqueued job -> worker reserves it -> open one session
@@ -254,11 +254,53 @@ Budgets arrive as plain numbers or not at all. `"500k"` is refused rather than g
 
 `lead_activities` is append-only — there is no service method and no route that edits or deletes an entry. An audit trail the application can rewrite does not answer the question it exists to answer, and the question here is "why does this lead say the budget is half a million".
 
-Follow-ups, which are scheduled, cancellable, and respect the WhatsApp 24-hour service window and template rules, arrive in Phase 8.
+Follow-ups are covered in the next section.
 
-## 10. Background jobs and Redis usage
+## 10. Follow-up flow
 
-**Status: In Progress** — the Redis client, its health probe, the refresh-token denylist, the agent job queue and the AI worker are Implemented. Media, ingestion, follow-up and campaign workers are not, and no worker yet runs as its own process.
+**Status: Implemented** — the model, scheduling, cancellation on reply, window and template compliance, the polling worker and the `schedule_follow_up` tool, exercised against real PostgreSQL.
+
+```
+"I'll think about it"
+    |
+schedule_follow_up (agent) or POST /follow-ups (person)
+    |
+one PENDING row per conversation  -- partial unique index
+    |
+    +--- customer replies ---> CANCELLED on the inbound path
+    |
+FollowUpWorker polls every 30s
+    |
+claim due rows: FOR UPDATE SKIP LOCKED   -- two replicas cannot both send
+    |
+inside the 24h window? --- yes ---> send free text ---> SENT
+    |
+    no
+    |
+has an approved template? -- yes --> send template ---> SENT
+    |
+    no
+    |
+  SKIPPED (recorded, never retried)
+```
+
+Unlike every other background job here, this one is **time**-triggered rather than event-triggered, so there is nothing to push and nothing to block on. It polls the database instead of holding a schedule in Redis (ADR-022): the follow-up must be a durable, cancellable, auditable row regardless, and a Redis sorted set carrying the same schedule would be a second source of truth that drifts the moment one is written without the other.
+
+Three properties are load-bearing, and each has a test.
+
+**A reply cancels the nudge, on the inbound path.** The follow-up exists because the customer went quiet; the moment they answer, its reason is gone. Cancellation happens in the webhook's own transaction rather than being left for the worker to notice, because the worker may sweep before that transaction's effects are visible to it — and a message that talks over someone who is already talking is exactly what a follow-up must never be. A delivery status is not a reply and cancels nothing.
+
+**Two replicas cannot send the same message twice.** `SKIP LOCKED` settles it in the database. The sweep is bounded per claim so a backlog drains in batches rather than under one long-held lock.
+
+**Not sending is a recorded outcome.** Outside the 24-hour window Meta accepts approved templates only, so a follow-up with no template is `SKIPPED` — distinct from `FAILED`, and never retried. `FAILED` means an attempt broke and may work later; `SKIPPED` means policy forbade it and the window will not reopen on its own. Collapsing the two would create a retry loop against a wall. The reason is written to the row, so a workspace can see why its nudge never went.
+
+A rejected send is retried with a widening backoff until the attempt limit, then left `FAILED` with the reason. Scheduling twice on one conversation reschedules rather than queueing a second message: an agent that decides to follow up on every turn would otherwise stack notifications on one customer's phone.
+
+**Known gap.** There is no template registry until Phase 11, so `template_name` is free text and nothing can confirm Meta has approved it before the send is attempted. That is the weakest point in this compliance story.
+
+## 11. Background jobs and Redis usage
+
+**Status: In Progress** — the Redis client, its health probe, the refresh-token denylist, the agent job queue, and the AI, ingestion and follow-up workers are Implemented. Media and campaign workers are not.
 
 Redis provides job queues, caching, rate limiting, follow-up scheduling, and temporary state. Workers handle AI processing, media processing, document ingestion and embeddings, follow-ups, campaigns, and usage aggregation.
 
@@ -266,9 +308,9 @@ The agent queue is three lists rather than one: `agent:jobs:pending`, `agent:job
 
 Two gaps are known and recorded rather than implied away. Nothing reaps the in-flight list, so a job abandoned by a killed worker stalls until an operator moves it; and requeueing is an operator decision, because re-running a job produces a second reply to the customer — these jobs are repeatable, not idempotent.
 
-## 11. Database architecture
+## 12. Database architecture
 
-**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, and the identity, tenancy, WhatsApp, conversation, agent, knowledge and CRM tables are Implemented; follow-up, campaign, usage and billing tables arrive in later phases.
+**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, and the identity, tenancy, WhatsApp, conversation, agent, knowledge, CRM and follow-up tables are Implemented; campaign, usage and billing tables arrive in later phases.
 
 PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically; migration `0002` creates `tenants`, `users`, `memberships`, and `tenant_invitations`; migration `0003` creates `whatsapp_accounts` and `whatsapp_events`; migration `0004` creates `contacts`, `conversations`, and `messages`; migration `0005` creates `agents` and `agent_tools`.
 
@@ -284,7 +326,7 @@ The schema carries one deliberate denormalisation. `conversations.last_inbound_a
 
 Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, the unique invitation token hash, `whatsapp_accounts (tenant_id)`, a platform-wide `UNIQUE(phone_number_id)`, `whatsapp_events (tenant_id)`, `whatsapp_events (account_id)`, `whatsapp_events (tenant_id, state)`, `UNIQUE(tenant_id, event_id)`, `contacts (tenant_id)`, `UNIQUE(tenant_id, wa_id)`, `conversations (tenant_id)`, `conversations (tenant_id, status)`, `conversations (tenant_id, last_message_at)`, `conversations (contact_id)`, `UNIQUE(tenant_id, contact_id, account_id)`, `messages (tenant_id)`, `messages (conversation_id, created_at)`, `UNIQUE(tenant_id, wa_message_id)`, `agents (tenant_id)`, `agents (tenant_id, status)`, `UNIQUE(tenant_id, name)` on agents, `agent_tools (tenant_id)`, `agent_tools (agent_id)`, and `UNIQUE(tenant_id, agent_id, name)`. Further indexes are planned on lead `(tenant_id, status)`, usage and analytics `(tenant_id, created_at)`, and document `tenant_id`.
 
-## 12. Multi-tenancy
+## 13. Multi-tenancy
 
 **Status: Implemented** — enforced in the repository layer and tested against a real database.
 
@@ -296,13 +338,13 @@ A background worker has no authenticated context to take a tenant id from, so it
 
 Cross-tenant reads answer `not_found`, never `forbidden`, so error codes cannot be used to map another tenant's data. `tests/integration/test_authorization.py`, `tests/integration/test_whatsapp_persistence.py` and `tests/integration/test_conversation_projection.py` prove this against PostgreSQL.
 
-## 13. SaaS owner architecture
+## 14. SaaS owner architecture
 
 **Status: In Progress** — the platform role authorization layer is Implemented; the `app/platform/` surface is Planned.
 
 Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated: a platform role grants nothing inside a workspace, which is tested. The platform layer lives in `app/platform/` and is exposed under `/api/v1/platform/*` for tenant administration, usage, revenue, plans, subscriptions, system health, and audit logs. Privileged platform actions are always audit-logged.
 
-## 14. Authentication and authorization
+## 15. Authentication and authorization
 
 **Status: Implemented** — rate limiting on authentication endpoints remains Planned (phase 14).
 
@@ -310,7 +352,7 @@ Argon2id password hashing with rehash-on-login, typed access and refresh tokens,
 
 Conversation routes are open to every workspace member rather than to admins only, because restricting them would exclude the people who staff an inbox. Reading agent configuration is open for the same reason. Role gates stay on administrative actions: connecting a number, inviting a colleague, revoking an invitation, and changing what an agent says to customers.
 
-## 15. Billing and usage tracking
+## 16. Billing and usage tracking
 
 **Status: Planned**
 
@@ -318,7 +360,7 @@ Usage is a first-class subsystem of append-only usage events (`tenant_id`, `even
 
 Token usage is already returned by the provider client and logged per turn, so the recorder has a source when it is built.
 
-## 16. Observability
+## 17. Observability
 
 **Status: Implemented** — structured logging, request IDs, and health endpoints exist and are tested. OpenTelemetry, Prometheus, and Sentry remain Planned.
 
@@ -338,7 +380,7 @@ Events that are expected but worth counting are logged rather than raised: an un
 
 An agent turn logs one summary event carrying the rounds taken, the tools run, whether it handed off, the estimated and actual token counts, and how many history turns were dropped, which is what makes a bad prompt or an over-tight budget diagnosable after the fact. Provider failures log the status, the attempt count and the provider's error `code` and `type` — never its prose, because that prose can quote the request and the request contains a customer's conversation.
 
-## 17. CI/CD and production deployment
+## 18. CI/CD and production deployment
 
 **Status: In Progress** — CI is Implemented; deployment automation and worker containers are Planned.
 

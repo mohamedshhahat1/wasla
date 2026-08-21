@@ -181,12 +181,16 @@ Deferred by decision, not unfinished:
 
 ## Phase 8 — Follow-ups
 
-- [ ] Follow-up model
-- [ ] Scheduling service
-- [ ] Follow-up worker
+- [x] Follow-up model (migration `0009`)
+- [x] Scheduling service, rescheduling rather than stacking nudges
+- [x] One pending follow-up per conversation, enforced by a partial unique index
+- [x] Follow-up worker, polling with `FOR UPDATE SKIP LOCKED` (ADR-022)
+- [x] Cancellation on customer reply, on the inbound webhook path
+- [x] Messaging-window and template compliance, with `SKIPPED` distinct from `FAILED`
+- [x] Retry with backoff and a bounded attempt count
+- [x] `schedule_follow_up` tool for agents
+- [x] Follow-up API
 - [ ] Worker service in Docker Compose (local and production)
-- [ ] Cancellation on customer reply
-- [ ] Messaging-window and template compliance
 
 ## Phase 9 — Media
 

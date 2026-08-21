@@ -435,3 +435,25 @@ The activity log carries the previous value because the protection is not suffic
 
 Consequences:
 An extra array column and an activity row per change — the log grows faster than the leads do, which is the expected cost of an audit trail. A person who typed a value wrongly must correct it themselves; the AI will not fix it for them. Extraction that is refused is recorded rather than silent, so the skip is visible in the timeline instead of looking like the model never tried.
+
+## ADR-022 — Follow-ups Are Polled From PostgreSQL, Not Queued in Redis
+
+Date:
+2026-08-22
+
+Status:
+Accepted
+
+Decision:
+Store each follow-up as a row in `follow_ups` and have a worker poll for rows whose `scheduled_at` has passed, claiming them with `SELECT ... FOR UPDATE SKIP LOCKED`. Do not put the schedule in Redis.
+
+Context:
+Every other background job in Wasla is event-triggered and arrives through a reliable Redis queue (ADR-015, ADR-019). A follow-up is different: it is triggered by *time*, and its due moment may be days after it was scheduled. Redis can express that — a sorted set keyed on the due timestamp is the standard trick — so the consistent-looking choice was to use one.
+
+Reason:
+The follow-up has to be a durable row regardless. A person must be able to see what is scheduled, cancel it, and read afterwards why it was or was not sent; a customer's reply has to cancel it; and the whole thing must survive a restart. Once that row exists, a Redis sorted set holding the same schedule is a second source of truth, and the two drift the moment one is written without the other — a cancellation that updates the row but not the set sends a message the business explicitly stopped.
+
+Polling costs one indexed query per interval, against a partial index covering only pending rows, which stays cheap as finished follow-ups accumulate. `SKIP LOCKED` gives the property the Redis queue was wanted for: two replicas sweeping at the same instant do not both send the same nudge, because the second steps over the rows the first has locked rather than blocking on them.
+
+Consequences:
+Precision is bounded by the poll interval — a follow-up fires within one interval of its due time rather than at it. For a nudge measured in half-hours that is not a meaningful difference, and buying exactness would mean a scheduler holding in-memory state that a restart loses. The claim is bounded per sweep so a backlog drains in batches rather than under one long-held lock. The worker is the only component in the codebase that queries across tenants; it does so through `DueFollowUpClaim`, a separate unscoped repository class named so that reaching for it is deliberate and visible in review, and every row it returns is handed to a `FollowUpService` scoped to that row's own tenant.

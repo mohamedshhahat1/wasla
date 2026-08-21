@@ -21,7 +21,8 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | AI agents (configuration, memory, tools, orchestrator, queue) | Implemented |
 | Knowledge base and RAG (ingestion, pgvector retrieval, `search_knowledge`) | Implemented |
 | CRM and leads (capture, lifecycle, assignment, notes, activity timeline, `record_lead_details`) | Implemented |
-| Follow-ups, media, sentiment, campaigns | Planned |
+| Follow-ups (scheduling, cancel-on-reply, window and template compliance, polling worker) | Implemented |
+| Media, sentiment, campaigns | Planned |
 | Usage, analytics, plans, subscriptions, billing | Planned |
 | Platform owner administration layer | Planned |
 | Worker processes and deployment automation | Planned |

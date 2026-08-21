@@ -22,6 +22,7 @@ from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
 from app.services.agent_service import AgentService
 from app.services.auth_service import AuthService
+from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
 from app.services.invitation_service import InvitationService
 from app.services.knowledge_service import KnowledgeService
@@ -157,6 +158,26 @@ def get_agent_service(
 
 
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
+
+
+def get_follow_up_service(
+    settings: SettingsDep,
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> FollowUpService:
+    """Workspace-scoped, so no route can pass a tenant id of its own choosing.
+
+    Settings are supplied even though no route dispatches a follow-up, so the
+    service a request holds is the same one the worker holds.
+    """
+    return FollowUpService(
+        session=session,
+        tenant_id=workspace.tenant.id,
+        settings=settings,
+    )
+
+
+FollowUpServiceDep = Annotated[FollowUpService, Depends(get_follow_up_service)]
 
 
 def get_inbox_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> InboxService:

@@ -14,6 +14,12 @@ from .conversation import (
     MessageStatus,
 )
 from .enums import InvitationStatus, PlatformRole, TenantRole, TenantStatus
+from .follow_up import (
+    MAX_ATTEMPTS,
+    TERMINAL_FOLLOW_UP_STATUSES,
+    FollowUp,
+    FollowUpStatus,
+)
 from .invitation import TenantInvitation
 from .knowledge import (
     EMBEDDING_DIMENSIONS,
@@ -53,8 +59,10 @@ __all__ = [
     "AGENT_WRITABLE_FIELDS",
     "ALLOWED_TRANSITIONS",
     "EMBEDDING_DIMENSIONS",
+    "MAX_ATTEMPTS",
     "MAX_SCORE",
     "MIN_SCORE",
+    "TERMINAL_FOLLOW_UP_STATUSES",
     "TERMINAL_STATUSES",
     "ActorKind",
     "Agent",
@@ -69,6 +77,8 @@ __all__ = [
     "DocumentChunk",
     "DocumentSource",
     "DocumentStatus",
+    "FollowUp",
+    "FollowUpStatus",
     "InvitationStatus",
     "KnowledgeBase",
     "Lead",
