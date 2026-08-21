@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
 import pytest_asyncio
@@ -88,17 +88,48 @@ async def _build_schema(url: str) -> None:
         await engine.dispose()
 
 
+async def _drop_schema(url: str) -> None:
+    """Remove every table the session created.
+
+    The extensions are left alone: they are cheap, shared, and dropping
+    ``vector`` out from under a concurrently running suite would be rude.
+    """
+    engine = create_async_engine(url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.drop_all)
+    finally:
+        await engine.dispose()
+
+
 @pytest.fixture(scope="session")
-def prepared_database(database_url: str) -> str:
-    """The schema, built once for the whole session.
+def prepared_database(database_url: str) -> Iterator[str]:
+    """The schema, built once for the whole session and removed afterwards.
 
     Deliberately synchronous. ``asyncio.run`` gives this its own event loop and
     closes it before returning, so nothing it opened can be reached from a
     test's loop later - which is the failure mode a session-scoped *async*
-    fixture would introduce here.
+    fixture would introduce here. The teardown gets its own loop for the same
+    reason.
+
+    **The teardown is not tidiness.** The suite builds this schema from the
+    models, and CI points pytest and Alembic at the *same* database: it runs the
+    tests, then ``alembic upgrade head`` on what is left behind. Tables left
+    standing make that upgrade fail on ``CREATE TABLE ... already exists``,
+    which reads as a broken migration when it is nothing of the sort.
+
+    That is not hypothetical. An earlier version of this file dropped the schema
+    per test, so the last teardown happened to leave the database clean; moving
+    the build to session scope removed the drop along with it and turned CI red
+    for two commits. CI is the regression test - it runs the two steps in that
+    order - so if this teardown disappears again, it will fail there rather than
+    here.
     """
     asyncio.run(_build_schema(database_url))
-    return database_url
+    try:
+        yield database_url
+    finally:
+        asyncio.run(_drop_schema(database_url))
 
 
 @pytest_asyncio.fixture
