@@ -23,7 +23,9 @@ from app.integrations.whatsapp.client import WhatsAppClient
 ACCESS_TOKEN = "meta-access-token"
 PHONE_NUMBER_ID = "109876543210"
 RECIPIENT = "201234567890"
-MESSAGES_URL = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
+# Built by concatenation on purpose: an f-string here needs literal braces
+# around nothing, which is easy to get wrong and impossible to notice.
+MESSAGES_URL = "https://graph.facebook.com/v21.0/" + PHONE_NUMBER_ID + "/messages"
 ACCEPTED = {
     "messaging_product": "whatsapp",
     "contacts": [{"input": RECIPIENT, "wa_id": RECIPIENT}],
