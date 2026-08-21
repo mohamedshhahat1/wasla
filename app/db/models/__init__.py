@@ -15,6 +15,14 @@ from .conversation import (
 )
 from .enums import InvitationStatus, PlatformRole, TenantRole, TenantStatus
 from .invitation import TenantInvitation
+from .knowledge import (
+    EMBEDDING_DIMENSIONS,
+    Document,
+    DocumentChunk,
+    DocumentSource,
+    DocumentStatus,
+    KnowledgeBase,
+)
 from .membership import Membership
 from .tenant import Tenant
 from .user import User
@@ -27,6 +35,7 @@ from .whatsapp import (
 )
 
 __all__ = [
+    "EMBEDDING_DIMENSIONS",
     "Agent",
     "AgentStatus",
     "AgentTool",
@@ -35,7 +44,12 @@ __all__ = [
     "Conversation",
     "ConversationMode",
     "ConversationStatus",
+    "Document",
+    "DocumentChunk",
+    "DocumentSource",
+    "DocumentStatus",
     "InvitationStatus",
+    "KnowledgeBase",
     "Membership",
     "Message",
     "MessageDirection",

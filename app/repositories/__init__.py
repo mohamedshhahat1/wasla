@@ -13,6 +13,12 @@ from .conversation_repository import (
     MessageRepository,
 )
 from .invitation_repository import InvitationRepository, InvitationTokenRepository
+from .knowledge_repository import (
+    DocumentChunkRepository,
+    DocumentRepository,
+    KnowledgeBaseRepository,
+    ScoredChunk,
+)
 from .membership_repository import MembershipRepository, UserMembershipRepository
 from .tenant_repository import TenantRepository
 from .user_repository import UserRepository
@@ -28,10 +34,14 @@ __all__ = [
     "BaseRepository",
     "ContactRepository",
     "ConversationRepository",
+    "DocumentChunkRepository",
+    "DocumentRepository",
     "InvitationRepository",
     "InvitationTokenRepository",
+    "KnowledgeBaseRepository",
     "MembershipRepository",
     "MessageRepository",
+    "ScoredChunk",
     "TenantRepository",
     "TenantScopedRepository",
     "UserMembershipRepository",

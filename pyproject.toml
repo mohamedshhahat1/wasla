@@ -21,6 +21,10 @@ dependencies = [
     "pydantic-settings>=2.7,<3",
     "sqlalchemy[asyncio]>=2.0.36,<2.1",
     "asyncpg>=0.30,<0.31",
+    # pgvector's SQLAlchemy type. The extension itself is enabled by migration
+    # 0001; this is the mapping that lets a Vector column be declared and
+    # queried like any other (ADR-008).
+    "pgvector>=0.3.6,<0.5",
     "alembic>=1.14,<2",
     "redis>=5.2,<6",
     "httpx>=0.28,<0.29",
@@ -98,6 +102,13 @@ disallow_untyped_defs = false
 # Insurance: the published wheel is typed, but a build without py.typed must
 # not turn into a strict-mode failure across the auth code.
 module = ["argon2.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# pgvector ships no py.typed marker. Only the Vector column type is imported
+# from it, and the model declares that column's Python type itself, so nothing
+# downstream loses checking.
+module = ["pgvector.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
