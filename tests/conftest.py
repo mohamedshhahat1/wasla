@@ -18,6 +18,23 @@ from app.core.exceptions import DependencyUnavailableError
 from app.main import create_app
 
 
+class FakeRedisCommands:
+    """The only Redis command a request issues: enqueueing work.
+
+    Reserving, releasing and dead-lettering belong to the worker, which is
+    covered by its own fake. Implementing them here would invite a route to
+    start using them.
+    """
+
+    def __init__(self) -> None:
+        self.pushed: dict[str, list[str]] = {}
+
+    async def rpush(self, key: str, value: str) -> int:
+        queue = self.pushed.setdefault(key, [])
+        queue.append(value)
+        return len(queue)
+
+
 class FakeDependency:
     """Stands in for the database or Redis client.
 
@@ -28,6 +45,12 @@ class FakeDependency:
         self.name = name
         self.healthy = healthy
         self.calls = 0
+        self.commands = FakeRedisCommands()
+
+    @property
+    def client(self) -> FakeRedisCommands:
+        """Mirrors RedisClient.client, which routes that queue work reach for."""
+        return self.commands
 
     async def check(self, timeout_seconds: float | None = None) -> None:
         self.calls += 1

@@ -1,7 +1,15 @@
 """Inbound WhatsApp ingestion.
 
 The webhook's only job: resolve the workspace, store the event once, project it,
-return. No AI, no media fetching, no outbound calls.
+ask a worker to answer, return. No inference happens here. A model call takes
+longer than Meta's retry window, so running it on this path would duplicate the
+work rather than deliver it.
+
+Jobs are enqueued before the request's transaction commits, which is the lesser
+of two evils. A job whose transaction then rolled back names a conversation that
+does not exist, and the worker dead-letters it with a log. Enqueueing after the
+commit would instead risk a stored message that no worker was ever told about,
+and that is the failure a customer notices.
 """
 
 from __future__ import annotations
@@ -12,6 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -26,26 +35,37 @@ from app.repositories.whatsapp_repository import (
     WhatsAppEventRepository,
 )
 from app.services.conversation_service import ConversationProjectionService
+from app.workers.queue import AgentJob, AgentQueue
 
 logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
 class IngestionOutcome:
-    """What happened to a webhook delivery. Every event lands in exactly one."""
+    """What happened to a webhook delivery. Every event lands in exactly one.
+
+    `queued` is not one of those buckets. It counts conversations handed to a
+    worker, which is at most the number of messages stored and often fewer.
+    """
 
     stored: int = 0
     duplicates: int = 0
     unknown_accounts: int = 0
     inactive_accounts: int = 0
     ignored: int = 0
+    queued: int = 0
 
 
 class WhatsAppIngestionService:
-    """Turns one webhook delivery into stored events and conversation rows."""
+    """Turns one webhook delivery into stored events and conversation rows.
 
-    def __init__(self, *, session: AsyncSession) -> None:
+    The queue is optional. Without it nothing is asked to answer, but events are
+    still stored and projected, which is all the projection tests need.
+    """
+
+    def __init__(self, *, session: AsyncSession, queue: AgentQueue | None = None) -> None:
         self._session = session
+        self._queue = queue
         self._directory = WhatsAppAccountDirectory(session)
         self._repositories: dict[uuid.UUID, WhatsAppEventRepository] = {}
         self._projections: dict[uuid.UUID, ConversationProjectionService] = {}
@@ -55,6 +75,7 @@ class WhatsAppIngestionService:
         envelope = parse_webhook(payload)
         stored = duplicates = unknown = inactive = 0
         ignored = envelope.ignored
+        answering: list[tuple[uuid.UUID, uuid.UUID]] = []
 
         # Messages and statuses are handled by the same loop because the storage
         # rules are identical; only the projection differs.
@@ -103,12 +124,17 @@ class WhatsAppIngestionService:
             stored += 1
             projection = self._projection(account.tenant_id)
             if isinstance(source, InboundMessage):
-                await projection.project_message(account_id=account.id, message=source)
+                message = await projection.project_message(account_id=account.id, message=source)
+                answering.append((account.tenant_id, message.conversation_id))
             else:
+                # A delivery status tells us about our own message. There is
+                # nothing for an agent to reply to.
                 await projection.project_status(status=source)
 
         if stored:
             await self._session.flush()
+
+        queued = await self._enqueue(answering)
 
         return IngestionOutcome(
             stored=stored,
@@ -116,7 +142,40 @@ class WhatsAppIngestionService:
             unknown_accounts=unknown,
             inactive_accounts=inactive,
             ignored=ignored,
+            queued=queued,
         )
+
+    async def _enqueue(self, conversations: list[tuple[uuid.UUID, uuid.UUID]]) -> int:
+        """Ask a worker to look at each conversation that received a message.
+
+        One job per conversation however many messages arrived: the worker reads
+        the conversation fresh, so a second job would only repeat the first.
+
+        Whether an agent should answer at all is not decided here. The
+        orchestrator refuses a conversation a human has taken over, and keeping
+        that judgement in one place is worth the occasional wasted job.
+
+        A queue failure is logged and swallowed. The messages are already stored,
+        and a non-2xx answer would make Meta retry the whole delivery and
+        eventually disable the subscription, so a Redis outage must not become a
+        webhook outage.
+        """
+        if self._queue is None or not conversations:
+            return 0
+
+        queued = 0
+        for tenant_id, conversation_id in dict.fromkeys(conversations):
+            job = AgentJob(tenant_id=tenant_id, conversation_id=conversation_id)
+            try:
+                await self._queue.enqueue(job)
+            except RedisError:
+                logger.warning(
+                    "agent.enqueue_failed",
+                    extra={"conversation_id": str(conversation_id)},
+                )
+                continue
+            queued += 1
+        return queued
 
     async def _account(self, phone_number_id: str) -> WhatsAppAccount | None:
         """Resolve once per delivery; a batch usually shares one number."""

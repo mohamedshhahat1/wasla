@@ -8,6 +8,9 @@ and eventually disables a persistently failing subscription, so an error status
 for a payload that will never become valid would turn one bad message into an
 outage. Only an invalid signature answers 403, because that request was not
 Meta's.
+
+No inference happens here. The endpoint stores what arrived and puts a job on the
+queue; the worker calls the model.
 """
 
 from __future__ import annotations
@@ -20,11 +23,12 @@ from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import PlainTextResponse
 
 from app.core.config import Settings
-from app.core.dependencies import SessionDep, SettingsDep
+from app.core.dependencies import RedisDep, SessionDep, SettingsDep
 from app.core.exceptions import DependencyUnavailableError, PermissionDeniedError
 from app.core.logging import get_logger
 from app.integrations.whatsapp.signature import SIGNATURE_HEADER, verify_signature
 from app.services.whatsapp_service import WhatsAppIngestionService
+from app.workers.queue import AgentQueue
 
 logger = get_logger(__name__)
 
@@ -36,8 +40,8 @@ router = APIRouter(prefix="/webhooks/whatsapp", tags=["WhatsApp"])
 # This provider lives here rather than in app/api/dependencies.py because that
 # module is the authentication wiring, and this endpoint is unauthenticated by
 # necessity: Meta cannot hold a credential of ours.
-def get_ingestion_service(session: SessionDep) -> WhatsAppIngestionService:
-    return WhatsAppIngestionService(session=session)
+def get_ingestion_service(session: SessionDep, redis: RedisDep) -> WhatsAppIngestionService:
+    return WhatsAppIngestionService(session=session, queue=AgentQueue(redis.client))
 
 
 IngestionServiceDep = Annotated[WhatsAppIngestionService, Depends(get_ingestion_service)]
@@ -99,7 +103,7 @@ async def receive_events(
     settings: SettingsDep,
     service: IngestionServiceDep,
 ) -> dict[str, str]:
-    """Store what arrived and return immediately."""
+    """Store what arrived, ask a worker to answer, and return."""
     body = await request.body()
     _require_signature(
         body=body,
@@ -121,6 +125,7 @@ async def receive_events(
             "unknown_accounts": outcome.unknown_accounts,
             "inactive_accounts": outcome.inactive_accounts,
             "ignored": outcome.ignored,
+            "queued": outcome.queued,
         },
     )
     return {"status": "accepted"}
