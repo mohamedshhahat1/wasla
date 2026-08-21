@@ -1,17 +1,20 @@
 """Repositories: the only place database queries are written.
 
-Keeping queries here is what makes tenant isolation enforceable. See
-``base.py`` for the scoping rules every tenant-owned model inherits.
+Every workspace-owned read starts from `TenantScopedRepository`, which applies
+the tenant filter in one place. The handful of lookups that legitimately cannot
+be scoped live in their own small classes so they stay visible.
 """
 
-from app.repositories.base import BaseRepository, TenantScopedRepository
-from app.repositories.invitation_repository import (
-    InvitationRepository,
-    InvitationTokenRepository,
+from .base import BaseRepository, TenantScopedRepository
+from .invitation_repository import InvitationRepository, InvitationTokenRepository
+from .membership_repository import MembershipRepository, UserMembershipRepository
+from .tenant_repository import TenantRepository
+from .user_repository import UserRepository
+from .whatsapp_repository import (
+    WhatsAppAccountDirectory,
+    WhatsAppAccountRepository,
+    WhatsAppEventRepository,
 )
-from app.repositories.membership_repository import MembershipRepository, UserMembershipRepository
-from app.repositories.tenant_repository import TenantRepository
-from app.repositories.user_repository import UserRepository
 
 __all__ = [
     "BaseRepository",
@@ -22,4 +25,7 @@ __all__ = [
     "TenantScopedRepository",
     "UserMembershipRepository",
     "UserRepository",
+    "WhatsAppAccountDirectory",
+    "WhatsAppAccountRepository",
+    "WhatsAppEventRepository",
 ]

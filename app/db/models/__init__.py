@@ -1,16 +1,19 @@
-"""Model registry.
-
-``Base.metadata`` and Alembic autogeneration only see models that are imported
-here, so every model module must be re-exported. ``alembic/env.py`` imports
-``Base`` from this module for exactly that reason.
-"""
+"""Declarative models. Importing this package registers every table on `Base`."""
 
 from app.db.base import Base
-from app.db.models.enums import InvitationStatus, PlatformRole, TenantRole, TenantStatus
-from app.db.models.invitation import TenantInvitation
-from app.db.models.membership import Membership
-from app.db.models.tenant import Tenant
-from app.db.models.user import User
+
+from .enums import InvitationStatus, PlatformRole, TenantRole, TenantStatus
+from .invitation import TenantInvitation
+from .membership import Membership
+from .tenant import Tenant
+from .user import User
+from .whatsapp import (
+    WhatsAppAccount,
+    WhatsAppAccountStatus,
+    WhatsAppEvent,
+    WhatsAppEventKind,
+    WhatsAppEventState,
+)
 
 __all__ = [
     "Base",
@@ -22,4 +25,9 @@ __all__ = [
     "TenantRole",
     "TenantStatus",
     "User",
+    "WhatsAppAccount",
+    "WhatsAppAccountStatus",
+    "WhatsAppEvent",
+    "WhatsAppEventKind",
+    "WhatsAppEventState",
 ]
