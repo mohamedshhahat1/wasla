@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0, 1, 2, 3 and 4 are complete. Stored WhatsApp events are projected into contacts, conversations and messages; delivery statuses advance those messages without ever moving one backwards; and the outbound send API enforces the 24-hour service window. Phase 5 (AI agents) is next.
+**Current position:** Phases 0 through 5 are complete. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API. What the worker still lacks is a process of its own to run in, which belongs with the Phase 8 worker service. Phase 6 (knowledge base and RAG) is next.
 
 ## Phase 0 — Foundation
 
@@ -100,14 +100,20 @@ This file is updated as part of every logical change. Phases follow the implemen
 
 ## Phase 5 — AI agents
 
-- [ ] Agent and agent-tool models
-- [ ] OpenAI Responses API integration layer
-- [ ] Agent configuration service
-- [ ] Agent orchestrator
-- [ ] Token-aware conversation memory
-- [ ] Tool registry and argument validation
-- [ ] AI worker
-- [ ] Orchestrator unit tests with mocked providers
+- [x] Agent and agent-tool models (migration `0005`)
+- [x] OpenAI Responses API integration layer (HTTP-level, no SDK — ADR-014)
+- [x] Agent configuration service
+- [x] Agent configuration API (CRUD, default promotion, tool grants, available tools)
+- [x] Token-aware conversation memory (message and token budgets, oldest turns dropped)
+- [x] Tool registry and argument validation (`request_human_handoff` implemented)
+- [x] Agent orchestrator (bounded tool-calling loop; decides a reply, never sends it)
+- [x] Agent job queue (pending, in-flight and failed lists — ADR-015)
+- [x] AI worker (reserves a job, runs the agent, sends through the messaging service)
+- [x] Enqueue from the inbound webhook path (one job per conversation, never AI on the request)
+- [x] Unit tests with a mocked provider (memory, registry, orchestrator, queue)
+- [ ] Agent model and migration parity tests (PostgreSQL-backed)
+- [ ] Worker process entrypoint and container service (with the Phase 8 worker)
+- [ ] In-flight reaper for jobs abandoned by a dead worker (with the Phase 8 worker)
 
 ## Phase 6 — Knowledge base and RAG
 
