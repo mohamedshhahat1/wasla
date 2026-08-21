@@ -5,12 +5,18 @@ Keeping queries here is what makes tenant isolation enforceable. See
 """
 
 from app.repositories.base import BaseRepository, TenantScopedRepository
+from app.repositories.invitation_repository import (
+    InvitationRepository,
+    InvitationTokenRepository,
+)
 from app.repositories.membership_repository import MembershipRepository, UserMembershipRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.repositories.user_repository import UserRepository
 
 __all__ = [
     "BaseRepository",
+    "InvitationRepository",
+    "InvitationTokenRepository",
     "MembershipRepository",
     "TenantRepository",
     "TenantScopedRepository",

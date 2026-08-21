@@ -21,6 +21,7 @@ from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
 from app.services.auth_service import AuthService
+from app.services.invitation_service import InvitationService
 
 # auto_error is off so a missing header raises the same domain error as a bad
 # one, and every failure leaves through the same response envelope.
@@ -42,6 +43,13 @@ def get_auth_service(
 
 
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
+
+
+def get_invitation_service(session: SessionDep) -> InvitationService:
+    return InvitationService(session=session)
+
+
+InvitationServiceDep = Annotated[InvitationService, Depends(get_invitation_service)]
 
 
 @dataclass(frozen=True, slots=True)
