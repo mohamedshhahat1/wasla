@@ -3,11 +3,13 @@
 Status legend:
 
 - `[ ]` Not started (Planned)
-- `[~]` In progress
 - `[x]` Completed (Implemented)
+- `[~]` In progress
 - `[!]` Blocked
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
+
+**Current position:** Phase 0 is complete. Phase 1 (database and tenancy foundation) is next.
 
 ## Phase 0 — Foundation
 
@@ -15,35 +17,36 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] Documentation protocol captured (`Documentation_Protocol.md`)
 - [x] Project memory files (README, ARCHITECTURE, TASKS, DECISIONS)
 - [x] `docs/` documentation structure
-- [~] Python project definition (`pyproject.toml`, pinned dependencies)
-- [~] Configuration management (Pydantic Settings, `.env.example`)
-- [~] Structured logging with request IDs
-- [~] Centralised error handling and domain exceptions
-- [~] Dependency injection wiring
-- [~] FastAPI application factory and minimal app
-- [~] Health endpoints (`/health`, `/health/live`, `/health/ready`)
-- [~] Database foundation (async SQLAlchemy 2.0 engine, session, declarative base)
-- [~] Alembic migration tooling
-- [~] Redis client and health check
-- [~] Testing infrastructure (pytest, pytest-asyncio, httpx client, fixtures)
-- [~] Initial test suite for the foundation
-- [~] Dockerfile and `.dockerignore`
-- [~] Docker Compose (API, worker, PostgreSQL + pgvector, Redis)
-- [~] Production Docker Compose
-- [~] Nginx reverse proxy example
-- [~] GitHub Actions CI pipeline
-- [ ] Pre-commit configuration
+- [x] Python project definition (`pyproject.toml`, pinned dependency ranges)
+- [x] Configuration management (Pydantic Settings, `.env.example`, production guard rails)
+- [x] Structured logging with request IDs and secret redaction
+- [x] Centralised error handling and domain exceptions
+- [x] Dependency injection wiring
+- [x] FastAPI application factory and minimal app
+- [x] Health endpoints (`/health`, `/health/live`, `/health/ready`)
+- [x] Database foundation (async SQLAlchemy 2.0 engine, session, declarative base)
+- [x] Alembic migration tooling
+- [x] Initial migration enabling `pgcrypto` and `vector`
+- [x] Redis client and health check
+- [x] Testing infrastructure (pytest, pytest-asyncio, httpx client, fixtures)
+- [x] Initial test suite for the foundation
+- [x] Dockerfile and `.dockerignore`
+- [x] Docker Compose (API, PostgreSQL + pgvector, Redis)
+- [x] Production Docker Compose
+- [x] Nginx reverse proxy example
+- [x] GitHub Actions CI pipeline
+- [x] Pre-commit configuration
 - [ ] Security workflow (dependency and secret scanning)
 
 ## Phase 1 — Database and tenancy foundation
 
-- [ ] Base model mixins (UUID keys, timestamps, soft delete)
+- [x] Base model mixins (UUID keys, timestamps, soft delete, tenant scope)
 - [ ] Tenant model
 - [ ] User model (global identity)
 - [ ] Membership model with `UNIQUE(user_id, tenant_id)`
 - [ ] Tenant invitation model
 - [ ] Role definitions (platform and tenant scopes)
-- [ ] Initial migration
+- [ ] Initial domain migration
 - [ ] Tenant and user repositories with enforced isolation
 - [ ] Tenant isolation tests
 
@@ -94,7 +97,7 @@ This file is updated as part of every logical change. Phases follow the implemen
 
 ## Phase 6 — Knowledge base and RAG
 
-- [ ] pgvector enablement
+- [x] pgvector enablement (migration `0001`)
 - [ ] Knowledge base, document, and chunk models
 - [ ] Ingestion pipeline (extract, chunk, embed, store)
 - [ ] Tenant-filtered vector search
@@ -114,6 +117,7 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [ ] Follow-up model
 - [ ] Scheduling service
 - [ ] Follow-up worker
+- [ ] Worker service in Docker Compose (local and production)
 - [ ] Cancellation on customer reply
 - [ ] Messaging-window and template compliance
 
@@ -159,7 +163,7 @@ This file is updated as part of every logical change. Phases follow the implemen
 
 - [ ] Rate limiting
 - [ ] Audit logging
-- [ ] CORS and secure headers
+- [x] CORS and secure headers (CORS configurable; Nginx security headers in place)
 - [ ] Request size and timeout limits
 - [ ] Retry policies for external calls
 - [ ] Performance review and indexing pass

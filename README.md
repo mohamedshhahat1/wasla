@@ -6,30 +6,37 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 
 ## Project status
 
-This repository is at **Phase 0 — Foundation**. The table below reflects the actual state of the code, not the roadmap.
+**Phase 0 — Foundation is complete.** Phase 1 (database and tenancy foundation) is next. The table below reflects the actual state of the code, not the roadmap.
 
 | Area | Status |
 | --- | --- |
 | Engineering rules (`claude.md`) | Implemented |
 | Documentation protocol (`Documentation_Protocol.md`) | Implemented |
 | Project memory (`README` / `ARCHITECTURE` / `TASKS` / `DECISIONS`, `docs/`) | Implemented |
-| Application foundation (FastAPI, config, logging, DB, Redis, Docker, CI) | In Progress |
+| Application foundation (FastAPI, config, logging, errors, DB, Redis, health, Docker, CI) | Implemented |
+| Domain models and migrations beyond extension enablement | Planned |
 | Multi-tenancy, auth, WhatsApp, AI agents, RAG, CRM, billing | Planned |
+| Background workers and deployment automation | Planned |
 
 Status vocabulary used across all documentation: **Implemented**, **In Progress**, **Planned**, **Blocked**.
 
 See [TASKS.md](TASKS.md) for the phase-by-phase roadmap and the current status of every task.
 
-## Planned technology stack
+## Technology stack
 
-- **Runtime:** Python 3.12+, FastAPI, Uvicorn
-- **Data:** PostgreSQL, SQLAlchemy 2.0 (async), Alembic, pgvector
-- **Cache / queues:** Redis
+In use today:
+
+- **Runtime:** Python 3.12, FastAPI, Uvicorn
+- **Data:** PostgreSQL 16 with pgvector, SQLAlchemy 2.0 (async), Alembic
+- **Cache / queues:** Redis 7
 - **Config / validation:** Pydantic v2, Pydantic Settings
+- **Quality:** Ruff, Black, MyPy, pytest, pytest-asyncio, pre-commit
+- **Delivery:** Docker, Docker Compose, Nginx, GitHub Actions
+
+Planned for later phases:
+
 - **AI:** OpenAI Responses API, OpenAI embeddings
 - **Messaging:** WhatsApp Business Cloud API (Meta Graph API) via httpx
-- **Quality:** Ruff, Black, MyPy, pytest, pytest-asyncio
-- **Delivery:** Docker, Docker Compose, Nginx, GitHub Actions
 
 ## Documentation map
 
@@ -53,7 +60,70 @@ See [TASKS.md](TASKS.md) for the phase-by-phase roadmap and the current status o
 
 ## Local development
 
-**Status: In Progress.** Setup, environment variables, database, migrations, Docker, workers, and test instructions are added to this section as the foundation lands in Phase 0. Nothing runnable is committed yet, so no commands are documented here.
+**Status: Implemented.**
+
+### Requirements
+
+Either Docker with Compose v2.24 or newer, or Python 3.12 with local PostgreSQL 16 (pgvector) and Redis 7.
+
+### Run with Docker
+
+```bash
+cp .env.example .env   # optional: Compose already carries working local defaults
+docker compose up --build
+```
+
+- API: http://localhost:8000
+- Interactive docs: http://localhost:8000/docs
+- Migrations are applied on startup (`RUN_MIGRATIONS=true` in `docker-compose.yml`)
+
+There is no worker service yet; background workers arrive in Phase 8.
+
+### Verify the service
+
+```bash
+curl http://localhost:8000/health         # identity and status, no dependency checks
+curl http://localhost:8000/health/live    # liveness, never touches PostgreSQL or Redis
+curl http://localhost:8000/health/ready   # readiness, checks PostgreSQL and Redis
+```
+
+`/health/ready` returns `503` with a per-dependency breakdown when PostgreSQL or Redis is unreachable. `/health/live` intentionally stays green in that case, because the process itself is healthy and restarting it would not help.
+
+### Run without Docker
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env
+alembic upgrade head
+uvicorn app.main:app --reload
+```
+
+### Tests and quality gates
+
+```bash
+pytest                 # unit and integration tests
+pytest --cov=app       # with coverage
+ruff check .
+black --check .
+mypy app
+pre-commit install     # run the same gates on every commit
+```
+
+The suite injects fake infrastructure, so no PostgreSQL, Redis, OpenAI or Meta credentials are required to run it.
+
+### Migrations
+
+```bash
+alembic upgrade head                                   # apply
+alembic downgrade -1                                   # revert one revision
+alembic revision --autogenerate -m "add tenant model"  # generate from model changes
+alembic check                                          # fail if models drift from migrations
+```
+
+### Configuration
+
+Every setting is environment-driven and documented in [.env.example](.env.example). In `production` the application refuses to start with a placeholder or short `JWT_SECRET`, or with `DEBUG` enabled.
 
 ## Engineering rules
 
