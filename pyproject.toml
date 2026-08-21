@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wasla"
+version = "0.1.0"
+description = "Wasla - multi-tenant AI customer engagement platform for WhatsApp Business"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+dependencies = [
+    "fastapi>=0.115.6,<0.117",
+    "uvicorn[standard]>=0.34,<0.36",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "sqlalchemy[asyncio]>=2.0.36,<2.1",
+    "asyncpg>=0.30,<0.31",
+    "alembic>=1.14,<2",
+    "redis>=5.2,<6",
+    "httpx>=0.28,<0.29",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.25,<0.26",
+    "pytest-cov>=6,<7",
+    "ruff>=0.8,<0.13",
+    "black>=24.10,<26",
+    "mypy>=1.13,<2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "ASYNC", "S", "T20", "ANN", "RUF"]
+ignore = ["ANN401", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "ANN001", "ANN201", "ANN202"]
+"alembic/**" = ["ANN", "INP001", "E501"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+strict = true
+warn_unreachable = true
+show_error_codes = true
+exclude = "^alembic/versions/"
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"
+markers = [
+    "integration: exercises the ASGI application or infrastructure adapters",
+    "e2e: exercises a full end-to-end flow",
+]
