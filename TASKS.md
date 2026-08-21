@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0, 1 and 2 are complete. Phase 3 is in progress: the inbound webhook (verification, signature checking, parsing, tenant resolution, idempotent storage) is in place; the outbound client is next.
+**Current position:** Phases 0, 1 and 2 are complete. Phase 3 is nearly complete: the inbound webhook and the outbound client are in place; the account connection API is the remaining item before phase 4 (conversations).
 
 ## Phase 0 — Foundation
 
@@ -75,8 +75,9 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] Inbound event persistence
 - [x] Idempotency on WhatsApp event IDs
 - [x] Webhook integration tests
+- [x] Outbound client (text, media, location, buttons, lists, templates, read receipts)
+- [x] Outbound retry policy and error mapping
 - [ ] Account connection API (connect, list, disable)
-- [ ] Outbound client (text, media, location, buttons, lists, templates)
 - [~] Delivery status and read receipts (stored as events; projection onto messages needs phase 4)
 
 ## Phase 4 — Conversations
@@ -86,6 +87,7 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [ ] Message model and repository
 - [ ] Conversation mode (AI / HUMAN)
 - [ ] Assignment and ownership tracking
+- [ ] Outbound send API (with service-window enforcement)
 - [ ] Conversation and message APIs
 
 ## Phase 5 — AI agents

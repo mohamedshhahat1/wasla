@@ -1,6 +1,6 @@
 # WhatsApp Integration
 
-**Status: In Progress** — inbound webhook verification, signature checking, parsing, tenant resolution and idempotent event storage are Implemented. The outbound client, media handling and templates are Planned. See [../TASKS.md](../TASKS.md) phase 3.
+**Status: In Progress** — the inbound webhook (verification, signature checking, parsing, tenant resolution, idempotent storage) and the outbound client are Implemented. The account connection API, media handling and template sync are Planned. See [../TASKS.md](../TASKS.md) phase 3.
 
 ## Endpoints
 
@@ -17,7 +17,7 @@ Both sit under the versioned prefix, so the callback URL configured in the Meta 
 | --- | --- |
 | `META_APP_SECRET` | Verifies the `X-Hub-Signature-256` payload signature |
 | `META_VERIFY_TOKEN` | Shared secret for the subscription challenge |
-| `META_ACCESS_TOKEN` | Platform credential for outbound calls (phase 3, outbound) |
+| `META_ACCESS_TOKEN` | Platform credential for outbound calls |
 | `META_APP_ID`, `META_API_VERSION` | Graph API target |
 
 ## Subscription verification
@@ -57,10 +57,31 @@ Status events compose their key as `{message_id}:{status}`, because Meta reports
 
 The uniqueness constraint, not the preceding read, is the guarantee. Two simultaneous deliveries of one event both miss the read; the database rejects the loser, Meta retries, and the retry finds the row.
 
+## Outbound client
+
+`WhatsAppClient` covers text, media (link or uploaded id), location, reply buttons, lists, templates, and read receipts. The HTTP client, sleep function and attempt budget are injected, so retry behaviour is tested against `httpx.MockTransport` with no network and no real waiting.
+
+### Retry policy
+
+The Cloud API send endpoint accepts **no idempotency key**, so a retry can duplicate a customer-visible message. Only failures that definitely did not send are retried:
+
+| Failure | Retried | Reason |
+| --- | --- | --- |
+| `429` | Yes, with backoff | Rejected outright; nothing was sent |
+| Connection error | Yes, with backoff | No connection, so no request arrived |
+| `5xx` | No | May have been accepted; a duplicate reply is worse than a failure |
+| Read timeout | No | Same: the request may have landed |
+
+Meta's error `code`, `type` and `error_subcode` are logged; the message raised to callers is our own, because provider error text can echo fragments of a request and this client holds a live platform credential.
+
+A message accepted without an identifier is treated as an error: delivery statuses arrive keyed on that id, so a message that cannot be identified cannot be tracked.
+
 ## What the webhook does not do
 
 No AI processing, media downloading, or outbound calls. The request resolves the workspace, stores the event, and returns. Queueing to Redis and message/conversation projection arrive with phases 4 and 5.
 
-## Planned: outbound
+## Planned
 
-A client for text, media, location, buttons, lists and templates, with retries and error mapping; the 24-hour service window and template rules enforced before sending; delivery statuses and read receipts projected onto message rows once those exist (phase 4).
+- Account connection API (connect, list, disable) for workspace administrators.
+- An outbound send API, which belongs with conversations in phase 4: there is a message to persist and a 24-hour service window to enforce, and a raw send endpoint now would invite bypassing both.
+- Media download and storage (phase 9), template sync and campaigns (phase 11).
