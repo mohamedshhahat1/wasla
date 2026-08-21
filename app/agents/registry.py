@@ -21,14 +21,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.models.conversation import ConversationMode
+from app.integrations.openai.embeddings import EmbeddingsClient
 from app.integrations.openai.types import ToolSpec
 from app.services.inbox_service import InboxService
+from app.services.retrieval_service import DEFAULT_TOP_K, MAX_TOP_K, RetrievalService
 
 logger = get_logger(__name__)
 
 ParameterType = Literal["string", "integer", "number", "boolean"]
 
 HANDOFF_TOOL: Final = "request_human_handoff"
+SEARCH_KNOWLEDGE_TOOL: Final = "search_knowledge"
 # Conversation.handoff_reason is String(200); a longer reason would fail at the
 # database rather than at the model.
 MAX_HANDOFF_REASON_LENGTH: Final = 200
@@ -49,11 +52,16 @@ class ToolContext:
 
     The tenant id is passed explicitly rather than inferred, so a tool cannot
     accidentally act outside the workspace whose conversation triggered it.
+
+    `embeddings` is optional because not every caller has a provider to hand -
+    a test driving the handoff tool should not need one. A tool that requires it
+    says so in its own output rather than failing the turn.
     """
 
     tenant_id: uuid.UUID
     conversation_id: uuid.UUID
     session: AsyncSession
+    embeddings: EmbeddingsClient | None = None
 
 
 ToolHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[str]]
@@ -202,6 +210,75 @@ HANDOFF_DEFINITION: Final = ToolDefinition(
 )
 
 
+async def _search_knowledge(context: ToolContext, arguments: dict[str, Any]) -> str:
+    """Look the question up in this workspace's own documents.
+
+    Returns the passages as text, or an explicit statement that nothing was
+    found. The empty answer is phrased as an instruction rather than left blank,
+    because a model handed silence fills it from training data - which is
+    exactly the invention grounding exists to prevent.
+    """
+    if context.embeddings is None:
+        # Configuration is missing, not the model's mistake. Telling it so lets
+        # it fall back to a handoff instead of retrying a tool that cannot work.
+        logger.warning("agent.search_unavailable", extra={"tenant_id": str(context.tenant_id)})
+        return (
+            "The knowledge base cannot be searched right now. "
+            "Do not guess an answer; offer to pass the question to a colleague."
+        )
+
+    query = str(arguments["query"])
+    requested = arguments.get("max_results")
+    top_k = int(requested) if isinstance(requested, int) else DEFAULT_TOP_K
+
+    service = RetrievalService(
+        session=context.session,
+        # From the context, never from the arguments: a tenant id the model
+        # could supply is a tenant id the model could change.
+        tenant_id=context.tenant_id,
+        embeddings=context.embeddings,
+    )
+    retrieval = await service.search(query=query, top_k=top_k)
+    logger.info(
+        "agent.knowledge_searched",
+        extra={
+            "conversation_id": str(context.conversation_id),
+            "passages": len(retrieval.passages),
+        },
+    )
+    return retrieval.as_context()
+
+
+SEARCH_KNOWLEDGE_DEFINITION: Final = ToolDefinition(
+    name=SEARCH_KNOWLEDGE_TOOL,
+    description=(
+        "Search the company's own documents for information before answering. "
+        "Use it for any question about products, prices, policies, services or "
+        "procedures. Answer only from what it returns; if it returns nothing, "
+        "say you do not have that information."
+    ),
+    parameters=(
+        ToolParameter(
+            name="query",
+            type="string",
+            description=(
+                "What to look up, in the customer's own words. Include the "
+                "specific product, service or policy they asked about."
+            ),
+        ),
+        ToolParameter(
+            name="max_results",
+            type="integer",
+            description=(
+                f"How many passages to return, 1 to {MAX_TOP_K}. " f"Defaults to {DEFAULT_TOP_K}."
+            ),
+            required=False,
+        ),
+    ),
+    handler=_search_knowledge,
+)
+
+
 class ToolRegistry:
     """The tools this deployment implements.
 
@@ -263,4 +340,5 @@ def build_default_registry() -> ToolRegistry:
     """
     registry = ToolRegistry()
     registry.register(HANDOFF_DEFINITION)
+    registry.register(SEARCH_KNOWLEDGE_DEFINITION)
     return registry

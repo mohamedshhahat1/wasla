@@ -10,7 +10,14 @@ from types import SimpleNamespace
 
 from app.agents import orchestrator as orchestrator_module
 from app.agents.orchestrator import AgentOrchestrator
-from app.agents.registry import HANDOFF_TOOL, ToolDefinition, ToolParameter, ToolRegistry
+from app.agents.registry import (
+    HANDOFF_TOOL,
+    SEARCH_KNOWLEDGE_TOOL,
+    ToolDefinition,
+    ToolParameter,
+    ToolRegistry,
+    build_default_registry,
+)
 from app.db.models.agent import Agent, AgentStatus
 from app.db.models.conversation import (
     Conversation,
@@ -91,6 +98,15 @@ async def _handed_over(context, arguments):
     return "handed over"
 
 
+async def _empty_search(context, arguments):
+    """What the real tool returns when the knowledge base holds nothing."""
+    return (
+        "No information about this was found in the company's knowledge base. "
+        "Tell the customer you do not have that information rather than guessing, "
+        "and offer to pass the question to a colleague."
+    )
+
+
 def _agent(**overrides):
     values = {
         "id": uuid.uuid4(),
@@ -164,6 +180,7 @@ def _build(
     grants=(),
     registry=None,
     max_rounds=3,
+    embeddings=None,
 ):
     fakes = {
         "ConversationRepository": FakeConversations(
@@ -184,6 +201,7 @@ def _build(
         client=client,
         registry=registry,
         max_rounds=max_rounds,
+        embeddings=embeddings,
     )
 
 
@@ -407,3 +425,171 @@ async def test_usage_is_summed_across_rounds(monkeypatch):
 
     assert outcome.usage.input_tokens == 15
     assert outcome.usage.total_tokens == 30
+
+
+# --- Grounding: what the agent does with retrieved knowledge -----------------
+
+
+def _search_registry(handler):
+    """A registry holding only search_knowledge, backed by `handler`."""
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name=SEARCH_KNOWLEDGE_TOOL,
+            description="Search the company documents.",
+            parameters=(
+                ToolParameter(name="query", type="string", description="What to look up."),
+            ),
+            handler=handler,
+        )
+    )
+    return registry
+
+
+async def test_the_agent_can_actually_invoke_search_knowledge(monkeypatch):
+    """The whole chain: a granted tool, a call, and a handler that ran."""
+    searched = []
+
+    async def fake_search(context, arguments):
+        searched.append(arguments)
+        return "Premium finishing costs 7200 EGP per square metre."
+
+    client = StubClient(
+        [
+            _reply(tool_calls=[_call(SEARCH_KNOWLEDGE_TOOL, {"query": "premium finishing"})]),
+            _reply(text="Premium finishing is 7200 EGP per square metre."),
+        ]
+    )
+    orchestrator = _build(
+        monkeypatch,
+        client=client,
+        agent=_agent(),
+        grants=(SEARCH_KNOWLEDGE_TOOL,),
+        registry=_search_registry(fake_search),
+    )
+
+    outcome = await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert searched == [{"query": "premium finishing"}]
+    assert outcome.tools_run == (SEARCH_KNOWLEDGE_TOOL,)
+    assert outcome.reply == "Premium finishing is 7200 EGP per square metre."
+
+
+async def test_a_granted_search_tool_is_offered_to_the_model(monkeypatch):
+    """A granted tool must reach the provider payload, or it can never be called.
+
+    Uses the real default registry, so a tool renamed or dropped from it fails
+    here rather than silently going missing from every agent.
+    """
+    client = StubClient([_reply(text="hello")])
+    orchestrator = _build(
+        monkeypatch,
+        client=client,
+        agent=_agent(),
+        grants=(SEARCH_KNOWLEDGE_TOOL,),
+        registry=build_default_registry(),
+    )
+
+    await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert SEARCH_KNOWLEDGE_TOOL in [spec.name for spec in client.calls[0]["tools"]]
+
+
+async def test_an_agent_without_the_grant_is_never_offered_it(monkeypatch):
+    """Tools are granted per agent; a booking agent need not read the price list."""
+    client = StubClient([_reply(text="hello")])
+    orchestrator = _build(
+        monkeypatch,
+        client=client,
+        agent=_agent(),
+        grants=(HANDOFF_TOOL,),
+        registry=build_default_registry(),
+    )
+
+    await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert SEARCH_KNOWLEDGE_TOOL not in [spec.name for spec in client.calls[0]["tools"]]
+
+
+async def test_retrieved_knowledge_reaches_the_next_provider_call(monkeypatch):
+    """Retrieval is worthless if the passages never enter the model's context."""
+    passage = "Economy finishing costs 4500 EGP per square metre."
+
+    async def fake_search(context, arguments):
+        return passage
+
+    client = StubClient(
+        [
+            _reply(tool_calls=[_call(SEARCH_KNOWLEDGE_TOOL, {"query": "economy finishing"})]),
+            _reply(text="It is 4500 EGP per square metre."),
+        ]
+    )
+    orchestrator = _build(
+        monkeypatch,
+        client=client,
+        agent=_agent(),
+        grants=(SEARCH_KNOWLEDGE_TOOL,),
+        registry=_search_registry(fake_search),
+    )
+
+    await orchestrator.answer(conversation_id=CONVERSATION)
+
+    outputs = [result.output for result in client.calls[1]["tool_results"]]
+    assert passage in outputs
+
+
+async def test_an_empty_retrieval_reaches_the_model_as_an_instruction(monkeypatch):
+    """The agent must be told there was nothing, not handed silence.
+
+    A model given a blank tool result fills the gap from its training data,
+    which is exactly the invented answer grounding exists to prevent.
+    """
+    client = StubClient(
+        [
+            _reply(tool_calls=[_call(SEARCH_KNOWLEDGE_TOOL, {"query": "warranty"})]),
+            _reply(text="I do not have that information, but I can ask a colleague."),
+        ]
+    )
+    orchestrator = _build(
+        monkeypatch,
+        client=client,
+        agent=_agent(),
+        grants=(SEARCH_KNOWLEDGE_TOOL,),
+        registry=_search_registry(_empty_search),
+    )
+
+    await orchestrator.answer(conversation_id=CONVERSATION)
+
+    output = client.calls[1]["tool_results"][0].output
+    assert output.strip() != ""
+    assert "do not have that information" in output.lower()
+
+
+async def test_a_search_without_a_provider_says_so_rather_than_failing(monkeypatch):
+    """Missing configuration is ours, not the model's mistake.
+
+    Saying so plainly lets it fall back to a handoff instead of retrying a tool
+    that cannot work. Uses the real registry, so this exercises the real
+    handler's guard.
+    """
+    client = StubClient(
+        [
+            _reply(tool_calls=[_call(SEARCH_KNOWLEDGE_TOOL, {"query": "prices"})]),
+            _reply(text="Let me pass you to a colleague."),
+        ]
+    )
+    orchestrator = _build(
+        monkeypatch,
+        client=client,
+        agent=_agent(),
+        grants=(SEARCH_KNOWLEDGE_TOOL,),
+        registry=build_default_registry(),
+        embeddings=None,
+    )
+
+    outcome = await orchestrator.answer(conversation_id=CONVERSATION)
+
+    output = client.calls[1]["tool_results"][0].output
+    assert "cannot be searched" in output.lower()
+    assert "do not guess" in output.lower()
+    assert outcome.reply == "Let me pass you to a colleague."

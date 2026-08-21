@@ -21,8 +21,10 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
 from app.db.models.agent import Agent
+from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.db.session import Database
 from app.integrations.openai.client import ResponsesClient, build_http_client
+from app.integrations.openai.embeddings import EmbeddingsClient
 from app.repositories.agent_repository import AgentRepository
 from app.services.messaging_service import MessagingService
 from app.workers.queue import BLOCK_SECONDS, AgentJob, AgentQueue, MalformedJobError
@@ -109,15 +111,22 @@ class AgentWorker:
                     )
 
             async with build_http_client() as http:
-                client = ResponsesClient(
+                api_key = self._settings.openai_api_key or ""
+                client = ResponsesClient(http=http, api_key=api_key)
+                # Shares the turn's HTTP client: a knowledge search happens
+                # inside the tool loop, so it belongs to the same request.
+                embeddings = EmbeddingsClient(
                     http=http,
-                    api_key=self._settings.openai_api_key or "",
+                    api_key=api_key,
+                    model=self._settings.openai_embedding_model,
+                    dimensions=EMBEDDING_DIMENSIONS,
                 )
                 orchestrator = AgentOrchestrator(
                     session=session,
                     tenant_id=job.tenant_id,
                     client=client,
                     registry=self._registry,
+                    embeddings=embeddings,
                 )
                 outcome = await orchestrator.answer(
                     conversation_id=job.conversation_id,

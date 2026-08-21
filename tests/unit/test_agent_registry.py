@@ -4,6 +4,7 @@ import pytest
 
 from app.agents.registry import (
     HANDOFF_TOOL,
+    SEARCH_KNOWLEDGE_TOOL,
     ToolArgumentError,
     ToolDefinition,
     ToolParameter,
@@ -182,8 +183,14 @@ async def test_a_registered_tool_runs_with_validated_arguments():
     assert output == "ran"
 
 
-def test_handoff_is_available_by_default():
+def test_the_default_registry_offers_handoff_and_knowledge_search():
+    """Asserted exhaustively on purpose.
+
+    A tool appearing in the default registry is a capability every workspace can
+    grant, so one arriving unnoticed is a change to the product, not a detail.
+    """
     registry = build_default_registry()
 
     assert registry.knows(HANDOFF_TOOL)
-    assert registry.names() == (HANDOFF_TOOL,)
+    assert registry.knows(SEARCH_KNOWLEDGE_TOOL)
+    assert registry.names() == (HANDOFF_TOOL, SEARCH_KNOWLEDGE_TOOL)

@@ -30,6 +30,7 @@ from app.core.logging import get_logger
 from app.db.models.agent import Agent
 from app.db.models.conversation import ConversationMode
 from app.integrations.openai.client import ResponsesClient
+from app.integrations.openai.embeddings import EmbeddingsClient
 from app.integrations.openai.types import TokenUsage, ToolCall, ToolResult, Turn
 from app.repositories.agent_repository import AgentRepository, AgentToolRepository
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
@@ -84,10 +85,14 @@ class AgentOrchestrator:
         client: ResponsesClient,
         registry: ToolRegistry | None = None,
         max_rounds: int = MAX_ROUNDS,
+        embeddings: EmbeddingsClient | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self._client = client
+        # Optional: an agent granted no knowledge tool never needs one, and a
+        # deployment without an embedding provider should still answer.
+        self._embeddings = embeddings
         self._registry = registry if registry is not None else build_default_registry()
         self._max_rounds = max(1, max_rounds)
         self._agents = AgentRepository(session, tenant_id=tenant_id)
@@ -183,6 +188,7 @@ class AgentOrchestrator:
                 tenant_id=self._tenant_id,
                 conversation_id=conversation_id,
                 session=self._session,
+                embeddings=self._embeddings,
             )
             for call in reply.tool_calls:
                 results.append(ToolResult.for_call(call, output=await self._run(call, context)))
