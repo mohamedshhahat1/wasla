@@ -8,6 +8,22 @@ from pydantic import ValidationError
 from app.core.config import Settings, get_settings
 
 
+@pytest.fixture(autouse=True)
+def isolated_environment(monkeypatch):
+    """Run every test against a clean environment.
+
+    ``_env_file=None`` only disables ``.env`` loading; real environment
+    variables still take precedence. CI exports ENVIRONMENT and JWT_SECRET, so
+    without this the assertions below would describe the runner instead of the
+    code under test.
+    """
+    for field_name in Settings.model_fields:
+        monkeypatch.delenv(field_name.upper(), raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 def test_defaults_are_local_and_safe():
     settings = Settings(_env_file=None)
 

@@ -17,7 +17,8 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 Environment = Literal["local", "test", "staging", "production"]
 LogFormat = Literal["json", "console"]
 
-PLACEHOLDER_SECRET = "change-me"
+# Sentinel, not a credential: production configuration rejects this value.
+PLACEHOLDER_SECRET = "change-me"  # noqa: S105
 MINIMUM_SECRET_LENGTH = 32
 VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"})
 

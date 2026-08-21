@@ -41,14 +41,22 @@ target-version = ["py312"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["app", "tests"]
+# Project root: "app" must resolve as first-party from tests/ and alembic/ too.
+src = ["."]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "ASYNC", "S", "T20", "ANN", "RUF"]
 ignore = ["ANN401", "B008"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
+# The alembic/ directory here shadows the installed alembic package during
+# first-party detection, so state the classification explicitly.
+known-third-party = ["alembic"]
+
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "ANN001", "ANN201", "ANN202"]
+# Test helpers follow the same annotation policy as the test functions.
+"tests/**" = ["S101", "ANN001", "ANN003", "ANN201", "ANN202", "ANN204"]
 "alembic/**" = ["ANN", "INP001", "E501"]
 
 [tool.mypy]

@@ -34,11 +34,14 @@ class RedisClient:
     def client(self) -> Redis:
         return self._client
 
-    async def check(self, timeout: float | None = None) -> None:
+    async def check(self, timeout_seconds: float | None = None) -> None:
         """Verify connectivity. Raises DependencyUnavailableError on failure."""
-        limit = timeout if timeout is not None else self._settings.health_check_timeout_seconds
+        limit = self._settings.health_check_timeout_seconds
+        if timeout_seconds is not None:
+            limit = timeout_seconds
         try:
-            await asyncio.wait_for(self._client.ping(), timeout=limit)
+            async with asyncio.timeout(limit):
+                await self._client.ping()
         except Exception as exc:
             logger.warning(
                 "health.redis_unavailable",

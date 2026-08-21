@@ -19,14 +19,17 @@ from app.main import create_app
 
 
 class FakeDependency:
-    """Stands in for the database or Redis client."""
+    """Stands in for the database or Redis client.
+
+    The check signature mirrors the real clients so the fake stays honest.
+    """
 
     def __init__(self, *, name: str, healthy: bool = True) -> None:
         self.name = name
         self.healthy = healthy
         self.calls = 0
 
-    async def check(self, timeout: float | None = None) -> None:
+    async def check(self, timeout_seconds: float | None = None) -> None:
         self.calls += 1
         if not self.healthy:
             raise DependencyUnavailableError(
