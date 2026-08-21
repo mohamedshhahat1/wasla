@@ -19,11 +19,13 @@ from typing import Any, Final, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import ConflictError
 from app.core.logging import get_logger
 from app.db.models.conversation import ConversationMode
 from app.integrations.openai.embeddings import EmbeddingsClient
 from app.integrations.openai.types import ToolSpec
 from app.services.inbox_service import InboxService
+from app.services.lead_service import ExtractedLead, LeadService
 from app.services.retrieval_service import DEFAULT_TOP_K, MAX_TOP_K, RetrievalService
 
 logger = get_logger(__name__)
@@ -32,6 +34,7 @@ ParameterType = Literal["string", "integer", "number", "boolean"]
 
 HANDOFF_TOOL: Final = "request_human_handoff"
 SEARCH_KNOWLEDGE_TOOL: Final = "search_knowledge"
+RECORD_LEAD_TOOL: Final = "record_lead_details"
 # Conversation.handoff_reason is String(200); a longer reason would fail at the
 # database rather than at the model.
 MAX_HANDOFF_REASON_LENGTH: Final = 200
@@ -279,6 +282,125 @@ SEARCH_KNOWLEDGE_DEFINITION: Final = ToolDefinition(
 )
 
 
+async def _record_lead_details(context: ToolContext, arguments: dict[str, Any]) -> str:
+    """Save what the customer said about themselves onto their lead.
+
+    The model never names a lead. It reports what it learned, and the service
+    resolves which lead that belongs to from the conversation's own contact.
+    That is deliberate: a lead id the model could choose is a lead id the model
+    could choose wrongly, and "wrongly" here includes another customer's record.
+
+    It is also what makes the tool idempotent. Called five times across a
+    conversation, it updates one lead five times rather than opening five.
+    """
+    service = LeadService(session=context.session, tenant_id=context.tenant_id)
+    extracted = ExtractedLead(
+        name=_optional_text(arguments.get("name")),
+        phone=_optional_text(arguments.get("phone")),
+        email=_optional_text(arguments.get("email")),
+        interest=_optional_text(arguments.get("interest")),
+        budget_amount=arguments.get("budget_amount"),
+        budget_currency=_optional_text(arguments.get("budget_currency")),
+    )
+    if not extracted.as_fields():
+        return (
+            "Nothing was saved: no details were provided. "
+            "Call this only once the customer has actually told you something."
+        )
+
+    try:
+        lead = await service.capture_from_conversation(
+            conversation_id=context.conversation_id,
+            extracted=extracted,
+        )
+    except ConflictError:
+        # The conversation was handed to a colleague between this job being
+        # queued and it running. Phrased for the model, which must stop rather
+        # than retry.
+        return "A colleague has taken over this conversation. Do not reply further."
+
+    logger.info(
+        "agent.lead_recorded",
+        extra={
+            "conversation_id": str(context.conversation_id),
+            "lead_id": str(lead.id),
+        },
+    )
+    return (
+        "The customer's details have been saved. "
+        "Do not tell them about internal records; simply continue the conversation."
+    )
+
+
+def _optional_text(value: Any) -> str | None:
+    """Treat blank text as absent, so an empty argument does not clear a field."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+RECORD_LEAD_DEFINITION: Final = ToolDefinition(
+    name=RECORD_LEAD_TOOL,
+    description=(
+        "Save details the customer has given about themselves and what they "
+        "want, so a colleague can follow up. Call it as soon as you learn a "
+        "name, a contact detail, what they are interested in, or their budget. "
+        "Send only what the customer actually said - never a guess, and never "
+        "something you inferred from how they are writing."
+    ),
+    parameters=(
+        ToolParameter(
+            name="name",
+            type="string",
+            description="The customer's name, exactly as they gave it.",
+            required=False,
+        ),
+        ToolParameter(
+            name="phone",
+            type="string",
+            description=(
+                "A phone number the customer gave for contact. Only include one "
+                "if they stated it in the conversation."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="email",
+            type="string",
+            description="An email address the customer gave.",
+            required=False,
+        ),
+        ToolParameter(
+            name="interest",
+            type="string",
+            description=(
+                "One short sentence on what the customer wants, in their own "
+                "terms - the product, service or job they described."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="budget_amount",
+            type="number",
+            description=(
+                "The budget the customer stated, as a plain number with no "
+                "separators or currency symbol. Write 500000, not '500k' and "
+                "not '500,000'. Omit it entirely unless they named a figure."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="budget_currency",
+            type="string",
+            description="Three-letter currency code for the budget, such as EGP or USD.",
+            required=False,
+        ),
+    ),
+    handler=_record_lead_details,
+)
+
+
 class ToolRegistry:
     """The tools this deployment implements.
 
@@ -341,4 +463,5 @@ def build_default_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(HANDOFF_DEFINITION)
     registry.register(SEARCH_KNOWLEDGE_DEFINITION)
+    registry.register(RECORD_LEAD_DEFINITION)
     return registry

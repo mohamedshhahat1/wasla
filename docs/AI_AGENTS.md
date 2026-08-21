@@ -84,6 +84,7 @@ Implemented:
 
 - `request_human_handoff` — hands the conversation to a person with a reason of at most 200 characters and stops the loop.
 - `search_knowledge` — searches this workspace's own documents and returns the matching passages, or an explicit statement that nothing was found. The tenant id comes from the tool context, never from an argument: a tenant id a model could supply is a tenant id a model could change. Details in [RAG.md](RAG.md).
+- `record_lead_details` — saves what the customer said about themselves onto their lead. Every argument is optional, because extraction is partial by nature: a name arrives in one message and a budget three messages later, and a required field would push the model into inventing one. The tool offers no way to name a lead, set a status or set a score — it reports what it heard, and the service resolves which lead that is from the conversation's contact. Fields a person entered are never overwritten. Details in [CRM.md](CRM.md).
 
 Planned, in the phase that gives each one something to act on: `create_lead`, `update_lead`, `get_lead`, `assign_lead` (Phase 7), `schedule_follow_up` (Phase 8), `send_media` (Phase 9), and later `get_product`, `get_price`, `create_ticket`, `get_order`, `check_availability`, `create_appointment`, `cancel_appointment`, `reschedule_appointment`.
 

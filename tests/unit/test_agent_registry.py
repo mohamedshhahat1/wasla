@@ -4,6 +4,7 @@ import pytest
 
 from app.agents.registry import (
     HANDOFF_TOOL,
+    RECORD_LEAD_TOOL,
     SEARCH_KNOWLEDGE_TOOL,
     ToolArgumentError,
     ToolDefinition,
@@ -183,7 +184,7 @@ async def test_a_registered_tool_runs_with_validated_arguments():
     assert output == "ran"
 
 
-def test_the_default_registry_offers_handoff_and_knowledge_search():
+def test_the_default_registry_offers_the_expected_tools():
     """Asserted exhaustively on purpose.
 
     A tool appearing in the default registry is a capability every workspace can
@@ -193,4 +194,51 @@ def test_the_default_registry_offers_handoff_and_knowledge_search():
 
     assert registry.knows(HANDOFF_TOOL)
     assert registry.knows(SEARCH_KNOWLEDGE_TOOL)
-    assert registry.names() == (HANDOFF_TOOL, SEARCH_KNOWLEDGE_TOOL)
+    assert registry.knows(RECORD_LEAD_TOOL)
+    # `names()` is sorted, so this reads alphabetically rather than by age.
+    assert registry.names() == (RECORD_LEAD_TOOL, HANDOFF_TOOL, SEARCH_KNOWLEDGE_TOOL)
+
+
+def test_recording_a_lead_asks_for_nothing_in_particular():
+    """Every argument optional, by design.
+
+    Extraction is partial: a customer gives their name in one message and their
+    budget three messages later. A required field would either block the call or
+    push the model into inventing a value to satisfy it.
+    """
+    definition = build_default_registry().get(RECORD_LEAD_TOOL)
+
+    assert definition is not None
+    assert definition.json_schema()["required"] == []
+    assert not any(parameter.required for parameter in definition.parameters)
+
+
+def test_the_lead_tool_offers_no_way_to_name_a_lead():
+    """The model reports what it heard; the service decides which lead that is.
+
+    A lead id the model could pass is a lead id it could pass wrongly, and
+    "wrongly" here includes another customer's record.
+    """
+    definition = build_default_registry().get(RECORD_LEAD_TOOL)
+
+    assert definition is not None
+    names = {parameter.name for parameter in definition.parameters}
+    assert not names & {"lead_id", "contact_id", "conversation_id", "tenant_id"}
+
+
+def test_the_lead_tool_offers_no_way_to_set_judgement_fields():
+    """Status, score and assignment are decisions, not extractions."""
+    definition = build_default_registry().get(RECORD_LEAD_TOOL)
+
+    assert definition is not None
+    names = {parameter.name for parameter in definition.parameters}
+    assert not names & {"status", "score", "assigned_to_id", "tags"}
+
+
+def test_the_budget_argument_is_a_number_not_prose():
+    """ "500k" is ambiguous, so the schema does not invite it."""
+    definition = build_default_registry().get(RECORD_LEAD_TOOL)
+
+    assert definition is not None
+    budget = next(p for p in definition.parameters if p.name == "budget_amount")
+    assert budget.type == "number"

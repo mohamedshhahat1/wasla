@@ -25,6 +25,7 @@ from app.services.auth_service import AuthService
 from app.services.inbox_service import InboxService
 from app.services.invitation_service import InvitationService
 from app.services.knowledge_service import KnowledgeService
+from app.services.lead_service import LeadService
 from app.services.messaging_service import MessagingService
 from app.services.whatsapp_account_service import WhatsAppAccountService
 from app.workers.ingestion_queue import IngestionQueue
@@ -180,6 +181,14 @@ def get_knowledge_service(
 
 
 KnowledgeServiceDep = Annotated[KnowledgeService, Depends(get_knowledge_service)]
+
+
+def get_lead_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> LeadService:
+    """Workspace-scoped, so no route can pass a tenant id of its own choosing."""
+    return LeadService(session=session, tenant_id=workspace.tenant.id)
+
+
+LeadServiceDep = Annotated[LeadService, Depends(get_lead_service)]
 
 
 def get_messaging_service(

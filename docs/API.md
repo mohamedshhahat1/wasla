@@ -1,6 +1,6 @@
 # API
 
-**Status: In Progress** — health, authentication, invitations, WhatsApp accounts, the WhatsApp webhook and conversations are Implemented. Everything else is Planned.
+**Status: In Progress** — health, authentication, invitations, WhatsApp accounts, the WhatsApp webhook, conversations, the knowledge base and leads are Implemented. Everything else is Planned.
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
@@ -124,9 +124,38 @@ Three behaviours worth knowing:
 - **Submitting the same text twice is not an error.** It returns the existing document with `created: false`, keyed on a hash of the extracted text. The upload was recognised, not duplicated.
 - **A document read never returns the extracted text.** It reports what was ingested — status, chunk count, size, failure reason. The API is not a document store.
 
+## Leads
+
+**Status: Implemented.** Full behaviour in [CRM.md](CRM.md).
+
+| Method | Path | Role |
+| --- | --- | --- |
+| GET | `/api/v1/leads` | Any workspace member |
+| POST | `/api/v1/leads` | Any workspace member (`201`) |
+| GET | `/api/v1/leads/statistics` | Admin or owner |
+| GET | `/api/v1/leads/{lead_id}` | Any workspace member |
+| PATCH | `/api/v1/leads/{lead_id}` | Any workspace member |
+| POST | `/api/v1/leads/{lead_id}/status` | Any workspace member |
+| POST | `/api/v1/leads/{lead_id}/assignment` | Admin or owner |
+| POST | `/api/v1/leads/{lead_id}/score` | Any workspace member |
+| GET | `/api/v1/leads/{lead_id}/notes` | Any workspace member |
+| POST | `/api/v1/leads/{lead_id}/notes` | Any workspace member (`201`) |
+| GET | `/api/v1/leads/{lead_id}/activity` | Any workspace member |
+
+Working a pipeline is open to any member. Assignment and the workspace-wide statistics view require an administrator: handing someone a deal and reading across every rep's pipeline are management actions. That is a different line from the one on conversations, where any member may assign, because grabbing an unanswered conversation is triage.
+
+Listing filters by `status`, `source`, `assigned_to_id`, `unassigned`, `tag`, `search`, `contact_id` and `conversation_id`. `status`, `source` and `tag` repeat for multiple values. Filters intersect. Paged by cursor.
+
+Four behaviours worth knowing:
+
+- **`PATCH` distinguishes an omitted field from an explicit null.** Omitting a field leaves it alone; sending `null` clears it. Anything touched becomes human-verified and is then protected from AI extraction — including a field you deliberately cleared.
+- **Creating a second lead for a customer who already has an open one answers `409`.** One opportunity, one record; close the first or update it. A customer whose lead is `won` or `lost` can start a new one.
+- **An illegal status move answers `422`.** The permitted transitions are a graph, not a free-for-all — see [CRM.md](CRM.md). Setting the status a lead already has succeeds and changes nothing, so a retry is safe.
+- **`human_verified_fields` is returned on every lead.** It names the fields an agent will not overwrite, so an interface can show which values are pinned.
+
 ## Planned tenant endpoints
 
-`/api/v1/contacts`, `/api/v1/leads`, `/api/v1/follow-ups`, `/api/v1/campaigns`, `/api/v1/analytics`, `/api/v1/usage`, `/api/v1/billing`.
+`/api/v1/contacts`, `/api/v1/follow-ups`, `/api/v1/campaigns`, `/api/v1/analytics`, `/api/v1/usage`, `/api/v1/billing`.
 
 ## Planned platform endpoints
 

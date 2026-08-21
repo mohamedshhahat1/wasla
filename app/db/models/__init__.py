@@ -23,6 +23,21 @@ from .knowledge import (
     DocumentStatus,
     KnowledgeBase,
 )
+from .lead import (
+    AGENT_WRITABLE_FIELDS,
+    ALLOWED_TRANSITIONS,
+    MAX_SCORE,
+    MIN_SCORE,
+    TERMINAL_STATUSES,
+    ActorKind,
+    Lead,
+    LeadActivity,
+    LeadActivityKind,
+    LeadNote,
+    LeadSource,
+    LeadStatus,
+    clamp_score,
+)
 from .membership import Membership
 from .tenant import Tenant
 from .user import User
@@ -35,7 +50,13 @@ from .whatsapp import (
 )
 
 __all__ = [
+    "AGENT_WRITABLE_FIELDS",
+    "ALLOWED_TRANSITIONS",
     "EMBEDDING_DIMENSIONS",
+    "MAX_SCORE",
+    "MIN_SCORE",
+    "TERMINAL_STATUSES",
+    "ActorKind",
     "Agent",
     "AgentStatus",
     "AgentTool",
@@ -50,6 +71,12 @@ __all__ = [
     "DocumentStatus",
     "InvitationStatus",
     "KnowledgeBase",
+    "Lead",
+    "LeadActivity",
+    "LeadActivityKind",
+    "LeadNote",
+    "LeadSource",
+    "LeadStatus",
     "Membership",
     "Message",
     "MessageDirection",
@@ -66,4 +93,5 @@ __all__ = [
     "WhatsAppEvent",
     "WhatsAppEventKind",
     "WhatsAppEventState",
+    "clamp_score",
 ]

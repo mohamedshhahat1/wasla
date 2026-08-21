@@ -389,3 +389,49 @@ The two have different urgency and different idempotency. An agent job is a cust
 
 Consequences:
 Two workers to deploy rather than one, and two dead-letter lists to watch. The queues share their encoding and reservation logic, so a fix to one applies to both. A stranded document — enqueued while Redis was unavailable — stays `PENDING` and is findable through `DocumentRepository.list_pending`; a sweeper for those belongs with the Phase 8 worker service.
+
+## ADR-020 — One Open Lead per Customer, Enforced by a Partial Unique Index
+
+Date:
+2026-08-22
+
+Status:
+Accepted
+
+Decision:
+Allow at most one lead per contact whose status is not `won` or `lost`, enforced by a partial unique index on `(tenant_id, contact_id)`. An agent capturing details from a conversation resolves the lead from the conversation's contact rather than being given a lead identifier.
+
+Context:
+An AI agent calls `record_lead_details` whenever it learns something, which across one conversation is several times. Something has to decide whether each call opens a new opportunity or updates the existing one, and a customer who buys and returns a year later genuinely is a new opportunity.
+
+Reason:
+A service-level check would lose the race. Two webhook deliveries can be in flight at once — Meta retries, and the queue can hand the same conversation to two workers — so "look for an open lead, then create one if there is none" has a window between the two statements in which both callers find nothing. Only a constraint settles that. Making it *partial* is what keeps the rule from being wrong in the other direction: a closed lead releases the slot, so a returning customer starts a fresh record instead of having their old, closed deal reopened and overwritten, and leads entered by hand carry no contact at all and would otherwise all collide on a null.
+
+Resolving the lead from the conversation rather than from a model-supplied identifier follows from the same reasoning one layer up. An identifier the model chooses is an identifier it can choose wrongly, and "wrongly" here reaches another customer's record. Since the tool cannot name a lead, calling it five times updates one lead five times, which makes the tool idempotent by construction rather than by convention.
+
+Consequences:
+Creating a second open lead answers 409 rather than silently splitting one opportunity's history across two records. A workspace that genuinely wants two concurrent opportunities for the same customer cannot have them today; that is a real limitation, and the alternative — an unbounded number of leads per customer with no way to tell which the agent should update — is worse. Merging duplicate leads is not implemented, because this design is what stops the duplicates arising.
+
+## ADR-021 — Human-Entered Lead Fields Are Protected from AI Overwrite
+
+Date:
+2026-08-22
+
+Status:
+Accepted
+
+Decision:
+Record on each lead the set of fields a person has set (`human_verified_fields`). Extraction skips every field in that set, and can only write the fields in `AGENT_WRITABLE_FIELDS` — contact details and stated interest — never status, score, assignment or tags. Every change writes a `LeadActivity` row naming the actor and carrying the previous value.
+
+Context:
+Two kinds of caller write to a lead and they are not equally reliable. A person using the API states a fact: they typed the customer's name. A model infers one from a sentence written in passing, and is frequently right and occasionally confidently wrong. Without a rule, whichever wrote last wins.
+
+Reason:
+The asymmetry is the whole point: a model correcting its own earlier guess is an improvement, and a model overwriting what a colleague typed is data loss that nobody notices until the call goes to the wrong number. Storing provenance per field rather than per row is what allows both — the AI fills blanks and revises its own inferences while what a person confirmed stays put. A field a person deliberately *cleared* is protected too, because "this customer has no email" is knowledge rather than an empty slot to fill.
+
+Keeping status and score outside the writable set is a separate judgement. Those are decisions about an opportunity, not facts a customer stated, and inferring "qualified" from one enthusiastic message would let the pipeline be reordered by the model's mood.
+
+The activity log carries the previous value because the protection is not sufficient on its own: someone still has to be able to answer "why does this lead say the budget is half a million", and a lead row alone cannot.
+
+Consequences:
+An extra array column and an activity row per change — the log grows faster than the leads do, which is the expected cost of an audit trail. A person who typed a value wrongly must correct it themselves; the AI will not fix it for them. Extraction that is refused is recorded rather than silent, so the skip is visible in the timeline instead of looking like the model never tried.

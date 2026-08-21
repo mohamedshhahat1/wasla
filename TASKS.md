@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0 through 6 are complete, and the pipeline that verifies them has been repaired — see *Phase 5.5* below, which came first because none of the claims in this file were being checked while it was broken. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API, upload documents, and their agents answer from them: a question is embedded, matched against that workspace's own chunks in pgvector, and the passages enter the model's context. What the workers still lack is a process of their own to run in, which belongs with the Phase 8 worker service. Phase 7 (CRM and leads) is next.
+**Current position:** Phases 0 through 7 are complete, and the pipeline that verifies them has been repaired — see *Phase 5.5* below, which came first because none of the claims in this file were being checked while it was broken. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API, upload documents, and their agents answer from them: a question is embedded, matched against that workspace's own chunks in pgvector, and the passages enter the model's context. Agents now also capture leads from those conversations — one per customer, never overwriting what a person entered, with every change on an append-only timeline. What the workers still lack is a process of their own to run in, which belongs with the Phase 8 worker service. Phase 8 (follow-ups) is next.
 
 ## Phase 0 — Foundation
 
@@ -156,11 +156,28 @@ The four unchecked items below are **deferred by decision, not unfinished**. Two
 
 ## Phase 7 — CRM and leads
 
-- [ ] Lead model and repository
-- [ ] Lead extraction from conversations
-- [ ] Lead lifecycle statuses and scoring
-- [ ] Assignment and notes
-- [ ] Lead tools for agents
+**COMPLETE.** Verified 2026-08-22 against PostgreSQL 16: 588 tests passed, 0 failed, 0 skipped in 81.06s; migration `0008` upgrades, `alembic check` reports no drift, downgrades to base, upgrades again and checks clean; Ruff, Black and MyPy clean; the image builds, starts, answers `/health/live` and `/health/ready`, and serves `/api/v1/leads`.
+
+- [x] Lead, note and activity models (migration `0008`)
+- [x] Lead, note and activity repositories, tenant-scoped
+- [x] Lead extraction from conversations, idempotent on the contact
+- [x] One open lead per customer, enforced by a partial unique index (ADR-020)
+- [x] Human-entered fields protected from AI overwrite (ADR-021)
+- [x] Lead lifecycle statuses with an explicit transition graph
+- [x] Scoring, clamped to its bounds
+- [x] Assignment through the existing membership system
+- [x] Internal notes
+- [x] Append-only activity timeline
+- [x] Search, filtering, tags and keyset pagination
+- [x] Statistics endpoint, aggregated in one query
+- [x] `record_lead_details` tool for agents
+- [x] Administration API with role boundaries
+
+Deferred by decision, not unfinished:
+
+- [ ] Lead scoring *rules* — the field and its bounds exist; deciding what earns a score needs the qualification signals Phase 10 introduces
+- [ ] Lead deletion or merge — no route exists on purpose; merging two histories is a product decision, and nothing yet creates the duplicates that would need it
+- [ ] Budget unit parsing (`"500k"`) — refused rather than guessed, because reading it wrong reprioritises a real pipeline silently
 
 ## Phase 8 — Follow-ups
 

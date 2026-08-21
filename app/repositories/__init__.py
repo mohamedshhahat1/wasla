@@ -19,6 +19,13 @@ from .knowledge_repository import (
     KnowledgeBaseRepository,
     ScoredChunk,
 )
+from .lead_repository import (
+    LeadActivityRepository,
+    LeadFilters,
+    LeadNoteRepository,
+    LeadRepository,
+    LeadStatistics,
+)
 from .membership_repository import MembershipRepository, UserMembershipRepository
 from .tenant_repository import TenantRepository
 from .user_repository import UserRepository
@@ -39,6 +46,11 @@ __all__ = [
     "InvitationRepository",
     "InvitationTokenRepository",
     "KnowledgeBaseRepository",
+    "LeadActivityRepository",
+    "LeadFilters",
+    "LeadNoteRepository",
+    "LeadRepository",
+    "LeadStatistics",
     "MembershipRepository",
     "MessageRepository",
     "ScoredChunk",

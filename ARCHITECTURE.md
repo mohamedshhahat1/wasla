@@ -11,7 +11,7 @@ Technical source of truth for the current system architecture. Every section car
 
 ## 1. System overview
 
-**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport, conversations, and the agent orchestrator with its queue and worker exist. Knowledge retrieval does not.
+**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport, conversations, the agent orchestrator with its queue and worker, tenant-scoped knowledge retrieval, and lead management exist. Follow-ups, media, sentiment, campaigns, usage and billing do not.
 
 Wasla is an API-first, multi-tenant backend. A business (tenant) connects one or more WhatsApp Business phone numbers. Inbound customer messages arrive as Meta webhooks, are resolved to a tenant, persisted, and queued for asynchronous AI processing. An agent orchestrator loads the conversation, retrieves tenant-scoped knowledge, calls the OpenAI Responses API with a controlled tool set, and replies through the WhatsApp Cloud API.
 
@@ -157,7 +157,7 @@ The cursor is opaque by construction rather than by obfuscation. It carries noth
 
 ## 6. AI agent flow
 
-**Status: In Progress** — configuration, memory, tools, orchestration, the queue and the worker are Implemented. Knowledge retrieval (Phase 6), usage recording (Phase 12), and a process for the worker to run in (Phase 8) are not.
+**Status: In Progress** — configuration, memory, tools, orchestration, the queue and the worker are Implemented, as are the knowledge-search and lead-capture tools. Usage recording (Phase 12) and a process for the worker to run in (Phase 8) are not.
 
 ```
 Enqueued job -> worker reserves it -> open one session
@@ -220,9 +220,41 @@ Automatic handoff — triggered by low confidence, negative or angry sentiment, 
 
 ## 9. CRM / lead flow
 
-**Status: Planned**
+**Status: Implemented** — leads, notes, the activity timeline, the `record_lead_details` tool and the administration API, exercised against real PostgreSQL. Follow-ups (Phase 8), scoring rules (Phase 10) and lead merging are not.
 
-Conversations produce contacts and leads. Agents create or update leads through validated, tenant-scoped tools. Lead statuses: `NEW`, `CONTACTED`, `QUALIFIED`, `PROPOSAL`, `WON`, `LOST`. Follow-ups are scheduled, cancellable, and respect the WhatsApp 24-hour service window and template rules.
+```
+Customer says something about themselves
+    |
+Agent calls record_lead_details (no lead id - it cannot name one)
+    |
+Resolve the conversation -> HUMAN mode? refuse
+    |
+Find the contact's OPEN lead        -- partial unique index: at most one
+    |                                       |
+  none                                   exists
+    |                                       |
+create (source=AGENT)              drop fields a human verified
+    |                                       |
+    +---------------+-----------------------+
+                    |
+        validate; drop what will not parse
+                    |
+        write LeadActivity (actor, before -> after)
+```
+
+Three properties are load-bearing, and each has a test.
+
+**One open lead per customer, guaranteed by the database.** A partial unique index on `(tenant_id, contact_id)` covers only non-terminal statuses (ADR-020). A service-level check would lose the race — Meta retries webhooks and the queue can hand the same conversation to two workers, so "look, then create" has a window in which both callers find nothing. Partial rather than total is what keeps the rule right in the other direction: a closed lead releases the slot so a returning customer starts a fresh record, and hand-entered leads carry no contact and would otherwise all collide on a null.
+
+**The model cannot name a lead.** It reports what it heard; the service resolves which lead that is from the conversation's own contact. An identifier the model chooses is one it can choose wrongly, and wrongly here reaches another customer's record. It also makes the tool idempotent by construction: called five times in a conversation, it updates one lead five times.
+
+**A human edit outranks an inference.** Fields a person sets are recorded in `human_verified_fields` and extraction skips them, so the AI fills blanks and revises its own guesses but never overwrites what someone confirmed — including a field deliberately cleared, because "this customer has no email" is knowledge (ADR-021). Extraction is confined to contact details and stated interest; status, score, assignment and tags are decisions, not things to infer from one message.
+
+Budgets arrive as plain numbers or not at all. `"500k"` is refused rather than guessed, because it reads as 500,000 to a person and 500 to a parser that gives up, and a wrong budget silently reorders a real sales pipeline. A model's value that fails validation is dropped so the rest of the capture still lands; a person's is reported, because someone typing into a form deserves to be told.
+
+`lead_activities` is append-only — there is no service method and no route that edits or deletes an entry. An audit trail the application can rewrite does not answer the question it exists to answer, and the question here is "why does this lead say the budget is half a million".
+
+Follow-ups, which are scheduled, cancellable, and respect the WhatsApp 24-hour service window and template rules, arrive in Phase 8.
 
 ## 10. Background jobs and Redis usage
 
@@ -236,7 +268,7 @@ Two gaps are known and recorded rather than implied away. Nothing reaps the in-f
 
 ## 11. Database architecture
 
-**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, the identity and tenancy tables, the WhatsApp tables, the conversation tables and the agent tables are Implemented; knowledge, CRM, and billing tables arrive in later phases.
+**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, and the identity, tenancy, WhatsApp, conversation, agent, knowledge and CRM tables are Implemented; follow-up, campaign, usage and billing tables arrive in later phases.
 
 PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically; migration `0002` creates `tenants`, `users`, `memberships`, and `tenant_invitations`; migration `0003` creates `whatsapp_accounts` and `whatsapp_events`; migration `0004` creates `contacts`, `conversations`, and `messages`; migration `0005` creates `agents` and `agent_tools`.
 
