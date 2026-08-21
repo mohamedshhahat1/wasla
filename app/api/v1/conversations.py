@@ -16,9 +16,11 @@ from typing import Annotated
 from fastapi import APIRouter, Query, status
 
 from app.api.dependencies import ActiveWorkspaceDep, InboxServiceDep, MessagingServiceDep
+from app.core.pagination import MAX_CURSOR_LENGTH
 from app.schemas.conversation import (
     AssignmentRequest,
     ConversationRead,
+    CursorPage,
     MessageRead,
     ModeUpdateRequest,
     SendTemplateRequest,
@@ -28,23 +30,36 @@ from app.schemas.conversation import (
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
+# Opaque to callers: it comes from a previous page's `next_cursor` and is not
+# meant to be constructed by hand. Bounded so a long query string is rejected
+# before any decoding is attempted.
+CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]
 
 
-@router.get("", response_model=list[ConversationRead])
+@router.get("", response_model=CursorPage[ConversationRead])
 async def list_conversations(
     inbox: InboxServiceDep,
     messaging: MessagingServiceDep,
     limit: LimitQuery = 50,
-) -> list[ConversationRead]:
-    """Open conversations, most recently active first."""
-    conversations = await inbox.list_conversations(limit=limit)
-    return [
-        ConversationRead.from_model(
-            conversation,
-            service_window_open=messaging.window_open(conversation),
-        )
-        for conversation in conversations
-    ]
+    cursor: CursorQuery = None,
+) -> CursorPage[ConversationRead]:
+    """Open conversations, most recently active first.
+
+    Paged by cursor rather than offset: the inbox is written to while it is
+    being read, and an offset would let an arriving conversation push a row
+    across the page boundary.
+    """
+    page = await inbox.list_conversations(limit=limit, cursor=cursor)
+    return CursorPage[ConversationRead](
+        items=[
+            ConversationRead.from_model(
+                conversation,
+                service_window_open=messaging.window_open(conversation),
+            )
+            for conversation in page.items
+        ],
+        next_cursor=page.next_cursor,
+    )
 
 
 @router.get("/{conversation_id}", response_model=ConversationRead)
@@ -60,15 +75,23 @@ async def get_conversation(
     )
 
 
-@router.get("/{conversation_id}/messages", response_model=list[MessageRead])
+@router.get("/{conversation_id}/messages", response_model=CursorPage[MessageRead])
 async def list_messages(
     conversation_id: uuid.UUID,
     inbox: InboxServiceDep,
     limit: LimitQuery = 50,
-) -> list[MessageRead]:
+    cursor: CursorQuery = None,
+) -> CursorPage[MessageRead]:
     """Most recent messages first."""
-    messages = await inbox.list_messages(conversation_id=conversation_id, limit=limit)
-    return [MessageRead.from_model(message) for message in messages]
+    page = await inbox.list_messages(
+        conversation_id=conversation_id,
+        limit=limit,
+        cursor=cursor,
+    )
+    return CursorPage[MessageRead](
+        items=[MessageRead.from_model(message) for message in page.items],
+        next_cursor=page.next_cursor,
+    )
 
 
 @router.post(

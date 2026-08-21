@@ -59,6 +59,18 @@ class AssignmentRequest(BaseModel):
     assigned_to_id: uuid.UUID | None = None
 
 
+class CursorPage[ItemT](BaseModel):
+    """One page, and the cursor that asks for the next.
+
+    `next_cursor` is null when the collection is exhausted. Clients should stop
+    on that rather than counting items: a full page is not proof of more, and an
+    empty one is not proof of none once filtering is involved.
+    """
+
+    items: list[ItemT]
+    next_cursor: str | None = None
+
+
 class MessageRead(BaseModel):
     id: uuid.UUID
     conversation_id: uuid.UUID

@@ -11,6 +11,7 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.core.pagination import Cursor, Page, paginate
 from app.db.models.conversation import (
     Conversation,
     ConversationMode,
@@ -32,9 +33,20 @@ class InboxService:
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._memberships = MembershipRepository(session, tenant_id=tenant_id)
 
-    async def list_conversations(self, *, limit: int = 50) -> list[Conversation]:
+    async def list_conversations(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> Page[Conversation]:
         """Everything not closed, most recently active first."""
-        return await self._conversations.list_open(limit=limit)
+        after = Cursor.decode(cursor) if cursor else None
+        rows = await self._conversations.list_open(limit=limit, after=after)
+        return paginate(
+            rows,
+            limit=limit,
+            key=lambda row: Cursor(sort_value=row.last_message_at, id=row.id),
+        )
 
     async def get_conversation(self, conversation_id: uuid.UUID) -> Conversation:
         return await self._conversations.require_by_id(conversation_id)
@@ -44,13 +56,21 @@ class InboxService:
         *,
         conversation_id: uuid.UUID,
         limit: int = 50,
-    ) -> list[Message]:
+        cursor: str | None = None,
+    ) -> Page[Message]:
         # Resolved first so another workspace's id answers not-found instead of
         # an empty list, which would leak that the conversation exists.
         await self._conversations.require_by_id(conversation_id)
-        return await self._messages.list_for_conversation(
+        after = Cursor.decode(cursor) if cursor else None
+        rows = await self._messages.list_for_conversation(
             conversation_id=conversation_id,
             limit=limit,
+            after=after,
+        )
+        return paginate(
+            rows,
+            limit=limit,
+            key=lambda row: Cursor(sort_value=row.created_at, id=row.id),
         )
 
     async def set_mode(

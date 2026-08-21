@@ -5,8 +5,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ColumnElement
+from sqlalchemy import ColumnElement, and_, or_
 
+from app.core.pagination import Cursor
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -18,6 +19,25 @@ from app.db.models.conversation import (
     MessageStatus,
 )
 from app.repositories.base import TenantScopedRepository
+
+
+def _after_nullable(model: type[Conversation], after: Cursor) -> ColumnElement[bool]:
+    """Rows following `after` under `ORDER BY last_message_at DESC NULLS LAST, id DESC`.
+
+    Two cases, because a null sort value is not comparable and SQL will not do
+    this for us. With a timestamp in hand, what follows is anything older, the
+    same instant with a smaller id, or the whole null block that sorts after
+    every timestamp. Once the cursor is itself null the reader is already inside
+    that block, and only a smaller id follows.
+    """
+    column = model.last_message_at
+    if after.sort_value is None:
+        return and_(column.is_(None), model.id < after.id)
+    return or_(
+        column < after.sort_value,
+        and_(column == after.sort_value, model.id < after.id),
+        column.is_(None),
+    )
 
 
 class ContactRepository(TenantScopedRepository[Contact]):
@@ -118,13 +138,31 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         )
         return self.add(conversation), True
 
-    async def list_open(self, *, limit: int = 50) -> list[Conversation]:
-        return await self._all(
+    async def list_open(
+        self,
+        *,
+        limit: int = 50,
+        after: Cursor | None = None,
+    ) -> list[Conversation]:
+        """Everything not closed, most recently active first.
+
+        Ordered by `last_message_at` with nulls last and `id` as the
+        tiebreaker. A conversation that has never carried a message sorts to the
+        end rather than the front, which is what PostgreSQL would otherwise do
+        with a descending sort.
+        """
+        query = (
             self._select()
             .where(Conversation.status != ConversationStatus.CLOSED)
-            .order_by(Conversation.last_message_at.desc())
+            .order_by(
+                Conversation.last_message_at.desc().nullslast(),
+                Conversation.id.desc(),
+            )
             .limit(limit)
         )
+        if after is not None:
+            query = query.where(_after_nullable(Conversation, after))
+        return await self._all(query)
 
     async def touch_inbound(self, conversation: Conversation, *, at: datetime) -> None:
         """Record customer activity, which reopens the service window.
@@ -154,13 +192,30 @@ class MessageRepository(TenantScopedRepository[Message]):
         *,
         conversation_id: uuid.UUID,
         limit: int = 50,
+        after: Cursor | None = None,
     ) -> list[Message]:
-        return await self._all(
+        """Most recent messages first.
+
+        `created_at` is never null here, so the keyset is a plain row
+        comparison - no nulls-last branch is needed.
+        """
+        query = (
             self._select()
             .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.desc())
+            .order_by(Message.created_at.desc(), Message.id.desc())
             .limit(limit)
         )
+        if after is not None and after.sort_value is not None:
+            query = query.where(
+                or_(
+                    Message.created_at < after.sort_value,
+                    and_(
+                        Message.created_at == after.sort_value,
+                        Message.id < after.id,
+                    ),
+                )
+            )
+        return await self._all(query)
 
     async def record_inbound(
         self,

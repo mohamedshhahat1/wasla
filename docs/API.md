@@ -11,7 +11,7 @@ Scope: API conventions and the endpoint catalogue. The interactive schema is ser
 - Domain exceptions map to stable status codes through one exception handler, so every failure returns the same envelope. Stack traces are never returned.
 - The workspace a request acts on comes from the signed access token, never from a path, query or body field. There is no request field a caller could forge to reach another workspace's data.
 - A resource belonging to another workspace answers `404`, not `403`: a permission error would confirm the resource exists.
-- Collections take a `limit` bound (default 50, maximum 100). Cursor pagination is Planned.
+- Collections take a `limit` bound (default 50, maximum 100). Conversations and messages are paged by cursor: the response is `{ "items": [...], "next_cursor": "..." }`, and passing that value back as `?cursor=` returns the rows that follow. A null `next_cursor` means the collection is exhausted — stop on that rather than on a short page. Cursors are opaque and should not be constructed by hand; a malformed one answers `422`. Other collections still return bare arrays.
 
 ## Error envelope
 

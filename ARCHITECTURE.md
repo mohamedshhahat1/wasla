@@ -142,6 +142,19 @@ Four rules govern the projection:
 
 The same customer writing to two workspaces produces two contacts and two conversations. That is the intended consequence of `tenant_id` isolation: a person is a customer of a business, not of the platform.
 
+### 5.3 Paging the inbox
+
+**Status: Implemented** — `app/core/pagination.py`, exercised against PostgreSQL by `tests/integration/test_pagination.py`.
+
+Conversations and messages are paged by keyset, not offset. An inbox is read while it is being written to, and an offset shifts under every insert: a conversation arriving between page one and page two pushes a row across the boundary, so the reader sees it twice or misses it. A cursor names the last row seen and asks for what follows, which is stable under concurrent writes.
+
+Two details make the ordering total, and both matter:
+
+- **The row id is the tiebreaker.** Conversations order by `last_message_at DESC, id DESC`; messages by `created_at DESC, id DESC`. Two rows can share a timestamp to the microsecond, and without a second key the page boundary between them is arbitrary — which is another way of saying a row can fall through it.
+- **Nulls sort last, with their own keyset.** A conversation that has never carried a message has a null `last_message_at`, and a plain descending sort would put it *first*, ahead of live traffic. It is ordered `NULLS LAST`, and because null is not comparable, the block is paged by id alone once the cursor reaches it.
+
+The cursor is opaque by construction rather than by obfuscation. It carries nothing not already visible in the page it came from, and it is only ever applied inside a tenant-scoped query — so a cursor taken from another workspace is a position, not an authorisation, and can widen nothing. Encoding it keeps clients from building cursors by hand against a sort key that is ours to change. Every malformed cursor is one `422`; none may become a `500`, because cursors arrive in query strings and therefore arrive truncated, re-encoded and fuzzed.
+
 ## 6. AI agent flow
 
 **Status: In Progress** — configuration, memory, tools, orchestration, the queue and the worker are Implemented. Knowledge retrieval (Phase 6), usage recording (Phase 12), and a process for the worker to run in (Phase 8) are not.

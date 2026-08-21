@@ -96,7 +96,7 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] Conversation and message APIs
 - [x] Conversation projection tests (PostgreSQL-backed: replay, status ordering, isolation)
 - [x] Dedicated `template` message kind, with `template_name` and `template_language` columns and no body (migration `0006`)
-- [ ] Cursor pagination for conversation and message collections
+- [x] Cursor pagination for conversation and message collections (keyset on `(last_message_at, id)` and `(created_at, id)`)
 
 ## Phase 5 — AI agents
 
