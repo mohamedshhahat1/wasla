@@ -111,7 +111,7 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] AI worker (reserves a job, runs the agent, sends through the messaging service)
 - [x] Enqueue from the inbound webhook path (one job per conversation, never AI on the request)
 - [x] Unit tests with a mocked provider (memory, registry, orchestrator, queue)
-- [ ] Agent model and migration parity tests (PostgreSQL-backed)
+- [x] Agent model and migration parity tests (metadata parity in the unit suite, constraints and isolation against PostgreSQL)
 - [ ] Worker process entrypoint and container service (with the Phase 8 worker)
 - [ ] In-flight reaper for jobs abandoned by a dead worker (with the Phase 8 worker)
 
@@ -202,6 +202,7 @@ Unplanned, and recorded because it changed what every other status in this file 
 - [ ] Retry policies for external calls
 - [ ] Per-workspace credential encryption at rest
 - [ ] Performance review and indexing pass
+- [ ] Speed up the PostgreSQL-backed suite — `tests/integration/conftest.py` drops and recreates the whole schema per test, which measured 30 minutes for 84 tests locally. A session-scoped schema with per-test transaction rollback is the usual fix; the current fixture is deliberate (a crashed run must not poison the next), so replacing it needs care rather than a quick edit.
 
 ## Phase 15 — Delivery
 
