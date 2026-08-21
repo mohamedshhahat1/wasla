@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0, 1, 2 and 3 are complete, and the documentation is in sync with the code. The one Phase 3 item still open is the projection of delivery statuses onto message rows, which cannot be built before the message model exists. Phase 4 (conversations) is next.
+**Current position:** Phases 0, 1, 2, 3 and 4 are complete. Stored WhatsApp events are projected into contacts, conversations and messages; delivery statuses advance those messages without ever moving one backwards; and the outbound send API enforces the 24-hour service window. Phase 5 (AI agents) is next.
 
 ## Phase 0 — Foundation
 
@@ -79,19 +79,24 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] Account connection API (connect, list, disable, enable)
 - [x] Outbound client (text, media, location, buttons, lists, templates, read receipts)
 - [x] Outbound retry policy and error mapping
-- [~] Delivery status projection onto messages (statuses are stored as events; the projection needs the phase 4 message model)
+- [x] Delivery status projection onto messages (completed in Phase 4, once messages existed)
 
 ## Phase 4 — Conversations
 
-- [ ] Contact model and repository
-- [ ] Conversation model and repository
-- [ ] Message model and repository
-- [ ] Inbound event projection into conversations and messages
-- [ ] Delivery status projection onto messages
-- [ ] Conversation mode (AI / HUMAN)
-- [ ] Assignment and ownership tracking
-- [ ] Outbound send API (with 24-hour service window enforcement)
-- [ ] Conversation and message APIs
+- [x] Contact model and repository
+- [x] Conversation model and repository
+- [x] Message model and repository
+- [x] Conversation tables migration (`0004`)
+- [x] Inbound event projection into conversations and messages
+- [x] Delivery status projection onto messages (never regresses a status)
+- [x] Customer profile names captured from the webhook `contacts` block
+- [x] Conversation mode (AI / HUMAN) with handoff reason
+- [x] Assignment and ownership tracking (membership verified, not trusted)
+- [x] Outbound send API (with 24-hour service window enforcement)
+- [x] Conversation and message APIs
+- [x] Conversation projection tests (PostgreSQL-backed: replay, status ordering, isolation)
+- [ ] Dedicated `template` message kind (templates are recorded as text; needs a migration)
+- [ ] Cursor pagination for conversation and message collections
 
 ## Phase 5 — AI agents
 
