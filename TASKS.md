@@ -219,7 +219,7 @@ The four unchecked items below are **deferred by decision, not unfinished**. Two
 - [x] Dependency advisories cleared and a floor put under them (Starlette declared directly — ADR-017)
 - [ ] Per-workspace credential encryption at rest
 - [ ] Performance review and indexing pass
-- [ ] Speed up the PostgreSQL-backed suite — `tests/integration/conftest.py` drops and recreates the whole schema per test, which measured 30 minutes for 84 tests locally. A session-scoped schema with per-test transaction rollback is the usual fix; the current fixture is deliberate (a crashed run must not poison the next), so replacing it needs care rather than a quick edit.
+- [x] Speed up the PostgreSQL-backed suite. The schema is now built once per session and each test runs in a transaction that is rolled back. Measured on the same machine and the same 451 tests: **2507s → 94s**, a 27x reduction. Isolation is unchanged and is now itself covered by `tests/integration/test_fixture_isolation.py`.
 
 ## Phase 15 — Delivery
 
