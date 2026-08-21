@@ -11,7 +11,7 @@ Technical source of truth for the current system architecture. Every section car
 
 ## 1. System overview
 
-**Status: Planned**
+**Status: Planned** — identity, tenancy, and authorization exist; the messaging pipeline below does not.
 
 Wasla is an API-first, multi-tenant backend. A business (tenant) connects one or more WhatsApp Business phone numbers. Inbound customer messages arrive as Meta webhooks, are resolved to a tenant, persisted, and queued for asynchronous AI processing. An agent orchestrator loads the conversation, retrieves tenant-scoped knowledge, calls the OpenAI Responses API with a controlled tool set, and replies through the WhatsApp Cloud API.
 
@@ -39,19 +39,19 @@ Persistence + Usage + Analytics
 
 ## 2. Project structure
 
-**Status: In Progress** — the Phase 0 skeleton exists; directories marked *(planned)* are created by the phase that needs them.
+**Status: In Progress** — directories marked *(planned)* are created by the phase that needs them.
 
 ```
 wasla/
 |-- app/
 |   |-- main.py              application factory
-|   |-- core/                config, logging, exceptions, middleware, redis, DI
+|   |-- core/                config, logging, exceptions, middleware, redis, DI, security
 |   |-- db/                  declarative base, mixins, async session, models
-|   |-- repositories/        data access, tenant-scoped (models from Phase 1)
+|   |-- repositories/        data access, tenant-scoped and isolation-enforcing
 |   |-- schemas/             Pydantic request/response contracts
 |   |-- services/            business logic / use cases
-|   |-- api/                 health router
-|   |   +-- v1/              versioned business routers
+|   |-- api/                 health router, auth dependencies
+|   |   +-- v1/              versioned business routers (auth, invitations)
 |   |-- integrations/        whatsapp/, openai/               (planned)
 |   |-- agents/              agent definitions, orchestrator  (planned)
 |   |-- workers/             background job consumers         (planned)
@@ -60,12 +60,12 @@ wasla/
 |-- tests/                   unit, integration, e2e
 |-- nginx/                   reverse proxy example
 |-- scripts/                 container entrypoint
-+-- .github/workflows/       CI pipeline
++-- .github/workflows/       CI and security pipelines
 ```
 
 ## 3. Application layers
 
-**Status: In Progress** — the layering and dependency injection are established and exercised by the health subsystem; repositories and models arrive in Phase 1.
+**Status: Implemented** — the layering and dependency injection are established and exercised by the health, authentication, and invitation subsystems.
 
 | Layer | Responsibility | Rule |
 | --- | --- | --- |
@@ -77,11 +77,13 @@ wasla/
 
 Dependencies point inwards: API -> services -> repositories/integrations -> models. Dependency injection is used for sessions, clients, and settings so the orchestrator is testable without FastAPI, Meta, or OpenAI. Infrastructure is created once per process in the application lifespan, stored on application state, and injected as typed dependencies; the health service receives its probes as injected callables, which is why the endpoint tests need no real database or cache.
 
+Services own no transaction. The session is request-scoped and commits when the request succeeds, so a partially completed operation cannot be left behind; repositories stage writes and never commit.
+
 ## 4. Request flow
 
-**Status: Implemented** — middleware, routing, and centralised error handling exist and are tested. The auth and tenant dependencies are Planned (Phase 2).
+**Status: Implemented** — middleware, routing, centralised error handling, and the authentication and workspace dependencies all exist and are tested.
 
-`Request -> middleware (request_id, log context, timing) -> router -> auth/tenant dependency (planned) -> service -> repository -> PostgreSQL -> response schema -> structured access log`
+`Request -> middleware (request_id, log context, timing) -> router -> auth dependency -> workspace + role dependency -> service -> repository -> PostgreSQL -> response schema -> structured access log`
 
 Every request carries a request ID, taken from the configured header or generated, bound to the log context, and returned on the response. Errors raise domain exceptions that centralised handlers map to a stable envelope:
 
@@ -129,37 +131,43 @@ Conversations produce contacts and leads. Agents create or update leads through 
 
 ## 10. Background jobs and Redis usage
 
-**Status: Planned** — the Redis client and its health probe are Implemented; queues and workers are not.
+**Status: In Progress** — the Redis client, its health probe, and the refresh-token denylist are Implemented; queues and workers are not.
 
 Redis provides job queues, caching, rate limiting, follow-up scheduling, and temporary state. Workers handle AI processing, media processing, document ingestion and embeddings, follow-ups, campaigns, and usage aggregation. All jobs are idempotent and support retry with an error/dead-letter strategy.
 
 ## 11. Database architecture
 
-**Status: In Progress** — engine, session scope, declarative base, shared mixins, and migration tooling are Implemented; domain models and their indexes arrive in Phase 1 onwards.
+**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, and the identity and tenancy tables are Implemented; messaging, knowledge, CRM, and billing tables arrive in later phases.
 
-PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically.
+PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically; migration `0002` creates `tenants`, `users`, `memberships`, and `tenant_invitations`.
 
 Sessions are request-scoped and commit on success or roll back on failure. Connections use pre-ping, bounded pooling, recycling, and an explicit connect timeout.
 
-Indexes are planned on `tenant_id`, conversation `(tenant_id, status)`, message `(conversation_id, created_at)`, contact `(tenant_id, phone)`, lead `(tenant_id, status)`, WhatsApp `phone_number_id`, usage and analytics `(tenant_id, created_at)`, and document `tenant_id`.
+Enum columns are native PostgreSQL types. Phase 1 tables deliberately carry no `server_default` for enum and boolean columns — defaults are applied in the application — so that `alembic check` compares like with like and stays trustworthy as a drift gate.
+
+Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, and the unique token hash. Further indexes are planned on conversation `(tenant_id, status)`, message `(conversation_id, created_at)`, contact `(tenant_id, phone)`, lead `(tenant_id, status)`, WhatsApp `phone_number_id`, usage and analytics `(tenant_id, created_at)`, and document `tenant_id`.
 
 ## 12. Multi-tenancy
 
-**Status: Planned** — the tenant-scoped model mixin exists; enforcement arrives with the models and repositories in Phase 1.
+**Status: Implemented** — enforced in the repository layer and tested against a real database.
 
-Shared PostgreSQL infrastructure with `tenant_id` isolation (see ADR-001). Users are global identities; the authoritative link to a company is `User -> Membership -> Tenant` (see ADR-002). Roles are scoped to the membership, never to the user. A request executes in exactly one active workspace, and a client-supplied `tenant_id` is only honoured after membership verification. Tenant isolation is enforced in repositories and services and is explicitly tested.
+Shared PostgreSQL infrastructure with `tenant_id` isolation (see ADR-001). Users are global identities; the authoritative link to a company is `User -> Membership -> Tenant` (see ADR-002). Roles are scoped to the membership, never to the user. A request executes in exactly one active workspace, taken from the signed access token and re-verified against a live membership on every request.
+
+Isolation is structural rather than a habit: `TenantScopedRepository` takes its tenant id once from the authenticated context, fixes it for the repository's lifetime, and applies it in the single method every read starts from. A subclass that fails to declare its tenant predicate cannot be instantiated. Queries that must cross workspaces — resolving which workspaces a user belongs to, and resolving an invitation by its token hash before any workspace is known — are isolated in their own small classes with one method each, so the exceptions are visible instead of scattered.
+
+Cross-tenant reads answer `not_found`, never `forbidden`, so error codes cannot be used to map another tenant's data. `tests/integration/test_authorization.py` proves this against PostgreSQL.
 
 ## 13. SaaS owner architecture
 
-**Status: Planned**
+**Status: In Progress** — the platform role authorization layer is Implemented; the `app/platform/` surface is Planned.
 
-Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated. The platform layer lives in `app/platform/` and is exposed under `/api/v1/platform/*` for tenant administration, usage, revenue, plans, subscriptions, system health, and audit logs. Privileged platform actions are always audit-logged.
+Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated: a platform role grants nothing inside a workspace, which is tested. The platform layer lives in `app/platform/` and is exposed under `/api/v1/platform/*` for tenant administration, usage, revenue, plans, subscriptions, system health, and audit logs. Privileged platform actions are always audit-logged.
 
 ## 14. Authentication and authorization
 
-**Status: Planned**
+**Status: Implemented** — rate limiting on authentication endpoints remains Planned (phase 14).
 
-Modern password hashing, access/refresh tokens, and revocation. Authorization answers: who is the user, which membership and role apply, which tenant owns the resource, and is the action permitted. See [docs/AUTH.md](docs/AUTH.md).
+Argon2id password hashing with rehash-on-login, typed access and refresh tokens, rotating refresh tokens with a Redis denylist, a current-user dependency, workspace resolution and switching from the token, and role dependencies for both scopes. Access tokens are intentionally not revocable and membership is re-verified per request; the reasoning for both, and the invitation flow, is in [docs/AUTH.md](docs/AUTH.md).
 
 ## 15. Billing and usage tracking
 
@@ -187,6 +195,6 @@ Readiness probes run concurrently, are timeout-bounded, and contain their failur
 
 **Status: In Progress** — CI is Implemented; deployment automation and worker containers are Planned.
 
-GitHub Actions runs three jobs: quality (Ruff, Black, MyPy), tests (pytest with coverage against PostgreSQL with pgvector and Redis service containers, an application startup check, migration upgrade/downgrade/upgrade validation, and model drift detection via `alembic check`), and a Docker build that boots the runtime image and asserts it answers liveness.
+GitHub Actions runs three jobs: quality (Ruff, Black, MyPy), tests (pytest with coverage against PostgreSQL with pgvector and Redis service containers, including authorization and tenant-isolation tests that build their schema from the models, plus an application startup check, migration upgrade/downgrade/upgrade validation, and model drift detection via `alembic check`), and a Docker build that boots the runtime image and asserts it answers liveness. A separate security workflow scans dependencies and the repository history for secrets.
 
 The runtime image is multi-stage and runs as a non-root user with a liveness-based container health check. Migrations are opt-in through `RUN_MIGRATIONS` so a release applies them once as an explicit step rather than racing across replicas. Production runs the API behind Nginx with health checks, restart policies, resource limits, an isolated network, and persistent volumes; workers join this topology in Phase 8. Details in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).

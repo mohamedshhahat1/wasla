@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0 and 1 are complete. Phase 2 is functionally complete: registration, login, refresh rotation, workspace switching, RBAC dependencies and the invitation flow are in place. What remains is the database-backed authorization test pass, then Phase 3 (WhatsApp integration).
+**Current position:** Phases 0, 1 and 2 are complete. Phase 3 (WhatsApp integration) is next.
 
 ## Phase 0 — Foundation
 
@@ -62,7 +62,7 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] Membership-scoped RBAC dependencies
 - [x] Platform role authorization layer
 - [x] Invitation issuing, revocation and acceptance
-- [~] RBAC and cross-tenant access tests (HTTP surface and role guards covered; database-backed pass pending)
+- [x] RBAC and cross-tenant access tests (PostgreSQL-backed)
 
 ## Phase 3 — WhatsApp integration
 
@@ -71,7 +71,7 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [ ] Meta signature verification
 - [ ] Payload parser
 - [ ] Tenant resolution from `phone_number_id`
-- [ ] Inbound message persistence
+- [ ] Inbound event persistence
 - [ ] Idempotency on WhatsApp event IDs
 - [ ] Outbound client (text, media, location, buttons, lists, templates)
 - [ ] Delivery status and read receipts
