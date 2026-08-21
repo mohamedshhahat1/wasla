@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0, 1, 2 and 3 are complete. The one Phase 3 item still open is the projection of delivery statuses onto message rows, which cannot be built before the message model exists. Phase 4 (conversations) is next.
+**Current position:** Phases 0, 1, 2 and 3 are complete, and the documentation is in sync with the code. The one Phase 3 item still open is the projection of delivery statuses onto message rows, which cannot be built before the message model exists. Phase 4 (conversations) is next.
 
 ## Phase 0 — Foundation
 
@@ -75,6 +75,7 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] Inbound event persistence
 - [x] Idempotency on WhatsApp event IDs
 - [x] Webhook integration tests
+- [x] Model and repository tests (PostgreSQL-backed, including model/migration parity)
 - [x] Account connection API (connect, list, disable, enable)
 - [x] Outbound client (text, media, location, buttons, lists, templates, read receipts)
 - [x] Outbound retry policy and error mapping
