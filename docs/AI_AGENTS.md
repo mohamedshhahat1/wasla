@@ -1,38 +1,99 @@
 # AI Agents
 
-**Status: Planned** — no agent code exists yet. See [../TASKS.md](../TASKS.md) phase 5. Provider decision: ADR-007.
+**Status: Implemented** — an agent answers a customer end to end. Knowledge retrieval (Phase 6), usage recording (Phase 12) and a worker process of its own (Phase 8) are not built. Decisions: ADR-007, ADR-014, ADR-015.
 
 Scope: agent configuration, orchestration, tool calling, and conversation memory.
 
 ## Agent configuration
 
-An agent is an AI employee configuration, not a bare prompt: `name`, `description`, `personality`, `language`, `tone`, `instructions`, `model`, knowledge sources, allowed tools, triggers, routing rules, handoff rules, enabled state, fallback behaviour, metadata. Agents are tenant-owned; multiple agents per tenant are supported.
+An agent is a row in `agents`, owned by one workspace, with a unique name inside it. What is actually stored:
 
-Examples: a sales agent with product and pricing knowledge plus lead tools; a support agent with complaint handling, order lookup, ticketing, and escalation; a booking agent with availability, create, cancel, and reschedule tools.
+| Field | Meaning |
+| --- | --- |
+| `name`, `description` | Identification inside the workspace |
+| `status` | `DRAFT`, `ACTIVE` or `DISABLED` |
+| `model` | Any Responses-API model; defaults to the configured `OPENAI_MODEL` |
+| `system_prompt` | The developer instructions sent on every turn |
+| `temperature`, `max_output_tokens` | Sampling and output bounds |
+| `memory_message_limit`, `memory_token_budget` | How much history the agent may see |
+| `is_default` | The agent that answers when nothing more specific applies |
+
+Personality, language, tone, triggers, routing rules and fallback behaviour were originally sketched as separate fields. They are not columns: all of them are expressible in the system prompt, and a column per stylistic knob would have to be assembled back into that same prompt anyway. Routing beyond a single default has no second selector to route to yet, so it waits for one.
+
+Agents are created as drafts whatever the request says. An agent that began answering the moment it was created would be live before anyone had read its prompt. Only an `ACTIVE` agent marked default will answer, so promotion is the deliberate act that puts one in front of customers.
+
+Tool access is a grant per agent in `agent_tools`: a tool name, an `enabled` flag, and optional JSON configuration. Grants are validated against the registry when made, so a typo fails immediately; a grant naming a tool a later release removed still reads back rather than breaking the screen. Revoking disables the grant instead of deleting it, so turning a tool back on does not discard its configuration.
+
+### API
+
+| Method | Path | Who |
+| --- | --- | --- |
+| `GET` | `/api/v1/agents` | Any workspace member |
+| `POST` | `/api/v1/agents` | Admin or owner |
+| `GET` | `/api/v1/agents/available-tools` | Any workspace member |
+| `GET` | `/api/v1/agents/{agent_id}` | Any workspace member |
+| `PATCH` | `/api/v1/agents/{agent_id}` | Admin or owner |
+| `POST` | `/api/v1/agents/{agent_id}/default` | Admin or owner |
+| `GET` | `/api/v1/agents/{agent_id}/tools` | Any workspace member |
+| `PUT` | `/api/v1/agents/{agent_id}/tools` | Admin or owner |
+| `DELETE` | `/api/v1/agents/{agent_id}/tools/{name}` | Admin or owner |
+
+Reading is open to members because staffing an inbox means seeing what the agent is configured to do. Changing what customers are told is an administrative act.
 
 ## Orchestrator flow
 
 ```
-Incoming message -> load tenant -> load conversation -> determine mode
-  -> if HUMAN: stop (no AI) -> determine agent -> load agent config
-  -> load conversation memory -> retrieve knowledge -> prepare allowed tools
-  -> OpenAI Responses API -> handle tool calls -> execute business tools
-  -> continue interaction if needed -> final response
-  -> send via WhatsApp -> persist -> record usage
+Webhook stores + projects the message -> enqueue one job per conversation
+  -> worker reserves the job -> open one database session
+  -> load conversation -> HUMAN mode? stop
+  -> resolve the agent (requested, or the active default)
+  -> build the memory window -> collect granted tools
+  -> Responses API -> tool calls? run them, feed results back (max 3 rounds)
+  -> reply text -> worker sends it through the messaging service -> commit
 ```
 
-The orchestrator is testable independently of FastAPI, Meta, and OpenAI.
+The split in the last two lines is the important one. `AgentOrchestrator.answer()` returns an `AgentOutcome` — reply text, whether a handoff was requested, which tools ran, token usage, how many rounds it took — and sends nothing. The worker decides to send. That keeps the orchestrator testable with no WhatsApp account and no database, and it means a bug in sending cannot be reached by a bug in reasoning.
 
-## Provider integration
+Three guards stop a turn before it costs anything:
 
-All inference goes through `app/integrations/openai/` using the current Responses API: configurable models, developer instructions, conversation context, structured outputs where useful, tool calling, token usage tracking, retries, timeouts, and error handling. AI failures never crash the webhook path. API keys are never logged, and sensitive customer content is not logged unnecessarily.
+- **`HUMAN` mode.** A conversation a colleague has taken over is never answered by an agent, logged as `agent.skipped_human_mode`.
+- **No active default.** If nothing is configured to answer, the turn ends rather than falling back to some built-in prompt.
+- **A round limit.** The tool loop runs at most three rounds. A model that keeps asking for tools stops being useful long before it stops being expensive, and `agent.round_limit_reached` says so.
+
+A tool that raises is not an outage. A rejected argument becomes tool output the model can read and retry against (`agent.tool_rejected`), and a domain error becomes "That did not work: …" (`agent.tool_failed`). Only unexpected exceptions escape, and they belong to the worker.
 
 ## Conversation memory
 
-Context is assembled from a recent message window, a rolling conversation summary, relevant retrieved knowledge, and the current message. Full history is never resent; context assembly is token-aware.
+The window is assembled from the conversation's own messages, newest first, and stops at whichever bound is reached first: `memory_message_limit` turns or `memory_token_budget` estimated tokens. Dropped turns are counted and logged, so a truncated context is visible rather than silent.
+
+Twice the message limit is fetched to fill it, because failed outbound messages are skipped: a message Meta rejected was never seen by the customer, so replaying it as something the agent said would make the agent reason about a conversation that did not happen.
+
+Token counts are an estimate, not a tokenisation: four characters per token for ASCII, two for non-ASCII, which keeps Arabic from being wildly under-counted. This is deliberate — a real tokeniser means a new dependency and a model-specific vocabulary, for a number used only to decide where to cut history. The estimate is compared against a budget, never billed against.
+
+A rolling conversation summary is still planned. Long conversations currently lose their oldest turns rather than compressing them.
+
+## Provider integration
+
+All inference goes through `app/integrations/openai/`, over HTTP with no vendor SDK, using the Responses API (ADR-007, ADR-014). Requests set `store: false` and never thread turns provider-side: the conversation lives in the workspace's own tables.
+
+Retries are the inverse of the WhatsApp client's — 429, transport errors and 5xx are all retried, three attempts with linear backoff — because a duplicated inference costs tokens and reaches no customer, while a duplicated send reaches one. Provider error prose is never logged, only its `code` and `type`, because that prose can quote the request and the request contains a customer's conversation.
 
 ## Tools
 
-Planned tool surface: `create_lead`, `update_lead`, `get_lead`, `assign_lead`, `get_product`, `get_price`, `search_knowledge`, `send_media`, `handoff_to_human`, `create_ticket`, `get_order`, `check_availability`, `create_appointment`, `cancel_appointment`, `reschedule_appointment`, `schedule_follow_up`.
+Implemented: `request_human_handoff`, which hands the conversation to a person with a reason of at most 200 characters and stops the loop.
 
-Rules: arguments are schema-validated, every tool enforces tenant isolation, agents receive only explicitly allowed tools, and model output can never trigger arbitrary execution. Retrieval details in [RAG.md](RAG.md); escalation in [CRM.md](CRM.md).
+Planned, in the phase that gives each one something to act on: `search_knowledge` (Phase 6), `create_lead`, `update_lead`, `get_lead`, `assign_lead` (Phase 7), `schedule_follow_up` (Phase 8), `send_media` (Phase 9), and later `get_product`, `get_price`, `create_ticket`, `get_order`, `check_availability`, `create_appointment`, `cancel_appointment`, `reschedule_appointment`.
+
+Rules the registry enforces now: every argument is validated against a declared schema before a handler runs; a handler receives a `ToolContext` carrying the tenant id, the conversation id and the session, so a tool cannot reach outside the workspace it was called in; an agent is offered only the tools it has been granted; and a name the registry does not know is never dispatched, so model output cannot name its way into arbitrary execution.
+
+Retrieval details in [RAG.md](RAG.md); escalation in [CRM.md](CRM.md).
+
+## Queue and worker
+
+Jobs move through three Redis lists — `agent:jobs:pending`, `agent:jobs:inflight`, `agent:jobs:failed` — reserved with a blocking `BLMOVE` so a job survives the death of the worker holding it (ADR-015). A job carries the tenant id, the conversation id, and optionally a specific agent.
+
+The webhook enqueues one job per conversation that received a message, however many arrived in the delivery, and swallows a queue failure after logging `agent.enqueue_failed`: the messages are already stored, and a Redis outage must not make Meta retry the whole delivery.
+
+The worker owns the transaction. It opens one session per job, runs the orchestrator inside it, sends any reply through `MessagingService`, and commits once — so the outbound message row and the conversation timestamps land together or not at all.
+
+What the worker does not have is a process to run in. `AgentWorker.run_forever()` exists and nothing calls it; the entrypoint and its container service arrive with the Phase 8 worker. Nothing reaps the in-flight list yet either, so a job abandoned by a killed worker stays visible but stalled.

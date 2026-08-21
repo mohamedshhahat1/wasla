@@ -11,11 +11,11 @@ Technical source of truth for the current system architecture. Every section car
 
 ## 1. System overview
 
-**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport and conversations exist. The agent orchestrator and RAG do not.
+**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport, conversations, and the agent orchestrator with its queue and worker exist. Knowledge retrieval does not.
 
 Wasla is an API-first, multi-tenant backend. A business (tenant) connects one or more WhatsApp Business phone numbers. Inbound customer messages arrive as Meta webhooks, are resolved to a tenant, persisted, and queued for asynchronous AI processing. An agent orchestrator loads the conversation, retrieves tenant-scoped knowledge, calls the OpenAI Responses API with a controlled tool set, and replies through the WhatsApp Cloud API.
 
-Of that pipeline, the webhook, tenant resolution, event persistence, the projection into conversations and messages, and the outbound client are built. Everything from the queue onwards is not.
+Of that pipeline, everything except retrieval is built: the webhook, tenant resolution, event persistence, the projection into conversations and messages, the Redis queue, the orchestrator, the outbound client, and the worker that joins them. The worker has no process of its own yet — it is a class nothing calls — and usage recording arrives with Phase 12.
 
 ```
 WhatsApp
@@ -53,10 +53,10 @@ wasla/
 |   |-- schemas/             Pydantic request/response contracts
 |   |-- services/            business logic / use cases
 |   |-- api/                 health router, auth dependencies
-|   |   +-- v1/              auth, conversations, invitations, webhooks, whatsapp
-|   |-- integrations/        whatsapp/ (signature, payload, client); openai/ (planned)
-|   |-- agents/              agent definitions, orchestrator  (planned)
-|   |-- workers/             background job consumers         (planned)
+|   |   +-- v1/              agents, auth, conversations, invitations, webhooks, whatsapp
+|   |-- integrations/        whatsapp/ (signature, payload, client); openai/ (types, client)
+|   |-- agents/              memory, tool registry, orchestrator
+|   |-- workers/             job queue, AI worker (no process entrypoint yet)
 |   +-- platform/            SaaS owner administration layer  (planned)
 |-- alembic/                 migrations
 |-- tests/                   unit, integration, e2e
@@ -79,7 +79,7 @@ wasla/
 
 Dependencies point inwards: API -> services -> repositories/integrations -> models. Dependency injection is used for sessions, clients, and settings so the orchestrator is testable without FastAPI, Meta, or OpenAI. Infrastructure is created once per process in the application lifespan, stored on application state, and injected as typed dependencies; the health service receives its probes as injected callables, which is why the endpoint tests need no real database or cache.
 
-Services own no transaction. The session is request-scoped and commits when the request succeeds, so a partially completed operation cannot be left behind; repositories stage writes and never commit.
+Services own no transaction. The session is request-scoped and commits when the request succeeds, so a partially completed operation cannot be left behind; repositories stage writes and never commit. A worker is the one place that opens a session itself, because it has no request to borrow one from.
 
 Workspace-scoped services take their tenant id from the injected active workspace, not from a route argument, so no endpoint can choose which workspace it operates on.
 
@@ -99,22 +99,23 @@ Stack traces are never exposed in production responses. Cross-tenant access is r
 
 ## 5. WhatsApp webhook flow
 
-**Status: In Progress** — verification, signature checking, parsing, tenant resolution, idempotent event storage and projection into conversations are Implemented. Queueing for AI processing arrives with Phase 5.
+**Status: Implemented** — verification, signature checking, parsing, tenant resolution, idempotent event storage, projection into conversations, and enqueueing for the agent.
 
 1. `GET /api/v1/webhooks/whatsapp` verifies the Meta challenge token with a constant-time comparison. **Implemented**
 2. `POST /api/v1/webhooks/whatsapp` verifies the `X-Hub-Signature-256` signature over the payload. **Implemented**
 3. The payload is parsed; `phone_number_id` resolves the WhatsApp account and therefore the tenant. The tenant is never inferred from the customer phone number. **Implemented**
 4. Message and status events are persisted idempotently, keyed on the WhatsApp message/event ID (ADR-011). **Implemented**
-5. The contact, conversation and message are created or updated from the stored event, and the endpoint returns immediately. **Implemented**
-6. Work is enqueued to Redis for the agent orchestrator. **Planned (Phase 5)**
+5. The contact, conversation and message are created or updated from the stored event. **Implemented**
+6. One job per conversation that received a message is enqueued to Redis, and the endpoint returns. **Implemented**
 
 No AI or media processing happens inside the webhook request.
 
-Three properties of the endpoint are deliberate and should not be "tidied" later:
+Four properties of the endpoint are deliberate and should not be "tidied" later:
 
 - **The signature is computed over the raw request body**, before parsing. Verifying a re-serialised payload would verify Wasla's own serialisation rather than the bytes Meta signed.
 - **Anything unactionable still answers 200.** Meta retries non-2xx deliveries and eventually disables the subscription, so returning an error for a payload that will never become valid — an unparseable body, an unknown `phone_number_id`, a disabled account — turns one bad message into an outage. Only a failed signature answers 403.
 - **`phone_number_id` is unique platform-wide**, not per workspace, which is what makes step 3 trustworthy: a number can never resolve to two tenants.
+- **A queue failure is logged and swallowed.** The messages are already stored, so failing the delivery would make Meta resend traffic that landed, to fix a problem retrying cannot fix.
 
 ### 5.1 Outbound
 
@@ -141,9 +142,24 @@ The same customer writing to two workspaces produces two contacts and two conver
 
 ## 6. AI agent flow
 
-**Status: Planned**
+**Status: In Progress** — configuration, memory, tools, orchestration, the queue and the worker are Implemented. Knowledge retrieval (Phase 6), usage recording (Phase 12), and a process for the worker to run in (Phase 8) are not.
 
-`Load tenant -> load conversation -> check mode (HUMAN stops AI) -> select agent -> load agent config -> build token-aware memory -> retrieve knowledge -> expose allowed tools -> OpenAI Responses API -> execute validated tool calls -> final response -> send + persist -> record usage`
+```
+Enqueued job -> worker reserves it -> open one session
+  -> load conversation -> HUMAN mode? stop
+  -> resolve agent (requested, or the workspace's active default)
+  -> build token-aware memory window -> collect granted tools
+  -> Responses API -> validated tool calls -> feed results back (max 3 rounds)
+  -> reply text -> send via the messaging service -> commit
+```
+
+The orchestrator decides; the worker sends. `answer()` returns an outcome — reply text, whether a handoff was requested, which tools ran, token usage, rounds taken — and performs no I/O beyond the provider call and its own reads. That is what makes it testable with no WhatsApp account, no Redis and no database, and it means a defect in sending cannot be reached from a defect in reasoning.
+
+The transaction belongs to the worker, which is the one component here with no request to borrow a session from. It opens one session per job and commits once, so the outbound message row and the conversation's timestamps land together or not at all. The provider call sits inside that session deliberately, so a tool reads and writes in the transaction the reply will be written to; the cost is a pinned connection for the length of an inference (ADR-015).
+
+Four rules bound a turn. `HUMAN` mode stops it before any cost. A workspace with no active default answers nothing rather than falling back to a built-in prompt. The tool loop runs at most three rounds. And a tool that rejects its arguments or raises a domain error becomes output the model can read and retry against, not an exception — only the unexpected reaches the worker, which dead-letters the job.
+
+Agent memory is a window over the conversation's own messages, bounded by both a message count and an estimated token budget, with failed outbound messages skipped: a message Meta rejected was never seen, so replaying it would make the agent reason about a conversation that never happened. Details, including why the token count is a character-ratio estimate rather than a tokeniser, are in [docs/AI_AGENTS.md](docs/AI_AGENTS.md).
 
 ## 7. RAG flow
 
@@ -153,11 +169,13 @@ The same customer writing to two workspaces produces two contacts and two conver
 
 ## 8. Human handoff flow
 
-**Status: In Progress** — mode, handoff reason and assignment are Implemented; the automatic triggers are Planned.
+**Status: In Progress** — mode, handoff reason, assignment, and an agent's own request for a human are Implemented; the automatic triggers are Planned.
 
 Every conversation carries a mode, `AI` or `HUMAN`, and a nullable handoff reason. Switching to `HUMAN` records the reason; returning to `AI` clears it, because a stale explanation left attached to an AI-handled conversation misleads whoever reads it next. Assignment names a member of the workspace, and that membership is verified through the repository rather than trusted from the request body, so a conversation cannot be assigned to an outsider whose id a caller happens to know.
 
-Automatic handoff — triggered by explicit customer request, low confidence, negative or angry sentiment, sensitive requests, tool failure, or an agent rule — arrives with sentiment analysis in Phase 10. The rule that `HUMAN` mode stops automatic AI replies belongs to the orchestrator and arrives with it in Phase 5; `Conversation.is_ai_handled` already exists for it to read.
+An agent can hand over on its own. `request_human_handoff` is the one tool implemented in the registry: it records a reason of at most 200 characters, ends the tool loop, and suppresses the reply, because a conversation being handed to a person should not also receive a parting message from the agent. The orchestrator then refuses that conversation on every later turn, which is the `HUMAN`-mode guard reading `Conversation.is_ai_handled`.
+
+Automatic handoff — triggered by low confidence, negative or angry sentiment, sensitive requests, or an agent rule — arrives with sentiment analysis in Phase 10.
 
 ## 9. CRM / lead flow
 
@@ -167,27 +185,31 @@ Conversations produce contacts and leads. Agents create or update leads through 
 
 ## 10. Background jobs and Redis usage
 
-**Status: In Progress** — the Redis client, its health probe, and the refresh-token denylist are Implemented; queues and workers are not.
+**Status: In Progress** — the Redis client, its health probe, the refresh-token denylist, the agent job queue and the AI worker are Implemented. Media, ingestion, follow-up and campaign workers are not, and no worker yet runs as its own process.
 
-Redis provides job queues, caching, rate limiting, follow-up scheduling, and temporary state. Workers handle AI processing, media processing, document ingestion and embeddings, follow-ups, campaigns, and usage aggregation. All jobs are idempotent and support retry with an error/dead-letter strategy.
+Redis provides job queues, caching, rate limiting, follow-up scheduling, and temporary state. Workers handle AI processing, media processing, document ingestion and embeddings, follow-ups, campaigns, and usage aggregation.
+
+The agent queue is three lists rather than one: `agent:jobs:pending`, `agent:jobs:inflight`, and `agent:jobs:failed`. A worker reserves with a blocking `BLMOVE` into the in-flight list, removes the exact payload on success, and dead-letters it on failure, so a job whose worker dies is still visible instead of lost with the process (ADR-015). Payloads are compact JSON with sorted keys, because removal matches by exact value.
+
+Two gaps are known and recorded rather than implied away. Nothing reaps the in-flight list, so a job abandoned by a killed worker stalls until an operator moves it; and requeueing is an operator decision, because re-running a job produces a second reply to the customer — these jobs are repeatable, not idempotent.
 
 ## 11. Database architecture
 
-**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, the identity and tenancy tables, the WhatsApp tables and the conversation tables are Implemented; knowledge, CRM, and billing tables arrive in later phases.
+**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, the identity and tenancy tables, the WhatsApp tables, the conversation tables and the agent tables are Implemented; knowledge, CRM, and billing tables arrive in later phases.
 
-PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically; migration `0002` creates `tenants`, `users`, `memberships`, and `tenant_invitations`; migration `0003` creates `whatsapp_accounts` and `whatsapp_events`; migration `0004` creates `contacts`, `conversations`, and `messages`.
+PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically; migration `0002` creates `tenants`, `users`, `memberships`, and `tenant_invitations`; migration `0003` creates `whatsapp_accounts` and `whatsapp_events`; migration `0004` creates `contacts`, `conversations`, and `messages`; migration `0005` creates `agents` and `agent_tools`.
 
 Sessions are request-scoped and commit on success or roll back on failure. Connections use pre-ping, bounded pooling, recycling, and an explicit connect timeout.
 
-Primary keys are generated in Python and applied at insert time, so a newly added row has no id until the session is flushed. Code that creates a parent and then references it — the projection creating a contact before its conversation — must flush in between. This is a deliberate trade for portable, application-visible identifiers rather than database-generated ones.
+Primary keys are generated in Python and applied at insert time, so a newly added row has no id until the session is flushed. Code that creates a parent and then references it — the projection creating a contact before its conversation, the agent service returning a created agent — must flush in between. This is a deliberate trade for portable, application-visible identifiers rather than database-generated ones.
 
 Enum columns are native PostgreSQL types. Tables deliberately carry no `server_default` for enum and boolean columns — defaults are applied in the application — so that `alembic check` compares like with like and stays trustworthy as a drift gate.
 
-One pitfall is recorded here because it already produced a defect. A model that declares `__table_args__` in its own class body **replaces** the value contributed by `TenantScopedMixin` instead of extending it, and so loses its `tenant_id` index with no error anywhere. Both WhatsApp models did exactly that, leaving the model metadata without two indexes that migration `0003` creates — a difference `alembic check` exists to fail on. `tests/unit/test_whatsapp_models.py` now asserts that every mapped table carrying a `tenant_id` column also declares `ix_<table>_tenant_id`, so a tenant-scoped model added in a later phase cannot reintroduce it quietly. The conversation models each restate their own tenant index for the same reason.
+One pitfall is recorded here because it already produced a defect. A model that declares `__table_args__` in its own class body **replaces** the value contributed by `TenantScopedMixin` instead of extending it, and so loses its `tenant_id` index with no error anywhere. Both WhatsApp models did exactly that, leaving the model metadata without two indexes that migration `0003` creates — a difference `alembic check` exists to fail on. `tests/unit/test_whatsapp_models.py` now asserts that every mapped table carrying a `tenant_id` column also declares `ix_<table>_tenant_id`, so a tenant-scoped model added in a later phase cannot reintroduce it quietly. The conversation and agent models each restate their own tenant index for the same reason.
 
 The schema carries one deliberate denormalisation. `conversations.last_inbound_at` duplicates the timestamp of the customer's most recent message, which could be derived from the `messages` table instead. It is stored because the 24-hour service window is checked on every outbound send and returned on every conversation read, so deriving it would make that the most frequent query in the system. The projection is the only writer.
 
-Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, the unique invitation token hash, `whatsapp_accounts (tenant_id)`, a platform-wide `UNIQUE(phone_number_id)`, `whatsapp_events (tenant_id)`, `whatsapp_events (account_id)`, `whatsapp_events (tenant_id, state)`, `UNIQUE(tenant_id, event_id)`, `contacts (tenant_id)`, `UNIQUE(tenant_id, wa_id)`, `conversations (tenant_id)`, `conversations (tenant_id, status)`, `conversations (tenant_id, last_message_at)`, `conversations (contact_id)`, `UNIQUE(tenant_id, contact_id, account_id)`, `messages (tenant_id)`, `messages (conversation_id, created_at)`, and `UNIQUE(tenant_id, wa_message_id)`. Further indexes are planned on lead `(tenant_id, status)`, usage and analytics `(tenant_id, created_at)`, and document `tenant_id`.
+Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, the unique invitation token hash, `whatsapp_accounts (tenant_id)`, a platform-wide `UNIQUE(phone_number_id)`, `whatsapp_events (tenant_id)`, `whatsapp_events (account_id)`, `whatsapp_events (tenant_id, state)`, `UNIQUE(tenant_id, event_id)`, `contacts (tenant_id)`, `UNIQUE(tenant_id, wa_id)`, `conversations (tenant_id)`, `conversations (tenant_id, status)`, `conversations (tenant_id, last_message_at)`, `conversations (contact_id)`, `UNIQUE(tenant_id, contact_id, account_id)`, `messages (tenant_id)`, `messages (conversation_id, created_at)`, `UNIQUE(tenant_id, wa_message_id)`, `agents (tenant_id)`, `agents (tenant_id, status)`, `UNIQUE(tenant_id, name)` on agents, `agent_tools (tenant_id)`, `agent_tools (agent_id)`, and `UNIQUE(tenant_id, agent_id, name)`. Further indexes are planned on lead `(tenant_id, status)`, usage and analytics `(tenant_id, created_at)`, and document `tenant_id`.
 
 ## 12. Multi-tenancy
 
@@ -196,6 +218,8 @@ Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(use
 Shared PostgreSQL infrastructure with `tenant_id` isolation (see ADR-001). Users are global identities; the authoritative link to a company is `User -> Membership -> Tenant` (see ADR-002). Roles are scoped to the membership, never to the user. A request executes in exactly one active workspace, taken from the signed access token and re-verified against a live membership on every request.
 
 Isolation is structural rather than a habit: `TenantScopedRepository` takes its tenant id once from the authenticated context, fixes it for the repository's lifetime, and applies it in the single method every read starts from. A subclass that fails to declare its tenant predicate cannot be instantiated. Queries that must cross workspaces — resolving which workspaces a user belongs to, resolving an invitation by its token hash before any workspace is known, and resolving a WhatsApp `phone_number_id` to its account, since inbound traffic has no workspace until that lookup succeeds — are isolated in their own small classes with one method each, so the exceptions are visible instead of scattered.
+
+A background worker has no authenticated context to take a tenant id from, so it takes one from the job it reserved and constructs its repositories with it, exactly as a request-scoped service would. A tool handler receives that same tenant id in its context rather than reading one from model output.
 
 Cross-tenant reads answer `not_found`, never `forbidden`, so error codes cannot be used to map another tenant's data. `tests/integration/test_authorization.py`, `tests/integration/test_whatsapp_persistence.py` and `tests/integration/test_conversation_projection.py` prove this against PostgreSQL.
 
@@ -211,13 +235,15 @@ Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant rol
 
 Argon2id password hashing with rehash-on-login, typed access and refresh tokens, rotating refresh tokens with a Redis denylist, a current-user dependency, workspace resolution and switching from the token, and role dependencies for both scopes. Access tokens are intentionally not revocable and membership is re-verified per request; the reasoning for both, and the invitation flow, is in [docs/AUTH.md](docs/AUTH.md).
 
-Conversation routes are open to every workspace member rather than to admins only, because restricting them would exclude the people who staff an inbox. Role gates stay on administrative actions: connecting a number, inviting a colleague, revoking an invitation.
+Conversation routes are open to every workspace member rather than to admins only, because restricting them would exclude the people who staff an inbox. Reading agent configuration is open for the same reason. Role gates stay on administrative actions: connecting a number, inviting a colleague, revoking an invitation, and changing what an agent says to customers.
 
 ## 15. Billing and usage tracking
 
 **Status: Planned**
 
 Usage is a first-class subsystem of append-only usage events (`tenant_id`, `event_type`, `quantity`, `unit`, `metadata`, `created_at`) aggregated for dashboards and billing. Plans and limits are stored and configurable, enforced through a central entitlement service. Billing models are provider-agnostic behind an abstraction.
+
+Token usage is already returned by the provider client and logged per turn, so the recorder has a source when it is built.
 
 ## 16. Observability
 
@@ -235,12 +261,14 @@ Health endpoints separate liveness from readiness:
 
 Readiness probes run concurrently, are timeout-bounded, and contain their failures: a dependency outage degrades the report instead of raising, and driver internals are never returned to callers.
 
-Events that are expected but worth counting are logged rather than raised: an unmapped delivery status, and a status for a message Wasla never sent — which is normal for a template sent from Meta's own console.
+Events that are expected but worth counting are logged rather than raised: an unmapped delivery status, a status for a message Wasla never sent — normal for a template sent from Meta's own console — and a queue push that failed while the message itself was stored.
+
+An agent turn logs one summary event carrying the rounds taken, the tools run, whether it handed off, the estimated and actual token counts, and how many history turns were dropped, which is what makes a bad prompt or an over-tight budget diagnosable after the fact. Provider failures log the status, the attempt count and the provider's error `code` and `type` — never its prose, because that prose can quote the request and the request contains a customer's conversation.
 
 ## 17. CI/CD and production deployment
 
 **Status: In Progress** — CI is Implemented; deployment automation and worker containers are Planned.
 
-GitHub Actions runs three jobs: quality (Ruff, Black, MyPy), tests (pytest with coverage against PostgreSQL with pgvector and Redis service containers, including authorization, tenant-isolation, model-metadata parity and conversation projection tests that build their schema from the models, plus an application startup check, migration upgrade/downgrade/upgrade validation, and model drift detection via `alembic check`), and a Docker build that boots the runtime image and asserts it answers liveness. A separate security workflow scans dependencies and the repository history for secrets.
+GitHub Actions runs three jobs: quality (Ruff, Black, MyPy), tests (pytest with coverage against PostgreSQL with pgvector and Redis service containers, including authorization, tenant-isolation, model-metadata parity, conversation projection, and agent memory, registry, orchestrator and queue tests that need neither a database nor a provider, plus an application startup check, migration upgrade/downgrade/upgrade validation, and model drift detection via `alembic check`), and a Docker build that boots the runtime image and asserts it answers liveness. A separate security workflow scans dependencies and the repository history for secrets.
 
 The runtime image is multi-stage and runs as a non-root user with a liveness-based container health check. Migrations are opt-in through `RUN_MIGRATIONS` so a release applies them once as an explicit step rather than racing across replicas. Production runs the API behind Nginx with health checks, restart policies, resource limits, an isolated network, and persistent volumes; workers join this topology in Phase 8. Details in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
