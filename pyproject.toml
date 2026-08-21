@@ -19,6 +19,9 @@ dependencies = [
     "alembic>=1.14,<2",
     "redis>=5.2,<6",
     "httpx>=0.28,<0.29",
+    # Authentication: Argon2id password hashing and JWT encoding.
+    "argon2-cffi>=23.1,<26",
+    "pyjwt>=2.10,<3",
 ]
 
 [project.optional-dependencies]
@@ -55,8 +58,18 @@ known-first-party = ["app", "tests"]
 known-third-party = ["alembic"]
 
 [tool.ruff.lint.per-file-ignores]
-# Test helpers follow the same annotation policy as the test functions.
-"tests/**" = ["S101", "ANN001", "ANN003", "ANN201", "ANN202", "ANN204"]
+# Test helpers follow the same annotation policy as the test functions, and
+# credentials appearing in tests are fake by construction.
+"tests/**" = [
+    "S101",
+    "S105",
+    "S106",
+    "ANN001",
+    "ANN003",
+    "ANN201",
+    "ANN202",
+    "ANN204",
+]
 "alembic/**" = ["ANN", "INP001", "E501"]
 
 [tool.mypy]
@@ -70,6 +83,12 @@ exclude = "^alembic/versions/"
 [[tool.mypy.overrides]]
 module = ["tests.*"]
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# Insurance: the published wheel is typed, but a build without py.typed must
+# not turn into a strict-mode failure across the auth code.
+module = ["argon2.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

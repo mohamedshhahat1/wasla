@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0 and 1 are complete. Phase 2 (authentication and authorization) is next.
+**Current position:** Phases 0 and 1 are complete. Phase 2 is in progress: password hashing and token issuance are in place; the authentication service, endpoints and RBAC dependencies are next.
 
 ## Phase 0 — Foundation
 
@@ -52,9 +52,11 @@ This file is updated as part of every logical change. Phases follow the implemen
 
 ## Phase 2 — Authentication and authorization
 
-- [ ] Password hashing
-- [ ] Login and token issuance
-- [ ] Refresh tokens and revocation
+- [x] Password hashing (Argon2id, with rehash-on-login detection)
+- [x] Token issuance (access and refresh, typed, with per-token identifiers)
+- [x] Invitation token generation (hash-only storage)
+- [ ] Registration and login endpoints
+- [ ] Refresh token rotation and revocation (Redis)
 - [ ] Current-user dependency
 - [ ] Active workspace resolution and switching
 - [ ] Membership-scoped RBAC dependencies
