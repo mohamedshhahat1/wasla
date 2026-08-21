@@ -1,0 +1,36 @@
+# Line endings.
+#
+# Git normalises text to LF in the repository, and by default a Windows
+# checkout converts it back to CRLF in the working tree. That is harmless for
+# files only Windows reads, and quietly fatal for files a Linux container
+# executes: `docker build` copies the working tree, so a checkout with
+# `core.autocrlf=true` puts a `#!/bin/sh\r` shebang inside the image. Linux
+# then looks for an interpreter literally named `/bin/sh\r` and the container
+# dies with "no such file or directory", naming the script rather than the
+# shebang and sending you looking in the wrong place entirely.
+#
+# This actually happened: the runtime image built on Windows would not start,
+# while the same commit built fine in CI, because CI runs on Linux and never
+# saw a CRLF. Pinning the endings here makes the build reproducible on either.
+
+* text=auto
+
+# Anything executed inside a container must keep LF whatever the host does.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.Dockerfile text eol=lf
+.dockerignore text eol=lf
+
+# Configuration read by Linux services, for the same reason.
+*.conf text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+
+# Source and documentation. Kept at LF so a diff never shows an entire file as
+# changed because someone edited it on a different operating system.
+*.py text eol=lf
+*.md text eol=lf
+*.sql text eol=lf
+*.env text eol=lf
