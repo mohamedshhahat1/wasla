@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phase 0 is complete. Phase 1 is in progress: the tenancy models and their migration are in place; repositories and isolation tests are next.
+**Current position:** Phases 0 and 1 are complete. Phase 2 (authentication and authorization) is next.
 
 ## Phase 0 — Foundation
 
@@ -47,8 +47,8 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] Tenant invitation model
 - [x] Role definitions (platform and tenant scopes)
 - [x] Initial domain migration (`0002`)
-- [ ] Tenant and user repositories with enforced isolation
-- [ ] Tenant isolation tests
+- [x] Tenant and user repositories with enforced isolation
+- [x] Tenant isolation tests
 
 ## Phase 2 — Authentication and authorization
 
