@@ -2,6 +2,16 @@
 
 from app.db.base import Base
 
+from .conversation import (
+    Contact,
+    Conversation,
+    ConversationMode,
+    ConversationStatus,
+    Message,
+    MessageDirection,
+    MessageKind,
+    MessageStatus,
+)
 from .enums import InvitationStatus, PlatformRole, TenantRole, TenantStatus
 from .invitation import TenantInvitation
 from .membership import Membership
@@ -17,8 +27,16 @@ from .whatsapp import (
 
 __all__ = [
     "Base",
+    "Contact",
+    "Conversation",
+    "ConversationMode",
+    "ConversationStatus",
     "InvitationStatus",
     "Membership",
+    "Message",
+    "MessageDirection",
+    "MessageKind",
+    "MessageStatus",
     "PlatformRole",
     "Tenant",
     "TenantInvitation",
