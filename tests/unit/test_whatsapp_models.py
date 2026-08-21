@@ -1,0 +1,135 @@
+"""Metadata guarantees for the WhatsApp tables.
+
+These tests read the mapped metadata rather than a database, so they run in the
+unit suite and catch drift against migration 0003 without PostgreSQL. They exist
+because the tenant index really did go missing from both tables: declaring
+``__table_args__`` in a class body replaces the one ``TenantScopedMixin``
+contributes, and nothing complains until ``alembic check`` compares the metadata
+with the migrated schema.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy import Table, UniqueConstraint
+
+from app.db.models import (
+    Base,
+    WhatsAppAccount,
+    WhatsAppAccountStatus,
+    WhatsAppEvent,
+    WhatsAppEventKind,
+    WhatsAppEventState,
+)
+
+# Column names that would mean a Meta credential had been persisted on the
+# account row, which ADR-009 forbids.
+CREDENTIAL_HINTS = ("token", "secret", "credential", "password")
+
+
+def _index_names(table: Table) -> set[str]:
+    return {index.name for index in table.indexes if index.name is not None}
+
+
+def _unique_columns(table: Table, name: str) -> tuple[str, ...]:
+    for constraint in table.constraints:
+        if isinstance(constraint, UniqueConstraint) and constraint.name == name:
+            return tuple(column.name for column in constraint.columns)
+    raise AssertionError(f"{table.name} has no unique constraint named {name}")
+
+
+def test_every_table_with_a_tenant_column_indexes_it():
+    """The regression guard for the missing WhatsApp tenant indexes.
+
+    Written against the whole metadata rather than the two tables that were
+    broken, so a tenant-scoped model added in a later phase cannot reintroduce
+    the same drift.
+    """
+    missing = sorted(
+        table.name
+        for table in Base.metadata.tables.values()
+        if "tenant_id" in table.columns
+        and f"ix_{table.name}_tenant_id" not in _index_names(table)
+    )
+    assert missing == []
+
+
+def test_whatsapp_tables_declare_the_indexes_migration_0003_creates():
+    assert _index_names(WhatsAppAccount.__table__) == {"ix_whatsapp_accounts_tenant_id"}
+    assert _index_names(WhatsAppEvent.__table__) == {
+        "ix_whatsapp_events_tenant_id",
+        "ix_whatsapp_events_account_id",
+        "ix_whatsapp_events_tenant_id_state",
+    }
+
+
+def test_enum_values_match_the_migration_literals():
+    assert [member.value for member in WhatsAppAccountStatus] == ["active", "disabled"]
+    assert [member.value for member in WhatsAppEventKind] == [
+        "message",
+        "status",
+        "unsupported",
+    ]
+    assert [member.value for member in WhatsAppEventState] == [
+        "received",
+        "processed",
+        "failed",
+    ]
+
+
+def test_phone_number_id_is_unique_platform_wide():
+    """Not (tenant_id, phone_number_id): tenant resolution depends on this."""
+    columns = _unique_columns(
+        WhatsAppAccount.__table__,
+        "uq_whatsapp_accounts_phone_number_id",
+    )
+    assert columns == ("phone_number_id",)
+
+
+def test_event_idempotency_is_scoped_to_one_workspace():
+    columns = _unique_columns(
+        WhatsAppEvent.__table__,
+        "uq_whatsapp_events_tenant_id_event_id",
+    )
+    assert columns == ("tenant_id", "event_id")
+
+
+def test_the_account_row_stores_no_meta_credential():
+    names = " ".join(WhatsAppAccount.__table__.columns.keys()).lower()
+    offenders = [hint for hint in CREDENTIAL_HINTS if hint in names]
+    assert offenders == []
+
+
+def test_tenant_foreign_keys_cascade():
+    for table in (WhatsAppAccount.__table__, WhatsAppEvent.__table__):
+        (foreign_key,) = table.c.tenant_id.foreign_keys
+        assert foreign_key.column.table.name == "tenants"
+        assert foreign_key.ondelete == "CASCADE"
+
+
+def test_enum_defaults_are_application_side():
+    """Migration 0003 declares no server default for the enum columns.
+
+    A server_default here would put the metadata and the migration in
+    disagreement, and env.py compares server defaults.
+    """
+    for table, column_name in (
+        (WhatsAppAccount.__table__, "status"),
+        (WhatsAppEvent.__table__, "state"),
+    ):
+        column = table.c[column_name]
+        assert column.server_default is None
+        assert column.default is not None
+
+
+def test_audit_timestamps_have_server_defaults():
+    for table in (WhatsAppAccount.__table__, WhatsAppEvent.__table__):
+        assert table.c.created_at.server_default is not None
+        assert table.c.updated_at.server_default is not None
+
+
+def test_is_active_reflects_status():
+    account = WhatsAppAccount(status=WhatsAppAccountStatus.ACTIVE)
+    assert account.is_active is True
+
+    account.status = WhatsAppAccountStatus.DISABLED
+    assert account.is_active is False

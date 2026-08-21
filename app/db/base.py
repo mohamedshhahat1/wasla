@@ -76,6 +76,13 @@ class TenantScopedMixin:
     Provides the ``tenant_id`` foreign key and its index. Isolation itself is
     enforced in repositories and services; this mixin only guarantees that the
     column and index exist wherever tenant data is stored.
+
+    Careful: a model that declares ``__table_args__`` in its own class body
+    *replaces* the value below instead of extending it, and so loses the tenant
+    index without any error. Models that need extra table arguments must restate
+    the index themselves. ``tests/unit/test_whatsapp_models.py`` asserts that
+    every mapped table carrying a ``tenant_id`` column has its index, which is
+    the guard against repeating that mistake.
     """
 
     @declared_attr.directive

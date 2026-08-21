@@ -3,7 +3,7 @@
 The account row carries no Meta credential on purpose. A per-workspace access
 token in a plain column would hand a live sending capability to anyone with a
 database dump; until there is encryption at rest, outbound calls use the
-platform credential from configuration.
+platform credential from configuration. See ADR-009.
 """
 
 from __future__ import annotations
@@ -14,8 +14,7 @@ from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.dialects.postgresql import UUID as PgUUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -62,8 +61,13 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
     """
 
     __tablename__ = "whatsapp_accounts"
+    # The tenant index is restated here rather than inherited. Declaring
+    # __table_args__ in a class body replaces the one TenantScopedMixin
+    # contributes, so omitting it drops the index from the metadata while
+    # migration 0003 still creates it, and `alembic check` fails.
     __table_args__ = (
         UniqueConstraint("phone_number_id", name="uq_whatsapp_accounts_phone_number_id"),
+        Index("ix_whatsapp_accounts_tenant_id", "tenant_id"),
     )
 
     phone_number_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -89,22 +93,25 @@ class WhatsAppEvent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
 
     `UNIQUE(tenant_id, event_id)` is the idempotency guarantee. It is scoped by
     workspace rather than globally so one workspace's traffic can never suppress
-    another's.
+    another's. See ADR-011.
     """
 
     __tablename__ = "whatsapp_events"
+    # See WhatsAppAccount: the inherited tenant index does not survive a
+    # class-body __table_args__, so it is restated.
     __table_args__ = (
         UniqueConstraint(
             "tenant_id",
             "event_id",
             name="uq_whatsapp_events_tenant_id_event_id",
         ),
+        Index("ix_whatsapp_events_tenant_id", "tenant_id"),
         Index("ix_whatsapp_events_account_id", "account_id"),
         Index("ix_whatsapp_events_tenant_id_state", "tenant_id", "state"),
     )
 
     account_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True),
+        UUID(as_uuid=True),
         ForeignKey("whatsapp_accounts.id", ondelete="CASCADE"),
         nullable=False,
     )
