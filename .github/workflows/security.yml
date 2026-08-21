@@ -1,0 +1,71 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # New advisories are published without this repository changing.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependencies:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install project and audit tool
+        # pip-audit inspects the environment it runs in, so the project and the
+        # tool share one environment. The development extra is included on
+        # purpose: build and test tooling is part of the supply chain that
+        # produces the image.
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[dev]" pip-audit
+
+      - name: Audit dependencies for known vulnerabilities
+        # --strict is omitted deliberately: the local wasla distribution is not
+        # on PyPI and would be reported as unauditable. Real advisories still
+        # fail this step.
+        run: pip-audit --progress-spinner=off --desc
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v4
+        with:
+          # A secret deleted in a later commit has still leaked.
+          fetch-depth: 0
+
+      - name: Scan repository history for secrets
+        # Pinned image instead of a marketplace action: no licence key and a
+        # deterministic version. --redact keeps findings out of the build log.
+        run: |
+          docker run --rm \
+            --volume "${{ github.workspace }}:/repo:ro" \
+            ghcr.io/gitleaks/gitleaks:v8.18.4 \
+            detect \
+              --source=/repo \
+              --config=/repo/.gitleaks.toml \
+              --redact \
+              --no-banner \
+              --verbose

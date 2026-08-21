@@ -36,7 +36,7 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] Nginx reverse proxy example
 - [x] GitHub Actions CI pipeline
 - [x] Pre-commit configuration
-- [ ] Security workflow (dependency and secret scanning)
+- [x] Security workflow (dependency and secret scanning)
 
 ## Phase 1 — Database and tenancy foundation
 

@@ -1,0 +1,26 @@
+# Secret scanning configuration.
+#
+# The bundled rule set is extended, never replaced. The allowlist below covers
+# values that are deliberately not credentials. A real secret must be rotated,
+# never allowlisted.
+
+title = "Wasla secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented placeholders and local development values"
+paths = [
+  # Template file: every value in it is a placeholder by definition.
+  '''^\.env\.example$''',
+]
+regexes = [
+  # Placeholder that production configuration refuses to start with.
+  '''change-me''',
+  # Signing value used only by the CI test run.
+  '''continuous-integration-secret-value-not-for-deployment''',
+  # Local Compose credentials for a database that only exists on a laptop.
+  '''postgresql\+asyncpg://wasla:wasla@''',
+  '''POSTGRES_PASSWORD: wasla''',
+]
