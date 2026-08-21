@@ -11,9 +11,11 @@ Technical source of truth for the current system architecture. Every section car
 
 ## 1. System overview
 
-**Status: Planned** — identity, tenancy, and authorization exist; the messaging pipeline below does not.
+**Status: In Progress** — identity, tenancy, authorization and the WhatsApp transport exist. Conversations, the agent orchestrator and RAG do not.
 
 Wasla is an API-first, multi-tenant backend. A business (tenant) connects one or more WhatsApp Business phone numbers. Inbound customer messages arrive as Meta webhooks, are resolved to a tenant, persisted, and queued for asynchronous AI processing. An agent orchestrator loads the conversation, retrieves tenant-scoped knowledge, calls the OpenAI Responses API with a controlled tool set, and replies through the WhatsApp Cloud API.
+
+Of that pipeline, the webhook, tenant resolution, event persistence and the outbound client are built. Everything from the queue onwards is not.
 
 ```
 WhatsApp
@@ -51,8 +53,8 @@ wasla/
 |   |-- schemas/             Pydantic request/response contracts
 |   |-- services/            business logic / use cases
 |   |-- api/                 health router, auth dependencies
-|   |   +-- v1/              versioned business routers (auth, invitations)
-|   |-- integrations/        whatsapp/, openai/               (planned)
+|   |   +-- v1/              auth, invitations, webhooks, whatsapp
+|   |-- integrations/        whatsapp/ (signature, payload, client); openai/ (planned)
 |   |-- agents/              agent definitions, orchestrator  (planned)
 |   |-- workers/             background job consumers         (planned)
 |   +-- platform/            SaaS owner administration layer  (planned)
@@ -65,7 +67,7 @@ wasla/
 
 ## 3. Application layers
 
-**Status: Implemented** — the layering and dependency injection are established and exercised by the health, authentication, and invitation subsystems.
+**Status: Implemented** — the layering and dependency injection are established and exercised by the health, authentication, invitation and WhatsApp subsystems.
 
 | Layer | Responsibility | Rule |
 | --- | --- | --- |
@@ -95,15 +97,27 @@ Stack traces are never exposed in production responses. Cross-tenant access is r
 
 ## 5. WhatsApp webhook flow
 
-**Status: Planned**
+**Status: In Progress** — verification, signature checking, parsing, tenant resolution and idempotent event storage are Implemented. Projection into conversations and queueing arrive with Phase 4.
 
-1. `GET /webhooks/whatsapp` verifies the Meta challenge token.
-2. `POST /webhooks/whatsapp` validates the `X-Hub-Signature-256` payload signature.
-3. Payload is parsed; `phone_number_id` resolves the WhatsApp account and therefore the tenant. The tenant is never inferred from the customer phone number.
-4. Message and status events are persisted idempotently, keyed on the WhatsApp message/event ID.
-5. The conversation is created or updated; work is enqueued to Redis; the endpoint returns immediately.
+1. `GET /api/v1/webhooks/whatsapp` verifies the Meta challenge token with a constant-time comparison. **Implemented**
+2. `POST /api/v1/webhooks/whatsapp` verifies the `X-Hub-Signature-256` signature over the payload. **Implemented**
+3. The payload is parsed; `phone_number_id` resolves the WhatsApp account and therefore the tenant. The tenant is never inferred from the customer phone number. **Implemented**
+4. Message and status events are persisted idempotently, keyed on the WhatsApp message/event ID (ADR-011). **Implemented**
+5. The conversation is created or updated; work is enqueued to Redis; the endpoint returns immediately. **Planned (Phase 4)**
 
 No AI or media processing happens inside the webhook request.
+
+Three properties of the endpoint are deliberate and should not be "tidied" later:
+
+- **The signature is computed over the raw request body**, before parsing. Verifying a re-serialised payload would verify Wasla's own serialisation rather than the bytes Meta signed.
+- **Anything unactionable still answers 200.** Meta retries non-2xx deliveries and eventually disables the subscription, so returning an error for a payload that will never become valid — an unparseable body, an unknown `phone_number_id`, a disabled account — turns one bad message into an outage. Only a failed signature answers 403.
+- **`phone_number_id` is unique platform-wide**, not per workspace, which is what makes step 3 trustworthy: a number can never resolve to two tenants.
+
+### 5.1 Outbound
+
+**Status: Implemented** — text, media, location, reply buttons, lists, templates and read receipts, behind `app/integrations/whatsapp/client.py`.
+
+Retries are deliberately narrow: HTTP 429 and connection errors only, never 5xx and never read timeouts, because the Meta send endpoint accepts no idempotency key and an ambiguous retry duplicates a message in a real customer's chat (ADR-010). Sending uses the platform Meta credential; the account row stores no token (ADR-009).
 
 ## 6. AI agent flow
 
@@ -137,15 +151,17 @@ Redis provides job queues, caching, rate limiting, follow-up scheduling, and tem
 
 ## 11. Database architecture
 
-**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, and the identity and tenancy tables are Implemented; messaging, knowledge, CRM, and billing tables arrive in later phases.
+**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, the identity and tenancy tables and the WhatsApp tables are Implemented; conversations, knowledge, CRM, and billing tables arrive in later phases.
 
-PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically; migration `0002` creates `tenants`, `users`, `memberships`, and `tenant_invitations`.
+PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically; migration `0002` creates `tenants`, `users`, `memberships`, and `tenant_invitations`; migration `0003` creates `whatsapp_accounts` and `whatsapp_events`.
 
 Sessions are request-scoped and commit on success or roll back on failure. Connections use pre-ping, bounded pooling, recycling, and an explicit connect timeout.
 
-Enum columns are native PostgreSQL types. Phase 1 tables deliberately carry no `server_default` for enum and boolean columns — defaults are applied in the application — so that `alembic check` compares like with like and stays trustworthy as a drift gate.
+Enum columns are native PostgreSQL types. Tables deliberately carry no `server_default` for enum and boolean columns — defaults are applied in the application — so that `alembic check` compares like with like and stays trustworthy as a drift gate.
 
-Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, and the unique token hash. Further indexes are planned on conversation `(tenant_id, status)`, message `(conversation_id, created_at)`, contact `(tenant_id, phone)`, lead `(tenant_id, status)`, WhatsApp `phone_number_id`, usage and analytics `(tenant_id, created_at)`, and document `tenant_id`.
+One pitfall is recorded here because it already produced a defect. A model that declares `__table_args__` in its own class body **replaces** the value contributed by `TenantScopedMixin` instead of extending it, and so loses its `tenant_id` index with no error anywhere. Both WhatsApp models did exactly that, leaving the model metadata without two indexes that migration `0003` creates — a difference `alembic check` exists to fail on. `tests/unit/test_whatsapp_models.py` now asserts that every mapped table carrying a `tenant_id` column also declares `ix_<table>_tenant_id`, so a tenant-scoped model added in a later phase cannot reintroduce it quietly.
+
+Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, the unique invitation token hash, `whatsapp_accounts (tenant_id)`, a platform-wide `UNIQUE(phone_number_id)`, `whatsapp_events (tenant_id)`, `whatsapp_events (account_id)`, `whatsapp_events (tenant_id, state)`, and `UNIQUE(tenant_id, event_id)`. Further indexes are planned on conversation `(tenant_id, status)`, message `(conversation_id, created_at)`, contact `(tenant_id, phone)`, lead `(tenant_id, status)`, usage and analytics `(tenant_id, created_at)`, and document `tenant_id`.
 
 ## 12. Multi-tenancy
 
@@ -153,9 +169,9 @@ Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(use
 
 Shared PostgreSQL infrastructure with `tenant_id` isolation (see ADR-001). Users are global identities; the authoritative link to a company is `User -> Membership -> Tenant` (see ADR-002). Roles are scoped to the membership, never to the user. A request executes in exactly one active workspace, taken from the signed access token and re-verified against a live membership on every request.
 
-Isolation is structural rather than a habit: `TenantScopedRepository` takes its tenant id once from the authenticated context, fixes it for the repository's lifetime, and applies it in the single method every read starts from. A subclass that fails to declare its tenant predicate cannot be instantiated. Queries that must cross workspaces — resolving which workspaces a user belongs to, and resolving an invitation by its token hash before any workspace is known — are isolated in their own small classes with one method each, so the exceptions are visible instead of scattered.
+Isolation is structural rather than a habit: `TenantScopedRepository` takes its tenant id once from the authenticated context, fixes it for the repository's lifetime, and applies it in the single method every read starts from. A subclass that fails to declare its tenant predicate cannot be instantiated. Queries that must cross workspaces — resolving which workspaces a user belongs to, resolving an invitation by its token hash before any workspace is known, and resolving a WhatsApp `phone_number_id` to its account, since inbound traffic has no workspace until that lookup succeeds — are isolated in their own small classes with one method each, so the exceptions are visible instead of scattered.
 
-Cross-tenant reads answer `not_found`, never `forbidden`, so error codes cannot be used to map another tenant's data. `tests/integration/test_authorization.py` proves this against PostgreSQL.
+Cross-tenant reads answer `not_found`, never `forbidden`, so error codes cannot be used to map another tenant's data. `tests/integration/test_authorization.py` and `tests/integration/test_whatsapp_persistence.py` prove this against PostgreSQL.
 
 ## 13. SaaS owner architecture
 
@@ -195,6 +211,6 @@ Readiness probes run concurrently, are timeout-bounded, and contain their failur
 
 **Status: In Progress** — CI is Implemented; deployment automation and worker containers are Planned.
 
-GitHub Actions runs three jobs: quality (Ruff, Black, MyPy), tests (pytest with coverage against PostgreSQL with pgvector and Redis service containers, including authorization and tenant-isolation tests that build their schema from the models, plus an application startup check, migration upgrade/downgrade/upgrade validation, and model drift detection via `alembic check`), and a Docker build that boots the runtime image and asserts it answers liveness. A separate security workflow scans dependencies and the repository history for secrets.
+GitHub Actions runs three jobs: quality (Ruff, Black, MyPy), tests (pytest with coverage against PostgreSQL with pgvector and Redis service containers, including authorization, tenant-isolation and model-metadata parity tests that build their schema from the models, plus an application startup check, migration upgrade/downgrade/upgrade validation, and model drift detection via `alembic check`), and a Docker build that boots the runtime image and asserts it answers liveness. A separate security workflow scans dependencies and the repository history for secrets.
 
 The runtime image is multi-stage and runs as a non-root user with a liveness-based container health check. Migrations are opt-in through `RUN_MIGRATIONS` so a release applies them once as an explicit step rather than racing across replicas. Production runs the API behind Nginx with health checks, restart policies, resource limits, an isolated network, and persistent volumes; workers join this topology in Phase 8. Details in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
