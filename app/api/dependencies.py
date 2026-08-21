@@ -21,7 +21,9 @@ from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
 from app.services.auth_service import AuthService
+from app.services.inbox_service import InboxService
 from app.services.invitation_service import InvitationService
+from app.services.messaging_service import MessagingService
 from app.services.whatsapp_account_service import WhatsAppAccountService
 
 # auto_error is off so a missing header raises the same domain error as a bad
@@ -136,6 +138,29 @@ async def get_active_workspace(
 
 
 ActiveWorkspaceDep = Annotated[ActiveWorkspace, Depends(get_active_workspace)]
+
+
+def get_inbox_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> InboxService:
+    """Workspace-scoped, so no route can pass a tenant id of its own choosing."""
+    return InboxService(session=session, tenant_id=workspace.tenant.id)
+
+
+InboxServiceDep = Annotated[InboxService, Depends(get_inbox_service)]
+
+
+def get_messaging_service(
+    settings: SettingsDep,
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> MessagingService:
+    return MessagingService(
+        session=session,
+        settings=settings,
+        tenant_id=workspace.tenant.id,
+    )
+
+
+MessagingServiceDep = Annotated[MessagingService, Depends(get_messaging_service)]
 
 
 def require_tenant_roles(*roles: TenantRole) -> Callable[[ActiveWorkspace], ActiveWorkspace]:
