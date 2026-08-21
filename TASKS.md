@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0, 1 and 2 are complete. Phase 3 (WhatsApp integration) is next.
+**Current position:** Phases 0, 1 and 2 are complete. Phase 3 is in progress: the inbound webhook (verification, signature checking, parsing, tenant resolution, idempotent storage) is in place; the outbound client is next.
 
 ## Phase 0 — Foundation
 
@@ -66,16 +66,18 @@ This file is updated as part of every logical change. Phases follow the implemen
 
 ## Phase 3 — WhatsApp integration
 
-- [ ] WhatsApp account model
-- [ ] Webhook verification endpoint
-- [ ] Meta signature verification
-- [ ] Payload parser
-- [ ] Tenant resolution from `phone_number_id`
-- [ ] Inbound event persistence
-- [ ] Idempotency on WhatsApp event IDs
+- [x] WhatsApp account model
+- [x] WhatsApp event model with `UNIQUE(tenant_id, event_id)` (migration `0003`)
+- [x] Webhook verification endpoint
+- [x] Meta signature verification
+- [x] Payload parser
+- [x] Tenant resolution from `phone_number_id`
+- [x] Inbound event persistence
+- [x] Idempotency on WhatsApp event IDs
+- [x] Webhook integration tests
+- [ ] Account connection API (connect, list, disable)
 - [ ] Outbound client (text, media, location, buttons, lists, templates)
-- [ ] Delivery status and read receipts
-- [ ] Webhook integration tests
+- [~] Delivery status and read receipts (stored as events; projection onto messages needs phase 4)
 
 ## Phase 4 — Conversations
 
