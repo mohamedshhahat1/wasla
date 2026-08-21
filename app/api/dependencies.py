@@ -20,6 +20,7 @@ from app.core.security import TokenClaims, TokenType, decode_token
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
+from app.services.agent_service import AgentService
 from app.services.auth_service import AuthService
 from app.services.inbox_service import InboxService
 from app.services.invitation_service import InvitationService
@@ -138,6 +139,21 @@ async def get_active_workspace(
 
 
 ActiveWorkspaceDep = Annotated[ActiveWorkspace, Depends(get_active_workspace)]
+
+
+def get_agent_service(
+    settings: SettingsDep,
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> AgentService:
+    return AgentService(
+        session=session,
+        settings=settings,
+        tenant_id=workspace.tenant.id,
+    )
+
+
+AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 
 
 def get_inbox_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> InboxService:
