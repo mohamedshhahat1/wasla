@@ -19,7 +19,12 @@ TEXT_TYPE = "text"
 
 @dataclass(frozen=True, slots=True)
 class InboundMessage:
-    """A customer message. `event_id` is Meta's own message id."""
+    """A customer message. `event_id` is Meta's own message id.
+
+    `profile_name` comes from the delivery's `contacts` block rather than from
+    the message itself, which is the only place Meta sends it. It is last and
+    optional so the parser's existing callers are unaffected.
+    """
 
     event_id: str
     phone_number_id: str
@@ -28,6 +33,7 @@ class InboundMessage:
     timestamp: datetime | None
     text: str | None
     raw: dict[str, Any]
+    profile_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +94,22 @@ def _message_text(message: Mapping[str, Any], message_type: str) -> str | None:
     return _text(_mapping(message.get(TEXT_TYPE)).get("body"))
 
 
+def _profile_names(value: Mapping[str, Any]) -> dict[str, str]:
+    """Map WhatsApp id to profile name from the delivery's contacts block.
+
+    The block is optional and a customer may have no name set, so a missing
+    entry is normal rather than a parse failure.
+    """
+    names: dict[str, str] = {}
+    for raw_contact in _sequence(value.get("contacts")):
+        contact = _mapping(raw_contact)
+        wa_id = _text(contact.get("wa_id"))
+        name = _text(_mapping(contact.get("profile")).get("name"))
+        if wa_id is not None and name is not None:
+            names[wa_id] = name
+    return names
+
+
 def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
     """Flatten Meta's nested envelope into messages and statuses."""
     messages: list[InboundMessage] = []
@@ -102,6 +124,8 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                 # Without it there is no way to know which workspace this is for.
                 ignored += 1
                 continue
+
+            profile_names = _profile_names(value)
 
             for raw_message in _sequence(value.get("messages")):
                 message = _mapping(raw_message)
@@ -121,6 +145,7 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                         timestamp=_timestamp(message.get("timestamp")),
                         text=_message_text(message, message_type),
                         raw=message,
+                        profile_name=profile_names.get(from_number),
                     )
                 )
 

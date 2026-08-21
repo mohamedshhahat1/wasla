@@ -1,7 +1,7 @@
 """Inbound WhatsApp ingestion.
 
-The webhook's only job: resolve the workspace, store the event once, return.
-No AI, no media fetching, no outbound calls.
+The webhook's only job: resolve the workspace, store the event once, project it,
+return. No AI, no media fetching, no outbound calls.
 """
 
 from __future__ import annotations
@@ -16,11 +16,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppEventKind
-from app.integrations.whatsapp.payload import parse_webhook
+from app.integrations.whatsapp.payload import (
+    DeliveryStatus,
+    InboundMessage,
+    parse_webhook,
+)
 from app.repositories.whatsapp_repository import (
     WhatsAppAccountDirectory,
     WhatsAppEventRepository,
 )
+from app.services.conversation_service import ConversationProjectionService
 
 logger = get_logger(__name__)
 
@@ -37,12 +42,13 @@ class IngestionOutcome:
 
 
 class WhatsAppIngestionService:
-    """Turns one webhook delivery into stored events."""
+    """Turns one webhook delivery into stored events and conversation rows."""
 
     def __init__(self, *, session: AsyncSession) -> None:
         self._session = session
         self._directory = WhatsAppAccountDirectory(session)
         self._repositories: dict[uuid.UUID, WhatsAppEventRepository] = {}
+        self._projections: dict[uuid.UUID, ConversationProjectionService] = {}
         self._accounts: dict[str, WhatsAppAccount | None] = {}
 
     async def ingest(self, payload: Mapping[str, Any]) -> IngestionOutcome:
@@ -50,36 +56,22 @@ class WhatsAppIngestionService:
         stored = duplicates = unknown = inactive = 0
         ignored = envelope.ignored
 
-        events: list[tuple[str, str, WhatsAppEventKind, dict[str, Any], datetime | None]] = [
-            (
-                message.phone_number_id,
-                message.event_id,
-                WhatsAppEventKind.MESSAGE,
-                message.raw,
-                message.timestamp,
-            )
-            for message in envelope.messages
+        # Messages and statuses are handled by the same loop because the storage
+        # rules are identical; only the projection differs.
+        sources: list[InboundMessage | DeliveryStatus] = [
+            *envelope.messages,
+            *envelope.statuses,
         ]
-        events.extend(
-            (
-                status.phone_number_id,
-                status.event_id,
-                WhatsAppEventKind.STATUS,
-                status.raw,
-                status.timestamp,
-            )
-            for status in envelope.statuses
-        )
 
-        for phone_number_id, event_id, kind, raw, timestamp in events:
-            account = await self._account(phone_number_id)
+        for source in sources:
+            account = await self._account(source.phone_number_id)
             if account is None:
                 # Someone else's number, or one connected then removed. Not an
                 # error for us to report: Meta cannot fix it by retrying.
                 unknown += 1
                 logger.warning(
                     "whatsapp.unknown_phone_number_id",
-                    extra={"phone_number_id": phone_number_id},
+                    extra={"phone_number_id": source.phone_number_id},
                 )
                 continue
 
@@ -87,24 +79,33 @@ class WhatsAppIngestionService:
                 inactive += 1
                 logger.info(
                     "whatsapp.account_disabled",
-                    extra={"phone_number_id": phone_number_id},
+                    extra={"phone_number_id": source.phone_number_id},
                 )
                 continue
 
+            is_message = isinstance(source, InboundMessage)
             repository = self._repository(account.tenant_id)
             _, created = await repository.record(
                 account_id=account.id,
-                event_id=event_id,
-                kind=kind,
-                payload=raw,
+                event_id=source.event_id,
+                kind=WhatsAppEventKind.MESSAGE if is_message else WhatsAppEventKind.STATUS,
+                payload=source.raw,
                 # A missing timestamp still needs a value to order by; arrival
                 # time is the honest fallback.
-                received_at=timestamp or datetime.now(UTC),
+                received_at=source.timestamp or datetime.now(UTC),
             )
-            if created:
-                stored += 1
-            else:
+            if not created:
+                # A replay. Projecting again would duplicate a message or
+                # re-advance a status, so the event stops here.
                 duplicates += 1
+                continue
+
+            stored += 1
+            projection = self._projection(account.tenant_id)
+            if isinstance(source, InboundMessage):
+                await projection.project_message(account_id=account.id, message=source)
+            else:
+                await projection.project_status(status=source)
 
         if stored:
             await self._session.flush()
@@ -131,3 +132,13 @@ class WhatsAppIngestionService:
             repository = WhatsAppEventRepository(self._session, tenant_id=tenant_id)
             self._repositories[tenant_id] = repository
         return repository
+
+    def _projection(self, tenant_id: uuid.UUID) -> ConversationProjectionService:
+        projection = self._projections.get(tenant_id)
+        if projection is None:
+            projection = ConversationProjectionService(
+                session=self._session,
+                tenant_id=tenant_id,
+            )
+            self._projections[tenant_id] = projection
+        return projection
