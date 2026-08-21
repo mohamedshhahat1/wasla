@@ -106,8 +106,13 @@ class MessagingService:
 
         return await self._dispatch(
             conversation_id=conversation_id,
-            kind=MessageKind.TEXT,
-            body=f"[template:{name}]",
+            kind=MessageKind.TEMPLATE,
+            # No body: Meta renders the approved template from its own copy, so
+            # the text the customer saw is not ours to record. Claiming
+            # otherwise would put a guess in the transcript.
+            body=None,
+            template_name=name,
+            template_language=language,
             sent_by_id=sent_by_id,
             send=send,
             # Templates are the sanctioned way out of the service window.
@@ -123,6 +128,8 @@ class MessagingService:
         sent_by_id: uuid.UUID | None,
         send: SendCall,
         require_window: bool,
+        template_name: str | None = None,
+        template_language: str | None = None,
     ) -> Message:
         conversation = await self._conversations.require_by_id(conversation_id)
         if require_window and not self.window_open(conversation):
@@ -141,6 +148,8 @@ class MessagingService:
             kind=kind,
             body=body,
             sent_by_id=sent_by_id,
+            template_name=template_name,
+            template_language=template_language,
         )
         # Flushed before the network call so the attempt exists as a row even if
         # everything after this fails.

@@ -71,7 +71,7 @@ The uniqueness constraint, not the preceding read, is the guarantee. Two simulta
 
 ## Outbound client
 
-`WhatsAppClient` covers text, media (link or uploaded id), location, reply buttons, lists, templates, and read receipts. The HTTP client, sleep function and attempt budget are injected, so retry behaviour is tested against `httpx.MockTransport` with no network and no real waiting.
+`WhatsAppClient` covers text, media (link or uploaded id), location, reply buttons, lists, templates, and read receipts. An outbound template is stored as a `template` message carrying the name and language it was sent with and no body, since Meta renders the wording from its approved copy and Wasla never sees it. The HTTP client, sleep function and attempt budget are injected, so retry behaviour is tested against `httpx.MockTransport` with no network and no real waiting.
 
 ### Retry policy
 

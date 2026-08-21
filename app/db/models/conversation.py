@@ -53,6 +53,10 @@ class MessageKind(StrEnum):
     VIDEO = "video"
     LOCATION = "location"
     INTERACTIVE = "interactive"
+    # Outbound only. Meta renders an approved template from its own copy, so
+    # what Wasla holds is the name and language it asked for, never the text the
+    # customer read.
+    TEMPLATE = "template"
     UNSUPPORTED = "unsupported"
 
 
@@ -199,6 +203,11 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         default=MessageStatus.PENDING,
     )
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set on TEMPLATE messages and null everywhere else. Kept as columns rather
+    # than folded into `body`, because a follow-up or a campaign has to be able
+    # to ask which template it sent without parsing prose back out of a string.
+    template_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    template_language: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # Set when a human or an agent sent it; null for customer messages.
     sent_by_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

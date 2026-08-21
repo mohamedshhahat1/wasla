@@ -27,6 +27,15 @@ def test_unsupported_is_never_a_mapping_target():
     assert MessageKind.UNSUPPORTED not in MESSAGE_KINDS.values()
 
 
+def test_template_is_never_a_mapping_target():
+    """Templates are outbound only.
+
+    A customer cannot send one, so an inbound payload mapping to TEMPLATE would
+    mean Wasla had misread the traffic.
+    """
+    assert MessageKind.TEMPLATE not in MESSAGE_KINDS.values()
+
+
 def test_voice_and_audio_share_a_kind():
     """Meta sends both; they are the same thing to us."""
     assert MESSAGE_KINDS["voice"] is MESSAGE_KINDS["audio"]

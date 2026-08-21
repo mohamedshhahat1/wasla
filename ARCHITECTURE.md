@@ -125,6 +125,8 @@ Retries are deliberately narrow: HTTP 429 and connection errors only, never 5xx 
 
 A send writes its message row before calling Meta and records a rejection on that row rather than raising, so an attempt always survives as evidence; the API therefore answers `201` with a `failed` status instead of an error code (ADR-013).
 
+A template send is recorded as `MessageKind.TEMPLATE` with `template_name` and `template_language`, and with **no body**. Meta renders an approved template from its own copy, so the text the customer read is not something Wasla holds; writing a reconstruction into the transcript would put words there that were never sent. The name and language are columns rather than a formatted string in `body`, because follow-ups (phase 8) and campaigns (phase 11) both need to ask which template went out without parsing it back out of prose. Templates are also the one message kind exempt from the 24-hour service window (ADR-012), which is precisely what they exist for.
+
 ### 5.2 Conversation projection
 
 **Status: Implemented** — `app/services/conversation_service.py`, exercised against PostgreSQL by `tests/integration/test_conversation_projection.py`.

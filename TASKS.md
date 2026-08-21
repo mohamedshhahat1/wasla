@@ -95,7 +95,7 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] Outbound send API (with 24-hour service window enforcement)
 - [x] Conversation and message APIs
 - [x] Conversation projection tests (PostgreSQL-backed: replay, status ordering, isolation)
-- [ ] Dedicated `template` message kind (templates are recorded as text; needs a migration)
+- [x] Dedicated `template` message kind, with `template_name` and `template_language` columns and no body (migration `0006`)
 - [ ] Cursor pagination for conversation and message collections
 
 ## Phase 5 — AI agents

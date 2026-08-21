@@ -195,6 +195,8 @@ class MessageRepository(TenantScopedRepository[Message]):
         kind: MessageKind,
         body: str | None,
         sent_by_id: uuid.UUID | None = None,
+        template_name: str | None = None,
+        template_language: str | None = None,
     ) -> Message:
         """Create the row before calling Meta.
 
@@ -210,6 +212,8 @@ class MessageRepository(TenantScopedRepository[Message]):
             status=MessageStatus.PENDING,
             body=body,
             sent_by_id=sent_by_id,
+            template_name=template_name,
+            template_language=template_language,
         )
         return self.add(message)
 

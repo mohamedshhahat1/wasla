@@ -67,6 +67,10 @@ class MessageRead(BaseModel):
     kind: MessageKind
     status: MessageStatus
     body: str | None
+    # Set on template messages only, so a client can render which template went
+    # out in place of the text it has no copy of.
+    template_name: str | None
+    template_language: str | None
     sent_by_id: uuid.UUID | None
     sent_at: datetime | None
     delivered_at: datetime | None
@@ -84,6 +88,8 @@ class MessageRead(BaseModel):
             kind=message.kind,
             status=message.status,
             body=message.body,
+            template_name=message.template_name,
+            template_language=message.template_language,
             sent_by_id=message.sent_by_id,
             sent_at=message.sent_at,
             delivered_at=message.delivered_at,

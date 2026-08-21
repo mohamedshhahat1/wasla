@@ -94,10 +94,12 @@ All conversation routes are available to any member of the workspace. Restrictin
 | POST | `/api/v1/conversations/{conversation_id}/close` | Close the conversation |
 | POST | `/api/v1/conversations/{conversation_id}/reopen` | Reopen it |
 
-Two behaviours worth knowing before integrating:
+Three behaviours worth knowing before integrating:
 
 - **Free text is only accepted inside the 24-hour service window.** Outside it, Meta accepts approved templates only, so the free-text route answers `422` and the template route still works. Every conversation read includes `service_window_open`, so a client can disable its composer instead of discovering the rule by failing a send.
 - **A rejected send answers `201`, with the message in `failed` state.** The message row is written before Meta is called, and a rejection is recorded on that row. Raising instead would roll the request back and destroy the only evidence the attempt was made. A missing platform credential does raise `503`, because nothing was attempted. Callers should read `status` rather than relying on the response code.
+
+- **A template message has no `body`.** It carries `template_name` and `template_language` instead, and `kind` is `template`. Meta renders the wording from its own approved copy, so Wasla has no text to return; a client should render the template it identifies rather than expecting the words the customer saw. Both fields are null on every other kind.
 
 Conversations carry identifiers rather than embedded contact objects. The models declare no ORM relationships deliberately: a lazy load inside an async request is blocking I/O that only becomes visible under load.
 
