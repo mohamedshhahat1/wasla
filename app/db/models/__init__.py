@@ -2,6 +2,7 @@
 
 from app.db.base import Base
 
+from .agent import Agent, AgentStatus, AgentTool
 from .conversation import (
     Contact,
     Conversation,
@@ -26,6 +27,9 @@ from .whatsapp import (
 )
 
 __all__ = [
+    "Agent",
+    "AgentStatus",
+    "AgentTool",
     "Base",
     "Contact",
     "Conversation",

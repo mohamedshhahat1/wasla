@@ -5,6 +5,7 @@ the tenant filter in one place. The handful of lookups that legitimately cannot
 be scoped live in their own small classes so they stay visible.
 """
 
+from .agent_repository import AgentRepository, AgentToolRepository
 from .base import BaseRepository, TenantScopedRepository
 from .conversation_repository import (
     ContactRepository,
@@ -22,6 +23,8 @@ from .whatsapp_repository import (
 )
 
 __all__ = [
+    "AgentRepository",
+    "AgentToolRepository",
     "BaseRepository",
     "ContactRepository",
     "ConversationRepository",
