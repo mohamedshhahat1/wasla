@@ -21,7 +21,12 @@ from typing import Any, Final, Literal
 
 import httpx
 
-from app.core.exceptions import ExternalServiceError, RateLimitedError, ValidationError
+from app.core.exceptions import (
+    DependencyUnavailableError,
+    ExternalServiceError,
+    RateLimitedError,
+    ValidationError,
+)
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -33,6 +38,8 @@ MAX_ATTEMPTS: Final = 3
 BACKOFF_SECONDS: Final = 0.5
 TOO_MANY_REQUESTS: Final = 429
 SERVER_ERROR_FLOOR: Final = 500
+CLIENT_ERROR_FLOOR: Final = 400
+MAX_REPLY_BUTTONS: Final = 3
 
 MediaKind = Literal["image", "document", "audio", "video"]
 
@@ -73,7 +80,9 @@ class WhatsAppClient:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         if not access_token:
-            raise ValidationError("A WhatsApp access token is required to send messages.")
+            # An absent platform credential is our misconfiguration, not the
+            # caller's mistake, so this is a 503 rather than a 422.
+            raise DependencyUnavailableError("The WhatsApp access token is not configured.")
         self._http = http
         self._access_token = access_token
         self._api_version = api_version
@@ -154,7 +163,7 @@ class WhatsAppClient:
         buttons: list[tuple[str, str]],
     ) -> SentMessage:
         """Reply buttons, as `(id, title)` pairs. Meta allows at most three."""
-        if not buttons or len(buttons) > 3:
+        if not buttons or len(buttons) > MAX_REPLY_BUTTONS:
             raise ValidationError("Provide between one and three reply buttons.")
 
         return await self._send(
@@ -238,7 +247,7 @@ class WhatsAppClient:
         to: str,
         content: dict[str, Any],
     ) -> SentMessage:
-        payload = {
+        payload: dict[str, Any] = {
             "messaging_product": MESSAGING_PRODUCT,
             "recipient_type": "individual",
             "to": to,
@@ -283,12 +292,9 @@ class WhatsAppClient:
                 attempt += 1
                 continue
 
-            if response.status_code >= SERVER_ERROR_FLOOR:
-                # Deliberately not retried: the message may have been accepted.
-                self._log_failure(response)
-                raise ExternalServiceError("WhatsApp rejected the message.")
-
-            if response.status_code >= httpx.codes.BAD_REQUEST:
+            if response.status_code >= CLIENT_ERROR_FLOOR:
+                # 5xx is deliberately not retried either: the message may have
+                # been accepted, and a duplicate reply is worse than a failure.
                 self._log_failure(response)
                 raise ExternalServiceError("WhatsApp rejected the message.")
 
@@ -303,7 +309,7 @@ class WhatsAppClient:
         Provider error text can echo fragments of the request, and this client
         holds a live platform credential.
         """
-        error = {}
+        error: dict[str, Any] = {}
         try:
             body = response.json()
         except ValueError:

@@ -7,15 +7,23 @@ wall-clock wait.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
-from app.core.exceptions import ExternalServiceError, RateLimitedError, ValidationError
+from app.core.exceptions import (
+    DependencyUnavailableError,
+    ExternalServiceError,
+    RateLimitedError,
+    ValidationError,
+)
 from app.integrations.whatsapp.client import WhatsAppClient
 
 ACCESS_TOKEN = "meta-access-token"
 PHONE_NUMBER_ID = "109876543210"
 RECIPIENT = "201234567890"
+MESSAGES_URL = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
 ACCEPTED = {
     "messaging_product": "whatsapp",
     "contacts": [{"input": RECIPIENT, "wa_id": RECIPIENT}],
@@ -43,6 +51,9 @@ class Recorder:
     @property
     def attempts(self) -> int:
         return len(self.requests)
+
+    def body(self, index: int = 0):
+        return json.loads(self.requests[index].content)
 
 
 def _client(recorder: Recorder, **overrides) -> WhatsAppClient:
@@ -73,9 +84,7 @@ async def test_a_text_message_is_posted_where_meta_expects_it():
 
     request = recorder.requests[0]
     assert request.method == "POST"
-    assert str(request.url) == (
-        f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
-    )
+    assert str(request.url) == MESSAGES_URL
     assert request.headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
 
 
@@ -84,10 +93,7 @@ async def test_the_text_body_matches_the_cloud_api_contract():
 
     await _client(recorder).send_text(phone_number_id=PHONE_NUMBER_ID, to=RECIPIENT, body="hi")
 
-    import json
-
-    payload = json.loads(recorder.requests[0].content)
-    assert payload == {
+    assert recorder.body() == {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
         "to": RECIPIENT,
@@ -179,6 +185,7 @@ async def test_a_connection_error_is_retried():
 
     assert sent.message_id == "wamid.sent"
     assert attempts["count"] == 2
+    assert recorder.sleeps == [0.1]
 
 
 async def test_a_timeout_is_not_retried():
@@ -231,8 +238,6 @@ async def test_media_needs_exactly_one_source():
 
 
 async def test_a_caption_is_dropped_for_audio_and_kept_for_images():
-    import json
-
     recorder = Recorder(_ok())
     client = _client(recorder)
 
@@ -251,16 +256,26 @@ async def test_a_caption_is_dropped_for_audio_and_kept_for_images():
         caption="kept",
     )
 
-    audio = json.loads(recorder.requests[0].content)
-    image = json.loads(recorder.requests[1].content)
     # Meta rejects the whole message if audio carries a caption.
-    assert "caption" not in audio["audio"]
-    assert image["image"]["caption"] == "kept"
+    assert "caption" not in recorder.body(0)["audio"]
+    assert recorder.body(1)["image"]["caption"] == "kept"
+
+
+async def test_a_document_keeps_its_filename():
+    recorder = Recorder(_ok())
+
+    await _client(recorder).send_media(
+        phone_number_id=PHONE_NUMBER_ID,
+        to=RECIPIENT,
+        kind="document",
+        media_id="media-9",
+        filename="invoice.pdf",
+    )
+
+    assert recorder.body()["document"] == {"id": "media-9", "filename": "invoice.pdf"}
 
 
 async def test_a_template_carries_its_language_and_components():
-    import json
-
     recorder = Recorder(_ok())
 
     await _client(recorder).send_template(
@@ -271,7 +286,7 @@ async def test_a_template_carries_its_language_and_components():
         components=[{"type": "body", "parameters": [{"type": "text", "text": "123"}]}],
     )
 
-    payload = json.loads(recorder.requests[0].content)
+    payload = recorder.body()
     assert payload["type"] == "template"
     assert payload["template"]["name"] == "order_update"
     assert payload["template"]["language"] == {"code": "ar"}
@@ -301,9 +316,25 @@ async def test_buttons_are_limited_to_three():
     assert recorder.attempts == 0
 
 
-async def test_marking_a_message_read_posts_a_status():
-    import json
+async def test_reply_buttons_are_shaped_as_meta_expects():
+    recorder = Recorder(_ok())
 
+    await _client(recorder).send_buttons(
+        phone_number_id=PHONE_NUMBER_ID,
+        to=RECIPIENT,
+        body="pick one",
+        buttons=[("yes", "Yes"), ("no", "No")],
+    )
+
+    interactive = recorder.body()["interactive"]
+    assert interactive["type"] == "button"
+    assert interactive["action"]["buttons"][0] == {
+        "type": "reply",
+        "reply": {"id": "yes", "title": "Yes"},
+    }
+
+
+async def test_marking_a_message_read_posts_a_status():
     recorder = Recorder(httpx.Response(200, json={"success": True}))
 
     await _client(recorder).mark_read(
@@ -311,8 +342,7 @@ async def test_marking_a_message_read_posts_a_status():
         message_id="wamid.in",
     )
 
-    payload = json.loads(recorder.requests[0].content)
-    assert payload == {
+    assert recorder.body() == {
         "messaging_product": "whatsapp",
         "status": "read",
         "message_id": "wamid.in",
@@ -322,7 +352,8 @@ async def test_marking_a_message_read_posts_a_status():
 async def test_a_client_without_a_token_refuses_to_exist():
     recorder = Recorder(_ok())
 
-    with pytest.raises(ValidationError):
+    # A missing platform credential is a misconfiguration, not a caller error.
+    with pytest.raises(DependencyUnavailableError):
         WhatsAppClient(
             http=httpx.AsyncClient(transport=httpx.MockTransport(recorder.handler)),
             access_token="",
