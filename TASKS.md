@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0 and 1 are complete. Phase 2 is in progress: password hashing and token issuance are in place; the authentication service, endpoints and RBAC dependencies are next.
+**Current position:** Phases 0 and 1 are complete. Phase 2 is in progress: registration, login, refresh rotation, workspace switching and the RBAC dependencies are in place; the invitation flow and database-backed authorization tests are next.
 
 ## Phase 0 — Foundation
 
@@ -55,14 +55,14 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] Password hashing (Argon2id, with rehash-on-login detection)
 - [x] Token issuance (access and refresh, typed, with per-token identifiers)
 - [x] Invitation token generation (hash-only storage)
-- [ ] Registration and login endpoints
-- [ ] Refresh token rotation and revocation (Redis)
-- [ ] Current-user dependency
-- [ ] Active workspace resolution and switching
-- [ ] Membership-scoped RBAC dependencies
-- [ ] Platform owner authorization layer
-- [ ] Invitation acceptance flow
-- [ ] RBAC and cross-tenant access tests
+- [x] Registration and login endpoints
+- [x] Refresh token rotation and revocation (Redis)
+- [x] Current-user dependency
+- [x] Active workspace resolution and switching
+- [x] Membership-scoped RBAC dependencies
+- [x] Platform role authorization layer
+- [ ] Invitation issuing and acceptance flow
+- [~] RBAC and cross-tenant access tests (HTTP surface covered; database-backed tests pending)
 
 ## Phase 3 — WhatsApp integration
 

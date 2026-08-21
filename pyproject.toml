@@ -19,9 +19,11 @@ dependencies = [
     "alembic>=1.14,<2",
     "redis>=5.2,<6",
     "httpx>=0.28,<0.29",
-    # Authentication: Argon2id password hashing and JWT encoding.
+    # Authentication: Argon2id password hashing, JWT encoding, and address
+    # validation for the email identities those tokens are issued to.
     "argon2-cffi>=23.1,<26",
     "pyjwt>=2.10,<3",
+    "email-validator>=2.2,<3",
 ]
 
 [project.optional-dependencies]
