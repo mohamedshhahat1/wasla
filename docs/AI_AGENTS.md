@@ -80,11 +80,16 @@ Retries are the inverse of the WhatsApp client's — 429, transport errors and 5
 
 ## Tools
 
-Implemented: `request_human_handoff`, which hands the conversation to a person with a reason of at most 200 characters and stops the loop.
+Implemented:
 
-Planned, in the phase that gives each one something to act on: `search_knowledge` (Phase 6), `create_lead`, `update_lead`, `get_lead`, `assign_lead` (Phase 7), `schedule_follow_up` (Phase 8), `send_media` (Phase 9), and later `get_product`, `get_price`, `create_ticket`, `get_order`, `check_availability`, `create_appointment`, `cancel_appointment`, `reschedule_appointment`.
+- `request_human_handoff` — hands the conversation to a person with a reason of at most 200 characters and stops the loop.
+- `search_knowledge` — searches this workspace's own documents and returns the matching passages, or an explicit statement that nothing was found. The tenant id comes from the tool context, never from an argument: a tenant id a model could supply is a tenant id a model could change. Details in [RAG.md](RAG.md).
 
-Rules the registry enforces now: every argument is validated against a declared schema before a handler runs; a handler receives a `ToolContext` carrying the tenant id, the conversation id and the session, so a tool cannot reach outside the workspace it was called in; an agent is offered only the tools it has been granted; and a name the registry does not know is never dispatched, so model output cannot name its way into arbitrary execution.
+Planned, in the phase that gives each one something to act on: `create_lead`, `update_lead`, `get_lead`, `assign_lead` (Phase 7), `schedule_follow_up` (Phase 8), `send_media` (Phase 9), and later `get_product`, `get_price`, `create_ticket`, `get_order`, `check_availability`, `create_appointment`, `cancel_appointment`, `reschedule_appointment`.
+
+Rules the registry enforces now: every argument is validated against a declared schema before a handler runs; a handler receives a `ToolContext` carrying the tenant id, the conversation id, the session and — where one is configured — an embeddings client, so a tool cannot reach outside the workspace it was called in; an agent is offered only the tools it has been granted; and a name the registry does not know is never dispatched, so model output cannot name its way into arbitrary execution.
+
+A tool that cannot work says so in its own output rather than failing the turn. `search_knowledge` without a configured provider returns a sentence telling the agent not to guess and to offer a handoff, which is a usable instruction; an exception would only end the turn silently.
 
 Retrieval details in [RAG.md](RAG.md); escalation in [CRM.md](CRM.md).
 

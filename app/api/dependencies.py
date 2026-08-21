@@ -24,8 +24,10 @@ from app.services.agent_service import AgentService
 from app.services.auth_service import AuthService
 from app.services.inbox_service import InboxService
 from app.services.invitation_service import InvitationService
+from app.services.knowledge_service import KnowledgeService
 from app.services.messaging_service import MessagingService
 from app.services.whatsapp_account_service import WhatsAppAccountService
+from app.workers.ingestion_queue import IngestionQueue
 
 # auto_error is off so a missing header raises the same domain error as a bad
 # one, and every failure leaves through the same response envelope.
@@ -162,6 +164,22 @@ def get_inbox_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> Inb
 
 
 InboxServiceDep = Annotated[InboxService, Depends(get_inbox_service)]
+
+
+def get_knowledge_service(
+    session: SessionDep,
+    redis: RedisDep,
+    workspace: ActiveWorkspaceDep,
+) -> KnowledgeService:
+    """Workspace-scoped, so no route can pass a tenant id of its own choosing."""
+    return KnowledgeService(
+        session=session,
+        tenant_id=workspace.tenant.id,
+        queue=IngestionQueue(redis.client),
+    )
+
+
+KnowledgeServiceDep = Annotated[KnowledgeService, Depends(get_knowledge_service)]
 
 
 def get_messaging_service(

@@ -178,9 +178,35 @@ Agent memory is a window over the conversation's own messages, bounded by both a
 
 ## 7. RAG flow
 
-**Status: Planned** — the `vector` extension is already enabled by migration `0001`.
+**Status: Implemented** — ingestion, tenant-scoped retrieval and the `search_knowledge` tool, exercised against real PostgreSQL with pgvector. PDF extraction and an approximate vector index are not.
 
-`Question -> embedding -> tenant-filtered pgvector search -> top chunks -> agent context -> Responses API -> answer`. Ingestion: `upload -> validate -> extract -> chunk -> embed -> store -> index`. Cross-tenant retrieval is structurally prevented by mandatory `tenant_id` filters.
+```
+Upload (202)                      Question
+    |                                 |
+Document row, PENDING             embed the question
+    |                                 |
+Redis: knowledge:ingestion        tenant-filtered pgvector search
+    |                                 |
+IngestionWorker                   distance threshold
+    |-- extract                       |
+    |-- chunk (overlapping)       passages, or an explicit "nothing found"
+    |-- embed (batched)               |
+    +-- store chunks + vectors    search_knowledge tool output
+    |                                 |
+Document READY                    Agent orchestrator -> Responses API -> answer
+```
+
+Ingestion never happens in the request that submitted the document. Submitting writes a `PENDING` row, enqueues, and answers `202`; extraction, chunking and embedding call a provider, and a large document is dozens of embedding requests. It has its own queue and worker rather than sharing the agent's (ADR-019), so a bulk upload cannot sit in front of a customer waiting for a reply.
+
+Three properties are load-bearing and each has a test:
+
+- **Cross-tenant retrieval is structurally impossible.** The similarity search is written once, in `DocumentChunkRepository.search`, and carries a mandatory `tenant_id` predicate. The tenant id comes from the tool's context, never from an argument the model produced — a tenant id a model could supply is a tenant id a model could change.
+- **Only `READY` documents answer.** The search joins the document and filters on status, so chunks written before a failure contribute nothing. A half-ingested document that still answered would be worse than one that answered not at all.
+- **Nothing found is said, not implied.** An empty retrieval returns a sentence instructing the agent to say it does not have the information and offer a handoff. A model handed an empty string fills the silence from its training data, which is the invented answer grounding exists to prevent.
+
+Chunking splits on paragraph structure first and character count only when a paragraph exceeds the budget alone, because a cut mid-sentence embeds as neither of the ideas it straddles. Chunks overlap, so an answer sitting across a boundary is reachable from either side. Ingestion is idempotent by content hash: the same text submitted twice is one document, and re-ingesting replaces a document's chunks rather than appending, which is what makes a duplicated job harmless. A failure is recorded on the document with its reason and is retryable through the API.
+
+Embedding width is fixed in the column at 1536 rather than being configurable (ADR-018): a width that could be changed by configuration would corrupt a knowledge base quietly, because existing vectors are not recomputed and distances across widths are meaningless. No approximate vector index exists yet — ivfflat and hnsw need to be built against representative data, and exact search is correct at every size and fast at the sizes a new workspace has.
 
 ## 8. Human handoff flow
 

@@ -349,3 +349,43 @@ A dependency the application imports is a direct dependency whether or not it is
 
 Consequences:
 Upgrading FastAPI now requires checking the Starlette bound too, since the two are coupled more tightly than either declares. The FastAPI bound was narrowed to a single minor (`>=0.141.1,<0.142`) because its 0.x minors have broken this project before — 0.116.2 stopped resolving `-> None` under postponed annotations and refused to build the two `204` routes. The weekly cron on the security workflow means new advisories surface without a commit, and a failing audit is the signal to bump. Any dependency whose behaviour the application relies on directly should be declared the same way when it is next touched; `anyio` and `h11` are the obvious remaining candidates, reached only through Starlette and httpx today.
+
+## ADR-018 — Embedding Width Fixed in the Column, Not in Configuration
+
+Date:
+2026-08-21
+
+Status:
+Accepted
+
+Decision:
+Declare `document_chunks.embedding` as `vector(1536)` — the width of `text-embedding-3-small` — as a constant in the model and the migration, and request that width explicitly on every embedding call. Changing the embedding model to one of a different width is a migration.
+
+Context:
+pgvector columns carry a fixed dimension. The embedding model is already configurable (`OPENAI_EMBEDDING_MODEL`), which invites making the width configurable alongside it, and the OpenAI `text-embedding-3-*` models can be asked to truncate to an arbitrary width.
+
+Reason:
+A configurable width would be a setting that silently corrupts a knowledge base. Changing it does not re-embed anything: the existing rows keep vectors of the old width, new rows get the new one, and cosine distance between them is meaningless — so retrieval degrades quietly rather than failing. Making the width a schema fact means the database refuses the mismatch instead. Requesting the width on each call is the same argument one layer out: the provider cannot hand back a vector the column will not take.
+
+Consequences:
+Moving to a different embedding model means a migration that alters the column and a re-ingestion of every document, which is the honest cost — the vectors would have to be recomputed anyway. The client checks the returned width and fails the batch rather than writing a partial document. Two models of the same width can be swapped by configuration alone, and that is safe only because their vectors are at least comparable in shape; the documents still want re-ingesting for the results to mean anything.
+
+## ADR-019 — Ingestion Has Its Own Queue
+
+Date:
+2026-08-21
+
+Status:
+Accepted
+
+Decision:
+Run document ingestion through a separate Redis queue (`knowledge:ingestion`) with its own worker, rather than adding a job type to the agent queue.
+
+Context:
+Both are background work driven by the same reliable-queue mechanics (ADR-015). Sharing one list and one worker pool would be less code.
+
+Reason:
+The two have different urgency and different idempotency. An agent job is a customer waiting for a reply, measured in seconds; an ingestion job is a document that will be searchable in a minute. On a shared list, one bulk upload of a hundred documents sits in front of every question asked while it drains. They also differ in what a repeat costs: re-running ingestion replaces the document's chunks and changes nothing, so requeueing is safe, while re-running an agent turn sends the customer a second reply — which is why the agent queue leaves requeueing to an operator and this one does not have to.
+
+Consequences:
+Two workers to deploy rather than one, and two dead-letter lists to watch. The queues share their encoding and reservation logic, so a fix to one applies to both. A stranded document — enqueued while Redis was unavailable — stays `PENDING` and is findable through `DocumentRepository.list_pending`; a sweeper for those belongs with the Phase 8 worker service.

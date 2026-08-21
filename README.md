@@ -14,9 +14,16 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Documentation protocol (`Documentation_Protocol.md`) | Implemented |
 | Project memory (`README` / `ARCHITECTURE` / `TASKS` / `DECISIONS`, `docs/`) | Implemented |
 | Application foundation (FastAPI, config, logging, errors, DB, Redis, health, Docker, CI) | Implemented |
-| Domain models and migrations beyond extension enablement | Planned |
-| Multi-tenancy, auth, WhatsApp, AI agents, RAG, CRM, billing | Planned |
-| Background workers and deployment automation | Planned |
+| Domain models and migrations (`0001`–`0007`) | Implemented |
+| Multi-tenancy, authentication, workspace RBAC, invitations | Implemented |
+| WhatsApp Cloud API (webhook, signatures, idempotency, outbound client) | Implemented |
+| Conversations, inbox, human handoff, templates, cursor paging | Implemented |
+| AI agents (configuration, memory, tools, orchestrator, queue) | Implemented |
+| Knowledge base and RAG (ingestion, pgvector retrieval, `search_knowledge`) | Implemented |
+| CRM and leads, follow-ups, media, sentiment, campaigns | Planned |
+| Usage, analytics, plans, subscriptions, billing | Planned |
+| Platform owner administration layer | Planned |
+| Worker processes and deployment automation | Planned |
 
 Status vocabulary used across all documentation: **Implemented**, **In Progress**, **Planned**, **Blocked**.
 

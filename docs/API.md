@@ -103,9 +103,30 @@ Three behaviours worth knowing before integrating:
 
 Conversations carry identifiers rather than embedded contact objects. The models declare no ORM relationships deliberately: a lazy load inside an async request is blocking I/O that only becomes visible under load.
 
+## Knowledge base
+
+| Method | Path | Who |
+| --- | --- | --- |
+| GET | `/api/v1/knowledge/bases` | Any workspace member |
+| POST | `/api/v1/knowledge/bases` | Admin or owner |
+| GET | `/api/v1/knowledge/bases/{knowledge_base_id}` | Any workspace member |
+| GET | `/api/v1/knowledge/bases/{knowledge_base_id}/documents` | Any workspace member |
+| POST | `/api/v1/knowledge/bases/{knowledge_base_id}/documents` | Admin or owner (`202`) |
+| GET | `/api/v1/knowledge/documents/{document_id}` | Any workspace member |
+| POST | `/api/v1/knowledge/documents/{document_id}/ingest` | Admin or owner (`202`) |
+| DELETE | `/api/v1/knowledge/documents/{document_id}` | Admin or owner (`204`) |
+
+Reading is open to any member — the people staffing an inbox need to see what their agents can answer from. Writing is administrators only, because a document added here is something the AI will state to customers as fact.
+
+Three behaviours worth knowing:
+
+- **Submitting a document answers `202`, not `201`.** The document exists but is not yet retrievable; ingestion runs in the background. Poll `GET /knowledge/documents/{id}` until `status` is `ready`. A `failed` document carries the reason in `error`, and `POST .../ingest` queues it again once the cause is fixed.
+- **Submitting the same text twice is not an error.** It returns the existing document with `created: false`, keyed on a hash of the extracted text. The upload was recognised, not duplicated.
+- **A document read never returns the extracted text.** It reports what was ingested — status, chunk count, size, failure reason. The API is not a document store.
+
 ## Planned tenant endpoints
 
-`/api/v1/contacts`, `/api/v1/agents`, `/api/v1/leads`, `/api/v1/knowledge`, `/api/v1/follow-ups`, `/api/v1/campaigns`, `/api/v1/analytics`, `/api/v1/usage`, `/api/v1/billing`.
+`/api/v1/contacts`, `/api/v1/leads`, `/api/v1/follow-ups`, `/api/v1/campaigns`, `/api/v1/analytics`, `/api/v1/usage`, `/api/v1/billing`.
 
 ## Planned platform endpoints
 

@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0 through 5 are complete, and the pipeline that verifies them has been repaired — see *Phase 5.5* below, which came first because none of the claims in this file were being checked while it was broken. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API. What the worker still lacks is a process of its own to run in, which belongs with the Phase 8 worker service. Phase 6 (knowledge base and RAG) is next.
+**Current position:** Phases 0 through 6 are complete, and the pipeline that verifies them has been repaired — see *Phase 5.5* below, which came first because none of the claims in this file were being checked while it was broken. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API, upload documents, and their agents answer from them: a question is embedded, matched against that workspace's own chunks in pgvector, and the passages enter the model's context. What the workers still lack is a process of their own to run in, which belongs with the Phase 8 worker service. Phase 7 (CRM and leads) is next.
 
 ## Phase 0 — Foundation
 
@@ -132,11 +132,23 @@ Unplanned, and recorded because it changed what every other status in this file 
 ## Phase 6 — Knowledge base and RAG
 
 - [x] pgvector enablement (migration `0001`)
-- [ ] Knowledge base, document, and chunk models
-- [ ] Ingestion pipeline (extract, chunk, embed, store)
-- [ ] Tenant-filtered vector search
-- [ ] `search_knowledge` tool
-- [ ] Cross-tenant retrieval tests
+- [x] Knowledge base, document, and chunk models (migration `0007`)
+- [x] OpenAI embeddings client (HTTP-level, batched, width-checked)
+- [x] Structure-aware chunking with overlap
+- [x] Ingestion pipeline (extract, chunk, embed, store), idempotent by content hash
+- [x] Ingestion queue and worker, separate from the agent queue (ADR-019)
+- [x] Document lifecycle (`pending`, `processing`, `ready`, `failed`) with the failure reason on the row
+- [x] Re-ingestion endpoint, so a failure is recoverable once its cause is fixed
+- [x] Tenant-filtered vector search (cosine distance, `READY` documents only)
+- [x] Retrieval service with a distance threshold and an explicit empty answer
+- [x] `search_knowledge` tool, wired through the orchestrator
+- [x] Knowledge admin API with role separation (members read, admins write)
+- [x] Cross-tenant retrieval tests (PostgreSQL + pgvector)
+- [x] Grounding tests: the agent invokes the tool, the passages reach its context, and an empty result is stated rather than silent
+- [ ] PDF extraction (refused explicitly today; needs a parser dependency)
+- [ ] Approximate vector index (ivfflat or hnsw), to be chosen against real volume in Phase 14
+- [ ] Sweeper for documents stranded `PENDING` by a queue outage (with the Phase 8 worker service)
+- [ ] RAG usage metering (with Phase 12)
 
 ## Phase 7 — CRM and leads
 
