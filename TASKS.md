@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phase 0 is complete. Phase 1 (database and tenancy foundation) is next.
+**Current position:** Phase 0 is complete. Phase 1 is in progress: the tenancy models and their migration are in place; repositories and isolation tests are next.
 
 ## Phase 0 — Foundation
 
@@ -41,12 +41,12 @@ This file is updated as part of every logical change. Phases follow the implemen
 ## Phase 1 — Database and tenancy foundation
 
 - [x] Base model mixins (UUID keys, timestamps, soft delete, tenant scope)
-- [ ] Tenant model
-- [ ] User model (global identity)
-- [ ] Membership model with `UNIQUE(user_id, tenant_id)`
-- [ ] Tenant invitation model
-- [ ] Role definitions (platform and tenant scopes)
-- [ ] Initial domain migration
+- [x] Tenant model
+- [x] User model (global identity)
+- [x] Membership model with `UNIQUE(user_id, tenant_id)`
+- [x] Tenant invitation model
+- [x] Role definitions (platform and tenant scopes)
+- [x] Initial domain migration (`0002`)
 - [ ] Tenant and user repositories with enforced isolation
 - [ ] Tenant isolation tests
 
