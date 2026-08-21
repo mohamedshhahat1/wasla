@@ -1,0 +1,103 @@
+"""Async database engine and session management.
+
+One ``Database`` instance is created per process during application startup and
+stored on the application state, so the engine and its connection pool are
+shared. Sessions are short-lived and request-scoped.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+from app.core.config import Settings
+from app.core.exceptions import DependencyUnavailableError
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+class Database:
+    """Owns the async engine and hands out sessions."""
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self._engine = create_async_engine(
+            settings.database_url,
+            echo=settings.database_echo,
+            pool_pre_ping=True,
+            pool_size=settings.database_pool_size,
+            max_overflow=settings.database_max_overflow,
+            pool_timeout=settings.database_pool_timeout,
+            pool_recycle=settings.database_pool_recycle_seconds,
+            connect_args=self._connect_args(settings),
+        )
+        self._session_factory = async_sessionmaker(
+            bind=self._engine,
+            expire_on_commit=False,
+            autoflush=False,
+        )
+
+    @staticmethod
+    def _connect_args(settings: Settings) -> dict[str, Any]:
+        """asyncpg-specific connect arguments, skipped for other drivers."""
+        if "asyncpg" not in settings.database_url:
+            return {}
+        return {
+            "timeout": settings.database_connect_timeout_seconds,
+            "server_settings": {"application_name": settings.app_name.lower()},
+        }
+
+    @property
+    def engine(self) -> AsyncEngine:
+        return self._engine
+
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        return self._session_factory
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[AsyncSession]:
+        """Yield a session, committing on success and rolling back on failure."""
+        session = self._session_factory()
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+    async def check(self, timeout: float | None = None) -> None:
+        """Verify connectivity. Raises DependencyUnavailableError on failure."""
+        limit = timeout if timeout is not None else self._settings.health_check_timeout_seconds
+        try:
+            await asyncio.wait_for(self._select_one(), timeout=limit)
+        except Exception as exc:
+            logger.warning(
+                "health.database_unavailable",
+                extra={"event": "health.database_unavailable", "reason": type(exc).__name__},
+            )
+            raise DependencyUnavailableError(
+                "PostgreSQL is unavailable.",
+                details={"dependency": "postgresql"},
+            ) from exc
+
+    async def _select_one(self) -> None:
+        async with self._engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+
+    async def dispose(self) -> None:
+        """Close all pooled connections."""
+        await self._engine.dispose()
