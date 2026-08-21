@@ -17,7 +17,7 @@ async def _handler(context, arguments):
     return "ran"
 
 
-def _definition(*parameters):
+def _definition(*parameters: ToolParameter):
     return ToolDefinition(
         name="lookup_order",
         description="Look up an order.",
