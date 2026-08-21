@@ -110,7 +110,9 @@ mypy app
 pre-commit install     # run the same gates on every commit
 ```
 
-The suite injects fake infrastructure, so no PostgreSQL, Redis, OpenAI or Meta credentials are required to run it.
+The suite injects fake infrastructure, so no PostgreSQL, Redis, OpenAI or Meta credentials are required to run it. Tests that do need a database skip unless `TEST_DATABASE_URL` (or `DATABASE_URL`) points at PostgreSQL with `pgvector`; `docker compose up -d postgres` is enough to make them run.
+
+Install with `pip install -e ".[dev]"` rather than installing the tools yourself: Ruff, Black and MyPy are pinned to exact versions (ADR-016), and a different version will report findings CI does not, or miss ones it does.
 
 ### Migrations
 

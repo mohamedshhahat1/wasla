@@ -98,8 +98,9 @@ def test_tenant_is_usable_only_while_live():
 
 
 def test_platform_role_is_opt_in():
-    assert not User(email="member@wasla.test").is_platform_staff
-    assert User(email="staff@wasla.test", platform_role=PlatformRole.PLATFORM_OWNER).is_platform_staff
+    assert not User(email="member@example.com").is_platform_staff
+    staff = User(email="staff@example.com", platform_role=PlatformRole.PLATFORM_OWNER)
+    assert staff.is_platform_staff
 
 
 @pytest.mark.parametrize(
@@ -117,7 +118,7 @@ def test_only_owners_and_admins_administer_a_tenant(role, expected):
 def test_invitation_is_open_until_revoked_or_expired():
     now = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
     invitation = TenantInvitation(
-        email="new@wasla.test",
+        email="new@example.com",
         role=TenantRole.MEMBER,
         status=InvitationStatus.PENDING,
         token_hash="a" * 64,

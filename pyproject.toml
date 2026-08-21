@@ -27,13 +27,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Pinned exactly, not ranged. These tools gate CI on style and typing, and a
+# new release changing a default turns a green pipeline red without a commit
+# touching the project. Upgrading is a deliberate change with its own diff.
 dev = [
-    "pytest>=8.3,<9",
-    "pytest-asyncio>=0.25,<0.26",
-    "pytest-cov>=6,<7",
-    "ruff>=0.8,<0.13",
-    "black>=24.10,<26",
-    "mypy>=1.13,<2",
+    "pytest==8.3.2",
+    "pytest-asyncio==0.25.3",
+    "pytest-cov==6.3.0",
+    "ruff==0.12.12",
+    "black==25.12.0",
+    "mypy==1.20.2",
 ]
 
 [tool.hatch.build.targets.wheel]

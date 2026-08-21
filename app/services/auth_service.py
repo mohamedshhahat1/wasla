@@ -275,17 +275,19 @@ class AuthService:
             return None
 
         tenant = await self._tenants.get_by_slug(workspace_slug)
-        membership = next(
+        # Named apart from the loop variable above: reusing that name would fix
+        # this one's type as non-optional and hide the None the search can give.
+        requested = next(
             (entry for entry in memberships if tenant and entry.tenant_id == tenant.id),
             None,
         )
-        if tenant is None or membership is None:
+        if tenant is None or requested is None:
             # One answer for "no such workspace" and "you are not in it".
             # Distinguishing them would let anyone map which workspaces exist.
             raise TenantIsolationError()
         if not tenant.is_active:
             raise PermissionDeniedError("This workspace is suspended.")
-        return WorkspaceContext(membership=membership, tenant=tenant)
+        return WorkspaceContext(membership=requested, tenant=tenant)
 
     def _issue(self, *, user: User, workspace: WorkspaceContext | None) -> AuthenticatedSession:
         access_token, _ = create_access_token(

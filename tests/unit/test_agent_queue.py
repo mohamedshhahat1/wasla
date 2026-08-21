@@ -31,7 +31,9 @@ class FakeRedis:
         self.pushed.append((key, value))
         return 1
 
-    async def blmove(self, source, destination, timeout):
+    # ASYNC109 wants asyncio.timeout, but this mirrors redis-py's own
+    # signature: the fake has to accept what the queue actually passes.
+    async def blmove(self, source, destination, timeout):  # noqa: ASYNC109
         self.moves.append((source, destination, timeout))
         return self._reserved
 

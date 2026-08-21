@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0 through 5 are complete. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API. What the worker still lacks is a process of its own to run in, which belongs with the Phase 8 worker service. Phase 6 (knowledge base and RAG) is next.
+**Current position:** Phases 0 through 5 are complete, and the pipeline that verifies them has been repaired — see *Phase 5.5* below, which came first because none of the claims in this file were being checked while it was broken. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API. What the worker still lacks is a process of its own to run in, which belongs with the Phase 8 worker service. Phase 6 (knowledge base and RAG) is next.
 
 ## Phase 0 — Foundation
 
@@ -114,6 +114,20 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [ ] Agent model and migration parity tests (PostgreSQL-backed)
 - [ ] Worker process entrypoint and container service (with the Phase 8 worker)
 - [ ] In-flight reaper for jobs abandoned by a dead worker (with the Phase 8 worker)
+
+## Phase 5.5 — Pipeline repair
+
+Unplanned, and recorded because it changed what every other status in this file is worth. CI had been red on `main` since `185545a`, and the test job never ran a single test.
+
+- [x] Make `tests/`, `tests/unit/` and `tests/integration/` packages (two modules shared a basename, so collection aborted and *nothing* ran)
+- [x] Pin the developer toolchain to exact versions (ADR-016)
+- [x] Fix Ruff findings under the pinned version (line length, import order, PEP 695 generics in the repository base)
+- [x] Reformat under the pinned Black
+- [x] Clear all 25 MyPy errors (`__table_args__` override type, `tenant_id` declared directly rather than through `declared_attr.directive`, redis-py's sync/async command union, a shadowed membership variable)
+- [x] Fix the `204` routes, which FastAPI 0.116.2 refused to build under postponed annotations — the application would not start
+- [x] Fix the invitation token bug this uncovered: `issue()` treated the `(token, hash)` pair as the token, hashed the tuple, and raised at runtime
+- [x] Cover invitation issuing with tests that need no database, since nothing executable covered the path that broke
+- [ ] Re-run the PostgreSQL-backed suite, migrations and `alembic check` — not verifiable in this environment (no PostgreSQL, no Docker)
 
 ## Phase 6 — Knowledge base and RAG
 

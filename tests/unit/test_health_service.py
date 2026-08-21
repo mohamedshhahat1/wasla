@@ -24,13 +24,9 @@ async def test_report_is_ready_when_every_probe_passes():
 
 async def test_domain_failure_marks_only_that_component_down():
     async def unavailable() -> None:
-        raise DependencyUnavailableError(
-            "Redis is unavailable.", details={"dependency": "redis"}
-        )
+        raise DependencyUnavailableError("Redis is unavailable.", details={"dependency": "redis"})
 
-    report = await HealthService(
-        {"postgresql": _healthy, "redis": unavailable}
-    ).check_readiness()
+    report = await HealthService({"postgresql": _healthy, "redis": unavailable}).check_readiness()
 
     assert not report.is_ready
     assert report.status == "degraded"

@@ -87,6 +87,4 @@ class InvitationTokenRepository(BaseRepository[TenantInvitation]):
     model = TenantInvitation
 
     async def get_by_token_hash(self, token_hash: str) -> TenantInvitation | None:
-        return await self._first(
-            self._select().where(TenantInvitation.token_hash == token_hash)
-        )
+        return await self._first(self._select().where(TenantInvitation.token_hash == token_hash))

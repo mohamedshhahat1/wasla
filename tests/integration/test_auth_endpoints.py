@@ -26,14 +26,14 @@ from app.services.auth_service import (
 pytestmark = pytest.mark.integration
 
 REGISTRATION = {
-    "email": "owner@wasla.test",
+    "email": "owner@example.com",
     "password": "correct horse battery staple",
     "full_name": "Owner",
     "workspace_name": "Acme",
     "workspace_slug": "acme",
 }
 CREDENTIALS = {
-    "email": "owner@wasla.test",
+    "email": "owner@example.com",
     "password": "correct horse battery staple",
 }
 
@@ -42,7 +42,7 @@ CREDENTIALS = {
 def user() -> User:
     return User(
         id=uuid.uuid4(),
-        email="owner@wasla.test",
+        email="owner@example.com",
         full_name="Owner",
         is_active=True,
     )
@@ -265,7 +265,7 @@ async def test_the_profile_lists_the_callers_workspaces(client, service, authent
 
     assert response.status_code == 200
     body = response.json()
-    assert body["email"] == "owner@wasla.test"
+    assert body["email"] == "owner@example.com"
     assert [entry["slug"] for entry in body["workspaces"]] == ["acme"]
     assert body["platform_role"] is None
 

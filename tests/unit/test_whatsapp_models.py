@@ -47,8 +47,7 @@ def test_every_table_with_a_tenant_column_indexes_it():
     missing = sorted(
         table.name
         for table in Base.metadata.tables.values()
-        if "tenant_id" in table.columns
-        and f"ix_{table.name}_tenant_id" not in _index_names(table)
+        if "tenant_id" in table.columns and f"ix_{table.name}_tenant_id" not in _index_names(table)
     )
     assert missing == []
 

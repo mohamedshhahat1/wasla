@@ -158,7 +158,9 @@ async def test_a_signature_for_a_different_body_is_refused(client, configured, i
     assert ingestion.calls == []
 
 
-async def test_an_unparseable_body_is_acknowledged_rather_than_retried(client, configured, ingestion):
+async def test_an_unparseable_body_is_acknowledged_rather_than_retried(
+    client, configured, ingestion
+):
     body = b"not json at all"
 
     response = await client.post(PATH, content=body, headers=_signed(body))

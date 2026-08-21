@@ -42,8 +42,7 @@ def estimate_tokens(text: str) -> int:
     ascii_characters = sum(1 for character in text if character.isascii())
     other_characters = len(text) - ascii_characters
     estimate = (
-        ascii_characters / CHARACTERS_PER_TOKEN
-        + other_characters / NON_ASCII_CHARACTERS_PER_TOKEN
+        ascii_characters / CHARACTERS_PER_TOKEN + other_characters / NON_ASCII_CHARACTERS_PER_TOKEN
     )
     return max(1, ceil(estimate))
 

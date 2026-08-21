@@ -97,18 +97,18 @@ async def _invitation(db_session, *, tenant_id: uuid.UUID, email: str) -> Tenant
 async def test_a_scoped_read_never_returns_another_workspaces_rows(db_session):
     first = await _tenant(db_session, name="First", slug="first")
     second = await _tenant(db_session, name="Second", slug="second")
-    await _invitation(db_session, tenant_id=first.id, email="a@wasla.test")
-    await _invitation(db_session, tenant_id=second.id, email="b@wasla.test")
+    await _invitation(db_session, tenant_id=first.id, email="a@example.com")
+    await _invitation(db_session, tenant_id=second.id, email="b@example.com")
 
     visible = await InvitationRepository(db_session, tenant_id=first.id).list_pending()
 
-    assert [entry.email for entry in visible] == ["a@wasla.test"]
+    assert [entry.email for entry in visible] == ["a@example.com"]
 
 
 async def test_reaching_for_another_workspaces_row_answers_not_found(db_session):
     first = await _tenant(db_session, name="First", slug="first")
     second = await _tenant(db_session, name="Second", slug="second")
-    theirs = await _invitation(db_session, tenant_id=second.id, email="b@wasla.test")
+    theirs = await _invitation(db_session, tenant_id=second.id, email="b@example.com")
 
     repository = InvitationRepository(db_session, tenant_id=first.id)
 
@@ -122,7 +122,7 @@ async def test_reaching_for_another_workspaces_row_answers_not_found(db_session)
 async def test_the_database_enforces_one_membership_per_user_and_workspace(db_session):
     tenant = await _tenant(db_session, name="First", slug="first")
     user = await UserRepository(db_session).create(
-        email="owner@wasla.test",
+        email="owner@example.com",
         hashed_password=hash_password(PASSWORD),
     )
     await db_session.flush()
@@ -140,7 +140,7 @@ async def test_the_database_enforces_one_membership_per_user_and_workspace(db_se
 async def test_one_identity_can_belong_to_two_workspaces(db_session):
     first = await _tenant(db_session, name="First", slug="first")
     second = await _tenant(db_session, name="Second", slug="second")
-    user = await UserRepository(db_session).create(email="owner@wasla.test")
+    user = await UserRepository(db_session).create(email="owner@example.com")
     await db_session.flush()
 
     for tenant, role in ((first, TenantRole.TENANT_OWNER), (second, TenantRole.MEMBER)):
@@ -157,7 +157,7 @@ async def test_one_identity_can_belong_to_two_workspaces(db_session):
 
 async def test_a_platform_role_grants_nothing_inside_a_workspace(db_session):
     tenant = await _tenant(db_session, name="First", slug="first")
-    staff = await UserRepository(db_session).create(email="staff@wasla.test")
+    staff = await UserRepository(db_session).create(email="staff@example.com")
     staff.platform_role = PlatformRole.PLATFORM_ADMIN
     await db_session.flush()
 
@@ -171,7 +171,7 @@ async def test_a_platform_role_grants_nothing_inside_a_workspace(db_session):
 
 async def test_registration_creates_an_owner_membership(auth, db_session):
     session = await auth.register(
-        email="Owner@Wasla.test",
+        email="Owner@Example.com",
         password=PASSWORD,
         workspace_name="Acme",
         workspace_slug="Acme",
@@ -180,33 +180,33 @@ async def test_registration_creates_an_owner_membership(auth, db_session):
     assert session.workspace is not None
     assert session.workspace.membership.role is TenantRole.TENANT_OWNER
     # Both identifiers are normalised on the way in.
-    assert session.user.email == "owner@wasla.test"
+    assert session.user.email == "owner@example.com"
     assert session.workspace.tenant.slug == "acme"
 
-    stored = await UserRepository(db_session).get_by_email("owner@wasla.test")
+    stored = await UserRepository(db_session).get_by_email("owner@example.com")
     assert stored is not None
     assert stored.hashed_password != PASSWORD
 
 
 async def test_a_registered_account_can_log_in_and_a_wrong_password_cannot(auth):
     await auth.register(
-        email="owner@wasla.test",
+        email="owner@example.com",
         password=PASSWORD,
         workspace_name="Acme",
         workspace_slug="acme",
     )
 
-    session = await auth.login(email="owner@wasla.test", password=PASSWORD)
+    session = await auth.login(email="owner@example.com", password=PASSWORD)
     assert session.workspace is not None
     assert session.workspace.tenant.slug == "acme"
 
     with pytest.raises(AuthenticationError):
-        await auth.login(email="owner@wasla.test", password="not the password")
+        await auth.login(email="owner@example.com", password="not the password")
 
 
 async def test_a_second_registration_with_the_same_address_conflicts(auth):
     await auth.register(
-        email="owner@wasla.test",
+        email="owner@example.com",
         password=PASSWORD,
         workspace_name="Acme",
         workspace_slug="acme",
@@ -214,7 +214,7 @@ async def test_a_second_registration_with_the_same_address_conflicts(auth):
 
     with pytest.raises(ConflictError):
         await auth.register(
-            email="owner@wasla.test",
+            email="owner@example.com",
             password=PASSWORD,
             workspace_name="Other",
             workspace_slug="other",
@@ -223,7 +223,7 @@ async def test_a_second_registration_with_the_same_address_conflicts(auth):
 
 async def test_a_refresh_token_works_once_and_then_never_again(auth):
     registered = await auth.register(
-        email="owner@wasla.test",
+        email="owner@example.com",
         password=PASSWORD,
         workspace_name="Acme",
         workspace_slug="acme",
@@ -239,7 +239,7 @@ async def test_a_refresh_token_works_once_and_then_never_again(auth):
 
 async def test_a_workspace_the_caller_does_not_belong_to_looks_missing(auth, db_session):
     await auth.register(
-        email="owner@wasla.test",
+        email="owner@example.com",
         password=PASSWORD,
         workspace_name="Acme",
         workspace_slug="acme",
@@ -248,7 +248,7 @@ async def test_a_workspace_the_caller_does_not_belong_to_looks_missing(auth, db_
 
     with pytest.raises(TenantIsolationError):
         await auth.login(
-            email="owner@wasla.test",
+            email="owner@example.com",
             password=PASSWORD,
             workspace_slug="somebody-else",
         )
@@ -256,23 +256,23 @@ async def test_a_workspace_the_caller_does_not_belong_to_looks_missing(auth, db_
 
 async def test_a_disabled_account_cannot_log_in(auth, db_session):
     await auth.register(
-        email="owner@wasla.test",
+        email="owner@example.com",
         password=PASSWORD,
         workspace_name="Acme",
         workspace_slug="acme",
     )
-    user = await UserRepository(db_session).get_by_email("owner@wasla.test")
+    user = await UserRepository(db_session).get_by_email("owner@example.com")
     assert user is not None
     user.is_active = False
     await db_session.flush()
 
     with pytest.raises(PermissionDeniedError):
-        await auth.login(email="owner@wasla.test", password=PASSWORD)
+        await auth.login(email="owner@example.com", password=PASSWORD)
 
 
 async def test_an_invitation_grants_membership_exactly_once(auth, invitations, db_session):
     owner_session = await auth.register(
-        email="owner@wasla.test",
+        email="owner@example.com",
         password=PASSWORD,
         workspace_name="Acme",
         workspace_slug="acme",
@@ -284,7 +284,7 @@ async def test_an_invitation_grants_membership_exactly_once(auth, invitations, d
         tenant_id=tenant.id,
         inviter=owner_session.user,
         inviter_role=TenantRole.TENANT_OWNER,
-        email="invited@wasla.test",
+        email="invited@example.com",
         role=TenantRole.MEMBER,
     )
 
@@ -305,13 +305,13 @@ async def test_an_invitation_grants_membership_exactly_once(auth, invitations, d
 
 async def test_an_invited_member_lands_in_the_inviting_workspace_only(auth, invitations):
     owner_session = await auth.register(
-        email="owner@wasla.test",
+        email="owner@example.com",
         password=PASSWORD,
         workspace_name="Acme",
         workspace_slug="acme",
     )
     outsider = await auth.register(
-        email="outsider@wasla.test",
+        email="outsider@example.com",
         password=PASSWORD,
         workspace_name="Other",
         workspace_slug="other",
@@ -323,12 +323,12 @@ async def test_an_invited_member_lands_in_the_inviting_workspace_only(auth, invi
         tenant_id=owner_session.workspace.tenant.id,
         inviter=owner_session.user,
         inviter_role=TenantRole.TENANT_OWNER,
-        email="invited@wasla.test",
+        email="invited@example.com",
         role=TenantRole.MEMBER,
     )
     await invitations.accept(raw_token=raw_token, password=PASSWORD)
 
-    invited = await auth.login(email="invited@wasla.test", password=PASSWORD)
+    invited = await auth.login(email="invited@example.com", password=PASSWORD)
 
     assert invited.workspace is not None
     assert invited.workspace.tenant.slug == "acme"
@@ -336,7 +336,7 @@ async def test_an_invited_member_lands_in_the_inviting_workspace_only(auth, invi
     # The other workspace exists, but not for this account.
     with pytest.raises(TenantIsolationError):
         await auth.login(
-            email="invited@wasla.test",
+            email="invited@example.com",
             password=PASSWORD,
             workspace_slug="other",
         )
@@ -344,7 +344,7 @@ async def test_an_invited_member_lands_in_the_inviting_workspace_only(auth, invi
 
 async def test_an_administrator_cannot_invite_an_owner(auth, invitations, db_session):
     owner_session = await auth.register(
-        email="owner@wasla.test",
+        email="owner@example.com",
         password=PASSWORD,
         workspace_name="Acme",
         workspace_slug="acme",
@@ -356,7 +356,7 @@ async def test_an_administrator_cannot_invite_an_owner(auth, invitations, db_ses
             tenant_id=owner_session.workspace.tenant.id,
             inviter=owner_session.user,
             inviter_role=TenantRole.TENANT_ADMIN,
-            email="peer@wasla.test",
+            email="peer@example.com",
             role=TenantRole.TENANT_OWNER,
         )
 
@@ -366,7 +366,7 @@ async def test_an_expired_invitation_is_refused(invitations, db_session):
     raw_token = uuid.uuid4().hex
     repository = InvitationRepository(db_session, tenant_id=tenant.id)
     await repository.create(
-        email="invited@wasla.test",
+        email="invited@example.com",
         role=TenantRole.MEMBER,
         token_hash=hash_invitation_token(raw_token),
         expires_at=datetime.now(UTC) - timedelta(minutes=1),

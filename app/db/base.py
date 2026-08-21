@@ -14,6 +14,7 @@ from typing import Final
 from sqlalchemy import DateTime, ForeignKey, Index, MetaData, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
+from sqlalchemy.schema import SchemaItem
 
 NAMING_CONVENTION: Final[dict[str, str]] = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
@@ -85,17 +86,21 @@ class TenantScopedMixin:
     the guard against repeating that mistake.
     """
 
-    @declared_attr.directive
-    @classmethod
-    def tenant_id(cls) -> Mapped[uuid.UUID]:
-        return mapped_column(
-            UUID(as_uuid=True),
-            ForeignKey("tenants.id", ondelete="CASCADE"),
-            nullable=False,
-        )
+    # Declared directly rather than through ``declared_attr``. SQLAlchemy 2.0
+    # copies a mixin's ``mapped_column`` - foreign key included - onto each
+    # mapped subclass, and the direct form is what lets a type checker resolve
+    # ``instance.tenant_id`` to a UUID instead of to the Mapped descriptor.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
 
     @declared_attr.directive
     @classmethod
-    def __table_args__(cls) -> tuple[Index, ...]:
+    def __table_args__(cls) -> tuple[SchemaItem, ...]:
+        # Typed as SchemaItem rather than Index because subclasses override this
+        # with constraints alongside their indexes, and a narrower type here
+        # makes every one of those overrides a type error.
         table_name = cls.__tablename__  # type: ignore[attr-defined]
         return (Index(f"ix_{table_name}_tenant_id", "tenant_id"),)

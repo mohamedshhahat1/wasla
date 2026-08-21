@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Any, Final, Self
+from typing import Any, Final, Self, cast
 
 from redis.asyncio import Redis
 
@@ -22,6 +23,16 @@ QUEUE_NAMESPACE: Final = "agent:jobs"
 # How long a reserve call waits before returning empty, so a worker loop can
 # notice it has been asked to stop.
 BLOCK_SECONDS: Final = 5
+
+
+async def _command[T](result: Awaitable[T] | T) -> T:
+    """Await a redis-py command result.
+
+    redis-py types every command as sync-or-async because one class backs both
+    clients. On the async client the result is always awaitable, so this states
+    that once here instead of at each of the call sites below.
+    """
+    return await cast("Awaitable[T]", result)
 
 
 class MalformedJobError(Exception):
@@ -99,7 +110,7 @@ class AgentQueue:
         self._failed = namespace + ":failed"
 
     async def enqueue(self, job: AgentJob) -> None:
-        await self._redis.rpush(self._pending, job.encode())
+        await _command(self._redis.rpush(self._pending, job.encode()))
 
     async def reserve(self, *, wait_seconds: int = BLOCK_SECONDS) -> str | None:
         """Claim the oldest job, or return None if none arrives in time.
@@ -107,12 +118,12 @@ class AgentQueue:
         The payload is returned rather than a decoded job because releasing it
         later requires the exact original bytes.
         """
-        raw: Any = await self._redis.blmove(self._pending, self._inflight, wait_seconds)
+        raw: Any = await _command(self._redis.blmove(self._pending, self._inflight, wait_seconds))
         return raw if isinstance(raw, str) else None
 
     async def release(self, raw: str) -> None:
         """Mark a reserved job done."""
-        await self._redis.lrem(self._inflight, 1, raw)
+        await _command(self._redis.lrem(self._inflight, 1, raw))
 
     async def fail(self, raw: str) -> None:
         """Move a reserved job to the dead-letter list.
@@ -120,12 +131,12 @@ class AgentQueue:
         Kept rather than discarded: a job that failed is the only evidence that
         a customer went unanswered.
         """
-        await self._redis.lrem(self._inflight, 1, raw)
-        await self._redis.rpush(self._failed, raw)
+        await _command(self._redis.lrem(self._inflight, 1, raw))
+        await _command(self._redis.rpush(self._failed, raw))
 
     async def depth(self) -> int:
         """How many jobs are waiting."""
-        return int(await self._redis.llen(self._pending))
+        return int(await _command(self._redis.llen(self._pending)))
 
     async def failed_depth(self) -> int:
-        return int(await self._redis.llen(self._failed))
+        return int(await _command(self._redis.llen(self._failed)))

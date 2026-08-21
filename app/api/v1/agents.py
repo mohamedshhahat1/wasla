@@ -123,7 +123,12 @@ async def grant_tool(
     return ToolGrantRead.model_validate(grant)
 
 
-@router.delete("/{agent_id}/tools/{name}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{agent_id}/tools/{name}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    # See the note on the logout route: a 204 must declare no model.
+    response_model=None,
+)
 async def revoke_tool(
     agent_id: uuid.UUID,
     name: str,

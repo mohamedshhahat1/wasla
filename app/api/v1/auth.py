@@ -86,6 +86,10 @@ async def refresh(payload: RefreshRequest, service: AuthServiceDep) -> SessionRe
 @router.post(
     "/logout",
     status_code=status.HTTP_204_NO_CONTENT,
+    # Stated rather than inferred. Under postponed annotations FastAPI resolves
+    # a `-> None` return to NoneType, which it then treats as a real response
+    # model and rejects against a 204.
+    response_model=None,
     summary="Revoke a refresh token",
 )
 async def logout(payload: LogoutRequest, service: AuthServiceDep) -> None:

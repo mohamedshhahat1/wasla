@@ -8,10 +8,12 @@ PostgreSQL, Redis, Meta or OpenAI credentials.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.exceptions import DependencyUnavailableError
@@ -46,6 +48,19 @@ class FakeDependency:
         self.healthy = healthy
         self.calls = 0
         self.commands = FakeRedisCommands()
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[AsyncSession]:
+        """Mirrors Database.session, yielding a session bound to nothing.
+
+        Routes that reject a request before touching the database - an absent
+        bearer token, a failed authorization check - resolve their session
+        dependency all the same, so one has to exist. It is deliberately
+        unbound: a test that reaches an actual query fails loudly here instead
+        of silently passing against a stub, and belongs in the PostgreSQL-backed
+        suite or should override the service dependency outright.
+        """
+        yield AsyncSession()
 
     @property
     def client(self) -> FakeRedisCommands:

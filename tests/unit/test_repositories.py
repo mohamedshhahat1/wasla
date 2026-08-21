@@ -148,24 +148,24 @@ async def test_cross_tenant_membership_listing_is_keyed_by_user():
 async def test_email_lookup_is_case_insensitive():
     session = RecordingSession()
 
-    await UserRepository(session).get_by_email("  Owner@Wasla.TEST ")
+    await UserRepository(session).get_by_email("  Owner@Example.COM ")
 
-    assert "owner@wasla.test" in bound_values(session.statements[0])
+    assert "owner@example.com" in bound_values(session.statements[0])
 
 
 async def test_duplicate_email_is_rejected_as_a_conflict():
-    session = RecordingSession(rows=[User(email="owner@wasla.test")])
+    session = RecordingSession(rows=[User(email="owner@example.com")])
 
     with pytest.raises(ConflictError):
-        await UserRepository(session).create(email="Owner@Wasla.test")
+        await UserRepository(session).create(email="Owner@Example.com")
 
 
 async def test_new_user_is_normalised_and_active():
     session = RecordingSession()
 
-    user = await UserRepository(session).create(email=" Owner@Wasla.TEST ", full_name="  Sara  ")
+    user = await UserRepository(session).create(email=" Owner@Example.COM ", full_name="  Sara  ")
 
-    assert user.email == "owner@wasla.test"
+    assert user.email == "owner@example.com"
     assert user.full_name == "Sara"
     assert user.is_active is True
     assert user.hashed_password is None

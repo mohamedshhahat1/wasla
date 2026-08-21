@@ -207,7 +207,9 @@ class ResponsesClient:
         try:
             body = response.json()
         except ValueError as error:
-            raise ExternalServiceError("The AI provider returned an unreadable response.") from error
+            raise ExternalServiceError(
+                "The AI provider returned an unreadable response."
+            ) from error
         if not isinstance(body, dict):
             raise ExternalServiceError("The AI provider returned an unexpected response.")
         return body

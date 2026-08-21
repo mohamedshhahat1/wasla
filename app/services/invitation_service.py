@@ -83,12 +83,12 @@ class InvitationService:
             if await memberships.get_for_user(existing.id) is not None:
                 raise ConflictError("That person is already a member of this workspace.")
 
-        raw_token = generate_invitation_token()
+        raw_token, token_hash = generate_invitation_token()
         invitations = InvitationRepository(self._session, tenant_id=tenant_id)
         invitation = await invitations.create(
             email=email,
             role=role,
-            token_hash=hash_invitation_token(raw_token),
+            token_hash=token_hash,
             expires_at=datetime.now(UTC) + timedelta(days=INVITATION_TTL_DAYS),
             invited_by_id=inviter.id,
         )

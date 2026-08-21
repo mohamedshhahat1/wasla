@@ -29,7 +29,7 @@ pytestmark = pytest.mark.integration
 
 
 def _workspace(role: TenantRole) -> ActiveWorkspace:
-    user = User(id=uuid.uuid4(), email="admin@wasla.test", is_active=True)
+    user = User(id=uuid.uuid4(), email="admin@example.com", is_active=True)
     tenant = Tenant(id=uuid.uuid4(), name="Acme", slug="acme", status=TenantStatus.ACTIVE)
     membership = Membership(tenant_id=tenant.id, user_id=user.id, role=role)
     return ActiveWorkspace(user=user, membership=membership, tenant=tenant)
@@ -39,7 +39,7 @@ def _invitation(tenant_id: uuid.UUID) -> TenantInvitation:
     return TenantInvitation(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
-        email="invited@wasla.test",
+        email="invited@example.com",
         role=TenantRole.MEMBER,
         status=InvitationStatus.PENDING,
         token_hash="a" * 64,
@@ -73,7 +73,7 @@ class StubInvitationService:
             slug="acme",
             status=TenantStatus.ACTIVE,
         )
-        user = User(id=uuid.uuid4(), email="invited@wasla.test", is_active=True)
+        user = User(id=uuid.uuid4(), email="invited@example.com", is_active=True)
         membership = Membership(
             tenant_id=tenant.id,
             user_id=user.id,
@@ -99,13 +99,13 @@ def service(app: FastAPI, owner: ActiveWorkspace) -> StubInvitationService:
 async def test_issuing_returns_the_token_once(client, service, owner):
     response = await client.post(
         "/api/v1/invitations",
-        json={"email": "invited@wasla.test", "role": "member"},
+        json={"email": "invited@example.com", "role": "member"},
     )
 
     assert response.status_code == 201
     body = response.json()
     assert body["token"] == "raw-invitation-token"
-    assert body["email"] == "invited@wasla.test"
+    assert body["email"] == "invited@example.com"
     assert body["status"] == "pending"
     # The tenant comes from the resolved workspace, not from the request.
     assert service.calls[0][1]["tenant_id"] == owner.tenant.id
@@ -132,7 +132,7 @@ async def test_a_member_cannot_invite_anybody(client, app: FastAPI, service):
 
     response = await client.post(
         "/api/v1/invitations",
-        json={"email": "invited@wasla.test"},
+        json={"email": "invited@example.com"},
     )
 
     assert response.status_code == 403
@@ -144,7 +144,7 @@ async def test_inviting_requires_authentication(client, app: FastAPI):
     # credentials.
     response = await client.post(
         "/api/v1/invitations",
-        json={"email": "invited@wasla.test"},
+        json={"email": "invited@example.com"},
     )
 
     assert response.status_code == 401
@@ -161,7 +161,7 @@ async def test_a_duplicate_invitation_conflicts(client, app: FastAPI, service, o
 
     response = await client.post(
         "/api/v1/invitations",
-        json={"email": "invited@wasla.test"},
+        json={"email": "invited@example.com"},
     )
 
     assert response.status_code == 409
@@ -175,7 +175,7 @@ async def test_accepting_needs_no_credentials(client, service):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["email"] == "invited@wasla.test"
+    assert body["email"] == "invited@example.com"
     assert body["workspace"]["slug"] == "acme"
     # Acceptance prepares the membership; it does not hand out a session.
     assert "access_token" not in body
@@ -186,9 +186,7 @@ async def test_an_unusable_invitation_is_not_described(client, app: FastAPI, own
         async def accept(self, **kwargs):
             raise AuthenticationError("That invitation is not valid.")
 
-    app.dependency_overrides[get_invitation_service] = lambda: Rejecting(
-        tenant_id=owner.tenant.id
-    )
+    app.dependency_overrides[get_invitation_service] = lambda: Rejecting(tenant_id=owner.tenant.id)
 
     response = await client.post(
         "/api/v1/invitations/accept",

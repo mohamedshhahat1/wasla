@@ -348,9 +348,7 @@ async def test_a_rejected_argument_becomes_output_the_model_can_read(monkeypatch
 
 async def test_a_handoff_suppresses_the_reply(monkeypatch):
     """The conversation belongs to a person, so an AI message must not follow."""
-    client = StubClient(
-        [_reply(text="Getting someone.", tool_calls=[_call(HANDOFF_TOOL)])]
-    )
+    client = StubClient([_reply(text="Getting someone.", tool_calls=[_call(HANDOFF_TOOL)])])
     orchestrator = _build(
         monkeypatch,
         client=client,

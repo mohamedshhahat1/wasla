@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar
 
 from sqlalchemy import ColumnElement, Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,10 +19,10 @@ from app.db.base import Base
 
 logger = get_logger(__name__)
 
-ModelT = TypeVar("ModelT", bound=Base)
 
-
-class BaseRepository(Generic[ModelT]):
+# PEP 695 type parameters: the bound keeps a repository pinned to a mapped
+# class, so `model` and every query helper stay tied to the same table.
+class BaseRepository[ModelT: Base]:
     """Data access for one model within one session."""
 
     model: type[ModelT]
@@ -57,7 +56,7 @@ class BaseRepository(Generic[ModelT]):
         return entity
 
 
-class TenantScopedRepository(BaseRepository[ModelT], ABC):
+class TenantScopedRepository[ModelT: Base](BaseRepository[ModelT], ABC):
     """Data access confined to a single tenant.
 
     The tenant id is supplied once, from the authenticated context, and is

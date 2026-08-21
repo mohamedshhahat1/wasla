@@ -61,13 +61,12 @@ def _account(**overrides) -> WhatsAppAccount:
 
 def _workspace(role: TenantRole) -> ActiveWorkspace:
     return ActiveWorkspace(
-        user=User(id=USER_ID, email="owner@wasla.test", is_active=True),
+        user=User(id=USER_ID, email="owner@example.com", is_active=True),
         membership=Membership(
             id=uuid.uuid4(),
             user_id=USER_ID,
             tenant_id=TENANT_ID,
             role=role,
-            can_administer_tenant=role is not TenantRole.MEMBER,
         ),
         tenant=Tenant(
             id=TENANT_ID,

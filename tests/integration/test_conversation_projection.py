@@ -205,9 +205,7 @@ async def test_an_unrecognised_type_is_stored_as_unsupported(db_session):
     tenant = await _tenant(db_session, slug="acme")
     await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
 
-    await WhatsAppIngestionService(session=db_session).ingest(
-        _inbound(message_type="sticker")
-    )
+    await WhatsAppIngestionService(session=db_session).ingest(_inbound(message_type="sticker"))
 
     message = await MessageRepository(db_session, tenant_id=tenant.id).get_by_wa_message_id(
         WAMID_IN
@@ -277,9 +275,7 @@ async def test_the_same_customer_is_separate_in_each_workspace(db_session):
     )
 
     first_contact = await ContactRepository(db_session, tenant_id=first.id).get_by_wa_id(CUSTOMER)
-    second_contact = await ContactRepository(db_session, tenant_id=second.id).get_by_wa_id(
-        CUSTOMER
-    )
+    second_contact = await ContactRepository(db_session, tenant_id=second.id).get_by_wa_id(CUSTOMER)
     assert first_contact is not None
     assert second_contact is not None
     assert first_contact.id != second_contact.id
