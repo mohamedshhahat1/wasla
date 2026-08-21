@@ -200,6 +200,7 @@ Unplanned, and recorded because it changed what every other status in this file 
 - [x] CORS and secure headers (CORS configurable; Nginx security headers in place)
 - [ ] Request size and timeout limits
 - [ ] Retry policies for external calls
+- [x] Dependency advisories cleared and a floor put under them (Starlette declared directly — ADR-017)
 - [ ] Per-workspace credential encryption at rest
 - [ ] Performance review and indexing pass
 - [ ] Speed up the PostgreSQL-backed suite — `tests/integration/conftest.py` drops and recreates the whole schema per test, which measured 30 minutes for 84 tests locally. A session-scoped schema with per-test transaction rollback is the usual fix; the current fixture is deliberate (a crashed run must not poison the next), so replacing it needs care rather than a quick edit.

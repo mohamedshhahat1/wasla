@@ -10,7 +10,12 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
 dependencies = [
-    "fastapi>=0.115.6,<0.117",
+    "fastapi>=0.141.1,<0.142",
+    # Declared rather than left to FastAPI. The application imports Starlette
+    # directly - Request, the middleware base - so it is a real dependency, and
+    # FastAPI asks only for `starlette>=0.46.0`, which happily resolved to a
+    # release carrying five advisories. The floor here is the security floor.
+    "starlette>=1.6,<2",
     "uvicorn[standard]>=0.34,<0.36",
     "pydantic>=2.10,<3",
     "pydantic-settings>=2.7,<3",
@@ -31,11 +36,11 @@ dependencies = [
 # new release changing a default turns a green pipeline red without a commit
 # touching the project. Upgrading is a deliberate change with its own diff.
 dev = [
-    "pytest==8.3.2",
-    "pytest-asyncio==0.25.3",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
     "pytest-cov==6.3.0",
     "ruff==0.12.12",
-    "black==25.12.0",
+    "black==26.5.1",
     "mypy==1.20.2",
 ]
 
