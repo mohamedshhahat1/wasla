@@ -94,6 +94,14 @@ services:
   worker:
     image: ${WASLA_IMAGE:?WASLA_IMAGE is required}
     command: ["worker"]
+    # The image's HEALTHCHECK curls the API's liveness endpoint, and this
+    # process serves no HTTP. Inheriting it reports a perfectly healthy worker
+    # as unhealthy for as long as it runs, which is worse than no signal: it
+    # makes `docker ps` lie, hangs anything waiting on `service_healthy`, and
+    # trains an operator to ignore the health column. Disabled rather than
+    # faked. A real probe needs the loops to publish a heartbeat - see TASKS.
+    healthcheck:
+      disable: true
     environment:
       ENVIRONMENT: production
       DEBUG: "false"

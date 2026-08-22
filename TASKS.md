@@ -274,6 +274,7 @@ Deferred by decision, not unfinished:
 - [ ] Retry policies for external calls
 - [x] Dependency advisories cleared and a floor put under them (Starlette declared directly — ADR-017)
 - [ ] Per-workspace credential encryption at rest
+- [ ] A real liveness probe for the worker. The image's HEALTHCHECK curls the API, and the worker serves no HTTP, so it inherited a check it could never pass and reported unhealthy for its whole life — found by reading the health column during the phase 10 container run, not by any test. Both compose files now disable it explicitly rather than fake it; a genuine probe needs the loops to publish a heartbeat, which is also what the phase 8 in-flight reaper wants
 - [ ] Performance review and indexing pass
 - [x] Speed up the PostgreSQL-backed suite. The schema is now built once per session and each test runs in a transaction that is rolled back. Measured on the same machine and the same 451 tests: **2507s → 94s**, a 27x reduction. Isolation is unchanged and is now itself covered by `tests/integration/test_fixture_isolation.py`.
 

@@ -14,6 +14,8 @@ Scope: containers, reverse proxy, CI/CD, and production operations. Runtime inst
 
 The worker never applies migrations, whatever `RUN_MIGRATIONS` says: it scales to several replicas, and a schema change racing across them is exactly what the opt-in flag on the API exists to avoid. Run `migrate` as its own step first; the production compose does this with `service_completed_successfully`.
 
+**The worker has no health check, deliberately.** The image's `HEALTHCHECK` curls the API's liveness endpoint, and this process serves no HTTP — so inheriting it reported a perfectly healthy worker as unhealthy for as long as it ran. Both compose files disable it explicitly (`healthcheck: disable: true`) rather than leave a check that always fails: a permanently red health column makes `docker ps` lie, hangs anything waiting on `service_healthy`, and teaches an operator to ignore the one signal that is supposed to mean something. Judge a worker by its logs — each loop announces `*.worker_started` — until a real probe exists, which needs the loops to publish a heartbeat.
+
 SIGTERM asks each loop to stop, and each finishes the job in its hand before exiting. The production `stop_grace_period` is 60s, longer than the API's, because a worker mid-inference holds an outstanding HTTP call and an open transaction — killing it there dead-letters a job that was about to succeed.
 
 One image, three entrypoint commands: `api` (default), `worker`, and `migrate`. Services: the FastAPI API, the worker, PostgreSQL with pgvector, Redis, and Nginx in production. Production requirements: non-root containers, health checks, environment-based configuration, graceful shutdown, restart policies, isolated networks, and persistent database volumes. Secrets are never baked into images.
