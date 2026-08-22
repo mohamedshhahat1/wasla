@@ -234,6 +234,9 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
         Index("ix_campaign_recipients_tenant_id", "tenant_id"),
         Index("ix_campaign_recipients_campaign_id_status", "campaign_id", "status"),
         Index("ix_campaign_recipients_contact_id", "contact_id"),
+        # Analytics: broadcast outcomes in a window, across every campaign.
+        # The per-campaign indexes serve the worker; this serves the report.
+        Index("ix_campaign_recipients_tenant_id_created_at", "tenant_id", "created_at"),
         # What the worker claims from, and the only query that runs ten thousand
         # times. Partial: everything else in the table is finished work.
         Index(
