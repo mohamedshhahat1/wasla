@@ -94,14 +94,20 @@ services:
   worker:
     image: ${WASLA_IMAGE:?WASLA_IMAGE is required}
     command: ["worker"]
-    # The image's HEALTHCHECK curls the API's liveness endpoint, and this
-    # process serves no HTTP. Inheriting it reports a perfectly healthy worker
-    # as unhealthy for as long as it runs, which is worse than no signal: it
-    # makes `docker ps` lie, hangs anything waiting on `service_healthy`, and
-    # trains an operator to ignore the health column. Disabled rather than
-    # faked. A real probe needs the loops to publish a heartbeat - see TASKS.
+    # A real probe, replacing the API's liveness curl the image declares -
+    # this process serves no HTTP and could never have answered it. The command
+    # asks Redis whether every loop this container runs has beaten recently, so
+    # a crashed or hung process stops reporting healthy within three intervals.
+    #
+    # What it does not prove is that a loop is making progress: a worker waiting
+    # on a query that never returns keeps beating. That needs the in-flight
+    # reaper, which reads the same keys - see TASKS.
     healthcheck:
-      disable: true
+      test: ["CMD", "scripts/entrypoint.sh", "worker-health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 45s
+      retries: 3
     environment:
       ENVIRONMENT: production
       DEBUG: "false"
