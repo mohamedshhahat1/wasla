@@ -350,7 +350,23 @@ Deferred by decision, not unfinished:
 
 ## Phase 15 — Delivery
 
-- [ ] Deploy workflow
-- [ ] Container registry publishing
-- [ ] Production TLS documentation
-- [ ] Operational runbook
+- [x] Container registry publishing. Every commit on `main` is built and pushed to GitHub Container Registry as `sha-<commit>`, using the workflow's own token rather than a registry secret (ADR-035)
+- [x] Image provenance. The runtime image carries OCI labels naming its commit, version and build time, and the revision is an environment variable inside the container — so `docker inspect` answers "what is running" without the pipeline's help
+- [x] Deploy workflow, gated on CI *concluding successfully* rather than on the push, building the commit CI verified rather than the branch head, deploying a digest rather than a moving tag, running migrations as their own step before anything serves, and checking readiness afterwards. With no deployment target configured it fails loudly instead of reporting a green tick for a release that touched nothing
+- [x] Container vulnerability scanning. The published image is scanned after the push (ADR-035 explains why after); pull requests scan a locally built image, failing on fixable CRITICAL/HIGH findings and reporting unfixable ones without failing
+- [x] The workflows are under test (`tests/unit/test_delivery_pipeline.py`). YAML is the one part of this repository nothing else checks — not imported, not typed — and a mistake in it surfaces as a broken release rather than a red build. The tests assert rules, not contents
+- [x] Production TLS documentation and an nginx configuration that can actually obtain a certificate: the ACME challenge path is served *before* the redirect to HTTPS, which is the deadlock a first issuance otherwise hits. The TLS server block is complete and commented out, because `nginx -t` fails on a certificate path that does not exist — an operator who enables it early gets a proxy that will not start rather than one silently serving plaintext
+- [x] Production compose carries the settings phases 13 and 14 added (`CREDENTIAL_ENCRYPTION_KEYS`, `DEFAULT_PLAN_CODE`, the rate-limit switches, the body and timeout caps), with the encryption keys reaching the worker as well as the API — they must match, or a credential written by one is unreadable by the other
+- [x] Operational runbook ([docs/RUNBOOK.md](docs/RUNBOOK.md)): triage order, the symptoms this system actually produces, and the procedures — deploy a digest, roll back without running migrations, find what is running, rotate each secret, add worker capacity, take a number offline
+
+**COMPLETE.** Verified 2026-08-23 against PostgreSQL 16 and in containers: 1373 tests passed, 0 failed, 0 skipped (the whole suite, database-backed tests included, in 195s); Ruff, Black and MyPy clean; migrations `0001`-`0020` apply from an empty database, `alembic check` reports no drift, and the schema downgrades to base and reapplies clean with no drift after. The runtime image builds with real build arguments and `docker inspect` reads back the commit, version and build time it was given; the container boots, reports **healthy**, answers `/health/live` and `/health/ready` with PostgreSQL and Redis up, and `WASLA_BUILD_REVISION` inside the process matches the OCI label. `nginx -t` passes on the compose network. `docker-compose.prod.yml` validates, and the encryption key ring and default plan reach the worker as well as the API while all three application services resolve to one pinned digest. The workflow guards were checked by breaking each invariant in turn - removing the CI-success gate, building the branch head instead of the verified commit, and swapping host-key pinning for `StrictHostKeyChecking=no` - and confirming a test goes red for each.
+
+What has **not** been verified, because it cannot be here: the deploy job has never run against a host. It is written, its shape is tested, and it fails closed when no target is configured.
+
+Deferred by decision, not unfinished:
+
+- [ ] A production deployment. The pipeline is written and none of it has run against a real host, because no host exists. The deploy job is gated on secrets that are not set, so it fails rather than pretending; both `docs/DEPLOYMENT.md` and `docs/RUNBOOK.md` say so plainly rather than reading as though something is live
+- [ ] Backups. `postgres-data` is a Docker volume and nothing dumps it. Before real traffic: scheduled `pg_dump`, a *tested* restore, and a stated recovery objective. Writing the procedure without a system to test it against would produce a document nobody can trust
+- [ ] Alerting. The runbook lists the log events worth waking somebody for; no aggregator is configured to act on them, and configuring one is a decision about which service, made once there is something to page about
+- [ ] Zero-downtime releases. `up -d --wait` stops the old container before the new one is healthy, so a deploy is a short outage. Blue/green needs a second upstream and a proxy that can switch between them — worth doing, and not worth guessing at before there is traffic to protect
+- [ ] Signed images and SBOM attestation. The build emits provenance; signing (cosign) and an attested SBOM are the next step and want a key-management decision this project has already deferred once (ADR-034)

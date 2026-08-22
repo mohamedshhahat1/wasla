@@ -858,3 +858,43 @@ The guard from ADR-009 survives the change rather than being deleted with it. It
 Key management stops at the process boundary: keys come from configuration, which means they are in the environment of every API and worker container. That is a real limit — a KMS or a secret manager would be better — and it is the same limit `JWT_SECRET` already has, so it is not a new class of exposure.
 
 Rotation is possible but not automated. Prepending a key makes new credentials use it; old ones keep working until somebody rewrites them, and nothing does that yet.
+
+---
+
+## ADR-035 — A Release Is a Digest, and CI Is the Gate Rather Than a Second Opinion
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Publish every commit on `main` to GitHub Container Registry as an image tagged `sha-<commit>`, triggered by the CI workflow *concluding successfully* rather than by the push itself. Deploy by digest, never by tag. Scan the published image after the push, not before it. Build the commit CI verified, not the branch head.
+
+Context:
+Phase 15 is the first time this project ships anything anywhere. Everything before it ran on a developer's machine or in a CI runner that threw itself away afterwards. The decisions here are cheap now and expensive to reverse once a deployment exists that people depend on.
+
+Reason:
+**`workflow_run` rather than a duplicated test job.** "Do not deploy if tests fail" can be expressed as a dependency or as a copy of the test suite inside the deploy workflow. The copy drifts: someone adds a check to CI and not to deploy, and the release path is quietly weaker than the pull-request path. Waiting on the CI workflow's conclusion means there is exactly one definition of "passing".
+
+**The commit CI verified, not the branch head.** Between CI finishing and the publish job starting, `main` can move. Checking out `main` would build a commit no test ever saw while reporting the green tick of the one that was tested. `workflow_run.head_sha` is the commit that was actually verified.
+
+**A digest, not a tag.** `latest` and `main` are conveniences for a human reading a registry listing. A digest names exactly one set of bytes and cannot be moved, so "roll back to what was running yesterday" is an exact instruction rather than a hope that nobody re-pushed the tag. This is also what makes the scan meaningful: the thing scanned and the thing deployed are provably the same image.
+
+**Scan after the push, not before.** Blocking the push on a scan sounds stricter and is worse. A critical CVE published against the base image would then mean nothing can be published *at all* — including the commit that fixes it. Publishing first and failing the job second leaves the image available (for a rollback, for inspection) while making the finding visible and stopping the deploy job that depends on it. The pull-request scan in the security workflow is the one that catches this earlier, and it deliberately ignores unfixed findings so that a gate nobody can pass does not become a gate people learn to bypass.
+
+**A missing deployment target fails the job.** A workflow that "succeeds" without touching a server is worse than one that fails, because a green tick is read as "it shipped". With no `DEPLOY_HOST` configured the job exits non-zero and names what is missing.
+
+**Migrations are a step, not a container's startup.** `RUN_MIGRATIONS` already exists so a release applies them once instead of racing across replicas; the deploy job runs `migrate` as its own command and only then starts the new version. Rolling *back* deliberately does not run it — that is in the runbook, because `alembic downgrade` over live data drops columns.
+
+Consequences:
+The registry is GitHub's, and the credential is the workflow's own token. No registry secret exists to leak or rotate. Moving to another registry is a change to two `env` values and a login step.
+
+Every image carries OCI labels naming its commit, version and build time, and the revision is also an environment variable inside the container — so `docker inspect` answers "what is running" without the pipeline's help, and so can a log line.
+
+The deploy job is written and has never run against a real host. It is gated on secrets that do not exist yet, so it fails rather than pretending; what it does is documented in `docs/DEPLOYMENT.md` and what to do when it goes wrong is in `docs/RUNBOOK.md`. Both say plainly that no production deployment exists.
+
+The workflows themselves are now under test (`tests/unit/test_delivery_pipeline.py`). YAML is the one part of this repository nothing else checks — it is not imported and not typed — and the failure mode is a broken release rather than a red build. The tests assert rules rather than contents, so renaming a step does not break them.
+
+**TLS is documented and not shipped.** A certificate is issued to a domain this repository does not know. The nginx configuration contains the HTTP listener, the ACME challenge path served *before* the redirect (a redirect to a certificate that does not exist yet cannot be verified — that deadlock is the usual first-issuance failure), and a complete but commented TLS server block. A self-signed certificate shipped here would be worse than none: it would look like TLS while failing every client that checks.
