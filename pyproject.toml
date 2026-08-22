@@ -38,6 +38,13 @@ dependencies = [
     # parser. Pure Python and dependency-free, which matters for a library that
     # is fed attachments from strangers.
     "pypdf>=5.1,<7",
+    # Multipart form parsing, for the attachment upload endpoint. Starlette
+    # imports it lazily and raises at request time without it, so an undeclared
+    # copy that happens to be installed is a 500 waiting for a deployment that
+    # does not have one. The floor is the security floor: releases before
+    # 0.0.18 carry a denial-of-service advisory in the parser, which is exactly
+    # the code path an uploaded file reaches (ADR-017).
+    "python-multipart>=0.0.18,<0.1",
 ]
 
 [project.optional-dependencies]

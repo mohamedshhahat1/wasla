@@ -288,3 +288,153 @@ async def test_a_second_run_over_a_read_file_does_not_pay_again(db_session, tmp_
 
     assert whatsapp.fetched == 1
     assert reader.reads == 1
+
+
+class UploadingWhatsApp:
+    """A client that records an upload and then acknowledges the send."""
+
+    def __init__(self) -> None:
+        self.uploads: list[dict] = []
+        self.sends: list[dict] = []
+
+    async def upload_media(self, **kwargs) -> str:
+        self.uploads.append(kwargs)
+        return "uploaded-1"
+
+    async def send_media(self, **kwargs):
+        self.sends.append(kwargs)
+        from app.integrations.whatsapp.client import SentMessage
+
+        return SentMessage(message_id="wamid.out", recipient="201234567890", raw={})
+
+
+async def test_an_attachment_is_uploaded_then_sent_and_recorded(
+    db_session, tmp_path, settings, monkeypatch
+):
+    """Uploaded rather than linked.
+
+    A link needs a publicly reachable URL for as long as Meta might fetch it;
+    an upload exposes the bytes to one recipient for one send.
+    """
+    from datetime import UTC, datetime
+
+    from app.services import messaging_service as messaging_module
+    from app.services.messaging_service import MessagingService
+
+    tenant, conversation = await _conversation(db_session)
+    # The service window is open only if the customer has spoken.
+    conversation.last_inbound_at = datetime.now(UTC)
+    await db_session.flush()
+
+    whatsapp = UploadingWhatsApp()
+
+    class _Http:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(messaging_module, "build_http_client", lambda: _Http())
+    monkeypatch.setattr(messaging_module, "WhatsAppClient", lambda **kwargs: whatsapp)
+
+    service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
+    message = await service.send_media(
+        conversation_id=conversation.id,
+        content=b"%PDF-1.4 quote",
+        mime_type="application/pdf",
+        filename="quote.pdf",
+        caption="here is the quote",
+        storage=LocalMediaStorage(tmp_path),
+    )
+
+    assert message.status is MessageStatus.SENT
+    assert message.kind is MessageKind.DOCUMENT
+    # The caption is the text of the message, as it is on an inbound one.
+    assert message.body == "here is the quote"
+    assert whatsapp.uploads[0]["filename"] == "quote.pdf"
+    assert whatsapp.sends[0]["media_id"] == "uploaded-1"
+
+    from app.repositories.media_repository import MediaRepository
+
+    media = await MediaRepository(db_session, tenant_id=tenant.id).get_for_message(message.id)
+    assert media is not None
+    assert media.status is MediaStatus.READY
+    assert media.storage_key is not None
+    assert media.byte_size == len(b"%PDF-1.4 quote")
+
+
+async def test_a_hostile_filename_is_replaced_before_it_reaches_meta(
+    db_session, tmp_path, settings, monkeypatch
+):
+    """The name travels to a third party and is shown to the recipient.
+
+    It is never used to build a path on this side, but anything that is not
+    plainly a filename is replaced rather than cleaned up.
+    """
+    from datetime import UTC, datetime
+
+    from app.services import messaging_service as messaging_module
+    from app.services.messaging_service import MessagingService
+
+    tenant, conversation = await _conversation(db_session)
+    conversation.last_inbound_at = datetime.now(UTC)
+    await db_session.flush()
+
+    whatsapp = UploadingWhatsApp()
+
+    class _Http:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(messaging_module, "build_http_client", lambda: _Http())
+    monkeypatch.setattr(messaging_module, "WhatsAppClient", lambda **kwargs: whatsapp)
+
+    service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
+    await service.send_media(
+        conversation_id=conversation.id,
+        content=b"%PDF-1.4",
+        mime_type="application/pdf",
+        filename="../../etc/passwd",
+    )
+
+    assert whatsapp.uploads[0]["filename"] == "attachment.pdf"
+
+
+async def test_an_attachment_outside_the_service_window_is_refused(db_session, tmp_path, settings):
+    """An attachment is a free-form message, so the same rule applies as to text."""
+    from app.core.exceptions import ValidationError
+    from app.services.messaging_service import MessagingService
+
+    tenant, conversation = await _conversation(db_session)
+    # `last_inbound_at` stays None: the customer has never written.
+
+    service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
+    with pytest.raises(ValidationError):
+        await service.send_media(
+            conversation_id=conversation.id,
+            content=b"x",
+            mime_type="image/png",
+        )
+
+
+async def test_a_type_meta_will_not_accept_is_refused(db_session, tmp_path, settings):
+    from datetime import UTC, datetime
+
+    from app.core.exceptions import ValidationError
+    from app.services.messaging_service import MessagingService
+
+    tenant, conversation = await _conversation(db_session)
+    conversation.last_inbound_at = datetime.now(UTC)
+    await db_session.flush()
+
+    service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
+    with pytest.raises(ValidationError):
+        await service.send_media(
+            conversation_id=conversation.id,
+            content=b"PK",
+            mime_type="application/zip",
+        )

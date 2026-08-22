@@ -12,6 +12,7 @@ What this module is careful about:
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -22,7 +23,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.exceptions import ExternalServiceError, RateLimitedError, ValidationError
 from app.core.logging import get_logger
-from app.db.models.conversation import Conversation, Message, MessageKind
+from app.core.storage import EXTENSIONS, MediaStorage, StorageError
+from app.db.models.conversation import Conversation, Message, MessageKind, MessageStatus
+from app.db.models.media import MediaStatus
 from app.integrations.whatsapp.client import (
     SentMessage,
     WhatsAppClient,
@@ -33,7 +36,9 @@ from app.repositories.conversation_repository import (
     ConversationRepository,
     MessageRepository,
 )
+from app.repositories.media_repository import MediaRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
+from app.services.media_service import content_hash as media_content_hash
 
 logger = get_logger(__name__)
 
@@ -42,6 +47,76 @@ logger = get_logger(__name__)
 SERVICE_WINDOW: Final = timedelta(hours=24)
 
 SendCall = Callable[[WhatsAppClient, str, str], Awaitable[SentMessage]]
+
+# Meta groups attachments into four kinds, and they are not the mime families.
+# "image/png" is an image, but "application/pdf" is a *document* - so the
+# mapping translates rather than splitting on the slash, which is the mistake
+# this table exists to prevent.
+MEDIA_FAMILIES: Final[dict[str, str]] = {
+    "image": "image",
+    "audio": "audio",
+    "video": "video",
+}
+# Everything Meta will carry that is not one of the three above.
+DOCUMENT_KIND: Final = "document"
+
+MEDIA_KINDS: Final[dict[str, MessageKind]] = {
+    "image": MessageKind.IMAGE,
+    "document": MessageKind.DOCUMENT,
+    "audio": MessageKind.AUDIO,
+    "video": MessageKind.VIDEO,
+}
+
+# Refused rather than sent as a document. Meta will carry almost anything under
+# "document", and a business forwarding an executable to a customer is not a
+# feature; the list is what a business plausibly sends on purpose.
+SENDABLE_DOCUMENTS: Final = frozenset(
+    {
+        "application/pdf",
+        "text/plain",
+        "text/csv",
+        "application/msword",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
+)
+
+# Meta requires a filename on a document, and one supplied by a caller is not
+# safe to pass through untouched. Replaced rather than sanitised: a name is a
+# convenience for the recipient, and a generated one that is definitely inert
+# beats a cleaned-up one that might not be.
+SAFE_FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,99}$")
+
+
+def _whatsapp_kind(mime_type: str) -> str | None:
+    """Which of Meta's four attachment kinds this type is sent as.
+
+    None means Wasla will not send it. That is a narrower rule than Meta's own -
+    it would carry almost any file as a document - and deliberately so: a
+    business forwarding an executable to a customer is not a feature anyone
+    asked for.
+    """
+    normalised = mime_type.strip().lower()
+    family = MEDIA_FAMILIES.get(normalised.split("/", 1)[0])
+    if family is not None:
+        return family
+    if normalised in SENDABLE_DOCUMENTS:
+        return DOCUMENT_KIND
+    return None
+
+
+def _safe_filename(filename: str | None, *, mime_type: str) -> str:
+    """A filename Meta will accept and a filesystem cannot be hurt by.
+
+    A name reaching here came from a request body. It is shown to the recipient
+    and is never used to build a path on this side, but it does travel to a
+    third party, so anything that is not plainly a filename is replaced.
+    """
+    if filename and SAFE_FILENAME.match(filename) and ".." not in filename:
+        return filename
+    return f"attachment{EXTENSIONS.get(mime_type.lower(), '')}"
 
 
 class MessagingService:
@@ -60,6 +135,7 @@ class MessagingService:
         self._contacts = ContactRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._accounts = WhatsAppAccountRepository(session, tenant_id=tenant_id)
+        self._media = MediaRepository(session, tenant_id=tenant_id)
 
     async def send_text(
         self,
@@ -118,6 +194,127 @@ class MessagingService:
             # Templates are the sanctioned way out of the service window.
             require_window=False,
         )
+
+    async def send_media(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        content: bytes,
+        mime_type: str,
+        filename: str | None = None,
+        caption: str | None = None,
+        sent_by_id: uuid.UUID | None = None,
+        storage: MediaStorage | None = None,
+    ) -> Message:
+        """Send a file, uploading it to Meta first.
+
+        Uploaded rather than sent by link, deliberately. A link requires every
+        attachment to sit behind a publicly reachable URL for as long as Meta
+        might fetch it; uploading exposes the bytes to one recipient for one
+        send. The upload returns an id that is valid for a single message.
+
+        Free text rules apply: an attachment is a free-form message, so the
+        24-hour window is enforced exactly as it is on text. Outside it, only an
+        approved template will do.
+
+        `storage` is optional and only used to keep a copy of what was sent.
+        Without it the message is still sent and recorded; the record simply
+        does not point at a stored file.
+        """
+        family = _whatsapp_kind(mime_type)
+        if family is None:
+            raise ValidationError(f"Files of type {mime_type} cannot be sent.")
+        kind = MEDIA_KINDS[family]
+
+        upload_name = _safe_filename(filename, mime_type=mime_type)
+
+        async def send(client: WhatsAppClient, phone_number_id: str, to: str) -> SentMessage:
+            media_id = await client.upload_media(
+                phone_number_id=phone_number_id,
+                content=content,
+                mime_type=mime_type,
+                filename=upload_name,
+            )
+            return await client.send_media(
+                phone_number_id=phone_number_id,
+                to=to,
+                kind=family,  # type: ignore[arg-type]
+                media_id=media_id,
+                caption=caption,
+                filename=upload_name,
+            )
+
+        message = await self._dispatch(
+            conversation_id=conversation_id,
+            kind=kind,
+            # The caption is the text of this message, exactly as it is on an
+            # inbound one: it is what the person typed.
+            body=caption,
+            sent_by_id=sent_by_id,
+            send=send,
+            require_window=True,
+        )
+
+        await self._record_attachment(
+            message=message,
+            content=content,
+            mime_type=mime_type,
+            filename=filename,
+            storage=storage,
+        )
+        return message
+
+    async def _record_attachment(
+        self,
+        *,
+        message: Message,
+        content: bytes,
+        mime_type: str,
+        filename: str | None,
+        storage: MediaStorage | None,
+    ) -> None:
+        """Keep a record of what was sent, and the file itself if there is a store.
+
+        Written after the send rather than before, unlike the message row. The
+        message row exists early so a failed send still leaves evidence; this
+        row describes a file that was actually transmitted, and storing bytes
+        for a send that never happened would accumulate files nobody sent.
+
+        A storage failure is swallowed. The customer has the file; losing our
+        own copy of it is not worth failing a request that already succeeded.
+        """
+        if message.status is MessageStatus.FAILED:
+            # Nothing was transmitted. Recording an attachment here would claim
+            # a file reached the customer that never did, and storing its bytes
+            # would accumulate copies of sends that did not happen.
+            return
+
+        row, _ = await self._media.record(
+            message_id=message.id,
+            conversation_id=message.conversation_id,
+            wa_media_id=None,
+            mime_type=mime_type,
+            filename=filename,
+            is_voice=False,
+        )
+        row.byte_size = len(content)
+        row.content_hash = media_content_hash(content)
+        row.status = MediaStatus.READY
+
+        if storage is None:
+            return
+
+        try:
+            row.storage_key = await storage.put(
+                tenant_id=row.tenant_id,
+                data=content,
+                mime_type=mime_type,
+            )
+        except StorageError:
+            logger.warning(
+                "media.outbound_not_stored",
+                extra={"conversation_id": str(message.conversation_id)},
+            )
 
     async def _dispatch(
         self,

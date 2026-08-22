@@ -13,9 +13,16 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, File, Form, Query, Response, UploadFile, status
 
-from app.api.dependencies import ActiveWorkspaceDep, InboxServiceDep, MessagingServiceDep
+from app.api.dependencies import (
+    ActiveWorkspaceDep,
+    InboxServiceDep,
+    MediaServiceDep,
+    MediaStorageDep,
+    MessagingServiceDep,
+)
+from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import MAX_CURSOR_LENGTH
 from app.schemas.conversation import (
     AssignmentRequest,
@@ -34,6 +41,13 @@ LimitQuery = Annotated[int, Query(ge=1, le=100)]
 # meant to be constructed by hand. Bounded so a long query string is rejected
 # before any decoding is attempted.
 CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]
+
+# WhatsApp's own caption limit.
+MAX_CAPTION_LENGTH = 1024
+# Bounded here as well as in the media settings, because this limit protects the
+# API process rather than the store: the whole upload is held in memory to be
+# handed to Meta, and an unbounded one is a way to exhaust it.
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024
 
 
 @router.get("", response_model=CursorPage[ConversationRead])
@@ -139,6 +153,86 @@ async def send_template(
         sent_by_id=workspace.user.id,
     )
     return MessageRead.from_model(message)
+
+
+@router.post(
+    "/{conversation_id}/messages/media",
+    response_model=MessageRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def send_media(
+    conversation_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
+    messaging: MessagingServiceDep,
+    storage: MediaStorageDep,
+    file: Annotated[UploadFile, File()],
+    caption: Annotated[str | None, Form(max_length=MAX_CAPTION_LENGTH)] = None,
+) -> MessageRead:
+    """Send an attachment, which Meta receives as an upload rather than a link.
+
+    Multipart rather than JSON: base64 in a request body inflates a file by a
+    third and has to be held in memory twice.
+
+    An attachment is a free-form message, so the 24-hour service window applies
+    exactly as it does to text. Answers 201 even when Meta rejects it - the
+    attempt is recorded, and the returned status says whether it was sent.
+    """
+    content = await file.read()
+    if not content:
+        raise ValidationError("The uploaded file is empty.")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise ValidationError("This file is too large to send.")
+
+    message = await messaging.send_media(
+        conversation_id=conversation_id,
+        content=content,
+        # `content_type` is what the browser claimed. It decides how Meta
+        # renders the file, not how anything here reads it, and an unsupported
+        # value is refused by the service rather than guessed at.
+        mime_type=file.content_type or "application/octet-stream",
+        filename=file.filename,
+        caption=caption,
+        sent_by_id=workspace.user.id,
+        storage=storage,
+    )
+    return MessageRead.from_model(message)
+
+
+@router.get("/{conversation_id}/media/{media_id}")
+async def download_media(
+    conversation_id: uuid.UUID,
+    media_id: uuid.UUID,
+    media_service: MediaServiceDep,
+) -> Response:
+    """The stored bytes of one attachment.
+
+    Streamed back through the application rather than served from a public URL.
+    A customer's photograph is workspace data, and a link that needs no
+    authentication is a link that can be forwarded out of the workspace.
+
+    `Content-Disposition: attachment` is not decoration. Serving a customer-
+    supplied file inline invites the browser to render it on this origin, which
+    turns an uploaded HTML file into a script running against the session
+    viewing it.
+    """
+    media = await media_service.get(media_id)
+    if media.conversation_id != conversation_id:
+        # The media exists in this workspace but not on this conversation.
+        # Answered as not-found rather than as a mismatch, which would confirm
+        # the id names something real.
+        raise NotFoundError()
+
+    content = await media_service.read(media)
+    return Response(
+        content=content,
+        media_type=media.mime_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": "attachment",
+            # Belt and braces with the disposition above: a file that is never
+            # sniffed is never re-typed into something executable.
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post("/{conversation_id}/mode", response_model=ConversationRead)

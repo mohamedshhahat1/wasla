@@ -17,6 +17,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.core.dependencies import RedisDep, SessionDep, SettingsDep
 from app.core.exceptions import AuthenticationError, PermissionDeniedError
 from app.core.security import TokenClaims, TokenType, decode_token
+from app.core.storage import LocalMediaStorage, MediaStorage
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
@@ -27,6 +28,7 @@ from app.services.inbox_service import InboxService
 from app.services.invitation_service import InvitationService
 from app.services.knowledge_service import KnowledgeService
 from app.services.lead_service import LeadService
+from app.services.media_service import MediaService
 from app.services.messaging_service import MessagingService
 from app.services.whatsapp_account_service import WhatsAppAccountService
 from app.workers.ingestion_queue import IngestionQueue
@@ -225,6 +227,41 @@ def get_messaging_service(
 
 
 MessagingServiceDep = Annotated[MessagingService, Depends(get_messaging_service)]
+
+
+def get_media_storage(settings: SettingsDep) -> MediaStorage:
+    """The file store this deployment is configured with.
+
+    Returned as the protocol rather than the concrete class, so replacing the
+    local implementation with an object store is a change here and nowhere else
+    (ADR-023).
+    """
+    return LocalMediaStorage(settings.media_storage_path)
+
+
+MediaStorageDep = Annotated[MediaStorage, Depends(get_media_storage)]
+
+
+def get_media_service(
+    settings: SettingsDep,
+    session: SessionDep,
+    storage: MediaStorageDep,
+    workspace: ActiveWorkspaceDep,
+) -> MediaService:
+    """Workspace-scoped, so no route can pass a tenant id of its own choosing.
+
+    No WhatsApp client: nothing reachable over the API downloads from Meta.
+    That happens in the worker, where it cannot hold a request open.
+    """
+    return MediaService(
+        session=session,
+        tenant_id=workspace.tenant.id,
+        settings=settings,
+        storage=storage,
+    )
+
+
+MediaServiceDep = Annotated[MediaService, Depends(get_media_service)]
 
 
 def require_tenant_roles(*roles: TenantRole) -> Callable[[ActiveWorkspace], ActiveWorkspace]:
