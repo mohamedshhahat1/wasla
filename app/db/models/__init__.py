@@ -3,6 +3,7 @@
 from app.db.base import Base
 
 from .agent import Agent, AgentStatus, AgentTool
+from .analytics import AnalyticsEvent, AnalyticsEventType, AnalyticsSource
 from .campaign import (
     MAX_RECIPIENT_ATTEMPTS,
     TERMINAL_CAMPAIGN_STATUSES,
@@ -108,6 +109,9 @@ __all__ = [
     "Agent",
     "AgentStatus",
     "AgentTool",
+    "AnalyticsEvent",
+    "AnalyticsEventType",
+    "AnalyticsSource",
     "Base",
     "Campaign",
     "CampaignRecipient",

@@ -6,6 +6,7 @@ be scoped live in their own small classes so they stay visible.
 """
 
 from .agent_repository import AgentRepository, AgentToolRepository
+from .analytics_repository import AnalyticsEventRepository, EventCount
 from .base import BaseRepository, TenantScopedRepository
 from .conversation_repository import (
     ContactRepository,
@@ -46,12 +47,14 @@ from .whatsapp_repository import (
 __all__ = [
     "AgentRepository",
     "AgentToolRepository",
+    "AnalyticsEventRepository",
     "BaseRepository",
     "ContactRepository",
     "ConversationRepository",
     "DocumentChunkRepository",
     "DocumentRepository",
     "DueFollowUpClaim",
+    "EventCount",
     "FollowUpRepository",
     "InvitationRepository",
     "InvitationTokenRepository",

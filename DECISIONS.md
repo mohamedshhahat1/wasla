@@ -615,3 +615,37 @@ There is no `updated_at`, because nothing updates a row. A correction is a new r
 Deduplication is not attempted here. Every metered path has an idempotency key upstream — the WhatsApp event id, the message row, the media row, `UNIQUE(campaign_id, contact_id)` — so a retry that skips the work also skips the meter. A retry that genuinely re-does the work is genuinely counted, because it genuinely consumed something.
 
 Retention is not solved. Nothing sweeps old rows, and nothing should until a billing period is closed and the figures for it are stored somewhere a sweep cannot change. That belongs with Phase 13.
+
+## ADR-028 — Analytics Are Derived From the Domain, Except What It Forgets
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Compute tenant analytics from the domain tables that already hold the facts — `messages`, `conversations`, `leads`, `lead_activities`, `message_sentiments`, `campaign_recipients` — and record analytics events only for occurrences that leave no other trace. Today that is exactly one thing: a handoff, in `analytics_events`, with the source that decided it.
+
+Context:
+The product specification lists a dozen analytics events: `message_received`, `message_sent`, `conversation_created`, `lead_created`, `lead_qualified`, `handoff`, `follow_up_sent`, `agent_response`, `customer_angry`, `campaign_sent`, `campaign_delivered`. The obvious reading is a table with a row per occurrence, written alongside the domain write.
+
+Every one of those except the handoff is already a timestamped, tenant-scoped row. A message received is a row in `messages`. A lead qualified is a row in `lead_activities`. An angry customer is a row in `message_sentiments`, carrying the label, the score and whether it escalated. A campaign delivered is a recipient row joined to its message's status.
+
+Reason:
+A second copy of a fact is a second thing to keep true. Two writes in one transaction can still diverge — one path updated and the other not, a backfill applied to one shape, a bug fixed in one query — and when they diverge there is no way to tell which number is right, because both were derived from the same event and only one was wrong. Every count in this system would then have two possible answers.
+
+Deriving is also *retroactive*, and that matters more than it sounds. A metric defined next month can be computed for last month, because the rows it reads have been there all along. An event stream can only answer questions somebody thought to emit an event for.
+
+The objection to deriving is cost: aggregating raw rows is slower than reading a counter. That is true and not yet relevant. These are indexed range scans over one workspace's rows for a bounded window, and when they stop being fast enough the answer is a rollup built *from* the rows — which is only possible because the rows exist.
+
+The handoff is the exception that proves the rule. `conversations.mode` is a current state, not a history: it cannot say when a conversation moved, how many times, or who decided. And the three causes — an agent giving up, a classifier judging a customer angry, a colleague taking over — are indistinguishable afterwards, while being the most important distinction on the dashboard. A business whose agents hand over half their conversations has a different problem from one whose staff take them over by hand.
+
+Consequences:
+`analytics_events` starts with two event types and will grow slowly, by the same test each time: does anything else record this? A member added to mirror a count that `messages` already answers is a bug, not a feature.
+
+Analytics reads are a handful of grouped queries rather than one scan of an event table. They are written in the repository layer like every other query, and they are tenant-scoped by the same mechanism.
+
+Metrics have to be *defined*, not merely counted, and the definitions live with the queries: average response time means the first business reply to a customer message that started a burst; AI resolution rate means conversations created in the window that were never handed to a person. Both are stated in the code and in `docs/ANALYTICS.md`, because a number whose definition is unwritten is a number two people will read differently.
+
+`usage_events` remains a separate table with the opposite policy (ADR-027), and the difference is deliberate. Usage is billing input: it must be reproducible exactly as it was recorded, even after the domain rows it describes are edited or deleted. Analytics is reporting: it should reflect what the data says now.

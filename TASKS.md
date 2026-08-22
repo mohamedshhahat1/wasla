@@ -279,7 +279,7 @@ Deferred by decision, not unfinished:
 - [x] Usage event model and recorder (migration `0014`, ADR-027)
 - [x] Aggregation services (named counters and a daily series, over a half-open window)
 - [x] Metering wired into every path that consumes something: inbound and outbound messages, conversations opened, agent turns and the sentiment call, retrieval, media reads and transcriptions, stored bytes, leads captured, campaign messages
-- [ ] Analytics event model
+- [x] Analytics event model, recording handoffs and who decided them (migration `0015`, ADR-028)
 - [ ] Tenant analytics APIs
 - [ ] Platform analytics APIs
 

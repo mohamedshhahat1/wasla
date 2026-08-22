@@ -12,6 +12,7 @@ import uuid
 import pytest
 
 from app.core.exceptions import ExternalServiceError, RateLimitedError
+from app.db.models.analytics import AnalyticsSource
 from app.db.models.conversation import (
     Conversation,
     ConversationMode,
@@ -119,6 +120,16 @@ class FakeUsage:
         self.requests.append(fields)
 
 
+class FakeAnalytics:
+    """Remembers the handoffs an escalation recorded."""
+
+    def __init__(self) -> None:
+        self.handoffs: list[dict] = []
+
+    def handoff(self, **fields) -> None:
+        self.handoffs.append(fields)
+
+
 def _inbound(body: str | None = "this is unacceptable") -> Message:
     return Message(
         id=MESSAGE,
@@ -159,9 +170,11 @@ def _build(
     stored=None,
     readings=None,
     usage=None,
+    analytics=None,
 ) -> SentimentService:
     fakes = {
         "UsageRecorder": usage if usage is not None else FakeUsage(),
+        "AnalyticsRecorder": analytics if analytics is not None else FakeAnalytics(),
         "ConversationRepository": FakeConversations(
             conversation
             if conversation is not None
@@ -544,3 +557,37 @@ async def test_a_reading_already_taken_is_not_metered_again(monkeypatch):
     )
 
     assert usage.requests == []
+
+
+async def test_an_escalation_records_the_classifier_as_the_one_who_decided(monkeypatch):
+    """Three things can hand a conversation over, and the conversation row
+    cannot tell them apart afterwards. This is the one that says the product
+    judged a customer angry."""
+    analytics = FakeAnalytics()
+    service = _build(monkeypatch, analyzer=StubAnalyzer(), analytics=analytics)
+
+    await service.assess(
+        conversation_id=CONVERSATION,
+        escalation_sentiment=SentimentLabel.ANGRY,
+    )
+
+    assert len(analytics.handoffs) == 1
+    assert analytics.handoffs[0]["source"] is AnalyticsSource.SENTIMENT
+    assert analytics.handoffs[0]["conversation_id"] == CONVERSATION
+
+
+async def test_a_reading_that_does_not_escalate_records_no_handoff(monkeypatch):
+    analytics = FakeAnalytics()
+    service = _build(
+        monkeypatch,
+        analyzer=StubAnalyzer(_reading(SentimentLabel.NEGATIVE)),
+        analytics=analytics,
+    )
+
+    outcome = await service.assess(
+        conversation_id=CONVERSATION,
+        escalation_sentiment=SentimentLabel.ANGRY,
+    )
+
+    assert outcome.escalated is False
+    assert analytics.handoffs == []

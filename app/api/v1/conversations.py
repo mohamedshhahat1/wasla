@@ -246,6 +246,7 @@ async def download_media(
 async def set_mode(
     conversation_id: uuid.UUID,
     payload: ModeUpdateRequest,
+    workspace: ActiveWorkspaceDep,
     inbox: InboxServiceDep,
     messaging: MessagingServiceDep,
 ) -> ConversationRead:
@@ -254,6 +255,10 @@ async def set_mode(
         conversation_id=conversation_id,
         mode=payload.mode,
         handoff_reason=payload.handoff_reason,
+        # Recorded against the person who did it. The conversation row keeps
+        # only the current state, so without this nobody can say afterwards who
+        # took it over or when.
+        actor_id=workspace.user.id,
     )
     return ConversationRead.from_model(
         conversation,

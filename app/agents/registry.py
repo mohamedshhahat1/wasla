@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, ValidationError
 from app.core.logging import get_logger
+from app.db.models.analytics import AnalyticsSource
 from app.db.models.conversation import ConversationMode
 from app.db.models.lead import ActorKind
 from app.integrations.openai.embeddings import EmbeddingsClient
@@ -191,6 +192,10 @@ async def _request_human_handoff(context: ToolContext, arguments: dict[str, Any]
         conversation_id=context.conversation_id,
         mode=ConversationMode.HUMAN,
         handoff_reason=reason,
+        # The agent asked for this one. A colleague taking a conversation over
+        # and an agent giving up on it are the same row on `conversations` and
+        # very different facts about the product.
+        source=AnalyticsSource.AGENT,
     )
     logger.info(
         "agent.handoff_requested",

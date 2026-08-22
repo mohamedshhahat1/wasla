@@ -34,9 +34,24 @@ Reads are aggregates only, over a half-open window `[since, until)` so two adjac
 
 ## Analytics events
 
-Planned events: `message_received`, `message_sent`, `conversation_created`, `lead_created`, `lead_qualified`, `handoff`, `appointment_created`, `follow_up_sent`, `agent_response`, `customer_angry`, `campaign_sent`, `campaign_delivered`.
+**Analytics are derived from the domain tables; `analytics_events` records only what the domain forgets** (ADR-028).
 
-`customer_angry` has a head start. Phase 10 already writes one timestamped, tenant-scoped row per classified message to `message_sentiments`, carrying the label, the score, the intent and whether it escalated ([SENTIMENT.md](SENTIMENT.md)). That is the series this event would count, so no second write was added here: doing so now would mean migrating two shapes later.
+Almost every event the product specification lists is already a timestamped, tenant-scoped row. A message received is a row in `messages`. A lead qualified is a row in `lead_activities`. An angry customer is a row in `message_sentiments`, carrying the label, the score and whether it escalated ([SENTIMENT.md](SENTIMENT.md)). A campaign delivered is a recipient row joined to its message's status. Writing a second copy of those would be two shapes to migrate, two places to fix a count, and two answers to the same question the moment they drift — and deriving is retroactive, so a metric defined next month can still be computed for last month.
+
+The handoff is the exception. `conversations.mode` says who has a conversation now; it cannot say when it moved, how often, or who decided — and the three causes are indistinguishable afterwards while being the most important distinction on the dashboard.
+
+| Column | Meaning |
+| --- | --- |
+| `event_type` | `handoff` or `handoff_resumed` |
+| `source` | `agent` (the agent asked to hand over), `sentiment` (a reading escalated it), `user` (a colleague took it), `system` |
+| `conversation_id` | The conversation it happened to |
+| `actor_id` | The person who did it, when a person did. `SET NULL` on delete: the handoff still happened after they left |
+| `metadata` | The reason, copied short so a historical row explains itself |
+| `occurred_at` | When |
+
+Only a real change is an event: setting `human` on a conversation a colleague already owns is somebody editing a reason, not a second handoff. Events and *conversations* are counted separately — a conversation handed over three times is three handoffs but one conversation, and a resolution rate built on the first number would punish it repeatedly.
+
+A member is added to this enum by one test: does anything else already record it? A type added to mirror a count `messages` already answers is a bug.
 
 ## Tenant metrics
 
