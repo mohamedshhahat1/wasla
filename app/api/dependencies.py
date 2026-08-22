@@ -33,6 +33,7 @@ from app.services.agent_service import AgentService
 from app.services.analytics_service import AnalyticsService
 from app.services.auth_service import AuthService
 from app.services.campaign_service import CampaignService
+from app.services.credential_service import CredentialService
 from app.services.entitlement_service import Entitlement, EntitlementService
 from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
@@ -78,8 +79,19 @@ def get_invitation_service(session: SessionDep) -> InvitationService:
 InvitationServiceDep = Annotated[InvitationService, Depends(get_invitation_service)]
 
 
-def get_whatsapp_account_service(session: SessionDep) -> WhatsAppAccountService:
-    return WhatsAppAccountService(session=session)
+def get_whatsapp_account_service(
+    settings: SettingsDep,
+    session: SessionDep,
+) -> WhatsAppAccountService:
+    """Built with a credential service, so a workspace can supply its own token.
+
+    A deployment with no encryption key configured still connects numbers - it
+    simply refuses to store a credential rather than storing one in the clear.
+    """
+    return WhatsAppAccountService(
+        session=session,
+        credentials=CredentialService(settings),
+    )
 
 
 WhatsAppAccountServiceDep = Annotated[

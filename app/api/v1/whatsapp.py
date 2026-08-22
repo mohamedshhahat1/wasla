@@ -47,6 +47,9 @@ async def connect_account(
         waba_id=payload.waba_id,
         display_phone_number=payload.display_phone_number,
         display_name=payload.display_name,
+        # Encrypted by the service; the plaintext goes no further than this
+        # call, and no response model can return it.
+        access_token=payload.access_token,
     )
     return WhatsAppAccountResponse.model_validate(account)
 

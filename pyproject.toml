@@ -33,6 +33,12 @@ dependencies = [
     "argon2-cffi>=23.1,<26",
     "pyjwt>=2.10,<3",
     "email-validator>=2.2,<3",
+    # AES-GCM for credentials at rest (ADR-034). Declared rather than relied on
+    # transitively: it was already installed here as somebody else's dependency,
+    # and an undeclared import is a deployment that works until the package that
+    # happened to pull it in is removed. The floor is the security floor - this
+    # library is where the project's cryptography actually lives (ADR-017).
+    "cryptography>=44,<49",
     # PDF text extraction, for documents customers send over WhatsApp and for
     # the knowledge base, which has refused PDFs since phase 6 for want of a
     # parser. Pure Python and dependency-free, which matters for a library that

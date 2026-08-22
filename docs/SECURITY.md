@@ -1,6 +1,6 @@
 # Security
 
-**Status: In Progress** — configuration hygiene, safe error handling, logging redaction, authentication, RBAC, tenant isolation, Meta signature verification, rate limiting and audit logging are Implemented. Per-workspace credential encryption is Planned (phase 14).
+**Status: Implemented** — configuration hygiene, safe error handling, logging redaction, authentication, RBAC, tenant isolation, Meta signature verification, rate limiting, request limits, audit logging and per-workspace credential encryption at rest all exist and are tested.
 
 Scope: the security model and its controls. Permission mechanics are in [AUTH.md](AUTH.md).
 
@@ -8,7 +8,18 @@ Scope: the security model and its controls. Permission mechanics are in [AUTH.md
 
 All secrets come from the environment. `.env` is never committed; `.env.example` documents required variables without values. No secrets in code, images, or CI logs.
 
-**WhatsApp credentials are currently a single global token** (`META_ACCESS_TOKEN`), not per workspace. Per-workspace credentials with encryption at rest are Planned in phase 14; until then a deployment serves every workspace with one Meta token, which is a real limitation of the multi-tenancy rather than a detail.
+## Credentials at rest
+
+**Status: Implemented** (ADR-034, superseding ADR-009). A workspace may supply its own Meta token when it connects a number. It is encrypted with AES-256-GCM under a key ring before it reaches the database, and the plaintext exists only inside the call that receives it or the call that sends with it.
+
+- **The workspace is bound into the ciphertext** as additional authenticated data, so a credential copied from one account row to another fails to decrypt. That copy is the obvious attack once a column of tokens exists.
+- **Authenticated encryption**, so tampering fails rather than decrypting into attacker-chosen bytes that would then be used as a bearer token.
+- **A key ring, not a key.** The envelope names its key by digest, so a new key can be prepended and old credentials keep working; reordering configuration cannot orphan them.
+- **Write-only.** No response model contains a token; a caller learns only whether a number has its own credential.
+- **No key configured is supported; plaintext is not.** Such a deployment sends through `META_ACCESS_TOKEN` as before and refuses to store a workspace credential, because "in the clear for now" is how a plaintext token column comes to exist.
+- **No silent fallback.** A stored credential that cannot be decrypted fails the send rather than quietly sending as the platform, which would be a different sender identity.
+
+Keys come from configuration, which puts them in the environment of every API and worker container — the same exposure `JWT_SECRET` already has. Rotation is possible (prepend a key) but not yet automated: `needs_rotation` identifies stragglers and nothing sweeps them.
 
 ## Rate limiting
 

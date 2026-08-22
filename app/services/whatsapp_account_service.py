@@ -1,4 +1,11 @@
-"""Connecting and managing WhatsApp accounts for a workspace."""
+"""Connecting and managing WhatsApp accounts for a workspace.
+
+A workspace may supply its own Meta token when it connects a number, and it is
+encrypted before it reaches the session (ADR-034). The service holds a credential
+service rather than a cipher so that a deployment with no key configured is a
+supported state - the number still connects and sends through the platform token -
+and only an attempt to *store* a credential is refused.
+"""
 
 from __future__ import annotations
 
@@ -6,12 +13,14 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import ValidationError
 from app.core.logging import get_logger
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.audit_service import AuditTrail
+from app.services.credential_service import CredentialService
 
 logger = get_logger(__name__)
 
@@ -19,8 +28,16 @@ logger = get_logger(__name__)
 class WhatsAppAccountService:
     """Every method takes the workspace explicitly; nothing is inferred."""
 
-    def __init__(self, *, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        *,
+        session: AsyncSession,
+        credentials: CredentialService | None = None,
+    ) -> None:
         self._session = session
+        # Optional: without one, a workspace cannot store its own token and
+        # says so, rather than storing it unencrypted.
+        self._credentials = credentials
 
     def _accounts(self, tenant_id: uuid.UUID) -> WhatsAppAccountRepository:
         return WhatsAppAccountRepository(self._session, tenant_id=tenant_id)
@@ -33,6 +50,7 @@ class WhatsAppAccountService:
         waba_id: str,
         display_phone_number: str,
         display_name: str | None = None,
+        access_token: str | None = None,
         actor: User | None = None,
     ) -> WhatsAppAccount:
         """Claim a phone number for this workspace.
@@ -47,6 +65,21 @@ class WhatsAppAccountService:
             display_phone_number=display_phone_number.strip(),
             display_name=display_name.strip() if display_name else None,
         )
+
+        if access_token:
+            # Encrypted before it is anywhere near the session. The plaintext
+            # exists only for the length of this call (ADR-034), and a
+            # deployment with no key refuses rather than storing it in the
+            # clear - which is the failure ADR-009 spent a phase preventing.
+            if self._credentials is None:
+                raise ValidationError(
+                    "This deployment cannot store a workspace credential: "
+                    "no credential encryption key is configured."
+                )
+            account.access_token_encrypted = self._credentials.seal(
+                access_token,
+                tenant_id=tenant_id,
+            )
 
         # created_at is a server default, and serialising an unrefreshed row
         # would trigger a lazy load outside the async greenlet context.

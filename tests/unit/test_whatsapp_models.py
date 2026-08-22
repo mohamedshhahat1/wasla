@@ -21,9 +21,14 @@ from app.db.models import (
     WhatsAppEventState,
 )
 
-# Column names that would mean a Meta credential had been persisted on the
-# account row, which ADR-009 forbids.
-CREDENTIAL_HINTS = ("token", "secret", "credential", "password")
+# Column names that would mean a *plaintext* credential had been persisted.
+# ADR-009 forbade any credential column at all; ADR-034 supersedes it with one
+# that may hold ciphertext only, so the rule is now about what a column could be
+# mistaken for rather than about its existence.
+PLAINTEXT_HINTS = ("token", "secret", "credential", "password")
+# The one column allowed to look like a credential, because its name says what
+# it actually contains.
+ENCRYPTED_COLUMN = "access_token_encrypted"
 
 
 def _index_names(table: Table) -> set[str]:
@@ -111,10 +116,26 @@ def test_event_idempotency_is_scoped_to_one_workspace():
     assert columns == ("tenant_id", "event_id")
 
 
-def test_the_account_row_stores_no_meta_credential():
-    names = " ".join(WhatsAppAccount.__table__.columns.keys()).lower()
-    offenders = [hint for hint in CREDENTIAL_HINTS if hint in names]
-    assert offenders == []
+def test_the_account_row_stores_no_plaintext_credential():
+    """ADR-009 refused a credential column until encryption existed; ADR-034
+    adds one that holds ciphertext only.
+
+    The guard survives the change rather than being deleted with it: any column
+    that looks like a credential must be the encrypted one, so a plaintext
+    `access_token` cannot be added later without this failing.
+    """
+    suspicious = [
+        column.name
+        for column in WhatsAppAccount.__table__.columns
+        if any(hint in column.name.lower() for hint in PLAINTEXT_HINTS)
+    ]
+    assert suspicious == [ENCRYPTED_COLUMN]
+
+
+def test_the_encrypted_credential_is_nullable():
+    """A workspace without its own token sends through the platform credential,
+    which is how every workspace worked before the column existed."""
+    assert WhatsAppAccount.__table__.c[ENCRYPTED_COLUMN].nullable is True
 
 
 def test_tenant_foreign_keys_cascade():

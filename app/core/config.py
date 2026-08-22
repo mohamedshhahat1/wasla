@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     # discover there was nothing to read.
     media_max_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
 
+    # Credential encryption at rest (ADR-034). A key ring: the first key
+    # encrypts, every key decrypts, so rotation is prepending one. Each is 32
+    # random bytes, base64. Empty means a workspace cannot store its own Meta
+    # token at all - the platform token is used instead, and an attempt to
+    # supply one is refused rather than stored in the clear.
+    credential_encryption_keys: list[str] = Field(default_factory=list)
+
     # Request limits, enforced by the application rather than only by nginx.
     # nginx is one deployment topology, not a property of the software: run the
     # container directly and every limit configured there disappears.
@@ -137,6 +144,25 @@ class Settings(BaseSettings):
     meta_verify_token: str | None = None
     meta_access_token: str | None = None
     meta_api_version: str = "v21.0"
+
+    @field_validator("credential_encryption_keys", mode="before")
+    @classmethod
+    def _parse_encryption_keys(cls, value: Any) -> Any:
+        """Accept a JSON array, a comma-separated string, or a list.
+
+        Comma-separated is what a container environment can actually express,
+        and the order matters: the first key is the one that encrypts.
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                return json.loads(raw)
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        return value
 
     @field_validator("cors_origins", mode="before")
     @classmethod

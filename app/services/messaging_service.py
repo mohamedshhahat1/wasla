@@ -29,6 +29,7 @@ from app.core.storage import EXTENSIONS, MediaStorage, StorageError
 from app.db.models.conversation import Conversation, Message, MessageKind, MessageStatus
 from app.db.models.media import MediaStatus
 from app.db.models.usage import UsageEventType
+from app.db.models.whatsapp import WhatsAppAccount
 from app.integrations.whatsapp.client import (
     SentMessage,
     WhatsAppClient,
@@ -41,6 +42,7 @@ from app.repositories.conversation_repository import (
 )
 from app.repositories.media_repository import MediaRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
+from app.services.credential_service import CredentialService
 from app.services.media_service import content_hash as media_content_hash
 from app.services.usage_service import UsageRecorder
 
@@ -150,6 +152,7 @@ class MessagingService:
         self._accounts = WhatsAppAccountRepository(session, tenant_id=tenant_id)
         self._media = MediaRepository(session, tenant_id=tenant_id)
         self._usage = UsageRecorder(session, tenant_id=tenant_id)
+        self._credentials = CredentialService(settings)
 
     async def send_text(
         self,
@@ -366,7 +369,7 @@ class MessagingService:
         # everything after this fails.
         await self._session.flush()
 
-        async with self._client() as client:
+        async with self._client(account) as client:
             try:
                 sent = await send(client, account.phone_number_id, contact.wa_id)
             except (ExternalServiceError, RateLimitedError) as error:
@@ -398,9 +401,16 @@ class MessagingService:
         return message
 
     @asynccontextmanager
-    async def _client(self) -> AsyncIterator[WhatsAppClient]:
-        """A WhatsApp client for one send, over a shared pool if there is one."""
-        token = self._settings.meta_access_token or ""
+    async def _client(self, account: WhatsAppAccount) -> AsyncIterator[WhatsAppClient]:
+        """A WhatsApp client for one send, over a shared pool if there is one.
+
+        The token belongs to the account rather than to the process: a
+        workspace that supplied its own sends as itself, and one that did not
+        sends through the platform credential (ADR-034). Resolved per send
+        rather than held on the service, so the plaintext lives no longer than
+        the call that needs it.
+        """
+        token = self._credentials.resolve(account).token
         version = self._settings.meta_api_version
 
         if self._http is not None:

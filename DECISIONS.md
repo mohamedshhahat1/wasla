@@ -168,7 +168,10 @@ Date:
 2026-08-21
 
 Status:
-Accepted
+Superseded by ADR-034 (2026-08-23), which adds the encryption at rest and key
+management this record made a precondition. The reasoning below is why the
+column did not exist for thirteen phases, and it still explains the shape of
+what replaced it.
 
 Decision:
 The `whatsapp_accounts` row stores no Meta access token or app secret. Outbound calls use the platform credential held in configuration. Per-workspace credentials are deferred until encryption at rest exists (Phase 14).
@@ -819,3 +822,39 @@ There is no route, repository method or service call that edits or deletes an en
 This is not an analytics event. `analytics_events` counts things for a dashboard and is derived from the domain where possible (ADR-028); this records deliberate acts by people, is never derived, and is kept after the thing it describes is gone.
 
 The guard asserting every tenant-scoped table has a tenant index was refined here rather than satisfied. It demanded an index *named* `ix_<table>_tenant_id`; it now demands an index whose first column is `tenant_id`, which is the property that actually makes a workspace's rows findable — `audit_logs` leads with `(tenant_id, occurred_at)`, and adding a redundant bare index alongside it would cost every write for nothing.
+
+## ADR-034 — Per-Workspace Credentials, Encrypted and Bound to Their Workspace
+
+Date:
+2026-08-23
+
+Status:
+Accepted (supersedes ADR-009)
+
+Decision:
+Store a workspace's own Meta token on the account row, encrypted with AES-256-GCM under a key ring, with the workspace id as additional authenticated data. Resolve the token per send: a workspace that supplied one sends as itself, one that did not sends through the platform credential. Refuse to store a credential at all when no encryption key is configured, and never fall back to the platform token when a stored credential cannot be read.
+
+Context:
+ADR-009 refused this column outright — a plaintext token puts a live, customer-visible sending capability into every backup, read replica and over-broad support query — and was explicit that lifting the ban required encryption at rest and key management first. This is that work. Until now every workspace sent through one platform Meta app, so no workspace had its own sender identity or its own rate limits.
+
+Reason:
+**GCM rather than an unauthenticated mode**, because the threat is not only reading the column but writing to it. Authenticated encryption makes a tampered ciphertext fail rather than decrypt into attacker-chosen bytes that are then used as a bearer token against Meta.
+
+**The workspace is authenticated data.** Once a column of tokens exists, the obvious attack is not breaking the cipher — it is copying one row's ciphertext into another row. Binding the tenant id into the encryption makes those bytes useless anywhere but where they were written, and costs one string.
+
+**A key ring rather than a key.** Rotation is the half of "encryption at rest" that gets deferred and then cannot be added, because there is nowhere to record which key encrypted what. The envelope names its key by digest — not by position, so reordering configuration cannot orphan every ciphertext — and `needs_rotation` exists so a sweep can find the stragglers even though nothing sweeps yet.
+
+**No key configured is a supported state, storing plaintext is not.** A deployment without a key connects numbers and sends through the platform token exactly as before; an attempt to store a workspace credential is refused with an explanation. "Store it in the clear for now" is precisely how a plaintext token column comes to exist, and ADR-009 spent thirteen phases refusing it.
+
+**An unreadable credential does not fall back.** Sending as the platform when a workspace asked to send as itself is a different act with a different sender identity, and doing it silently because a key was rotated badly is the kind of failure nobody notices until a customer does. The send fails loudly and a person re-enters the token.
+
+Consequences:
+The plaintext exists only inside a single call: it arrives in a request, is encrypted, and is discarded; it is decrypted at the moment a send needs it. No response model contains it — a caller can learn only *whether* a number has its own credential — and `ResolvedCredential.__repr__` hides it so a traceback or a debugger cannot print one.
+
+`cryptography` is now a declared dependency rather than one that happened to be installed. An undeclared import is a deployment that works until whatever pulled it in is removed.
+
+The guard from ADR-009 survives the change rather than being deleted with it. It asserted that no column looked like a credential; it now asserts that the only column which does is the encrypted one, so a plaintext `access_token` cannot be added later without a test failing.
+
+Key management stops at the process boundary: keys come from configuration, which means they are in the environment of every API and worker container. That is a real limit — a KMS or a secret manager would be better — and it is the same limit `JWT_SECRET` already has, so it is not a new class of exposure.
+
+Rotation is possible but not automated. Prepending a key makes new credentials use it; old ones keep working until somebody rewrites them, and nothing does that yet.
