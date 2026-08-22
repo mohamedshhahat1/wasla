@@ -309,8 +309,9 @@ Deferred by decision, not unfinished:
 - [x] Billing worker: trials end, pending cancellations take effect, periods roll over (`WORKER_KINDS=billing`)
 - [x] Limits enforced where somebody chooses, never on the inbound path (ADR-030)
 - [x] Billing APIs (catalogue, subscription, entitlements; owners commit the company, members read)
-- [ ] Provider-agnostic billing abstraction
-- [ ] Invoices and payment records
+- [x] Provider-agnostic billing abstraction (`PaymentProvider`, one method; `ManualProvider` — ADR-031)
+- [x] Invoices and payment records (migration `0017`), issued per period and never edited
+- [ ] Billing APIs for invoices, and a sweep that issues them when a period closes
 
 ## Phase 14 — Production hardening
 

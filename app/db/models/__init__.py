@@ -42,6 +42,13 @@ from .follow_up import (
     FollowUpStatus,
 )
 from .invitation import TenantInvitation
+from .invoice import (
+    TERMINAL_INVOICE_STATUSES,
+    Invoice,
+    InvoiceStatus,
+    Payment,
+    PaymentStatus,
+)
 from .knowledge import (
     EMBEDDING_DIMENSIONS,
     Document,
@@ -117,6 +124,7 @@ __all__ = [
     "SERVING_STATUSES",
     "TERMINAL_CAMPAIGN_STATUSES",
     "TERMINAL_FOLLOW_UP_STATUSES",
+    "TERMINAL_INVOICE_STATUSES",
     "TERMINAL_STATUSES",
     "TERMINAL_SUBSCRIPTION_STATUSES",
     "UNRESOLVED_MEDIA_STATUSES",
@@ -144,6 +152,8 @@ __all__ = [
     "FollowUp",
     "FollowUpStatus",
     "InvitationStatus",
+    "Invoice",
+    "InvoiceStatus",
     "KnowledgeBase",
     "Lead",
     "LeadActivity",
@@ -161,6 +171,8 @@ __all__ = [
     "MessageSentiment",
     "MessageStatus",
     "OptOutSource",
+    "Payment",
+    "PaymentStatus",
     "Plan",
     "PlatformRole",
     "RecipientStatus",

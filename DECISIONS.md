@@ -715,3 +715,39 @@ A workspace can exceed a period limit, and by design: the inbound messages that 
 A workspace that downgrades keeps every resource it already has. Its limits stop it adding more; nothing deletes an agent or disconnects a number, because a plan change is not a reason to destroy somebody's work.
 
 The dependency guards are static, one per limit key, so a route that creates something new must declare the right one. Nothing detects a route that forgets — the same gap the role guards have — and `tests/integration/test_plan_enforcement.py` is where each is pinned.
+
+## ADR-031 — An Invoice Is a Record, and the Provider Boundary Is One Method
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Store issued invoices with their amounts **copied**, never joined for, and never edit one after it is issued — a mistake is voided, not corrected. Record every payment attempt as its own row. Reduce the payment provider interface to a single operation, `charge`, and ship a `ManualProvider` that records what a human collected rather than pretending to collect anything.
+
+Context:
+Two designs were available for invoicing. One computes a bill on demand from the plan, the subscription and the usage rows — no invoice table, no duplication, always consistent with configuration. The other writes the figures down at the end of a period and never touches them again.
+
+For the provider, the pull is the opposite: processors have large APIs (customers, payment methods, intents, captures, webhooks, disputes), and adopting their vocabulary is the fastest way to get billing working.
+
+Reason:
+Computing a bill on demand fails the only question anybody asks about an invoice, which is "why was I charged this in March". A figure derived from today's configuration cannot answer it: the plan may have been repriced, the workspace may have changed plans, the limits may have moved. Worse, the answer would silently *change* — a customer looking at the same invoice twice would see two numbers, and the second one would be indefensible. So amounts and the plan code are copied onto the row at issue time, and a test asserts that repricing the plan afterwards leaves the invoice alone.
+
+Never editing follows from the same place. The customer has seen it. A bill that quietly changes is worse than one visibly withdrawn, so a mistake is voided and reissued, and a paid invoice cannot be voided at all — that is a refund, a different operation and a different conversation.
+
+Payments are rows rather than a status on the invoice because a failed attempt is not forgotten when a later one succeeds. The history is precisely what a dispute, a chargeback and an angry email turn on, and a status field keeps only the last thing that happened.
+
+On the provider: the moment a service knows what a payment intent is, the system belongs to that processor. So the interface is one method that takes an amount, a currency, an idempotency key and a description, and returns an outcome. Subscriptions, plans, periods and entitlements stay Wasla's, because they are what the product *means* and every processor models them slightly differently. A decline is an outcome rather than an exception, since it is an ordinary answer that produces a row and a message for the customer; only an unreachable provider raises.
+
+`ManualProvider` is not a stub. A great deal of business-to-business SaaS is invoiced and paid by bank transfer weeks later, and this models that honestly: `charge` returns `PENDING`, and only a person who has seen the money marks the invoice paid. A provider that reported success would put a paid invoice in front of a finance team that has not paid, which is worse than no billing at all — and it is the same reason the platform overview still shows no revenue figures it cannot substantiate.
+
+Consequences:
+Usage lines on an invoice carry a quantity and **no amount**. Nothing stores a per-unit overage price, and inventing one would put a number on a bill that no pricing decision stands behind. When overage pricing exists, those lines gain amounts and nothing else changes.
+
+`UNIQUE(tenant_id, period_start)` makes billing a period twice impossible rather than unlikely, which matters because the caller is a sweep that may run on two replicas. `UNIQUE(provider, provider_reference)` does the same for a processor's idempotency key.
+
+Adding a real processor means writing one class and choosing it in configuration. What it cannot do is change the meaning of a subscription, because it is never asked about one.
+
+Refunds, credits, proration and tax are all absent, and each is absent for the same reason as the rest of this record: they are decisions about money that nobody has made yet, and a system that guesses at them produces numbers a customer is asked to pay.

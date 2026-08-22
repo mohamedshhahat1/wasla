@@ -21,6 +21,12 @@ from .conversation_repository import (
 )
 from .follow_up_repository import DueFollowUpClaim, FollowUpRepository
 from .invitation_repository import InvitationRepository, InvitationTokenRepository
+from .invoice_repository import (
+    InvoiceRepository,
+    PaymentRepository,
+    PlatformInvoiceRepository,
+    RevenueTotal,
+)
 from .knowledge_repository import (
     DocumentChunkRepository,
     DocumentRepository,
@@ -64,6 +70,7 @@ __all__ = [
     "FollowUpRepository",
     "InvitationRepository",
     "InvitationTokenRepository",
+    "InvoiceRepository",
     "KnowledgeBaseRepository",
     "LeadActivityRepository",
     "LeadFilters",
@@ -72,9 +79,12 @@ __all__ = [
     "LeadStatistics",
     "MembershipRepository",
     "MessageRepository",
+    "PaymentRepository",
     "PlanRepository",
+    "PlatformInvoiceRepository",
     "PlatformSubscriptionRepository",
     "PlatformUsageRepository",
+    "RevenueTotal",
     "ScoredChunk",
     "SubscriptionCount",
     "SubscriptionRepository",

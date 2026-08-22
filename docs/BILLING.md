@@ -1,6 +1,6 @@
 # Billing
 
-**Status: In Progress** — plans, the seeded catalogue, subscriptions, the entitlement service, the subscription lifecycle, the billing APIs, the enforcement points and the period sweep are Implemented (migration `0016`, ADR-029, ADR-030). Invoices and payment providers are Planned. See [../TASKS.md](../TASKS.md) phase 13.
+**Status: In Progress** — plans, the seeded catalogue, subscriptions, the entitlement service, the subscription lifecycle, the billing APIs, the enforcement points, the period sweep, invoices, payment records and the provider boundary are Implemented (migrations `0016` and `0017`; ADR-029, ADR-030, ADR-031). Exposing invoices over the API, and issuing them automatically when a period closes, are Planned. See [../TASKS.md](../TASKS.md) phase 13.
 
 Scope: plans, subscriptions, entitlements, invoicing, and payment provider boundaries. Plan limits are listed in [SAAS.md](SAAS.md); metering is in [ANALYTICS.md](ANALYTICS.md).
 
@@ -11,8 +11,8 @@ Scope: plans, subscriptions, entitlements, invoicing, and payment provider bound
 | Plan | Implemented | Configurable feature and limit definition |
 | Subscription | Implemented | Tenant's current plan, period, and lifecycle state |
 | Entitlement check | Implemented | Central authority for "is this action allowed now" |
-| Invoice | Planned | Billable period summary |
-| Payment | Planned | Recorded payment attempt and outcome |
+| Invoice | Implemented | Billable period summary |
+| Payment | Implemented | Recorded payment attempt and outcome |
 
 ## Plans
 
@@ -56,9 +56,29 @@ The rules live in `roll_over`, a pure function over the row, so the worker is on
 
 A refused action answers **402**, not 403. A permission error tells a caller to ask an administrator; this one tells them to upgrade, and a client that cannot tell them apart shows the wrong dialogue to a customer trying to give us money.
 
+## Invoices
+
+An invoice is a **record of a past period**, not a live calculation (ADR-031). The plan code and the amounts are copied onto the row when it is issued, so a plan repriced in April cannot change what March says — which is the only question anybody ever asks about an invoice.
+
+An issued invoice is never edited. A mistake is **voided**, because the customer has already seen it and a bill that silently changes is worse than one visibly withdrawn. A paid invoice cannot be voided at all: that is a refund, a different operation and a different conversation.
+
+Lines are the plan's fee plus what the workspace consumed. **The usage lines carry a quantity and no amount**, and that absence is deliberate: no per-unit overage price is stored anywhere, and inventing one would put a number on a bill that no pricing decision stands behind.
+
+`UNIQUE(tenant_id, period_start)` makes billing a period twice impossible rather than merely unlikely — the caller is a sweep that may run on two replicas.
+
+## Payments
+
+Every attempt is a row. A failure is not forgotten when a later attempt succeeds, because that history is what a dispute, a chargeback and an angry email all turn on. Part payments leave the invoice open with a smaller balance; an overpayment leaves nothing outstanding rather than a negative.
+
+`UNIQUE(provider, provider_reference)` is the processor's idempotency key: two webhooks about one charge become one payment.
+
 ## Provider independence
 
-Billing logic is provider-agnostic behind an abstraction, so a payment provider can be added later without touching business rules. Billing APIs and internal models work in local development without a live provider.
+`PaymentProvider` is one method — charge this amount, with this idempotency key, and say what happened. Subscriptions, plans and periods stay Wasla's, because the moment a service knows what a "payment intent" is, the system belongs to that processor. A decline is an outcome, not an exception; only an unreachable provider raises.
+
+`ManualProvider` is the shipped implementation and is **not a stub**. Much business-to-business SaaS is invoiced and paid by transfer weeks later, so `charge` returns `pending` and only a person who has seen the money marks the invoice paid. A provider that reported success would put a paid invoice in front of a finance team that has not paid.
+
+Refunds, credits, proration and tax are all absent for one reason: they are decisions about money nobody has made yet, and a system that guesses produces numbers a customer is asked to pay.
 
 ## Entitlement enforcement
 
