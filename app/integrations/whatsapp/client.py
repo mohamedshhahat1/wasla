@@ -10,6 +10,10 @@ definitely did not send are retried.
 | connection error | yes | No connection, so no request arrived |
 | 5xx | no | May have been accepted; a duplicate reply is worse |
 | read timeout | no | Same: the request may have landed |
+
+Reads are the opposite and have their own path (`_get`). Fetching a file twice
+costs a request and changes nothing anyone can see, so everything transient is
+retried there, timeouts and 5xx included.
 """
 
 from __future__ import annotations
@@ -42,6 +46,30 @@ CLIENT_ERROR_FLOOR: Final = 400
 MAX_REPLY_BUTTONS: Final = 3
 
 MediaKind = Literal["image", "document", "audio", "video"]
+
+
+@dataclass(frozen=True, slots=True)
+class MediaDescriptor:
+    """What Meta says about a file, without the file."""
+
+    mime_type: str | None
+    byte_size: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadedMedia:
+    """A file that actually arrived.
+
+    `byte_size` is what was received; `declared_size` is what Meta said it would
+    be. They are kept apart rather than reconciled, because a mismatch is worth
+    seeing and silently preferring one would hide it.
+    """
+
+    content: bytes
+    mime_type: str | None
+    byte_size: int
+    declared_size: int | None
+    sha256: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +256,135 @@ class WhatsAppClient:
             to=to,
             content={"type": "template", "template": template},
         )
+
+    async def fetch_media(self, media_id: str) -> DownloadedMedia:
+        """Fetch an inbound file in the two steps Meta requires.
+
+        The webhook carries a handle, not a file. Resolving the handle returns a
+        short-lived URL on Meta's CDN, and that URL must still be requested with
+        the access token - it is not public, despite looking like it. Both halves
+        are done here so no caller ever holds a media URL.
+
+        Retries are safe on this path, unlike a send: fetching a file twice
+        costs a request and changes nothing a customer can see, which is why
+        this reuses `_get` rather than the send path's narrower policy.
+        """
+        descriptor = await self._get_json(f"{GRAPH_BASE_URL}/{self._api_version}/{media_id}")
+
+        url = descriptor.get("url")
+        if not isinstance(url, str) or not url:
+            raise ExternalServiceError("WhatsApp did not return a location for this file.")
+
+        mime_type = descriptor.get("mime_type")
+        declared = descriptor.get("file_size")
+
+        content = await self._get_bytes(url)
+        return DownloadedMedia(
+            content=content,
+            mime_type=mime_type.split(";", 1)[0].strip() if isinstance(mime_type, str) else None,
+            byte_size=len(content),
+            declared_size=declared if isinstance(declared, int) else None,
+            sha256=descriptor.get("sha256") if isinstance(descriptor.get("sha256"), str) else None,
+        )
+
+    async def probe_media(self, media_id: str) -> MediaDescriptor:
+        """Ask how big a file is without downloading it.
+
+        Worth a round trip: the alternative to asking is streaming a file that
+        turns out to be ninety megabytes, and the point of the size cap is not
+        to pay for that.
+        """
+        descriptor = await self._get_json(f"{GRAPH_BASE_URL}/{self._api_version}/{media_id}")
+        mime_type = descriptor.get("mime_type")
+        size = descriptor.get("file_size")
+        return MediaDescriptor(
+            mime_type=mime_type.split(";", 1)[0].strip() if isinstance(mime_type, str) else None,
+            byte_size=size if isinstance(size, int) else None,
+        )
+
+    async def upload_media(
+        self,
+        *,
+        phone_number_id: str,
+        content: bytes,
+        mime_type: str,
+        filename: str,
+    ) -> str:
+        """Upload a file to Meta and return the id it can be sent with.
+
+        Sending by hosted link is the other option and is not used: it would
+        require every attachment to sit behind a public URL, which is a wider
+        exposure than uploading the bytes for one send.
+        """
+        url = f"{GRAPH_BASE_URL}/{self._api_version}/{phone_number_id}/media"
+        files = {"file": (filename, content, mime_type)}
+        data = {"messaging_product": MESSAGING_PRODUCT, "type": mime_type}
+
+        try:
+            response = await self._http.post(
+                url,
+                data=data,
+                files=files,
+                headers={"Authorization": f"Bearer {self._access_token}"},
+            )
+        except httpx.HTTPError as error:
+            raise ExternalServiceError("WhatsApp could not be reached.") from error
+
+        if response.status_code >= CLIENT_ERROR_FLOOR:
+            self._log_failure(response)
+            raise ExternalServiceError("WhatsApp rejected the upload.")
+
+        body = self._decode(response)
+        uploaded = body.get("id")
+        if not isinstance(uploaded, str) or not uploaded:
+            raise ExternalServiceError("WhatsApp accepted the upload without an identifier.")
+        return uploaded
+
+    async def _get_json(self, url: str) -> dict[str, Any]:
+        response = await self._get(url)
+        return self._decode(response)
+
+    async def _get_bytes(self, url: str) -> bytes:
+        return (await self._get(url)).content
+
+    async def _get(self, url: str) -> httpx.Response:
+        """A retrying GET carrying the access token.
+
+        Wider than the send path deliberately. A repeated read has no
+        customer-visible effect, so every transient failure is worth another
+        attempt - including the timeouts and 5xx that a send must never retry.
+        """
+        attempt = 1
+        while True:
+            try:
+                response = await self._http.get(
+                    url,
+                    headers={"Authorization": f"Bearer {self._access_token}"},
+                    follow_redirects=True,
+                )
+            except httpx.HTTPError as error:
+                if attempt >= self._max_attempts:
+                    logger.warning("whatsapp.media_unreachable", extra={"attempts": attempt})
+                    raise ExternalServiceError("WhatsApp could not be reached.") from error
+                await self._backoff(attempt)
+                attempt += 1
+                continue
+
+            retryable = (
+                response.status_code == TOO_MANY_REQUESTS
+                or response.status_code >= SERVER_ERROR_FLOOR
+            )
+            if retryable and attempt < self._max_attempts:
+                await self._backoff(attempt)
+                attempt += 1
+                continue
+
+            if response.status_code == TOO_MANY_REQUESTS:
+                raise RateLimitedError("WhatsApp is rate limiting this account.")
+            if response.status_code >= CLIENT_ERROR_FLOOR:
+                self._log_failure(response)
+                raise ExternalServiceError("WhatsApp could not return this file.")
+            return response
 
     async def mark_read(self, *, phone_number_id: str, message_id: str) -> None:
         """Show the customer a read receipt."""

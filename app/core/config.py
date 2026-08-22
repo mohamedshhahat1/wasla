@@ -73,7 +73,24 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-small"
+    # Separate from the chat model on purpose. Describing every photograph a
+    # business receives is a recurring cost with its own budget, and a workspace
+    # may reasonably want a cheaper model for it than the one that answers.
+    openai_vision_model: str = "gpt-4.1-mini"
+    openai_transcription_model: str = "gpt-4o-mini-transcribe"
     openai_timeout_seconds: float = Field(default=60.0, gt=0)
+
+    # Media
+    # Where downloaded attachments are written. A path on the local filesystem,
+    # which requires the API and worker containers to share a volume; object
+    # storage replaces this implementation without changing the setting
+    # (ADR-023).
+    media_storage_path: str = "/var/lib/wasla/media"
+    # Larger than most of what WhatsApp permits, so the cap bites on video and
+    # on nothing else. A file over it is recorded as skipped rather than
+    # downloaded: the point is not to pay to move ninety megabytes in order to
+    # discover there was nothing to read.
+    media_max_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
 
     # Meta / WhatsApp: configuration only until the WhatsApp phase lands
     meta_app_id: str | None = None
