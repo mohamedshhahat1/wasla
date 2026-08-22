@@ -43,7 +43,9 @@ from app.db.models.follow_up import (
 from app.db.models.lead import ActorKind
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.follow_up_repository import FollowUpRepository
+from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.services.messaging_service import MessagingService
+from app.services.template_service import refusal_reason_for
 
 logger = get_logger(__name__)
 
@@ -90,6 +92,7 @@ class FollowUpService:
         self._messaging = messaging
         self._follow_ups = FollowUpRepository(session, tenant_id=tenant_id)
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
+        self._templates = WhatsAppTemplateRepository(session, tenant_id=tenant_id)
 
     # ------------------------------------------------------------------ reads
 
@@ -154,6 +157,14 @@ class FollowUpService:
             raise ValidationError(
                 "A follow-up needs a message to send, an approved template, or both."
             )
+
+        if name is not None:
+            refusal = await self._template_refusal(name, str(language))
+            if refusal is not None:
+                # Refused now rather than at the due moment. Scheduling is where
+                # a person is present to fix it; the send happens hours later
+                # against nobody.
+                raise ValidationError(refusal)
 
         existing = await self._follow_ups.get_pending_for_conversation(conversation_id)
         if existing is not None:
@@ -254,6 +265,16 @@ class FollowUpService:
             )
         return len(pending)
 
+    async def _template_refusal(self, name: str, language: str) -> str | None:
+        """Whether the registry knows a reason this template must not be sent.
+
+        Silent when the registry has never heard of the template. A workspace
+        that has not synced yet would otherwise lose every template-bearing
+        follow-up it has, and "unknown" cannot be told apart from "never
+        synced". See `refusal_reason_for`.
+        """
+        return refusal_reason_for(await self._templates.find_anywhere(name=name, language=language))
+
     def _cancel(self, follow_up: FollowUp, *, reason: str | None) -> FollowUp:
         follow_up.status = FollowUpStatus.CANCELLED
         follow_up.cancelled_at = datetime.now(UTC)
@@ -296,6 +317,16 @@ class FollowUpService:
         if window_open and follow_up.body:
             send = messaging.send_text(conversation_id=conversation.id, body=follow_up.body)
         elif follow_up.has_template:
+            # Checked again here, not only at scheduling. Meta pauses a template
+            # that draws complaints without warning, and hours can pass between
+            # the two moments; sending one it has since withdrawn is the thing
+            # that costs a workspace its number.
+            refusal = await self._template_refusal(
+                str(follow_up.template_name),
+                str(follow_up.template_language),
+            )
+            if refusal is not None:
+                return self._skip(follow_up, refusal)
             # Valid in or out of the window. Preferred outside it because it is
             # the only thing Meta will accept there.
             send = messaging.send_template(
@@ -400,10 +431,10 @@ def _validated_body(body: str | None) -> str | None:
 def _validated_template(name: str | None, language: str | None) -> tuple[str | None, str | None]:
     """A template needs both halves or neither.
 
-    Nothing here can confirm Meta has approved the template — there is no
-    template registry until Phase 11 — so this checks only that the pair is
-    complete. A name without a language would fail at Meta, after the send has
-    already been attempted.
+    Only the shape is checked here: a name without a language would fail at
+    Meta, after the send has already been attempted. Whether Meta has approved
+    the template is a question for the registry, and the caller asks it
+    separately because the answer needs the database.
     """
     clean_name = name.strip() if name else None
     clean_language = language.strip() if language else None

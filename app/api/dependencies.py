@@ -31,6 +31,7 @@ from app.services.lead_service import LeadService
 from app.services.media_service import MediaService
 from app.services.messaging_service import MessagingService
 from app.services.sentiment_service import SentimentService
+from app.services.template_service import TemplateService
 from app.services.whatsapp_account_service import WhatsAppAccountService
 from app.workers.ingestion_queue import IngestionQueue
 
@@ -279,6 +280,26 @@ def get_sentiment_service(
 
 
 SentimentServiceDep = Annotated[SentimentService, Depends(get_sentiment_service)]
+
+
+def get_template_service(
+    settings: SettingsDep,
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> TemplateService:
+    """Workspace-scoped, so no route can pass a tenant id of its own choosing.
+
+    Settings are supplied because a sync calls Meta, which is the one thing in
+    this service that leaves the process.
+    """
+    return TemplateService(
+        session=session,
+        settings=settings,
+        tenant_id=workspace.tenant.id,
+    )
+
+
+TemplateServiceDep = Annotated[TemplateService, Depends(get_template_service)]
 
 
 def require_tenant_roles(*roles: TenantRole) -> Callable[[ActiveWorkspace], ActiveWorkspace]:

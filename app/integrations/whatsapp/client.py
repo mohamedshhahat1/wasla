@@ -44,6 +44,12 @@ TOO_MANY_REQUESTS: Final = 429
 SERVER_ERROR_FLOOR: Final = 500
 CLIENT_ERROR_FLOOR: Final = 400
 MAX_REPLY_BUTTONS: Final = 3
+# How many templates one page of the registry sync asks for, and how many
+# pages it will follow. Meta caps the page size; the page *count* is ours,
+# and it is bounded so a workspace with a pathological template list cannot
+# turn one sync into an unbounded walk of a third party's pagination.
+TEMPLATE_PAGE_SIZE: Final = 100
+MAX_TEMPLATE_PAGES: Final = 20
 
 MediaKind = Literal["image", "document", "audio", "video"]
 
@@ -256,6 +262,44 @@ class WhatsAppClient:
             to=to,
             content={"type": "template", "template": template},
         )
+
+    async def list_templates(
+        self,
+        *,
+        waba_id: str,
+        page_size: int = TEMPLATE_PAGE_SIZE,
+        max_pages: int = MAX_TEMPLATE_PAGES,
+    ) -> list[dict[str, Any]]:
+        """Every message template on one WhatsApp Business account.
+
+        A read, so it takes the retrying `_get` path rather than the send path's
+        narrow one: asking twice costs a request and changes nothing.
+
+        Pagination is followed by Meta's own `paging.next` URL, which already
+        carries the cursor and the page size. It is bounded by `max_pages` so a
+        malformed or cyclic `next` cannot turn a sync into a loop.
+        """
+        url = (
+            f"{GRAPH_BASE_URL}/{self._api_version}/{waba_id}/message_templates"
+            f"?limit={page_size}"
+        )
+        templates: list[dict[str, Any]] = []
+
+        for _ in range(max(1, max_pages)):
+            body = await self._get_json(url)
+            page = body.get("data")
+            if not isinstance(page, list):
+                raise ExternalServiceError("WhatsApp returned an unreadable template list.")
+            templates.extend(item for item in page if isinstance(item, dict))
+
+            paging = body.get("paging")
+            following = paging.get("next") if isinstance(paging, dict) else None
+            if not isinstance(following, str) or not following:
+                return templates
+            url = following
+
+        logger.warning("whatsapp.template_pages_exhausted", extra={"pages": max_pages})
+        return templates
 
     async def fetch_media(self, media_id: str) -> DownloadedMedia:
         """Fetch an inbound file in the two steps Meta requires.

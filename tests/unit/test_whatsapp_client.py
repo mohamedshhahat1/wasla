@@ -519,3 +519,80 @@ async def test_a_rejected_upload_does_not_leak_metas_error_text():
         )
 
     assert "abc123" not in str(raised.value)
+
+
+# ------------------------------------------------------- the template registry
+
+WABA_ID = "555000111222"
+TEMPLATES_URL = "https://graph.facebook.com/v21.0/" + WABA_ID + "/message_templates"
+
+
+def _template_page(*names: str, next_url: str | None = None) -> httpx.Response:
+    body: dict = {
+        "data": [
+            {
+                "id": f"id-{name}",
+                "name": name,
+                "language": "ar_EG",
+                "status": "APPROVED",
+                "category": "MARKETING",
+                "components": [{"type": "BODY", "text": "Hello {{1}}"}],
+            }
+            for name in names
+        ]
+    }
+    if next_url:
+        body["paging"] = {"next": next_url}
+    return httpx.Response(200, json=body)
+
+
+async def test_the_template_list_is_asked_for_where_meta_keeps_it():
+    recorder = Recorder(_template_page("welcome"))
+
+    templates = await _client(recorder).list_templates(waba_id=WABA_ID)
+
+    assert [template["name"] for template in templates] == ["welcome"]
+    request = recorder.requests[0]
+    assert request.method == "GET"
+    assert str(request.url).startswith(TEMPLATES_URL)
+    assert request.headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
+
+
+async def test_every_page_meta_offers_is_followed():
+    second = TEMPLATES_URL + "?after=cursor"
+    recorder = Recorder(
+        _template_page("welcome", next_url=second),
+        _template_page("reminder"),
+    )
+
+    templates = await _client(recorder).list_templates(waba_id=WABA_ID)
+
+    assert [template["name"] for template in templates] == ["welcome", "reminder"]
+    assert str(recorder.requests[1].url) == second
+
+
+async def test_a_cyclic_next_link_cannot_loop_forever():
+    """Meta's `next` is followed, so a broken one must still terminate."""
+    recorder = Recorder(_template_page("welcome", next_url=TEMPLATES_URL + "?after=same"))
+
+    templates = await _client(recorder).list_templates(waba_id=WABA_ID, max_pages=3)
+
+    assert len(templates) == 3
+    assert recorder.attempts == 3
+
+
+async def test_a_template_list_without_data_is_refused():
+    recorder = Recorder(httpx.Response(200, json={"paging": {}}))
+
+    with pytest.raises(ExternalServiceError):
+        await _client(recorder).list_templates(waba_id=WABA_ID)
+
+
+async def test_a_transient_failure_on_the_template_read_is_retried():
+    """Reads take the wide retry policy: asking twice changes nothing."""
+    recorder = Recorder(httpx.Response(500), _template_page("welcome"))
+
+    templates = await _client(recorder).list_templates(waba_id=WABA_ID)
+
+    assert len(templates) == 1
+    assert recorder.attempts == 2

@@ -65,6 +65,12 @@ from .whatsapp import (
     WhatsAppEventKind,
     WhatsAppEventState,
 )
+from .whatsapp_template import (
+    TemplateCategory,
+    TemplateStatus,
+    WhatsAppTemplate,
+    count_placeholders,
+)
 
 __all__ = [
     "AGENT_WRITABLE_FIELDS",
@@ -113,6 +119,8 @@ __all__ = [
     "MessageStatus",
     "PlatformRole",
     "SentimentLabel",
+    "TemplateCategory",
+    "TemplateStatus",
     "Tenant",
     "TenantInvitation",
     "TenantRole",
@@ -123,7 +131,9 @@ __all__ = [
     "WhatsAppEvent",
     "WhatsAppEventKind",
     "WhatsAppEventState",
+    "WhatsAppTemplate",
     "clamp_score",
+    "count_placeholders",
     "is_at_least",
     "raised_priority",
 ]

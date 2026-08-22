@@ -10,6 +10,7 @@ from app.api.v1 import (
     invitations,
     knowledge,
     leads,
+    templates,
     webhooks,
     whatsapp,
 )
@@ -22,6 +23,7 @@ api_router.include_router(follow_ups.router)
 api_router.include_router(invitations.router)
 api_router.include_router(knowledge.router)
 api_router.include_router(leads.router)
+api_router.include_router(templates.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(whatsapp.router)
 
