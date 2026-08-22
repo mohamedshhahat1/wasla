@@ -1,6 +1,6 @@
 # Billing
 
-**Status: In Progress** — plans, the seeded catalogue, subscriptions, the entitlement service, the subscription lifecycle and the billing APIs are Implemented (migration `0016`, ADR-029). The enforcement points, the period roll-over sweep, invoices and payment providers are Planned. See [../TASKS.md](../TASKS.md) phase 13.
+**Status: In Progress** — plans, the seeded catalogue, subscriptions, the entitlement service, the subscription lifecycle, the billing APIs and the enforcement points are Implemented (migration `0016`, ADR-029, ADR-030). The period roll-over sweep, invoices and payment providers are Planned. See [../TASKS.md](../TASKS.md) phase 13.
 
 Scope: plans, subscriptions, entitlements, invoicing, and payment provider boundaries. Plan limits are listed in [SAAS.md](SAAS.md); metering is in [ANALYTICS.md](ANALYTICS.md).
 
@@ -52,7 +52,22 @@ Billing logic is provider-agnostic behind an abstraction, so a payment provider 
 
 ## Entitlement enforcement
 
-Limits are never hardcoded across the codebase. A single usage/entitlement service answers limit questions using stored plan configuration and aggregated usage, covering WhatsApp numbers, agents, messages, AI requests, and team members. Limit denials return consistent, actionable errors.
+Limits are never compared inline. `EntitlementService` is the only thing that reads a plan, and where it is called is a decision in its own right (ADR-030): a refusal has a victim, and the question is always whether that person is the one who can fix the billing.
+
+| Where | What happens |
+| --- | --- |
+| Creating an agent, connecting a number, inviting a colleague, submitting a document | **402**, from a dependency in the route signature |
+| Scheduling a campaign | **402** for the whole audience at once, in the service, before a single message goes out |
+| An agent turn with no AI requests left | The worker returns without composing; the job is released, not dead-lettered |
+| A customer's inbound message | **Never refused.** No check exists on that path at all |
+| Any read, including usage and entitlements | Never refused |
+| A person's own reply | Never refused |
+
+The guards are declared like the role guards — `slot: AgentSlotDep` in the signature — because a check written inside a handler is one the next handler forgets.
+
+**Nothing on the inbound path is refused, and that is the most important line here.** The words belong to a customer who owes us nothing, and a non-2xx to Meta is retried until the subscription is disabled: a billing problem would become a permanently broken integration. Inbound messages count against the allowance and are never rejected because of it, so a workspace can exceed a period limit. That overage is visible in usage and is the platform's to price or to chase.
+
+A workspace that downgrades keeps everything it already has. Its limits stop it adding more; nothing deletes an agent or disconnects a number, because a plan change is not a reason to destroy somebody's work.
 
 ## Platform revenue reporting
 

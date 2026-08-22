@@ -15,9 +15,12 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import get_entitlement_service
 from app.core.config import Settings
 from app.core.exceptions import DependencyUnavailableError
+from app.db.models.billing import LimitKey
 from app.main import create_app
+from app.services.entitlement_service import Entitlement
 
 
 class FakeRedisCommands:
@@ -103,6 +106,34 @@ def fake_redis() -> FakeDependency:
     return FakeDependency(name="redis")
 
 
+class AllowingEntitlements:
+    """An entitlement service that permits everything, and queries nothing.
+
+    Routes that create a limited resource declare a plan-limit guard, and that
+    guard reads the database - a count of agents, a sum of usage. The fake
+    session here is deliberately unbound, so without this override every
+    endpoint test that merely stubs its own service would fail on a query it is
+    not about.
+
+    Allowing by default is the right bias for these tests: they exist to pin
+    routing, shapes and roles. What a limit actually does is proved against real
+    rows in `tests/integration/test_entitlements.py`, and the refusals are
+    proved in `test_plan_enforcement.py` by overriding this again.
+    """
+
+    async def check(self, key, *, additional: int = 1) -> Entitlement:
+        return Entitlement(key=key, limit=None, used=0, allowed=True)
+
+    async def require(self, key, *, additional: int = 1) -> Entitlement:
+        return await self.check(key, additional=additional)
+
+    async def allows(self, key, *, additional: int = 1) -> bool:
+        return True
+
+    async def snapshot(self, keys=None) -> list[Entitlement]:
+        return [await self.check(key, additional=0) for key in LimitKey]
+
+
 @pytest.fixture
 def app(
     settings: Settings,
@@ -112,6 +143,7 @@ def app(
     application = create_app(settings)
     application.state.database = fake_database
     application.state.redis = fake_redis
+    application.dependency_overrides[get_entitlement_service] = AllowingEntitlements
     return application
 
 

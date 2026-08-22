@@ -13,6 +13,7 @@ from fastapi import APIRouter, status
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
+    NumberSlotDep,
     TenantAdminDep,
     WhatsAppAccountServiceDep,
 )
@@ -35,6 +36,7 @@ async def connect_account(
     payload: WhatsAppAccountConnectRequest,
     workspace: TenantAdminDep,
     service: WhatsAppAccountServiceDep,
+    slot: NumberSlotDep,
 ) -> WhatsAppAccountResponse:
     account = await service.connect(
         tenant_id=workspace.tenant.id,

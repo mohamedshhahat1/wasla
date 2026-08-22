@@ -22,6 +22,7 @@ from fastapi import APIRouter, Query, status
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
+    DocumentSlotDep,
     KnowledgeServiceDep,
     TenantAdminDep,
 )
@@ -105,6 +106,7 @@ async def submit_document(
     payload: DocumentCreateRequest,
     knowledge: KnowledgeServiceDep,
     admin: TenantAdminDep,
+    slot: DocumentSlotDep,
 ) -> DocumentSubmission:
     """Record a document for ingestion.
 

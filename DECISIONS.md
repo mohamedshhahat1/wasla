@@ -681,3 +681,37 @@ Adding a limit is a new `LimitKey` member, a branch in the entitlement service s
 Limits cannot be queried in SQL as conveniently as columns — "which plans allow more than 10 agents" is a JSONB expression rather than a comparison. That query is a platform reporting question about a handful of rows, and it is not on any hot path.
 
 Because limits are data, a plan edited in the database changes what a workspace may do immediately, with no deploy. That is the point, and it is also the risk: there is no approval workflow around a plan edit, which is acceptable while only platform staff can reach the rows, and becomes a real requirement the moment plans are editable through an API.
+
+## ADR-030 — Limits Are Enforced Where Somebody Chooses, Never on the Inbound Path
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Enforce plan limits as a route dependency on the actions that *create* something a plan counts — an agent, a number, a colleague, a document — and inside the service for the one action whose cost depends on its size, scheduling a campaign. Check the AI allowance in the agent worker and stop quietly when it is gone. Enforce nothing on the inbound webhook path, on any read, or on a message a person sends by hand.
+
+Context:
+Once limits exist, the tempting rule is "check everywhere something is consumed". Usage is metered at nine places (ADR-027), and each is a candidate for a check. But a limit is a refusal, and a refusal has a victim: the question is always *who* is stopped, and whether they are the person with the billing problem.
+
+Reason:
+Three groups, and they need three different answers.
+
+**Somebody in the workspace choosing to add something.** Creating an agent, connecting a number, inviting a colleague, uploading a document. The person acting is the person who can fix it, the refusal is immediate and comprehensible, and nothing is half-done. These get a hard 402. The check is a dependency in the route signature rather than a call inside the handler, exactly like the role guard: a check written in a body is a check the next handler forgets, and a declared one cannot be skipped without deleting it.
+
+**A customer writing to the business.** The inbound webhook carries no limit check at all, and that is the most important line in this record. The words belong to a customer who owes us nothing; refusing them would lose a message a business needed. Worse, refusing means a non-2xx to Meta, which retries and eventually disables the subscription — so a billing problem would become a permanently broken integration. Inbound messages are metered and counted against the allowance; they are never rejected because of it.
+
+**Work a worker was already asked to do.** An agent job whose workspace is out of AI requests returns without composing a reply, and does not raise. Raising would dead-letter the job, which loses the customer's turn permanently for a problem that will be fixed by a card being updated. The message is stored, the conversation is waiting for a person, and a warning is logged. Silence from the agent is the honest outcome of an exhausted allowance; a lost message is not.
+
+Campaigns sit between the first and the third and are checked for the whole audience at once, at scheduling, in the service. The limit depends on how many people it will reach, so no static route guard can express it — and checking per recipient in the worker would refuse a broadcast halfway, leaving a workspace having written to some of its customers and not others. That is worse than refusing it outright.
+
+Reads are never refused, including reads of usage and of the entitlements themselves. Locking somebody out of their own data over a bill is not a limit; it is a hostage, and it removes the very screens that explain the charge.
+
+Consequences:
+A workspace can exceed a period limit, and by design: the inbound messages that push it over are never refused, and a person's own reply is never blocked. The overage is visible in usage and is the platform's to price or to chase, which is a commercial decision rather than an engineering one.
+
+A workspace that downgrades keeps every resource it already has. Its limits stop it adding more; nothing deletes an agent or disconnects a number, because a plan change is not a reason to destroy somebody's work.
+
+The dependency guards are static, one per limit key, so a route that creates something new must declare the right one. Nothing detects a route that forgets — the same gap the role guards have — and `tests/integration/test_plan_enforcement.py` is where each is pinned.

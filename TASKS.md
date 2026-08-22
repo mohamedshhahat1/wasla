@@ -305,7 +305,7 @@ Deferred by decision, not unfinished:
 - [x] Subscription model, one per workspace, enforced by a unique index
 - [x] Entitlement service: resource limits counted from rows, period limits from `usage_events` over the billing period
 - [x] Subscription lifecycle (trial, change of plan, cancellation, resume, period roll-over as a pure function)
-- [ ] Limits enforced at the points that create resources and spend allowances — the service exists and nothing calls it yet
+- [x] Limits enforced where somebody chooses, never on the inbound path (ADR-030)
 - [x] Billing APIs (catalogue, subscription, entitlements; owners commit the company, members read)
 - [ ] Provider-agnostic billing abstraction
 - [ ] Invoices and payment records

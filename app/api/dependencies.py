@@ -7,7 +7,7 @@ could forge to aim a route at another workspace's data.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -20,6 +20,7 @@ from app.core.security import TokenClaims, TokenType, decode_token
 from app.core.storage import LocalMediaStorage, MediaStorage
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
+from app.db.models.billing import LimitKey
 from app.platform.platform_analytics import PlatformAnalyticsService
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
 from app.repositories.billing_repository import PlanRepository
@@ -27,7 +28,7 @@ from app.services.agent_service import AgentService
 from app.services.analytics_service import AnalyticsService
 from app.services.auth_service import AuthService
 from app.services.campaign_service import CampaignService
-from app.services.entitlement_service import EntitlementService
+from app.services.entitlement_service import Entitlement, EntitlementService
 from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
 from app.services.invitation_service import InvitationService
@@ -172,6 +173,7 @@ AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 
 
 def get_campaign_service(
+    settings: SettingsDep,
     session: SessionDep,
     workspace: ActiveWorkspaceDep,
 ) -> CampaignService:
@@ -181,7 +183,17 @@ def get_campaign_service(
     targeting and scheduling are all database work; the sending happens in the
     worker, where ten thousand messages cannot hold a request open.
     """
-    return CampaignService(session=session, tenant_id=workspace.tenant.id)
+    return CampaignService(
+        session=session,
+        tenant_id=workspace.tenant.id,
+        # Scheduling is where a campaign's cost is committed, and the limit
+        # depends on how many people it will reach.
+        entitlements=EntitlementService(
+            session,
+            tenant_id=workspace.tenant.id,
+            default_plan_code=settings.default_plan_code,
+        ),
+    )
 
 
 CampaignServiceDep = Annotated[CampaignService, Depends(get_campaign_service)]
@@ -419,6 +431,35 @@ def require_tenant_roles(*roles: TenantRole) -> Callable[[ActiveWorkspace], Acti
         return workspace
 
     return guard
+
+
+def require_entitlement(
+    key: LimitKey,
+) -> Callable[[EntitlementService], Awaitable[Entitlement]]:
+    """Build a dependency that refuses an action the plan does not allow.
+
+    Shaped exactly like `require_tenant_roles`, and for the same reason: a check
+    written inside a handler is a check the next handler forgets. Declaring it in
+    the signature means the route cannot run without it.
+
+    It is a limit on *creating* something, so it belongs only on the routes that
+    create. Nothing here is on the inbound path - see ADR-030 for why a customer's
+    message is never refused for a business's billing.
+    """
+
+    async def guard(entitlements: EntitlementServiceDep) -> Entitlement:
+        return await entitlements.require(key)
+
+    return guard
+
+
+AgentSlotDep = Annotated[Entitlement, Depends(require_entitlement(LimitKey.AGENTS))]
+NumberSlotDep = Annotated[Entitlement, Depends(require_entitlement(LimitKey.WHATSAPP_NUMBERS))]
+SeatDep = Annotated[Entitlement, Depends(require_entitlement(LimitKey.TEAM_MEMBERS))]
+DocumentSlotDep = Annotated[
+    Entitlement,
+    Depends(require_entitlement(LimitKey.KNOWLEDGE_DOCUMENTS)),
+]
 
 
 def require_platform_roles(*roles: PlatformRole) -> Callable[[CurrentUser], CurrentUser]:

@@ -42,6 +42,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
+from app.db.models.billing import LimitKey
 from app.db.models.campaign import (
     DEFAULT_MESSAGES_PER_MINUTE,
     MAX_CAMPAIGN_NAME_LENGTH,
@@ -67,6 +68,7 @@ from app.repositories.campaign_repository import (
 from app.repositories.conversation_repository import ContactRepository, ConversationRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
+from app.services.entitlement_service import EntitlementService
 from app.services.messaging_service import MessagingService
 from app.services.template_service import refusal_reason_for
 from app.services.usage_service import UsageRecorder
@@ -130,8 +132,16 @@ class CampaignService:
         session: AsyncSession,
         tenant_id: uuid.UUID,
         messaging: MessagingService | None = None,
+        entitlements: EntitlementService | None = None,
     ) -> None:
         """`messaging` is needed only to send.
+
+        `entitlements` is needed only to schedule. A campaign is the one place a
+        limit depends on *how much* is being asked for - ten thousand recipients
+        is ten thousand messages - so it cannot be a route-level guard the way
+        creating an agent can, and it is checked here instead. Without one, a
+        campaign schedules unchecked: that is what the worker wants, having
+        already been let through once.
 
         Composing, scheduling and cancelling touch nothing outside the database,
         so a request constructs this without one. The worker supplies it, and a
@@ -141,6 +151,7 @@ class CampaignService:
         self._session = session
         self._tenant_id = tenant_id
         self._messaging = messaging
+        self._entitlements = entitlements
         self._campaigns = CampaignRepository(session, tenant_id=tenant_id)
         self._recipients = CampaignRecipientRepository(session, tenant_id=tenant_id)
         self._audience = AudienceRepository(session, tenant_id=tenant_id)
@@ -324,6 +335,16 @@ class CampaignService:
         pending = await self._recipients.pending_count(campaign.id)
         if pending == 0:
             raise ValidationError("This campaign has nobody left to send to.")
+
+        if self._entitlements is not None:
+            # Checked for the whole audience at once, before a single message
+            # goes out. Refusing halfway through a broadcast would leave a
+            # workspace having written to some of its customers and not others,
+            # which is worse than refusing it outright (ADR-030).
+            await self._entitlements.require(
+                LimitKey.PERIOD_CAMPAIGN_MESSAGES,
+                additional=pending,
+            )
 
         now = datetime.now(UTC)
         when = now if scheduled_at is None else _aware(scheduled_at)

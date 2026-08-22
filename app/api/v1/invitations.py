@@ -6,7 +6,7 @@ import uuid
 
 from fastapi import APIRouter, status
 
-from app.api.dependencies import InvitationServiceDep, TenantAdminDep
+from app.api.dependencies import InvitationServiceDep, SeatDep, TenantAdminDep
 from app.db.models import TenantInvitation
 from app.schemas.auth import WorkspaceSummary
 from app.schemas.invitation import (
@@ -41,6 +41,10 @@ async def issue_invitation(
     payload: InvitationCreateRequest,
     workspace: TenantAdminDep,
     service: InvitationServiceDep,
+    # Checked when the invitation is issued rather than when it is accepted:
+    # refusing somebody who was invited in good faith, at the moment they click,
+    # is a worse experience than telling the inviter now.
+    seat: SeatDep,
 ) -> InvitationCreatedResponse:
     invitation, token = await service.issue(
         tenant_id=workspace.tenant.id,
