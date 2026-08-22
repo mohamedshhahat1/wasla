@@ -1,6 +1,6 @@
 # Billing
 
-**Status: In Progress** — plans, the seeded catalogue, subscriptions and the entitlement service are Implemented (migration `0016`, ADR-029). The subscription lifecycle, the enforcement points, the billing APIs, invoices and payment providers are Planned. See [../TASKS.md](../TASKS.md) phase 13.
+**Status: In Progress** — plans, the seeded catalogue, subscriptions, the entitlement service, the subscription lifecycle and the billing APIs are Implemented (migration `0016`, ADR-029). The enforcement points, the period roll-over sweep, invoices and payment providers are Planned. See [../TASKS.md](../TASKS.md) phase 13.
 
 Scope: plans, subscriptions, entitlements, invoicing, and payment provider boundaries. Plan limits are listed in [SAAS.md](SAAS.md); metering is in [ANALYTICS.md](ANALYTICS.md).
 

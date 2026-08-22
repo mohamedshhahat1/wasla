@@ -6,6 +6,7 @@ from app.api.v1 import (
     agents,
     analytics,
     auth,
+    billing,
     campaigns,
     contacts,
     conversations,
@@ -24,6 +25,7 @@ api_router = APIRouter()
 api_router.include_router(agents.router)
 api_router.include_router(analytics.router)
 api_router.include_router(auth.router)
+api_router.include_router(billing.router)
 api_router.include_router(campaigns.router)
 api_router.include_router(contacts.router)
 api_router.include_router(conversations.router)

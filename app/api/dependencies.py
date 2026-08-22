@@ -22,10 +22,12 @@ from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.platform.platform_analytics import PlatformAnalyticsService
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
+from app.repositories.billing_repository import PlanRepository
 from app.services.agent_service import AgentService
 from app.services.analytics_service import AnalyticsService
 from app.services.auth_service import AuthService
 from app.services.campaign_service import CampaignService
+from app.services.entitlement_service import EntitlementService
 from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
 from app.services.invitation_service import InvitationService
@@ -34,6 +36,7 @@ from app.services.lead_service import LeadService
 from app.services.media_service import MediaService
 from app.services.messaging_service import MessagingService
 from app.services.sentiment_service import SentimentService
+from app.services.subscription_service import SubscriptionService
 from app.services.template_service import TemplateService
 from app.services.usage_service import UsageService
 from app.services.whatsapp_account_service import WhatsAppAccountService
@@ -344,6 +347,46 @@ def get_analytics_service(
 
 
 AnalyticsServiceDep = Annotated[AnalyticsService, Depends(get_analytics_service)]
+
+
+def get_plan_repository(session: SessionDep) -> PlanRepository:
+    """The catalogue. Not workspace-scoped, because a plan belongs to nobody."""
+    return PlanRepository(session)
+
+
+PlanRepositoryDep = Annotated[PlanRepository, Depends(get_plan_repository)]
+
+
+def get_subscription_service(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> SubscriptionService:
+    """Workspace-scoped, so no route can name a tenant of its own choosing."""
+    return SubscriptionService(session, tenant_id=workspace.tenant.id)
+
+
+SubscriptionServiceDep = Annotated[SubscriptionService, Depends(get_subscription_service)]
+
+
+def get_entitlement_service(
+    settings: SettingsDep,
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> EntitlementService:
+    """The one authority on what this workspace may do.
+
+    The default plan code comes from settings rather than from a caller: it is
+    what a workspace without a subscription is held to, and a route able to name
+    it is a route able to grant itself a better plan.
+    """
+    return EntitlementService(
+        session,
+        tenant_id=workspace.tenant.id,
+        default_plan_code=settings.default_plan_code,
+    )
+
+
+EntitlementServiceDep = Annotated[EntitlementService, Depends(get_entitlement_service)]
 
 
 def get_platform_analytics_service(session: SessionDep) -> PlatformAnalyticsService:
