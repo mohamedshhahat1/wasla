@@ -283,7 +283,11 @@ Deferred by decision, not unfinished:
 - [x] Tenant analytics APIs (`GET /analytics`, `GET /analytics/conversations/{id}/events`, `GET /usage`, `GET /usage/daily`)
 - [x] Platform analytics APIs (`GET /platform/overview`, `GET /platform/tenants`, in `app/platform/`)
 
-**COMPLETE.** Verified 2026-08-23 against PostgreSQL 16: 1121 tests passed, 0 failed, 0 skipped; migrations `0014` and `0015` each upgrade, `alembic check` reports no drift, downgrade one step and to base, and reapply clean; Ruff, Black and MyPy clean; the application factory builds and serves the four tenant routes and the two platform ones.
+**COMPLETE.** Verified 2026-08-23 against PostgreSQL 16: 1121 tests passed, 0 failed, 0 skipped; migrations `0014` and `0015` each upgrade, `alembic check` reports no drift, downgrade one step and to base, and reapply clean; Ruff, Black and MyPy clean.
+
+Also verified in containers, against a database reset to empty first: the image builds, the API container applies `0014` and `0015` on start, and the whole path was driven over real HTTP. A workspace was registered, a lead created through `POST /leads`, and the `lead_created` row appeared in `usage_events` in the same commit as the lead — then came back through `GET /usage` (`leads_created: 1`), `GET /analytics` (`leads.created: 1`) and `GET /platform/tenants`, where the workspace's counter matched its own. Authorization was checked on the way: `401` unauthenticated, `403` on `/platform/*` for a workspace **owner**, and `200` only once that user was granted a platform role.
+
+One trap this run exposed, recorded because it will catch the next person: running the test suite and Alembic against the same database leaves it in a state CI never produces. The suite drops every table it built from the models but does not touch `alembic_version`, so a later `alembic upgrade head` sees itself at head against an empty schema and does nothing. The database has to be reset before a container run means anything.
 
 Deferred by decision, not unfinished:
 
