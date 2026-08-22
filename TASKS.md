@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0 through 10 are complete, and the pipeline that verifies them has been repaired — see *Phase 5.5* below, which came first because none of the claims in this file were being checked while it was broken. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API, upload documents, and their agents answer from them through tenant-scoped pgvector search. Agents capture leads from those conversations, and schedule follow-ups that a customer's reply cancels. The workers have a process of their own: one container runs the media, agent, ingestion and follow-up loops together, selectable by `WORKER_KINDS`, and stops cleanly on SIGTERM. As of phase 9 a customer can send a photograph, a voice note or a PDF and be answered about what is actually in it: the media worker reads the file before any agent is asked to reply, and a business can send attachments back. Phase 10 classifies how every customer message reads *before* the agent composes anything, raises the conversation's priority when it is bad, and hands an angry customer to a person instead of answering them. Phase 11 (campaigns and templates) is next.
+**Current position:** Phases 0 through 11 are complete, and the pipeline that verifies them has been repaired — see *Phase 5.5* below, which came first because none of the claims in this file were being checked while it was broken. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API, upload documents, and their agents answer from them through tenant-scoped pgvector search. Agents capture leads from those conversations, and schedule follow-ups that a customer's reply cancels. The workers have a process of their own: one container runs the media, agent, ingestion, follow-up and campaign loops together, selectable by `WORKER_KINDS`, and stops cleanly on SIGTERM. As of phase 9 a customer can send a photograph, a voice note or a PDF and be answered about what is actually in it: the media worker reads the file before any agent is asked to reply, and a business can send attachments back. Phase 10 classifies how every customer message reads *before* the agent composes anything, raises the conversation's priority when it is bad, and hands an angry customer to a person instead of answering them. Phase 11 mirrors Meta's approved templates into a registry the platform can check in a transaction, and builds broadcasts on top of it — targeted only at people who already wrote to the business, paced by a rate limit stored on the row, and stopped for anyone who says stop. Phase 12 (analytics and usage) is next.
 
 ## Phase 0 — Foundation
 
@@ -191,7 +191,7 @@ Deferred by decision, not unfinished:
 - [x] `schedule_follow_up` tool for agents
 - [x] Follow-up API
 - [x] Worker service in Docker Compose (local and production)
-- [x] Worker process entrypoint running all three loops, selectable by `WORKER_KINDS`
+- [x] Worker process entrypoint running every loop, selectable by `WORKER_KINDS`
 - [x] Graceful shutdown on SIGTERM
 
 **COMPLETE.** Verified 2026-08-22 against PostgreSQL 16: 664 tests passed, 0 failed, 0 skipped; migration `0009` upgrades, `alembic check` reports no drift, downgrades to base, upgrades again and checks clean; Ruff, Black and MyPy clean; the image builds, the worker container starts, survives its blocking reserves, claims a due follow-up and resolves it, and shuts down cleanly on SIGTERM.
@@ -199,7 +199,7 @@ Deferred by decision, not unfinished:
 Deferred by decision, not unfinished:
 
 - [ ] In-flight reaper for jobs abandoned by a dead worker — needs a heartbeat or a visibility timeout to tell a slow job from a dead one; guessing wrong sends a customer two replies
-- [ ] Template approval checking — there is no template registry until Phase 11, so `template_name` is free text and nothing can confirm Meta has approved it before the send
+- [x] Template approval checking — delivered in Phase 11. The registry answers it, and a follow-up asks twice: at scheduling and again before the send
 
 ## Phase 9 — Media
 
@@ -237,17 +237,37 @@ Deferred, and recorded rather than forgotten:
 Deferred by decision, not unfinished:
 
 - [ ] Escalation analytics events — there is no analytics event table until Phase 12, and `message_sentiments` already carries the timestamped rows those counts will read. Adding a second write now would mean migrating two shapes later
-- [ ] A holding message when a conversation escalates — the customer gets silence until a person arrives. Wording has to be per-workspace and, outside the service window, an approved template; both wait for Phase 11
+- [ ] A holding message when a conversation escalates — the customer gets silence until a person arrives. Phase 11 removed the obstacle (there is now a registry of approved templates), but the remaining question is not technical: what a business says to a customer it has just decided is angry is the sentence most likely to make things worse, and it must be that workspace's own words. It is agent configuration and belongs with escalation, not with campaigns
 - [ ] Conversation-level mood, as distinct from message-level — a customer whose tone curdles over ten polite messages is judged one message at a time
 - [ ] Intent as a closed vocabulary — suggested in the prompt so reports group, but not enforced, because the intents a business has not thought of yet are the ones worth seeing
 - [ ] Sentiment on outbound messages — nothing reads how the business itself sounds
 
 ## Phase 11 — Campaigns and templates
 
-- [ ] WhatsApp template model and sync
-- [ ] Campaign model and audience selection
-- [ ] Scheduling and rate-limited sending
-- [ ] Delivery and failure statistics
+- [x] WhatsApp template registry mirrored from Meta, with sync (migration `0012`)
+- [x] Statuses and categories that fail closed on anything Meta introduces later
+- [x] Template approval checked by follow-ups — closes the Phase 8 deferral
+- [x] Campaign and recipient models, one row per person (migration `0013`)
+- [x] Audience built from conversations only, never an uploaded list (ADR-025)
+- [x] Marketing opt-out on contacts, honoured in audiences and re-checked at send time
+- [x] A customer's stop word honoured on the inbound path
+- [x] Campaign lifecycle: draft, scheduled, running, paused, completed, cancelled, failed
+- [x] Rate-limited sending, paced by a timestamp on the row rather than a sleep (ADR-026)
+- [x] Campaign worker, `WORKER_KINDS=campaign`, claiming with `FOR UPDATE SKIP LOCKED`
+- [x] Delivery and failure statistics, with delivery read from the message rows
+- [x] Campaign, template and opt-out APIs with role separation
+
+**COMPLETE.** Verified 2026-08-23 against PostgreSQL 16: 1020 tests passed, 0 failed, 0 skipped in 162s at 90% coverage; migrations `0012` and `0013` each upgrade, `alembic check` reports no drift, downgrade one step and to base, and reapply clean; Ruff, Black and MyPy clean; the image builds and the worker container runs all five loops. See the phase report.
+
+Deferred by decision, not unfinished:
+
+- [ ] Per-recipient personalisation — a campaign's template variables are one list for the whole send. Filling `{{1}}` with each customer's name needs a source of per-recipient facts that nothing here has yet
+- [ ] A per-*number* rate limit, as distinct from the per-campaign one. Two campaigns on one number can exceed either one's rate; a shared budget needs a shared counter, and a workspace that starts two simultaneous broadcasts has made a decision this system can surface but should not silently override
+- [ ] Audience import — refused on purpose (ADR-025). Adding one means answering the consent question, not writing a CSV parser
+- [ ] Campaign analytics events — counts come from the recipient and message rows; the analytics event table arrives in Phase 12, and writing a second shape now would mean migrating two later
+- [ ] Retention for completed campaigns — recipient rows are the record of who was written to and when, so sweeping them is a product decision rather than a cleanup job
+- [ ] Per-category consent — an opt-out is currently all-or-nothing. Splitting it needs a vocabulary a business can actually explain to a customer
+- [ ] Understanding a sentence like "please take me off your list" — the stop-word matcher reads whole messages only. The alternative is a model call on every inbound message to decide something a person can record in one click
 
 ## Phase 12 — Analytics and usage
 

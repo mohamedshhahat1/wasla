@@ -1,6 +1,6 @@
 # WhatsApp Integration
 
-**Status: Implemented** — inbound webhook (verification, signature checking, parsing, tenant resolution, idempotent storage), the account connection API, the outbound client, and media in both directions ([MEDIA.md](MEDIA.md)). Template sync belongs to phase 11. See [../TASKS.md](../TASKS.md) phase 3.
+**Status: Implemented** — inbound webhook (verification, signature checking, parsing, tenant resolution, idempotent storage), the account connection API, the outbound client, media in both directions ([MEDIA.md](MEDIA.md)), and the approved-template registry synced from Meta ([CAMPAIGNS.md](CAMPAIGNS.md)). See [../TASKS.md](../TASKS.md) phase 3.
 
 ## Endpoints
 
@@ -92,9 +92,8 @@ A message accepted without an identifier is treated as an error: delivery status
 
 No AI processing, media downloading, or outbound calls. The request resolves the workspace, stores the event, projects it, enqueues and returns. An attachment is noted and its bytes are left where they are: a file arrives as a handle rather than as data, and fetching it takes two round trips to Meta, which is a worker's job ([MEDIA.md](MEDIA.md)).
 
+Two things *are* done here rather than deferred, and both for the same reason — a worker running later would leave a window in which the wrong message goes out. A customer's reply cancels any follow-up waiting on the conversation, and a message that is entirely a stop word opts them out of campaigns ([CAMPAIGNS.md](CAMPAIGNS.md)). Each costs one comparison against work the request is already doing.
+
 ## Planned
 
-- An outbound send API, which belongs with conversations in phase 4: there is a message to persist and a 24-hour service window to enforce, and a raw send endpoint now would invite bypassing both.
-- Projection of delivery statuses and read receipts onto message rows, which needs the message model from phase 4.
-- Template sync and campaigns (phase 11).
-- Per-workspace access tokens, once there is encryption at rest (phase 14).
+- Per-workspace access tokens, once there is encryption at rest (phase 14). Until then every outbound call uses the platform credential from configuration ([ADR-009](../DECISIONS.md)).

@@ -41,7 +41,7 @@ Customer message -> webhook -> tenant resolved -> contact resolved
 | Attachments: images, voice notes, documents | Implemented |
 | Sentiment, priority and automatic escalation | Implemented |
 | Team management with tenant-scoped roles | Implemented |
-| Campaigns and templates | Planned |
+| Campaigns and templates | Implemented |
 | Analytics and usage dashboards | Planned |
 | Plans, subscriptions, billing | Planned |
 

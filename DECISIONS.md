@@ -513,3 +513,71 @@ A reading is stored per message and reused, which makes a retried job free and �
 Escalation leaves the customer with silence until a person arrives. That is deliberate for now: an agent's parting words to an angry customer are the words most likely to make things worse. A holding message needs per-workspace wording and waits for templates in Phase 11.
 
 Existing agents escalate by default, because the migration adds `escalation_sentiment` with a server default of `angry` rather than a null. A workspace that never touches its configuration still gets an angry customer in front of a person; one that does not want that sets the column to null.
+
+---
+
+## ADR-025 — A Campaign Can Only Reach Someone Who Wrote First
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Build every campaign audience from contacts that already have a conversation on the sending number, minus anyone who has opted out. Provide no route that uploads phone numbers, imports a list, or otherwise creates a recipient who is not already a contact of the workspace.
+
+Context:
+Phase 11 adds broadcast messaging. The obvious shape — the one every bulk-messaging tool has — is an audience built from an uploaded CSV, because that is what a business asks for on day one. The alternative is to derive the audience from what the platform already knows about who has talked to this business.
+
+Reason:
+The upload is the feature that turns a customer engagement platform into a spam tool, and it does so without any further decision by anybody. Once a list can be pasted in, the platform's compliance story rests entirely on the promise that the business collected consent somewhere else — a promise nothing here can check, and one that WhatsApp will hold the *number* responsible for rather than the claim.
+
+Deriving the audience from conversations makes consent structural instead of asserted. Somebody who wrote to this business chose to start a conversation with it; that is a weaker signal than a signed marketing opt-in, and it is a real one that exists in the data rather than in a policy document. It also has the property that matters operationally: a workspace cannot exceed it by accident, because there is no input that would let it.
+
+The cost is that a business with an existing customer list cannot message it through Wasla on day one. That is the intended trade. Importing is a decision to be made deliberately later, with whatever consent evidence a compliance review demands — not a text field that ships by default.
+
+Opt-out sits inside the same rule rather than beside it. It is part of the base population in `AudienceRepository`, not a filter a caller passes, so no future endpoint can construct an audience that omits the check. It is then re-checked at send time, because a campaign may run for hours and somebody who says stop in the middle of one must not receive the rest of it.
+
+Consequences:
+There is no bulk import, and adding one later means answering the consent question rather than adding a parser.
+
+An audience is bounded by the workspace's own conversation history, so a new workspace's first campaign is small. That is the honest size of its permission.
+
+`AudienceRepository` is the single place the rule lives. A second query written elsewhere would bypass it, which is why the audience is materialised through this one path and campaigns store the filter they used.
+
+---
+
+## ADR-026 — Campaign Rate Limits Live in the Database, Not in the Worker
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Send a campaign in batches, and after each batch write the next permitted moment onto the campaign row (`next_send_at`). Claim due campaigns with `FOR UPDATE SKIP LOCKED` and claim the recipients inside them the same way. Never sleep to pace a campaign.
+
+Context:
+A campaign must not write to ten thousand people as fast as the network allows. Meta's own throughput limit is far higher than what is safe: a number that suddenly broadcasts collects blocks, and a blocked number takes the whole business down rather than one campaign. Some mechanism has to pace the send. The obvious one is to sleep between messages in the worker.
+
+Reason:
+A sleep is wrong in three separate ways here, and each is enough on its own.
+
+It holds the lock. The campaign row is claimed for the duration of the batch, so a worker sleeping through a minute is a worker keeping every other replica off that campaign for a minute while doing nothing.
+
+It does not survive a restart. A process killed mid-sleep loses its knowledge of when it was allowed to resume, and the replacement starts by sending immediately — precisely at the moment a deployment is rolling, which is when several replicas are starting at once.
+
+It does not compose across replicas. Two workers each sleeping their own way through their own idea of the rate produce twice the rate, and neither is wrong about its own arithmetic.
+
+A timestamp on the row has none of those properties. It is durable, it is shared, and the claim query reads it, so a campaign that has used its allowance is simply not claimed until the moment arrives. The pacing then holds however many replicas are running, including zero.
+
+`SKIP LOCKED` at both levels is what makes concurrency safe rather than merely fast. Without it on recipients, two replicas working one campaign would read the same pending rows and send the same person the same message twice — the one failure a broadcast must never have, because there is no way to take it back.
+
+Consequences:
+Precision is bounded by the poll interval: a campaign sends at or slightly under its configured rate, never above it. Under is the right direction to err.
+
+The worker holds no campaign state at all, so scaling `WORKER_KINDS=campaign` across replicas needs no coordination beyond what PostgreSQL already provides.
+
+The rate is per campaign rather than per number. Two campaigns running at once on the same number can therefore exceed either one's rate. That is recorded as a limit rather than solved: a per-number budget needs a shared counter, and the workspace that runs two simultaneous broadcasts on one number has made a decision this system can surface but should not silently override.

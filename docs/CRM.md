@@ -123,7 +123,7 @@ Cancelling something already sent succeeds and changes nothing: losing that race
 
 `SKIPPED` and `FAILED` are deliberately different states. `FAILED` means an attempt broke and may work later. `SKIPPED` means Wasla decided not to send because sending would breach WhatsApp's rules — a policy outcome that retrying can never fix, since the window does not reopen on its own. The reason is written to `last_error` either way, so a workspace can see why its nudge never went out.
 
-**Known gap.** There is no template registry until Phase 11, so `template_name` is free text and nothing can confirm Meta has approved it before the send is attempted.
+**Closed in Phase 11.** The template registry now answers whether Meta has approved a template, and a follow-up asks it twice: when the nudge is scheduled, where a person is present to fix the problem, and again before the send, because Meta pauses a template without warning and hours pass between. A refusal at dispatch is `SKIPPED` like any other policy outcome. A template the registry has never heard of is still allowed through — a workspace that has not synced cannot be told apart from one whose template is genuinely unknown, and refusing there would break every follow-up it has. See [CAMPAIGNS.md](CAMPAIGNS.md).
 
 ### Delivery
 

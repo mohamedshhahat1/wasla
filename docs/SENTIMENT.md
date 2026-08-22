@@ -106,7 +106,7 @@ A deployment with no OpenAI key takes no readings and answers customers exactly 
 
 ## Known limits
 
-- **Nothing acknowledges the customer on escalation.** The agent goes quiet and a person is flagged. A holding message needs per-workspace wording, which arrives with templates in Phase 11.
+- **Nothing acknowledges the customer on escalation.** The agent goes quiet and a person is flagged. Phase 11 removed the obstacle — there is now a registry of approved templates one could be sent from — but the remaining question is not a technical one: what a business says to a customer it has just decided is angry is the sentence most likely to make things worse, and it has to be that workspace's own words rather than a default. It is agent configuration, and it belongs with escalation rather than with campaigns; still open.
 - **Intent is a free-form label, not an enum.** Common ones are suggested in the prompt so reports group cleanly; a genuinely new intent is recorded in the model's own words rather than forced into "other".
 - **Only the newest inbound message is read.** Messages Meta delivers in one webhook share a `created_at` — it is the transaction's start time — so which of them is judged falls to the id tie-break. They arrived in the same moment and carry the same mood; the alternative is a monotonic column on the busiest table in the schema.
 - **Nothing re-reads a conversation as a whole.** A customer whose mood curdles over ten polite messages is judged one message at a time.

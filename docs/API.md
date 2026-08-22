@@ -182,9 +182,68 @@ Four behaviours worth knowing:
 
 There is no endpoint that sends a follow-up now. Sending is the worker's job, and "send this immediately" is just a message — use `POST /conversations/{id}/messages`.
 
+## Templates
+
+**Status: Implemented.** Full behaviour in [CAMPAIGNS.md](CAMPAIGNS.md).
+
+| Method | Path | Role |
+| --- | --- | --- |
+| GET | `/api/v1/templates` | Any workspace member |
+| GET | `/api/v1/templates/{template_id}` | Any workspace member |
+| POST | `/api/v1/templates/sync?account_id=...` | Owner or admin |
+
+Listing filters by `account_id`, `status` and `category`. Not cursor-paged, unlike conversations or leads: a WhatsApp Business account holds tens of templates, and Meta caps how many a business may have.
+
+- **There is no route that creates, edits or deletes a template.** Approval belongs to Meta; one written here would be a local fiction that fails at send time.
+- **Sync is synchronous and returns what changed** — `created`, `updated`, `withdrawn`. A workspace approves a template and then wants to use it, so an answer it can see beats a job it must wait for.
+- **A template that has vanished from Meta becomes `disabled`, not deleted.** A campaign may reference it, and its `rejection_reason` is where the workspace reads why it stopped working.
+- **Only `approved` may be sent.** A status Meta introduces later lands on `unknown`, which is not sendable.
+
+## Campaigns
+
+**Status: Implemented.** Full behaviour in [CAMPAIGNS.md](CAMPAIGNS.md).
+
+| Method | Path | Role |
+| --- | --- | --- |
+| GET | `/api/v1/campaigns` | Any workspace member |
+| POST | `/api/v1/campaigns` | Owner or admin (`201`) |
+| POST | `/api/v1/campaigns/audience/preview` | Owner or admin |
+| GET | `/api/v1/campaigns/{campaign_id}` | Any workspace member |
+| POST | `/api/v1/campaigns/{campaign_id}/audience` | Owner or admin |
+| POST | `/api/v1/campaigns/{campaign_id}/schedule` | Owner or admin |
+| POST | `/api/v1/campaigns/{campaign_id}/pause` | Owner or admin |
+| POST | `/api/v1/campaigns/{campaign_id}/cancel` | Owner or admin |
+| GET | `/api/v1/campaigns/{campaign_id}/statistics` | Any workspace member |
+| GET | `/api/v1/campaigns/{campaign_id}/recipients` | Any workspace member |
+
+Reading is ordinary inbox work. Composing, targeting and starting take an administrator: a campaign writes to thousands of customers at once and is the least reversible thing the platform does.
+
+Six behaviours worth knowing:
+
+- **There is no `body` field, and no way to name a phone number.** A campaign sends an approved template to contacts who already have a conversation on the sending number. Both absences are the compliance boundary — see [ADR-025](../DECISIONS.md).
+- **`variables` must match the template's own count.** A mismatch answers `422` at composition rather than failing at Meta ten thousand times.
+- **An audience can only be set on a draft.** Rebuilding a part-sent list would duplicate some people and drop others.
+- **Scheduling with no `scheduled_at` means now**, and still returns immediately: the worker sends, so no request is held open behind a broadcast.
+- **`pause` and `cancel` are different.** Paused is resumable — schedule again. Cancelled is final, and what was sent stays sent.
+- **Lifecycle changes are named transitions.** There is no `PATCH` that sets `status`.
+
+## Contacts
+
+**Status: Implemented.** Only the marketing opt-out; a contact is created by the webhook from what Meta reports and has nothing else a person edits.
+
+| Method | Path | Role |
+| --- | --- | --- |
+| POST | `/api/v1/contacts/{contact_id}/opt-out` | Any workspace member |
+| DELETE | `/api/v1/contacts/{contact_id}/opt-out` | Owner or admin |
+
+Recording is any member's to do — the person handling the conversation is the one a customer says "stop" to. Clearing takes an administrator, because undoing somebody's own refusal should be deliberate.
+
+- **Recording is idempotent and never moves the timestamp.** The first refusal is the one that counts.
+- **A customer whose whole message is a stop word is opted out automatically**, on the inbound path. It does not silence the agent.
+
 ## Planned tenant endpoints
 
-`/api/v1/contacts`, `/api/v1/campaigns`, `/api/v1/analytics`, `/api/v1/usage`, `/api/v1/billing`.
+`/api/v1/analytics`, `/api/v1/usage`, `/api/v1/billing`.
 
 ## Planned platform endpoints
 

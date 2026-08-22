@@ -11,11 +11,11 @@ Technical source of truth for the current system architecture. Every section car
 
 ## 1. System overview
 
-**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport, conversations, the agent orchestrator with its queue and worker, tenant-scoped knowledge retrieval, lead management and scheduled follow-ups exist. Media, sentiment, campaigns, usage and billing do not.
+**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport, conversations, the agent orchestrator with its queue and worker, tenant-scoped knowledge retrieval, lead management, scheduled follow-ups, media understanding, sentiment and escalation, and campaigns with an approved-template registry all exist. Usage metering and billing do not.
 
 Wasla is an API-first, multi-tenant backend. A business (tenant) connects one or more WhatsApp Business phone numbers. Inbound customer messages arrive as Meta webhooks, are resolved to a tenant, persisted, and queued for asynchronous AI processing. An agent orchestrator loads the conversation, retrieves tenant-scoped knowledge, calls the OpenAI Responses API with a controlled tool set, and replies through the WhatsApp Cloud API.
 
-Of that pipeline, everything except retrieval is built: the webhook, tenant resolution, event persistence, the projection into conversations and messages, the Redis queue, the orchestrator, the outbound client, and the worker that joins them. The worker has no process of its own yet — it is a class nothing calls — and usage recording arrives with Phase 12.
+The whole of that pipeline is built, and a worker process runs the five loops that feed it. What is not built is measurement: usage metering, analytics events and billing arrive in Phases 12 and 13, so nothing yet counts what a workspace consumes.
 
 ```
 WhatsApp
@@ -128,7 +128,7 @@ Retries are deliberately narrow: HTTP 429 and connection errors only, never 5xx 
 
 A send writes its message row before calling Meta and records a rejection on that row rather than raising, so an attempt always survives as evidence; the API therefore answers `201` with a `failed` status instead of an error code (ADR-013).
 
-A template send is recorded as `MessageKind.TEMPLATE` with `template_name` and `template_language`, and with **no body**. Meta renders an approved template from its own copy, so the text the customer read is not something Wasla holds; writing a reconstruction into the transcript would put words there that were never sent. The name and language are columns rather than a formatted string in `body`, because follow-ups (phase 8) and campaigns (phase 11) both need to ask which template went out without parsing it back out of prose. Templates are also the one message kind exempt from the 24-hour service window (ADR-012), which is precisely what they exist for.
+A template send is recorded as `MessageKind.TEMPLATE` with `template_name` and `template_language`, and with **no body**. Meta renders an approved template from its own copy, so the text the customer read is not something Wasla holds; writing a reconstruction into the transcript would put words there that were never sent. The name and language are columns rather than a formatted string in `body`, because follow-ups and campaigns both need to ask which template went out without parsing it back out of prose. Templates are also the one message kind exempt from the 24-hour service window (ADR-012), which is precisely what they exist for.
 
 ### 5.2 Conversation projection
 
@@ -299,7 +299,7 @@ Three properties are load-bearing, and each has a test.
 
 A rejected send is retried with a widening backoff until the attempt limit, then left `FAILED` with the reason. Scheduling twice on one conversation reschedules rather than queueing a second message: an agent that decides to follow up on every turn would otherwise stack notifications on one customer's phone.
 
-**Known gap.** There is no template registry until Phase 11, so `template_name` is free text and nothing can confirm Meta has approved it before the send is attempted. That is the weakest point in this compliance story.
+**Closed in Phase 11.** The template registry now answers whether Meta has approved a template, and a follow-up asks it twice: when the nudge is scheduled, where a person is present to fix the problem, and again before the send, because Meta pauses a template without warning and hours pass between the two moments. A refusal at dispatch is `SKIPPED`, like any other policy outcome. A template the registry has never heard of is still allowed through — see `docs/CAMPAIGNS.md` for why that asymmetry is deliberate.
 
 ## 11. Media flow
 
@@ -387,17 +387,59 @@ Two tables carry the result. `conversations` holds the current reading — what 
 
 Priority rises on a bad reading and never falls on a good one; a person gives it back through `POST /conversations/{id}/priority`. Handoff fires above a per-agent threshold (`Agent.escalation_sentiment`, default `angry`, null to disable) and above a fixed confidence floor — a doubtful reading raises the flag but never silences the agent.
 
-## 13. Background jobs and Redis usage
+## 13. Campaign flow
 
-**Status: In Progress** — the Redis client, its health probe, the refresh-token denylist, the agent, ingestion and media job queues, the AI, ingestion, follow-up and media workers, and the worker process that runs them are Implemented. The campaign worker is not.
+**Status: Implemented** — the template registry, campaign composition and targeting, the rate-limited worker, delivery statistics and marketing opt-out, exercised against real PostgreSQL. Detail in `docs/CAMPAIGNS.md`; the decisions are ADR-025 and ADR-026.
 
-All four workers run in **one container**, concurrently in one event loop, selected by `WORKER_KINDS` (empty means all). Each is I/O-bound — waiting on Redis, PostgreSQL, OpenAI or Meta — so they interleave rather than compete, and one process is markedly simpler to deploy and watch than three. Splitting them later is an environment variable, not another image.
+```
+template approved in the WhatsApp Business Manager
+    |
+POST /templates/sync ----> registry mirrors what Meta says
+    |
+POST /campaigns ---------> draft; template must be approved and on this number
+    |
+POST /campaigns/{id}/audience
+    |     contacts with a conversation on this number, minus anyone opted out
+    |     materialised now: one row per person, UNIQUE(campaign_id, contact_id)
+    |
+POST /campaigns/{id}/schedule ----> now, or a moment in the future
+    |
+worker claims it (SKIP LOCKED)
+    |
+number disabled? template withdrawn? -- yes --> FAILED, reason recorded
+    |
+claim a batch of recipients (SKIP LOCKED)
+    |
+opted out since? -- yes --> SKIPPED, never retried
+    |
+send the approved template; record the message
+    |
+next_send_at = now + batch / messages_per_minute
+    |
+nobody left? -- yes --> COMPLETED
+```
+
+Three rules define what a campaign is, and each is checked when it is composed and again before every batch — a campaign scheduled last night is one whose number may since have been disabled and whose template Meta may since have paused.
+
+**Only an approved template.** There is no free-text body on a campaign and never will be: outside the 24-hour service window Meta accepts approved templates only, and a campaign is by definition to people outside it.
+
+**Only people who wrote first.** The audience is built from conversations on the sending number. No route uploads a phone number, and that absence is the anti-spam boundary rather than a missing feature (ADR-025).
+
+**Never faster than the number can bear.** The rate limit is a timestamp on the campaign row, advanced as batches go out. A sleep would hold the lock, would not survive a restart, and would not compose across replicas (ADR-026).
+
+Opt-out lives in the base population of `AudienceRepository` rather than as a filter a caller passes, and is re-checked at send time. A customer whose entire message is a stop word is opted out on the inbound path, in the same transaction that stores the message — that closes the window in which a sweep could write to somebody who has already said no. It does not silence the agent: refusing marketing is not refusing an answer.
+
+## 14. Background jobs and Redis usage
+
+**Status: Implemented** — the Redis client, its health probe, the refresh-token denylist, the agent, ingestion and media job queues, and the AI, ingestion, follow-up, media and campaign workers, all run by one worker process.
+
+All five workers run in **one container**, concurrently in one event loop, selected by `WORKER_KINDS` (empty means all). Each is I/O-bound — waiting on Redis, PostgreSQL, OpenAI or Meta — so they interleave rather than compete, and one process is markedly simpler to deploy and watch than five. Splitting them apart later is an environment variable, not another image; `campaign` is the one that most often wants a replica of its own, because a workspace mid-broadcast is bandwidth against Meta rather than inference.
 
 SIGTERM asks each loop to stop and each finishes the job in its hand before returning, so a deploy does not dead-letter work that was about to succeed. The production compose gives the worker a longer `stop_grace_period` than the API: a worker mid-inference holds an HTTP call and an open transaction.
 
 One constraint binds the two together and is easy to get wrong. redis-py applies `socket_timeout` to *every* read, including the blocking `BLMOVE` a reserve is deliberately waiting on, so the read timeout has to outlast the block or an idle worker dies on its own patience. `MAX_BLOCKING_SECONDS` lives in `app/core/redis.py` beside the client that sizes its timeout around it, and the queues take their block duration from there.
 
-Redis provides job queues, caching, rate limiting, follow-up scheduling, and temporary state. Workers handle AI processing, media processing, document ingestion and embeddings, follow-ups, campaigns, and usage aggregation.
+Redis provides job queues, caching, rate limiting and temporary state. The two *time*-triggered workers — follow-ups and campaigns — poll PostgreSQL instead (ADR-022): their work is a durable row a person can see and cancel, and a schedule held in Redis as well would be a second source of truth that drifts from the first the moment one is written without the other.
 
 There are three queues, not one, and the separation is deliberate (ADR-019). An agent job is a customer waiting for a reply; an ingestion job is a document that will be searchable in a minute; a media job is a customer waiting whose reply cannot even be composed yet. Sharing one list would let a bulk upload of a hundred documents sit in front of somebody's question, and a worker pool sized for downloading is the wrong shape for one doing inference.
 
@@ -405,7 +447,7 @@ Each queue is three lists rather than one — for the agent queue, `agent:jobs:p
 
 Two gaps are known and recorded rather than implied away. Nothing reaps the in-flight list, so a job abandoned by a killed worker stalls until an operator moves it; and requeueing an *agent* job is an operator decision, because re-running one produces a second reply to the customer. Ingestion and media jobs are genuinely idempotent — a stored file is not fetched again and a read one is not read again — so requeueing those is safe.
 
-## 14. Database architecture
+## 15. Database architecture
 
 **Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, and the identity, tenancy, WhatsApp, conversation, agent, knowledge, CRM, follow-up and media tables are Implemented; campaign, usage and billing tables arrive in later phases.
 
@@ -423,7 +465,7 @@ The schema carries one deliberate denormalisation. `conversations.last_inbound_a
 
 Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, the unique invitation token hash, `whatsapp_accounts (tenant_id)`, a platform-wide `UNIQUE(phone_number_id)`, `whatsapp_events (tenant_id)`, `whatsapp_events (account_id)`, `whatsapp_events (tenant_id, state)`, `UNIQUE(tenant_id, event_id)`, `contacts (tenant_id)`, `UNIQUE(tenant_id, wa_id)`, `conversations (tenant_id)`, `conversations (tenant_id, status)`, `conversations (tenant_id, last_message_at)`, `conversations (contact_id)`, `UNIQUE(tenant_id, contact_id, account_id)`, `messages (tenant_id)`, `messages (conversation_id, created_at)`, `UNIQUE(tenant_id, wa_message_id)`, `agents (tenant_id)`, `agents (tenant_id, status)`, `UNIQUE(tenant_id, name)` on agents, `agent_tools (tenant_id)`, `agent_tools (agent_id)`, and `UNIQUE(tenant_id, agent_id, name)`. Media adds `message_media (tenant_id)`, `message_media (tenant_id, status)`, `message_media (conversation_id)` and `UNIQUE(message_id)`. The conversation index is not an optimisation: before an agent is allowed to answer, the worker asks whether anything on the conversation is still unread, and it asks once per file that arrives. The unique constraint is what makes a webhook replay a no-op and the download job safe to retry. Further indexes are planned on usage and analytics `(tenant_id, created_at)`.
 
-## 15. Multi-tenancy
+## 16. Multi-tenancy
 
 **Status: Implemented** — enforced in the repository layer and tested against a real database.
 
@@ -435,13 +477,13 @@ A background worker has no authenticated context to take a tenant id from, so it
 
 Cross-tenant reads answer `not_found`, never `forbidden`, so error codes cannot be used to map another tenant's data. `tests/integration/test_authorization.py`, `tests/integration/test_whatsapp_persistence.py` and `tests/integration/test_conversation_projection.py` prove this against PostgreSQL.
 
-## 16. SaaS owner architecture
+## 17. SaaS owner architecture
 
 **Status: In Progress** — the platform role authorization layer is Implemented; the `app/platform/` surface is Planned.
 
 Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated: a platform role grants nothing inside a workspace, which is tested. The platform layer lives in `app/platform/` and is exposed under `/api/v1/platform/*` for tenant administration, usage, revenue, plans, subscriptions, system health, and audit logs. Privileged platform actions are always audit-logged.
 
-## 17. Authentication and authorization
+## 18. Authentication and authorization
 
 **Status: Implemented** — rate limiting on authentication endpoints remains Planned (phase 14).
 
@@ -449,7 +491,7 @@ Argon2id password hashing with rehash-on-login, typed access and refresh tokens,
 
 Conversation routes are open to every workspace member rather than to admins only, because restricting them would exclude the people who staff an inbox. Reading agent configuration is open for the same reason. Role gates stay on administrative actions: connecting a number, inviting a colleague, revoking an invitation, and changing what an agent says to customers.
 
-## 18. Billing and usage tracking
+## 19. Billing and usage tracking
 
 **Status: Planned**
 
@@ -457,7 +499,7 @@ Usage is a first-class subsystem of append-only usage events (`tenant_id`, `even
 
 Token usage is already returned by the provider client and logged per turn, so the recorder has a source when it is built.
 
-## 19. Observability
+## 20. Observability
 
 **Status: Implemented** — structured logging, request IDs, and health endpoints exist and are tested. OpenTelemetry, Prometheus, and Sentry remain Planned.
 
@@ -477,7 +519,7 @@ Events that are expected but worth counting are logged rather than raised: an un
 
 An agent turn logs one summary event carrying the rounds taken, the tools run, whether it handed off, the estimated and actual token counts, and how many history turns were dropped, which is what makes a bad prompt or an over-tight budget diagnosable after the fact. Provider failures log the status, the attempt count and the provider's error `code` and `type` — never its prose, because that prose can quote the request and the request contains a customer's conversation.
 
-## 20. CI/CD and production deployment
+## 21. CI/CD and production deployment
 
 **Status: In Progress** — CI is Implemented; deployment automation and worker containers are Planned.
 
