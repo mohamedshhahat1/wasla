@@ -17,6 +17,7 @@ from app.api import health
 from app.api.v1 import api_router
 from app.core.config import Settings, get_settings
 from app.core.exceptions import register_exception_handlers
+from app.core.limits import BodySizeLimitMiddleware, RequestTimeoutMiddleware
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestContextMiddleware
 from app.core.redis import RedisClient
@@ -63,7 +64,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved
 
+    # Ordering matters and is deliberate. Middleware added later runs first,
+    # so the body limit is outermost: an oversized request is refused before
+    # anything else touches it, including the request logger. The timeout sits
+    # inside it, and the request context innermost, so a timed-out request still
+    # gets a request id in its log line.
     app.add_middleware(RequestContextMiddleware, header_name=resolved.request_id_header)
+    app.add_middleware(
+        RequestTimeoutMiddleware,
+        timeout_seconds=resolved.request_timeout_seconds,
+    )
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=resolved.max_request_bytes)
     if resolved.cors_origins:
         app.add_middleware(
             CORSMiddleware,

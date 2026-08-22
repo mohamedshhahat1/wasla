@@ -48,6 +48,14 @@ Privileged and administrative actions are recorded in an audit log, including pl
 
 Controlled dependency versions, dependency vulnerability scanning, secret scanning, and container scanning where practical.
 
+## Request limits
+
+**Status: Implemented.** A body larger than `MAX_REQUEST_BYTES` is refused with `413` **before it is read** — a limit applied after buffering has already spent the memory it exists to protect — and a request that declares no length is counted as it streams. A handler that runs past `REQUEST_TIMEOUT_SECONDS` answers `504`, which bounds a pooled database connection being held rather than the client's patience.
+
+Both are configured in nginx as well, and both are here anyway: nginx is one deployment topology, not a property of the software. Run the container directly or put a different proxy in front and every limit configured there disappears silently.
+
+The WhatsApp webhook is exempt from the timeout, for the reason it is exempt from rate limiting: a timed-out delivery is a non-2xx that Meta retries until the subscription is disabled. It keeps the body cap, because that protects memory rather than shedding load.
+
 ## Audit trail
 
 **Status: Implemented** (ADR-033). `audit_logs` records deliberate acts: who was let into a workspace, which numbers were connected or disabled, every change to what a workspace pays, and every campaign scheduled or cancelled. A workspace reads its own trail at `GET /api/v1/audit-logs` (owners and administrators); platform staff read every entry, including the platform's own, at `GET /api/v1/platform/audit-logs`.

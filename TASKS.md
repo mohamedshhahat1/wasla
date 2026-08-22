@@ -329,7 +329,7 @@ Deferred by decision, not unfinished:
 - [x] Rate limiting: authentication by client address, workspace traffic and campaigns by workspace, the WhatsApp webhook deliberately unlimited, failing open on a Redis outage (ADR-032)
 - [x] Audit logging: append-only, labels copied so an entry outlives the account it names, platform actions recorded in the workspace's own trail, readable at `/audit-logs` and `/platform/audit-logs` (migration `0018`, ADR-033)
 - [x] CORS and secure headers (CORS configurable; Nginx security headers in place)
-- [ ] Request size and timeout limits
+- [x] Request size and timeout limits, enforced by the application rather than only by nginx: an oversized body is refused before it is read, a handler that overruns answers 504, and the WhatsApp webhook is exempt from the timeout but not from the body cap
 - [ ] Retry policies for external calls
 - [x] Dependency advisories cleared and a floor put under them (Starlette declared directly — ADR-017)
 - [ ] Per-workspace credential encryption at rest

@@ -96,6 +96,16 @@ class Settings(BaseSettings):
     # discover there was nothing to read.
     media_max_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
 
+    # Request limits, enforced by the application rather than only by nginx.
+    # nginx is one deployment topology, not a property of the software: run the
+    # container directly and every limit configured there disappears.
+    # Comfortably above the media cap, so an attachment upload is bounded by the
+    # rule that understands attachments rather than by this blunt one.
+    max_request_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
+    # How long a handler may take. Bounds a pooled database connection being
+    # held, not the client's patience. The WhatsApp webhook is exempt.
+    request_timeout_seconds: float = Field(default=60.0, gt=0)
+
     # Rate limiting
     # Off by default in tests and on everywhere else, because a limiter that is
     # on in the suite makes every test order-dependent: the twentieth login in a
