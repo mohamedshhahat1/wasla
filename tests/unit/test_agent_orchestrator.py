@@ -28,7 +28,9 @@ from app.db.models.conversation import (
     MessageStatus,
 )
 from app.db.models.media import MediaStatus, MessageMedia
+from app.db.models.sentiment import SentimentLabel
 from app.integrations.openai.types import AgentReply, TokenUsage, ToolCall
+from app.services.sentiment_service import SentimentOutcome
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 CONVERSATION = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -100,6 +102,18 @@ class FakeMedia:
             for message_id in message_ids
             if message_id in self._attachments
         }
+
+
+class FakeSentiment:
+    """Stands in for the assessor and records the threshold it was given."""
+
+    def __init__(self, *, escalates: bool = False) -> None:
+        self._escalates = escalates
+        self.thresholds: list[object] = []
+
+    async def assess(self, *, conversation_id, escalation_sentiment):
+        self.thresholds.append(escalation_sentiment)
+        return SentimentOutcome(escalated=self._escalates)
 
 
 def _returns(instance):
@@ -201,6 +215,7 @@ def _build(
     max_rounds=3,
     embeddings=None,
     attachments=None,
+    sentiment=None,
 ):
     fakes = {
         "ConversationRepository": FakeConversations(
@@ -223,6 +238,7 @@ def _build(
         registry=registry,
         max_rounds=max_rounds,
         embeddings=embeddings,
+        sentiment=sentiment,
     )
 
 
@@ -659,3 +675,75 @@ async def test_an_image_description_reaches_the_model(monkeypatch):
     prompt = " ".join(turn.text for turn in client.calls[0]["turns"])
     assert "4,500 EGP" in prompt
     assert "how much?" in prompt
+
+
+async def test_an_escalated_conversation_is_never_answered(monkeypatch):
+    """The whole point of assessing before composing.
+
+    The provider is not called at all - not called and discarded. A reply that
+    was written and then thrown away has already cost the tokens, and worse,
+    anything its tools did during the turn would have happened too.
+    """
+    client = StubClient([])
+    orchestrator = _build(
+        monkeypatch,
+        client=client,
+        agent=_agent(),
+        sentiment=FakeSentiment(escalates=True),
+    )
+
+    outcome = await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert outcome.escalated is True
+    assert outcome.handed_off is True
+    assert outcome.should_send is False
+    assert client.calls == []
+
+
+async def test_a_calm_conversation_is_answered_as_usual(monkeypatch):
+    client = StubClient([_reply("Of course, here you go.")])
+    orchestrator = _build(
+        monkeypatch,
+        client=client,
+        agent=_agent(),
+        sentiment=FakeSentiment(escalates=False),
+    )
+
+    outcome = await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert outcome.reply == "Of course, here you go."
+    assert outcome.escalated is False
+    assert len(client.calls) == 1
+
+
+async def test_the_answering_agent_decides_the_threshold(monkeypatch):
+    """Not a global setting: the agent that will reply is the one whose rules apply."""
+    sentiment = FakeSentiment()
+    client = StubClient([_reply("hello")])
+    orchestrator = _build(
+        monkeypatch,
+        client=client,
+        agent=_agent(escalation_sentiment=SentimentLabel.NEGATIVE),
+        sentiment=sentiment,
+    )
+
+    await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert sentiment.thresholds == [SentimentLabel.NEGATIVE]
+
+
+async def test_an_agent_that_cannot_answer_is_never_assessed(monkeypatch):
+    """No reply to stop, so nothing worth paying a provider to judge."""
+    sentiment = FakeSentiment(escalates=True)
+    disabled = _agent(status=AgentStatus.DISABLED)
+    orchestrator = _build(
+        monkeypatch,
+        client=StubClient([]),
+        agent=disabled,
+        sentiment=sentiment,
+    )
+
+    outcome = await orchestrator.answer(conversation_id=CONVERSATION, agent=disabled)
+
+    assert outcome.escalated is False
+    assert sentiment.thresholds == []

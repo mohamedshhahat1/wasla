@@ -29,6 +29,8 @@ from app.integrations.openai.client import ResponsesClient, build_http_client
 from app.integrations.openai.embeddings import EmbeddingsClient
 from app.repositories.agent_repository import AgentRepository
 from app.services.messaging_service import MessagingService
+from app.services.sentiment_reader import SentimentAnalyzer
+from app.services.sentiment_service import SentimentService
 from app.workers.queue import BLOCK_SECONDS, AgentJob, AgentQueue, MalformedJobError
 
 logger = get_logger(__name__)
@@ -139,12 +141,25 @@ class AgentWorker:
                     model=self._settings.openai_embedding_model,
                     dimensions=EMBEDDING_DIMENSIONS,
                 )
+                # Shares the turn's client too. One small classification call
+                # runs before the agent composes anything, which is the only
+                # order in which an escalation can stop a reply rather than
+                # follow one.
+                sentiment = SentimentService(
+                    session=session,
+                    tenant_id=job.tenant_id,
+                    analyzer=SentimentAnalyzer(
+                        responses=client,
+                        model=self._settings.openai_sentiment_model,
+                    ),
+                )
                 orchestrator = AgentOrchestrator(
                     session=session,
                     tenant_id=job.tenant_id,
                     client=client,
                     registry=self._registry,
                     embeddings=embeddings,
+                    sentiment=sentiment,
                 )
                 outcome = await orchestrator.answer(
                     conversation_id=job.conversation_id,
@@ -153,8 +168,9 @@ class AgentWorker:
 
             reply = outcome.reply
             if outcome.handed_off or not reply:
-                # Silence is a decision here, not a failure: a handoff, a
-                # conversation a human owns, or nothing worth saying.
+                # Silence is a decision here, not a failure: a handoff, an
+                # escalation, a conversation a human owns, or nothing worth
+                # saying.
                 return
 
             messaging = MessagingService(

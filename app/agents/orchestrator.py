@@ -35,6 +35,7 @@ from app.integrations.openai.types import TokenUsage, ToolCall, ToolResult, Turn
 from app.repositories.agent_repository import AgentRepository, AgentToolRepository
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
 from app.repositories.media_repository import MediaRepository
+from app.services.sentiment_service import SentimentService
 
 logger = get_logger(__name__)
 
@@ -58,20 +59,29 @@ class AgentOutcome:
     usage: TokenUsage
     rounds: int
     agent_id: uuid.UUID | None = None
+    # A handoff the classifier decided rather than one the model asked for.
+    # Both stop the reply; only this one happened before a word was composed.
+    escalated: bool = False
 
     @property
     def should_send(self) -> bool:
         return bool(self.reply) and not self.handed_off
 
 
-def _nothing(*, agent_id: uuid.UUID | None = None) -> AgentOutcome:
+def _nothing(
+    *,
+    agent_id: uuid.UUID | None = None,
+    handed_off: bool = False,
+    escalated: bool = False,
+) -> AgentOutcome:
     return AgentOutcome(
         reply=None,
-        handed_off=False,
+        handed_off=handed_off,
         tools_run=(),
         usage=TokenUsage(input_tokens=0, output_tokens=0, total_tokens=0),
         rounds=0,
         agent_id=agent_id,
+        escalated=escalated,
     )
 
 
@@ -87,6 +97,7 @@ class AgentOrchestrator:
         registry: ToolRegistry | None = None,
         max_rounds: int = MAX_ROUNDS,
         embeddings: EmbeddingsClient | None = None,
+        sentiment: SentimentService | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
@@ -94,6 +105,10 @@ class AgentOrchestrator:
         # Optional: an agent granted no knowledge tool never needs one, and a
         # deployment without an embedding provider should still answer.
         self._embeddings = embeddings
+        # Optional in the same way, and for the same reason: no assessor means
+        # no assessment, and a deployment without a provider still answers. The
+        # worker always supplies one, which is the path customers arrive on.
+        self._sentiment = sentiment
         self._registry = registry if registry is not None else build_default_registry()
         self._max_rounds = max(1, max_rounds)
         self._agents = AgentRepository(session, tenant_id=tenant_id)
@@ -133,6 +148,21 @@ class AgentOrchestrator:
         if not resolved.is_answering:
             logger.info("agent.not_active", extra={"agent_id": str(resolved.id)})
             return _nothing(agent_id=resolved.id)
+
+        if self._sentiment is not None:
+            # Before a word is composed, not after. An escalation that arrives
+            # second means the agent already answered an angry customer, which
+            # is the thing this is here to prevent.
+            mood = await self._sentiment.assess(
+                conversation_id=conversation_id,
+                escalation_sentiment=resolved.escalation_sentiment,
+            )
+            if mood.blocks_reply:
+                logger.info(
+                    "agent.escalated_before_reply",
+                    extra={"conversation_id": str(conversation_id)},
+                )
+                return _nothing(agent_id=resolved.id, handed_off=True, escalated=True)
 
         history = await self._messages.list_for_conversation(
             conversation_id=conversation_id,

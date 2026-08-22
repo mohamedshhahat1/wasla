@@ -223,6 +223,14 @@ class MessageRepository(TenantScopedRepository[Message]):
         What sentiment analysis reads. Only the newest one: a job that waited
         behind others is answering the conversation as it stands now, and the
         mood that matters is the mood of the message that prompted it.
+
+        "Newest" is by `created_at`, and Meta can deliver several messages in
+        one webhook. Those are stored in one transaction, so they share a
+        timestamp - PostgreSQL's `now()` is the transaction's start - and which
+        of them this returns is then decided by the id tie-break rather than by
+        arrival order. Accepted: messages that arrived together came from the
+        same moment and carry the same mood, and the alternative is a monotonic
+        column on the busiest table in the schema.
         """
         return await self._first(
             self._select()

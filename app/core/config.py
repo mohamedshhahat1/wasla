@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     # may reasonably want a cheaper model for it than the one that answers.
     openai_vision_model: str = "gpt-4.1-mini"
     openai_transcription_model: str = "gpt-4o-mini-transcribe"
+    # Runs on every customer message, so it is the model whose cost scales with
+    # traffic rather than with usage of one feature. Separate from the chat
+    # model so a workspace can classify cheaply and answer well.
+    openai_sentiment_model: str = "gpt-4.1-mini"
     openai_timeout_seconds: float = Field(default=60.0, gt=0)
 
     # Media
