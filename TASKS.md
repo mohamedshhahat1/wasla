@@ -280,7 +280,7 @@ Deferred by decision, not unfinished:
 - [x] Aggregation services (named counters and a daily series, over a half-open window)
 - [x] Metering wired into every path that consumes something: inbound and outbound messages, conversations opened, agent turns and the sentiment call, retrieval, media reads and transcriptions, stored bytes, leads captured, campaign messages
 - [x] Analytics event model, recording handoffs and who decided them (migration `0015`, ADR-028)
-- [ ] Tenant analytics APIs
+- [x] Tenant analytics APIs (`GET /analytics`, `GET /analytics/conversations/{id}/events`, `GET /usage`, `GET /usage/daily`)
 - [ ] Platform analytics APIs
 
 Deferred by decision, not unfinished:

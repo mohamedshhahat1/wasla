@@ -1,6 +1,6 @@
 # Analytics and Usage
 
-**Status: In Progress** — usage metering is Implemented and wired into every path that consumes something; the analytics event model and the dashboard APIs are Planned. See [../TASKS.md](../TASKS.md) phase 12. The decision behind how usage is written is ADR-027.
+**Status: In Progress** — usage metering, the analytics event model and the tenant dashboard APIs are Implemented; the platform surface is Planned. See [../TASKS.md](../TASKS.md) phase 12. The decision behind how usage is written is ADR-027.
 
 Scope: analytics events, usage metering, and dashboard data contracts.
 
@@ -55,7 +55,26 @@ A member is added to this enum by one test: does anything else already record it
 
 ## Tenant metrics
 
-Conversations, messages, leads, qualified leads, conversion rate, human handoffs, AI resolution rate, average response time, unhappy customers, agent performance, campaign performance. Tenant-level usage counters: `messages_received`, `messages_sent`, `ai_requests`, `input_tokens`, `output_tokens`, `total_tokens`, `rag_queries`, `media_processed`, `voice_minutes`, `leads_created`, `conversations_created`, `storage_used`, API requests, campaign messages.
+Derived from the domain tables, over the same half-open window usage uses, so a figure on the analytics page and one on the usage page cover the same period.
+
+| Group | Figures |
+| --- | --- |
+| Conversations | created, handed off, escalated, AI-resolved, AI resolution rate |
+| Messages | received, sent, failed, average response seconds, unanswered |
+| Leads | created, qualified, won, lost, conversion rate, by status |
+| Sentiment | readings, unhappy conversations, by label |
+| Campaigns | sent, delivered, failed, skipped |
+| Handoffs | count by source |
+
+Two definitions decide what several of these numbers mean, and both are stated here because a metric whose definition is unwritten is one two people will read differently.
+
+**Average response time** is the time from a customer message that *started a burst* to the next business message in that conversation. A burst is a message whose predecessor was not also inbound: a customer who sends four messages in a row waited once, not four times, and measuring each of them would divide the same wait by four — flattering the figure exactly when service is worst. A customer still waiting contributes nothing rather than an infinity, and is reported separately as `unanswered`. A failed send is not a reply.
+
+**AI resolution rate** is the share of conversations *created in the window* that were never handed to a person. Conversations, not handoff events: one conversation that bounced between agent and colleague three times is one conversation the AI did not resolve, and counting events could drive the rate negative.
+
+Two are deliberately naive and say so. Conversion rate is wins over leads created *in the window*, so a lead created in August and won in September counts in neither month's rate — cohort accounting is a product decision. And `delivered` is read from the message rows rather than the recipient rows, because delivery is Meta's word and arrives later as a status webhook; conflating it with a successful send would report a hundred per cent delivery forever.
+
+Rates are always returned beside the counts they were computed from. A rate on its own cannot be checked, cannot be re-aggregated across two windows, and hides the difference between nine of ten and nine hundred of a thousand.
 
 ## Platform metrics
 

@@ -1,6 +1,6 @@
 # API
 
-**Status: In Progress** — health, authentication, invitations, WhatsApp accounts, the WhatsApp webhook, conversations, media, the knowledge base, leads and follow-ups are Implemented. Everything else is Planned.
+**Status: In Progress** — health, authentication, invitations, WhatsApp accounts, the WhatsApp webhook, conversations, media, the knowledge base, leads, follow-ups, templates, campaigns, usage and analytics are Implemented. Billing and the platform surface are Planned.
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
@@ -241,9 +241,42 @@ Recording is any member's to do — the person handling the conversation is the 
 - **Recording is idempotent and never moves the timestamp.** The first refusal is the one that counts.
 - **A customer whose whole message is a stop word is opted out automatically**, on the inbound path. It does not silence the agent.
 
+## Usage
+
+**Status: Implemented.** What the workspace consumed, for a window.
+
+| Method | Path | Role |
+| --- | --- | --- |
+| GET | `/api/v1/usage` | Owner or admin |
+| GET | `/api/v1/usage/daily` | Owner or admin |
+
+Administrators only, unlike analytics: usage is the input to a bill and to a plan limit, so it sits with billing rather than with the inbox.
+
+- **Both take an optional `since` and `until`**, UTC, half-open `[since, until)`. Given neither, the last thirty days. A window longer than 366 days is refused.
+- **The response carries the window it applied**, because a figure without its period is not quotable.
+- **`counters`** are the named meters a plan limit is written against, every one present even at zero; **`totals`** is the unabridged list, so a meter added later is visible before anything is renamed to carry it.
+- **`/daily` is sparse**: a day on which nothing happened has no point. Filling zeros is the client's job, because only the client knows whether it is drawing bars or a cumulative line. Narrow it with repeated `event_type=`.
+
+## Analytics
+
+**Status: Implemented.** How the workspace is doing, for a window.
+
+| Method | Path | Role |
+| --- | --- | --- |
+| GET | `/api/v1/analytics` | Any workspace member |
+| GET | `/api/v1/analytics/conversations/{conversation_id}/events` | Any workspace member |
+
+Open to every member, unlike usage: these are the numbers that tell the people staffing an inbox how the inbox is doing.
+
+- **Rates arrive beside the counts they came from**, never instead of them. A rate alone cannot be checked and hides the difference between nine of ten and nine hundred of a thousand.
+- **`average_response_seconds` is null, not zero, when nothing was answered.** Zero would read as instant service. `unanswered` counts the customers still waiting.
+- **Every lead status and sentiment label is named even at zero**, so a dashboard renders the column without knowing the vocabulary.
+- **`handoffs_by_source`** splits handoffs into the agent asking, a reading escalating, and a colleague taking over — the same total with very different meanings.
+- **A conversation's events answer "why did this end up with a person"**, newest first. Another workspace's id answers `404`.
+
 ## Planned tenant endpoints
 
-`/api/v1/analytics`, `/api/v1/usage`, `/api/v1/billing`.
+`/api/v1/billing`.
 
 ## Planned platform endpoints
 

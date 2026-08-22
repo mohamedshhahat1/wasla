@@ -22,6 +22,7 @@ from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
 from app.services.agent_service import AgentService
+from app.services.analytics_service import AnalyticsService
 from app.services.auth_service import AuthService
 from app.services.campaign_service import CampaignService
 from app.services.follow_up_service import FollowUpService
@@ -33,6 +34,7 @@ from app.services.media_service import MediaService
 from app.services.messaging_service import MessagingService
 from app.services.sentiment_service import SentimentService
 from app.services.template_service import TemplateService
+from app.services.usage_service import UsageService
 from app.services.whatsapp_account_service import WhatsAppAccountService
 from app.workers.ingestion_queue import IngestionQueue
 
@@ -317,6 +319,30 @@ def get_template_service(
 
 
 TemplateServiceDep = Annotated[TemplateService, Depends(get_template_service)]
+
+
+def get_usage_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> UsageService:
+    """Workspace-scoped, and read-only.
+
+    The recorder is deliberately absent: nothing a request does is metered by a
+    route. Meters belong to the services that consume something, which is what
+    keeps a meter in the same transaction as the work it measures (ADR-027).
+    """
+    return UsageService(session, tenant_id=workspace.tenant.id)
+
+
+UsageServiceDep = Annotated[UsageService, Depends(get_usage_service)]
+
+
+def get_analytics_service(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> AnalyticsService:
+    """Workspace-scoped reporting. Recording happens in the services that act."""
+    return AnalyticsService(session, tenant_id=workspace.tenant.id)
+
+
+AnalyticsServiceDep = Annotated[AnalyticsService, Depends(get_analytics_service)]
 
 
 def require_tenant_roles(*roles: TenantRole) -> Callable[[ActiveWorkspace], ActiveWorkspace]:

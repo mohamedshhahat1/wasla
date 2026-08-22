@@ -540,7 +540,7 @@ Plans and limits will be stored and configurable, enforced through a central ent
 
 ## 19a. Analytics
 
-**Status: In Progress** — the analytics event table and handoff recording are Implemented (migration `0015`, ADR-028); the reporting APIs follow in this phase.
+**Status: In Progress** — the analytics event table, handoff recording and the tenant reporting APIs are Implemented (migration `0015`, ADR-028); the platform surface follows in this phase.
 
 Analytics are **derived from the domain tables**, not from a parallel event stream. Messages, conversations, leads, lead activities, sentiment readings and campaign recipients are already timestamped and tenant-scoped, so a count is a grouped query over rows that exist rather than a second write that can drift from them. Deriving is also retroactive: a metric defined next month can be computed for last month.
 
@@ -557,6 +557,12 @@ analytics_events (append-only, staged in the same transaction)
 ```
 
 `conversations.mode` is a current state: it cannot say when a conversation moved, how often, or who decided, and those three causes are indistinguishable afterwards while being the most important distinction on the dashboard. Only a real change is recorded — setting `human` on a conversation a colleague already owns is somebody editing a reason. Events and distinct conversations are counted separately, because a conversation handed over three times is three handoffs and one conversation.
+
+Reporting is `TenantMetricsRepository`: one grouped query per metric family, each an indexed range scan over one workspace's rows. Several queries rather than one, deliberately — a single statement joining messages to leads to sentiment produces a plan nobody can read and a cartesian product somebody eventually has to debug. `AnalyticsService` composes them into one report over the same half-open window usage uses.
+
+Two definitions carry the numbers and are written down beside the queries, because a metric whose definition is unwritten is one two people will read differently. **Average response time** measures from a customer message that started a burst to the next business message: a customer who sends four messages in a row waited once, and measuring each would divide the same wait by four exactly when service is worst. **AI resolution rate** counts conversations, not handoff events, so one conversation bounced between agent and colleague three times is one conversation the AI did not resolve.
+
+`GET /usage` is administrators only and `GET /analytics` is open to every member. That line is the product's, not an accident: usage is the input to a bill, while analytics is how the inbox is doing, and restricting the second would hide the team's own work from the team.
 
 The two tables have deliberately opposite policies. `usage_events` must be reproducible exactly as recorded, because it is billing input; analytics should reflect what the data says now.
 
