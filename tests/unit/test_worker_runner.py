@@ -15,11 +15,13 @@ import pytest
 from app.workers.ai_worker import AgentWorker
 from app.workers.follow_up_worker import FollowUpWorker
 from app.workers.ingestion_worker import IngestionWorker
+from app.workers.media_worker import MediaWorker
 from app.workers.runner import (
     AGENT,
     ALL_KINDS,
     FOLLOW_UP,
     INGESTION,
+    MEDIA,
     build_workers,
     run,
     selected_kinds,
@@ -74,6 +76,11 @@ def test_the_order_is_stable_however_it_was_written():
     assert selected_kinds("follow_up,agent") == selected_kinds("agent,follow_up")
 
 
+def test_media_is_ordered_before_the_agent_it_feeds():
+    """The order work actually flows in: a file is read, then answered."""
+    assert selected_kinds("agent,media") == (MEDIA, AGENT)
+
+
 def test_an_unknown_kind_is_refused():
     """A typo would otherwise start a process that quietly does nothing.
 
@@ -85,8 +92,17 @@ def test_an_unknown_kind_is_refused():
 
 
 def test_the_error_names_the_valid_choices():
-    with pytest.raises(ValueError, match="agent, ingestion, follow_up"):
+    with pytest.raises(ValueError, match="media, agent, ingestion, follow_up"):
         selected_kinds("nonsense")
+
+
+def test_media_can_be_run_on_its_own():
+    """Downloading files is a different shape of work from inference.
+
+    A deployment that wants to scale them apart does it with this variable
+    rather than a second image.
+    """
+    assert selected_kinds("media") == (MEDIA,)
 
 
 def test_each_kind_builds_its_own_worker(settings):
@@ -98,6 +114,7 @@ def test_each_kind_builds_its_own_worker(settings):
     )
 
     assert [type(worker) for worker in workers] == [
+        MediaWorker,
         AgentWorker,
         IngestionWorker,
         FollowUpWorker,

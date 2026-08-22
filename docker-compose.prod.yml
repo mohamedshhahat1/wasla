@@ -65,7 +65,14 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       META_APP_SECRET: ${META_APP_SECRET:-}
       META_VERIFY_TOKEN: ${META_VERIFY_TOKEN:-}
+      MEDIA_STORAGE_PATH: ${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
       RUN_MIGRATIONS: "false"
+    volumes:
+      # Shared with the worker: one writes the file, the other serves it back.
+      # This is a single-host arrangement, and it is the constraint ADR-023
+      # records - with the API and the worker on different hosts, this volume
+      # is not shared and the object-store implementation is required.
+      - media-data:${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
     depends_on:
       postgres:
         condition: service_healthy
@@ -96,9 +103,13 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:-}
+      MEDIA_STORAGE_PATH: ${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
       # Empty runs every kind. Set to a comma-separated subset to scale the
-      # agent loop apart from ingestion and follow-ups.
+      # media and agent loops apart from ingestion and follow-ups - reading
+      # files is bandwidth-bound where inference is not.
       WORKER_KINDS: ${WORKER_KINDS:-}
+    volumes:
+      - media-data:${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
     depends_on:
       postgres:
         condition: service_healthy
@@ -136,6 +147,7 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  media-data:
 
 networks:
   internal:

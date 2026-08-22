@@ -28,6 +28,7 @@ from app.core.exceptions import DependencyUnavailableError, PermissionDeniedErro
 from app.core.logging import get_logger
 from app.integrations.whatsapp.signature import SIGNATURE_HEADER, verify_signature
 from app.services.whatsapp_service import WhatsAppIngestionService
+from app.workers.media_queue import MediaQueue
 from app.workers.queue import AgentQueue
 
 logger = get_logger(__name__)
@@ -41,7 +42,11 @@ router = APIRouter(prefix="/webhooks/whatsapp", tags=["WhatsApp"])
 # module is the authentication wiring, and this endpoint is unauthenticated by
 # necessity: Meta cannot hold a credential of ours.
 def get_ingestion_service(session: SessionDep, redis: RedisDep) -> WhatsAppIngestionService:
-    return WhatsAppIngestionService(session=session, queue=AgentQueue(redis.client))
+    return WhatsAppIngestionService(
+        session=session,
+        queue=AgentQueue(redis.client),
+        media_queue=MediaQueue(redis.client),
+    )
 
 
 IngestionServiceDep = Annotated[WhatsAppIngestionService, Depends(get_ingestion_service)]

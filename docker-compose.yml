@@ -50,11 +50,16 @@ services:
       DATABASE_URL: postgresql+asyncpg://wasla:wasla@postgres:5432/wasla
       REDIS_URL: redis://redis:6379/0
       RUN_MIGRATIONS: "true"
+      MEDIA_STORAGE_PATH: /var/lib/wasla/media
     ports:
       - "8000:8000"
     volumes:
       - ./app:/app/app:ro
       - ./alembic:/app/alembic:ro
+      # Shared with the worker, which writes what the API reads back. This is a
+      # single-host arrangement and the reason ADR-023 exists: the moment there
+      # are two hosts, the object-store implementation replaces the local one.
+      - media-data:/var/lib/wasla/media
     command:
       [
         "uvicorn",
@@ -84,11 +89,13 @@ services:
       LOG_FORMAT: console
       DATABASE_URL: postgresql+asyncpg://wasla:wasla@postgres:5432/wasla
       REDIS_URL: redis://redis:6379/0
-      # Every kind by default. Set to a comma-separated subset - "agent" or
+      MEDIA_STORAGE_PATH: /var/lib/wasla/media
+      # Every kind by default. Set to a comma-separated subset - "media" or
       # "ingestion,follow_up" - to run them in separate replicas.
       WORKER_KINDS: ""
     volumes:
       - ./app:/app/app:ro
+      - media-data:/var/lib/wasla/media
     command: ["worker"]
     depends_on:
       postgres:
@@ -104,3 +111,4 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  media-data:

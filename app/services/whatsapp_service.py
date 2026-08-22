@@ -30,12 +30,14 @@ from app.integrations.whatsapp.payload import (
     InboundMessage,
     parse_webhook,
 )
+from app.repositories.media_repository import MediaRepository
 from app.repositories.whatsapp_repository import (
     WhatsAppAccountDirectory,
     WhatsAppEventRepository,
 )
 from app.services.conversation_service import ConversationProjectionService
 from app.services.follow_up_service import FollowUpService
+from app.workers.media_queue import MediaJob, MediaQueue
 from app.workers.queue import AgentJob, AgentQueue
 
 logger = get_logger(__name__)
@@ -47,6 +49,11 @@ class IngestionOutcome:
 
     `queued` is not one of those buckets. It counts conversations handed to a
     worker, which is at most the number of messages stored and often fewer.
+
+    `media_queued` counts files handed to the media worker. A conversation that
+    received one is deliberately *not* counted in `queued`: its agent job is
+    enqueued by that worker once the file has been read, because answering a
+    photograph before looking at it produces a reply about nothing.
     """
 
     stored: int = 0
@@ -56,6 +63,7 @@ class IngestionOutcome:
     ignored: int = 0
     queued: int = 0
     cancelled_follow_ups: int = 0
+    media_queued: int = 0
 
 
 class WhatsAppIngestionService:
@@ -65,18 +73,27 @@ class WhatsAppIngestionService:
     still stored and projected, which is all the projection tests need.
     """
 
-    def __init__(self, *, session: AsyncSession, queue: AgentQueue | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        session: AsyncSession,
+        queue: AgentQueue | None = None,
+        media_queue: MediaQueue | None = None,
+    ) -> None:
         self._session = session
         self._queue = queue
+        self._media_queue = media_queue
         self._directory = WhatsAppAccountDirectory(session)
         self._repositories: dict[uuid.UUID, WhatsAppEventRepository] = {}
         self._projections: dict[uuid.UUID, ConversationProjectionService] = {}
         self._follow_ups: dict[uuid.UUID, FollowUpService] = {}
+        self._media: dict[uuid.UUID, MediaRepository] = {}
         self._accounts: dict[str, WhatsAppAccount | None] = {}
 
     async def ingest(self, payload: Mapping[str, Any]) -> IngestionOutcome:
         envelope = parse_webhook(payload)
         stored = duplicates = unknown = inactive = cancelled = 0
+        attachments: list[tuple[uuid.UUID, uuid.UUID]] = []
         ignored = envelope.ignored
         answering: list[tuple[uuid.UUID, uuid.UUID]] = []
 
@@ -128,7 +145,13 @@ class WhatsAppIngestionService:
             projection = self._projection(account.tenant_id)
             if isinstance(source, InboundMessage):
                 message = await projection.project_message(account_id=account.id, message=source)
-                answering.append((account.tenant_id, message.conversation_id))
+                if source.media is not None:
+                    # Read first, answered after. The media worker enqueues the
+                    # agent job once there is something to answer with, so this
+                    # conversation is deliberately left out of `answering`.
+                    attachments.append((account.tenant_id, message.id))
+                else:
+                    answering.append((account.tenant_id, message.conversation_id))
                 # The customer has spoken, so any nudge waiting on this
                 # conversation has lost its reason. Cancelled here, on the
                 # inbound path, rather than left for the follow-up worker to
@@ -147,6 +170,7 @@ class WhatsAppIngestionService:
             await self._session.flush()
 
         queued = await self._enqueue(answering)
+        media_queued = await self._enqueue_media(attachments)
 
         return IngestionOutcome(
             stored=stored,
@@ -156,7 +180,56 @@ class WhatsAppIngestionService:
             ignored=ignored,
             queued=queued,
             cancelled_follow_ups=cancelled,
+            media_queued=media_queued,
         )
+
+    async def _enqueue_media(self, attachments: list[tuple[uuid.UUID, uuid.UUID]]) -> int:
+        """Ask the media worker to read each file that arrived.
+
+        One job per file rather than per conversation, unlike agent jobs: two
+        photographs are two things to read, and collapsing them would leave one
+        unread.
+
+        A queue failure is logged and swallowed for the same reason it is on the
+        agent path - a non-2xx answer would make Meta retry the whole delivery
+        and eventually disable the subscription, so a Redis outage must not
+        become a webhook outage. The cost here is a file that stays PENDING and
+        a conversation whose reply waits for someone to requeue it, which is
+        recoverable; the message itself is stored.
+        """
+        if self._media_queue is None or not attachments:
+            return 0
+
+        media_rows = await self._media_for(attachments)
+        queued = 0
+        for tenant_id, media_id in media_rows:
+            try:
+                await self._media_queue.enqueue(MediaJob(tenant_id=tenant_id, media_id=media_id))
+            except RedisError:
+                logger.warning("media.enqueue_failed", extra={"media_id": str(media_id)})
+                continue
+            queued += 1
+        return queued
+
+    async def _media_for(
+        self,
+        attachments: list[tuple[uuid.UUID, uuid.UUID]],
+    ) -> list[tuple[uuid.UUID, uuid.UUID]]:
+        """Resolve message ids to the media rows just written for them."""
+        resolved: list[tuple[uuid.UUID, uuid.UUID]] = []
+        for tenant_id, message_id in attachments:
+            repository = self._media_repository(tenant_id)
+            media = await repository.get_for_message(message_id)
+            if media is not None:
+                resolved.append((tenant_id, media.id))
+        return resolved
+
+    def _media_repository(self, tenant_id: uuid.UUID) -> MediaRepository:
+        repository = self._media.get(tenant_id)
+        if repository is None:
+            repository = MediaRepository(self._session, tenant_id=tenant_id)
+            self._media[tenant_id] = repository
+        return repository
 
     async def _enqueue(self, conversations: list[tuple[uuid.UUID, uuid.UUID]]) -> int:
         """Ask a worker to look at each conversation that received a message.

@@ -33,13 +33,18 @@ from app.db.session import Database
 from app.workers.ai_worker import AgentWorker
 from app.workers.follow_up_worker import FollowUpWorker
 from app.workers.ingestion_worker import IngestionWorker
+from app.workers.media_worker import MediaWorker
 
 logger = get_logger(__name__)
 
 AGENT: Final = "agent"
 INGESTION: Final = "ingestion"
 FOLLOW_UP: Final = "follow_up"
-ALL_KINDS: Final = (AGENT, INGESTION, FOLLOW_UP)
+MEDIA: Final = "media"
+# Media comes before agent deliberately. It is the order the work flows in -
+# a file is read, then answered - and the order the log lines appear in at
+# startup, which is worth having match.
+ALL_KINDS: Final = (MEDIA, AGENT, INGESTION, FOLLOW_UP)
 
 KINDS_VARIABLE: Final = "WORKER_KINDS"
 
@@ -96,6 +101,8 @@ def build_workers(
             workers.append(IngestionWorker(database=database, redis=redis, settings=settings))
         elif kind == FOLLOW_UP:
             workers.append(FollowUpWorker(database=database, settings=settings))
+        elif kind == MEDIA:
+            workers.append(MediaWorker(database=database, redis=redis, settings=settings))
     return workers
 
 

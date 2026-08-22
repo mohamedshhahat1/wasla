@@ -278,3 +278,104 @@ async def test_a_sticker_is_read_as_an_image(db_session):
     media = await MediaRepository(db_session, tenant_id=tenant.id).get_for_message(message.id)
     assert media is not None
     assert media.mime_type == "image/webp"
+
+
+class RecordingQueue:
+    """Stands in for a Redis queue and remembers what was put on it."""
+
+    def __init__(self) -> None:
+        self.jobs: list[object] = []
+
+    async def enqueue(self, job) -> None:
+        self.jobs.append(job)
+
+
+async def test_a_photograph_is_queued_for_reading_not_for_answering(db_session):
+    """The ordering the phase turns on.
+
+    An agent asked to answer now would see a message with no words in it. The
+    media worker enqueues the agent job once there is something to answer with.
+    """
+    tenant = await _tenant(db_session, slug="acme")
+    await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
+
+    agents = RecordingQueue()
+    media_queue = RecordingQueue()
+    outcome = await WhatsAppIngestionService(
+        session=db_session,
+        queue=agents,
+        media_queue=media_queue,
+    ).ingest(_media_delivery(caption="how much?"))
+
+    assert outcome.stored == 1
+    assert outcome.media_queued == 1
+    assert outcome.queued == 0
+    assert agents.jobs == []
+    assert len(media_queue.jobs) == 1
+
+    message = await MessageRepository(db_session, tenant_id=tenant.id).get_by_wa_message_id(
+        "wamid.image"
+    )
+    assert message is not None
+    media = await MediaRepository(db_session, tenant_id=tenant.id).get_for_message(message.id)
+    assert media is not None
+    assert media_queue.jobs[0].media_id == media.id
+
+
+async def test_a_text_message_is_still_queued_for_answering(db_session):
+    """Nothing about the ordinary path changes."""
+    tenant = await _tenant(db_session, slug="acme")
+    await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
+
+    agents = RecordingQueue()
+    media_queue = RecordingQueue()
+    outcome = await WhatsAppIngestionService(
+        session=db_session,
+        queue=agents,
+        media_queue=media_queue,
+    ).ingest(
+        {
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "metadata": {"phone_number_id": PHONE_NUMBER_ID},
+                                "messages": [
+                                    {
+                                        "id": "wamid.plain",
+                                        "from": CUSTOMER,
+                                        "type": "text",
+                                        "timestamp": SENT_AT,
+                                        "text": {"body": "hello"},
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    )
+
+    assert outcome.queued == 1
+    assert outcome.media_queued == 0
+    assert len(agents.jobs) == 1
+    assert media_queue.jobs == []
+
+
+async def test_two_photographs_are_two_reading_jobs(db_session):
+    """One job per file, unlike agent jobs, which are one per conversation.
+
+    Two photographs are two things to read; collapsing them would leave one
+    unread and the conversation waiting on it forever.
+    """
+    tenant = await _tenant(db_session, slug="acme")
+    await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
+
+    media_queue = RecordingQueue()
+    service = WhatsAppIngestionService(session=db_session, media_queue=media_queue)
+    await service.ingest(_media_delivery(message_id="wamid.one"))
+    await service.ingest(_media_delivery(message_id="wamid.two"))
+
+    assert len(media_queue.jobs) == 2
