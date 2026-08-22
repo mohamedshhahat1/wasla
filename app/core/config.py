@@ -96,6 +96,22 @@ class Settings(BaseSettings):
     # discover there was nothing to read.
     media_max_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
 
+    # Rate limiting
+    # Off by default in tests and on everywhere else, because a limiter that is
+    # on in the suite makes every test order-dependent: the twentieth login in a
+    # file would fail for a reason the test never mentions.
+    rate_limit_enabled: bool = True
+    # Authentication: per client address, since the caller has no identity yet.
+    # Ten attempts a minute is generous for a person and hostile to a script.
+    rate_limit_auth_per_minute: int = Field(default=10, gt=0)
+    # Everything else a workspace does, counted per workspace rather than per
+    # user: the limit protects the platform's shared resources, and a workspace
+    # with fifty colleagues is fifty times the load of one with one.
+    rate_limit_workspace_per_minute: int = Field(default=300, gt=0)
+    # Broadcasts and template syncs, which are expensive per request and rare
+    # per person. Deliberately much lower than the general workspace limit.
+    rate_limit_campaign_per_minute: int = Field(default=30, gt=0)
+
     # Billing
     # The plan a workspace is entitled to when it has no subscription of its
     # own: every workspace that predates billing, and any created before one is

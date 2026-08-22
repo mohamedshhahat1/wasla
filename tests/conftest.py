@@ -24,20 +24,37 @@ from app.services.entitlement_service import Entitlement
 
 
 class FakeRedisCommands:
-    """The only Redis command a request issues: enqueueing work.
+    """The Redis commands a request issues: enqueueing work, and counting it.
 
     Reserving, releasing and dead-lettering belong to the worker, which is
     covered by its own fake. Implementing them here would invite a route to
     start using them.
+
+    The counter commands exist because the rate limiter runs inside the request
+    path. They are only reached by tests that switch limiting on - the default
+    settings fixture leaves it off.
     """
 
     def __init__(self) -> None:
         self.pushed: dict[str, list[str]] = {}
+        self.counters: dict[str, int] = {}
+        self.expiries: dict[str, int] = {}
 
     async def rpush(self, key: str, value: str) -> int:
         queue = self.pushed.setdefault(key, [])
         queue.append(value)
         return len(queue)
+
+    async def incr(self, key: str) -> int:
+        self.counters[key] = self.counters.get(key, 0) + 1
+        return self.counters[key]
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        self.expiries[key] = seconds
+        return True
+
+    async def ttl(self, key: str) -> int:
+        return self.expiries.get(key, -1)
 
 
 class FakeDependency:
@@ -93,6 +110,11 @@ def settings() -> Settings:
         log_format="console",
         log_level="WARNING",
         cors_origins=[],
+        # Off by default here, and deliberately. A limiter counting across a
+        # file makes every test in it order-dependent: the eleventh login would
+        # fail for a reason the test never mentions. The limiter has its own
+        # tests, which switch it on.
+        rate_limit_enabled=False,
     )
 
 

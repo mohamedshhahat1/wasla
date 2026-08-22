@@ -1,12 +1,20 @@
 # Security
 
-**Status: In Progress** — Phase 0 covers configuration hygiene, safe error handling, and logging redaction. Authentication, RBAC, signature verification, and audit logging are Planned.
+**Status: In Progress** — configuration hygiene, safe error handling, logging redaction, authentication, RBAC, tenant isolation, Meta signature verification and rate limiting are Implemented. Audit logging and per-workspace credential encryption are Planned (phase 14).
 
 Scope: the security model and its controls. Permission mechanics are in [AUTH.md](AUTH.md).
 
 ## Secrets and configuration
 
-All secrets come from the environment. `.env` is never committed; `.env.example` documents required variables without values. No secrets in code, images, or CI logs. Tenant-specific WhatsApp credentials are stored with encryption at rest rather than as a single global token.
+All secrets come from the environment. `.env` is never committed; `.env.example` documents required variables without values. No secrets in code, images, or CI logs.
+
+**WhatsApp credentials are currently a single global token** (`META_ACCESS_TOKEN`), not per workspace. Per-workspace credentials with encryption at rest are Planned in phase 14; until then a deployment serves every workspace with one Meta token, which is a real limitation of the multi-tenancy rather than a detail.
+
+## Rate limiting
+
+**Status: Implemented** (ADR-032). Authentication is counted per client address, everything a signed-in workspace does is counted per workspace, and campaigns and template syncs carry a second, smaller budget. A refusal answers `429` with `Retry-After`.
+
+Two properties are deliberate and both are tested. The limiter **fails open**: if Redis is unreachable the request is allowed, because a limiter that fails closed turns a cache outage into a total outage. And **the WhatsApp webhook is never limited** — Meta retries a non-2xx and eventually disables the subscription, so a 429 there loses a customer's message and then the integration. The webhook is bounded instead by signature verification, idempotency on the event id, and doing no inference on the request path.
 
 ## Tenant isolation
 

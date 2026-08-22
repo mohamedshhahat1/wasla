@@ -6,7 +6,9 @@ workspace grants nothing here, and holding a platform role grants nothing
 *inside* a workspace - a platform administrator reading these figures still
 cannot open a customer's inbox.
 
-Read-only, deliberately. Suspending or deleting a workspace is exactly the kind
+Read-only with one narrow exception - recording a payment against an invoice,
+which asserts that somebody has seen money arrive and cannot change what the
+invoice says. Suspending or deleting a workspace is exactly the kind
 of privileged action that must be audit-logged, and there is no audit log until
 Phase 14; shipping the action first would mean a period during which the most
 consequential operations in the product left no trace.
@@ -18,14 +20,25 @@ because revenue is a question about subscriptions and there are none until Phase
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Query
 
-from app.api.dependencies import PlatformAnalyticsServiceDep, PlatformStaffDep
+from app.api.dependencies import (
+    PlatformAnalyticsServiceDep,
+    PlatformInvoiceServiceDep,
+    PlatformStaffDep,
+)
 from app.db.models.enums import TenantStatus
 from app.platform.platform_analytics import DEFAULT_PAGE, MAX_PAGE
+from app.schemas.invoice import (
+    InvoiceRead,
+    InvoiceVoidRequest,
+    PaymentRead,
+    PaymentRecordRequest,
+)
 from app.schemas.platform import PlatformOverviewRead, WorkspacePageRead
 
 router = APIRouter(prefix="/platform", tags=["platform"])
@@ -76,3 +89,45 @@ async def platform_tenants(
         offset=offset,
     )
     return WorkspacePageRead.from_page(page)
+
+
+@router.post("/invoices/{invoice_id}/payments", response_model=PaymentRead)
+async def record_payment(
+    invoice_id: uuid.UUID,
+    payload: PaymentRecordRequest,
+    staff: PlatformStaffDep,
+    invoices: PlatformInvoiceServiceDep,
+) -> PaymentRead:
+    """Record money that arrived outside the system. Platform staff only.
+
+    A bank transfer, a card taken over the phone. It is here rather than on the
+    workspace's own invoice routes because the act is an assertion that somebody
+    has seen the money - and a customer able to make that assertion about their
+    own invoice pays nothing.
+
+    Writing, not reading: this one is an exception to the read-only rule the
+    rest of this module keeps, and it is the narrowest possible one. It cannot
+    change what an invoice says, only record a payment against it.
+    """
+    payment = await invoices.record_payment(
+        invoice_id=invoice_id,
+        amount=payload.amount,
+        provider=payload.provider,
+        reference=payload.reference,
+    )
+    return PaymentRead.from_model(payment)
+
+
+@router.post("/invoices/{invoice_id}/void", response_model=InvoiceRead)
+async def void_invoice(
+    invoice_id: uuid.UUID,
+    payload: InvoiceVoidRequest,
+    staff: PlatformStaffDep,
+    invoices: PlatformInvoiceServiceDep,
+) -> InvoiceRead:
+    """Withdraw an invoice that should not have been issued. Platform staff only.
+
+    Voided rather than deleted or edited: the customer has seen it. A paid
+    invoice cannot be voided - that is a refund, and a different conversation.
+    """
+    return InvoiceRead.from_model(await invoices.void(invoice_id, reason=payload.reason))

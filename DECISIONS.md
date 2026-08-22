@@ -751,3 +751,37 @@ Usage lines on an invoice carry a quantity and **no amount**. Nothing stores a p
 Adding a real processor means writing one class and choosing it in configuration. What it cannot do is change the meaning of a subscription, because it is never asked about one.
 
 Refunds, credits, proration and tax are all absent, and each is absent for the same reason as the rest of this record: they are decisions about money that nobody has made yet, and a system that guesses at them produces numbers a customer is asked to pay.
+
+## ADR-032 — Rate Limits Fail Open, and Never Touch the Webhook
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Limit requests with a fixed window counted in Redis, applied as router-level dependencies. Count authentication by client address and everything a workspace does by workspace. **Allow the request when Redis is unavailable**, and apply **no limit at all** to the WhatsApp webhook.
+
+Context:
+The product has three kinds of caller with genuinely different risks: somebody trying passwords, a signed-in workspace making ordinary requests, and Meta delivering webhooks. A single limiter over all of them is either too loose to stop the first or tight enough to break the third.
+
+Reason:
+**The webhook is the important one.** Meta retries anything that is not a 2xx and eventually disables a subscription that keeps failing. A 429 there does not shed load — it loses a customer's message, and if the condition persists it removes the integration entirely. So the webhook routers carry no limiter, and a test asserts that twenty consecutive deliveries all get the same answer. The webhook is protected instead by the things that actually bound its cost: signature verification, idempotency on the event id, and doing no inference on the request path.
+
+**Failing open is the same argument in a different place.** A limiter that refuses when Redis is down converts a cache outage into a total outage of a product whose critical path — storing an inbound message — does not need Redis at all. The exception is caught inside the limiter, so no caller has to remember.
+
+**Authentication counts by address** because the caller has no identity yet; that is what they are trying to establish. It is the weakest identity in this system and it is still the right one, because the traffic being stopped is a script and a script has an address. It limits attempts rather than authorising anything, so trusting `X-Forwarded-For` here is a bounded risk rather than a hole.
+
+**Workspace traffic counts by workspace, not by user.** The limit protects shared platform resources, and a workspace with fifty colleagues legitimately generates fifty times the load of one with a single person. Counting per user would let a large customer exhaust the platform while every individual stayed politely under their own limit.
+
+A fixed window rather than a sliding one or a token bucket: both alternatives smooth bursts better and both need a sorted set per caller or a Lua script to stay atomic. A fixed window is `INCR` plus `EXPIRE`, is obviously correct under concurrency, and its worst case — twice the limit across a boundary — is not a failure mode that matters for logins or dashboard traffic.
+
+Consequences:
+Limits are attached to routers rather than routes, so `app/api/v1/__init__.py` is the one place that answers "what is limited". A router must therefore be uniformly scoped: mixing workspace routes and platform routes on one router breaks under a workspace-scoped guard, which is exactly what happened to the invoice routes and is why recording a payment and voiding a bill moved to `/platform/invoices/*` — where the authority they need was always visible in the path anyway.
+
+A refusal carries `Retry-After`, because a client told to back off without being told for how long retries immediately. `WaslaError` grew an optional `headers` for it.
+
+Limiting is off in the test suite by default. A limiter counting across a file makes every test in it order-dependent, and the eleventh login failing for a reason the test never mentions is a debugging session nobody should have to have. It has its own tests, which switch it on.
+
+Platform administration is unlimited: it is a handful of staff, and a limit there would first bite during an incident, which is when it is least welcome.

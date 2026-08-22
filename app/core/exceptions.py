@@ -36,11 +36,18 @@ class WaslaError(Exception):
         details: dict[str, Any] | None = None,
         error_code: str | None = None,
         status_code: int | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self.message = message or type(self).message
         self.details = details
         self.error_code = error_code or type(self).error_code
         self.status_code = status_code or type(self).status_code
+        # Response headers that belong to the failure itself rather than to the
+        # request - `Retry-After` on a refusal, and nothing else so far. Kept
+        # on the exception because the handler is the only place that builds a
+        # response, and a caller told to back off without being told for how
+        # long will simply retry immediately.
+        self.headers = headers
         super().__init__(self.message)
 
 
@@ -179,6 +186,7 @@ def register_exception_handlers(app: FastAPI) -> None:
                 details=error.details,
                 request_id=_request_id(request),
             ),
+            headers=error.headers,
         )
 
     async def handle_request_validation_error(request: Request, exc: Exception) -> Response:

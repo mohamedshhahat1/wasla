@@ -1,8 +1,13 @@
 """The invoice routes, and the line between a workspace and the platform.
 
-The line is the point of this file. A workspace reads its own invoices; only
-platform staff record a payment or void a bill, because a customer able to mark
-their own invoice paid is a customer who pays nothing.
+The line is the point of this file, and it is drawn in the URL: a workspace
+reads its own invoices under `/invoices`, while recording a payment and voiding
+a bill live under `/platform/invoices` because a customer able to mark their own
+invoice paid is a customer who pays nothing.
+
+Keeping them on separate routers is also what lets the per-workspace rate limit
+be attached to the whole of the first one (ADR-032). A platform administrator
+has no active workspace, so a workspace-scoped guard would refuse them.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
 pytestmark = pytest.mark.integration
 
 PATH = "/api/v1/invoices"
+PLATFORM_PATH = "/api/v1/platform/invoices"
 TENANT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 USER_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 INVOICE_ID = uuid.UUID("55555555-5555-5555-5555-555555555555")
@@ -245,7 +251,7 @@ async def test_platform_staff_can_record_money_that_arrived(client, app, platfor
     _as_platform(app, PlatformRole.PLATFORM_ADMIN)
 
     response = await client.post(
-        f"{PATH}/{INVOICE_ID}/payments",
+        f"{PLATFORM_PATH}/{INVOICE_ID}/payments",
         json={"amount": "99.00", "provider": "manual", "reference": "transfer-1"},
     )
 
@@ -264,7 +270,7 @@ async def test_a_workspace_owner_cannot_mark_their_own_invoice_paid(
     _as_platform(app, None)
 
     response = await client.post(
-        f"{PATH}/{INVOICE_ID}/payments",
+        f"{PLATFORM_PATH}/{INVOICE_ID}/payments",
         json={"amount": "99.00", "provider": "manual"},
     )
 
@@ -280,7 +286,7 @@ async def test_a_payment_for_nothing_is_rejected_before_the_service(
     _as_platform(app, PlatformRole.PLATFORM_OWNER)
 
     response = await client.post(
-        f"{PATH}/{INVOICE_ID}/payments",
+        f"{PLATFORM_PATH}/{INVOICE_ID}/payments",
         json={"amount": "0.00", "provider": "manual"},
     )
 
@@ -291,7 +297,9 @@ async def test_a_payment_for_nothing_is_rejected_before_the_service(
 async def test_platform_staff_can_withdraw_an_invoice(client, app, platform_billing):
     _as_platform(app, PlatformRole.PLATFORM_OWNER)
 
-    response = await client.post(f"{PATH}/{INVOICE_ID}/void", json={"reason": "Issued in error."})
+    response = await client.post(
+        f"{PLATFORM_PATH}/{INVOICE_ID}/void", json={"reason": "Issued in error."}
+    )
 
     assert response.status_code == 200
     assert response.json()["status"] == "void"
@@ -303,7 +311,7 @@ async def test_voiding_a_paid_invoice_conflicts(client, app, platform_billing):
     _as_platform(app, PlatformRole.PLATFORM_OWNER)
     platform_billing.conflict = True
 
-    response = await client.post(f"{PATH}/{INVOICE_ID}/void", json={})
+    response = await client.post(f"{PLATFORM_PATH}/{INVOICE_ID}/void", json={})
 
     assert response.status_code == 409
 
@@ -311,7 +319,7 @@ async def test_voiding_a_paid_invoice_conflicts(client, app, platform_billing):
 async def test_a_workspace_cannot_void_its_own_bill(client, app, platform_billing):
     _as_platform(app, None)
 
-    response = await client.post(f"{PATH}/{INVOICE_ID}/void", json={})
+    response = await client.post(f"{PLATFORM_PATH}/{INVOICE_ID}/void", json={})
 
     assert response.status_code == 403
     assert platform_billing.voided == []

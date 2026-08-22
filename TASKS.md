@@ -326,7 +326,7 @@ Deferred by decision, not unfinished:
 - [ ] Plan administration over the API. Plans are edited in the database today, which is acceptable while only platform staff can reach them and becomes a real requirement the moment they are editable by anyone else (ADR-029)
 ## Phase 14 — Production hardening
 
-- [ ] Rate limiting
+- [x] Rate limiting: authentication by client address, workspace traffic and campaigns by workspace, the WhatsApp webhook deliberately unlimited, failing open on a Redis outage (ADR-032)
 - [ ] Audit logging
 - [x] CORS and secure headers (CORS configurable; Nginx security headers in place)
 - [ ] Request size and timeout limits

@@ -1,15 +1,14 @@
-"""Invoice endpoints.
+"""Invoice endpoints, for the workspace that owes the money.
 
-Reading is a workspace's own business and takes an owner: an invoice says what
-the company spends, which is not something every colleague staffing an inbox is
-entitled to see.
+Reading takes an owner: an invoice says what the company spends, which is not
+something every colleague staffing an inbox is entitled to see.
 
-Recording a payment and voiding an invoice are **platform** actions, not
-workspace ones, and that is the important line here. A customer marking their
-own invoice paid is a customer paying nothing, and a customer voiding their own
-bill is the same thing with extra steps. Both are assertions that somebody at
-the platform has seen the money or made the decision, so both sit behind the
-platform-role dependency.
+Recording a payment and voiding a bill are **not here**. They are platform
+actions and live under `/platform/invoices/*`, because a customer who can mark
+their own invoice paid is a customer who pays nothing, and one who can void
+their own bill is the same thing with extra steps. Keeping them on a separate
+router also keeps this one uniformly workspace-scoped, which is what lets the
+per-workspace rate limit be attached to the whole of it.
 """
 
 from __future__ import annotations
@@ -19,18 +18,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
-from app.api.dependencies import (
-    InvoiceServiceDep,
-    PlatformInvoiceServiceDep,
-    PlatformStaffDep,
-    TenantOwnerDep,
-)
-from app.schemas.invoice import (
-    InvoiceRead,
-    InvoiceVoidRequest,
-    PaymentRead,
-    PaymentRecordRequest,
-)
+from app.api.dependencies import InvoiceServiceDep, TenantOwnerDep
+from app.schemas.invoice import InvoiceRead, PaymentRead
 
 router = APIRouter(prefix="/invoices", tags=["billing"])
 
@@ -76,40 +65,3 @@ async def list_payments(
     """
     payments = await invoices.payments_for(invoice_id)
     return [PaymentRead.from_model(payment) for payment in payments]
-
-
-@router.post("/{invoice_id}/payments", response_model=PaymentRead)
-async def record_payment(
-    invoice_id: uuid.UUID,
-    payload: PaymentRecordRequest,
-    staff: PlatformStaffDep,
-    invoices: PlatformInvoiceServiceDep,
-) -> PaymentRead:
-    """Record money that arrived outside the system. Platform staff only.
-
-    A workspace cannot mark its own invoice paid, which is the whole reason this
-    is a platform route: the act is an assertion that somebody has seen the
-    money.
-    """
-    payment = await invoices.record_payment(
-        invoice_id=invoice_id,
-        amount=payload.amount,
-        provider=payload.provider,
-        reference=payload.reference,
-    )
-    return PaymentRead.from_model(payment)
-
-
-@router.post("/{invoice_id}/void", response_model=InvoiceRead)
-async def void_invoice(
-    invoice_id: uuid.UUID,
-    payload: InvoiceVoidRequest,
-    staff: PlatformStaffDep,
-    invoices: PlatformInvoiceServiceDep,
-) -> InvoiceRead:
-    """Withdraw an invoice that should not have been issued. Platform staff only.
-
-    Voided rather than deleted or edited: the customer has seen it. A paid
-    invoice cannot be voided — that is a refund, and a different conversation.
-    """
-    return InvoiceRead.from_model(await invoices.void(invoice_id, reason=payload.reason))
