@@ -20,6 +20,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
+from app.db.models.campaign import OPT_OUT_SOURCE_TYPE, OptOutSource
 from app.db.models.enums import _enum_type
 from app.db.models.sentiment import (
     CONVERSATION_PRIORITY_TYPE,
@@ -106,6 +107,29 @@ class Contact(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     wa_id: Mapped[str] = mapped_column(String(32), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # When this person asked to stop receiving campaigns, and who recorded it.
+    # A timestamp rather than a boolean: "since when" is the question a dispute
+    # about a marketing message actually turns on.
+    marketing_opt_out_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    opt_out_source: Mapped[OptOutSource | None] = mapped_column(
+        OPT_OUT_SOURCE_TYPE,
+        nullable=True,
+    )
+
+    @property
+    def accepts_campaigns(self) -> bool:
+        """Whether a broadcast may include this person.
+
+        Opt-out is the only thing checked here. Opt-*in* is not a column,
+        because a campaign can only reach someone who has written to this
+        business at all — the audience is built from conversations, and there is
+        no route that uploads a list of numbers. See CAMPAIGNS.md.
+        """
+        return self.marketing_opt_out_at is None
 
 
 class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):

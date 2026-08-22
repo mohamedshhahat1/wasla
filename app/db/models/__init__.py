@@ -3,6 +3,15 @@
 from app.db.base import Base
 
 from .agent import Agent, AgentStatus, AgentTool
+from .campaign import (
+    MAX_RECIPIENT_ATTEMPTS,
+    TERMINAL_CAMPAIGN_STATUSES,
+    Campaign,
+    CampaignRecipient,
+    CampaignStatus,
+    OptOutSource,
+    RecipientStatus,
+)
 from .conversation import (
     Contact,
     Conversation,
@@ -77,11 +86,13 @@ __all__ = [
     "ALLOWED_TRANSITIONS",
     "EMBEDDING_DIMENSIONS",
     "MAX_ATTEMPTS",
+    "MAX_RECIPIENT_ATTEMPTS",
     "MAX_SCORE",
     "MIN_SCORE",
     "PRIORITY_RANK",
     "SENTIMENT_PRIORITY",
     "SENTIMENT_SEVERITY",
+    "TERMINAL_CAMPAIGN_STATUSES",
     "TERMINAL_FOLLOW_UP_STATUSES",
     "TERMINAL_STATUSES",
     "UNRESOLVED_MEDIA_STATUSES",
@@ -90,6 +101,9 @@ __all__ = [
     "AgentStatus",
     "AgentTool",
     "Base",
+    "Campaign",
+    "CampaignRecipient",
+    "CampaignStatus",
     "Contact",
     "Conversation",
     "ConversationMode",
@@ -117,7 +131,9 @@ __all__ = [
     "MessageMedia",
     "MessageSentiment",
     "MessageStatus",
+    "OptOutSource",
     "PlatformRole",
+    "RecipientStatus",
     "SentimentLabel",
     "TemplateCategory",
     "TemplateStatus",
