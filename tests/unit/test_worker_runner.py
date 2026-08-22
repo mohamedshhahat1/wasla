@@ -13,6 +13,7 @@ import asyncio
 import pytest
 
 from app.workers.ai_worker import AgentWorker
+from app.workers.billing_worker import BillingWorker
 from app.workers.campaign_worker import CampaignWorker
 from app.workers.follow_up_worker import FollowUpWorker
 from app.workers.ingestion_worker import IngestionWorker
@@ -130,6 +131,7 @@ def test_each_kind_builds_its_own_worker(settings):
         IngestionWorker,
         FollowUpWorker,
         CampaignWorker,
+        BillingWorker,
     ]
 
 

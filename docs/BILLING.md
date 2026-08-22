@@ -1,6 +1,6 @@
 # Billing
 
-**Status: In Progress** — plans, the seeded catalogue, subscriptions, the entitlement service, the subscription lifecycle, the billing APIs and the enforcement points are Implemented (migration `0016`, ADR-029, ADR-030). The period roll-over sweep, invoices and payment providers are Planned. See [../TASKS.md](../TASKS.md) phase 13.
+**Status: In Progress** — plans, the seeded catalogue, subscriptions, the entitlement service, the subscription lifecycle, the billing APIs, the enforcement points and the period sweep are Implemented (migration `0016`, ADR-029, ADR-030). Invoices and payment providers are Planned. See [../TASKS.md](../TASKS.md) phase 13.
 
 Scope: plans, subscriptions, entitlements, invoicing, and payment provider boundaries. Plan limits are listed in [SAAS.md](SAAS.md); metering is in [ANALYTICS.md](ANALYTICS.md).
 
@@ -42,7 +42,17 @@ One per workspace, enforced by `UNIQUE(tenant_id)` rather than by a service — 
 
 `past_due` still serves the workspace. A failed card is a conversation to have with a customer, not a reason to cut them off mid-sentence with their own customers; when that grace runs out is a separate decision the platform makes. `expired` is what a trial becomes when nobody acts, kept apart from `cancelled` because nobody chose it.
 
-A workspace with no subscription — every workspace that predates billing — is entitled to the plan named by `DEFAULT_PLAN_CODE`, and its period limits are counted over the calendar month. If that plan is missing, limits are not enforced and a warning is logged: a missing catalogue row should not take a deployment offline.
+Registering a workspace starts a subscription on `DEFAULT_PLAN_CODE`, on trial if that plan offers one. A signup whose catalogue has no such plan still succeeds, with a warning: a signup that 500s over billing configuration is the least forgivable failure in the product.
+
+A workspace with no subscription — every workspace that predates billing — is entitled to the plan named by `DEFAULT_PLAN_CODE` all the same, and its period limits are counted over the calendar month. If that plan is missing, limits are not enforced and a warning is logged: a missing catalogue row should not take a deployment offline.
+
+## The sweep
+
+`WORKER_KINDS=billing` runs a loop that polls for subscriptions whose period has ended (ADR-022, like follow-ups and campaigns) and advances each one: a pending cancellation takes effect, a trial nobody acted on becomes `expired`, and anything else opens its next period starting where the last one ended — so a sweep that runs late does not shorten a customer's month.
+
+It polls every ten minutes rather than every thirty seconds, because a period boundary is a date rather than an instant, and entitlements are computed from the row on each request anyway: a trial that ended at 09:00 and is noticed at 09:55 has cost nobody anything. A subscription that has already ended is never picked up again — its period ending is the past, not an event.
+
+The rules live in `roll_over`, a pure function over the row, so the worker is only the query, the loop and the commit.
 
 A refused action answers **402**, not 403. A permission error tells a caller to ask an administrator; this one tells them to upgrade, and a client that cannot tell them apart shows the wrong dialogue to a customer trying to give us money.
 

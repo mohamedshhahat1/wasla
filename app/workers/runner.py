@@ -31,6 +31,7 @@ from app.core.logging import configure_logging, get_logger
 from app.core.redis import RedisClient
 from app.db.session import Database
 from app.workers.ai_worker import AgentWorker
+from app.workers.billing_worker import BillingWorker
 from app.workers.campaign_worker import CampaignWorker
 from app.workers.follow_up_worker import FollowUpWorker
 from app.workers.ingestion_worker import IngestionWorker
@@ -43,10 +44,12 @@ INGESTION: Final = "ingestion"
 FOLLOW_UP: Final = "follow_up"
 MEDIA: Final = "media"
 CAMPAIGN: Final = "campaign"
+BILLING: Final = "billing"
 # Media comes before agent deliberately. It is the order the work flows in -
 # a file is read, then answered - and the order the log lines appear in at
-# startup, which is worth having match.
-ALL_KINDS: Final = (MEDIA, AGENT, INGESTION, FOLLOW_UP, CAMPAIGN)
+# startup, which is worth having match. Billing is last: it is the only loop
+# whose period is measured in days, and nothing else waits on it.
+ALL_KINDS: Final = (MEDIA, AGENT, INGESTION, FOLLOW_UP, CAMPAIGN, BILLING)
 
 KINDS_VARIABLE: Final = "WORKER_KINDS"
 
@@ -107,6 +110,8 @@ def build_workers(
             workers.append(MediaWorker(database=database, redis=redis, settings=settings))
         elif kind == CAMPAIGN:
             workers.append(CampaignWorker(database=database, settings=settings))
+        elif kind == BILLING:
+            workers.append(BillingWorker(database=database, settings=settings))
     return workers
 
 

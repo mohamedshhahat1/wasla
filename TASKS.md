@@ -304,7 +304,9 @@ Deferred by decision, not unfinished:
 - [x] Plan model with configurable limits, and the documented catalogue seeded (migration `0016`, ADR-029)
 - [x] Subscription model, one per workspace, enforced by a unique index
 - [x] Entitlement service: resource limits counted from rows, period limits from `usage_events` over the billing period
-- [x] Subscription lifecycle (trial, change of plan, cancellation, resume, period roll-over as a pure function)
+- [x] Subscription lifecycle (trial, change of plan, cancellation, resume, period roll-over)
+- [x] A new workspace starts on the default plan at registration, and a signup survives a catalogue that has no such plan
+- [x] Billing worker: trials end, pending cancellations take effect, periods roll over (`WORKER_KINDS=billing`)
 - [x] Limits enforced where somebody chooses, never on the inbound path (ADR-030)
 - [x] Billing APIs (catalogue, subscription, entitlements; owners commit the company, members read)
 - [ ] Provider-agnostic billing abstraction

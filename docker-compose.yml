@@ -85,8 +85,9 @@ services:
       DATABASE_URL: postgresql+asyncpg://wasla:wasla@postgres:5432/wasla
       REDIS_URL: redis://redis:6379/0
       MEDIA_STORAGE_PATH: /var/lib/wasla/media
-      # Every kind by default. Set to a comma-separated subset - "media",
-      # "campaign" or "ingestion,follow_up" - to run them in separate replicas.
+      # Every kind by default: media, agent, ingestion, follow_up, campaign,
+      # billing. Set to a comma-separated subset - "media", "campaign" or
+      # "ingestion,follow_up" - to run them in separate replicas.
       WORKER_KINDS: ""
     volumes:
       - ./app:/app/app:ro

@@ -11,11 +11,11 @@ Technical source of truth for the current system architecture. Every section car
 
 ## 1. System overview
 
-**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport, conversations, the agent orchestrator with its queue and worker, tenant-scoped knowledge retrieval, lead management, scheduled follow-ups, media understanding, sentiment and escalation, and campaigns with an approved-template registry all exist. Usage metering and billing do not.
+**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport, conversations, the agent orchestrator with its queue and worker, tenant-scoped knowledge retrieval, lead management, scheduled follow-ups, media understanding, sentiment and escalation, campaigns with an approved-template registry, usage metering with tenant and platform analytics, and plans, subscriptions and enforced entitlements all exist. Invoices and a payment provider do not.
 
 Wasla is an API-first, multi-tenant backend. A business (tenant) connects one or more WhatsApp Business phone numbers. Inbound customer messages arrive as Meta webhooks, are resolved to a tenant, persisted, and queued for asynchronous AI processing. An agent orchestrator loads the conversation, retrieves tenant-scoped knowledge, calls the OpenAI Responses API with a controlled tool set, and replies through the WhatsApp Cloud API.
 
-The whole of that pipeline is built, and a worker process runs the five loops that feed it. What is not built is measurement: usage metering, analytics events and billing arrive in Phases 12 and 13, so nothing yet counts what a workspace consumes.
+The whole of that pipeline is built, and a worker process runs the six loops that feed it. Everything it does is metered in the transaction that did it, reported back through tenant and platform analytics, and bounded by the plan the workspace is on. What is not built is money changing hands: invoices and a payment provider are the remainder of Phase 13.
 
 ```
 WhatsApp
@@ -431,15 +431,15 @@ Opt-out lives in the base population of `AudienceRepository` rather than as a fi
 
 ## 14. Background jobs and Redis usage
 
-**Status: Implemented** — the Redis client, its health probe, the refresh-token denylist, the agent, ingestion and media job queues, and the AI, ingestion, follow-up, media and campaign workers, all run by one worker process.
+**Status: Implemented** — the Redis client, its health probe, the refresh-token denylist, the agent, ingestion and media job queues, and the AI, ingestion, follow-up, media, campaign and billing workers, all run by one worker process.
 
-All five workers run in **one container**, concurrently in one event loop, selected by `WORKER_KINDS` (empty means all). Each is I/O-bound — waiting on Redis, PostgreSQL, OpenAI or Meta — so they interleave rather than compete, and one process is markedly simpler to deploy and watch than five. Splitting them apart later is an environment variable, not another image; `campaign` is the one that most often wants a replica of its own, because a workspace mid-broadcast is bandwidth against Meta rather than inference.
+All six workers run in **one container**, concurrently in one event loop, selected by `WORKER_KINDS` (empty means all). Each is I/O-bound — waiting on Redis, PostgreSQL, OpenAI or Meta — so they interleave rather than compete, and one process is markedly simpler to deploy and watch than six. Splitting them apart later is an environment variable, not another image; `campaign` is the one that most often wants a replica of its own, because a workspace mid-broadcast is bandwidth against Meta rather than inference.
 
 SIGTERM asks each loop to stop and each finishes the job in its hand before returning, so a deploy does not dead-letter work that was about to succeed. The production compose gives the worker a longer `stop_grace_period` than the API: a worker mid-inference holds an HTTP call and an open transaction.
 
 One constraint binds the two together and is easy to get wrong. redis-py applies `socket_timeout` to *every* read, including the blocking `BLMOVE` a reserve is deliberately waiting on, so the read timeout has to outlast the block or an idle worker dies on its own patience. `MAX_BLOCKING_SECONDS` lives in `app/core/redis.py` beside the client that sizes its timeout around it, and the queues take their block duration from there.
 
-Redis provides job queues, caching, rate limiting and temporary state. The two *time*-triggered workers — follow-ups and campaigns — poll PostgreSQL instead (ADR-022): their work is a durable row a person can see and cancel, and a schedule held in Redis as well would be a second source of truth that drifts from the first the moment one is written without the other.
+Redis provides job queues, caching, rate limiting and temporary state. The three *time*-triggered workers — follow-ups, campaigns and billing — poll PostgreSQL instead (ADR-022): their work is a durable row a person can see and cancel, and a schedule held in Redis as well would be a second source of truth that drifts from the first the moment one is written without the other.
 
 There are three queues, not one, and the separation is deliberate (ADR-019). An agent job is a customer waiting for a reply; an ingestion job is a document that will be searchable in a minute; a media job is a customer waiting whose reply cannot even be composed yet. Sharing one list would let a bulk upload of a hundred documents sit in front of somebody's question, and a worker pool sized for downloading is the wrong shape for one doing inference.
 
@@ -449,9 +449,9 @@ Two gaps are known and recorded rather than implied away. Nothing reaps the in-f
 
 ## 15. Database architecture
 
-**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, and the identity, tenancy, WhatsApp, conversation, agent, knowledge, CRM, follow-up, media, sentiment, template, campaign, usage and analytics tables are Implemented; billing tables arrive in Phase 13.
+**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, and the identity, tenancy, WhatsApp, conversation, agent, knowledge, CRM, follow-up, media, sentiment, template, campaign, usage, analytics, plan and subscription tables are Implemented; invoices and payment records arrive with a provider.
 
-PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically; migration `0002` creates `tenants`, `users`, `memberships`, and `tenant_invitations`; migration `0003` creates `whatsapp_accounts` and `whatsapp_events`; migration `0004` creates `contacts`, `conversations`, and `messages`; migration `0005` creates `agents` and `agent_tools`; `0006` records template messages; `0007` creates the knowledge tables; `0008` the lead tables; `0009` the follow-up table; `0010` creates `message_media`; `0011` the sentiment tables and escalation columns; `0012` the WhatsApp template registry; `0013` the campaign tables and contact opt-out; `0014` creates `usage_events`; and `0015` creates `analytics_events`.
+PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically; migration `0002` creates `tenants`, `users`, `memberships`, and `tenant_invitations`; migration `0003` creates `whatsapp_accounts` and `whatsapp_events`; migration `0004` creates `contacts`, `conversations`, and `messages`; migration `0005` creates `agents` and `agent_tools`; `0006` records template messages; `0007` creates the knowledge tables; `0008` the lead tables; `0009` the follow-up table; `0010` creates `message_media`; `0011` the sentiment tables and escalation columns; `0012` the WhatsApp template registry; `0013` the campaign tables and contact opt-out; `0014` creates `usage_events`; `0015` creates `analytics_events`; and `0016` creates `plans` and `subscriptions`, seeding the documented catalogue.
 
 Sessions are request-scoped and commit on success or roll back on failure. Connections use pre-ping, bounded pooling, recycling, and an explicit connect timeout.
 
@@ -503,7 +503,11 @@ Conversation routes are open to every workspace member rather than to admins onl
 
 ## 19. Usage metering and billing
 
-**Status: In Progress** — the usage event table, the recorder, the aggregation services and the metered paths are Implemented (migration `0014`, ADR-027). The analytics tables and the dashboard APIs follow in this phase; plans, entitlements and billing are Phase 13.
+**Status: In Progress** — usage metering (migration `0014`, ADR-027), plans, subscriptions and enforced entitlements (migration `0016`, ADR-029, ADR-030) are Implemented. Invoices and a payment provider are Planned.
+
+Metering came first because entitlements read it: a period limit is a sum over `usage_events` between the subscription's period bounds, which is what makes "1,000 messages a month" reset rather than accumulate forever. Resource limits — numbers, agents, colleagues, documents — are counted from the rows themselves.
+
+Where a limit is enforced is a decision recorded in ADR-030, and the short version is: refuse the person who chose, never the customer who wrote. Creating something answers 402 from a dependency in the route signature; scheduling a campaign is checked for its whole audience at once; an agent turn with no allowance left stops without failing its job; and the inbound webhook path carries no check at all, because those words belong to a customer who owes us nothing and a non-2xx to Meta eventually disables the integration.
 
 Usage is a first-class subsystem of append-only rows in `usage_events` (`tenant_id`, `event_type`, `quantity`, `unit`, `metadata`, `occurred_at`), aggregated on read rather than maintained as counters.
 
