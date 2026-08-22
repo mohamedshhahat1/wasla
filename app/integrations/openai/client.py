@@ -39,6 +39,7 @@ from app.core.exceptions import (
 from app.core.logging import get_logger
 from app.integrations.openai.types import (
     AgentReply,
+    StructuredFormat,
     TokenUsage,
     ToolCall,
     ToolResult,
@@ -104,11 +105,17 @@ class ResponsesClient:
         tool_results: Sequence[ToolResult] = (),
         temperature: float | None = None,
         max_output_tokens: int | None = None,
+        response_format: StructuredFormat | None = None,
     ) -> AgentReply:
         """Run one inference.
 
         `tool_results` continues an exchange the model started: pass the results
         of the calls it asked for and it will either answer or ask for more.
+
+        `response_format` constrains the reply to a JSON shape, for callers that
+        parse it rather than send it. The reply still arrives as text; decoding
+        it belongs to the caller, which is the only thing that knows what the
+        shape means.
         """
         if not turns and not tool_results:
             raise ValidationError("An agent call needs at least one input item.")
@@ -131,6 +138,8 @@ class ResponsesClient:
             payload["temperature"] = temperature
         if max_output_tokens is not None:
             payload["max_output_tokens"] = max_output_tokens
+        if response_format is not None:
+            payload["text"] = {"format": response_format.to_payload()}
 
         body = await self._post(payload)
         return self._reply(body)

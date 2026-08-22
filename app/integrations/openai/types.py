@@ -74,6 +74,34 @@ class ToolSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class StructuredFormat:
+    """A JSON shape the model is required to answer in.
+
+    Used where the reply is read by code rather than by a person - a sentiment
+    reading, not a message to a customer. Asking for JSON in the prompt and
+    hoping is the alternative, and it fails on exactly the traffic that matters:
+    the unusual message.
+
+    `strict` is on by default, which the provider enforces. It comes with rules
+    the schema must satisfy - every property listed in `required`, and
+    `additionalProperties` false - so an optional field is expressed as a
+    nullable type rather than by omission.
+    """
+
+    name: str
+    schema: dict[str, Any]
+    strict: bool = True
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "type": "json_schema",
+            "name": self.name,
+            "schema": self.schema,
+            "strict": self.strict,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ToolCall:
     """A tool invocation the model asked for.
 
