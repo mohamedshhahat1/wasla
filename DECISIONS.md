@@ -581,3 +581,37 @@ Precision is bounded by the poll interval: a campaign sends at or slightly under
 The worker holds no campaign state at all, so scaling `WORKER_KINDS=campaign` across replicas needs no coordination beyond what PostgreSQL already provides.
 
 The rate is per campaign rather than per number. Two campaigns running at once on the same number can therefore exceed either one's rate. That is recorded as a limit rather than solved: a per-number budget needs a shared counter, and the workspace that runs two simultaneous broadcasts on one number has made a decision this system can surface but should not silently override.
+
+## ADR-027 — Usage Is Metered in the Transaction That Consumed It
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Record usage as append-only rows in `usage_events`, staged through the same `AsyncSession` — and therefore the same transaction — as the work being measured. No worker, no queue, no second connection, no `updated_at`. The unit of each meter is a property of its event type rather than an argument a caller passes, and exactly-once comes from the idempotency keys each metered path already has.
+
+Context:
+Usage is the input to billing and to plan limits, so two failures matter more than throughput: charging for work that never happened, and under-counting work that did. Every metered path already runs inside a transaction — the webhook's, the agent worker's, the campaign worker's — and each of those transactions can roll back after the point where the meter would fire.
+
+The alternatives were a fire-and-forget write on its own connection, a Redis counter flushed periodically, or an event stream consumed by an aggregation worker. All three decouple the meter from the work.
+
+Reason:
+Decoupling is exactly what must not happen here. A usage row written on its own connection survives the rollback of the turn it measured: the customer never got a reply, and the bill says they did. A Redis counter loses whatever was in it when the process dies, which is under-counting with no record that it happened. An event stream has both properties and adds a component that has to be running for the bill to be right.
+
+Sharing the caller's transaction makes the invariant structural rather than procedural: the metered work and its meter are the same commit. A rolled-back agent turn is not billed because the row went with it, and a message that committed is always counted because the row could not have been left behind.
+
+The cost is that a metering bug can fail a request that would otherwise have succeeded. That is the right direction to fail. Staging performs no I/O — `session.add` is in-memory — so the realistic failure is a constraint violation at flush, which means the row was wrong and the alternative was a wrong bill.
+
+Aggregation is a `GROUP BY` over an indexed range, not a maintained counter. Counters drift, and a drifted counter cannot be recomputed from anything; a sum over rows can be re-run for any window, which is what makes a disputed invoice answerable months later. When aggregation becomes the bottleneck, rollups are added *beside* the rows rather than instead of them.
+
+Consequences:
+`usage_events` becomes the largest table in the schema. Its indexes are chosen for the three queries that exist — one workspace over a window, one meter over a window, and the platform total — and the row is deliberately narrow.
+
+There is no `updated_at`, because nothing updates a row. A correction is a new row, which is what keeps last month's figure reproducible after the fact.
+
+Deduplication is not attempted here. Every metered path has an idempotency key upstream — the WhatsApp event id, the message row, the media row, `UNIQUE(campaign_id, contact_id)` — so a retry that skips the work also skips the meter. A retry that genuinely re-does the work is genuinely counted, because it genuinely consumed something.
+
+Retention is not solved. Nothing sweeps old rows, and nothing should until a billing period is closed and the figures for it are stored somewhere a sweep cannot change. That belongs with Phase 13.

@@ -276,8 +276,9 @@ Deferred by decision, not unfinished:
 
 ## Phase 12 — Analytics and usage
 
-- [ ] Usage event model and recorder
-- [ ] Aggregation services
+- [x] Usage event model and recorder (migration `0014`, ADR-027)
+- [x] Aggregation services (named counters and a daily series, over a half-open window)
+- [ ] Metering wired into every path that consumes something
 - [ ] Analytics event model
 - [ ] Tenant analytics APIs
 - [ ] Platform analytics APIs

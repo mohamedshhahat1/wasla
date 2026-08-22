@@ -29,6 +29,13 @@ from .lead_repository import (
 )
 from .membership_repository import MembershipRepository, UserMembershipRepository
 from .tenant_repository import TenantRepository
+from .usage_repository import (
+    PlatformUsageRepository,
+    TenantUsageTotal,
+    UsageEventRepository,
+    UsagePoint,
+    UsageTotal,
+)
 from .user_repository import UserRepository
 from .whatsapp_repository import (
     WhatsAppAccountDirectory,
@@ -56,9 +63,14 @@ __all__ = [
     "LeadStatistics",
     "MembershipRepository",
     "MessageRepository",
+    "PlatformUsageRepository",
     "ScoredChunk",
     "TenantRepository",
     "TenantScopedRepository",
+    "TenantUsageTotal",
+    "UsageEventRepository",
+    "UsagePoint",
+    "UsageTotal",
     "UserMembershipRepository",
     "UserRepository",
     "WhatsAppAccountDirectory",

@@ -66,6 +66,13 @@ from .sentiment import (
     raised_priority,
 )
 from .tenant import Tenant
+from .usage import (
+    EVENT_UNITS,
+    UsageEvent,
+    UsageEventType,
+    UsageUnit,
+    unit_for,
+)
 from .user import User
 from .whatsapp import (
     WhatsAppAccount,
@@ -85,6 +92,7 @@ __all__ = [
     "AGENT_WRITABLE_FIELDS",
     "ALLOWED_TRANSITIONS",
     "EMBEDDING_DIMENSIONS",
+    "EVENT_UNITS",
     "MAX_ATTEMPTS",
     "MAX_RECIPIENT_ATTEMPTS",
     "MAX_SCORE",
@@ -141,6 +149,9 @@ __all__ = [
     "TenantInvitation",
     "TenantRole",
     "TenantStatus",
+    "UsageEvent",
+    "UsageEventType",
+    "UsageUnit",
     "User",
     "WhatsAppAccount",
     "WhatsAppAccountStatus",
@@ -152,4 +163,5 @@ __all__ = [
     "count_placeholders",
     "is_at_least",
     "raised_priority",
+    "unit_for",
 ]
