@@ -1,0 +1,348 @@
+"""Entitlements against real rows.
+
+Two kinds of limit, two kinds of query, and the cases that decide whether the
+answers can be trusted: a workspace with no subscription at all, a plan with no
+limit for a key, a period that has rolled over, and another workspace's rows
+never counting toward this one's allowance.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import pytest
+
+from app.core.exceptions import PlanLimitExceededError
+from app.db.models.agent import Agent, AgentStatus
+from app.db.models.billing import (
+    BillingInterval,
+    LimitKey,
+    Plan,
+    SubscriptionStatus,
+)
+from app.db.models.tenant import Tenant
+from app.db.models.usage import UsageEventType
+from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
+from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
+from app.services.entitlement_service import EntitlementService
+from app.services.usage_service import UsageRecorder
+
+pytestmark = pytest.mark.integration
+
+NOW = datetime.now(UTC)
+PERIOD_START = NOW - timedelta(days=5)
+PERIOD_END = NOW + timedelta(days=25)
+
+
+async def _tenant(session, slug: str = "acme") -> Tenant:
+    tenant = Tenant(name=slug.title(), slug=slug)
+    session.add(tenant)
+    await session.flush()
+    return tenant
+
+
+async def _plan(session, *, code: str = "test", **limits) -> Plan:
+    plan = Plan(
+        code=code,
+        name=code.title(),
+        price=Decimal("10.00"),
+        currency="USD",
+        interval=BillingInterval.MONTHLY,
+        limits={key.value: value for key, value in limits.items()},
+    )
+    session.add(plan)
+    await session.flush()
+    return plan
+
+
+async def _subscribe(session, tenant, plan, *, start=PERIOD_START, end=PERIOD_END):
+    subscription = SubscriptionRepository(session, tenant_id=tenant.id).create(
+        plan_id=plan.id,
+        status=SubscriptionStatus.ACTIVE,
+        current_period_start=start,
+        current_period_end=end,
+    )
+    await session.flush()
+    return subscription
+
+
+def _service(session, tenant, *, default_plan_code: str | None = None) -> EntitlementService:
+    return EntitlementService(
+        session,
+        tenant_id=tenant.id,
+        default_plan_code=default_plan_code,
+    )
+
+
+async def _agent(session, tenant, name: str) -> Agent:
+    agent = Agent(
+        tenant_id=tenant.id,
+        name=name,
+        status=AgentStatus.ACTIVE,
+        model="gpt-4.1-mini",
+        system_prompt="Be helpful.",
+    )
+    session.add(agent)
+    await session.flush()
+    return agent
+
+
+# ------------------------------------------------------------ resource limits
+
+
+async def test_a_resource_limit_counts_what_exists_now(db_session):
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, **{LimitKey.AGENTS: 2})
+    await _subscribe(db_session, tenant, plan)
+    await _agent(db_session, tenant, "Sales")
+
+    entitlement = await _service(db_session, tenant).check(LimitKey.AGENTS)
+    assert entitlement.limit == 2
+    assert entitlement.used == 1
+    assert entitlement.remaining == 1
+    assert entitlement.allowed is True
+
+
+async def test_the_last_slot_is_allowed_and_the_next_is_not(db_session):
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, **{LimitKey.AGENTS: 2})
+    await _subscribe(db_session, tenant, plan)
+    await _agent(db_session, tenant, "Sales")
+    service = _service(db_session, tenant)
+
+    assert (await service.check(LimitKey.AGENTS, additional=1)).allowed is True
+
+    await _agent(db_session, tenant, "Support")
+    # A fresh service: the resolved plan is cached per instance, and so is
+    # nothing else - the count is read again.
+    assert (await _service(db_session, tenant).check(LimitKey.AGENTS)).allowed is False
+
+
+async def test_refusing_says_what_to_do_about_it(db_session):
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, code="tiny", **{LimitKey.AGENTS: 1})
+    await _subscribe(db_session, tenant, plan)
+    await _agent(db_session, tenant, "Sales")
+
+    with pytest.raises(PlanLimitExceededError) as raised:
+        await _service(db_session, tenant).require(LimitKey.AGENTS)
+
+    assert raised.value.status_code == 402
+    assert "Upgrade" in str(raised.value)
+
+
+async def test_a_disabled_number_frees_its_slot(db_session):
+    """It is connected to nothing, and charging for it would charge for nothing."""
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, **{LimitKey.WHATSAPP_NUMBERS: 1})
+    await _subscribe(db_session, tenant, plan)
+    db_session.add(
+        WhatsAppAccount(
+            tenant_id=tenant.id,
+            phone_number_id=f"phone-{uuid.uuid4().hex[:8]}",
+            waba_id="555000111",
+            display_phone_number="+201000000000",
+            status=WhatsAppAccountStatus.DISABLED,
+        )
+    )
+    await db_session.flush()
+
+    assert (await _service(db_session, tenant).check(LimitKey.WHATSAPP_NUMBERS)).used == 0
+
+
+async def test_a_draft_agent_still_occupies_a_slot(db_session):
+    """The asymmetry with numbers is deliberate: a limit that ignored drafts
+    would be satisfied by twenty agents somebody toggles."""
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, **{LimitKey.AGENTS: 1})
+    await _subscribe(db_session, tenant, plan)
+    agent = await _agent(db_session, tenant, "Draft")
+    agent.status = AgentStatus.DRAFT
+    await db_session.flush()
+
+    assert (await _service(db_session, tenant).check(LimitKey.AGENTS)).used == 1
+
+
+# -------------------------------------------------------------- period limits
+
+
+async def test_a_period_limit_counts_usage_inside_the_period(db_session):
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, **{LimitKey.PERIOD_AI_REQUESTS: 100})
+    await _subscribe(db_session, tenant, plan)
+
+    recorder = UsageRecorder(db_session, tenant_id=tenant.id)
+    recorder.record(UsageEventType.AI_REQUEST, quantity=30, occurred_at=NOW)
+    # Before this period began: last month's spending is not this month's.
+    recorder.record(
+        UsageEventType.AI_REQUEST,
+        quantity=999,
+        occurred_at=PERIOD_START - timedelta(days=1),
+    )
+    await db_session.flush()
+
+    entitlement = await _service(db_session, tenant).check(LimitKey.PERIOD_AI_REQUESTS)
+    assert entitlement.used == 30
+    assert entitlement.remaining == 70
+
+
+async def test_messages_are_counted_in_both_directions(db_session):
+    """A conversation is two-sided, and a workspace that received a hundred
+    thousand messages consumed something whoever typed them."""
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, **{LimitKey.PERIOD_MESSAGES: 10})
+    await _subscribe(db_session, tenant, plan)
+
+    recorder = UsageRecorder(db_session, tenant_id=tenant.id)
+    recorder.record(UsageEventType.WHATSAPP_MESSAGE_SENT, quantity=3, occurred_at=NOW)
+    recorder.record(UsageEventType.WHATSAPP_MESSAGE_RECEIVED, quantity=4, occurred_at=NOW)
+    await db_session.flush()
+
+    assert (await _service(db_session, tenant).check(LimitKey.PERIOD_MESSAGES)).used == 7
+
+
+async def test_a_plan_that_allows_no_campaigns_refuses_the_first_one(db_session):
+    """Zero has to be expressible: it is what Starter allows."""
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, **{LimitKey.PERIOD_CAMPAIGN_MESSAGES: 0})
+    await _subscribe(db_session, tenant, plan)
+
+    entitlement = await _service(db_session, tenant).check(LimitKey.PERIOD_CAMPAIGN_MESSAGES)
+    assert entitlement.limit == 0
+    assert entitlement.allowed is False
+
+
+# --------------------------------------------------------------- fallbacks
+
+
+async def test_a_workspace_with_no_subscription_falls_back_to_the_default_plan(db_session):
+    """Every workspace predating billing has none, and a product that stopped
+    working for them would be worse than any limit."""
+    tenant = await _tenant(db_session)
+    await _plan(db_session, code="starter", **{LimitKey.AGENTS: 1})
+
+    entitlement = await _service(db_session, tenant, default_plan_code="starter").check(
+        LimitKey.AGENTS
+    )
+    assert entitlement.plan_code == "starter"
+    assert entitlement.limit == 1
+
+
+async def test_no_plan_at_all_leaves_limits_unenforced(db_session):
+    """Taking a working deployment offline over a missing catalogue row is not
+    a failure mode a limit check should have."""
+    tenant = await _tenant(db_session)
+
+    entitlement = await _service(db_session, tenant, default_plan_code="missing").check(
+        LimitKey.AGENTS
+    )
+    assert entitlement.allowed is True
+    assert entitlement.is_unlimited is True
+
+
+async def test_an_unlimited_plan_reports_no_remaining_number(db_session):
+    """None rather than a large number: "999999 left" is a falsehood."""
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, code="enterprise")
+    await _subscribe(db_session, tenant, plan)
+
+    entitlement = await _service(db_session, tenant).check(LimitKey.AGENTS)
+    assert entitlement.is_unlimited is True
+    assert entitlement.remaining is None
+    assert entitlement.allowed is True
+
+
+async def test_a_workspace_without_a_subscription_counts_the_calendar_month(db_session):
+    """Otherwise the sum runs from the beginning of time and refuses everybody."""
+    tenant = await _tenant(db_session)
+    await _plan(db_session, code="starter", **{LimitKey.PERIOD_MESSAGES: 100})
+
+    recorder = UsageRecorder(db_session, tenant_id=tenant.id)
+    recorder.record(UsageEventType.WHATSAPP_MESSAGE_SENT, quantity=5, occurred_at=NOW)
+    recorder.record(
+        UsageEventType.WHATSAPP_MESSAGE_SENT,
+        quantity=500,
+        occurred_at=NOW.replace(day=1) - timedelta(days=1),
+    )
+    await db_session.flush()
+
+    entitlement = await _service(db_session, tenant, default_plan_code="starter").check(
+        LimitKey.PERIOD_MESSAGES
+    )
+    assert entitlement.used == 5
+
+
+# --------------------------------------------------------------- isolation
+
+
+async def test_another_workspaces_usage_is_not_charged_to_this_one(db_session):
+    acme = await _tenant(db_session, "acme")
+    rival = await _tenant(db_session, "rival")
+    plan = await _plan(db_session, **{LimitKey.PERIOD_AI_REQUESTS: 10})
+    await _subscribe(db_session, acme, plan)
+    await _subscribe(db_session, rival, plan)
+
+    UsageRecorder(db_session, tenant_id=rival.id).record(
+        UsageEventType.AI_REQUEST,
+        quantity=50,
+        occurred_at=NOW,
+    )
+    await db_session.flush()
+
+    entitlement = await _service(db_session, acme).check(LimitKey.PERIOD_AI_REQUESTS)
+    assert entitlement.used == 0
+    assert entitlement.allowed is True
+
+
+async def test_another_workspaces_agents_do_not_fill_this_ones_slots(db_session):
+    acme = await _tenant(db_session, "acme")
+    rival = await _tenant(db_session, "rival")
+    plan = await _plan(db_session, **{LimitKey.AGENTS: 1})
+    await _subscribe(db_session, acme, plan)
+    await _agent(db_session, rival, "Theirs")
+
+    assert (await _service(db_session, acme).check(LimitKey.AGENTS)).used == 0
+
+
+# ---------------------------------------------------------------- catalogue
+
+
+async def test_the_seeded_catalogue_is_not_visible_to_this_suite(db_session):
+    """The schema here is built from the models, so migration 0016's seed rows
+    are absent. Recorded so the next reader does not hunt for them."""
+    assert await PlanRepository(db_session).list_plans() == []
+
+
+async def test_a_private_plan_is_not_listed(db_session):
+    await _plan(db_session, code="public")
+    bespoke = await _plan(db_session, code="bespoke")
+    bespoke.is_public = False
+    await db_session.flush()
+
+    codes = [plan.code for plan in await PlanRepository(db_session).list_plans()]
+    assert codes == ["public"]
+
+
+async def test_a_retired_plan_is_kept_but_not_offered(db_session):
+    """Subscriptions still point at it, and their history has to keep meaning
+    what it meant."""
+    retired = await _plan(db_session, code="old")
+    retired.is_active = False
+    await db_session.flush()
+
+    repository = PlanRepository(db_session)
+    assert await repository.list_plans() == []
+    assert await repository.get_by_code("old") is not None
+
+
+async def test_a_snapshot_reports_every_limit(db_session):
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, **{LimitKey.AGENTS: 3})
+    await _subscribe(db_session, tenant, plan)
+
+    snapshot = await _service(db_session, tenant).snapshot()
+    assert {item.key for item in snapshot} == set(LimitKey)
+    # Nothing is refused by asking: a snapshot adds nothing.
+    assert all(item.allowed for item in snapshot)

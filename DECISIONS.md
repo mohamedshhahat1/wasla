@@ -649,3 +649,35 @@ Analytics reads are a handful of grouped queries rather than one scan of an even
 Metrics have to be *defined*, not merely counted, and the definitions live with the queries: average response time means the first business reply to a customer message that started a burst; AI resolution rate means conversations created in the window that were never handed to a person. Both are stated in the code and in `docs/ANALYTICS.md`, because a number whose definition is unwritten is a number two people will read differently.
 
 `usage_events` remains a separate table with the opposite policy (ADR-027), and the difference is deliberate. Usage is billing input: it must be reproducible exactly as it was recorded, even after the domain rows it describes are edited or deleted. Analytics is reporting: it should reflect what the data says now.
+
+## ADR-029 — Plan Limits Are Data With a Closed Vocabulary, and Absent Means Unlimited
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Store a plan's limits as JSONB on the `plans` row, keyed by a closed vocabulary (`LimitKey`), with an absent key meaning *unlimited*. Give every workspace at most one subscription, enforced by a unique index. Where a workspace has no subscription, entitle it to a configured default plan; where that plan is missing too, do not enforce limits at all and log it.
+
+Context:
+Plan limits appear in three shapes across the specification — a marketing table, a check before an action, and a figure on a settings page — and the requirement is explicit that they must not be hardcoded. The obvious implementations are a column per limit, a `plan_limits` child table, or a JSON document.
+
+Reason:
+A column per limit is the wrong unit of change. The set of things worth limiting grows with the product — documents arrived with the knowledge base, campaign messages with broadcasts — and a schema migration per pricing idea is a tax on exactly the experiments a SaaS needs to run. A child table avoids the migrations but buys a join and a second thing to keep referentially tidy for what is, in practice, a dictionary of at most a dozen small integers read as a unit.
+
+JSONB carries the obvious risk that a typo becomes a silently missing limit. `LimitKey` is what removes it: keys are validated against the enum at the service boundary, a limit is only ever read through `Plan.limit_for`, and nothing outside the entitlement service reads the dictionary at all. A key nobody recognises therefore cannot grant an allowance; it simply is not a limit.
+
+Absent-means-unlimited is the load-bearing convention, and the alternatives are all worse. A magic sentinel (`-1`, `999999`) is a number somebody eventually compares, sums or displays. A nullable column per limit is the column-per-limit problem with extra steps. And "unlimited" is not an edge case here — it is the definition of the Enterprise plan, so the encoding for it should be the simplest thing in the file. A malformed value is read as unlimited for the same reason: a plan edited badly must not lock a paying customer out of their own product, and zero is never what a broken row was trying to say.
+
+One subscription per workspace is a unique index rather than a service rule because two subscriptions give two answers to "what am I allowed to do" and there is no correct way to choose between them. A workspace on bespoke terms gets its own plan row, not an override on its subscription, so there is exactly one place that answers the question.
+
+The fallback matters more than it looks. Every workspace that existed before this phase has no subscription, and a limit check that refused them would take a working product away from paying customers on deployment day. Falling back to the configured default plan keeps limits meaningful for them. If that plan is missing as well — a fresh database, a mistyped code — limits are not enforced and a warning is logged, because a catalogue row failing to exist should not be able to take a deployment offline.
+
+Consequences:
+Adding a limit is a new `LimitKey` member, a branch in the entitlement service saying how to count it, and an edit to the plans that use it. No migration.
+
+Limits cannot be queried in SQL as conveniently as columns — "which plans allow more than 10 agents" is a JSONB expression rather than a comparison. That query is a platform reporting question about a handful of rows, and it is not on any hot path.
+
+Because limits are data, a plan edited in the database changes what a workspace may do immediately, with no deploy. That is the point, and it is also the risk: there is no approval workflow around a plan edit, which is acceptable while only platform staff can reach the rows, and becomes a real requirement the moment plans are editable through an API.

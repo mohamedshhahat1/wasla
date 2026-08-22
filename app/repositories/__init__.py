@@ -8,6 +8,12 @@ be scoped live in their own small classes so they stay visible.
 from .agent_repository import AgentRepository, AgentToolRepository
 from .analytics_repository import AnalyticsEventRepository, EventCount
 from .base import BaseRepository, TenantScopedRepository
+from .billing_repository import (
+    PlanRepository,
+    PlatformSubscriptionRepository,
+    SubscriptionCount,
+    SubscriptionRepository,
+)
 from .conversation_repository import (
     ContactRepository,
     ConversationRepository,
@@ -66,8 +72,12 @@ __all__ = [
     "LeadStatistics",
     "MembershipRepository",
     "MessageRepository",
+    "PlanRepository",
+    "PlatformSubscriptionRepository",
     "PlatformUsageRepository",
     "ScoredChunk",
+    "SubscriptionCount",
+    "SubscriptionRepository",
     "TenantRepository",
     "TenantScopedRepository",
     "TenantUsageTotal",

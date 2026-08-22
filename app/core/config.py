@@ -96,6 +96,15 @@ class Settings(BaseSettings):
     # discover there was nothing to read.
     media_max_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
 
+    # Billing
+    # The plan a workspace is entitled to when it has no subscription of its
+    # own: every workspace that predates billing, and any created before one is
+    # chosen. Named by code rather than by id so it is the same string in every
+    # environment. A code that matches no plan leaves limits unenforced and logs
+    # it, which is a better failure than taking a working deployment offline
+    # over a missing catalogue row.
+    default_plan_code: str = "starter"
+
     # Meta / WhatsApp: configuration only until the WhatsApp phase lands
     meta_app_id: str | None = None
     meta_app_secret: str | None = None

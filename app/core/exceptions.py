@@ -82,6 +82,20 @@ class ConflictError(WaslaError):
     message = "The request conflicts with the current state."
 
 
+class PlanLimitExceededError(WaslaError):
+    """The workspace's plan does not allow this, and no role change would.
+
+    402 rather than 403, which is not pedantry. A permission error tells a
+    caller to ask an administrator; this one tells them to upgrade, and a
+    client that cannot tell the two apart shows the wrong dialogue to a
+    customer who is trying to give us money.
+    """
+
+    status_code = 402
+    error_code = "plan_limit_exceeded"
+    message = "This workspace's plan does not allow that."
+
+
 class RateLimitedError(WaslaError):
     status_code = 429
     error_code = "rate_limited"
@@ -103,6 +117,7 @@ class DependencyUnavailableError(WaslaError):
 _HTTP_ERROR_CODES: Final[dict[int, str]] = {
     400: "bad_request",
     401: "unauthenticated",
+    402: "plan_limit_exceeded",
     403: "permission_denied",
     404: "not_found",
     405: "method_not_allowed",

@@ -301,9 +301,12 @@ Deferred by decision, not unfinished:
 
 ## Phase 13 — Plans, subscriptions, billing
 
-- [ ] Plan model with configurable limits
-- [ ] Subscription lifecycle
-- [ ] Entitlement enforcement service
+- [x] Plan model with configurable limits, and the documented catalogue seeded (migration `0016`, ADR-029)
+- [x] Subscription model, one per workspace, enforced by a unique index
+- [x] Entitlement service: resource limits counted from rows, period limits from `usage_events` over the billing period
+- [ ] Subscription lifecycle (trial, change of plan, cancellation, period roll-over)
+- [ ] Limits enforced at the points that create resources and spend allowances
+- [ ] Billing APIs (catalogue, subscription, entitlements)
 - [ ] Provider-agnostic billing abstraction
 - [ ] Invoices and payment records
 
