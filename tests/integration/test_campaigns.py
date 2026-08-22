@@ -52,6 +52,7 @@ from app.repositories.campaign_repository import (
     AudienceFilter,
     CampaignRecipientRepository,
 )
+from app.schemas.campaign import CampaignRead
 from app.services.campaign_service import CampaignService
 
 pytestmark = pytest.mark.integration
@@ -784,3 +785,27 @@ async def test_resuming_sends_to_nobody_twice(db_session):
     assert len(messaging.sends) == 3
     statistics = await service.statistics(campaign.id)
     assert (statistics.sent, statistics.pending) == (3, 0)
+
+
+async def test_a_new_campaign_can_be_serialised_without_a_further_flush(db_session):
+    """The 500 a stubbed endpoint test cannot see.
+
+    A route returns the row the service just staged and the request commits
+    afterwards, so anything the database fills in at flush — the primary key
+    default, the server-default timestamps — has to exist by the time the
+    response is built. Building the response schema here is what the route does.
+    """
+    tenant = await _tenant(db_session, slug="serialisable")
+    account = await _account(db_session, tenant=tenant)
+    template = await _template(db_session, tenant=tenant, account=account)
+
+    campaign = await _service(db_session, tenant).create(
+        account_id=account.id,
+        template_id=template.id,
+        name="Spring offer",
+    )
+
+    read = CampaignRead.from_model(campaign)
+    assert read.id is not None
+    assert read.created_at is not None
+    assert read.updated_at is not None

@@ -33,6 +33,7 @@ from app.db.models.lead import ActorKind
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.repositories.follow_up_repository import DueFollowUpClaim, FollowUpRepository
+from app.schemas.follow_up import FollowUpRead
 from app.services.follow_up_service import FollowUpService
 
 pytestmark = pytest.mark.integration
@@ -976,3 +977,26 @@ async def test_a_delivery_status_does_not_cancel_a_nudge(db_session):
 
     assert outcome.cancelled_follow_ups == 0
     assert follow_up.status is FollowUpStatus.PENDING
+
+
+async def test_a_new_follow_up_can_be_serialised_without_a_further_flush(db_session):
+    """The 500 a stubbed endpoint test cannot see.
+
+    `POST /api/v1/follow-ups` returns the row the service just staged, and the
+    request commits afterwards — so the primary key default and the
+    server-default timestamps must already be there. Building the response
+    schema here is exactly what the route does.
+    """
+    tenant = await _tenant(db_session, slug="serialisable-nudge")
+    conversation = await _conversation(db_session, tenant=tenant, wa_id="201000000042")
+
+    follow_up = await _service(db_session, tenant).schedule(
+        conversation_id=conversation.id,
+        delay=SOON,
+        body="Just checking in.",
+    )
+
+    read = FollowUpRead.from_model(follow_up)
+    assert read.id is not None
+    assert read.created_at is not None
+    assert read.updated_at is not None

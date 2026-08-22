@@ -198,6 +198,11 @@ class FollowUpService:
             created_by_id=created_by_id,
             created_by_kind=created_by_kind,
         )
+        # Flushed so the caller can read the generated id and the timestamps.
+        # Without it a route serialising this row answers 500: the primary key
+        # default and the server defaults are applied at flush, and the request
+        # commits after the response has already been built.
+        await self._session.flush()
         logger.info(
             "follow_up.scheduled",
             extra={"conversation_id": str(conversation_id), "scheduled_at": when.isoformat()},

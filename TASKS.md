@@ -257,7 +257,12 @@ Deferred by decision, not unfinished:
 - [x] Delivery and failure statistics, with delivery read from the message rows
 - [x] Campaign, template and opt-out APIs with role separation
 
-**COMPLETE.** Verified 2026-08-23 against PostgreSQL 16: 1020 tests passed, 0 failed, 0 skipped in 162s at 90% coverage; migrations `0012` and `0013` each upgrade, `alembic check` reports no drift, downgrade one step and to base, and reapply clean; Ruff, Black and MyPy clean; the image builds and the worker container runs all five loops. See the phase report.
+**COMPLETE.** Verified 2026-08-23 against PostgreSQL 16 and in containers; see the phase report for the figures. Migrations `0012` and `0013` each upgrade, `alembic check` reports no drift, downgrade one step and to base, and reapply clean; Ruff, Black and MyPy clean; the image builds, the worker container runs all five loops, and a campaign was composed, targeted, scheduled and stopped through real HTTP against real PostgreSQL.
+
+Two defects the container run found and no test could see, both now covered by tests that fail without the fix:
+
+- `POST /api/v1/campaigns` and `POST /api/v1/follow-ups` both answered **500**. A route returns the row the service just staged and the request commits afterwards, so the primary key default and the server-default timestamps were still null when the response was built. The follow-up route had been broken this way since Phase 8; every endpoint test used a stub service returning a fully populated model, which is exactly what hid it
+- A missing WhatsApp credential looped a campaign forever without exhausting anyone's attempts, staging a message row per recipient per sweep
 
 Deferred by decision, not unfinished:
 
