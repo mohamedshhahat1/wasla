@@ -47,16 +47,19 @@ Persistence + Usage + Analytics
 wasla/
 |-- app/
 |   |-- main.py              application factory
-|   |-- core/                config, logging, exceptions, middleware, redis, DI, security
+|   |-- core/                config, logging, exceptions, middleware, redis, storage, DI, security
 |   |-- db/                  declarative base, mixins, async session, models
 |   |-- repositories/        data access, tenant-scoped and isolation-enforcing
 |   |-- schemas/             Pydantic request/response contracts
 |   |-- services/            business logic / use cases
 |   |-- api/                 health router, auth dependencies
-|   |   +-- v1/              agents, auth, conversations, invitations, webhooks, whatsapp
-|   |-- integrations/        whatsapp/ (signature, payload, client); openai/ (types, client)
+|   |   +-- v1/              agents, auth, conversations, follow-ups, invitations, knowledge,
+|   |                         leads, webhooks, whatsapp
+|   |-- integrations/        whatsapp/ (signature, payload, client); openai/ (types, client,
+|   |                         embeddings, transcription)
 |   |-- agents/              memory, tool registry, orchestrator
-|   |-- workers/             job queue, AI worker (no process entrypoint yet)
+|   |-- workers/             runner process; agent, ingestion, follow-up and media workers
+|   |                         with their queues
 |   +-- platform/            SaaS owner administration layer  (planned)
 |-- alembic/                 migrations
 |-- tests/                   unit, integration, e2e
@@ -298,11 +301,62 @@ A rejected send is retried with a widening backoff until the attempt limit, then
 
 **Known gap.** There is no template registry until Phase 11, so `template_name` is free text and nothing can confirm Meta has approved it before the send is attempted. That is the weakest point in this compliance story.
 
-## 11. Background jobs and Redis usage
+## 11. Media flow
 
-**Status: In Progress** — the Redis client, its health probe, the refresh-token denylist, the agent job queue, the AI, ingestion and follow-up workers, and the worker process that runs them are Implemented. Media and campaign workers are not.
+**Status: Implemented** — descriptor parsing, storage, download, image description, transcription, document extraction, the media worker and outbound attachments, exercised against real PostgreSQL.
 
-All three workers run in **one container**, concurrently in one event loop, selected by `WORKER_KINDS` (empty means all). Each is I/O-bound — waiting on Redis, PostgreSQL, OpenAI or Meta — so they interleave rather than compete, and one process is markedly simpler to deploy and watch than three. Splitting them later is an environment variable, not another image.
+```
+photograph arrives
+    |
+message stored; caption becomes the body
+    |
+message_media row, PENDING          -- one per message, enforced
+    |
+media job enqueued                  -- NOT an agent job
+    |
+MediaWorker:
+    probe size ---- over the cap ---> SKIPPED
+    |
+    download ------ Meta failed ----> FAILED (retried)
+    |
+    store bytes                      -- key generated, tenant-prefixed
+    |
+    read: vision | transcription | extraction
+    |         |
+    |     nothing to read ---------> SKIPPED
+    |
+    READY, transcript on the row
+    |
+lock the conversation row
+    |
+anything still unread here? -- yes --> stop; the sibling job will release
+    |
+    no
+    |
+agent job enqueued ---> agent answers, seeing the transcript
+```
+
+The webhook does none of this. It stores the event, notes the attachment, enqueues and returns, exactly as it does for text.
+
+Four things carry weight here.
+
+**The media job replaces the agent job rather than racing it.** A photograph is a question, and an agent asked to answer before anyone has looked at the picture replies about nothing — which is precisely what happened before this phase, when memory rendered every attachment as the literal string `[image]`.
+
+**Two attachments produce one reply.** One delivery can carry two photographs, which become two jobs on two workers; each finishes and asks whether anything is still unread, and if both ask at once, both see nothing and both ask an agent to answer. An agent turn is not idempotent, so that is two answers to one question. `ConversationMediaGate` takes a row lock on the conversation before counting, which turns the race into a queue.
+
+**A caption is not a transcript.** The customer's words go in `messages.body`; what Wasla concluded the file says goes in `message_media.transcript`, and memory labels the second. A stored conversation in which an inference is indistinguishable from what somebody actually said cannot answer the question it exists to answer.
+
+**Not reading a file is a recorded outcome.** `SKIPPED` — over the cap, an unreadable type, a silent recording, a scanned page — is a decision no retry changes. `FAILED` is an attempt that broke. The same distinction follow-ups draw, for the same reason. Both count as resolved, because the customer is still owed an answer and an agent that says it could not open the attachment beats one that never speaks.
+
+Bytes live behind a `MediaStorage` interface on local disk (ADR-023), never in PostgreSQL. Keys are generated by the store under a tenant prefix and never derived from a customer-supplied filename. The local implementation requires the API and worker to share a volume, which is a single-host constraint and the trigger for writing the object-store implementation.
+
+**Known gaps.** No OCR, so a scanned document is reported unreadable rather than read. Video is stored but not understood. Nothing streams, and nothing sweeps stored files.
+
+## 12. Background jobs and Redis usage
+
+**Status: In Progress** — the Redis client, its health probe, the refresh-token denylist, the agent, ingestion and media job queues, the AI, ingestion, follow-up and media workers, and the worker process that runs them are Implemented. The campaign worker is not.
+
+All four workers run in **one container**, concurrently in one event loop, selected by `WORKER_KINDS` (empty means all). Each is I/O-bound — waiting on Redis, PostgreSQL, OpenAI or Meta — so they interleave rather than compete, and one process is markedly simpler to deploy and watch than three. Splitting them later is an environment variable, not another image.
 
 SIGTERM asks each loop to stop and each finishes the job in its hand before returning, so a deploy does not dead-letter work that was about to succeed. The production compose gives the worker a longer `stop_grace_period` than the API: a worker mid-inference holds an HTTP call and an open transaction.
 
@@ -310,15 +364,17 @@ One constraint binds the two together and is easy to get wrong. redis-py applies
 
 Redis provides job queues, caching, rate limiting, follow-up scheduling, and temporary state. Workers handle AI processing, media processing, document ingestion and embeddings, follow-ups, campaigns, and usage aggregation.
 
-The agent queue is three lists rather than one: `agent:jobs:pending`, `agent:jobs:inflight`, and `agent:jobs:failed`. A worker reserves with a blocking `BLMOVE` into the in-flight list, removes the exact payload on success, and dead-letters it on failure, so a job whose worker dies is still visible instead of lost with the process (ADR-015). Payloads are compact JSON with sorted keys, because removal matches by exact value.
+There are three queues, not one, and the separation is deliberate (ADR-019). An agent job is a customer waiting for a reply; an ingestion job is a document that will be searchable in a minute; a media job is a customer waiting whose reply cannot even be composed yet. Sharing one list would let a bulk upload of a hundred documents sit in front of somebody's question, and a worker pool sized for downloading is the wrong shape for one doing inference.
 
-Two gaps are known and recorded rather than implied away. Nothing reaps the in-flight list, so a job abandoned by a killed worker stalls until an operator moves it; and requeueing is an operator decision, because re-running a job produces a second reply to the customer — these jobs are repeatable, not idempotent.
+Each queue is three lists rather than one — for the agent queue, `agent:jobs:pending`, `agent:jobs:inflight`, and `agent:jobs:failed`. A worker reserves with a blocking `BLMOVE` into the in-flight list, removes the exact payload on success, and dead-letters it on failure, so a job whose worker dies is still visible instead of lost with the process (ADR-015). Payloads are compact JSON with sorted keys, because removal matches by exact value.
 
-## 12. Database architecture
+Two gaps are known and recorded rather than implied away. Nothing reaps the in-flight list, so a job abandoned by a killed worker stalls until an operator moves it; and requeueing an *agent* job is an operator decision, because re-running one produces a second reply to the customer. Ingestion and media jobs are genuinely idempotent — a stored file is not fetched again and a read one is not read again — so requeueing those is safe.
 
-**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, and the identity, tenancy, WhatsApp, conversation, agent, knowledge, CRM and follow-up tables are Implemented; campaign, usage and billing tables arrive in later phases.
+## 13. Database architecture
 
-PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically; migration `0002` creates `tenants`, `users`, `memberships`, and `tenant_invitations`; migration `0003` creates `whatsapp_accounts` and `whatsapp_events`; migration `0004` creates `contacts`, `conversations`, and `messages`; migration `0005` creates `agents` and `agent_tools`.
+**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, and the identity, tenancy, WhatsApp, conversation, agent, knowledge, CRM, follow-up and media tables are Implemented; campaign, usage and billing tables arrive in later phases.
+
+PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically; migration `0002` creates `tenants`, `users`, `memberships`, and `tenant_invitations`; migration `0003` creates `whatsapp_accounts` and `whatsapp_events`; migration `0004` creates `contacts`, `conversations`, and `messages`; migration `0005` creates `agents` and `agent_tools`; `0006` records template messages; `0007` creates the knowledge tables; `0008` the lead tables; `0009` the follow-up table; and `0010` creates `message_media`.
 
 Sessions are request-scoped and commit on success or roll back on failure. Connections use pre-ping, bounded pooling, recycling, and an explicit connect timeout.
 
@@ -330,9 +386,9 @@ One pitfall is recorded here because it already produced a defect. A model that 
 
 The schema carries one deliberate denormalisation. `conversations.last_inbound_at` duplicates the timestamp of the customer's most recent message, which could be derived from the `messages` table instead. It is stored because the 24-hour service window is checked on every outbound send and returned on every conversation read, so deriving it would make that the most frequent query in the system. The projection is the only writer.
 
-Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, the unique invitation token hash, `whatsapp_accounts (tenant_id)`, a platform-wide `UNIQUE(phone_number_id)`, `whatsapp_events (tenant_id)`, `whatsapp_events (account_id)`, `whatsapp_events (tenant_id, state)`, `UNIQUE(tenant_id, event_id)`, `contacts (tenant_id)`, `UNIQUE(tenant_id, wa_id)`, `conversations (tenant_id)`, `conversations (tenant_id, status)`, `conversations (tenant_id, last_message_at)`, `conversations (contact_id)`, `UNIQUE(tenant_id, contact_id, account_id)`, `messages (tenant_id)`, `messages (conversation_id, created_at)`, `UNIQUE(tenant_id, wa_message_id)`, `agents (tenant_id)`, `agents (tenant_id, status)`, `UNIQUE(tenant_id, name)` on agents, `agent_tools (tenant_id)`, `agent_tools (agent_id)`, and `UNIQUE(tenant_id, agent_id, name)`. Further indexes are planned on lead `(tenant_id, status)`, usage and analytics `(tenant_id, created_at)`, and document `tenant_id`.
+Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, the unique invitation token hash, `whatsapp_accounts (tenant_id)`, a platform-wide `UNIQUE(phone_number_id)`, `whatsapp_events (tenant_id)`, `whatsapp_events (account_id)`, `whatsapp_events (tenant_id, state)`, `UNIQUE(tenant_id, event_id)`, `contacts (tenant_id)`, `UNIQUE(tenant_id, wa_id)`, `conversations (tenant_id)`, `conversations (tenant_id, status)`, `conversations (tenant_id, last_message_at)`, `conversations (contact_id)`, `UNIQUE(tenant_id, contact_id, account_id)`, `messages (tenant_id)`, `messages (conversation_id, created_at)`, `UNIQUE(tenant_id, wa_message_id)`, `agents (tenant_id)`, `agents (tenant_id, status)`, `UNIQUE(tenant_id, name)` on agents, `agent_tools (tenant_id)`, `agent_tools (agent_id)`, and `UNIQUE(tenant_id, agent_id, name)`. Media adds `message_media (tenant_id)`, `message_media (tenant_id, status)`, `message_media (conversation_id)` and `UNIQUE(message_id)`. The conversation index is not an optimisation: before an agent is allowed to answer, the worker asks whether anything on the conversation is still unread, and it asks once per file that arrives. The unique constraint is what makes a webhook replay a no-op and the download job safe to retry. Further indexes are planned on usage and analytics `(tenant_id, created_at)`.
 
-## 13. Multi-tenancy
+## 14. Multi-tenancy
 
 **Status: Implemented** — enforced in the repository layer and tested against a real database.
 
@@ -344,13 +400,13 @@ A background worker has no authenticated context to take a tenant id from, so it
 
 Cross-tenant reads answer `not_found`, never `forbidden`, so error codes cannot be used to map another tenant's data. `tests/integration/test_authorization.py`, `tests/integration/test_whatsapp_persistence.py` and `tests/integration/test_conversation_projection.py` prove this against PostgreSQL.
 
-## 14. SaaS owner architecture
+## 15. SaaS owner architecture
 
 **Status: In Progress** — the platform role authorization layer is Implemented; the `app/platform/` surface is Planned.
 
 Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated: a platform role grants nothing inside a workspace, which is tested. The platform layer lives in `app/platform/` and is exposed under `/api/v1/platform/*` for tenant administration, usage, revenue, plans, subscriptions, system health, and audit logs. Privileged platform actions are always audit-logged.
 
-## 15. Authentication and authorization
+## 16. Authentication and authorization
 
 **Status: Implemented** — rate limiting on authentication endpoints remains Planned (phase 14).
 
@@ -358,7 +414,7 @@ Argon2id password hashing with rehash-on-login, typed access and refresh tokens,
 
 Conversation routes are open to every workspace member rather than to admins only, because restricting them would exclude the people who staff an inbox. Reading agent configuration is open for the same reason. Role gates stay on administrative actions: connecting a number, inviting a colleague, revoking an invitation, and changing what an agent says to customers.
 
-## 16. Billing and usage tracking
+## 17. Billing and usage tracking
 
 **Status: Planned**
 
@@ -366,7 +422,7 @@ Usage is a first-class subsystem of append-only usage events (`tenant_id`, `even
 
 Token usage is already returned by the provider client and logged per turn, so the recorder has a source when it is built.
 
-## 17. Observability
+## 18. Observability
 
 **Status: Implemented** — structured logging, request IDs, and health endpoints exist and are tested. OpenTelemetry, Prometheus, and Sentry remain Planned.
 
@@ -386,7 +442,7 @@ Events that are expected but worth counting are logged rather than raised: an un
 
 An agent turn logs one summary event carrying the rounds taken, the tools run, whether it handed off, the estimated and actual token counts, and how many history turns were dropped, which is what makes a bad prompt or an over-tight budget diagnosable after the fact. Provider failures log the status, the attempt count and the provider's error `code` and `type` — never its prose, because that prose can quote the request and the request contains a customer's conversation.
 
-## 18. CI/CD and production deployment
+## 19. CI/CD and production deployment
 
 **Status: In Progress** — CI is Implemented; deployment automation and worker containers are Planned.
 

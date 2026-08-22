@@ -2,7 +2,7 @@
 
 **Status: Implemented** — an agent answers a customer end to end. Knowledge retrieval (Phase 6), usage recording (Phase 12) and a worker process of its own (Phase 8) are not built. Decisions: ADR-007, ADR-014, ADR-015.
 
-Scope: agent configuration, orchestration, tool calling, and conversation memory.
+Scope: agent configuration, orchestration, tool calling, and conversation memory. What an agent sees of an attached file is covered in [MEDIA.md](MEDIA.md).
 
 ## Agent configuration
 
@@ -69,6 +69,19 @@ The window is assembled from the conversation's own messages, newest first, and 
 Twice the message limit is fetched to fill it, because failed outbound messages are skipped: a message Meta rejected was never seen by the customer, so replaying it as something the agent said would make the agent reason about a conversation that did not happen.
 
 Token counts are an estimate, not a tokenisation: four characters per token for ASCII, two for non-ASCII, which keeps Arabic from being wildly under-counted. This is deliberate — a real tokeniser means a new dependency and a model-specific vocabulary, for a number used only to decide where to cut history. The estimate is compared against a budget, never billed against.
+
+### What an agent sees of an attachment
+
+A media message contributes up to two things, and the window keeps them apart:
+
+```
+how much is this one?
+[image] A blue three-seat sofa with a price tag reading 4,500 EGP.
+```
+
+The first line is the customer's caption — their own words, rendered as ordinary text. The second is what Wasla concluded the file says, and it is labelled, so the model is never in a position to quote a machine transcription back to someone as their own sentence. A file that could not be read still produces a line with its reason, because silence would let the agent answer as though nothing had been sent.
+
+Attachments are fetched for the whole window in one query and passed into `build_window`, rather than reached through a relationship: a lazy load inside an async session does not merely cost a query per message, it raises. See [MEDIA.md](MEDIA.md).
 
 A rolling conversation summary is still planned. Long conversations currently lose their oldest turns rather than compressing them.
 

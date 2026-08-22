@@ -1,6 +1,6 @@
 # API
 
-**Status: In Progress** — health, authentication, invitations, WhatsApp accounts, the WhatsApp webhook, conversations, the knowledge base, leads and follow-ups are Implemented. Everything else is Planned.
+**Status: In Progress** — health, authentication, invitations, WhatsApp accounts, the WhatsApp webhook, conversations, media, the knowledge base, leads and follow-ups are Implemented. Everything else is Planned.
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
@@ -89,6 +89,8 @@ All conversation routes are available to any member of the workspace. Restrictin
 | GET | `/api/v1/conversations/{conversation_id}/messages` | Messages, most recent first |
 | POST | `/api/v1/conversations/{conversation_id}/messages` | Send free text (`201`) |
 | POST | `/api/v1/conversations/{conversation_id}/messages/template` | Send an approved template (`201`) |
+| POST | `/api/v1/conversations/{conversation_id}/messages/media` | Send an attachment, multipart (`201`) |
+| GET | `/api/v1/conversations/{conversation_id}/media/{media_id}` | Download a stored attachment |
 | POST | `/api/v1/conversations/{conversation_id}/mode` | Switch between AI and human handling |
 | POST | `/api/v1/conversations/{conversation_id}/assignment` | Assign, or clear the assignment |
 | POST | `/api/v1/conversations/{conversation_id}/close` | Close the conversation |

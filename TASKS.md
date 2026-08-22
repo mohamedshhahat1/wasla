@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0 through 8 are complete, and the pipeline that verifies them has been repaired — see *Phase 5.5* below, which came first because none of the claims in this file were being checked while it was broken. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API, upload documents, and their agents answer from them through tenant-scoped pgvector search. Agents capture leads from those conversations, and schedule follow-ups that a customer's reply cancels. As of this phase the workers finally have a process of their own: one container runs the agent, ingestion and follow-up loops together, selectable by `WORKER_KINDS`, and stops cleanly on SIGTERM. Phase 9 (media) is next.
+**Current position:** Phases 0 through 9 are complete, and the pipeline that verifies them has been repaired — see *Phase 5.5* below, which came first because none of the claims in this file were being checked while it was broken. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API, upload documents, and their agents answer from them through tenant-scoped pgvector search. Agents capture leads from those conversations, and schedule follow-ups that a customer's reply cancels. The workers have a process of their own: one container runs the media, agent, ingestion and follow-up loops together, selectable by `WORKER_KINDS`, and stops cleanly on SIGTERM. As of phase 9 a customer can send a photograph, a voice note or a PDF and be answered about what is actually in it: the media worker reads the file before any agent is asked to reply, and a business can send attachments back. Phase 10 (sentiment and escalation) is next.
 
 ## Phase 0 — Foundation
 
@@ -203,11 +203,23 @@ Deferred by decision, not unfinished:
 
 ## Phase 9 — Media
 
-- [ ] Media download and storage abstraction
-- [ ] Image understanding
-- [ ] Voice transcription
-- [ ] Document handling
-- [ ] Media worker
+- [x] Media download and storage abstraction (`MediaStorage` protocol, `LocalMediaStorage`, ADR-023)
+- [x] Media descriptors parsed from the webhook; captions become the message body
+- [x] `message_media` table and migration `0010`
+- [x] Image understanding (Responses API image input, reusing the existing client)
+- [x] Voice transcription (`TranscriptionClient`)
+- [x] Document handling (PDF and plain text extraction; also unblocks knowledge base PDF ingestion)
+- [x] Media worker, its own queue, and `WORKER_KINDS=media`
+- [x] Conversation gate: two attachments produce one agent job
+- [x] Transcripts rendered into agent memory, distinct from customer captions
+- [x] Outbound attachments (upload to Meta, send, serve stored files back)
+
+Deferred, and recorded rather than forgotten:
+
+- [ ] OCR for scanned documents — reported as unreadable for now
+- [ ] Video understanding — downloaded and stored, but skipped as unreadable
+- [ ] Streaming rather than whole-file reads
+- [ ] Retention sweep for stored files — belongs with the object-store implementation
 
 ## Phase 10 — Sentiment and escalation
 

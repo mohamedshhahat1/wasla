@@ -1,6 +1,6 @@
 # WhatsApp Integration
 
-**Status: Implemented** — inbound webhook (verification, signature checking, parsing, tenant resolution, idempotent storage), the account connection API, and the outbound client. Media handling and template sync belong to later phases. See [../TASKS.md](../TASKS.md) phase 3.
+**Status: Implemented** — inbound webhook (verification, signature checking, parsing, tenant resolution, idempotent storage), the account connection API, the outbound client, and media in both directions ([MEDIA.md](MEDIA.md)). Template sync belongs to phase 11. See [../TASKS.md](../TASKS.md) phase 3.
 
 ## Endpoints
 
@@ -71,7 +71,7 @@ The uniqueness constraint, not the preceding read, is the guarantee. Two simulta
 
 ## Outbound client
 
-`WhatsAppClient` covers text, media (link or uploaded id), location, reply buttons, lists, templates, and read receipts. An outbound template is stored as a `template` message carrying the name and language it was sent with and no body, since Meta renders the wording from its approved copy and Wasla never sees it. The HTTP client, sleep function and attempt budget are injected, so retry behaviour is tested against `httpx.MockTransport` with no network and no real waiting.
+`WhatsAppClient` covers text, media (by uploaded id — Wasla never sends by link), location, reply buttons, lists, templates, read receipts, and the two-step media fetch for inbound files. Reads take the opposite retry policy to sends: fetching a file twice costs a request and changes nothing anyone can see, so timeouts and 5xx are retried there where a send must never retry them. An outbound template is stored as a `template` message carrying the name and language it was sent with and no body, since Meta renders the wording from its approved copy and Wasla never sees it. The HTTP client, sleep function and attempt budget are injected, so retry behaviour is tested against `httpx.MockTransport` with no network and no real waiting.
 
 ### Retry policy
 
@@ -90,11 +90,11 @@ A message accepted without an identifier is treated as an error: delivery status
 
 ## What the webhook does not do
 
-No AI processing, media downloading, or outbound calls. The request resolves the workspace, stores the event, and returns. Queueing to Redis and message/conversation projection arrive with phases 4 and 5.
+No AI processing, media downloading, or outbound calls. The request resolves the workspace, stores the event, projects it, enqueues and returns. An attachment is noted and its bytes are left where they are: a file arrives as a handle rather than as data, and fetching it takes two round trips to Meta, which is a worker's job ([MEDIA.md](MEDIA.md)).
 
 ## Planned
 
 - An outbound send API, which belongs with conversations in phase 4: there is a message to persist and a 24-hour service window to enforce, and a raw send endpoint now would invite bypassing both.
 - Projection of delivery statuses and read receipts onto message rows, which needs the message model from phase 4.
-- Media download and storage (phase 9), template sync and campaigns (phase 11).
+- Template sync and campaigns (phase 11).
 - Per-workspace access tokens, once there is encryption at rest (phase 14).

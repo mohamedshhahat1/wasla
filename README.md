@@ -6,7 +6,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 
 ## Project status
 
-**Phase 0 — Foundation is complete.** Phase 1 (database and tenancy foundation) is next. The table below reflects the actual state of the code, not the roadmap.
+**Phases 0 through 9 are complete.** Phase 10 (sentiment and escalation) is next. The table below reflects the actual state of the code, not the roadmap.
 
 | Area | Status |
 | --- | --- |
@@ -14,7 +14,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Documentation protocol (`Documentation_Protocol.md`) | Implemented |
 | Project memory (`README` / `ARCHITECTURE` / `TASKS` / `DECISIONS`, `docs/`) | Implemented |
 | Application foundation (FastAPI, config, logging, errors, DB, Redis, health, Docker, CI) | Implemented |
-| Domain models and migrations (`0001`–`0007`) | Implemented |
+| Domain models and migrations (`0001`–`0010`) | Implemented |
 | Multi-tenancy, authentication, workspace RBAC, invitations | Implemented |
 | WhatsApp Cloud API (webhook, signatures, idempotency, outbound client) | Implemented |
 | Conversations, inbox, human handoff, templates, cursor paging | Implemented |
@@ -22,10 +22,11 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Knowledge base and RAG (ingestion, pgvector retrieval, `search_knowledge`) | Implemented |
 | CRM and leads (capture, lifecycle, assignment, notes, activity timeline, `record_lead_details`) | Implemented |
 | Follow-ups (scheduling, cancel-on-reply, window and template compliance, polling worker) | Implemented |
-| Media, sentiment, campaigns | Planned |
+| Media (download, storage, vision, transcription, documents, outbound attachments) | Implemented |
+| Sentiment, campaigns | Planned |
 | Usage, analytics, plans, subscriptions, billing | Planned |
 | Platform owner administration layer | Planned |
-| Worker process (agent, ingestion and follow-up loops in one container) | Implemented |
+| Worker process (media, agent, ingestion and follow-up loops in one container) | Implemented |
 | Deployment automation | Planned |
 
 Status vocabulary used across all documentation: **Implemented**, **In Progress**, **Planned**, **Blocked**.
@@ -62,6 +63,7 @@ Planned for later phases:
 | [docs/AI_AGENTS.md](docs/AI_AGENTS.md) | AI agent configuration, orchestration, tools |
 | [docs/RAG.md](docs/RAG.md) | Knowledge base, ingestion, tenant-scoped retrieval |
 | [docs/CRM.md](docs/CRM.md) | Contacts, leads, follow-ups, human handoff |
+| [docs/MEDIA.md](docs/MEDIA.md) | Attachments: storage, understanding, sending |
 | [docs/BILLING.md](docs/BILLING.md) | Plans, subscriptions, entitlements, invoicing |
 | [docs/ANALYTICS.md](docs/ANALYTICS.md) | Analytics events, usage tracking, dashboards |
 | [docs/API.md](docs/API.md) | API conventions and endpoint catalogue |

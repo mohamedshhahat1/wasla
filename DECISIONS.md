@@ -457,3 +457,27 @@ Polling costs one indexed query per interval, against a partial index covering o
 
 Consequences:
 Precision is bounded by the poll interval — a follow-up fires within one interval of its due time rather than at it. For a nudge measured in half-hours that is not a meaningful difference, and buying exactness would mean a scheduler holding in-memory state that a restart loses. The claim is bounded per sweep so a backlog drains in batches rather than under one long-held lock. The worker is the only component in the codebase that queries across tenants; it does so through `DueFollowUpClaim`, a separate unscoped repository class named so that reaching for it is deliberate and visible in review, and every row it returns is handed to a `FollowUpService` scoped to that row's own tenant.
+
+## ADR-023 — Media Bytes Live Behind a Storage Interface, on Local Disk for Now
+
+Date:
+2026-08-22
+
+Status:
+Accepted
+
+Decision:
+Store downloaded and sent files through a `MediaStorage` protocol, with `LocalMediaStorage` as the only implementation. Keys are produced by the store from a generated UUID under a tenant prefix, never by a caller and never from anything a customer supplied. Do not put file bytes in PostgreSQL.
+
+Context:
+Phase 9 needs somewhere to put a customer's photograph between the worker that downloads it and the request that serves it back. Three options existed: a `bytea` column, an object store, or the local filesystem. An interface with a single implementation is normally a smell, and this project's rules say not to abstract prematurely.
+
+Reason:
+PostgreSQL is out on its own merits (claude.md §26). A voice note is a megabyte and a video is fifteen; in rows they are carried by every backup, every replica and every dump, and the database is the one component that cannot be scaled by adding disks.
+
+The interface is not premature because *where files live is a deployment decision that has already changed once and will change again*. Local disk is right for development and for a single host; object storage is right the moment there are two. Without a named boundary that change means rewriting every service that had opened a file. With one it is a new class and a changed dependency. The one implementation that exists is the one that runs today, not a placeholder.
+
+Keys are the store's own business because they are the only thing between a store and the rest of the host's filesystem. A filename arriving from a stranger's phone is untrusted input, and `../../etc/passwd` is a request rather than an accident, so the customer's filename is recorded for display and never consulted when building a path. Keys are validated on the way out as well as in: one read back from a database row is still input, whatever wrote it.
+
+Consequences:
+The local implementation requires the API and worker containers to share a volume — one writes the file, the other serves it back — which both compose files now configure. That is a genuine single-host constraint, and it is the trigger for writing the object-store implementation rather than a detail to discover during an incident. Deleting a workspace's files is a prefix operation because the tenant id leads the key. Nothing streams: a file is read into memory whole, which is bounded by the download cap and by a separate, smaller cap on the upload endpoint, since that one is holding the bytes inside an API process rather than a worker.

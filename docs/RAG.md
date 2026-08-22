@@ -1,6 +1,6 @@
 # Knowledge Base and RAG
 
-**Status: Implemented** — ingestion, tenant-scoped retrieval and the `search_knowledge` tool exist and are exercised against real PostgreSQL with pgvector. PDF extraction, an approximate vector index and usage metering are Planned. See [../TASKS.md](../TASKS.md) phase 6. Storage decision: ADR-008. Embedding width: ADR-018. Queue separation: ADR-019.
+**Status: Implemented** — ingestion, tenant-scoped retrieval and the `search_knowledge` tool exist and are exercised against real PostgreSQL with pgvector. PDF extraction arrived with phase 9. An approximate vector index and usage metering are Planned. See [../TASKS.md](../TASKS.md) phase 6. Storage decision: ADR-008. Embedding width: ADR-018. Queue separation: ADR-019.
 
 Scope: knowledge sources, ingestion, embeddings, and tenant-scoped retrieval.
 
@@ -8,7 +8,9 @@ Scope: knowledge sources, ingestion, embeddings, and tenant-scoped retrieval.
 
 Per-tenant isolated knowledge bases. A workspace may keep several — sales material apart from support policies — and point different agents at different sets; a workspace that does not care keeps one and never thinks about it again, since the first upload creates it.
 
-Plain text and Markdown are ingested today. Markdown keeps its punctuation, because headings and lists are structure the chunker uses. **PDF is refused explicitly** rather than accepted and silently producing nothing: a document that looks ingested and answers nothing is worse than one that was rejected with a reason. It needs a parser dependency the project does not yet carry.
+Plain text, Markdown and PDF are ingested. Markdown keeps its punctuation, because headings and lists are structure the chunker uses. A PDF is submitted base64-encoded, since this endpoint takes JSON and a PDF is not text.
+
+A **scanned** PDF — a photograph of a page, with no text layer — is refused with a message saying so rather than stored empty. A document that looks perfectly ingested from the outside and answers every question with nothing is worse than one rejected with a reason, and the two are distinguishable: an empty extraction means a valid PDF with nothing to read, where a raised error means the bytes were not a PDF at all. Extraction is shared with inbound WhatsApp documents ([MEDIA.md](MEDIA.md)); there is no OCR.
 
 ## Ingestion pipeline
 
