@@ -12,9 +12,35 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 TEXT_TYPE = "text"
+
+# Meta's media message types. Voice notes arrive as "voice" rather than "audio"
+# and carry the same descriptor, so both are read the same way; the distinction
+# survives in the raw payload for anyone who needs it.
+MEDIA_TYPES: Final = ("image", "document", "audio", "voice", "video", "sticker")
+
+
+@dataclass(frozen=True, slots=True)
+class InboundMedia:
+    """The descriptor Meta sends instead of the file itself.
+
+    `media_id` is a handle, not a URL: the file is fetched in two steps and the
+    handle expires, which is why downloading is a worker's job rather than
+    something the webhook could do on the way past.
+
+    `sha256` is Meta's own checksum of the bytes. It is kept for the same reason
+    a document's content hash is - recognising the same file twice - and never
+    trusted as a substitute for hashing what actually arrived.
+    """
+
+    media_id: str
+    kind: str
+    mime_type: str | None
+    sha256: str | None
+    filename: str | None
+    is_voice: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +50,11 @@ class InboundMessage:
     `profile_name` comes from the delivery's `contacts` block rather than from
     the message itself, which is the only place Meta sends it. It is last and
     optional so the parser's existing callers are unaffected.
+
+    `text` carries a media message's caption as well as a text message's body,
+    because a caption is what the customer actually typed. What Wasla later
+    infers about the file - a transcript, a description - is deliberately not
+    put here: the two must stay distinguishable in the stored conversation.
     """
 
     event_id: str
@@ -34,6 +65,7 @@ class InboundMessage:
     text: str | None
     raw: dict[str, Any]
     profile_name: str | None = None
+    media: InboundMedia | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,10 +120,66 @@ def _timestamp(value: Any) -> datetime | None:
 
 
 def _message_text(message: Mapping[str, Any], message_type: str) -> str | None:
-    """Only genuine text is extracted. Everything else keeps its raw payload."""
-    if message_type != TEXT_TYPE:
+    """The words the customer typed, whether alone or attached to a file.
+
+    A caption counts. It is the customer's own sentence and often carries the
+    whole question - "how much is this one?" under a photo - so dropping it
+    would leave the agent with a picture and no idea what was being asked.
+
+    What Wasla later concludes about the file is not text and does not come back
+    from here.
+    """
+    if message_type == TEXT_TYPE:
+        return _text(_mapping(message.get(TEXT_TYPE)).get("body"))
+    if message_type in MEDIA_TYPES:
+        return _text(_mapping(message.get(message_type)).get("caption"))
+    return None
+
+
+def _media(message: Mapping[str, Any], message_type: str) -> InboundMedia | None:
+    """Read the media descriptor, or None if this message carries no file.
+
+    An entry without an id is treated as no media at all rather than as a
+    parse failure: the message itself is still worth storing, and there is
+    nothing to download without the handle.
+
+    The filename is passed through exactly as Meta sent it and is never used to
+    build a path. It arrives from a stranger's phone, and a value like
+    "../../etc/passwd" is a request, not an accident. Storage derives its own
+    key; this is only ever shown to a person.
+    """
+    if message_type not in MEDIA_TYPES:
         return None
-    return _text(_mapping(message.get(TEXT_TYPE)).get("body"))
+
+    descriptor = _mapping(message.get(message_type))
+    media_id = _text(descriptor.get("id"))
+    if media_id is None:
+        return None
+
+    return InboundMedia(
+        media_id=media_id,
+        kind=message_type,
+        mime_type=_mime_type(descriptor.get("mime_type")),
+        sha256=_text(descriptor.get("sha256")),
+        filename=_text(descriptor.get("filename")),
+        # Meta marks a recorded voice note this way; an attached audio file
+        # arrives without it. Both are transcribed, but only one is somebody
+        # speaking to the business, and that is worth keeping.
+        is_voice=message_type == "voice" or descriptor.get("voice") is True,
+    )
+
+
+def _mime_type(value: Any) -> str | None:
+    """Strip the codec parameters Meta appends to audio types.
+
+    A voice note arrives as "audio/ogg; codecs=opus". The parameters matter to a
+    decoder and not to us, and keeping them would make two identical types
+    compare unequal wherever the value is matched.
+    """
+    text = _text(value)
+    if text is None:
+        return None
+    return text.split(";", 1)[0].strip() or None
 
 
 def _profile_names(value: Mapping[str, Any]) -> dict[str, str]:
@@ -146,6 +234,7 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                         text=_message_text(message, message_type),
                         raw=message,
                         profile_name=profile_names.get(from_number),
+                        media=_media(message, message_type),
                     )
                 )
 

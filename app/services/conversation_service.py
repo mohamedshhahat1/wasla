@@ -21,6 +21,7 @@ from app.repositories.conversation_repository import (
     ConversationRepository,
     MessageRepository,
 )
+from app.repositories.media_repository import MediaRepository
 
 logger = get_logger(__name__)
 
@@ -37,6 +38,10 @@ MESSAGE_KINDS: dict[str, MessageKind] = {
     "location": MessageKind.LOCATION,
     "interactive": MessageKind.INTERACTIVE,
     "button": MessageKind.INTERACTIVE,
+    # A sticker is a small image and is read as one. Meta gives it its own type
+    # rather than folding it into "image", but nothing downstream needs the
+    # distinction, and the raw event keeps it for anything that later does.
+    "sticker": MessageKind.IMAGE,
 }
 
 # Only the four statuses Meta actually reports for a sent message.
@@ -59,6 +64,7 @@ class ConversationProjectionService:
         self._contacts = ContactRepository(session, tenant_id=tenant_id)
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
+        self._media = MediaRepository(session, tenant_id=tenant_id)
 
     async def project_message(
         self,
@@ -88,13 +94,28 @@ class ConversationProjectionService:
 
         await self._conversations.touch_inbound(conversation, at=occurred_at)
 
-        stored, _ = await self._messages.record_inbound(
+        stored, is_new = await self._messages.record_inbound(
             conversation_id=conversation.id,
             wa_message_id=message.event_id,
             kind=MESSAGE_KINDS.get(message.message_type, MessageKind.UNSUPPORTED),
+            # The caption, on a media message. What the file turns out to say is
+            # recorded separately and never merged into the customer's words.
             body=message.text,
             sent_at=occurred_at,
         )
+        if is_new and message.media is not None:
+            # Flushed for the same reason the contact was: `stored.id` is
+            # generated in Python and stays None until the row reaches the
+            # database, and the media row needs it.
+            await self._session.flush()
+            await self._media.record(
+                message_id=stored.id,
+                conversation_id=conversation.id,
+                wa_media_id=message.media.media_id,
+                mime_type=message.media.mime_type,
+                filename=message.media.filename,
+                is_voice=message.media.is_voice,
+            )
         return stored
 
     async def project_status(self, *, status: DeliveryStatus) -> Message | None:

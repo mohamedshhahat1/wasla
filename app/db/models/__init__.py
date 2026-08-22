@@ -44,6 +44,7 @@ from .lead import (
     LeadStatus,
     clamp_score,
 )
+from .media import UNRESOLVED_MEDIA_STATUSES, MediaStatus, MessageMedia
 from .membership import Membership
 from .tenant import Tenant
 from .user import User
@@ -64,6 +65,7 @@ __all__ = [
     "MIN_SCORE",
     "TERMINAL_FOLLOW_UP_STATUSES",
     "TERMINAL_STATUSES",
+    "UNRESOLVED_MEDIA_STATUSES",
     "ActorKind",
     "Agent",
     "AgentStatus",
@@ -87,10 +89,12 @@ __all__ = [
     "LeadNote",
     "LeadSource",
     "LeadStatus",
+    "MediaStatus",
     "Membership",
     "Message",
     "MessageDirection",
     "MessageKind",
+    "MessageMedia",
     "MessageStatus",
     "PlatformRole",
     "Tenant",

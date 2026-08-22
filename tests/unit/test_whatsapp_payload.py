@@ -181,3 +181,182 @@ def test_several_entries_are_flattened():
     envelope = parse_webhook(payload)
 
     assert [message.event_id for message in envelope.messages] == ["a", "b"]
+
+
+def test_an_image_carries_its_media_descriptor():
+    payload = _envelope(
+        _value(
+            messages=[
+                {
+                    "from": "201234567890",
+                    "id": "wamid.image",
+                    "timestamp": "1767225600",
+                    "type": "image",
+                    "image": {
+                        "id": "media-1",
+                        "mime_type": "image/jpeg",
+                        "sha256": "abc123",
+                    },
+                }
+            ]
+        )
+    )
+
+    media = parse_webhook(payload).messages[0].media
+
+    assert media is not None
+    assert media.media_id == "media-1"
+    assert media.kind == "image"
+    assert media.mime_type == "image/jpeg"
+    assert media.sha256 == "abc123"
+    assert media.is_voice is False
+
+
+def test_a_caption_is_the_message_text():
+    """The customer's own sentence, and often the whole question.
+
+    Dropping it would leave the agent with a photograph and no idea what was
+    being asked about it.
+    """
+    payload = _envelope(
+        _value(
+            messages=[
+                {
+                    "from": "201234567890",
+                    "id": "wamid.captioned",
+                    "type": "image",
+                    "image": {"id": "media-2", "caption": "how much is this one?"},
+                }
+            ]
+        )
+    )
+
+    message = parse_webhook(payload).messages[0]
+
+    assert message.text == "how much is this one?"
+    assert message.media is not None
+
+
+def test_a_document_keeps_the_filename_it_arrived_with():
+    payload = _envelope(
+        _value(
+            messages=[
+                {
+                    "from": "201234567890",
+                    "id": "wamid.doc",
+                    "type": "document",
+                    "document": {
+                        "id": "media-3",
+                        "mime_type": "application/pdf",
+                        "filename": "quote.pdf",
+                    },
+                }
+            ]
+        )
+    )
+
+    media = parse_webhook(payload).messages[0].media
+
+    assert media is not None
+    assert media.filename == "quote.pdf"
+
+
+def test_a_hostile_filename_is_passed_through_untouched():
+    """The parser does not sanitise it, because the parser is not what protects.
+
+    Storage derives its own key from a generated identifier and never consults
+    this value, so the safe thing is to record exactly what arrived rather than
+    a cleaned-up version that hides what the sender tried.
+    """
+    payload = _envelope(
+        _value(
+            messages=[
+                {
+                    "from": "201234567890",
+                    "id": "wamid.evil",
+                    "type": "document",
+                    "document": {"id": "media-4", "filename": "../../etc/passwd"},
+                }
+            ]
+        )
+    )
+
+    media = parse_webhook(payload).messages[0].media
+
+    assert media is not None
+    assert media.filename == "../../etc/passwd"
+
+
+def test_a_voice_note_is_distinguished_from_an_audio_file():
+    """Both are transcribed; only one is somebody speaking to the business."""
+    payload = _envelope(
+        _value(
+            messages=[
+                {
+                    "from": "201234567890",
+                    "id": "wamid.voice",
+                    "type": "audio",
+                    "audio": {
+                        "id": "media-5",
+                        "mime_type": "audio/ogg; codecs=opus",
+                        "voice": True,
+                    },
+                },
+                {
+                    "from": "201234567890",
+                    "id": "wamid.audio",
+                    "type": "audio",
+                    "audio": {"id": "media-6", "mime_type": "audio/mpeg"},
+                },
+            ]
+        )
+    )
+
+    voice, attached = parse_webhook(payload).messages
+
+    assert voice.media is not None
+    assert voice.media.is_voice is True
+    # Codec parameters are stripped: they matter to a decoder, not to us, and
+    # keeping them would make two identical types compare unequal.
+    assert voice.media.mime_type == "audio/ogg"
+    assert attached.media is not None
+    assert attached.media.is_voice is False
+
+
+def test_a_media_message_without_an_id_still_parses():
+    """There is nothing to download, but the message itself is worth storing."""
+    payload = _envelope(
+        _value(
+            messages=[
+                {
+                    "from": "201234567890",
+                    "id": "wamid.idless",
+                    "type": "image",
+                    "image": {"caption": "look"},
+                }
+            ]
+        )
+    )
+
+    envelope = parse_webhook(payload)
+
+    assert len(envelope.messages) == 1
+    assert envelope.messages[0].media is None
+    assert envelope.messages[0].text == "look"
+
+
+def test_a_text_message_carries_no_media():
+    payload = _envelope(
+        _value(
+            messages=[
+                {
+                    "from": "201234567890",
+                    "id": "wamid.text",
+                    "type": "text",
+                    "text": {"body": "hello"},
+                }
+            ]
+        )
+    )
+
+    assert parse_webhook(payload).messages[0].media is None
