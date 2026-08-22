@@ -46,6 +46,16 @@ from .lead import (
 )
 from .media import UNRESOLVED_MEDIA_STATUSES, MediaStatus, MessageMedia
 from .membership import Membership
+from .sentiment import (
+    PRIORITY_RANK,
+    SENTIMENT_PRIORITY,
+    SENTIMENT_SEVERITY,
+    ConversationPriority,
+    MessageSentiment,
+    SentimentLabel,
+    is_at_least,
+    raised_priority,
+)
 from .tenant import Tenant
 from .user import User
 from .whatsapp import (
@@ -63,6 +73,9 @@ __all__ = [
     "MAX_ATTEMPTS",
     "MAX_SCORE",
     "MIN_SCORE",
+    "PRIORITY_RANK",
+    "SENTIMENT_PRIORITY",
+    "SENTIMENT_SEVERITY",
     "TERMINAL_FOLLOW_UP_STATUSES",
     "TERMINAL_STATUSES",
     "UNRESOLVED_MEDIA_STATUSES",
@@ -74,6 +87,7 @@ __all__ = [
     "Contact",
     "Conversation",
     "ConversationMode",
+    "ConversationPriority",
     "ConversationStatus",
     "Document",
     "DocumentChunk",
@@ -95,8 +109,10 @@ __all__ = [
     "MessageDirection",
     "MessageKind",
     "MessageMedia",
+    "MessageSentiment",
     "MessageStatus",
     "PlatformRole",
+    "SentimentLabel",
     "Tenant",
     "TenantInvitation",
     "TenantRole",
@@ -108,4 +124,6 @@ __all__ = [
     "WhatsAppEventKind",
     "WhatsAppEventState",
     "clamp_score",
+    "is_at_least",
+    "raised_priority",
 ]

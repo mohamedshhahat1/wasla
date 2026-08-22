@@ -26,6 +26,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import _enum_type
+from app.db.models.sentiment import SENTIMENT_LABEL_TYPE, SentimentLabel
 
 
 class AgentStatus(StrEnum):
@@ -47,6 +48,11 @@ AGENT_STATUS_TYPE = _enum_type(AgentStatus, name="agent_status")
 DEFAULT_TEMPERATURE: Final = 0.3
 DEFAULT_MEMORY_MESSAGE_LIMIT: Final = 20
 DEFAULT_MEMORY_TOKEN_BUDGET: Final = 4_000
+# Escalate when a customer reads as angry, and not merely unhappy. Chosen as the
+# default because it is the reading a business would want a person to see, and
+# because the cost of the alternative runs the wrong way: an agent that hands
+# off every disappointed customer stops being an agent.
+DEFAULT_ESCALATION_SENTIMENT: Final = SentimentLabel.ANGRY
 
 
 class Agent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
@@ -96,6 +102,16 @@ class Agent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         default=DEFAULT_MEMORY_TOKEN_BUDGET,
     )
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # How badly a customer has to be taking it before this agent stops replying
+    # and hands the conversation to a person. Null disables automatic handoff
+    # entirely; the reading is still taken and still raises priority, so the
+    # conversation is flagged for a human either way.
+    escalation_sentiment: Mapped[SentimentLabel | None] = mapped_column(
+        SENTIMENT_LABEL_TYPE,
+        nullable=True,
+        default=DEFAULT_ESCALATION_SENTIMENT,
+        server_default=DEFAULT_ESCALATION_SENTIMENT.value,
+    )
 
     @property
     def is_answering(self) -> bool:

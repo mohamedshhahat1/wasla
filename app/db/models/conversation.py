@@ -15,12 +15,19 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, Float, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import _enum_type
+from app.db.models.sentiment import (
+    CONVERSATION_PRIORITY_TYPE,
+    MAX_INTENT_LENGTH,
+    SENTIMENT_LABEL_TYPE,
+    ConversationPriority,
+    SentimentLabel,
+)
 
 
 class ConversationStatus(StrEnum):
@@ -120,6 +127,7 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         Index("ix_conversations_tenant_id", "tenant_id"),
         Index("ix_conversations_tenant_id_status", "tenant_id", "status"),
         Index("ix_conversations_tenant_id_last_message_at", "tenant_id", "last_message_at"),
+        Index("ix_conversations_tenant_id_priority", "tenant_id", "priority"),
         Index("ix_conversations_contact_id", "contact_id"),
     )
 
@@ -160,9 +168,33 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         nullable=True,
     )
 
+    # The most recent reading of how the customer sounds. Current state only;
+    # every reading is kept on `message_sentiments`, which is where a history
+    # or a count over time comes from.
+    sentiment: Mapped[SentimentLabel | None] = mapped_column(
+        SENTIMENT_LABEL_TYPE,
+        nullable=True,
+    )
+    sentiment_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Raised by a negative reading, never lowered by a positive one. See
+    # `raised_priority`: giving it back is a person's decision.
+    priority: Mapped[ConversationPriority] = mapped_column(
+        CONVERSATION_PRIORITY_TYPE,
+        nullable=False,
+        default=ConversationPriority.NORMAL,
+        server_default=ConversationPriority.NORMAL.value,
+    )
+    intent: Mapped[str | None] = mapped_column(String(MAX_INTENT_LENGTH), nullable=True)
+    intent_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     @property
     def is_ai_handled(self) -> bool:
         return self.mode is ConversationMode.AI
+
+    @property
+    def needs_attention(self) -> bool:
+        """Whether this conversation should be surfaced ahead of the queue."""
+        return self.priority is not ConversationPriority.NORMAL
 
 
 class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):

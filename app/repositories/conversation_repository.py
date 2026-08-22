@@ -217,6 +217,22 @@ class MessageRepository(TenantScopedRepository[Message]):
             )
         return await self._all(query)
 
+    async def latest_inbound(self, conversation_id: uuid.UUID) -> Message | None:
+        """The most recent thing the customer said.
+
+        What sentiment analysis reads. Only the newest one: a job that waited
+        behind others is answering the conversation as it stands now, and the
+        mood that matters is the mood of the message that prompted it.
+        """
+        return await self._first(
+            self._select()
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.direction == MessageDirection.INBOUND,
+            )
+            .order_by(Message.created_at.desc(), Message.id.desc())
+        )
+
     async def record_inbound(
         self,
         *,
