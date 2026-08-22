@@ -6,7 +6,17 @@ Scope: containers, reverse proxy, CI/CD, and production operations. Runtime inst
 
 ## Containers
 
-Planned images and services: the FastAPI API, background workers, PostgreSQL with pgvector, Redis, and optionally Nginx. Production requirements: non-root containers, health checks, environment-based configuration, graceful shutdown, restart policies, isolated networks, and persistent database volumes. Secrets are never baked into images.
+### The worker
+
+`docker compose up worker` locally; `command: ["worker"]` in production. One process runs the agent, ingestion and follow-up loops concurrently — all are I/O-bound, so they interleave rather than compete.
+
+`WORKER_KINDS` selects which run: empty (the default) runs all three, or a comma-separated subset such as `agent` or `ingestion,follow_up` to scale them apart across replicas. An unrecognised name fails at startup rather than being ignored, because a process that silently does nothing shows its symptom — work piling up in a queue — far from its cause.
+
+The worker never applies migrations, whatever `RUN_MIGRATIONS` says: it scales to several replicas, and a schema change racing across them is exactly what the opt-in flag on the API exists to avoid. Run `migrate` as its own step first; the production compose does this with `service_completed_successfully`.
+
+SIGTERM asks each loop to stop, and each finishes the job in its hand before exiting. The production `stop_grace_period` is 60s, longer than the API's, because a worker mid-inference holds an outstanding HTTP call and an open transaction — killing it there dead-letters a job that was about to succeed.
+
+One image, three entrypoint commands: `api` (default), `worker`, and `migrate`. Services: the FastAPI API, the worker, PostgreSQL with pgvector, Redis, and Nginx in production. Production requirements: non-root containers, health checks, environment-based configuration, graceful shutdown, restart policies, isolated networks, and persistent database volumes. Secrets are never baked into images.
 
 ## Compose
 

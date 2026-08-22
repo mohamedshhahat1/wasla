@@ -25,7 +25,8 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Media, sentiment, campaigns | Planned |
 | Usage, analytics, plans, subscriptions, billing | Planned |
 | Platform owner administration layer | Planned |
-| Worker processes and deployment automation | Planned |
+| Worker process (agent, ingestion and follow-up loops in one container) | Implemented |
+| Deployment automation | Planned |
 
 Status vocabulary used across all documentation: **Implemented**, **In Progress**, **Planned**, **Blocked**.
 

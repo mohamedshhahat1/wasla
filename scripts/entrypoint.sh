@@ -15,6 +15,12 @@ case "${command}" in
     fi
     exec uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}"
     ;;
+  worker)
+    # Never runs migrations, whatever RUN_MIGRATIONS says. Workers scale to
+    # several replicas, and a schema change racing across them is precisely
+    # what the opt-in flag on the API exists to avoid.
+    exec python -m app.workers.runner
+    ;;
   migrate)
     exec alembic upgrade head
     ;;

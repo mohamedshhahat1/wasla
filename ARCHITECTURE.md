@@ -300,7 +300,13 @@ A rejected send is retried with a widening backoff until the attempt limit, then
 
 ## 11. Background jobs and Redis usage
 
-**Status: In Progress** — the Redis client, its health probe, the refresh-token denylist, the agent job queue, and the AI, ingestion and follow-up workers are Implemented. Media and campaign workers are not.
+**Status: In Progress** — the Redis client, its health probe, the refresh-token denylist, the agent job queue, the AI, ingestion and follow-up workers, and the worker process that runs them are Implemented. Media and campaign workers are not.
+
+All three workers run in **one container**, concurrently in one event loop, selected by `WORKER_KINDS` (empty means all). Each is I/O-bound — waiting on Redis, PostgreSQL, OpenAI or Meta — so they interleave rather than compete, and one process is markedly simpler to deploy and watch than three. Splitting them later is an environment variable, not another image.
+
+SIGTERM asks each loop to stop and each finishes the job in its hand before returning, so a deploy does not dead-letter work that was about to succeed. The production compose gives the worker a longer `stop_grace_period` than the API: a worker mid-inference holds an HTTP call and an open transaction.
+
+One constraint binds the two together and is easy to get wrong. redis-py applies `socket_timeout` to *every* read, including the blocking `BLMOVE` a reserve is deliberately waiting on, so the read timeout has to outlast the block or an idle worker dies on its own patience. `MAX_BLOCKING_SECONDS` lives in `app/core/redis.py` beside the client that sizes its timeout around it, and the queues take their block duration from there.
 
 Redis provides job queues, caching, rate limiting, follow-up scheduling, and temporary state. Workers handle AI processing, media processing, document ingestion and embeddings, follow-ups, campaigns, and usage aggregation.
 

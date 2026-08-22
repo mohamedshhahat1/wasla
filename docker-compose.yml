@@ -1,6 +1,5 @@
 # Local development stack.
 #
-# The worker service is intentionally absent: background workers are Phase 8.
 # PostgreSQL uses the pgvector image because RAG (Phase 6) requires the vector
 # extension, which the initial migration enables.
 name: wasla
@@ -71,6 +70,35 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      target: runtime
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ENVIRONMENT: local
+      LOG_FORMAT: console
+      DATABASE_URL: postgresql+asyncpg://wasla:wasla@postgres:5432/wasla
+      REDIS_URL: redis://redis:6379/0
+      # Every kind by default. Set to a comma-separated subset - "agent" or
+      # "ingestion,follow_up" - to run them in separate replicas.
+      WORKER_KINDS: ""
+    volumes:
+      - ./app:/app/app:ro
+    command: ["worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # The API applies migrations locally (RUN_MIGRATIONS), so the worker waits
+      # for it rather than starting against a schema that does not exist yet.
+      api:
+        condition: service_started
     restart: unless-stopped
 
 volumes:

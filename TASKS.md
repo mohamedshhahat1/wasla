@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0 through 7 are complete, and the pipeline that verifies them has been repaired — see *Phase 5.5* below, which came first because none of the claims in this file were being checked while it was broken. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API, upload documents, and their agents answer from them: a question is embedded, matched against that workspace's own chunks in pgvector, and the passages enter the model's context. Agents now also capture leads from those conversations — one per customer, never overwriting what a person entered, with every change on an append-only timeline. What the workers still lack is a process of their own to run in, which belongs with the Phase 8 worker service. Phase 8 (follow-ups) is next.
+**Current position:** Phases 0 through 8 are complete, and the pipeline that verifies them has been repaired — see *Phase 5.5* below, which came first because none of the claims in this file were being checked while it was broken. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API, upload documents, and their agents answer from them through tenant-scoped pgvector search. Agents capture leads from those conversations, and schedule follow-ups that a customer's reply cancels. As of this phase the workers finally have a process of their own: one container runs the agent, ingestion and follow-up loops together, selectable by `WORKER_KINDS`, and stops cleanly on SIGTERM. Phase 9 (media) is next.
 
 ## Phase 0 — Foundation
 
@@ -112,8 +112,8 @@ This file is updated as part of every logical change. Phases follow the implemen
 - [x] Enqueue from the inbound webhook path (one job per conversation, never AI on the request)
 - [x] Unit tests with a mocked provider (memory, registry, orchestrator, queue)
 - [x] Agent model and migration parity tests (metadata parity in the unit suite, constraints and isolation against PostgreSQL)
-- [ ] Worker process entrypoint and container service (with the Phase 8 worker)
-- [ ] In-flight reaper for jobs abandoned by a dead worker (with the Phase 8 worker)
+- [x] Worker process entrypoint and container service (delivered with Phase 8)
+- [ ] In-flight reaper for jobs abandoned by a dead worker (still open — see Phase 8)
 
 ## Phase 5.5 — Pipeline repair
 
@@ -190,7 +190,16 @@ Deferred by decision, not unfinished:
 - [x] Retry with backoff and a bounded attempt count
 - [x] `schedule_follow_up` tool for agents
 - [x] Follow-up API
-- [ ] Worker service in Docker Compose (local and production)
+- [x] Worker service in Docker Compose (local and production)
+- [x] Worker process entrypoint running all three loops, selectable by `WORKER_KINDS`
+- [x] Graceful shutdown on SIGTERM
+
+**COMPLETE.** Verified 2026-08-22 against PostgreSQL 16: 664 tests passed, 0 failed, 0 skipped; migration `0009` upgrades, `alembic check` reports no drift, downgrades to base, upgrades again and checks clean; Ruff, Black and MyPy clean; the image builds, the worker container starts, survives its blocking reserves, claims a due follow-up and resolves it, and shuts down cleanly on SIGTERM.
+
+Deferred by decision, not unfinished:
+
+- [ ] In-flight reaper for jobs abandoned by a dead worker — needs a heartbeat or a visibility timeout to tell a slow job from a dead one; guessing wrong sends a customer two replies
+- [ ] Template approval checking — there is no template registry until Phase 11, so `template_name` is free text and nothing can confirm Meta has approved it before the send
 
 ## Phase 9 — Media
 

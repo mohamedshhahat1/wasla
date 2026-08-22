@@ -84,6 +84,43 @@ services:
     stop_grace_period: 30s
     restart: always
 
+  worker:
+    image: ${WASLA_IMAGE:?WASLA_IMAGE is required}
+    command: ["worker"]
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "false"
+      LOG_FORMAT: json
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:-}
+      # Empty runs every kind. Set to a comma-separated subset to scale the
+      # agent loop apart from ingestion and follow-ups.
+      WORKER_KINDS: ${WORKER_KINDS:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - internal
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    # Longer than the API's. A worker mid-inference has an HTTP call outstanding
+    # and a database transaction open; killing it there dead-letters a job that
+    # was about to succeed. It stops taking new work on SIGTERM and finishes
+    # what it holds.
+    stop_grace_period: 60s
+    restart: always
+
   nginx:
     image: nginx:1.27-alpine
     volumes:
