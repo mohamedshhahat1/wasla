@@ -785,3 +785,37 @@ A refusal carries `Retry-After`, because a client told to back off without being
 Limiting is off in the test suite by default. A limiter counting across a file makes every test in it order-dependent, and the eleventh login failing for a reason the test never mentions is a debugging session nobody should have to have. It has its own tests, which switch it on.
 
 Platform administration is unlimited: it is a handful of staff, and a limit there would first bite during an incident, which is when it is least welcome.
+
+## ADR-033 — The Audit Trail Copies What Was True, and the Platform Is Not Exempt
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Record deliberate acts in an append-only `audit_logs` table, staged in the same transaction as the act. Copy the actor's and target's labels onto the row rather than joining for them. Make `tenant_id` nullable so a platform action is recorded the same way a workspace one is, and record a platform action *against* a workspace in that workspace's own trail. Offer no update or delete path anywhere.
+
+Context:
+An audit log is read when somebody is asking a hostile question: who disconnected that number, who let this person in, who marked that invoice paid. The specification requires that platform actions are always logged and that the platform owner cannot bypass it (claude.md §8).
+
+The tempting implementation is a normalised one: foreign keys to the actor and the target, joined at read time, with a generic `entity_type`/`entity_id` pair.
+
+Reason:
+Joining fails at exactly the moment the log matters. The interesting entries are about accounts that have since been deleted, workspaces that have been closed and leads that were merged away — a join produces a blank column for precisely the row somebody is asking about, and `actor_id 8f3c… did something to 91ab…` answers nothing. So the email and a human label are copied at write time, and `actor_id` is `SET NULL` rather than `CASCADE`: deleting an account must not erase what that account did, which is exactly what somebody would do if it worked.
+
+Staging in the caller's transaction is the same argument the usage recorder makes (ADR-027), with the sign flipped. There, an over-count is the danger; here it is a *claim*: an entry that survives the rollback of the thing it describes says somebody did something they did not do, which is worse than no log because it is believed. And nothing swallows an exception on the way in — if we cannot record who disconnected the number, we do not disconnect it.
+
+A closed `AuditAction` vocabulary rather than free text, because an audit log is read by filtering. Free-text actions become a dozen spellings of one event and a search that silently misses half of them. The vocabulary is deliberately narrow: only acts somebody could be asked about later. Reads are not audited — that would bury the entries that matter under a million that do not, and it is the wrong tool for that question anyway.
+
+A platform action taken against a workspace is written to *that workspace's* trail, attributed to the staff member. The customer is entitled to see who marked their invoice paid; hiding it in a platform-only log would make the trail a tool for the platform's convenience rather than a record.
+
+Consequences:
+There is no route, repository method or service call that edits or deletes an entry. Handing somebody the ability to rewrite the record of what they did defeats the point, so the capability does not exist to be misused.
+
+`audit_logs` grows without bound and nothing prunes it. That is correct for now: retention is a legal question rather than a storage one, and deleting audit history to save disk is the decision most likely to be regretted.
+
+This is not an analytics event. `analytics_events` counts things for a dashboard and is derived from the domain where possible (ADR-028); this records deliberate acts by people, is never derived, and is kept after the thing it describes is gone.
+
+The guard asserting every tenant-scoped table has a tenant index was refined here rather than satisfied. It demanded an index *named* `ix_<table>_tenant_id`; it now demands an index whose first column is `tenant_id`, which is the property that actually makes a workspace's rows findable — `audit_logs` leads with `(tenant_id, occurred_at)`, and adding a redundant bare index alongside it would cost every write for nothing.

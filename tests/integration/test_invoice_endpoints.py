@@ -116,7 +116,7 @@ class StubPlatformBilling:
         self.voided: list[uuid.UUID] = []
         self.conflict = False
 
-    async def record_payment(self, *, invoice_id, amount, provider, reference=None):
+    async def record_payment(self, *, invoice_id, amount, provider, reference=None, actor=None):
         self.recorded.append({"invoice_id": invoice_id, "amount": amount, "provider": provider})
         return Payment(
             id=uuid.uuid4(),
@@ -132,7 +132,7 @@ class StubPlatformBilling:
             updated_at=NOW,
         )
 
-    async def void(self, invoice_id, *, reason=None):
+    async def void(self, invoice_id, *, reason=None, actor=None):
         if self.conflict:
             raise ConflictError("A paid invoice cannot be voided. Refund it instead.")
         self.voided.append(invoice_id)

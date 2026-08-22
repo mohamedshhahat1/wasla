@@ -1,6 +1,6 @@
 # Security
 
-**Status: In Progress** — configuration hygiene, safe error handling, logging redaction, authentication, RBAC, tenant isolation, Meta signature verification and rate limiting are Implemented. Audit logging and per-workspace credential encryption are Planned (phase 14).
+**Status: In Progress** — configuration hygiene, safe error handling, logging redaction, authentication, RBAC, tenant isolation, Meta signature verification, rate limiting and audit logging are Implemented. Per-workspace credential encryption is Planned (phase 14).
 
 Scope: the security model and its controls. Permission mechanics are in [AUTH.md](AUTH.md).
 
@@ -47,3 +47,16 @@ Privileged and administrative actions are recorded in an audit log, including pl
 ## Supply chain
 
 Controlled dependency versions, dependency vulnerability scanning, secret scanning, and container scanning where practical.
+
+## Audit trail
+
+**Status: Implemented** (ADR-033). `audit_logs` records deliberate acts: who was let into a workspace, which numbers were connected or disabled, every change to what a workspace pays, and every campaign scheduled or cancelled. A workspace reads its own trail at `GET /api/v1/audit-logs` (owners and administrators); platform staff read every entry, including the platform's own, at `GET /api/v1/platform/audit-logs`.
+
+Four properties, each chosen against a specific failure:
+
+- **Append-only.** No route, repository method or service call updates or deletes an entry. The ability to rewrite the record of what you did does not exist to be misused.
+- **Labels are copied, not joined.** An entry names `owner@example.com`, not a user id, and keeps naming them after the account is deleted — `actor_id` is `SET NULL`, never `CASCADE`. The interesting entries are always about things that have since been removed.
+- **Staged in the same transaction as the act.** An entry cannot survive the rollback of the thing it describes, and an act cannot succeed while its entry fails.
+- **The platform is not exempt.** A payment recorded or an invoice voided by platform staff is written to *that workspace's* trail, attributed to the staff member. The customer is entitled to see who marked their invoice paid.
+
+Reads are deliberately not audited: they would bury the entries that matter, and they are the wrong tool for that question.

@@ -294,22 +294,22 @@ class StubSubscriptions:
     async def plan_for(self, subscription):
         return self.plan
 
-    async def start(self, *, plan_code, now=None):
+    async def start(self, *, plan_code, now=None, actor=None):
         self.started.append(plan_code)
         self.subscription = self._row(status=SubscriptionStatus.TRIALING)
         return self.subscription
 
-    async def change_plan(self, *, plan_code, now=None):
+    async def change_plan(self, *, plan_code, now=None, actor=None):
         self.changed.append(plan_code)
         self.subscription = self._row()
         return self.subscription
 
-    async def cancel(self, *, immediately=False, now=None):
+    async def cancel(self, *, immediately=False, now=None, actor=None):
         self.cancelled.append(immediately)
         self.subscription = self._row(cancel_at_period_end=not immediately)
         return self.subscription
 
-    async def resume(self):
+    async def resume(self, *, actor=None):
         self.resumed += 1
         self.subscription = self._row()
         return self.subscription

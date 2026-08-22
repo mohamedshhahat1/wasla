@@ -31,13 +31,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
+from app.db.models.audit import AuditAction
 from app.db.models.billing import (
     BillingInterval,
     Plan,
     Subscription,
     SubscriptionStatus,
 )
+from app.db.models.user import User
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
+from app.services.audit_service import AuditTrail
 
 logger = get_logger(__name__)
 
@@ -79,6 +82,9 @@ class SubscriptionService:
         self._tenant_id = tenant_id
         self._subscriptions = SubscriptionRepository(session, tenant_id=tenant_id)
         self._plans = PlanRepository(session)
+        # Every operation here changes what the workspace pays, which is the
+        # definition of an action somebody is asked about later.
+        self._audit = AuditTrail(session, tenant_id=tenant_id)
 
     async def get(self) -> Subscription | None:
         return await self._subscriptions.get()
@@ -94,6 +100,7 @@ class SubscriptionService:
         *,
         plan_code: str,
         now: datetime | None = None,
+        actor: User | None = None,
     ) -> Subscription:
         """Give a workspace its first subscription.
 
@@ -122,6 +129,14 @@ class SubscriptionService:
         # and server defaults are not populated until the insert reaches the
         # database, and a route that returns this would otherwise answer 500.
         await self._session.flush()
+        self._audit.record(
+            AuditAction.SUBSCRIPTION_STARTED,
+            actor=actor,
+            target_type="subscription",
+            target_id=subscription.id,
+            target_label=plan.code,
+            meta={"trialing": trialing},
+        )
         logger.info(
             "billing.subscription_started",
             extra={
@@ -133,7 +148,13 @@ class SubscriptionService:
         )
         return subscription
 
-    async def change_plan(self, *, plan_code: str, now: datetime | None = None) -> Subscription:
+    async def change_plan(
+        self,
+        *,
+        plan_code: str,
+        now: datetime | None = None,
+        actor: User | None = None,
+    ) -> Subscription:
         """Move to another plan, effective immediately.
 
         The period restarts, and that cuts both ways on purpose: an upgrade
@@ -165,6 +186,14 @@ class SubscriptionService:
         subscription.cancel_at_period_end = False
         subscription.cancelled_at = None
 
+        self._audit.record(
+            AuditAction.SUBSCRIPTION_PLAN_CHANGED,
+            actor=actor,
+            target_type="subscription",
+            target_id=subscription.id,
+            target_label=plan.code,
+            meta={"from_plan_id": str(previous)},
+        )
         logger.info(
             "billing.plan_changed",
             extra={
@@ -177,7 +206,11 @@ class SubscriptionService:
         return subscription
 
     async def cancel(
-        self, *, immediately: bool = False, now: datetime | None = None
+        self,
+        *,
+        immediately: bool = False,
+        now: datetime | None = None,
+        actor: User | None = None,
     ) -> Subscription:
         """Stop the subscription, at the end of the period or at once.
 
@@ -201,6 +234,13 @@ class SubscriptionService:
         else:
             subscription.cancel_at_period_end = True
 
+        self._audit.record(
+            AuditAction.SUBSCRIPTION_CANCELLED,
+            actor=actor,
+            target_type="subscription",
+            target_id=subscription.id,
+            meta={"immediately": immediately},
+        )
         logger.info(
             "billing.subscription_cancelled",
             extra={
@@ -211,7 +251,7 @@ class SubscriptionService:
         )
         return subscription
 
-    async def resume(self) -> Subscription:
+    async def resume(self, *, actor: User | None = None) -> Subscription:
         """Undo a cancellation that has not taken effect yet."""
         subscription = await self._require_subscription()
         if subscription.is_terminal:
@@ -221,6 +261,12 @@ class SubscriptionService:
 
         subscription.cancel_at_period_end = False
         subscription.cancelled_at = None
+        self._audit.record(
+            AuditAction.SUBSCRIPTION_RESUMED,
+            actor=actor,
+            target_type="subscription",
+            target_id=subscription.id,
+        )
         logger.info(
             "billing.subscription_resumed",
             extra={

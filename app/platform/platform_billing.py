@@ -29,8 +29,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
+from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.invoice import Invoice, Payment
+from app.db.models.user import User
 from app.repositories.invoice_repository import PlatformInvoiceRepository, RevenueTotal
+from app.services.audit_service import AuditTrail
 from app.services.invoice_service import InvoiceService
 
 
@@ -62,18 +65,49 @@ class PlatformBillingService:
         amount: Decimal,
         provider: str,
         reference: str | None = None,
+        actor: User | None = None,
     ) -> Payment:
         invoice = await self._locate(invoice_id)
-        return await self._service(invoice).record_payment(
+        payment = await self._service(invoice).record_payment(
             invoice_id=invoice.id,
             amount=amount,
             provider=provider,
             reference=reference,
         )
+        # Recorded against the *workspace's* trail, not the platform's, and
+        # attributed to the staff member. The customer is entitled to see who
+        # marked their invoice paid, which is the whole reason this is logged.
+        self._audit(invoice).record(
+            AuditAction.PAYMENT_RECORDED,
+            actor=actor,
+            actor_kind=AuditActorKind.PLATFORM_STAFF,
+            target_type="invoice",
+            target_id=invoice.id,
+            meta={"amount": str(amount), "provider": provider},
+        )
+        return payment
 
-    async def void(self, invoice_id: uuid.UUID, *, reason: str | None = None) -> Invoice:
+    async def void(
+        self,
+        invoice_id: uuid.UUID,
+        *,
+        reason: str | None = None,
+        actor: User | None = None,
+    ) -> Invoice:
         invoice = await self._locate(invoice_id)
-        return await self._service(invoice).void(invoice.id, reason=reason)
+        voided = await self._service(invoice).void(invoice.id, reason=reason)
+        self._audit(invoice).record(
+            AuditAction.INVOICE_VOIDED,
+            actor=actor,
+            actor_kind=AuditActorKind.PLATFORM_STAFF,
+            target_type="invoice",
+            target_id=invoice.id,
+            meta={"reason": reason} if reason else None,
+        )
+        return voided
+
+    def _audit(self, invoice: Invoice) -> AuditTrail:
+        return AuditTrail(self._session, tenant_id=invoice.tenant_id)
 
     async def revenue(
         self,

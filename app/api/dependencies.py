@@ -24,6 +24,10 @@ from app.db.models.billing import LimitKey
 from app.platform.platform_analytics import PlatformAnalyticsService
 from app.platform.platform_billing import PlatformBillingService
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
+from app.repositories.audit_repository import (
+    AuditLogRepository,
+    PlatformAuditLogRepository,
+)
 from app.repositories.billing_repository import PlanRepository
 from app.services.agent_service import AgentService
 from app.services.analytics_service import AnalyticsService
@@ -361,6 +365,32 @@ def get_analytics_service(
 
 
 AnalyticsServiceDep = Annotated[AnalyticsService, Depends(get_analytics_service)]
+
+
+def get_audit_log_repository(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> AuditLogRepository:
+    """Workspace-scoped, so no route can read another workspace's trail."""
+    return AuditLogRepository(session, tenant_id=workspace.tenant.id)
+
+
+AuditLogRepositoryDep = Annotated[AuditLogRepository, Depends(get_audit_log_repository)]
+
+
+def get_platform_audit_log_repository(session: SessionDep) -> PlatformAuditLogRepository:
+    """Every entry, including the platform's own. Behind the platform role.
+
+    The entries this exists to show are precisely the ones the people reading
+    it generate, which is the point: the platform owner is not exempt.
+    """
+    return PlatformAuditLogRepository(session)
+
+
+PlatformAuditLogRepositoryDep = Annotated[
+    PlatformAuditLogRepository,
+    Depends(get_platform_audit_log_repository),
+]
 
 
 def get_plan_repository(session: SessionDep) -> PlanRepository:

@@ -327,7 +327,7 @@ Deferred by decision, not unfinished:
 ## Phase 14 — Production hardening
 
 - [x] Rate limiting: authentication by client address, workspace traffic and campaigns by workspace, the WhatsApp webhook deliberately unlimited, failing open on a Redis outage (ADR-032)
-- [ ] Audit logging
+- [x] Audit logging: append-only, labels copied so an entry outlives the account it names, platform actions recorded in the workspace's own trail, readable at `/audit-logs` and `/platform/audit-logs` (migration `0018`, ADR-033)
 - [x] CORS and secure headers (CORS configurable; Nginx security headers in place)
 - [ ] Request size and timeout limits
 - [ ] Retry policies for external calls

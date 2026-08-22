@@ -37,17 +37,36 @@ def _unique_columns(table: Table, name: str) -> tuple[str, ...]:
     raise AssertionError(f"{table.name} has no unique constraint named {name}")
 
 
+def _leads_with_tenant(table: Table) -> bool:
+    """Whether any index on this table starts with `tenant_id`.
+
+    Leading is the property that matters. PostgreSQL uses a composite index for
+    a predicate on its first column, so `(tenant_id, occurred_at)` serves a
+    tenant-scoped read exactly as a bare `(tenant_id)` would - and adding the
+    bare one alongside it would cost every write for nothing.
+    """
+    return any(
+        index.columns is not None and list(index.columns)[:1] == [table.columns["tenant_id"]]
+        for index in table.indexes
+    )
+
+
 def test_every_table_with_a_tenant_column_indexes_it():
     """The regression guard for the missing WhatsApp tenant indexes.
 
     Written against the whole metadata rather than the two tables that were
     broken, so a tenant-scoped model added in a later phase cannot reintroduce
     the same drift.
+
+    The rule is "an index leading with tenant_id", not "an index named
+    ix_<table>_tenant_id". The defect being guarded against was a table with no
+    way to find one workspace's rows; a table whose first index column is the
+    tenant does not have that defect, whatever the index is called.
     """
     missing = sorted(
         table.name
         for table in Base.metadata.tables.values()
-        if "tenant_id" in table.columns and f"ix_{table.name}_tenant_id" not in _index_names(table)
+        if "tenant_id" in table.columns and not _leads_with_tenant(table)
     )
     assert missing == []
 

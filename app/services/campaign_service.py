@@ -42,6 +42,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
+from app.db.models.audit import AuditAction
 from app.db.models.billing import LimitKey
 from app.db.models.campaign import (
     DEFAULT_MESSAGES_PER_MINUTE,
@@ -57,6 +58,7 @@ from app.db.models.campaign import (
 )
 from app.db.models.conversation import Contact, MessageStatus
 from app.db.models.usage import UsageEventType
+from app.db.models.user import User
 from app.repositories.campaign_repository import (
     DEFAULT_RECIPIENT_BATCH,
     AudienceFilter,
@@ -68,6 +70,7 @@ from app.repositories.campaign_repository import (
 from app.repositories.conversation_repository import ContactRepository, ConversationRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
+from app.services.audit_service import AuditTrail
 from app.services.entitlement_service import EntitlementService
 from app.services.messaging_service import MessagingService
 from app.services.template_service import refusal_reason_for
@@ -160,6 +163,7 @@ class CampaignService:
         self._contacts = ContactRepository(session, tenant_id=tenant_id)
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._usage = UsageRecorder(session, tenant_id=tenant_id)
+        self._audit = AuditTrail(session, tenant_id=tenant_id)
 
     # ------------------------------------------------------------------ reads
 
@@ -321,6 +325,7 @@ class CampaignService:
         *,
         campaign_id: uuid.UUID,
         scheduled_at: datetime | None = None,
+        actor: User | None = None,
     ) -> Campaign:
         """Hand the campaign to the worker, now or at a moment in the future.
 
@@ -357,6 +362,17 @@ class CampaignService:
         campaign.scheduled_at = max(when, now)
         campaign.next_send_at = None
         campaign.last_error = None
+        # Writing to thousands of people who did not just say something is the
+        # single most consequential thing a workspace can do here, so who
+        # authorised it and how many it would reach are both recorded.
+        self._audit.record(
+            AuditAction.CAMPAIGN_SCHEDULED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={"recipients": pending, "scheduled_at": campaign.scheduled_at.isoformat()},
+        )
         logger.info(
             "campaign.scheduled",
             extra={
@@ -383,7 +399,7 @@ class CampaignService:
         logger.info("campaign.paused", extra={"campaign_id": str(campaign.id)})
         return campaign
 
-    async def cancel(self, campaign_id: uuid.UUID) -> Campaign:
+    async def cancel(self, campaign_id: uuid.UUID, *, actor: User | None = None) -> Campaign:
         """Finish the campaign where it stands. What was sent stays sent.
 
         A failed campaign can be cancelled, unlike a completed or an already
@@ -397,6 +413,13 @@ class CampaignService:
 
         campaign.status = CampaignStatus.CANCELLED
         campaign.cancelled_at = datetime.now(UTC)
+        self._audit.record(
+            AuditAction.CAMPAIGN_CANCELLED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+        )
         logger.info("campaign.cancelled", extra={"campaign_id": str(campaign.id)})
         return campaign
 

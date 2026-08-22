@@ -23,6 +23,7 @@ from app.core.security import (
     validate_password_strength,
 )
 from app.db.models import InvitationStatus, Membership, Tenant, TenantInvitation, TenantRole, User
+from app.db.models.audit import AuditAction, AuditActorKind
 from app.repositories import (
     InvitationRepository,
     InvitationTokenRepository,
@@ -30,6 +31,7 @@ from app.repositories import (
     TenantRepository,
     UserRepository,
 )
+from app.services.audit_service import AuditTrail
 
 logger = get_logger(__name__)
 
@@ -93,6 +95,19 @@ class InvitationService:
             invited_by_id=inviter.id,
         )
         await self._session.flush()
+
+        AuditTrail(self._session, tenant_id=tenant_id).record(
+            AuditAction.MEMBER_INVITED,
+            actor=inviter,
+            # Deliberately as a USER even when the inviter holds a platform
+            # role: they are acting inside a workspace they belong to, and the
+            # log should say so.
+            actor_kind=AuditActorKind.USER,
+            target_type="invitation",
+            target_id=invitation.id,
+            target_label=email,
+            meta={"role": role.value},
+        )
 
         logger.info(
             "invitation.issued",

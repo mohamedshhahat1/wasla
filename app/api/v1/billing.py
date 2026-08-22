@@ -99,7 +99,10 @@ async def start_subscription(
     The trial, if there is one, comes from the plan. A caller that could ask for
     a trial length is a caller that can ask for a thousand days.
     """
-    subscription = await subscriptions.start(plan_code=payload.plan_code)
+    subscription = await subscriptions.start(
+        plan_code=payload.plan_code,
+        actor=workspace.user,
+    )
     plan = await subscriptions.plan_for(subscription)
     return SubscriptionRead.from_model(subscription, plan=plan)
 
@@ -117,7 +120,10 @@ async def change_plan(
     system yet, and inventing a credit no invoice reflects would be worse than
     not having one.
     """
-    subscription = await subscriptions.change_plan(plan_code=payload.plan_code)
+    subscription = await subscriptions.change_plan(
+        plan_code=payload.plan_code,
+        actor=workspace.user,
+    )
     plan = await subscriptions.plan_for(subscription)
     return SubscriptionRead.from_model(subscription, plan=plan)
 
@@ -133,7 +139,10 @@ async def cancel_subscription(
     At the end of the paid period by default; `immediately` gives it up at once,
     including the rest of the period already paid for.
     """
-    subscription = await subscriptions.cancel(immediately=payload.immediately)
+    subscription = await subscriptions.cancel(
+        immediately=payload.immediately,
+        actor=workspace.user,
+    )
     plan = await subscriptions.plan_for(subscription)
     return SubscriptionRead.from_model(subscription, plan=plan)
 
@@ -144,7 +153,7 @@ async def resume_subscription(
     subscriptions: SubscriptionServiceDep,
 ) -> SubscriptionRead:
     """Undo a cancellation that has not taken effect yet. Owners only."""
-    subscription = await subscriptions.resume()
+    subscription = await subscriptions.resume(actor=workspace.user)
     plan = await subscriptions.plan_for(subscription)
     return SubscriptionRead.from_model(subscription, plan=plan)
 

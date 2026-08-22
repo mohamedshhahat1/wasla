@@ -113,7 +113,7 @@ class StubCampaigns:
         self.audiences.append({"campaign_id": campaign_id, "filters": filters})
         return _campaign()
 
-    async def schedule(self, *, campaign_id, scheduled_at=None):
+    async def schedule(self, *, campaign_id, scheduled_at=None, actor=None):
         self.scheduled.append({"campaign_id": campaign_id, "scheduled_at": scheduled_at})
         return _campaign(CampaignStatus.SCHEDULED)
 
@@ -121,7 +121,7 @@ class StubCampaigns:
         self.paused.append(campaign_id)
         return _campaign(CampaignStatus.PAUSED)
 
-    async def cancel(self, campaign_id):
+    async def cancel(self, campaign_id, *, actor=None):
         self.cancelled.append(campaign_id)
         return _campaign(CampaignStatus.CANCELLED)
 

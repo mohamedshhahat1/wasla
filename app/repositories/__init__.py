@@ -7,6 +7,7 @@ be scoped live in their own small classes so they stay visible.
 
 from .agent_repository import AgentRepository, AgentToolRepository
 from .analytics_repository import AnalyticsEventRepository, EventCount
+from .audit_repository import AuditLogRepository, PlatformAuditLogRepository
 from .base import BaseRepository, TenantScopedRepository
 from .billing_repository import (
     PlanRepository,
@@ -60,6 +61,7 @@ __all__ = [
     "AgentRepository",
     "AgentToolRepository",
     "AnalyticsEventRepository",
+    "AuditLogRepository",
     "BaseRepository",
     "ContactRepository",
     "ConversationRepository",
@@ -81,6 +83,7 @@ __all__ = [
     "MessageRepository",
     "PaymentRepository",
     "PlanRepository",
+    "PlatformAuditLogRepository",
     "PlatformInvoiceRepository",
     "PlatformSubscriptionRepository",
     "PlatformUsageRepository",

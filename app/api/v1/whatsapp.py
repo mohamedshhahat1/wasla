@@ -39,6 +39,9 @@ async def connect_account(
     slot: NumberSlotDep,
 ) -> WhatsAppAccountResponse:
     account = await service.connect(
+        # Named, so the trail says who claimed this number rather than only
+        # that it appeared.
+        actor=workspace.user,
         tenant_id=workspace.tenant.id,
         phone_number_id=payload.phone_number_id,
         waba_id=payload.waba_id,
@@ -69,6 +72,7 @@ async def disable_account(
     service: WhatsAppAccountServiceDep,
 ) -> WhatsAppAccountResponse:
     account = await service.set_status(
+        actor=workspace.user,
         tenant_id=workspace.tenant.id,
         account_id=account_id,
         status=WhatsAppAccountStatus.DISABLED,
@@ -83,6 +87,7 @@ async def enable_account(
     service: WhatsAppAccountServiceDep,
 ) -> WhatsAppAccountResponse:
     account = await service.set_status(
+        actor=workspace.user,
         tenant_id=workspace.tenant.id,
         account_id=account_id,
         status=WhatsAppAccountStatus.ACTIVE,

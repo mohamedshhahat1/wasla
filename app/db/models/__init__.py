@@ -4,6 +4,7 @@ from app.db.base import Base
 
 from .agent import Agent, AgentStatus, AgentTool
 from .analytics import AnalyticsEvent, AnalyticsEventType, AnalyticsSource
+from .audit import AuditAction, AuditActorKind, AuditLog
 from .billing import (
     PERIOD_LIMITS,
     RESOURCE_LIMITS,
@@ -135,6 +136,9 @@ __all__ = [
     "AnalyticsEvent",
     "AnalyticsEventType",
     "AnalyticsSource",
+    "AuditAction",
+    "AuditActorKind",
+    "AuditLog",
     "Base",
     "BillingInterval",
     "Campaign",

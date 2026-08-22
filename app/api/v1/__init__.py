@@ -22,6 +22,7 @@ from app.api.rate_limits import campaign_rate_limit, workspace_rate_limit
 from app.api.v1 import (
     agents,
     analytics,
+    audit,
     auth,
     billing,
     campaigns,
@@ -48,6 +49,7 @@ _CAMPAIGN_LIMIT = Depends(campaign_rate_limit)
 WORKSPACE_ROUTERS = (
     agents.router,
     analytics.router,
+    audit.router,
     billing.router,
     contacts.router,
     conversations.router,

@@ -7,8 +7,11 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.db.models.audit import AuditAction, AuditActorKind
+from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
+from app.services.audit_service import AuditTrail
 
 logger = get_logger(__name__)
 
@@ -30,6 +33,7 @@ class WhatsAppAccountService:
         waba_id: str,
         display_phone_number: str,
         display_name: str | None = None,
+        actor: User | None = None,
     ) -> WhatsAppAccount:
         """Claim a phone number for this workspace.
 
@@ -49,6 +53,17 @@ class WhatsAppAccountService:
         await self._session.flush()
         await self._session.refresh(account)
 
+        AuditTrail(self._session, tenant_id=tenant_id).record(
+            AuditAction.WHATSAPP_ACCOUNT_CONNECTED,
+            actor=actor,
+            actor_kind=AuditActorKind.USER if actor is not None else AuditActorKind.SYSTEM,
+            target_type="whatsapp_account",
+            target_id=account.id,
+            # The display number, not the token or the account id: a person
+            # reading this needs to recognise which number it was.
+            target_label=account.display_phone_number,
+        )
+
         logger.info(
             "whatsapp.account_connected",
             extra={"phone_number_id": account.phone_number_id},
@@ -64,6 +79,7 @@ class WhatsAppAccountService:
         tenant_id: uuid.UUID,
         account_id: uuid.UUID,
         status: WhatsAppAccountStatus,
+        actor: User | None = None,
     ) -> WhatsAppAccount:
         """Enable or disable an account.
 
@@ -73,6 +89,19 @@ class WhatsAppAccountService:
         account = await self._accounts(tenant_id).require_by_id(account_id)
         account.status = status
         await self._session.flush()
+
+        AuditTrail(self._session, tenant_id=tenant_id).record(
+            (
+                AuditAction.WHATSAPP_ACCOUNT_DISABLED
+                if status is WhatsAppAccountStatus.DISABLED
+                else AuditAction.WHATSAPP_ACCOUNT_ENABLED
+            ),
+            actor=actor,
+            actor_kind=AuditActorKind.USER if actor is not None else AuditActorKind.SYSTEM,
+            target_type="whatsapp_account",
+            target_id=account.id,
+            target_label=account.display_phone_number,
+        )
 
         logger.info(
             "whatsapp.account_status_changed",
