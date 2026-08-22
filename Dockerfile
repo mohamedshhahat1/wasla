@@ -20,6 +20,26 @@ RUN pip install --upgrade pip && pip install .
 
 
 FROM base AS runtime
+
+# Provenance. A container answering a pager at three in the morning has to be
+# traceable to the commit that built it, and `docker inspect` is the only place
+# an operator can look without the deployment pipeline's help. Build arguments
+# rather than baked constants, so a local build says so instead of lying about
+# a revision it does not have.
+ARG WASLA_VERSION="0.0.0-local"
+ARG WASLA_REVISION="unknown"
+ARG WASLA_BUILT_AT="unknown"
+LABEL org.opencontainers.image.title="Wasla" \
+      org.opencontainers.image.description="Multi-tenant AI customer engagement platform for WhatsApp Business" \
+      org.opencontainers.image.source="https://github.com/mohamedshhahat1/wasla" \
+      org.opencontainers.image.licenses="LicenseRef-Proprietary" \
+      org.opencontainers.image.version="${WASLA_VERSION}" \
+      org.opencontainers.image.revision="${WASLA_REVISION}" \
+      org.opencontainers.image.created="${WASLA_BUILT_AT}"
+# Readable from inside the process too, so a log line or a health response can
+# name the build without shelling out to the container runtime.
+ENV WASLA_BUILD_REVISION="${WASLA_REVISION}"
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/* \

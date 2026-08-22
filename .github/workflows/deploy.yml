@@ -1,0 +1,242 @@
+name: deploy
+
+# Publishing and deployment are separate jobs on purpose. An image that has been
+# built, scanned and pushed is useful even when nothing is deployed with it -
+# it is what a rollback rolls back *to* - so publishing does not depend on a
+# deployment target existing.
+#
+# Nothing here runs before CI passes. `workflow_run` waits for the CI workflow
+# to conclude on the same commit and the first step refuses anything that did
+# not succeed, which is the "do not deploy if tests fail" rule expressed as a
+# dependency rather than as a duplicated test job.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: [main]
+    types: [completed]
+  # Tagging a release publishes that tag. Separate from the branch path because
+  # a tag is a deliberate act and should not wait on a branch build.
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy after publishing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  # Pushing to GitHub Container Registry needs no separate credential: the
+  # workflow's own token is the login. One fewer secret to rotate, and one
+  # fewer that can be leaked.
+  packages: write
+
+concurrency:
+  # Never two publishes of the same ref at once, and never cancel one halfway:
+  # a half-pushed manifest is a tag that resolves to nothing.
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  publish:
+    name: Build, scan and publish
+    runs-on: ubuntu-latest
+    # A CI run that failed produces no image. The condition covers the
+    # `workflow_run` path only; a tag push and a manual run have no CI run
+    # attached and are gated by their own triggers.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    outputs:
+      image: ${{ steps.reference.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Check out the commit CI verified
+        uses: actions/checkout@v4
+        with:
+          # The commit CI ran against, not the branch head. Between CI
+          # finishing and this starting, main may have moved - publishing the
+          # newer commit would ship something no test ever saw.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Work out the tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # `sha-<commit>` is the tag a deployment pins to: it names exactly one
+          # build and never moves. `main` and `latest` are conveniences for a
+          # human; nothing automated should follow them.
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            WASLA_VERSION=${{ steps.meta.outputs.version }}
+            WASLA_REVISION=${{ github.event.workflow_run.head_sha || github.sha }}
+            WASLA_BUILT_AT=${{ github.event.repository.updated_at }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+
+      - name: Name the image by digest
+        id: reference
+        # A digest, not a tag. Tags can be moved; a digest is the image that was
+        # actually built and scanned, and it is what the deploy step pulls.
+        run: |
+          echo "image=${REGISTRY}/${IMAGE_NAME}@${DIGEST}" >> "$GITHUB_OUTPUT"
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - name: Scan the published image
+        # After the push rather than before it, deliberately. A failing scan
+        # must not silently leave nothing published on main - the image exists,
+        # the finding is visible, and the deploy job below refuses to ship it.
+        # Blocking the push instead would mean a critical CVE in a base image
+        # also destroys the ability to roll forward with a fix.
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.reference.outputs.image }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          vuln-type: os,library
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: publish
+    # Only a deliberate act deploys: the default branch after a green CI run, a
+    # release tag, or a manual dispatch that ticked the box.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.deploy) ||
+      github.event_name == 'workflow_run'
+    # The environment is where the approval gate and the deployment secrets
+    # live. An unconfigured environment means this job waits rather than
+    # deploying into nothing.
+    environment:
+      name: production
+      url: ${{ vars.WASLA_PUBLIC_URL }}
+    steps:
+      - name: Check the deployment target is configured
+        # Fails loudly rather than pretending to deploy. A workflow that
+        # "succeeds" without touching a server is worse than one that fails:
+        # the green tick is read as "it shipped".
+        run: |
+          missing=""
+          [ -n "${DEPLOY_HOST}" ] || missing="${missing} DEPLOY_HOST"
+          [ -n "${DEPLOY_USER}" ] || missing="${missing} DEPLOY_USER"
+          [ -n "${DEPLOY_SSH_KEY}" ] || missing="${missing} DEPLOY_SSH_KEY"
+          if [ -n "${missing}" ]; then
+            echo "No deployment target configured. Missing secrets:${missing}" >&2
+            echo "See docs/DEPLOYMENT.md for what each one is and how to set it." >&2
+            exit 1
+          fi
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Check out the deployment files
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Open an SSH connection
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # The host key is pinned rather than accepted blindly: trusting an
+          # unknown host on first connection is how a deploy ends up talking to
+          # somebody else's server.
+          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+
+      - name: Ship the compose file
+        run: |
+          scp -i ~/.ssh/deploy_key \
+            docker-compose.prod.yml \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/docker-compose.prod.yml"
+          scp -i ~/.ssh/deploy_key -r \
+            nginx \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/"
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/wasla' }}
+
+      - name: Migrate, then start the new version
+        # Migrations are their own step and must succeed before anything serves
+        # traffic. `up --wait` blocks until every health check passes, so a
+        # container that starts and immediately dies fails the deployment
+        # instead of being reported as shipped.
+        run: |
+          ssh -i ~/.ssh/deploy_key "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "cd ${DEPLOY_PATH} \
+             && export WASLA_IMAGE='${WASLA_IMAGE}' \
+             && docker compose -f docker-compose.prod.yml pull \
+             && docker compose -f docker-compose.prod.yml run --rm migrate \
+             && docker compose -f docker-compose.prod.yml up -d --wait --remove-orphans"
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/wasla' }}
+          WASLA_IMAGE: ${{ needs.publish.outputs.image }}
+
+      - name: Check what is now serving
+        # The deployment is not finished when the containers start; it is
+        # finished when the thing they run answers. A readiness check here is
+        # what turns "the command exited zero" into "the release works".
+        run: |
+          ssh -i ~/.ssh/deploy_key "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "curl -fsS --max-time 10 http://127.0.0.1/health/ready"
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+
+      - name: Report the image that shipped
+        if: always()
+        run: |
+          echo "### Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: \`${WASLA_IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "To roll back, deploy the previous digest - see docs/DEPLOYMENT.md." >> "$GITHUB_STEP_SUMMARY"
+        env:
+          WASLA_IMAGE: ${{ needs.publish.outputs.image }}
