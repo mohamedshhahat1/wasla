@@ -27,6 +27,7 @@ from app.db.models.conversation import (
     MessageKind,
     MessageStatus,
 )
+from app.db.models.media import MediaStatus, MessageMedia
 from app.integrations.openai.types import AgentReply, TokenUsage, ToolCall
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -81,6 +82,24 @@ class FakeMessages:
 
     async def list_for_conversation(self, *, conversation_id, limit):
         return self._messages
+
+
+class FakeMedia:
+    """The attachments on a conversation, keyed by message id.
+
+    Empty by default: most of these tests are about text, and a conversation
+    with no files must render exactly as it did before media existed.
+    """
+
+    def __init__(self, attachments=None):
+        self._attachments = attachments or {}
+
+    async def map_for_messages(self, message_ids):
+        return {
+            message_id: self._attachments[message_id]
+            for message_id in message_ids
+            if message_id in self._attachments
+        }
 
 
 def _returns(instance):
@@ -181,6 +200,7 @@ def _build(
     registry=None,
     max_rounds=3,
     embeddings=None,
+    attachments=None,
 ):
     fakes = {
         "ConversationRepository": FakeConversations(
@@ -191,6 +211,7 @@ def _build(
         "MessageRepository": FakeMessages(
             messages if messages is not None else [_inbound("hello")]
         ),
+        "MediaRepository": FakeMedia(attachments),
     }
     for name, fake in fakes.items():
         monkeypatch.setattr(orchestrator_module, name, _returns(fake))
@@ -593,3 +614,48 @@ async def test_a_search_without_a_provider_says_so_rather_than_failing(monkeypat
     assert "cannot be searched" in output.lower()
     assert "do not guess" in output.lower()
     assert outcome.reply == "Let me pass you to a colleague."
+
+
+async def test_an_image_description_reaches_the_model(monkeypatch):
+    """End to end through the orchestrator, not just the renderer.
+
+    This is the assertion the whole phase exists for: what the customer
+    photographed has to arrive in the prompt. Before media understanding the
+    model saw the literal string "[image]" and answered as though nothing had
+    been sent.
+    """
+    photo = Message(
+        id=uuid.uuid4(),
+        direction=MessageDirection.INBOUND,
+        status=MessageStatus.RECEIVED,
+        kind=MessageKind.IMAGE,
+        body="how much?",
+        created_at=SENT_AT,
+    )
+    attachment = MessageMedia(
+        id=uuid.uuid4(),
+        tenant_id=TENANT,
+        message_id=photo.id,
+        conversation_id=CONVERSATION,
+        status=MediaStatus.READY,
+        transcript="A blue sofa with a price tag reading 4,500 EGP.",
+        is_voice=False,
+        byte_size=0,
+        attempts=0,
+    )
+
+    client = StubClient([_reply("It is 4,500 EGP.")])
+    orchestrator = _build(
+        monkeypatch,
+        client=client,
+        agent=_agent(),
+        messages=[photo],
+        attachments={photo.id: attachment},
+    )
+
+    outcome = await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert outcome.reply == "It is 4,500 EGP."
+    prompt = " ".join(turn.text for turn in client.calls[0]["turns"])
+    assert "4,500 EGP" in prompt
+    assert "how much?" in prompt

@@ -33,6 +33,11 @@ dependencies = [
     "argon2-cffi>=23.1,<26",
     "pyjwt>=2.10,<3",
     "email-validator>=2.2,<3",
+    # PDF text extraction, for documents customers send over WhatsApp and for
+    # the knowledge base, which has refused PDFs since phase 6 for want of a
+    # parser. Pure Python and dependency-free, which matters for a library that
+    # is fed attachments from strangers.
+    "pypdf>=5.1,<7",
 ]
 
 [project.optional-dependencies]

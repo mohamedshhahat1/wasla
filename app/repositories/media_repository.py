@@ -10,6 +10,7 @@ a repository would be found by accident rather than on purpose.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -78,6 +79,23 @@ class MediaRepository(TenantScopedRepository[MessageMedia]):
             is_voice=is_voice,
         )
         return self.add(media), True
+
+    async def map_for_messages(
+        self,
+        message_ids: Sequence[uuid.UUID],
+    ) -> dict[uuid.UUID, MessageMedia]:
+        """The files attached to these messages, keyed by message id.
+
+        One query for a whole conversation window. The alternative - reaching
+        through a relationship while rendering each message - is a query per
+        message, and inside an async session it does not merely cost more, it
+        raises.
+        """
+        if not message_ids:
+            return {}
+
+        rows = await self._all(self._select().where(MessageMedia.message_id.in_(message_ids)))
+        return {row.message_id: row for row in rows}
 
     async def count_unresolved(self, conversation_id: uuid.UUID) -> int:
         """How many files on this conversation still owe it an answer."""

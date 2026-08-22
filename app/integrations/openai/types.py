@@ -24,13 +24,31 @@ def _int(value: object) -> int:
 
 @dataclass(frozen=True, slots=True)
 class Turn:
-    """One message in the conversation as the model should see it."""
+    """One message in the conversation as the model should see it.
+
+    `images` are data URLs, and they are here rather than in a separate vision
+    client so that describing a photograph reuses the retry, timeout and error
+    handling the text path already has. A second client would be a second copy
+    of that policy, drifting from this one.
+
+    Data URLs rather than links: the alternative is putting every customer's
+    attachment behind a URL a provider can reach, which is a far wider exposure
+    than sending the bytes for one request.
+    """
 
     role: Role
     text: str
+    images: tuple[str, ...] = ()
 
     def to_input(self) -> dict[str, Any]:
-        return {"role": self.role, "content": self.text}
+        if not self.images:
+            # Kept as a bare string when there is nothing else in the turn. The
+            # provider accepts both, and this is what every existing turn sends.
+            return {"role": self.role, "content": self.text}
+
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": self.text}]
+        content.extend({"type": "input_image", "image_url": url} for url in self.images)
+        return {"role": self.role, "content": content}
 
 
 @dataclass(frozen=True, slots=True)

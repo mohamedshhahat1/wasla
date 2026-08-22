@@ -201,11 +201,16 @@ async def test_a_second_message_reuses_the_conversation(db_session):
 
 
 async def test_an_unrecognised_type_is_stored_as_unsupported(db_session):
-    """A new Meta message type must not drop the message."""
+    """A new Meta message type must not drop the message.
+
+    "reaction" rather than "sticker": stickers became a recognised type in
+    phase 9, and an example that is quietly no longer unrecognised stops
+    testing anything.
+    """
     tenant = await _tenant(db_session, slug="acme")
     await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
 
-    await WhatsAppIngestionService(session=db_session).ingest(_inbound(message_type="sticker"))
+    await WhatsAppIngestionService(session=db_session).ingest(_inbound(message_type="reaction"))
 
     message = await MessageRepository(db_session, tenant_id=tenant.id).get_by_wa_message_id(
         WAMID_IN

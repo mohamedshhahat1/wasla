@@ -250,3 +250,31 @@ async def test_an_unresolved_count_is_scoped_to_the_workspace(db_session):
 
     assert await acme_media.count_unresolved(message.conversation_id) == 1
     assert await globex_media.count_unresolved(message.conversation_id) == 0
+
+
+async def test_a_sticker_is_read_as_an_image(db_session):
+    """Meta gives stickers their own type; nothing downstream needs it apart.
+
+    A sticker is a small image and is described the same way. The raw event
+    keeps the distinction for anything that later wants it.
+    """
+    tenant = await _tenant(db_session, slug="acme")
+    await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
+
+    await WhatsAppIngestionService(session=db_session).ingest(
+        _media_delivery(
+            message_id="wamid.sticker",
+            message_type="sticker",
+            descriptor={"id": "media-7", "mime_type": "image/webp"},
+        )
+    )
+
+    message = await MessageRepository(db_session, tenant_id=tenant.id).get_by_wa_message_id(
+        "wamid.sticker"
+    )
+    assert message is not None
+    assert message.kind is MessageKind.IMAGE
+
+    media = await MediaRepository(db_session, tenant_id=tenant.id).get_for_message(message.id)
+    assert media is not None
+    assert media.mime_type == "image/webp"

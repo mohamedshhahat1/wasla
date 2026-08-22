@@ -18,7 +18,6 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,21 +28,15 @@ from app.core.storage import MediaStorage, StorageError
 from app.db.models.media import MAX_TRANSCRIPT_LENGTH, MediaStatus, MessageMedia
 from app.integrations.whatsapp.client import WhatsAppClient
 from app.repositories.media_repository import MediaRepository
+from app.services.extraction import UnreadableDocumentError
+from app.services.media_reader import (
+    READABLE_TYPES,
+    MediaReader,
+    ScannedDocumentError,
+    SilentRecordingError,
+)
 
 logger = get_logger(__name__)
-
-# Types worth downloading, mapped to how they are read. Anything absent is
-# skipped rather than stored: keeping bytes nothing can interpret costs disk and
-# buys a file no one will ever open.
-IMAGE_TYPES: Final = frozenset(
-    {"image/jpeg", "image/png", "image/webp", "image/gif"},
-)
-AUDIO_TYPES: Final = frozenset(
-    {"audio/ogg", "audio/mpeg", "audio/mp4", "audio/amr", "audio/aac", "audio/wav", "audio/webm"},
-)
-DOCUMENT_TYPES: Final = frozenset({"application/pdf", "text/plain"})
-
-READABLE_TYPES: Final = IMAGE_TYPES | AUDIO_TYPES | DOCUMENT_TYPES
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +165,57 @@ class MediaService:
             },
         )
         return MediaOutcome(media_id=media.id, status=MediaStatus.STORED)
+
+    async def understand(self, media: MessageMedia, *, reader: MediaReader) -> MediaOutcome:
+        """Work out what a stored file says, and record it.
+
+        The three outcomes are deliberately distinct, and which one a failure
+        gets is decided here rather than in the reader - this is the only place
+        that knows how many attempts are left.
+
+        - Read: `READY`, with the transcript.
+        - Nothing to read - a silent recording, a scanned page, an unsupported
+          type: `SKIPPED`. The file was opened and there was no text in it, and
+          no number of retries changes that.
+        - The attempt broke: `FAILED`, and retryable until the attempts run out,
+          at which point it becomes a give-up that still lets the customer be
+          answered.
+        """
+        if media.storage_key is None:
+            return await self._skip(media, "There is nothing stored to read.")
+        if media.status is MediaStatus.READY:
+            # Already read. The job can be retried, and paying a provider again
+            # to arrive at the transcript already on the row would be waste.
+            return MediaOutcome(media_id=media.id, status=MediaStatus.READY)
+
+        try:
+            content = await self._storage.get(media.storage_key)
+        except StorageError as error:
+            return await self._fail(media, str(error))
+
+        try:
+            result = await reader.read(content=content, mime_type=media.mime_type)
+        except (SilentRecordingError, ScannedDocumentError, UnreadableDocumentError) as decision:
+            # Not failures. The file was opened and found to hold no text, which
+            # is an answer rather than an error.
+            return await self._skip(media, decision.message)
+        except (ExternalServiceError, RateLimitedError) as error:
+            if media.is_exhausted:
+                return await self._skip(
+                    media,
+                    "This file could not be read after several attempts.",
+                )
+            return await self._fail(media, str(error))
+
+        logger.info(
+            "media.read",
+            extra={
+                "tenant_id": str(self._tenant_id),
+                "media_id": str(media.id),
+                "method": result.method,
+            },
+        )
+        return await self.mark_ready(media, transcript=result.transcript)
 
     async def mark_ready(self, media: MessageMedia, *, transcript: str | None) -> MediaOutcome:
         """Record what the file turned out to say.

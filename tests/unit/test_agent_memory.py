@@ -4,10 +4,12 @@ No database: memory takes messages, so these tests build them in memory and
 assert on what an agent would actually see.
 """
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from app.agents.memory import build_window, estimate_tokens
 from app.db.models.conversation import Message, MessageDirection, MessageKind, MessageStatus
+from app.db.models.media import MediaStatus, MessageMedia
 
 BASE_TIME = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
 ARABIC_LETTER = "\u0645"
@@ -22,12 +24,30 @@ def _message(
     kind=MessageKind.TEXT,
 ):
     return Message(
+        id=uuid.uuid4(),
         direction=direction,
         kind=kind,
         status=status,
         body=body,
         created_at=BASE_TIME + timedelta(minutes=minutes),
     )
+
+
+def _attachment(message, *, transcript=None, status=MediaStatus.READY, is_voice=False, error=None):
+    """A media row for `message`, and the map `build_window` takes."""
+    media = MessageMedia(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        message_id=message.id,
+        conversation_id=uuid.uuid4(),
+        status=status,
+        transcript=transcript,
+        is_voice=is_voice,
+        last_error=error,
+        byte_size=0,
+        attempts=0,
+    )
+    return {message.id: media}
 
 
 def test_empty_text_costs_nothing():
@@ -149,3 +169,109 @@ def test_a_window_with_nothing_usable_is_empty():
 
     assert window.is_empty
     assert window.estimated_tokens == 0
+
+
+def test_an_image_reads_as_its_description_not_as_a_placeholder():
+    """The whole point of the phase: an agent must not be shown "[image]"."""
+    message = _message(body=None, kind=MessageKind.IMAGE)
+    window = build_window(
+        [message],
+        message_limit=10,
+        token_budget=1000,
+        media=_attachment(message, transcript="A blue sofa, price tag 4,500 EGP."),
+    )
+
+    assert window.turns[0].text == "[image] A blue sofa, price tag 4,500 EGP."
+
+
+def test_a_caption_and_a_description_stay_distinguishable():
+    """The customer's words are theirs; the description is a machine's.
+
+    They are rendered on separate lines with the machine half labelled, so the
+    model is never in a position to quote a transcription back as something the
+    customer said.
+    """
+    message = _message(body="how much is this one?", kind=MessageKind.IMAGE)
+    window = build_window(
+        [message],
+        message_limit=10,
+        token_budget=1000,
+        media=_attachment(message, transcript="A blue sofa."),
+    )
+
+    text = window.turns[0].text
+    assert text.startswith("how much is this one?")
+    assert "[image] A blue sofa." in text
+
+
+def test_a_voice_note_says_it_was_transcribed():
+    message = _message(body=None, kind=MessageKind.AUDIO)
+    window = build_window(
+        [message],
+        message_limit=10,
+        token_budget=1000,
+        media=_attachment(message, transcript="ممكن اعرف السعر؟", is_voice=True),
+    )
+
+    assert window.turns[0].text == "[voice note, transcribed] ممكن اعرف السعر؟"
+
+
+def test_an_unreadable_file_still_produces_a_turn():
+    """Silence would let the agent answer as though nothing had been sent.
+
+    "The customer sent something I could not open" is a far better turn than
+    pretending there was no attachment at all.
+    """
+    message = _message(body=None, kind=MessageKind.DOCUMENT)
+    window = build_window(
+        [message],
+        message_limit=10,
+        token_budget=1000,
+        media=_attachment(
+            message,
+            status=MediaStatus.SKIPPED,
+            error="This file is larger than the 25 MB limit.",
+        ),
+    )
+
+    assert "unreadable" in window.turns[0].text
+    assert "25 MB" in window.turns[0].text
+
+
+def test_a_file_still_being_read_says_so():
+    message = _message(body=None, kind=MessageKind.IMAGE)
+    window = build_window(
+        [message],
+        message_limit=10,
+        token_budget=1000,
+        media=_attachment(message, status=MediaStatus.PENDING),
+    )
+
+    assert window.turns[0].text == "[image, not yet read]"
+
+
+def test_a_message_with_no_attachment_is_unaffected():
+    """Every existing text message must render exactly as it did before."""
+    message = _message(body="hello")
+    window = build_window([message], message_limit=10, token_budget=1000, media={})
+
+    assert window.turns[0].text == "hello"
+
+
+def test_media_is_optional():
+    """Callers that never had attachments do not have to pass an empty map."""
+    message = _message(body="hello")
+    assert build_window([message], message_limit=10, token_budget=1000).turns[0].text == "hello"
+
+
+def test_a_description_counts_against_the_token_budget():
+    """Otherwise a long transcript would silently blow the context window."""
+    message = _message(body=None, kind=MessageKind.IMAGE)
+    window = build_window(
+        [message],
+        message_limit=10,
+        token_budget=1000,
+        media=_attachment(message, transcript="a" * 400),
+    )
+
+    assert window.estimated_tokens > 50

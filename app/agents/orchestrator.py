@@ -34,6 +34,7 @@ from app.integrations.openai.embeddings import EmbeddingsClient
 from app.integrations.openai.types import TokenUsage, ToolCall, ToolResult, Turn
 from app.repositories.agent_repository import AgentRepository, AgentToolRepository
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
+from app.repositories.media_repository import MediaRepository
 
 logger = get_logger(__name__)
 
@@ -99,6 +100,7 @@ class AgentOrchestrator:
         self._grants = AgentToolRepository(session, tenant_id=tenant_id)
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
+        self._media = MediaRepository(session, tenant_id=tenant_id)
 
     async def answer(
         self,
@@ -136,10 +138,15 @@ class AgentOrchestrator:
             conversation_id=conversation_id,
             limit=resolved.memory_message_limit * HISTORY_MULTIPLIER,
         )
+        # Fetched for the whole window at once. What a customer attached is
+        # part of what they said, and an agent answering a photograph with
+        # "[image]" is the thing this phase exists to stop.
+        attachments = await self._media.map_for_messages([message.id for message in history])
         window = build_window(
             history,
             message_limit=resolved.memory_message_limit,
             token_budget=resolved.memory_token_budget,
+            media=attachments,
         )
         if window.is_empty:
             # Nothing was ever said, so there is nothing to answer.

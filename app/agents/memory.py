@@ -17,12 +17,18 @@ what it spent and how much history it left behind.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from math import ceil
 from typing import Final
 
-from app.db.models.conversation import Message, MessageDirection, MessageStatus
+from app.db.models.conversation import (
+    Message,
+    MessageDirection,
+    MessageStatus,
+)
+from app.db.models.media import UNRESOLVED_MEDIA_STATUSES, MessageMedia
 from app.integrations.openai.types import Turn
 
 CHARACTERS_PER_TOKEN: Final = 4.0
@@ -65,20 +71,27 @@ def build_window(
     *,
     message_limit: int,
     token_budget: int,
+    media: Mapping[uuid.UUID, MessageMedia] | None = None,
 ) -> MemoryWindow:
     """Select the most recent history that fits both limits.
 
     Messages may arrive in any order: they are sorted here rather than trusting
     a caller's query, because reversed history reads as a different conversation
     and the mistake is invisible in the output.
+
+    `media` maps message id to the file attached to it, and is passed in rather
+    than reached through a relationship on purpose. Lazy loading inside an async
+    session raises rather than working, and even where it worked it would issue
+    one query per message in the window; the caller fetches them in one.
     """
     ordered = sorted(messages, key=lambda message: message.created_at)
+    attachments = media or {}
     turns: list[Turn] = []
     spent = 0
     dropped = 0
 
     for index, message in enumerate(reversed(ordered)):
-        turn = _turn(message)
+        turn = _turn(message, attachments)
         if turn is None:
             continue
 
@@ -100,20 +113,60 @@ def build_window(
     return MemoryWindow(turns=tuple(turns), estimated_tokens=spent, dropped=dropped)
 
 
-def _turn(message: Message) -> Turn | None:
+def _turn(
+    message: Message,
+    media: Mapping[uuid.UUID, MessageMedia],
+) -> Turn | None:
     """Render one stored message as the model should see it, or skip it."""
+    text = _text(message, media.get(message.id))
     if message.direction is MessageDirection.OUTBOUND:
         if message.status is MessageStatus.FAILED:
             # Never delivered, so the customer never saw it. Including it would
             # convince the model it had already answered.
             return None
-        return Turn(role="assistant", text=_text(message))
-    return Turn(role="user", text=_text(message))
+        return Turn(role="assistant", text=text)
+    return Turn(role="user", text=text)
 
 
-def _text(message: Message) -> str:
-    if message.body:
-        return message.body
-    # Media carries no text, but its absence is information: the customer sent
-    # something the agent cannot read, and should say so rather than ignore it.
-    return f"[{message.kind.value}]"
+def _text(message: Message, media: MessageMedia | None) -> str:
+    """What the model should read for this message.
+
+    A media message contributes up to two things, and they stay apart in the
+    rendering exactly as they do in the database. The caption is the customer's
+    own words and reads as ordinary text. What was found inside the file is
+    labelled, so the model is never in a position to quote a machine
+    transcription back to the customer as something they said.
+
+    A file that could not be read still produces a line. Silence would let the
+    agent answer as though nothing had been sent, and "the customer sent a
+    photograph I could not open" is a far better turn than pretending there was
+    no photograph.
+    """
+    caption = message.body or ""
+    described = _described(message, media)
+
+    if caption and described:
+        return f"{caption}\n{described}"
+    return described or caption or f"[{message.kind.value}]"
+
+
+def _described(message: Message, media: MessageMedia | None) -> str:
+    """The attached file, rendered for the model."""
+    if media is None:
+        return ""
+
+    label = message.kind.value
+    if media.transcript:
+        if media.is_voice:
+            return f"[voice note, transcribed] {media.transcript}"
+        return f"[{label}] {media.transcript}"
+
+    if media.status in UNRESOLVED_MEDIA_STATUSES:
+        # Not normally reached: an agent job is not enqueued while anything on
+        # the conversation is unresolved. An older message in the window can
+        # still be in this state, and saying so beats pretending the file is
+        # not there.
+        return f"[{label}, not yet read]"
+
+    reason = media.last_error or "it could not be read"
+    return f"[{label}, unreadable: {reason}]"

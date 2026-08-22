@@ -17,6 +17,8 @@ document answering with two copies of everything.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import uuid
 from dataclasses import dataclass
@@ -34,7 +36,7 @@ from app.repositories.knowledge_repository import (
     DocumentRepository,
     KnowledgeBaseRepository,
 )
-from app.services import chunking
+from app.services import chunking, extraction
 from app.workers.ingestion_queue import IngestionJob, IngestionQueue
 
 logger = get_logger(__name__)
@@ -68,13 +70,28 @@ def extract(*, raw: str, source: DocumentSource) -> str:
     """Turn a submitted document into plain text.
 
     Text and Markdown are already text; Markdown keeps its punctuation because
-    headings and lists are structure the chunker uses. PDF extraction needs a
-    parser this project does not yet depend on, so it is refused explicitly
-    rather than silently producing an empty document that would look ingested
-    and answer nothing.
+    headings and lists are structure the chunker uses.
+
+    A PDF arrives here base64-encoded, because this endpoint takes JSON and a
+    PDF is not text. A scanned one - a photograph of a page, with no text layer -
+    is refused rather than stored empty: an empty document looks perfectly
+    ingested from the outside and answers every question with nothing, which is
+    worse than being told the file needs OCR.
     """
     if source is DocumentSource.PDF:
-        raise ValidationError("PDF ingestion is not available yet. Submit the text instead.")
+        try:
+            content = base64.b64decode(raw, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise ValidationError("Submit a PDF as base64-encoded content.") from error
+
+        text = extraction.extract_pdf(content)
+        if not text:
+            raise ValidationError(
+                "No text could be read from this PDF. It may be a scan, "
+                "which needs to be converted to text first."
+            )
+        return chunking.normalise(text)
+
     return chunking.normalise(raw)
 
 
