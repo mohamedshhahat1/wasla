@@ -52,6 +52,9 @@ class ContactRepository(TenantScopedRepository[Contact]):
     async def get_by_wa_id(self, wa_id: str) -> Contact | None:
         return await self._first(self._select().where(Contact.wa_id == wa_id))
 
+    async def get_by_id(self, contact_id: uuid.UUID) -> Contact | None:
+        return await self._first(self._select().where(Contact.id == contact_id))
+
     async def require_by_id(self, contact_id: uuid.UUID) -> Contact:
         return await self._require(self._select().where(Contact.id == contact_id))
 

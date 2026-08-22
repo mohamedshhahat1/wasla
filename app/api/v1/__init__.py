@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     agents,
     auth,
+    campaigns,
     conversations,
     follow_ups,
     invitations,
@@ -18,6 +19,7 @@ from app.api.v1 import (
 api_router = APIRouter()
 api_router.include_router(agents.router)
 api_router.include_router(auth.router)
+api_router.include_router(campaigns.router)
 api_router.include_router(conversations.router)
 api_router.include_router(follow_ups.router)
 api_router.include_router(invitations.router)

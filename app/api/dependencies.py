@@ -23,6 +23,7 @@ from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
 from app.services.agent_service import AgentService
 from app.services.auth_service import AuthService
+from app.services.campaign_service import CampaignService
 from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
 from app.services.invitation_service import InvitationService
@@ -162,6 +163,22 @@ def get_agent_service(
 
 
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
+
+
+def get_campaign_service(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> CampaignService:
+    """Workspace-scoped, and deliberately without a messaging service.
+
+    Nothing reachable over the API sends a campaign message. Composing,
+    targeting and scheduling are all database work; the sending happens in the
+    worker, where ten thousand messages cannot hold a request open.
+    """
+    return CampaignService(session=session, tenant_id=workspace.tenant.id)
+
+
+CampaignServiceDep = Annotated[CampaignService, Depends(get_campaign_service)]
 
 
 def get_follow_up_service(
