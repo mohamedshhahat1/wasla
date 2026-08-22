@@ -38,7 +38,9 @@ def test_every_meter_declares_what_it_counts():
 def test_the_unit_comes_from_the_meter():
     assert unit_for(UsageEventType.AI_INPUT_TOKEN) is UsageUnit.TOKEN
     assert unit_for(UsageEventType.STORAGE_USED) is UsageUnit.BYTE
-    assert unit_for(UsageEventType.VOICE_TRANSCRIPTION) is UsageUnit.SECOND
+    # A count of recordings, not their length: the configured transcription
+    # models report no duration, and a guess does not belong in a bill.
+    assert unit_for(UsageEventType.VOICE_TRANSCRIPTION) is UsageUnit.COUNT
     assert unit_for(UsageEventType.WHATSAPP_MESSAGE_SENT) is UsageUnit.COUNT
 
 

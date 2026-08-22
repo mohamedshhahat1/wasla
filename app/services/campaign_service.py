@@ -55,6 +55,7 @@ from app.db.models.campaign import (
     RecipientStatus,
 )
 from app.db.models.conversation import Contact, MessageStatus
+from app.db.models.usage import UsageEventType
 from app.repositories.campaign_repository import (
     DEFAULT_RECIPIENT_BATCH,
     AudienceFilter,
@@ -68,6 +69,7 @@ from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.messaging_service import MessagingService
 from app.services.template_service import refusal_reason_for
+from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
@@ -146,6 +148,7 @@ class CampaignService:
         self._templates = WhatsAppTemplateRepository(session, tenant_id=tenant_id)
         self._contacts = ContactRepository(session, tenant_id=tenant_id)
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
+        self._usage = UsageRecorder(session, tenant_id=tenant_id)
 
     # ------------------------------------------------------------------ reads
 
@@ -531,6 +534,18 @@ class CampaignService:
         recipient.sent_at = now
         recipient.message_id = message.id
         recipient.last_error = None
+        # A campaign message is metered twice on purpose, and the two figures
+        # answer different questions. The messaging service already counted it
+        # as a message sent, which is what a messaging allowance is spent from;
+        # this counts it as campaign traffic, which is what a workspace looks at
+        # when a broadcast costs more than it expected. The recipient row is
+        # what makes the pair safe from double counting: it moves to SENT in
+        # this same transaction and is never claimed again.
+        self._usage.record(
+            UsageEventType.CAMPAIGN_MESSAGE,
+            occurred_at=now,
+            meta={"campaign_id": str(campaign.id), "message_id": str(message.id)},
+        )
         return RecipientStatus.SENT
 
     def _skip(self, recipient: CampaignRecipient, detail: str) -> RecipientStatus:

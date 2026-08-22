@@ -495,7 +495,7 @@ Conversation routes are open to every workspace member rather than to admins onl
 
 ## 19. Usage metering and billing
 
-**Status: In Progress** — the usage event table, the recorder and the aggregation services are Implemented (migration `0014`, ADR-027). Metering at the paths that consume something, the analytics tables and the dashboard APIs follow in this phase; plans, entitlements and billing are Phase 13.
+**Status: In Progress** — the usage event table, the recorder, the aggregation services and the metered paths are Implemented (migration `0014`, ADR-027). The analytics tables and the dashboard APIs follow in this phase; plans, entitlements and billing are Phase 13.
 
 Usage is a first-class subsystem of append-only rows in `usage_events` (`tenant_id`, `event_type`, `quantity`, `unit`, `metadata`, `occurred_at`), aggregated on read rather than maintained as counters.
 
@@ -517,6 +517,22 @@ Three properties are load-bearing, and each is a failure mode chosen against (AD
 **The unit belongs to the event type, not to the caller.** `EVENT_UNITS` maps every meter to `count`, `token`, `byte` or `second`, and the recorder applies it. A caller that could pass a unit is a caller that can put seconds into a token total, and no aggregate afterwards can tell that happened.
 
 **Exactly-once comes from upstream.** Nothing deduplicates here. Every metered path already has an idempotency key — the WhatsApp event id, the message row, the media row, `UNIQUE(campaign_id, contact_id)` — so a retry that skips the work skips the meter, and a retry that redoes the work counts it because it consumed something.
+
+Where each meter fires, and what it is careful about:
+
+| Meter | Written by | The mistake it avoids |
+| --- | --- | --- |
+| `whatsapp_message_received`, `conversation_created` | The conversation projection | Counted on the *message*, not the delivery: one webhook can carry several, and a replay never reaches here because the event id already deduplicated it |
+| `whatsapp_message_sent` | The messaging service, after Meta accepts | A refused send is not counted. The failed row still records that the attempt happened |
+| `ai_request`, `ai_input_token`, `ai_output_token` | The agent worker, once a turn completes | `requests` is the number of provider calls, not turns — three tool rounds are three calls — and a turn that ended in a handoff is still metered, because it cost the same inference |
+| `ai_request` (again) | The sentiment service | The classification is a provider call of its own, on its own model. The caller never sees it, so the caller cannot count it |
+| `rag_query` | The retrieval service | Counted once the embedding is paid for, whether or not anything was found |
+| `media_processing`, `voice_transcription` | The media service, when a file is read | A file already read is not read again, so a retried job does not pay twice. Transcription is a count of recordings, not seconds — see below |
+| `storage_used` | The media service, when bytes are written | Written on the write, not by sweeping the store: a sweep reports a level, and a level cannot be billed for a period that has closed |
+| `lead_created` | The lead service | Only the branch that created one. An extraction that updated an existing lead has captured nothing new |
+| `campaign_message` | The campaign dispatcher | Deliberately alongside `whatsapp_message_sent`: an allowance is spent by every message, and a broadcast's own cost is a separate question. The recipient row moving to `sent` in the same transaction is what keeps the pair from double counting |
+
+Two meters are declared and deliberately unwritten. `voice_transcription` counts recordings rather than seconds, because the configured transcription models report no duration and the verbose format that carries one is refused by them — a number inferred from a compressed byte count would be a fabrication in a bill. `api_request` waits for a plan that prices requests, since a row per HTTP request on the largest table in the schema buys nothing until something reads it.
 
 Reads are aggregates only. `UsageService` returns named counters for a half-open window `[since, until)` and a daily series for charts; `PlatformUsageRepository` is the one reader that deliberately spans workspaces, and it is constructed only by the platform layer. The half-open window is what makes two adjacent months sum to the pair.
 

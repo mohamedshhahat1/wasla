@@ -278,10 +278,16 @@ Deferred by decision, not unfinished:
 
 - [x] Usage event model and recorder (migration `0014`, ADR-027)
 - [x] Aggregation services (named counters and a daily series, over a half-open window)
-- [ ] Metering wired into every path that consumes something
+- [x] Metering wired into every path that consumes something: inbound and outbound messages, conversations opened, agent turns and the sentiment call, retrieval, media reads and transcriptions, stored bytes, leads captured, campaign messages
 - [ ] Analytics event model
 - [ ] Tenant analytics APIs
 - [ ] Platform analytics APIs
+
+Deferred by decision, not unfinished:
+
+- [ ] Voice *minutes*, as distinct from a count of recordings. `gpt-4o-mini-transcribe` and its siblings answer in plain JSON with no duration, and the verbose format that carries one is refused by those models. A recording transcribed is a fact; seconds inferred from a compressed byte count would be a fabricated number in a bill. `UsageUnit.SECOND` is declared and unwritten, waiting for a provider that reports it
+- [ ] `API_REQUEST` metering. The meter exists and nothing writes it: counting every HTTP request means a row per request on a table already written to by every message, and what a plan actually limits is the work behind a request, not the request. It waits for a plan that prices it
+- [ ] Usage retention. Nothing sweeps old rows, and nothing should until a billing period is closed and its figures are stored where a sweep cannot change them (Phase 13)
 
 ## Phase 13 — Plans, subscriptions, billing
 

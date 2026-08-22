@@ -73,6 +73,10 @@ class UsageUnit(StrEnum):
     COUNT = "count"
     TOKEN = "token"  # noqa: S105 - a unit, not a credential
     BYTE = "byte"
+    # Declared, and deliberately unwritten for now. Metering audio by
+    # duration needs a duration, and the configured transcription models
+    # report none; inferring one from a compressed byte count would put a
+    # fabricated number in a bill. See VOICE_TRANSCRIPTION below.
     SECOND = "second"
 
 
@@ -87,7 +91,11 @@ EVENT_UNITS: Final[dict[UsageEventType, UsageUnit]] = {
     UsageEventType.AI_OUTPUT_TOKEN: UsageUnit.TOKEN,
     UsageEventType.RAG_QUERY: UsageUnit.COUNT,
     UsageEventType.MEDIA_PROCESSING: UsageUnit.COUNT,
-    UsageEventType.VOICE_TRANSCRIPTION: UsageUnit.SECOND,
+    # A count of recordings, not their length. `gpt-4o-mini-transcribe` and
+    # its siblings answer in plain JSON with no duration field, and the
+    # verbose format that carries one is not accepted by those models. One
+    # transcription is a fact; seconds would be a guess.
+    UsageEventType.VOICE_TRANSCRIPTION: UsageUnit.COUNT,
     UsageEventType.STORAGE_USED: UsageUnit.BYTE,
     UsageEventType.LEAD_CREATED: UsageUnit.COUNT,
     UsageEventType.CONVERSATION_CREATED: UsageUnit.COUNT,

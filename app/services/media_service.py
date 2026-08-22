@@ -26,15 +26,18 @@ from app.core.exceptions import ExternalServiceError, RateLimitedError
 from app.core.logging import get_logger
 from app.core.storage import MediaStorage, StorageError
 from app.db.models.media import MAX_TRANSCRIPT_LENGTH, MediaStatus, MessageMedia
+from app.db.models.usage import UsageEventType
 from app.integrations.whatsapp.client import WhatsAppClient
 from app.repositories.media_repository import MediaRepository
 from app.services.extraction import UnreadableDocumentError
 from app.services.media_reader import (
     READABLE_TYPES,
+    TRANSCRIPTION_METHOD,
     MediaReader,
     ScannedDocumentError,
     SilentRecordingError,
 )
+from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
@@ -78,6 +81,7 @@ class MediaService:
         # a stored file back, marking one skipped - work without one.
         self._whatsapp = whatsapp
         self._media = MediaRepository(session, tenant_id=tenant_id)
+        self._usage = UsageRecorder(session, tenant_id=tenant_id)
 
     async def get(self, media_id: uuid.UUID) -> MessageMedia:
         return await self._media.require_by_id(media_id)
@@ -154,6 +158,14 @@ class MediaService:
         media.content_hash = content_hash(downloaded.content)
         media.status = MediaStatus.STORED
         media.last_error = None
+        # Storage is metered when bytes are written, not by sweeping the store.
+        # A sweep would report a level rather than a consumption, and a level
+        # cannot be billed for a period that has already closed.
+        self._usage.record(
+            UsageEventType.STORAGE_USED,
+            quantity=downloaded.byte_size,
+            meta={"media_id": str(media.id)},
+        )
         await self._session.flush()
 
         logger.info(
@@ -206,6 +218,21 @@ class MediaService:
                     "This file could not be read after several attempts.",
                 )
             return await self._fail(media, str(error))
+
+        # One file read, whatever it took to read it. Transcription is metered
+        # separately because it is a second provider and priced as one - but as
+        # a count of recordings, not their length: the configured models report
+        # no duration, and inferring seconds from a compressed byte count would
+        # put a fabricated number in a bill.
+        self._usage.record(
+            UsageEventType.MEDIA_PROCESSING,
+            meta={"media_id": str(media.id), "method": result.method},
+        )
+        if result.method == TRANSCRIPTION_METHOD:
+            self._usage.record(
+                UsageEventType.VOICE_TRANSCRIPTION,
+                meta={"media_id": str(media.id), "byte_size": media.byte_size},
+            )
 
         logger.info(
             "media.read",

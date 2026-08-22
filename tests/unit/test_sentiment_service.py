@@ -109,6 +109,16 @@ class FakeReadings:
         return MessageSentiment(**fields, tenant_id=TENANT), True
 
 
+class FakeUsage:
+    """Remembers what was metered, without a session to stage it in."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+
+    def ai_request(self, **fields) -> None:
+        self.requests.append(fields)
+
+
 def _inbound(body: str | None = "this is unacceptable") -> Message:
     return Message(
         id=MESSAGE,
@@ -148,8 +158,10 @@ def _build(
     media=None,
     stored=None,
     readings=None,
+    usage=None,
 ) -> SentimentService:
     fakes = {
+        "UsageRecorder": usage if usage is not None else FakeUsage(),
         "ConversationRepository": FakeConversations(
             conversation
             if conversation is not None
@@ -464,3 +476,71 @@ async def test_priority_can_be_given_back_by_hand(monkeypatch):
     )
 
     assert updated.priority is ConversationPriority.NORMAL
+
+
+async def test_an_assessment_is_metered_as_a_provider_call_of_its_own(monkeypatch):
+    """The caller never sees this call, so the caller cannot count it.
+
+    Folding it into the agent turn's figures would hide a cost from the
+    workspace paying for it, on a model that is often not the agent's.
+    """
+    usage = FakeUsage()
+    service = _build(monkeypatch, analyzer=StubAnalyzer(), usage=usage)
+
+    await service.assess(
+        conversation_id=CONVERSATION,
+        escalation_sentiment=SentimentLabel.ANGRY,
+    )
+
+    assert usage.requests == [
+        {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "model": "gpt-4.1-mini",
+            "conversation_id": CONVERSATION,
+        }
+    ]
+
+
+async def test_a_provider_failure_is_not_metered(monkeypatch):
+    """Nothing was read, so nothing was consumed."""
+    usage = FakeUsage()
+    service = _build(
+        monkeypatch,
+        analyzer=StubAnalyzer(raises=ExternalServiceError("the classifier is down")),
+        usage=usage,
+    )
+
+    outcome = await service.assess(
+        conversation_id=CONVERSATION,
+        escalation_sentiment=SentimentLabel.ANGRY,
+    )
+
+    assert outcome.analysed is False
+    assert usage.requests == []
+
+
+async def test_a_reading_already_taken_is_not_metered_again(monkeypatch):
+    """A retried job must not pay twice for a message already read."""
+    usage = FakeUsage()
+    service = _build(
+        monkeypatch,
+        analyzer=StubAnalyzer(),
+        stored=MessageSentiment(
+            tenant_id=TENANT,
+            message_id=MESSAGE,
+            conversation_id=CONVERSATION,
+            label=SentimentLabel.ANGRY,
+            score=-0.9,
+            confidence=0.9,
+            escalated=True,
+        ),
+        usage=usage,
+    )
+
+    await service.assess(
+        conversation_id=CONVERSATION,
+        escalation_sentiment=SentimentLabel.ANGRY,
+    )
+
+    assert usage.requests == []

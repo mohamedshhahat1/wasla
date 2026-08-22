@@ -28,6 +28,7 @@ from app.core.logging import get_logger
 from app.core.storage import EXTENSIONS, MediaStorage, StorageError
 from app.db.models.conversation import Conversation, Message, MessageKind, MessageStatus
 from app.db.models.media import MediaStatus
+from app.db.models.usage import UsageEventType
 from app.integrations.whatsapp.client import (
     SentMessage,
     WhatsAppClient,
@@ -41,6 +42,7 @@ from app.repositories.conversation_repository import (
 from app.repositories.media_repository import MediaRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.media_service import content_hash as media_content_hash
+from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
@@ -147,6 +149,7 @@ class MessagingService:
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._accounts = WhatsAppAccountRepository(session, tenant_id=tenant_id)
         self._media = MediaRepository(session, tenant_id=tenant_id)
+        self._usage = UsageRecorder(session, tenant_id=tenant_id)
 
     async def send_text(
         self,
@@ -383,6 +386,15 @@ class MessagingService:
             sent_at=now,
         )
         conversation.last_message_at = now
+        # Metered here and not before the call: a send that Meta refused cost
+        # the workspace nothing to deliver, and the failed row above already
+        # records that the attempt happened. Everything that leaves this way is
+        # counted once - an agent's reply, a person's, a follow-up, a campaign.
+        self._usage.record(
+            UsageEventType.WHATSAPP_MESSAGE_SENT,
+            occurred_at=now,
+            meta={"conversation_id": str(conversation_id), "kind": kind.value},
+        )
         return message
 
     @asynccontextmanager

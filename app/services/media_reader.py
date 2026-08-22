@@ -97,6 +97,14 @@ class ScannedDocumentError(ExternalServiceError):
     message = "No text could be read from this document. It may be a scan."
 
 
+# How a file was read. Named rather than written as literals, because the log
+# line and the usage meter both key off these and a rename that missed one would
+# quietly stop counting transcriptions.
+VISION_METHOD: Final = "vision"
+TRANSCRIPTION_METHOD: Final = "transcription"
+EXTRACTION_METHOD: Final = "extraction"
+
+
 @dataclass(frozen=True, slots=True)
 class ReadResult:
     """What a file turned out to say, and how that was worked out."""
@@ -161,7 +169,7 @@ class MediaReader:
             # A refusal, or a model that produced nothing. Either way there is
             # no description, and inventing one would be worse than saying so.
             raise ExternalServiceError("The image could not be described.")
-        return ReadResult(transcript=described, method="vision")
+        return ReadResult(transcript=described, method=VISION_METHOD)
 
     async def _transcribe(self, *, content: bytes, mime_type: str) -> ReadResult:
         if self._transcription is None:
@@ -174,10 +182,10 @@ class MediaReader:
             # outcome rather than an error, and the caller records it as a file
             # that was read and had nothing in it.
             raise SilentRecordingError()
-        return ReadResult(transcript=spoken, method="transcription")
+        return ReadResult(transcript=spoken, method=TRANSCRIPTION_METHOD)
 
     def _extract(self, *, content: bytes, mime_type: str) -> ReadResult:
         text = extraction.extract_document(content=content, mime_type=mime_type)
         if not text:
             raise ScannedDocumentError()
-        return ReadResult(transcript=text, method="extraction")
+        return ReadResult(transcript=text, method=EXTRACTION_METHOD)

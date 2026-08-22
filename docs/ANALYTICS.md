@@ -1,6 +1,6 @@
 # Analytics and Usage
 
-**Status: In Progress** — usage metering (the table, the recorder and the aggregates) is Implemented; the analytics event model and the dashboard APIs are Planned. See [../TASKS.md](../TASKS.md) phase 12. The decision behind how usage is written is ADR-027.
+**Status: In Progress** — usage metering is Implemented and wired into every path that consumes something; the analytics event model and the dashboard APIs are Planned. See [../TASKS.md](../TASKS.md) phase 12. The decision behind how usage is written is ADR-027.
 
 Scope: analytics events, usage metering, and dashboard data contracts.
 

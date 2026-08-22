@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.models.conversation import Message, MessageKind, MessageStatus
+from app.db.models.usage import UsageEventType
 from app.integrations.whatsapp.payload import DeliveryStatus, InboundMessage
 from app.repositories.conversation_repository import (
     ContactRepository,
@@ -22,6 +23,7 @@ from app.repositories.conversation_repository import (
     MessageRepository,
 )
 from app.repositories.media_repository import MediaRepository
+from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
@@ -65,6 +67,11 @@ class ConversationProjectionService:
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._media = MediaRepository(session, tenant_id=tenant_id)
+        # Constructed here rather than injected. Metering is not an optional
+        # collaborator: a caller able to leave it out is a path that silently
+        # stops counting, and this service is the only writer of the two
+        # meters below.
+        self._usage = UsageRecorder(session, tenant_id=tenant_id)
 
     async def project_message(
         self,
@@ -91,6 +98,11 @@ class ConversationProjectionService:
         )
         if created:
             await self._session.flush()
+            self._usage.record(
+                UsageEventType.CONVERSATION_CREATED,
+                occurred_at=occurred_at,
+                meta={"conversation_id": str(conversation.id)},
+            )
 
         await self._conversations.touch_inbound(conversation, at=occurred_at)
 
@@ -103,6 +115,17 @@ class ConversationProjectionService:
             body=message.text,
             sent_at=occurred_at,
         )
+        if is_new:
+            # Metered on the message rather than on the webhook delivery. A
+            # replayed event does not reach here - the event id already
+            # deduplicated it - and one delivery can carry several messages,
+            # so counting deliveries would be counting the wrong thing.
+            self._usage.record(
+                UsageEventType.WHATSAPP_MESSAGE_RECEIVED,
+                occurred_at=occurred_at,
+                meta={"conversation_id": str(conversation.id)},
+            )
+
         if is_new and message.media is not None:
             # Flushed for the same reason the contact was: `stored.id` is
             # generated in Python and stays None until the row reaches the

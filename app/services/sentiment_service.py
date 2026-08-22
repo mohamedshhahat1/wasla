@@ -36,6 +36,7 @@ from app.repositories.conversation_repository import ConversationRepository, Mes
 from app.repositories.media_repository import MediaRepository
 from app.repositories.sentiment_repository import SentimentRepository
 from app.services.sentiment_reader import SentimentAnalyzer, SentimentReading
+from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
@@ -92,6 +93,7 @@ class SentimentService:
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._media = MediaRepository(session, tenant_id=tenant_id)
         self._readings = SentimentRepository(session, tenant_id=tenant_id)
+        self._usage = UsageRecorder(session, tenant_id=tenant_id)
 
     async def assess(
         self,
@@ -145,6 +147,17 @@ class SentimentService:
                 extra={"conversation_id": str(conversation_id)},
             )
             return SentimentOutcome()
+
+        # Metered here rather than by the caller, because the caller never sees
+        # this call: an assessment is a provider request of its own, on a model
+        # of its own, and folding it into the agent turn's figures would hide a
+        # cost from the workspace paying it.
+        self._usage.ai_request(
+            input_tokens=reading.usage.input_tokens,
+            output_tokens=reading.usage.output_tokens,
+            model=reading.model,
+            conversation_id=conversation_id,
+        )
 
         escalated = self._should_escalate(reading, threshold=escalation_sentiment)
         self._apply(conversation, reading)

@@ -100,7 +100,7 @@ class UsageSummary:
     output_tokens: int = 0
     rag_queries: int = 0
     media_processed: int = 0
-    voice_seconds: int = 0
+    voice_transcriptions: int = 0
     storage_bytes: int = 0
     leads_created: int = 0
     conversations_created: int = 0
@@ -125,7 +125,7 @@ _SUMMARY_FIELDS: Final[dict[UsageEventType, str]] = {
     UsageEventType.AI_OUTPUT_TOKEN: "output_tokens",
     UsageEventType.RAG_QUERY: "rag_queries",
     UsageEventType.MEDIA_PROCESSING: "media_processed",
-    UsageEventType.VOICE_TRANSCRIPTION: "voice_seconds",
+    UsageEventType.VOICE_TRANSCRIPTION: "voice_transcriptions",
     UsageEventType.STORAGE_USED: "storage_bytes",
     UsageEventType.LEAD_CREATED: "leads_created",
     UsageEventType.CONVERSATION_CREATED: "conversations_created",
@@ -190,6 +190,7 @@ class UsageRecorder:
         *,
         input_tokens: int,
         output_tokens: int,
+        requests: int = 1,
         model: str | None = None,
         conversation_id: uuid.UUID | None = None,
         occurred_at: datetime | None = None,
@@ -203,6 +204,12 @@ class UsageRecorder:
 
         The model is recorded because a token from one model is not a token from
         another, and a bill that cannot say which was used cannot be checked.
+
+        `requests` is how many provider calls the turn actually made. An agent
+        that ran three tool rounds called the provider three times and is
+        charged for three, while its tokens are the sum across all of them -
+        counting the turn as one request would under-count the meter that
+        every plan limit is written against.
         """
         meta: dict[str, Any] = {}
         if model is not None:
@@ -211,7 +218,12 @@ class UsageRecorder:
             meta["conversation_id"] = str(conversation_id)
         line = meta or None
 
-        self.record(UsageEventType.AI_REQUEST, occurred_at=occurred_at, meta=line)
+        self.record(
+            UsageEventType.AI_REQUEST,
+            quantity=requests,
+            occurred_at=occurred_at,
+            meta=line,
+        )
         self.record(
             UsageEventType.AI_INPUT_TOKEN,
             quantity=input_tokens,
