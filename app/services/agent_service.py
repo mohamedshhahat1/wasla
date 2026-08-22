@@ -8,7 +8,8 @@ screen and a customer reply shared a code path.
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from enum import Enum, auto
+from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +18,7 @@ from app.core.config import Settings
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.db.models.agent import (
+    DEFAULT_ESCALATION_SENTIMENT,
     DEFAULT_MEMORY_MESSAGE_LIMIT,
     DEFAULT_MEMORY_TOKEN_BUDGET,
     DEFAULT_TEMPERATURE,
@@ -24,10 +26,26 @@ from app.db.models.agent import (
     AgentStatus,
     AgentTool,
 )
+from app.db.models.sentiment import SentimentLabel
 from app.integrations.openai.types import ToolSpec
 from app.repositories.agent_repository import AgentRepository, AgentToolRepository
 
 logger = get_logger(__name__)
+
+
+class _Unset(Enum):
+    """A sentinel that mypy can narrow, unlike a bare object().
+
+    Needed for `escalation_sentiment` alone: null is a real setting there - it
+    is how a workspace switches automatic handoff off - so "not sent" and "sent
+    as null" have to be told apart. Every other updatable field treats None as
+    "leave it alone".
+    """
+
+    TOKEN = auto()
+
+
+UNSET: Final = _Unset.TOKEN
 
 
 class AgentService:
@@ -64,6 +82,7 @@ class AgentService:
         max_output_tokens: int | None = None,
         memory_message_limit: int = DEFAULT_MEMORY_MESSAGE_LIMIT,
         memory_token_budget: int = DEFAULT_MEMORY_TOKEN_BUDGET,
+        escalation_sentiment: SentimentLabel | None = DEFAULT_ESCALATION_SENTIMENT,
     ) -> Agent:
         """Create an agent as a draft.
 
@@ -80,6 +99,7 @@ class AgentService:
             max_output_tokens=max_output_tokens,
             memory_message_limit=memory_message_limit,
             memory_token_budget=memory_token_budget,
+            escalation_sentiment=escalation_sentiment,
         )
         # Flushed so the caller can read the generated id.
         await self._session.flush()
@@ -99,8 +119,13 @@ class AgentService:
         max_output_tokens: int | None = None,
         memory_message_limit: int | None = None,
         memory_token_budget: int | None = None,
+        escalation_sentiment: SentimentLabel | None | _Unset = UNSET,
     ) -> Agent:
-        """Apply changes. Anything left as None is unchanged."""
+        """Apply changes. Anything left as None is unchanged.
+
+        `escalation_sentiment` is the exception: null is a value there, so it
+        is left alone only when nothing was sent at all.
+        """
         agent = await self._agents.require_by_id(agent_id)
 
         if name is not None:
@@ -121,6 +146,8 @@ class AgentService:
             agent.memory_message_limit = memory_message_limit
         if memory_token_budget is not None:
             agent.memory_token_budget = memory_token_budget
+        if not isinstance(escalation_sentiment, _Unset):
+            agent.escalation_sentiment = escalation_sentiment
 
         logger.info("agent.updated", extra={"agent_id": str(agent.id)})
         return agent

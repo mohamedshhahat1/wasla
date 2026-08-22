@@ -18,6 +18,7 @@ from app.db.models.conversation import (
     ConversationStatus,
     Message,
 )
+from app.db.models.sentiment import ConversationPriority
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
 from app.repositories.membership_repository import MembershipRepository
 
@@ -38,10 +39,16 @@ class InboxService:
         *,
         limit: int = 50,
         cursor: str | None = None,
+        priority: ConversationPriority | None = None,
     ) -> Page[Conversation]:
-        """Everything not closed, most recently active first."""
+        """Everything not closed, most recently active first.
+
+        `priority` narrows the list to conversations at one level, which is how
+        somebody works the flagged queue without the default view changing under
+        everybody else.
+        """
         after = Cursor.decode(cursor) if cursor else None
-        rows = await self._conversations.list_open(limit=limit, after=after)
+        rows = await self._conversations.list_open(limit=limit, after=after, priority=priority)
         return paginate(
             rows,
             limit=limit,

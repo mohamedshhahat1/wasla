@@ -25,6 +25,7 @@ from app.db.models.conversation import (
     MessageKind,
     MessageStatus,
 )
+from app.db.models.sentiment import ConversationPriority, SentimentLabel
 
 # Meta's own limit for a text body.
 MAX_TEXT_LENGTH = 4096
@@ -50,6 +51,19 @@ class ModeUpdateRequest(BaseModel):
 
     mode: ConversationMode
     handoff_reason: str | None = Field(default=None, max_length=200)
+
+
+class PriorityUpdateRequest(BaseModel):
+    """Set the priority by hand.
+
+    The only way it comes down. Assessment raises it and never lowers it, so
+    returning a conversation to the ordinary queue is a decision somebody makes
+    after looking at it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    priority: ConversationPriority
 
 
 class AssignmentRequest(BaseModel):
@@ -121,6 +135,13 @@ class ConversationRead(BaseModel):
     handoff_reason: str | None
     last_message_at: datetime | None
     last_inbound_at: datetime | None
+    # The latest reading of how the customer sounds, and what it implied.
+    # `priority` is what an inbox sorts on; the rest explains why it is there.
+    sentiment: SentimentLabel | None
+    sentiment_score: float | None
+    priority: ConversationPriority
+    intent: str | None
+    intent_confidence: float | None
     # Whether free-form messages are still allowed, so a client can disable its
     # composer instead of discovering the rule by failing a send.
     service_window_open: bool
@@ -138,6 +159,11 @@ class ConversationRead(BaseModel):
             handoff_reason=conversation.handoff_reason,
             last_message_at=conversation.last_message_at,
             last_inbound_at=conversation.last_inbound_at,
+            sentiment=conversation.sentiment,
+            sentiment_score=conversation.sentiment_score,
+            priority=conversation.priority,
+            intent=conversation.intent,
+            intent_confidence=conversation.intent_confidence,
             service_window_open=service_window_open,
             created_at=conversation.created_at,
         )

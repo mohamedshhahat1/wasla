@@ -30,6 +30,7 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.lead_service import LeadService
 from app.services.media_service import MediaService
 from app.services.messaging_service import MessagingService
+from app.services.sentiment_service import SentimentService
 from app.services.whatsapp_account_service import WhatsAppAccountService
 from app.workers.ingestion_queue import IngestionQueue
 
@@ -262,6 +263,22 @@ def get_media_service(
 
 
 MediaServiceDep = Annotated[MediaService, Depends(get_media_service)]
+
+
+def get_sentiment_service(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> SentimentService:
+    """Workspace-scoped, and deliberately without an analyzer.
+
+    Nothing reachable over the API classifies anything. Assessment happens in
+    the worker, before an agent replies; what a request needs from this service
+    is the one operation a person performs - giving a priority back.
+    """
+    return SentimentService(session=session, tenant_id=workspace.tenant.id)
+
+
+SentimentServiceDep = Annotated[SentimentService, Depends(get_sentiment_service)]
 
 
 def require_tenant_roles(*roles: TenantRole) -> Callable[[ActiveWorkspace], ActiveWorkspace]:

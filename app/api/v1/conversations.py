@@ -21,15 +21,18 @@ from app.api.dependencies import (
     MediaServiceDep,
     MediaStorageDep,
     MessagingServiceDep,
+    SentimentServiceDep,
 )
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import MAX_CURSOR_LENGTH
+from app.db.models.sentiment import ConversationPriority
 from app.schemas.conversation import (
     AssignmentRequest,
     ConversationRead,
     CursorPage,
     MessageRead,
     ModeUpdateRequest,
+    PriorityUpdateRequest,
     SendTemplateRequest,
     SendTextRequest,
 )
@@ -56,14 +59,18 @@ async def list_conversations(
     messaging: MessagingServiceDep,
     limit: LimitQuery = 50,
     cursor: CursorQuery = None,
+    priority: ConversationPriority | None = None,
 ) -> CursorPage[ConversationRead]:
     """Open conversations, most recently active first.
 
     Paged by cursor rather than offset: the inbox is written to while it is
     being read, and an offset would let an arriving conversation push a row
     across the page boundary.
+
+    `priority` narrows the list without reordering it, so the flagged queue can
+    be worked deliberately while the default view stays as it was.
     """
-    page = await inbox.list_conversations(limit=limit, cursor=cursor)
+    page = await inbox.list_conversations(limit=limit, cursor=cursor, priority=priority)
     return CursorPage[ConversationRead](
         items=[
             ConversationRead.from_model(
@@ -247,6 +254,29 @@ async def set_mode(
         conversation_id=conversation_id,
         mode=payload.mode,
         handoff_reason=payload.handoff_reason,
+    )
+    return ConversationRead.from_model(
+        conversation,
+        service_window_open=messaging.window_open(conversation),
+    )
+
+
+@router.post("/{conversation_id}/priority", response_model=ConversationRead)
+async def set_priority(
+    conversation_id: uuid.UUID,
+    payload: PriorityUpdateRequest,
+    sentiment: SentimentServiceDep,
+    messaging: MessagingServiceDep,
+) -> ConversationRead:
+    """Set the priority by hand.
+
+    The only way it comes down. Assessment raises priority on a bad reading and
+    never lowers it on a good one, so returning a conversation to the ordinary
+    queue is a decision somebody makes after looking at it.
+    """
+    conversation = await sentiment.set_priority(
+        conversation_id=conversation_id,
+        priority=payload.priority,
     )
     return ConversationRead.from_model(
         conversation,

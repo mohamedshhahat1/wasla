@@ -9,6 +9,7 @@ from sqlalchemy import ColumnElement
 
 from app.core.exceptions import ConflictError
 from app.db.models.agent import (
+    DEFAULT_ESCALATION_SENTIMENT,
     DEFAULT_MEMORY_MESSAGE_LIMIT,
     DEFAULT_MEMORY_TOKEN_BUDGET,
     DEFAULT_TEMPERATURE,
@@ -16,6 +17,7 @@ from app.db.models.agent import (
     AgentStatus,
     AgentTool,
 )
+from app.db.models.sentiment import SentimentLabel
 from app.repositories.base import TenantScopedRepository
 
 
@@ -77,6 +79,7 @@ class AgentRepository(TenantScopedRepository[Agent]):
         memory_message_limit: int = DEFAULT_MEMORY_MESSAGE_LIMIT,
         memory_token_budget: int = DEFAULT_MEMORY_TOKEN_BUDGET,
         is_default: bool = False,
+        escalation_sentiment: SentimentLabel | None = DEFAULT_ESCALATION_SENTIMENT,
     ) -> Agent:
         """Create an agent, refusing a duplicate name in this workspace.
 
@@ -99,6 +102,7 @@ class AgentRepository(TenantScopedRepository[Agent]):
                 memory_message_limit=memory_message_limit,
                 memory_token_budget=memory_token_budget,
                 is_default=is_default,
+                escalation_sentiment=escalation_sentiment,
             )
         )
 

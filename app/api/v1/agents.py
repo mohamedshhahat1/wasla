@@ -20,6 +20,7 @@ from app.schemas.agent import (
     ToolGrantRequest,
     ToolSpecRead,
 )
+from app.services.agent_service import UNSET
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -47,6 +48,7 @@ async def create_agent(
         max_output_tokens=payload.max_output_tokens,
         memory_message_limit=payload.memory_message_limit,
         memory_token_budget=payload.memory_token_budget,
+        escalation_sentiment=payload.escalation_sentiment,
     )
     return AgentRead.model_validate(agent)
 
@@ -83,6 +85,11 @@ async def update_agent(
         max_output_tokens=payload.max_output_tokens,
         memory_message_limit=payload.memory_message_limit,
         memory_token_budget=payload.memory_token_budget,
+        # Sent only when the caller actually included it: null is a setting
+        # here, not an absence.
+        escalation_sentiment=(
+            payload.escalation_sentiment if payload.was_sent("escalation_sentiment") else UNSET
+        ),
     )
     return AgentRead.model_validate(agent)
 

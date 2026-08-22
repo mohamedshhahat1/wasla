@@ -18,6 +18,7 @@ from app.api.dependencies import (
     get_active_workspace,
     get_inbox_service,
     get_messaging_service,
+    get_sentiment_service,
 )
 from app.core.pagination import MAX_CURSOR_LENGTH, Cursor, Page
 from app.db.models import (
@@ -36,6 +37,7 @@ from app.db.models.conversation import (
     MessageKind,
     MessageStatus,
 )
+from app.db.models.sentiment import ConversationPriority
 
 pytestmark = pytest.mark.integration
 
@@ -58,6 +60,9 @@ def _conversation() -> Conversation:
         account_id=ACCOUNT_ID,
         status=ConversationStatus.OPEN,
         mode=ConversationMode.AI,
+        # Set explicitly, like `mode` and `status` above: a column default is
+        # applied at insert, and this row is never inserted.
+        priority=ConversationPriority.NORMAL,
         last_message_at=MOMENT,
         last_inbound_at=MOMENT,
         created_at=MOMENT,
@@ -90,8 +95,8 @@ class StubInbox:
         self.message_calls: list[dict] = []
         self.next_cursor: str | None = NEXT_CURSOR
 
-    async def list_conversations(self, *, limit=50, cursor=None):
-        self.conversation_calls.append({"limit": limit, "cursor": cursor})
+    async def list_conversations(self, *, limit=50, cursor=None, priority=None):
+        self.conversation_calls.append({"limit": limit, "cursor": cursor, "priority": priority})
         return Page(items=[_conversation()], next_cursor=self.next_cursor)
 
     async def list_messages(self, *, conversation_id, limit=50, cursor=None):
@@ -104,6 +109,19 @@ class StubInbox:
 class StubMessaging:
     def window_open(self, conversation) -> bool:
         return True
+
+
+class StubSentiment:
+    """Records the priority a route asked for, and hands the row back."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def set_priority(self, *, conversation_id, priority):
+        self.calls.append({"conversation_id": conversation_id, "priority": priority})
+        conversation = _conversation()
+        conversation.priority = priority
+        return conversation
 
 
 @pytest.fixture
@@ -129,6 +147,13 @@ def inbox(app) -> StubInbox:
     return stub
 
 
+@pytest.fixture
+def sentiment(app, inbox) -> StubSentiment:
+    stub = StubSentiment()
+    app.dependency_overrides[get_sentiment_service] = lambda: stub
+    return stub
+
+
 async def test_the_conversation_list_answers_a_page_not_a_bare_array(client, inbox):
     response = await client.get(PATH)
 
@@ -142,7 +167,7 @@ async def test_the_conversation_list_answers_a_page_not_a_bare_array(client, inb
 async def test_the_cursor_reaches_the_service(client, inbox):
     await client.get(PATH, params={"cursor": NEXT_CURSOR, "limit": 25})
 
-    assert inbox.conversation_calls == [{"limit": 25, "cursor": NEXT_CURSOR}]
+    assert inbox.conversation_calls == [{"limit": 25, "cursor": NEXT_CURSOR, "priority": None}]
 
 
 async def test_an_exhausted_collection_reports_a_null_cursor(client, inbox):
@@ -213,3 +238,47 @@ async def test_a_text_message_reports_no_template(client, inbox):
     message = body["items"][0]
     assert message["template_name"] is None
     assert message["template_language"] is None
+
+
+async def test_a_conversation_reports_how_the_customer_sounds(client, inbox):
+    body = (await client.get(PATH)).json()
+
+    conversation = body["items"][0]
+    assert conversation["priority"] == "normal"
+    assert conversation["sentiment"] is None
+    assert conversation["intent"] is None
+
+
+async def test_the_priority_filter_reaches_the_service(client, inbox):
+    await client.get(PATH, params={"priority": "urgent"})
+
+    assert inbox.conversation_calls[0]["priority"] is ConversationPriority.URGENT
+
+
+async def test_a_priority_that_is_not_one_of_ours_is_refused(client, inbox):
+    response = await client.get(PATH, params={"priority": "catastrophic"})
+
+    assert response.status_code == 422
+    assert inbox.conversation_calls == []
+
+
+async def test_priority_can_be_set_by_hand(client, sentiment):
+    response = await client.post(
+        f"{PATH}/{CONVERSATION_ID}/priority",
+        json={"priority": "normal"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["priority"] == "normal"
+    assert sentiment.calls[0]["priority"] is ConversationPriority.NORMAL
+    assert sentiment.calls[0]["conversation_id"] == CONVERSATION_ID
+
+
+async def test_an_unknown_priority_is_refused_before_the_service(client, sentiment):
+    response = await client.post(
+        f"{PATH}/{CONVERSATION_ID}/priority",
+        json={"priority": "on fire"},
+    )
+
+    assert response.status_code == 422
+    assert sentiment.calls == []

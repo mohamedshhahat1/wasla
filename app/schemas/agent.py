@@ -14,11 +14,13 @@ from typing import Annotated, Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db.models.agent import (
+    DEFAULT_ESCALATION_SENTIMENT,
     DEFAULT_MEMORY_MESSAGE_LIMIT,
     DEFAULT_MEMORY_TOKEN_BUDGET,
     DEFAULT_TEMPERATURE,
     AgentStatus,
 )
+from app.db.models.sentiment import SentimentLabel
 
 MAX_NAME_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 500
@@ -56,6 +58,10 @@ class AgentCreate(BaseModel):
     max_output_tokens: OutputTokens | None = None
     memory_message_limit: MessageLimit = DEFAULT_MEMORY_MESSAGE_LIMIT
     memory_token_budget: TokenBudget = DEFAULT_MEMORY_TOKEN_BUDGET
+    # How unhappy a customer must sound before this agent stops replying and
+    # hands over. Null switches automatic handoff off; the reading is still
+    # taken and the conversation is still flagged.
+    escalation_sentiment: SentimentLabel | None = DEFAULT_ESCALATION_SENTIMENT
 
 
 class AgentUpdate(BaseModel):
@@ -63,6 +69,11 @@ class AgentUpdate(BaseModel):
 
     Clearing a description is deliberately not expressible: telling "not sent"
     from "sent as null" needs a sentinel, and no screen needs it yet.
+
+    `escalation_sentiment` is the exception, because null is a setting there
+    rather than an absence - it is how a workspace switches automatic handoff
+    off. Pydantic records which fields arrived, so `was_sent` reads that rather
+    than inventing a sentinel value in the wire format.
     """
 
     name: AgentName | None = None
@@ -74,6 +85,11 @@ class AgentUpdate(BaseModel):
     max_output_tokens: OutputTokens | None = None
     memory_message_limit: MessageLimit | None = None
     memory_token_budget: TokenBudget | None = None
+    escalation_sentiment: SentimentLabel | None = None
+
+    def was_sent(self, field: str) -> bool:
+        """Whether the caller included this field, null or not."""
+        return field in self.model_fields_set
 
 
 class AgentRead(BaseModel):
@@ -90,6 +106,7 @@ class AgentRead(BaseModel):
     memory_message_limit: int
     memory_token_budget: int
     is_default: bool
+    escalation_sentiment: SentimentLabel | None
     created_at: datetime
     updated_at: datetime
 

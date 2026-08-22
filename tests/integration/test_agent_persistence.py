@@ -15,8 +15,10 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import ConflictError, TenantIsolationError
 from app.db.models.agent import Agent, AgentStatus, AgentTool
+from app.db.models.sentiment import SentimentLabel
 from app.db.models.tenant import Tenant
 from app.repositories.agent_repository import AgentRepository, AgentToolRepository
+from app.services.agent_service import UNSET, AgentService
 
 pytestmark = pytest.mark.integration
 
@@ -191,3 +193,53 @@ async def test_an_unknown_agent_id_is_not_found(db_session):
 
     with pytest.raises(TenantIsolationError):
         await repository.require_by_id(uuid.uuid4())
+
+
+def _service(session, tenant, settings) -> AgentService:
+    return AgentService(session=session, settings=settings, tenant_id=tenant.id)
+
+
+async def test_a_created_agent_escalates_on_anger_by_default(db_session, settings):
+    tenant = await _tenant(db_session, slug="acme")
+
+    agent = await _service(db_session, tenant, settings).create(
+        name="Sales",
+        system_prompt=PROMPT,
+    )
+
+    assert agent.escalation_sentiment is SentimentLabel.ANGRY
+
+
+async def test_automatic_handoff_can_be_switched_off(db_session, settings):
+    """Null is a setting, not an absence - so it has to survive the update."""
+    tenant = await _tenant(db_session, slug="acme")
+    service = _service(db_session, tenant, settings)
+    agent = await service.create(name="Sales", system_prompt=PROMPT)
+
+    await service.update(agent.id, escalation_sentiment=None)
+    await db_session.flush()
+    await db_session.refresh(agent)
+
+    assert agent.escalation_sentiment is None
+
+
+async def test_an_update_that_says_nothing_leaves_the_threshold_alone(db_session, settings):
+    """The reason the sentinel exists.
+
+    A rename must not quietly switch off a workspace's escalation rule because
+    the field it did not mention defaults to None.
+    """
+    tenant = await _tenant(db_session, slug="acme")
+    service = _service(db_session, tenant, settings)
+    agent = await service.create(
+        name="Support",
+        system_prompt=PROMPT,
+        escalation_sentiment=SentimentLabel.NEGATIVE,
+    )
+
+    await service.update(agent.id, name="Support desk", escalation_sentiment=UNSET)
+    await db_session.flush()
+    await db_session.refresh(agent)
+
+    assert agent.name == "Support desk"
+    assert agent.escalation_sentiment is SentimentLabel.NEGATIVE

@@ -18,6 +18,7 @@ from app.db.models.conversation import (
     MessageKind,
     MessageStatus,
 )
+from app.db.models.sentiment import ConversationPriority
 from app.repositories.base import TenantScopedRepository
 
 
@@ -143,6 +144,7 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         *,
         limit: int = 50,
         after: Cursor | None = None,
+        priority: ConversationPriority | None = None,
     ) -> list[Conversation]:
         """Everything not closed, most recently active first.
 
@@ -150,6 +152,11 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         tiebreaker. A conversation that has never carried a message sorts to the
         end rather than the front, which is what PostgreSQL would otherwise do
         with a descending sort.
+
+        `priority` filters rather than reorders. Sorting the whole inbox by
+        urgency would bury the ordinary queue under whatever the classifier
+        flagged today; a filter lets somebody work the flagged ones deliberately
+        and leaves the default view alone.
         """
         query = (
             self._select()
@@ -160,6 +167,8 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
             )
             .limit(limit)
         )
+        if priority is not None:
+            query = query.where(Conversation.priority == priority)
         if after is not None:
             query = query.where(_after_nullable(Conversation, after))
         return await self._all(query)
