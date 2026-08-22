@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -128,9 +130,18 @@ class MessagingService:
         session: AsyncSession,
         settings: Settings,
         tenant_id: uuid.UUID,
+        http: httpx.AsyncClient | None = None,
     ) -> None:
+        """`http` lets a caller sending many messages share one connection pool.
+
+        Without it each send opens and closes its own client, which is right for
+        a request handling one message and wrong for a campaign: ten thousand
+        sends would mean ten thousand TLS handshakes to the same host. The
+        caller that supplies one owns its lifetime.
+        """
         self._session = session
         self._settings = settings
+        self._http = http
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._contacts = ContactRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
@@ -352,12 +363,7 @@ class MessagingService:
         # everything after this fails.
         await self._session.flush()
 
-        async with build_http_client() as http:
-            client = WhatsAppClient(
-                http=http,
-                access_token=self._settings.meta_access_token or "",
-                api_version=self._settings.meta_api_version,
-            )
+        async with self._client() as client:
             try:
                 sent = await send(client, account.phone_number_id, contact.wa_id)
             except (ExternalServiceError, RateLimitedError) as error:
@@ -378,6 +384,19 @@ class MessagingService:
         )
         conversation.last_message_at = now
         return message
+
+    @asynccontextmanager
+    async def _client(self) -> AsyncIterator[WhatsAppClient]:
+        """A WhatsApp client for one send, over a shared pool if there is one."""
+        token = self._settings.meta_access_token or ""
+        version = self._settings.meta_api_version
+
+        if self._http is not None:
+            yield WhatsAppClient(http=self._http, access_token=token, api_version=version)
+            return
+
+        async with build_http_client() as http:
+            yield WhatsAppClient(http=http, access_token=token, api_version=version)
 
     def window_open(self, conversation: Conversation) -> bool:
         """Whether free-form messages are still allowed.

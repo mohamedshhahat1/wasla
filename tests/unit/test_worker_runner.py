@@ -13,12 +13,14 @@ import asyncio
 import pytest
 
 from app.workers.ai_worker import AgentWorker
+from app.workers.campaign_worker import CampaignWorker
 from app.workers.follow_up_worker import FollowUpWorker
 from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_worker import MediaWorker
 from app.workers.runner import (
     AGENT,
     ALL_KINDS,
+    CAMPAIGN,
     FOLLOW_UP,
     INGESTION,
     MEDIA,
@@ -76,6 +78,15 @@ def test_the_order_is_stable_however_it_was_written():
     assert selected_kinds("follow_up,agent") == selected_kinds("agent,follow_up")
 
 
+def test_campaigns_can_be_run_on_their_own():
+    """Sending a broadcast is bandwidth against Meta, not inference.
+
+    A workspace mid-campaign is the case that most wants its own replica, and
+    that is this variable rather than another image.
+    """
+    assert selected_kinds("campaign") == (CAMPAIGN,)
+
+
 def test_media_is_ordered_before_the_agent_it_feeds():
     """The order work actually flows in: a file is read, then answered."""
     assert selected_kinds("agent,media") == (MEDIA, AGENT)
@@ -92,7 +103,7 @@ def test_an_unknown_kind_is_refused():
 
 
 def test_the_error_names_the_valid_choices():
-    with pytest.raises(ValueError, match="media, agent, ingestion, follow_up"):
+    with pytest.raises(ValueError, match="media, agent, ingestion, follow_up, campaign"):
         selected_kinds("nonsense")
 
 
@@ -118,6 +129,7 @@ def test_each_kind_builds_its_own_worker(settings):
         AgentWorker,
         IngestionWorker,
         FollowUpWorker,
+        CampaignWorker,
     ]
 
 

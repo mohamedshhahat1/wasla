@@ -113,8 +113,9 @@ services:
       META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:-}
       MEDIA_STORAGE_PATH: ${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
       # Empty runs every kind. Set to a comma-separated subset to scale the
-      # media and agent loops apart from ingestion and follow-ups - reading
-      # files is bandwidth-bound where inference is not.
+      # loops apart - "campaign" during a large broadcast, or media and agent
+      # apart from ingestion and follow-ups, since moving bytes and running
+      # inference want differently sized pools.
       WORKER_KINDS: ${WORKER_KINDS:-}
     volumes:
       - media-data:${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
