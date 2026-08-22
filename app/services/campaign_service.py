@@ -95,6 +95,14 @@ SCHEDULABLE_FROM: Final[frozenset[CampaignStatus]] = frozenset(
     {CampaignStatus.DRAFT, CampaignStatus.PAUSED, CampaignStatus.FAILED},
 )
 
+# Statuses from which cancelling changes nothing, because the campaign is
+# already over. `FAILED` is deliberately *not* one of them: it is resumable, so
+# a workspace that has decided against a broken campaign needs a way to close it
+# for good rather than leaving something a later hand could reschedule.
+ALREADY_OVER: Final[frozenset[CampaignStatus]] = frozenset(
+    {CampaignStatus.COMPLETED, CampaignStatus.CANCELLED},
+)
+
 
 @dataclass(frozen=True, slots=True)
 class BatchOutcome:
@@ -352,9 +360,15 @@ class CampaignService:
         return campaign
 
     async def cancel(self, campaign_id: uuid.UUID) -> Campaign:
-        """Finish the campaign where it stands. What was sent stays sent."""
+        """Finish the campaign where it stands. What was sent stays sent.
+
+        A failed campaign can be cancelled, unlike a completed or an already
+        cancelled one. Failure is recoverable — the campaign can be rescheduled
+        once its cause is fixed — so a workspace that has decided against it
+        needs this to be the way it says so.
+        """
         campaign = await self._campaigns.require_by_id(campaign_id)
-        if campaign.is_finished:
+        if campaign.status in ALREADY_OVER:
             return campaign
 
         campaign.status = CampaignStatus.CANCELLED

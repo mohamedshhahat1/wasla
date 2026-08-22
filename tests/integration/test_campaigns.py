@@ -809,3 +809,35 @@ async def test_a_new_campaign_can_be_serialised_without_a_further_flush(db_sessi
     assert read.id is not None
     assert read.created_at is not None
     assert read.updated_at is not None
+
+
+async def test_a_failed_campaign_can_be_closed_for_good(db_session):
+    """Failure is recoverable, so a workspace needs a way to say "not this one"."""
+    tenant, account, _, campaign = await _ready(db_session, slug="close-failed")
+    service = _service(db_session, tenant, messaging=StubMessaging(db_session, tenant_id=tenant.id))
+    await service.schedule(campaign_id=campaign.id)
+    account.status = WhatsAppAccountStatus.DISABLED
+    await db_session.flush()
+    await service.dispatch_batch(campaign)
+    await db_session.flush()
+    assert campaign.status is CampaignStatus.FAILED
+
+    await service.cancel(campaign_id=campaign.id)
+
+    assert campaign.status is CampaignStatus.CANCELLED
+    assert campaign.cancelled_at is not None
+    with pytest.raises(ValidationError):
+        await service.schedule(campaign_id=campaign.id)
+
+
+async def test_a_completed_campaign_cannot_be_cancelled_into_something_else(db_session):
+    tenant, _, _, campaign = await _ready(db_session, slug="close-completed")
+    service = _service(db_session, tenant, messaging=StubMessaging(db_session, tenant_id=tenant.id))
+    await service.schedule(campaign_id=campaign.id)
+    await service.dispatch_batch(campaign)
+    await db_session.flush()
+    assert campaign.status is CampaignStatus.COMPLETED
+
+    await service.cancel(campaign_id=campaign.id)
+
+    assert campaign.status is CampaignStatus.COMPLETED

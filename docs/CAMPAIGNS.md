@@ -92,6 +92,8 @@ Somebody watching a broadcast go out and having second thoughts needs an action 
 
 **A failed campaign can be scheduled again**, because every condition that fails one is something a workspace fixes and then wants to carry on from. Its remaining recipients are still pending and still have not been written to, so resuming sends to them and to nobody twice. What `FAILED` keeps that `PAUSED` does not is `last_error` — the reason it stopped.
 
+It can also be **cancelled**, which a completed or already-cancelled campaign cannot. That follows from the same fact: because failure is recoverable, a workspace that has decided against a broken campaign needs a way to close it for good rather than leaving something a later hand could reschedule.
+
 A missing platform credential fails the campaign rather than each recipient in turn. The client refuses to be built without a token, so no attempt is made and nothing increments; treating it per-recipient would retry forever without exhausting anyone's attempts, staging a message row per recipient per sweep on a deployment that cannot send at all.
 
 ## Marketing opt-out
