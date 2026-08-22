@@ -22,6 +22,7 @@ from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.db.models.billing import LimitKey
 from app.platform.platform_analytics import PlatformAnalyticsService
+from app.platform.platform_billing import PlatformBillingService
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
 from app.repositories.billing_repository import PlanRepository
 from app.services.agent_service import AgentService
@@ -32,6 +33,7 @@ from app.services.entitlement_service import Entitlement, EntitlementService
 from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
 from app.services.invitation_service import InvitationService
+from app.services.invoice_service import InvoiceService
 from app.services.knowledge_service import KnowledgeService
 from app.services.lead_service import LeadService
 from app.services.media_service import MediaService
@@ -399,6 +401,34 @@ def get_entitlement_service(
 
 
 EntitlementServiceDep = Annotated[EntitlementService, Depends(get_entitlement_service)]
+
+
+def get_invoice_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> InvoiceService:
+    """Workspace-scoped, and deliberately without a payment provider.
+
+    Nothing reachable by a workspace collects money. Reading an invoice back is
+    database work; issuing and collecting happen in the worker and the platform
+    layer.
+    """
+    return InvoiceService(session, tenant_id=workspace.tenant.id)
+
+
+InvoiceServiceDep = Annotated[InvoiceService, Depends(get_invoice_service)]
+
+
+def get_platform_billing_service(session: SessionDep) -> PlatformBillingService:
+    """Invoice administration across workspaces, for platform staff only.
+
+    Recording a payment asserts that somebody has seen the money, and voiding
+    withdraws a bill. A workspace able to do either pays nothing.
+    """
+    return PlatformBillingService(session)
+
+
+PlatformInvoiceServiceDep = Annotated[
+    PlatformBillingService,
+    Depends(get_platform_billing_service),
+]
 
 
 def get_platform_analytics_service(session: SessionDep) -> PlatformAnalyticsService:

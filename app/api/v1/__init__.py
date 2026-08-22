@@ -12,6 +12,7 @@ from app.api.v1 import (
     conversations,
     follow_ups,
     invitations,
+    invoices,
     knowledge,
     leads,
     platform,
@@ -31,6 +32,7 @@ api_router.include_router(contacts.router)
 api_router.include_router(conversations.router)
 api_router.include_router(follow_ups.router)
 api_router.include_router(invitations.router)
+api_router.include_router(invoices.router)
 api_router.include_router(knowledge.router)
 api_router.include_router(leads.router)
 api_router.include_router(platform.router)

@@ -503,11 +503,25 @@ Conversation routes are open to every workspace member rather than to admins onl
 
 ## 19. Usage metering and billing
 
-**Status: In Progress** — usage metering (migration `0014`, ADR-027), plans, subscriptions and enforced entitlements (migration `0016`, ADR-029, ADR-030) are Implemented. Invoices and a payment provider are Planned.
+**Status: In Progress** — usage metering (migration `0014`, ADR-027), plans, subscriptions and enforced entitlements (migration `0016`, ADR-029, ADR-030), and invoices with payment records behind a one-method provider boundary (migration `0017`, ADR-031) are Implemented. A live payment provider is Planned.
 
 Metering came first because entitlements read it: a period limit is a sum over `usage_events` between the subscription's period bounds, which is what makes "1,000 messages a month" reset rather than accumulate forever. Resource limits — numbers, agents, colleagues, documents — are counted from the rows themselves.
 
 Where a limit is enforced is a decision recorded in ADR-030, and the short version is: refuse the person who chose, never the customer who wrote. Creating something answers 402 from a dependency in the route signature; scheduling a campaign is checked for its whole audience at once; an agent turn with no allowance left stops without failing its job; and the inbound webhook path carries no check at all, because those words belong to a customer who owes us nothing and a non-2xx to Meta eventually disables the integration.
+
+```
+period ends
+    |
+billing worker claims the subscription
+    |
+invoice the period that is closing  <- before the roll: afterwards the row
+    |                                  describes the next month
+roll over: cancel, expire, or open the next period
+```
+
+An invoice is a record rather than a calculation (ADR-031): the plan code and the amounts are copied at issue time, so a repricing cannot rewrite last month, and an issued invoice is voided rather than edited. Usage lines carry a quantity and no amount, because no per-unit price is stored anywhere and inventing one would put a number on a bill nothing stands behind. `UNIQUE(tenant_id, period_start)` makes double-billing a period impossible across replicas.
+
+The payment provider boundary is a single `charge` method. Subscriptions, plans and periods stay Wasla's, because a service that knows what a "payment intent" is belongs to that processor. The shipped `ManualProvider` records that an invoice awaits payment and never claims to have collected; a workspace reads its own invoices, and only platform staff record a payment or void one.
 
 Usage is a first-class subsystem of append-only rows in `usage_events` (`tenant_id`, `event_type`, `quantity`, `unit`, `metadata`, `occurred_at`), aggregated on read rather than maintained as counters.
 

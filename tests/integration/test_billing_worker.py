@@ -339,3 +339,97 @@ async def test_a_workspace_created_before_billing_can_still_subscribe(db_session
 
     assert subscription.status is SubscriptionStatus.ACTIVE
     assert subscription.tenant_id == tenant.id
+
+
+# ------------------------------------------------------------- invoicing
+
+
+async def test_the_sweep_invoices_the_period_it_closes(db_session):
+    """Billed before the roll-over, not after: afterwards the row describes the
+    next month and the invoice would cover the wrong window."""
+    from app.repositories.invoice_repository import InvoiceRepository
+
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _subscription(
+        db_session,
+        tenant,
+        plan,
+        status=SubscriptionStatus.ACTIVE,
+    )
+    closing_period_start = subscription.current_period_start
+
+    await _worker(db_session).run_once(now=NOW)
+    await db_session.flush()
+
+    invoices = await InvoiceRepository(db_session, tenant_id=tenant.id).list_invoices()
+    assert len(invoices) == 1
+    assert invoices[0].period_start == closing_period_start
+    assert invoices[0].period_end == ENDED
+    assert invoices[0].plan_code == "pro"
+
+
+async def test_a_trial_is_never_invoiced(db_session):
+    """Nobody agreed to pay for it, and a bill saying "Pro plan" for a period
+    the customer was told was free is a bill for something nobody sold."""
+    from app.repositories.invoice_repository import InvoiceRepository
+
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, trial_days=14)
+    await _subscription(db_session, tenant, plan, status=SubscriptionStatus.TRIALING)
+
+    await _worker(db_session).run_once(now=NOW)
+    await db_session.flush()
+
+    assert await InvoiceRepository(db_session, tenant_id=tenant.id).list_invoices() == []
+
+
+async def test_two_sweeps_bill_the_period_once(db_session):
+    """The constraint makes it impossible; the service check makes the second
+    sweep a no-op rather than an integrity error."""
+    from app.repositories.invoice_repository import InvoiceRepository
+
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    await _subscription(db_session, tenant, plan, status=SubscriptionStatus.ACTIVE)
+    worker = _worker(db_session)
+
+    await worker.run_once(now=NOW)
+    # The second sweep finds a period that has already rolled forward, so it
+    # picks nothing up at all - and even if it did, the invoice is idempotent.
+    await worker.run_once(now=NOW)
+    await db_session.flush()
+
+    invoices = await InvoiceRepository(db_session, tenant_id=tenant.id).list_invoices()
+    assert len(invoices) == 1
+
+
+async def test_an_invoice_that_cannot_be_issued_does_not_stop_the_roll_over(
+    db_session,
+    monkeypatch,
+):
+    """A billing problem must not become a customer whose plan never renews."""
+    from app.workers import billing_worker as worker_module
+
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _subscription(
+        db_session,
+        tenant,
+        plan,
+        status=SubscriptionStatus.ACTIVE,
+    )
+
+    class BrokenInvoices:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def issue_for_period(self, **kwargs: object):
+            raise RuntimeError("the invoice service is having a day")
+
+    monkeypatch.setattr(worker_module, "InvoiceService", BrokenInvoices)
+
+    handled = await _worker(db_session).run_once(now=NOW)
+
+    assert handled == 1
+    assert subscription.current_period_end > NOW

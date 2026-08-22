@@ -1,6 +1,6 @@
 # Billing
 
-**Status: In Progress** — plans, the seeded catalogue, subscriptions, the entitlement service, the subscription lifecycle, the billing APIs, the enforcement points, the period sweep, invoices, payment records and the provider boundary are Implemented (migrations `0016` and `0017`; ADR-029, ADR-030, ADR-031). Exposing invoices over the API, and issuing them automatically when a period closes, are Planned. See [../TASKS.md](../TASKS.md) phase 13.
+**Status: Implemented** — plans, the seeded catalogue, subscriptions, entitlements and their enforcement, the lifecycle and its sweep, invoices, payment records, the invoice API and the provider boundary all exist and are exercised against real PostgreSQL (migrations `0016` and `0017`; ADR-029, ADR-030, ADR-031). A live payment provider, overage pricing, refunds and dunning are Planned, each for a reason recorded in [../TASKS.md](../TASKS.md). See [../TASKS.md](../TASKS.md) phase 13.
 
 Scope: plans, subscriptions, entitlements, invoicing, and payment provider boundaries. Plan limits are listed in [SAAS.md](SAAS.md); metering is in [ANALYTICS.md](ANALYTICS.md).
 

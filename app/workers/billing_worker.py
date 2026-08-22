@@ -21,13 +21,17 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Final
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.db.models.billing import Plan, Subscription, SubscriptionStatus
 from app.db.session import Database
 from app.repositories.billing_repository import (
     PlanRepository,
     PlatformSubscriptionRepository,
 )
+from app.services.invoice_service import InvoiceService
 from app.services.subscription_service import roll_over
 
 logger = get_logger(__name__)
@@ -113,6 +117,15 @@ class BillingWorker:
                     continue
 
                 previous = subscription.status
+                # Billed for the period that is ending, *before* it is rolled
+                # over: after the roll the row's bounds describe the next month,
+                # and the invoice would cover the wrong window.
+                await self._invoice(
+                    session,
+                    subscription=subscription,
+                    plan=plan,
+                    now=moment,
+                )
                 await roll_over(subscription, plan=plan, now=moment)
                 handled += 1
                 logger.info(
@@ -127,6 +140,54 @@ class BillingWorker:
 
         logger.info("billing.sweep_completed", extra={"handled": handled})
         return handled
+
+    async def _invoice(
+        self,
+        session: AsyncSession,
+        *,
+        subscription: Subscription,
+        plan: Plan,
+        now: datetime,
+    ) -> None:
+        """Bill the period that has just ended, if it should be billed.
+
+        A trial is not invoiced. Nobody agreed to pay for it, and an invoice
+        saying "Pro plan" for a period the customer was told was free is a bill
+        for something nobody sold.
+
+        Failures are contained. An invoice that could not be issued is worth a
+        loud log and a retry on the next sweep; letting it escape would stop the
+        subscription rolling over at all, turning a billing problem into a
+        customer whose plan never renews.
+        """
+        if subscription.status is SubscriptionStatus.TRIALING:
+            return
+
+        service = InvoiceService(session, tenant_id=subscription.tenant_id)
+        try:
+            invoice, created = await service.issue_for_period(
+                subscription=subscription,
+                plan=plan,
+                period_start=subscription.current_period_start,
+                period_end=subscription.current_period_end,
+                now=now,
+            )
+        except Exception:
+            logger.exception(
+                "billing.invoice_failed",
+                extra={"subscription_id": str(subscription.id)},
+            )
+            return
+
+        if created:
+            logger.info(
+                "billing.invoice_issued_by_sweep",
+                extra={
+                    "event": "billing.invoice_issued_by_sweep",
+                    "tenant_id": str(subscription.tenant_id),
+                    "invoice_id": str(invoice.id),
+                },
+            )
 
 
 __all__ = ["CLAIM_LIMIT", "POLL_SECONDS", "BillingWorker"]
