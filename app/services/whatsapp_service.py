@@ -24,12 +24,14 @@ from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.db.models.campaign import OptOutSource
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppEventKind
 from app.integrations.whatsapp.payload import (
     DeliveryStatus,
     InboundMessage,
     parse_webhook,
 )
+from app.repositories.conversation_repository import ContactRepository
 from app.repositories.media_repository import MediaRepository
 from app.repositories.whatsapp_repository import (
     WhatsAppAccountDirectory,
@@ -37,6 +39,7 @@ from app.repositories.whatsapp_repository import (
 )
 from app.services.conversation_service import ConversationProjectionService
 from app.services.follow_up_service import FollowUpService
+from app.services.opt_out import is_stop_request
 from app.workers.media_queue import MediaJob, MediaQueue
 from app.workers.queue import AgentJob, AgentQueue
 
@@ -64,6 +67,7 @@ class IngestionOutcome:
     queued: int = 0
     cancelled_follow_ups: int = 0
     media_queued: int = 0
+    opt_outs: int = 0
 
 
 class WhatsAppIngestionService:
@@ -88,11 +92,12 @@ class WhatsAppIngestionService:
         self._projections: dict[uuid.UUID, ConversationProjectionService] = {}
         self._follow_ups: dict[uuid.UUID, FollowUpService] = {}
         self._media: dict[uuid.UUID, MediaRepository] = {}
+        self._contacts: dict[uuid.UUID, ContactRepository] = {}
         self._accounts: dict[str, WhatsAppAccount | None] = {}
 
     async def ingest(self, payload: Mapping[str, Any]) -> IngestionOutcome:
         envelope = parse_webhook(payload)
-        stored = duplicates = unknown = inactive = cancelled = 0
+        stored = duplicates = unknown = inactive = cancelled = opted_out = 0
         attachments: list[tuple[uuid.UUID, uuid.UUID]] = []
         ignored = envelope.ignored
         answering: list[tuple[uuid.UUID, uuid.UUID]] = []
@@ -161,6 +166,15 @@ class WhatsAppIngestionService:
                 cancelled += await self._follow_up_service(
                     account.tenant_id
                 ).cancel_for_conversation(conversation_id=message.conversation_id)
+                # A customer asking to stop is honoured here rather than by a
+                # worker. It costs one string comparison, and the alternative is
+                # a window in which a campaign sweep could write to somebody who
+                # has already said no.
+                opted_out += await self._record_opt_out(
+                    tenant_id=account.tenant_id,
+                    wa_id=source.from_number,
+                    text=source.text,
+                )
             else:
                 # A delivery status tells us about our own message. There is
                 # nothing for an agent to reply to.
@@ -181,7 +195,45 @@ class WhatsAppIngestionService:
             queued=queued,
             cancelled_follow_ups=cancelled,
             media_queued=media_queued,
+            opt_outs=opted_out,
         )
+
+    async def _record_opt_out(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        wa_id: str,
+        text: str | None,
+    ) -> int:
+        """Mark the sender as opted out of campaigns if that is what they said.
+
+        Deliberately narrow: only a message that is *entirely* a stop word
+        counts. See `app.services.opt_out` for why the matcher is this crude.
+
+        This does not silence the agent. A customer writing "stop" mid-
+        conversation is refusing marketing, not refusing an answer, and deciding
+        otherwise from one word would leave people talking to nobody.
+        """
+        if not is_stop_request(text):
+            return 0
+
+        contact = await self._contact_repository(tenant_id).get_by_wa_id(wa_id)
+        if contact is None or contact.marketing_opt_out_at is not None:
+            # Already opted out: the first refusal is the one that counts, and
+            # moving the timestamp would make it look freshly decided.
+            return 0
+
+        contact.marketing_opt_out_at = datetime.now(UTC)
+        contact.opt_out_source = OptOutSource.CUSTOMER
+        logger.info("campaign.opt_out_requested", extra={"contact_id": str(contact.id)})
+        return 1
+
+    def _contact_repository(self, tenant_id: uuid.UUID) -> ContactRepository:
+        repository = self._contacts.get(tenant_id)
+        if repository is None:
+            repository = ContactRepository(self._session, tenant_id=tenant_id)
+            self._contacts[tenant_id] = repository
+        return repository
 
     async def _enqueue_media(self, attachments: list[tuple[uuid.UUID, uuid.UUID]]) -> int:
         """Ask the media worker to read each file that arrived.
