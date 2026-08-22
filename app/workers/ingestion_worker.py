@@ -14,6 +14,8 @@ because the document says what broke and the job says that anything tried.
 
 from __future__ import annotations
 
+import asyncio
+
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
@@ -29,6 +31,9 @@ from app.workers.ingestion_queue import (
 from app.workers.queue import MalformedJobError
 
 logger = get_logger(__name__)
+
+# How long to wait after a failed reserve before trying again.
+RETRY_DELAY_SECONDS = 5.0
 
 
 class IngestionWorker:
@@ -51,11 +56,24 @@ class IngestionWorker:
         return self._queue
 
     async def run_forever(self) -> None:
-        """Process jobs until asked to stop."""
+        """Process jobs until asked to stop.
+
+        A failure reserving work is caught here rather than allowed out. Every
+        worker in this process shares one event loop, so an exception escaping
+        this loop takes the others down with it - and the most likely cause is a
+        momentary Redis hiccup, which is not a reason to stop answering
+        customers. The job itself is already protected inside `run_once`.
+        """
         self._running = True
         logger.info("knowledge.worker_started")
         while self._running:
-            await self.run_once()
+            try:
+                await self.run_once()
+            except Exception:
+                logger.exception("knowledge.reserve_failed")
+                # Paced, so a persistent outage is not a spin loop against a
+                # Redis that is not there.
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
         logger.info("knowledge.worker_stopped")
 
     def stop(self) -> None:

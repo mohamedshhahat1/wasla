@@ -19,10 +19,14 @@ from typing import Any, Final, Self, cast
 
 from redis.asyncio import Redis
 
+from app.core.redis import MAX_BLOCKING_SECONDS
+
 QUEUE_NAMESPACE: Final = "agent:jobs"
 # How long a reserve call waits before returning empty, so a worker loop can
 # notice it has been asked to stop.
-BLOCK_SECONDS: Final = 5
+# From the Redis client, which sizes its read timeout around this. The two
+# must be chosen together or a blocking reserve trips its own socket.
+BLOCK_SECONDS: Final = MAX_BLOCKING_SECONDS
 
 
 async def _command[T](result: Awaitable[T] | T) -> T:

@@ -7,6 +7,7 @@ One client and connection pool are shared per process.
 from __future__ import annotations
 
 import asyncio
+from typing import Final
 
 from redis.asyncio import Redis
 
@@ -15,6 +16,18 @@ from app.core.exceptions import DependencyUnavailableError
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+# The longest a queue reserve may block waiting for work. Declared here rather
+# than in the queues because it is a property of the *connection*: redis-py
+# applies `socket_timeout` to every read, including the one that is deliberately
+# waiting, so the two constants have to be chosen together.
+MAX_BLOCKING_SECONDS: Final = 5
+
+# Margin between the block and the read timeout. Without it the two race: a
+# `BLMOVE` that waits exactly as long as the socket allows means an idle worker
+# dies on a spurious timeout roughly every interval. That is not theoretical -
+# it is what the worker container did the first time it was started.
+BLOCKING_HEADROOM_SECONDS: Final = 5
 
 
 class RedisClient:
@@ -25,7 +38,15 @@ class RedisClient:
         self._client: Redis = Redis.from_url(
             settings.redis_url,
             max_connections=settings.redis_max_connections,
-            socket_timeout=settings.redis_socket_timeout_seconds,
+            # Never below what a blocking reserve needs. The configured value
+            # governs ordinary commands; a shorter read timeout than the block
+            # duration would make every idle worker fail on its own patience.
+            socket_timeout=max(
+                settings.redis_socket_timeout_seconds,
+                MAX_BLOCKING_SECONDS + BLOCKING_HEADROOM_SECONDS,
+            ),
+            # Connecting does not block on work, so this keeps the configured
+            # value: a dead host should be reported quickly.
             socket_connect_timeout=settings.redis_socket_timeout_seconds,
             decode_responses=True,
         )

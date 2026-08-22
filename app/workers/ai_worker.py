@@ -15,6 +15,8 @@ bounds how many workers one pool supports.
 
 from __future__ import annotations
 
+import asyncio
+
 from app.agents.orchestrator import AgentOrchestrator
 from app.agents.registry import ToolRegistry
 from app.core.config import Settings
@@ -30,6 +32,9 @@ from app.services.messaging_service import MessagingService
 from app.workers.queue import BLOCK_SECONDS, AgentJob, AgentQueue, MalformedJobError
 
 logger = get_logger(__name__)
+
+# How long to wait after a failed reserve before trying again.
+RETRY_DELAY_SECONDS = 5.0
 
 
 class AgentWorker:
@@ -54,11 +59,24 @@ class AgentWorker:
         return self._queue
 
     async def run_forever(self) -> None:
-        """Process jobs until asked to stop."""
+        """Process jobs until asked to stop.
+
+        A failure reserving work is caught here rather than allowed out. Every
+        worker in this process shares one event loop, so an exception escaping
+        this loop takes the others down with it - and the most likely cause is a
+        momentary Redis hiccup, which is not a reason to stop answering
+        customers. The job itself is already protected inside `run_once`.
+        """
         self._running = True
         logger.info("agent.worker_started")
         while self._running:
-            await self.run_once()
+            try:
+                await self.run_once()
+            except Exception:
+                logger.exception("agent.reserve_failed")
+                # Paced, so a persistent outage is not a spin loop against a
+                # Redis that is not there.
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
         logger.info("agent.worker_stopped")
 
     def stop(self) -> None:
