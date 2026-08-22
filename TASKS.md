@@ -337,6 +337,17 @@ Deferred by decision, not unfinished:
 - [~] Performance review and indexing pass. The analytics windows are done (migration `0019`): every tenant figure is "this workspace, this window", and four tables had a tenant index carrying no time, so PostgreSQL found the workspace's rows and discarded most of them by filter — waste proportional to how long a workspace had existed, which made the dashboard slowest for the longest-paying customers. Measured on 50 workspaces and 50,000 messages: **772 buffers and 850 rows discarded → 6 buffers, no heap fetches, an index-only scan**. `tests/unit/test_analytics_indexes.py` is the guard against adding the next windowed query the same way. Still open: the approximate vector index deferred from phase 6, and a review of the campaign and follow-up sweeps under load
 - [x] Speed up the PostgreSQL-backed suite. The schema is now built once per session and each test runs in a transaction that is rolled back. Measured on the same machine and the same 451 tests: **2507s → 94s**, a 27x reduction. Isolation is unchanged and is now itself covered by `tests/integration/test_fixture_isolation.py`.
 
+**COMPLETE**, with one item left deliberately in progress: the indexing pass closed the analytics gap it was opened for, and the vector index it also mentions was always Phase 6's deferral (it needs representative data to be built against, so it belongs with a real corpus rather than with a hardening sweep).
+
+Verified 2026-08-23 against PostgreSQL 16 and in containers: migrations `0018`, `0019` and `0020` apply from an empty database, `alembic check` reports no drift, and the schema downgrades to base and reapplies clean; the image builds; the API answers; and the worker container reports **healthy** for the first time since it existed, with all six heartbeat keys in Redis, the probe exiting 1 when one is deleted and recovering on the next beat.
+
+Deferred by decision, not unfinished:
+
+- [ ] Keys in a secret manager rather than in configuration. `CREDENTIAL_ENCRYPTION_KEYS` sits in the environment of every API and worker container, which is the exposure `JWT_SECRET` already has — a real limit, and not a new class of one
+- [ ] Automated key rotation. Prepending a key works and old credentials keep decrypting; `needs_rotation` finds the stragglers and nothing rewrites them yet
+- [ ] The in-flight reaper. It wants the heartbeat that now exists, and needs a visibility timeout to tell a slow job from a dead one — guessing wrong sends a customer two replies
+- [ ] Dunning, retention sweeps and the approximate vector index, each recorded in the phase that deferred it
+
 ## Phase 15 — Delivery
 
 - [ ] Deploy workflow

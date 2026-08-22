@@ -101,7 +101,12 @@ class Settings(BaseSettings):
     # random bytes, base64. Empty means a workspace cannot store its own Meta
     # token at all - the platform token is used instead, and an attempt to
     # supply one is refused rather than stored in the clear.
-    credential_encryption_keys: list[str] = Field(default_factory=list)
+    # `NoDecode` for the same reason `cors_origins` has it: without it
+    # pydantic-settings tries to JSON-decode a list field straight from the
+    # environment and raises before any validator runs, so a plain
+    # comma-separated value - the only thing a container environment can
+    # comfortably express - fails at start-up.
+    credential_encryption_keys: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     # Request limits, enforced by the application rather than only by nginx.
     # nginx is one deployment topology, not a property of the software: run the

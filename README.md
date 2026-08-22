@@ -6,7 +6,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 
 ## Project status
 
-**Phases 0 through 13 are complete.** Phase 14 (production hardening) is next. The table below reflects the actual state of the code, not the roadmap.
+**Phases 0 through 14 are complete.** Phase 15 (delivery) is next. The table below reflects the actual state of the code, not the roadmap.
 
 | Area | Status |
 | --- | --- |
@@ -14,7 +14,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Documentation protocol (`Documentation_Protocol.md`) | Implemented |
 | Project memory (`README` / `ARCHITECTURE` / `TASKS` / `DECISIONS`, `docs/`) | Implemented |
 | Application foundation (FastAPI, config, logging, errors, DB, Redis, health, Docker, CI) | Implemented |
-| Domain models and migrations (`0001`–`0017`) | Implemented |
+| Domain models and migrations (`0001`–`0020`) | Implemented |
 | Multi-tenancy, authentication, workspace RBAC, invitations | Implemented |
 | WhatsApp Cloud API (webhook, signatures, idempotency, outbound client) | Implemented |
 | Conversations, inbox, human handoff, templates, cursor paging | Implemented |
@@ -29,6 +29,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Platform owner view across every workspace (read-only) | Implemented |
 | Plans, subscriptions, entitlements enforced against usage, invoices and payment records | Implemented |
 | A live payment provider (the boundary and a manual implementation exist) | Planned |
+| Production hardening: rate limits, audit trail, request limits, encrypted workspace credentials, worker liveness | Implemented |
 | Worker process (media, agent, ingestion, follow-up and campaign loops in one container) | Implemented |
 | Deployment automation | Planned |
 
