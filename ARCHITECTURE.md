@@ -481,9 +481,17 @@ Cross-tenant reads answer `not_found`, never `forbidden`, so error codes cannot 
 
 ## 17. SaaS owner architecture
 
-**Status: In Progress** — the platform role authorization layer is Implemented; the `app/platform/` surface is Planned.
+**Status: In Progress** — the platform role authorization layer and a read-only reporting surface in `app/platform/` are Implemented; tenant administration, billing and audit logs are Planned.
 
-Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated: a platform role grants nothing inside a workspace, which is tested. The platform layer lives in `app/platform/` and is exposed under `/api/v1/platform/*` for tenant administration, usage, revenue, plans, subscriptions, system health, and audit logs. Privileged platform actions are always audit-logged.
+Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated: a platform role grants nothing inside a workspace, and owning a workspace grants nothing across the platform. Both directions are tested.
+
+`app/platform/` is a package rather than a few methods on existing services, and that is the point: every other query in this codebase is built so it *cannot* cross a tenant boundary, so the exception belongs somewhere a reviewer looks for it. A cross-tenant read outside this package is a bug.
+
+What it answers today, under `/api/v1/platform/*` and behind the platform-role dependency: how many workspaces exist and in what state, how many WhatsApp numbers are connected and live, what the platform consumed in a window, and what each workspace consumed — the last computed from the same counters that workspace sees, so an operator and a customer quote the same number.
+
+What it deliberately does not answer: revenue, MRR, ARR and churn, which are questions about subscriptions that do not exist until Phase 13; and estimated AI cost, which would need per-model prices stored nowhere — token counts are real, and a cost derived from invented prices would not be. A plausible zero on a dashboard is worse than an absent field.
+
+It is also read-only. Suspending or deleting a workspace is precisely the action that must be audit-logged, and there is no audit log until Phase 14; shipping the action first would mean a period in which the most consequential operations in the product left no trace.
 
 ## 18. Authentication and authorization
 

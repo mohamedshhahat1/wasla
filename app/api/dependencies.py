@@ -20,6 +20,7 @@ from app.core.security import TokenClaims, TokenType, decode_token
 from app.core.storage import LocalMediaStorage, MediaStorage
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
+from app.platform.platform_analytics import PlatformAnalyticsService
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
 from app.services.agent_service import AgentService
 from app.services.analytics_service import AnalyticsService
@@ -343,6 +344,22 @@ def get_analytics_service(
 
 
 AnalyticsServiceDep = Annotated[AnalyticsService, Depends(get_analytics_service)]
+
+
+def get_platform_analytics_service(session: SessionDep) -> PlatformAnalyticsService:
+    """Cross-tenant reporting, and the only service here built without a workspace.
+
+    Nothing narrows it, by design: it is the platform view. The routes that use
+    it are guarded by the platform-role dependency below, which is a property of
+    the user rather than of a membership.
+    """
+    return PlatformAnalyticsService(session)
+
+
+PlatformAnalyticsServiceDep = Annotated[
+    PlatformAnalyticsService,
+    Depends(get_platform_analytics_service),
+]
 
 
 def require_tenant_roles(*roles: TenantRole) -> Callable[[ActiveWorkspace], ActiveWorkspace]:

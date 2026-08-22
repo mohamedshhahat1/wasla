@@ -278,6 +278,22 @@ Open to every member, unlike usage: these are the numbers that tell the people s
 
 `/api/v1/billing`.
 
+## Platform
+
+**Status: In Progress** — the read-only reporting surface is Implemented; administration and billing are Planned.
+
+| Method | Path | Role |
+| --- | --- | --- |
+| GET | `/api/v1/platform/overview` | Platform owner or admin |
+| GET | `/api/v1/platform/tenants` | Platform owner or admin |
+
+Platform authority is a property of the user, not of a membership. Owning a workspace grants nothing here, and holding a platform role grants nothing inside a workspace — a platform administrator reading these figures still cannot open a customer's inbox.
+
+- **Read-only on purpose.** Suspending or deleting a workspace is exactly the action that must be audit-logged, and there is no audit log until phase 14.
+- **No revenue figures**, and none until there are subscriptions to compute them from. A plausible zero is worse than an absent field.
+- **`/tenants` uses offset paging**, unlike the cursors elsewhere: the list is sorted by name and searched by hand, so an operator wants page three of forty results rather than a stable feed. `total` is the number matching the filter. `search` matches name or address and is escaped, so `%` finds a workspace called "100%" rather than everything.
+- **Each row carries the same counters that workspace sees on its own `/usage`**, so an operator and a customer quote the same number.
+
 ## Planned platform endpoints
 
-`/api/v1/platform/tenants`, `/api/v1/platform/tenants/{tenant_id}`, `/api/v1/platform/usage`, `/api/v1/platform/analytics`, `/api/v1/platform/billing`, `/api/v1/platform/plans`, `/api/v1/platform/audit-logs`, `/api/v1/platform/system-health`.
+`/api/v1/platform/tenants/{tenant_id}`, `/api/v1/platform/billing`, `/api/v1/platform/plans`, `/api/v1/platform/audit-logs`, `/api/v1/platform/system-health`.

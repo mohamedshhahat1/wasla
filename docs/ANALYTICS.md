@@ -78,6 +78,8 @@ Rates are always returned beside the counts they were computed from. A rate on i
 
 ## Platform metrics
 
-Total, active, trial, and suspended companies; active WhatsApp numbers; messages today and this month; AI requests; input, output, and total tokens; leads and conversations created; human handoffs; RAG queries; voice minutes; media processed; storage usage; MRR; ARR; subscription revenue; estimated AI, infrastructure, and margin figures; growth; churn; plan distribution.
+**Implemented:** workspaces total, active and suspended; WhatsApp numbers connected and live; every usage meter summed across the platform; and the same counters per workspace, for the page being displayed.
 
-All analytics and usage endpoints support date-range filtering and pagination. Aggregation is designed to run in workers rather than on the request path.
+**Not implemented, and each for a reason rather than for want of time.** Revenue, MRR, ARR, subscription revenue and churn are questions about subscriptions, and there are none until phase 13. Estimated AI cost needs per-model prices that are stored nowhere: token counts are real, a cost derived from invented prices is not, and a plausible figure on a dashboard is worse than an absent one because somebody eventually believes it. Trial companies and plan distribution wait on plans for the same reason.
+
+All analytics and usage endpoints take an optional UTC window and report the one they applied. Aggregation runs on the request path today: each query is an indexed range scan over one workspace's rows, and moving it to a worker before that is the bottleneck would add a component that has to be running for a figure to be right. When it does become the bottleneck, a rollup is added *beside* the rows rather than instead of them — a sum over rows can be recomputed for any window, and a drifted counter cannot.
