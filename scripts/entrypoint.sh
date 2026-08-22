@@ -13,6 +13,13 @@ case "${command}" in
       echo "entrypoint: applying database migrations"
       alembic upgrade head
     fi
+    # Reload is a development convenience and is opt-in through the
+    # environment rather than through the command, because overriding the
+    # command bypasses this branch entirely - migrations included. That is
+    # exactly the bug this flag exists to make impossible.
+    if [ "${UVICORN_RELOAD:-false}" = "true" ]; then
+      exec uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}" --reload
+    fi
     exec uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}"
     ;;
   worker)

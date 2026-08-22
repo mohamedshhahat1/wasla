@@ -50,6 +50,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://wasla:wasla@postgres:5432/wasla
       REDIS_URL: redis://redis:6379/0
       RUN_MIGRATIONS: "true"
+      UVICORN_RELOAD: "true"
       MEDIA_STORAGE_PATH: /var/lib/wasla/media
     ports:
       - "8000:8000"
@@ -60,16 +61,10 @@ services:
       # single-host arrangement and the reason ADR-023 exists: the moment there
       # are two hosts, the object-store implementation replaces the local one.
       - media-data:/var/lib/wasla/media
-    command:
-      [
-        "uvicorn",
-        "app.main:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8000",
-        "--reload",
-      ]
+    # The entrypoint's own "api" branch, not a uvicorn line. Overriding the
+    # command skips that branch, and with it the migrations RUN_MIGRATIONS
+    # asks for - which left a fresh stack running against an empty database.
+    command: ["api"]
     depends_on:
       postgres:
         condition: service_healthy

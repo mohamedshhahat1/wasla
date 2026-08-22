@@ -54,7 +54,7 @@ RETRY_DELAY_SECONDS = 5.0
 # messaging service, and for the same reason: a worker that can only be
 # exercised against real providers is a worker whose failure paths are never
 # exercised at all.
-WhatsAppFactory = Callable[[httpx.AsyncClient], WhatsAppClient]
+WhatsAppFactory = Callable[[httpx.AsyncClient], WhatsAppClient | None]
 ReaderFactory = Callable[[httpx.AsyncClient], MediaReader]
 
 
@@ -190,12 +190,27 @@ class MediaWorker:
 
         await service.understand(media, reader=reader)
 
-    def _whatsapp(self, http: httpx.AsyncClient) -> WhatsAppClient:
+    def _whatsapp(self, http: httpx.AsyncClient) -> WhatsAppClient | None:
+        """A client for fetching from Meta, or None if there is no token.
+
+        None rather than a client that raises on construction. Not every job
+        needs Meta - a file already in the store is read without going near it -
+        and building the client eagerly turns a missing token into a failure for
+        those jobs too, which is how a deployment without one loses every
+        attachment it had already downloaded.
+
+        A job that genuinely needs a download and finds no client is dead-
+        lettered with its row left PENDING, so it can be retried once the token
+        is configured rather than being marked unreadable.
+        """
         if self._whatsapp_factory is not None:
             return self._whatsapp_factory(http)
+        if not self._settings.meta_access_token:
+            logger.warning("media.whatsapp_not_configured")
+            return None
         return WhatsAppClient(
             http=http,
-            access_token=self._settings.meta_access_token or "",
+            access_token=self._settings.meta_access_token,
             api_version=self._settings.meta_api_version,
         )
 

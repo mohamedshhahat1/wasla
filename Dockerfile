@@ -34,7 +34,14 @@ COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini
 COPY scripts ./scripts
 
-RUN chmod +x scripts/entrypoint.sh && chown -R wasla:wasla /app
+# The media directory is created here, owned by the application user, rather
+# than left for the volume mount to make. A named volume mounted onto a path
+# that does not exist in the image is created owned by root, and this container
+# runs as `wasla` - so every attempt to store a customer's attachment would
+# fail on permissions, in the worker, at run time, and nowhere earlier.
+RUN chmod +x scripts/entrypoint.sh \
+ && mkdir -p /var/lib/wasla/media \
+ && chown -R wasla:wasla /app /var/lib/wasla
 USER wasla
 
 EXPOSE 8000

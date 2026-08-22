@@ -438,3 +438,72 @@ async def test_a_type_meta_will_not_accept_is_refused(db_session, tmp_path, sett
             content=b"PK",
             mime_type="application/zip",
         )
+
+
+async def test_a_stored_file_is_read_without_a_whatsapp_token(db_session, tmp_path, settings):
+    """Found by running the container, not by the suite.
+
+    The worker used to build a `WhatsAppClient` before it knew whether the job
+    needed one, and that constructor raises when no access token is configured.
+    A deployment without a token therefore failed every media job - including
+    the ones whose bytes were already in the store and needed nothing from
+    Meta at all.
+    """
+    tenant, conversation = await _conversation(db_session)
+    media = await _attachment(db_session, tenant=tenant, conversation=conversation)
+
+    storage = LocalMediaStorage(tmp_path)
+    media.storage_key = await storage.put(
+        tenant_id=tenant.id,
+        data=b"the warranty lasts two years",
+        mime_type="text/plain",
+    )
+    media.mime_type = "text/plain"
+    media.status = MediaStatus.STORED
+    await db_session.flush()
+
+    worker = MediaWorker(
+        database=SessionHandle(db_session),  # type: ignore[arg-type]
+        redis=FakeRedis(),  # type: ignore[arg-type]
+        # No token, as an unconfigured deployment has none.
+        settings=settings.model_copy(update={"meta_access_token": None}),
+        storage=storage,
+    )
+    worker._agents = RecordingQueue()  # type: ignore[assignment]
+
+    await worker._handle(MediaJob(tenant_id=tenant.id, media_id=media.id))
+
+    await db_session.refresh(media)
+    assert media.status is MediaStatus.READY
+    assert media.transcript == "the warranty lasts two years"
+    assert len(worker._agents.jobs) == 1
+
+
+async def test_a_document_is_read_with_no_provider_configured(db_session, tmp_path, settings):
+    """Extraction needs no OpenAI key, and must not pretend otherwise."""
+    tenant, conversation = await _conversation(db_session)
+    media = await _attachment(db_session, tenant=tenant, conversation=conversation)
+
+    storage = LocalMediaStorage(tmp_path)
+    media.storage_key = await storage.put(
+        tenant_id=tenant.id,
+        data=b"delivery takes three working days",
+        mime_type="text/plain",
+    )
+    media.mime_type = "text/plain"
+    media.status = MediaStatus.STORED
+    await db_session.flush()
+
+    worker = MediaWorker(
+        database=SessionHandle(db_session),  # type: ignore[arg-type]
+        redis=FakeRedis(),  # type: ignore[arg-type]
+        settings=settings.model_copy(update={"meta_access_token": None, "openai_api_key": None}),
+        storage=storage,
+    )
+    worker._agents = RecordingQueue()  # type: ignore[assignment]
+
+    await worker._handle(MediaJob(tenant_id=tenant.id, media_id=media.id))
+
+    await db_session.refresh(media)
+    assert media.status is MediaStatus.READY
+    assert media.transcript == "delivery takes three working days"
