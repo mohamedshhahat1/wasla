@@ -88,7 +88,11 @@ The worker holds one HTTP connection pool per sweep, so a batch of fifty is fift
 - **Paused** is stopped and resumable. The remaining recipients keep waiting; scheduling again resumes.
 - **Cancelled** is finished. What was sent stays sent, and the rest never goes.
 
-Somebody watching a broadcast go out and having second thoughts needs an action that is not destructive, which is what pause is for. `FAILED` is different again: it means the campaign could not run at all — its template was withdrawn, its number was disabled — as distinct from one that ran and had some recipients fail, which completes.
+Somebody watching a broadcast go out and having second thoughts needs an action that is not destructive, which is what pause is for. `FAILED` is different again: it means the campaign could not run at all — its template was withdrawn, its number was disabled, no WhatsApp credential is configured — as distinct from one that ran and had some recipients fail, which completes.
+
+**A failed campaign can be scheduled again**, because every condition that fails one is something a workspace fixes and then wants to carry on from. Its remaining recipients are still pending and still have not been written to, so resuming sends to them and to nobody twice. What `FAILED` keeps that `PAUSED` does not is `last_error` — the reason it stopped.
+
+A missing platform credential fails the campaign rather than each recipient in turn. The client refuses to be built without a token, so no attempt is made and nothing increments; treating it per-recipient would retry forever without exhausting anyone's attempts, staging a message row per recipient per sweep on a deployment that cannot send at all.
 
 ## Marketing opt-out
 

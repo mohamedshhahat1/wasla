@@ -18,7 +18,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.core.exceptions import ExternalServiceError, TenantIsolationError, ValidationError
+from app.core.exceptions import (
+    DependencyUnavailableError,
+    ExternalServiceError,
+    TenantIsolationError,
+    ValidationError,
+)
 from app.db.models.campaign import (
     MAX_RECIPIENT_ATTEMPTS,
     Campaign,
@@ -705,3 +710,77 @@ async def test_an_audience_never_crosses_a_workspace_boundary(db_session):
     )
 
     assert size == 0
+
+
+# ------------------------------------------------- conditions outside itself
+
+
+class UnavailableMessaging:
+    """Stands in for a deployment with no WhatsApp credential configured."""
+
+    async def send_template(self, **_):
+        raise DependencyUnavailableError("The WhatsApp access token is not configured.")
+
+
+async def test_a_missing_credential_stops_the_campaign_rather_than_looping(db_session):
+    """Left per-recipient it would retry forever without exhausting anyone.
+
+    The client refuses to be built at all without a token, so no attempt is
+    made and nothing increments. A campaign of ten thousand would stage a
+    message row per recipient per sweep, on a deployment that cannot send.
+    """
+    tenant, _, _, campaign = await _ready(db_session, slug="no-credential", customers=2)
+    service = _service(db_session, tenant, messaging=UnavailableMessaging())
+
+    await service.schedule(campaign_id=campaign.id)
+    outcome = await service.dispatch_batch(campaign)
+    await db_session.flush()
+
+    assert outcome.status is CampaignStatus.FAILED
+    assert campaign.last_error is not None
+    statistics = await service.statistics(campaign.id)
+    assert statistics.pending == 2
+
+
+async def test_a_failed_campaign_can_be_resumed_once_the_cause_is_fixed(db_session):
+    """Everything that fails a campaign is something a workspace then fixes."""
+    tenant, account, _, campaign = await _ready(db_session, slug="resume-failed", customers=2)
+    service = _service(db_session, tenant, messaging=StubMessaging(db_session, tenant_id=tenant.id))
+    await service.schedule(campaign_id=campaign.id)
+    account.status = WhatsAppAccountStatus.DISABLED
+    await db_session.flush()
+
+    await service.dispatch_batch(campaign)
+    await db_session.flush()
+    assert campaign.status is CampaignStatus.FAILED
+
+    account.status = WhatsAppAccountStatus.ACTIVE
+    await db_session.flush()
+    await service.schedule(campaign_id=campaign.id)
+    outcome = await service.dispatch_batch(campaign)
+    await db_session.flush()
+
+    assert outcome.sent == 2
+    assert campaign.status is CampaignStatus.COMPLETED
+
+
+async def test_resuming_sends_to_nobody_twice(db_session):
+    """The pending recipients are exactly the ones not yet written to."""
+    tenant, _, template, campaign = await _ready(db_session, slug="resume-once", customers=3)
+    messaging = StubMessaging(db_session, tenant_id=tenant.id)
+    service = _service(db_session, tenant, messaging=messaging)
+
+    await service.schedule(campaign_id=campaign.id)
+    await service.dispatch_batch(campaign, batch_limit=2)
+    await db_session.flush()
+    assert len(messaging.sends) == 2
+
+    campaign.status = CampaignStatus.FAILED
+    await db_session.flush()
+    await service.schedule(campaign_id=campaign.id)
+    await service.dispatch_batch(campaign)
+    await db_session.flush()
+
+    assert len(messaging.sends) == 3
+    statistics = await service.statistics(campaign.id)
+    assert (statistics.sent, statistics.pending) == (3, 0)

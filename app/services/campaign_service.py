@@ -34,7 +34,12 @@ from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ExternalServiceError, RateLimitedError, ValidationError
+from app.core.exceptions import (
+    DependencyUnavailableError,
+    ExternalServiceError,
+    RateLimitedError,
+    ValidationError,
+)
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
 from app.db.models.campaign import (
@@ -79,8 +84,15 @@ MAX_SCHEDULE_AHEAD: Final = timedelta(days=90)
 # Statuses a campaign may be scheduled from. A running one is excluded on
 # purpose: rescheduling something already writing to people is not a schedule
 # change, it is a pause followed by a decision.
+#
+# `FAILED` is included, and that is deliberate. A campaign fails because of a
+# condition outside itself — a number disabled, a template withdrawn, a missing
+# credential — and every one of those is something a workspace fixes and then
+# wants to carry on from. Its remaining recipients are still pending and still
+# have not been written to, so resuming sends to them and to nobody twice. What
+# `FAILED` keeps that `PAUSED` does not is `last_error`: the reason it stopped.
 SCHEDULABLE_FROM: Final[frozenset[CampaignStatus]] = frozenset(
-    {CampaignStatus.DRAFT, CampaignStatus.PAUSED},
+    {CampaignStatus.DRAFT, CampaignStatus.PAUSED, CampaignStatus.FAILED},
 )
 
 
@@ -387,7 +399,15 @@ class CampaignService:
 
         sent = failed = skipped = 0
         for recipient in claimed:
-            outcome = await self._deliver(campaign, recipient, messaging=messaging, now=moment)
+            try:
+                outcome = await self._deliver(campaign, recipient, messaging=messaging, now=moment)
+            except DependencyUnavailableError as error:
+                # A missing platform credential, which is neither this
+                # recipient's problem nor fixable by trying the next one. Left
+                # as a per-recipient failure it would loop forever without ever
+                # exhausting anyone's attempts, staging a message row per
+                # recipient per sweep on a deployment that cannot send at all.
+                return self._fail(campaign, str(error))
             if outcome is RecipientStatus.SENT:
                 sent += 1
             elif outcome is RecipientStatus.SKIPPED:
