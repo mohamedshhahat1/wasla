@@ -9,7 +9,7 @@ Status legend:
 
 This file is updated as part of every logical change. Phases follow the implementation order defined in `claude.md`.
 
-**Current position:** Phases 0 through 9 are complete, and the pipeline that verifies them has been repaired — see *Phase 5.5* below, which came first because none of the claims in this file were being checked while it was broken. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API, upload documents, and their agents answer from them through tenant-scoped pgvector search. Agents capture leads from those conversations, and schedule follow-ups that a customer's reply cancels. The workers have a process of their own: one container runs the media, agent, ingestion and follow-up loops together, selectable by `WORKER_KINDS`, and stops cleanly on SIGTERM. As of phase 9 a customer can send a photograph, a voice note or a PDF and be answered about what is actually in it: the media worker reads the file before any agent is asked to reply, and a business can send attachments back. Phase 10 (sentiment and escalation) is next.
+**Current position:** Phases 0 through 10 are complete, and the pipeline that verifies them has been repaired — see *Phase 5.5* below, which came first because none of the claims in this file were being checked while it was broken. A customer message now travels the whole path: the webhook stores and projects it, enqueues one job per conversation, and a worker runs the agent — memory window, tool loop, handoff check — and sends the reply through the messaging service. Workspaces configure their own agents and tool grants over the API, upload documents, and their agents answer from them through tenant-scoped pgvector search. Agents capture leads from those conversations, and schedule follow-ups that a customer's reply cancels. The workers have a process of their own: one container runs the media, agent, ingestion and follow-up loops together, selectable by `WORKER_KINDS`, and stops cleanly on SIGTERM. As of phase 9 a customer can send a photograph, a voice note or a PDF and be answered about what is actually in it: the media worker reads the file before any agent is asked to reply, and a business can send attachments back. Phase 10 classifies how every customer message reads *before* the agent composes anything, raises the conversation's priority when it is bad, and hands an angry customer to a person instead of answering them. Phase 11 (campaigns and templates) is next.
 
 ## Phase 0 — Foundation
 
@@ -223,10 +223,24 @@ Deferred, and recorded rather than forgotten:
 
 ## Phase 10 — Sentiment and escalation
 
-- [ ] Sentiment analysis service
-- [ ] Priority and intent storage
-- [ ] Automatic handoff rules
-- [ ] Escalation analytics events
+- [x] Sentiment analysis service (`SentimentAnalyzer`, schema-constrained output, ADR-024)
+- [x] Priority and intent storage (`message_sentiments` and the conversation's current reading, migration `0011`)
+- [x] Automatic handoff rules, per agent, above a confidence floor
+- [x] Assessment before the reply rather than after it, inside the agent turn
+- [x] Priority raised by a reading and lowered only by a person
+- [x] Inbox priority filter and the manual priority endpoint
+- [x] Voice notes classified; image descriptions deliberately not
+- [x] Structured output on the Responses client (`text.format`, strict)
+
+**COMPLETE.** Verified 2026-08-22 against PostgreSQL 16: see the phase report. Migration `0011` upgrades, `alembic check` reports no drift, downgrades to `0010` and to base, and reapplies clean; Ruff, Black and MyPy clean; the image builds and the worker container runs.
+
+Deferred by decision, not unfinished:
+
+- [ ] Escalation analytics events — there is no analytics event table until Phase 12, and `message_sentiments` already carries the timestamped rows those counts will read. Adding a second write now would mean migrating two shapes later
+- [ ] A holding message when a conversation escalates — the customer gets silence until a person arrives. Wording has to be per-workspace and, outside the service window, an approved template; both wait for Phase 11
+- [ ] Conversation-level mood, as distinct from message-level — a customer whose tone curdles over ten polite messages is judged one message at a time
+- [ ] Intent as a closed vocabulary — suggested in the prompt so reports group, but not enforced, because the intents a business has not thought of yet are the ones worth seeing
+- [ ] Sentiment on outbound messages — nothing reads how the business itself sounds
 
 ## Phase 11 — Campaigns and templates
 

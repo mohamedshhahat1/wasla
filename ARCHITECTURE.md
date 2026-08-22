@@ -213,13 +213,13 @@ Embedding width is fixed in the column at 1536 rather than being configurable (A
 
 ## 8. Human handoff flow
 
-**Status: In Progress** — mode, handoff reason, assignment, and an agent's own request for a human are Implemented; the automatic triggers are Planned.
+**Status: Implemented** — mode, handoff reason, assignment, an agent's own request for a human, and automatic escalation on sentiment.
 
 Every conversation carries a mode, `AI` or `HUMAN`, and a nullable handoff reason. Switching to `HUMAN` records the reason; returning to `AI` clears it, because a stale explanation left attached to an AI-handled conversation misleads whoever reads it next. Assignment names a member of the workspace, and that membership is verified through the repository rather than trusted from the request body, so a conversation cannot be assigned to an outsider whose id a caller happens to know.
 
 An agent can hand over on its own. `request_human_handoff` is the one tool implemented in the registry: it records a reason of at most 200 characters, ends the tool loop, and suppresses the reply, because a conversation being handed to a person should not also receive a parting message from the agent. The orchestrator then refuses that conversation on every later turn, which is the `HUMAN`-mode guard reading `Conversation.is_ai_handled`.
 
-Automatic handoff — triggered by low confidence, negative or angry sentiment, sensitive requests, or an agent rule — arrives with sentiment analysis in Phase 10.
+Automatic handoff arrives from the other direction: not from the agent asking, but from the classifier deciding before the agent is asked anything. See §12 below.
 
 ## 9. CRM / lead flow
 
@@ -352,7 +352,42 @@ Bytes live behind a `MediaStorage` interface on local disk (ADR-023), never in P
 
 **Known gaps.** No OCR, so a scanned document is reported unreadable rather than read. Video is stored but not understood. Nothing streams, and nothing sweeps stored files.
 
-## 12. Background jobs and Redis usage
+## 12. Sentiment and escalation flow
+
+**Status: Implemented** — reading, storage, priority, automatic handoff and the manual reset, exercised against real PostgreSQL. Detail in `docs/SENTIMENT.md`; the decision is ADR-024.
+
+```
+agent job claimed
+    |
+conversation loaded ------ HUMAN mode -----> nothing to do
+    |
+agent resolved ----------- not active ------> nothing to do
+    |
+newest inbound message; customer's words only
+    |                     (body + voice transcript; never an image description)
+already read? --- yes ---> reuse the stored reading, pay nothing
+    |
+    no
+    |
+classify ---- provider failed ----> logged, the turn continues unassessed
+    |
+store one reading; conversation state updated; priority raised, never lowered
+    |
+severe enough AND confident enough?
+    |                       |
+   yes                     no
+    |                       |
+mode = HUMAN            agent replies as usual, conversation flagged
+agent stays silent
+```
+
+The order is the feature. Classification happens before a word is composed, because a reply that has been sent cannot be recalled and the tools that ran during that turn have already acted. There is no separate queue: the agent job already arrives once per conversation and already runs before any reply, so the classification rides on it.
+
+Two tables carry the result. `conversations` holds the current reading — what an inbox sorts and filters on. `message_sentiments` holds one row per analysed message, uniquely keyed on `message_id`, which is at once the audit trail, the time series Phase 12 will count, and the idempotency key that stops a retried job paying twice.
+
+Priority rises on a bad reading and never falls on a good one; a person gives it back through `POST /conversations/{id}/priority`. Handoff fires above a per-agent threshold (`Agent.escalation_sentiment`, default `angry`, null to disable) and above a fixed confidence floor — a doubtful reading raises the flag but never silences the agent.
+
+## 13. Background jobs and Redis usage
 
 **Status: In Progress** — the Redis client, its health probe, the refresh-token denylist, the agent, ingestion and media job queues, the AI, ingestion, follow-up and media workers, and the worker process that runs them are Implemented. The campaign worker is not.
 
@@ -370,7 +405,7 @@ Each queue is three lists rather than one — for the agent queue, `agent:jobs:p
 
 Two gaps are known and recorded rather than implied away. Nothing reaps the in-flight list, so a job abandoned by a killed worker stalls until an operator moves it; and requeueing an *agent* job is an operator decision, because re-running one produces a second reply to the customer. Ingestion and media jobs are genuinely idempotent — a stored file is not fetched again and a read one is not read again — so requeueing those is safe.
 
-## 13. Database architecture
+## 14. Database architecture
 
 **Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, and the identity, tenancy, WhatsApp, conversation, agent, knowledge, CRM, follow-up and media tables are Implemented; campaign, usage and billing tables arrive in later phases.
 
@@ -388,7 +423,7 @@ The schema carries one deliberate denormalisation. `conversations.last_inbound_a
 
 Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, the unique invitation token hash, `whatsapp_accounts (tenant_id)`, a platform-wide `UNIQUE(phone_number_id)`, `whatsapp_events (tenant_id)`, `whatsapp_events (account_id)`, `whatsapp_events (tenant_id, state)`, `UNIQUE(tenant_id, event_id)`, `contacts (tenant_id)`, `UNIQUE(tenant_id, wa_id)`, `conversations (tenant_id)`, `conversations (tenant_id, status)`, `conversations (tenant_id, last_message_at)`, `conversations (contact_id)`, `UNIQUE(tenant_id, contact_id, account_id)`, `messages (tenant_id)`, `messages (conversation_id, created_at)`, `UNIQUE(tenant_id, wa_message_id)`, `agents (tenant_id)`, `agents (tenant_id, status)`, `UNIQUE(tenant_id, name)` on agents, `agent_tools (tenant_id)`, `agent_tools (agent_id)`, and `UNIQUE(tenant_id, agent_id, name)`. Media adds `message_media (tenant_id)`, `message_media (tenant_id, status)`, `message_media (conversation_id)` and `UNIQUE(message_id)`. The conversation index is not an optimisation: before an agent is allowed to answer, the worker asks whether anything on the conversation is still unread, and it asks once per file that arrives. The unique constraint is what makes a webhook replay a no-op and the download job safe to retry. Further indexes are planned on usage and analytics `(tenant_id, created_at)`.
 
-## 14. Multi-tenancy
+## 15. Multi-tenancy
 
 **Status: Implemented** — enforced in the repository layer and tested against a real database.
 
@@ -400,13 +435,13 @@ A background worker has no authenticated context to take a tenant id from, so it
 
 Cross-tenant reads answer `not_found`, never `forbidden`, so error codes cannot be used to map another tenant's data. `tests/integration/test_authorization.py`, `tests/integration/test_whatsapp_persistence.py` and `tests/integration/test_conversation_projection.py` prove this against PostgreSQL.
 
-## 15. SaaS owner architecture
+## 16. SaaS owner architecture
 
 **Status: In Progress** — the platform role authorization layer is Implemented; the `app/platform/` surface is Planned.
 
 Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated: a platform role grants nothing inside a workspace, which is tested. The platform layer lives in `app/platform/` and is exposed under `/api/v1/platform/*` for tenant administration, usage, revenue, plans, subscriptions, system health, and audit logs. Privileged platform actions are always audit-logged.
 
-## 16. Authentication and authorization
+## 17. Authentication and authorization
 
 **Status: Implemented** — rate limiting on authentication endpoints remains Planned (phase 14).
 
@@ -414,7 +449,7 @@ Argon2id password hashing with rehash-on-login, typed access and refresh tokens,
 
 Conversation routes are open to every workspace member rather than to admins only, because restricting them would exclude the people who staff an inbox. Reading agent configuration is open for the same reason. Role gates stay on administrative actions: connecting a number, inviting a colleague, revoking an invitation, and changing what an agent says to customers.
 
-## 17. Billing and usage tracking
+## 18. Billing and usage tracking
 
 **Status: Planned**
 
@@ -422,7 +457,7 @@ Usage is a first-class subsystem of append-only usage events (`tenant_id`, `even
 
 Token usage is already returned by the provider client and logged per turn, so the recorder has a source when it is built.
 
-## 18. Observability
+## 19. Observability
 
 **Status: Implemented** — structured logging, request IDs, and health endpoints exist and are tested. OpenTelemetry, Prometheus, and Sentry remain Planned.
 
@@ -442,7 +477,7 @@ Events that are expected but worth counting are logged rather than raised: an un
 
 An agent turn logs one summary event carrying the rounds taken, the tools run, whether it handed off, the estimated and actual token counts, and how many history turns were dropped, which is what makes a bad prompt or an over-tight budget diagnosable after the fact. Provider failures log the status, the attempt count and the provider's error `code` and `type` — never its prose, because that prose can quote the request and the request contains a customer's conversation.
 
-## 19. CI/CD and production deployment
+## 20. CI/CD and production deployment
 
 **Status: In Progress** — CI is Implemented; deployment automation and worker containers are Planned.
 

@@ -481,3 +481,35 @@ Keys are the store's own business because they are the only thing between a stor
 
 Consequences:
 The local implementation requires the API and worker containers to share a volume — one writes the file, the other serves it back — which both compose files now configure. That is a genuine single-host constraint, and it is the trigger for writing the object-store implementation rather than a detail to discover during an incident. Deleting a workspace's files is a prefix operation because the tenant id leads the key. Nothing streams: a file is read into memory whole, which is bounded by the download cap and by a separate, smaller cap on the upload endpoint, since that one is holding the bytes inside an API process rather than a worker.
+
+## ADR-024 — Sentiment Is Read Before the Agent Replies, Not After
+
+Date:
+2026-08-22
+
+Status:
+Accepted
+
+Decision:
+Classify the newest inbound message inside the agent turn, after the agent is resolved and before any reply is composed. Store one reading per message, keyed uniquely on `message_id`. Let a reading raise a conversation's priority and never lower it. Escalate to a human only above a per-agent threshold and above a fixed confidence floor.
+
+Context:
+Phase 10 needs sentiment to do something rather than merely be recorded. Three placements were available: after the reply (cheapest to build, since the turn is untouched), in parallel with it, or before it. A fourth option — a queue of its own, as media has — was also on the table.
+
+Reason:
+Only "before" works. An escalation that lands after the reply means the agent has already answered an angry customer, and the reply cannot be recalled: it is on the customer's phone. Worse, the tools that ran during that turn have already created the lead, scheduled the follow-up or searched the knowledge base. A system that escalates correctly and one message too late helps nobody.
+
+A separate queue was rejected because the ordering problem it would create is the one Phase 9 had to solve with a conversation lock. The agent job already exists, already arrives once per conversation, and already runs before any reply — putting the classification inside it costs one small call and no new coordination.
+
+Priority rises and never falls because the failure modes are not symmetric. A conversation wrongly left at `urgent` is looked at by a person who finds nothing wrong. A conversation quietly demoted out of the queue somebody is working is never looked at again. The first wastes a minute; the second loses a customer. Lowering it is therefore a person's decision, made explicitly through the API.
+
+The confidence floor exists for the same asymmetry one level down. Raising a flag on a doubtful reading costs nothing, so the flag goes up regardless. Silencing an agent on a doubtful reading leaves the customer waiting on a colleague who was told nothing, so that requires the model to be sure. The model's own confidence is weakly calibrated and is used as a floor, never as evidence.
+
+Consequences:
+Every customer message now costs one extra small inference, on the path that a customer is waiting on. That is the price of the ordering, and it is why the model is configurable separately from the answering model.
+
+A reading is stored per message and reused, which makes a retried job free and — less obviously — stops a conversation that a colleague deliberately handed back to the AI from re-escalating on words already read.
+
+Escalation leaves the customer with silence until a person arrives. That is deliberate for now: an agent's parting words to an angry customer are the words most likely to make things worse. A holding message needs per-workspace wording and waits for templates in Phase 11.
+
+Existing agents escalate by default, because the migration adds `escalation_sentiment` with a server default of `angry` rather than a null. A workspace that never touches its configuration still gets an angry customer in front of a person; one that does not want that sets the column to null.

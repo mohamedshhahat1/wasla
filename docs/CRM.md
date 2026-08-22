@@ -2,7 +2,7 @@
 
 Scope: contacts, conversations, human handoff, leads, and follow-ups.
 
-Conversations, contacts and handoff are implemented (Phase 4). Leads are implemented (Phase 7). Follow-ups are implemented (Phase 8). Sentiment is **Status: Planned** — see [../TASKS.md](../TASKS.md) phase 10.
+Conversations, contacts and handoff are implemented (Phase 4). Leads are implemented (Phase 7). Follow-ups are implemented (Phase 8). Sentiment and automatic escalation are implemented (Phase 10) and documented in full in [SENTIMENT.md](SENTIMENT.md).
 
 ## Conversations
 
@@ -131,4 +131,10 @@ A polling worker sweeps every 30 seconds for rows whose time has come, claiming 
 
 ## Sentiment and priority
 
-**Status: Planned.** Sentiment (`positive`, `neutral`, `negative`, `angry`), sentiment score, priority, detected intent and confidence, stored per conversation. Strongly negative sentiment will raise priority, may flag the conversation, may trigger handoff, and will emit an analytics event ([ANALYTICS.md](ANALYTICS.md)).
+**Status: Implemented.** Full detail in [SENTIMENT.md](SENTIMENT.md); the short version follows.
+
+Every customer message is classified — `positive`, `neutral`, `negative` or `angry`, with a score, an intent and a confidence — before an agent is allowed to answer it. The current reading sits on the conversation, which is what the inbox filters on; every reading is kept on `message_sentiments`, which is the audit trail and the time series [ANALYTICS.md](ANALYTICS.md) will count.
+
+A bad reading raises priority (`negative` → `high`, `angry` → `urgent`) and never lowers it; a person gives it back through `POST /conversations/{id}/priority`. Above the agent's configured threshold and above a confidence floor it also hands the conversation to a human and stops the agent replying, with a reason that says the handoff was automatic.
+
+Escalation analytics events are not written yet: there is no analytics event table until Phase 12, and `message_sentiments` already carries the timestamped rows those counts will read.

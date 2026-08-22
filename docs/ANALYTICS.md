@@ -14,6 +14,8 @@ Usage is tenant-isolated, recorded from services rather than routes, and aggrega
 
 Planned events: `message_received`, `message_sent`, `conversation_created`, `lead_created`, `lead_qualified`, `handoff`, `appointment_created`, `follow_up_sent`, `agent_response`, `customer_angry`, `campaign_sent`, `campaign_delivered`.
 
+`customer_angry` has a head start. Phase 10 already writes one timestamped, tenant-scoped row per classified message to `message_sentiments`, carrying the label, the score, the intent and whether it escalated ([SENTIMENT.md](SENTIMENT.md)). That is the series this event would count, so no second write was added here: doing so now would mean migrating two shapes later.
+
 ## Tenant metrics
 
 Conversations, messages, leads, qualified leads, conversion rate, human handoffs, AI resolution rate, average response time, unhappy customers, agent performance, campaign performance. Tenant-level usage counters: `messages_received`, `messages_sent`, `ai_requests`, `input_tokens`, `output_tokens`, `total_tokens`, `rag_queries`, `media_processed`, `voice_minutes`, `leads_created`, `conversations_created`, `storage_used`, API requests, campaign messages.

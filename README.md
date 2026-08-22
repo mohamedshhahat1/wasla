@@ -6,7 +6,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 
 ## Project status
 
-**Phases 0 through 9 are complete.** Phase 10 (sentiment and escalation) is next. The table below reflects the actual state of the code, not the roadmap.
+**Phases 0 through 10 are complete.** Phase 11 (campaigns and templates) is next. The table below reflects the actual state of the code, not the roadmap.
 
 | Area | Status |
 | --- | --- |
@@ -14,7 +14,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Documentation protocol (`Documentation_Protocol.md`) | Implemented |
 | Project memory (`README` / `ARCHITECTURE` / `TASKS` / `DECISIONS`, `docs/`) | Implemented |
 | Application foundation (FastAPI, config, logging, errors, DB, Redis, health, Docker, CI) | Implemented |
-| Domain models and migrations (`0001`–`0010`) | Implemented |
+| Domain models and migrations (`0001`–`0011`) | Implemented |
 | Multi-tenancy, authentication, workspace RBAC, invitations | Implemented |
 | WhatsApp Cloud API (webhook, signatures, idempotency, outbound client) | Implemented |
 | Conversations, inbox, human handoff, templates, cursor paging | Implemented |
@@ -23,7 +23,8 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | CRM and leads (capture, lifecycle, assignment, notes, activity timeline, `record_lead_details`) | Implemented |
 | Follow-ups (scheduling, cancel-on-reply, window and template compliance, polling worker) | Implemented |
 | Media (download, storage, vision, transcription, documents, outbound attachments) | Implemented |
-| Sentiment, campaigns | Planned |
+| Sentiment, priority and automatic escalation to a human | Implemented |
+| Campaigns and templates | Planned |
 | Usage, analytics, plans, subscriptions, billing | Planned |
 | Platform owner administration layer | Planned |
 | Worker process (media, agent, ingestion and follow-up loops in one container) | Implemented |
@@ -64,6 +65,7 @@ Planned for later phases:
 | [docs/RAG.md](docs/RAG.md) | Knowledge base, ingestion, tenant-scoped retrieval |
 | [docs/CRM.md](docs/CRM.md) | Contacts, leads, follow-ups, human handoff |
 | [docs/MEDIA.md](docs/MEDIA.md) | Attachments: storage, understanding, sending |
+| [docs/SENTIMENT.md](docs/SENTIMENT.md) | Sentiment, priority, automatic escalation |
 | [docs/BILLING.md](docs/BILLING.md) | Plans, subscriptions, entitlements, invoicing |
 | [docs/ANALYTICS.md](docs/ANALYTICS.md) | Analytics events, usage tracking, dashboards |
 | [docs/API.md](docs/API.md) | API conventions and endpoint catalogue |

@@ -2,7 +2,7 @@
 
 **Status: Implemented** — an agent answers a customer end to end. Knowledge retrieval (Phase 6), usage recording (Phase 12) and a worker process of its own (Phase 8) are not built. Decisions: ADR-007, ADR-014, ADR-015.
 
-Scope: agent configuration, orchestration, tool calling, and conversation memory. What an agent sees of an attached file is covered in [MEDIA.md](MEDIA.md).
+Scope: agent configuration, orchestration, tool calling, and conversation memory. What an agent sees of an attached file is covered in [MEDIA.md](MEDIA.md); when an agent is stopped from replying at all, in [SENTIMENT.md](SENTIMENT.md).
 
 ## Agent configuration
 
@@ -95,7 +95,7 @@ Retries are the inverse of the WhatsApp client's — 429, transport errors and 5
 
 Implemented:
 
-- `request_human_handoff` — hands the conversation to a person with a reason of at most 200 characters and stops the loop.
+- `request_human_handoff` — hands the conversation to a person with a reason of at most 200 characters and stops the loop. A conversation can also be handed over without the agent asking: see [SENTIMENT.md](SENTIMENT.md), where the classifier decides before the agent composes anything.
 - `search_knowledge` — searches this workspace's own documents and returns the matching passages, or an explicit statement that nothing was found. The tenant id comes from the tool context, never from an argument: a tenant id a model could supply is a tenant id a model could change. Details in [RAG.md](RAG.md).
 - `schedule_follow_up` — arranges to message the customer again later if they go quiet. Names no follow-up: the nudge belongs to the conversation the turn is already in, and calling it again reschedules rather than queueing a second message. A delay outside the permitted bounds comes back as text the model can correct on its next turn. Details in [CRM.md](CRM.md).
 - `record_lead_details` — saves what the customer said about themselves onto their lead. Every argument is optional, because extraction is partial by nature: a name arrives in one message and a budget three messages later, and a required field would push the model into inventing one. The tool offers no way to name a lead, set a status or set a score — it reports what it heard, and the service resolves which lead that is from the conversation's contact. Fields a person entered are never overwritten. Details in [CRM.md](CRM.md).

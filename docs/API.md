@@ -84,7 +84,7 @@ All conversation routes are available to any member of the workspace. Restrictin
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/v1/conversations` | Open conversations, most recently active first |
+| GET | `/api/v1/conversations` | Open conversations, most recently active first; `?priority=` narrows |
 | GET | `/api/v1/conversations/{conversation_id}` | One conversation |
 | GET | `/api/v1/conversations/{conversation_id}/messages` | Messages, most recent first |
 | POST | `/api/v1/conversations/{conversation_id}/messages` | Send free text (`201`) |
@@ -92,16 +92,19 @@ All conversation routes are available to any member of the workspace. Restrictin
 | POST | `/api/v1/conversations/{conversation_id}/messages/media` | Send an attachment, multipart (`201`) |
 | GET | `/api/v1/conversations/{conversation_id}/media/{media_id}` | Download a stored attachment |
 | POST | `/api/v1/conversations/{conversation_id}/mode` | Switch between AI and human handling |
+| POST | `/api/v1/conversations/{conversation_id}/priority` | Set priority by hand |
 | POST | `/api/v1/conversations/{conversation_id}/assignment` | Assign, or clear the assignment |
 | POST | `/api/v1/conversations/{conversation_id}/close` | Close the conversation |
 | POST | `/api/v1/conversations/{conversation_id}/reopen` | Reopen it |
 
-Three behaviours worth knowing before integrating:
+Four behaviours worth knowing before integrating:
 
 - **Free text is only accepted inside the 24-hour service window.** Outside it, Meta accepts approved templates only, so the free-text route answers `422` and the template route still works. Every conversation read includes `service_window_open`, so a client can disable its composer instead of discovering the rule by failing a send.
 - **A rejected send answers `201`, with the message in `failed` state.** The message row is written before Meta is called, and a rejection is recorded on that row. Raising instead would roll the request back and destroy the only evidence the attempt was made. A missing platform credential does raise `503`, because nothing was attempted. Callers should read `status` rather than relying on the response code.
 
 - **A template message has no `body`.** It carries `template_name` and `template_language` instead, and `kind` is `template`. Meta renders the wording from its own approved copy, so Wasla has no text to return; a client should render the template it identifies rather than expecting the words the customer saw. Both fields are null on every other kind.
+
+- **Priority is raised automatically and lowered only by a person.** Every customer message is classified before an agent answers it; a negative or angry reading raises `priority` and may hand the conversation to a human. Nothing lowers it again, because a conversation quietly demoted out of somebody's queue is one nobody looks at. `POST .../priority` is the way back. The read model carries `sentiment`, `sentiment_score`, `intent` and `intent_confidence` so a client can show why a conversation is flagged. See [SENTIMENT.md](SENTIMENT.md).
 
 Conversations carry identifiers rather than embedded contact objects. The models declare no ORM relationships deliberately: a lazy load inside an async request is blocking I/O that only becomes visible under load.
 

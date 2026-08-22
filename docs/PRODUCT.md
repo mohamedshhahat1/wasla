@@ -32,16 +32,18 @@ Customer message -> webhook -> tenant resolved -> contact resolved
 
 | Capability | Status |
 | --- | --- |
-| WhatsApp Business Cloud API messaging | Planned |
-| Configurable AI agents (sales, support, booking) | Planned |
-| Knowledge base with tenant-scoped RAG | Planned |
-| Conversation inbox and human handoff | Planned |
-| Automatic lead capture and qualification | Planned |
-| Follow-ups | Planned |
+| WhatsApp Business Cloud API messaging | Implemented |
+| Configurable AI agents (sales, support, booking) | Implemented |
+| Knowledge base with tenant-scoped RAG | Implemented |
+| Conversation inbox and human handoff | Implemented |
+| Automatic lead capture and qualification | Implemented |
+| Follow-ups | Implemented |
+| Attachments: images, voice notes, documents | Implemented |
+| Sentiment, priority and automatic escalation | Implemented |
+| Team management with tenant-scoped roles | Implemented |
 | Campaigns and templates | Planned |
 | Analytics and usage dashboards | Planned |
 | Plans, subscriptions, billing | Planned |
-| Team management with tenant-scoped roles | Planned |
 
 ## Out of scope for now
 
