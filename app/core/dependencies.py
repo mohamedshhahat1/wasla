@@ -31,10 +31,36 @@ def get_redis(request: Request) -> RedisClient:
     return cast(RedisClient, request.app.state.redis)
 
 
+# Where the request's session is parked so the route wrapper can find it. A
+# dependency cannot hand anything back to the layer above it, and the commit has
+# to happen there - see `CommittingRoute`.
+SESSION_STATE_ATTRIBUTE = "db_session"
+
+
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
-    """Yield a request-scoped session that commits or rolls back on exit."""
+    """Yield a request-scoped session.
+
+    The commit does **not** happen here, and that is the point. This is a
+    ``yield`` dependency, so its teardown runs after the response has already
+    reached the client - measurably so: with a commit costing a network round
+    trip and an fsync, the API answers ``201 Created`` tens of milliseconds
+    before the write is durable.
+
+    Two consequences, and the second is the serious one. A client that acts on
+    the response immediately can read back nothing - a token minted by
+    ``/auth/register`` was rejected for ~50 ms, which looks like a broken
+    product. And a commit that *fails* after the response has been sent leaves
+    the caller holding a success for something that did not happen.
+
+    So the session is parked on the request and committed by
+    :class:`~app.api.route.CommittingRoute`, which runs inside the handler
+    chain. The context manager below still owns the rollback: an exception
+    unwinds through it and the transaction is discarded, which is exactly where
+    that belongs.
+    """
     database = get_database(request)
     async with database.session() as session:
+        setattr(request.state, SESSION_STATE_ATTRIBUTE, session)
         yield session
 
 

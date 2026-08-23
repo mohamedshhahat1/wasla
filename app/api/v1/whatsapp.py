@@ -11,6 +11,7 @@ import uuid
 
 from fastapi import APIRouter, status
 
+from app.api.route import CommittingRoute
 from app.api.dependencies import (
     ActiveWorkspaceDep,
     NumberSlotDep,
@@ -24,7 +25,9 @@ from app.schemas.whatsapp import (
     WhatsAppAccountResponse,
 )
 
-router = APIRouter(prefix="/whatsapp/accounts", tags=["WhatsApp"])
+router = APIRouter(
+    route_class=CommittingRoute, prefix="/whatsapp/accounts", tags=["WhatsApp"]
+)
 
 
 @router.post(

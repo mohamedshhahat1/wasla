@@ -22,6 +22,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query, status
 
 from app.api.dependencies import ActiveWorkspaceDep, FollowUpServiceDep
+from app.api.route import CommittingRoute
 from app.core.pagination import MAX_CURSOR_LENGTH
 from app.db.models.follow_up import FollowUpStatus
 from app.schemas.conversation import CursorPage
@@ -31,7 +32,7 @@ from app.schemas.follow_up import (
     FollowUpRead,
 )
 
-router = APIRouter(prefix="/follow-ups", tags=["follow-ups"])
+router = APIRouter(route_class=CommittingRoute, prefix="/follow-ups", tags=["follow-ups"])
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]

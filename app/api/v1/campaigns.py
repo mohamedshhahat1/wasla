@@ -19,6 +19,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query, status
 
 from app.api.dependencies import ActiveWorkspaceDep, CampaignServiceDep, TenantAdminDep
+from app.api.route import CommittingRoute
 from app.core.pagination import MAX_CURSOR_LENGTH
 from app.db.models.campaign import CampaignStatus, RecipientStatus
 from app.schemas.campaign import (
@@ -34,7 +35,7 @@ from app.schemas.campaign import (
 )
 from app.schemas.conversation import CursorPage
 
-router = APIRouter(prefix="/campaigns", tags=["campaigns"])
+router = APIRouter(route_class=CommittingRoute, prefix="/campaigns", tags=["campaigns"])
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]

@@ -18,6 +18,7 @@ routers are limited is the decision worth being able to read in one place
 
 from fastapi import APIRouter, Depends
 
+from app.api.route import CommittingRoute
 from app.api.rate_limits import campaign_rate_limit, workspace_rate_limit
 from app.api.v1 import (
     agents,
@@ -88,7 +89,7 @@ UNLIMITED_ROUTERS = (
     webhooks.router,
 )
 
-api_router = APIRouter()
+api_router = APIRouter(route_class=CommittingRoute)
 
 for router in WORKSPACE_ROUTERS:
     api_router.include_router(router, dependencies=[_WORKSPACE_LIMIT])

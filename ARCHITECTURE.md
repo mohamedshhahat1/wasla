@@ -641,3 +641,26 @@ The workflows are themselves under test (`tests/unit/test_delivery_pipeline.py`)
 TLS is documented rather than shipped, because a certificate is issued to a domain this repository does not know and a self-signed one would look like TLS while failing every client that checks. `nginx/nginx.conf` contains the HTTP listener with the ACME challenge served *before* the redirect to HTTPS — a redirect to a certificate that does not yet exist cannot be verified, which is the deadlock a first issuance runs into — and a complete TLS server block, commented out so that `nginx -t` fails loudly if it is enabled before certificates exist rather than silently serving plaintext.
 
 Details in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); what to do when it goes wrong is in [docs/RUNBOOK.md](docs/RUNBOOK.md).
+
+## The request's unit of work
+
+One request is one transaction, and **the commit happens inside the handler
+chain rather than in the session dependency's teardown**.
+
+That distinction is not stylistic. A `yield` dependency's teardown runs after
+the response has reached the client, so committing there means the API answers
+before the write is durable — measured at 25-75 ms against a containerised
+PostgreSQL, long enough that a token from `POST /auth/register` was rejected by
+the client's very next call. Worse than the timing: a commit that fails
+afterwards leaves the caller holding a success for something that never
+happened.
+
+`app/api/route.py` holds `CommittingRoute`, which every router declares.
+`app/core/dependencies.get_session` parks the session on the request and does
+not commit; `app/db/session.Database.session` keeps the rollback, because an
+exception should unwind past the handler rather than be interpreted by it. The
+workers use `Database.session` directly, where its commit *is* the unit of work.
+
+It cannot be observed through the in-process ASGI transport the test suite
+otherwise uses, so `tests/integration/test_commit_boundary.py` runs a real
+socket.

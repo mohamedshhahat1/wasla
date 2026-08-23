@@ -68,7 +68,15 @@ class Database:
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
-        """Yield a session, committing on success and rolling back on failure."""
+        """Yield a session, committing on success and rolling back on failure.
+
+        Used directly by the workers, where this *is* the unit of work. Requests
+        take a different path: they commit inside the handler chain rather than
+        here, because a commit in this teardown finishes after the response has
+        already been sent (see `app.core.dependencies.get_session`). The commit
+        below is then a no-op for them - the transaction is already closed - and
+        the rollback still does its job on the way out of an exception.
+        """
         session = self._session_factory()
         try:
             yield session

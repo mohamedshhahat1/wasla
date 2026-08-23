@@ -19,10 +19,11 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from app.api.dependencies import TenantAdminDep, UsageServiceDep
+from app.api.route import CommittingRoute
 from app.db.models.usage import UsageEventType
 from app.schemas.usage import UsageSeriesRead, UsageSummaryRead
 
-router = APIRouter(prefix="/usage", tags=["usage"])
+router = APIRouter(route_class=CommittingRoute, prefix="/usage", tags=["usage"])
 
 SinceQuery = Annotated[datetime | None, Query(description="Start of the window, inclusive (UTC)")]
 UntilQuery = Annotated[datetime | None, Query(description="End of the window, exclusive (UTC)")]

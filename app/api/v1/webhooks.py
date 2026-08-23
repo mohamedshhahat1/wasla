@@ -22,6 +22,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import PlainTextResponse
 
+from app.api.route import CommittingRoute
 from app.core.config import Settings
 from app.core.dependencies import RedisDep, SessionDep, SettingsDep
 from app.core.exceptions import DependencyUnavailableError, PermissionDeniedError
@@ -35,7 +36,7 @@ logger = get_logger(__name__)
 
 SUBSCRIBE_MODE = "subscribe"
 
-router = APIRouter(prefix="/webhooks/whatsapp", tags=["WhatsApp"])
+router = APIRouter(route_class=CommittingRoute, prefix="/webhooks/whatsapp", tags=["WhatsApp"])
 
 
 # This provider lives here rather than in app/api/dependencies.py because that

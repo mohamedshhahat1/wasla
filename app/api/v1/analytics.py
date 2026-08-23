@@ -19,9 +19,10 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from app.api.dependencies import ActiveWorkspaceDep, AnalyticsServiceDep, InboxServiceDep
+from app.api.route import CommittingRoute
 from app.schemas.analytics import AnalyticsEventRead, TenantAnalyticsRead
 
-router = APIRouter(prefix="/analytics", tags=["analytics"])
+router = APIRouter(route_class=CommittingRoute, prefix="/analytics", tags=["analytics"])
 
 SinceQuery = Annotated[datetime | None, Query(description="Start of the window, inclusive (UTC)")]
 UntilQuery = Annotated[datetime | None, Query(description="End of the window, exclusive (UTC)")]

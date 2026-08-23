@@ -14,6 +14,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Response, status
 
 from app import __version__
+from app.api.route import CommittingRoute
 from app.core.dependencies import DatabaseDep, RedisDep, SettingsDep
 from app.schemas.health import (
     ComponentStatus,
@@ -23,7 +24,7 @@ from app.schemas.health import (
 )
 from app.services.health_service import HealthService
 
-router = APIRouter(prefix="/health", tags=["health"])
+router = APIRouter(route_class=CommittingRoute, prefix="/health", tags=["health"])
 
 
 def get_health_service(

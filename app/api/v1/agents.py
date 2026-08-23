@@ -12,6 +12,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query, status
 
 from app.api.dependencies import AgentServiceDep, AgentSlotDep, TenantAdminDep
+from app.api.route import CommittingRoute
 from app.schemas.agent import (
     AgentCreate,
     AgentRead,
@@ -22,7 +23,7 @@ from app.schemas.agent import (
 )
 from app.services.agent_service import UNSET
 
-router = APIRouter(prefix="/agents", tags=["agents"])
+router = APIRouter(route_class=CommittingRoute, prefix="/agents", tags=["agents"])
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 

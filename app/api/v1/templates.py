@@ -16,6 +16,7 @@ import uuid
 from fastapi import APIRouter
 
 from app.api.dependencies import ActiveWorkspaceDep, TemplateServiceDep, TenantAdminDep
+from app.api.route import CommittingRoute
 from app.db.models.whatsapp_template import TemplateCategory, TemplateStatus
 from app.schemas.whatsapp_template import (
     TemplateListResponse,
@@ -23,7 +24,7 @@ from app.schemas.whatsapp_template import (
     TemplateSyncResponse,
 )
 
-router = APIRouter(prefix="/templates", tags=["templates"])
+router = APIRouter(route_class=CommittingRoute, prefix="/templates", tags=["templates"])
 
 
 @router.get("", summary="List approved and pending templates")

@@ -26,6 +26,7 @@ from app.api.dependencies import (
     KnowledgeServiceDep,
     TenantAdminDep,
 )
+from app.api.route import CommittingRoute
 from app.schemas.knowledge import (
     DocumentCreateRequest,
     DocumentRead,
@@ -34,7 +35,7 @@ from app.schemas.knowledge import (
     KnowledgeBaseRead,
 )
 
-router = APIRouter(prefix="/knowledge", tags=["knowledge"])
+router = APIRouter(route_class=CommittingRoute, prefix="/knowledge", tags=["knowledge"])
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 

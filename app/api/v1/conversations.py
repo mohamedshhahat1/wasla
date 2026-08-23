@@ -23,6 +23,7 @@ from app.api.dependencies import (
     MessagingServiceDep,
     SentimentServiceDep,
 )
+from app.api.route import CommittingRoute
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import MAX_CURSOR_LENGTH
 from app.db.models.sentiment import ConversationPriority
@@ -37,7 +38,7 @@ from app.schemas.conversation import (
     SendTextRequest,
 )
 
-router = APIRouter(prefix="/conversations", tags=["conversations"])
+router = APIRouter(route_class=CommittingRoute, prefix="/conversations", tags=["conversations"])
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 # Opaque to callers: it comes from a previous page's `next_cursor` and is not

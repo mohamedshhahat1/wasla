@@ -19,10 +19,11 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from app.api.dependencies import AuditLogRepositoryDep, TenantAdminDep
+from app.api.route import CommittingRoute
 from app.db.models.audit import AuditAction
 from app.schemas.audit import AuditEntryRead
 
-router = APIRouter(prefix="/audit-logs", tags=["audit"])
+router = APIRouter(route_class=CommittingRoute, prefix="/audit-logs", tags=["audit"])
 
 LimitQuery = Annotated[int, Query(ge=1, le=200)]
 SinceQuery = Annotated[datetime | None, Query(description="Start of the window, inclusive (UTC)")]

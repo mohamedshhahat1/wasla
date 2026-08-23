@@ -19,9 +19,10 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from app.api.dependencies import InvoiceServiceDep, TenantOwnerDep
+from app.api.route import CommittingRoute
 from app.schemas.invoice import InvoiceRead, PaymentRead
 
-router = APIRouter(prefix="/invoices", tags=["billing"])
+router = APIRouter(route_class=CommittingRoute, prefix="/invoices", tags=["billing"])
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 

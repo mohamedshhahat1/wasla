@@ -23,6 +23,7 @@ from app.api.dependencies import (
     SubscriptionServiceDep,
     TenantOwnerDep,
 )
+from app.api.route import CommittingRoute
 from app.schemas.billing import (
     CancellationRequest,
     EntitlementRead,
@@ -34,7 +35,7 @@ from app.schemas.billing import (
 from app.services.entitlement_service import EntitlementService
 from app.services.subscription_service import SubscriptionService
 
-router = APIRouter(prefix="/billing", tags=["billing"])
+router = APIRouter(route_class=CommittingRoute, prefix="/billing", tags=["billing"])
 
 
 async def _state(

@@ -22,6 +22,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query, status
 
 from app.api.dependencies import ActiveWorkspaceDep, LeadServiceDep, TenantAdminDep
+from app.api.route import CommittingRoute
 from app.core.pagination import MAX_CURSOR_LENGTH
 from app.db.models.lead import LeadSource, LeadStatus
 from app.repositories.lead_repository import LeadFilters
@@ -40,7 +41,7 @@ from app.schemas.lead import (
     LeadUpdateRequest,
 )
 
-router = APIRouter(prefix="/leads", tags=["leads"])
+router = APIRouter(route_class=CommittingRoute, prefix="/leads", tags=["leads"])
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]

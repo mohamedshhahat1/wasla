@@ -19,9 +19,10 @@ import uuid
 from fastapi import APIRouter
 
 from app.api.dependencies import ActiveWorkspaceDep, CampaignServiceDep, TenantAdminDep
+from app.api.route import CommittingRoute
 from app.schemas.campaign import ContactOptOutRead, OptOutRequest
 
-router = APIRouter(prefix="/contacts", tags=["contacts"])
+router = APIRouter(route_class=CommittingRoute, prefix="/contacts", tags=["contacts"])
 
 
 @router.post("/{contact_id}/opt-out", summary="Record that a customer wants no campaigns")

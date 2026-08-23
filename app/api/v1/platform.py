@@ -33,6 +33,7 @@ from app.api.dependencies import (
     PlatformInvoiceServiceDep,
     PlatformStaffDep,
 )
+from app.api.route import CommittingRoute
 from app.db.models.audit import AuditAction
 from app.db.models.enums import TenantStatus
 from app.platform.platform_analytics import DEFAULT_PAGE, MAX_PAGE
@@ -46,7 +47,7 @@ from app.schemas.invoice import (
 )
 from app.schemas.platform import PlatformOverviewRead, WorkspacePageRead
 
-router = APIRouter(prefix="/platform", tags=["platform"])
+router = APIRouter(route_class=CommittingRoute, prefix="/platform", tags=["platform"])
 
 SinceQuery = Annotated[datetime | None, Query(description="Start of the window, inclusive (UTC)")]
 UntilQuery = Annotated[datetime | None, Query(description="End of the window, exclusive (UTC)")]

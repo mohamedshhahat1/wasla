@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, status
 
 from app.api.dependencies import InvitationServiceDep, SeatDep, TenantAdminDep
 from app.api.rate_limits import auth_rate_limit, workspace_rate_limit
+from app.api.route import CommittingRoute
 from app.db.models import TenantInvitation
 from app.schemas.auth import WorkspaceSummary
 from app.schemas.invitation import (
@@ -18,7 +19,7 @@ from app.schemas.invitation import (
     InvitationResponse,
 )
 
-router = APIRouter(prefix="/invitations", tags=["Invitations"])
+router = APIRouter(route_class=CommittingRoute, prefix="/invitations", tags=["Invitations"])
 
 # Declared per route rather than on the router, because `/accept` must stay
 # reachable without credentials and the workspace guard resolves the whole
