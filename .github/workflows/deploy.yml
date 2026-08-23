@@ -124,7 +124,7 @@ jobs:
         # the finding is visible, and the deploy job below refuses to ship it.
         # Blocking the push instead would mean a critical CVE in a base image
         # also destroys the ability to roll forward with a fix.
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.reference.outputs.image }}
           format: table
