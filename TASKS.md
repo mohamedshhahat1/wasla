@@ -453,10 +453,21 @@ Deferred by decision, not unfinished:
       race invalidates the account's whole token estate
 - [x] `JWT_ALGORITHM` constrained to the HMAC family, so `none` and the
       asymmetric families cannot be configured
-- [ ] Re-verify number ownership on a schedule. It is proven once, at claim time;
-      a number that moves at Meta afterwards is not noticed, and rows claimed
-      before ADR-037 carry no proof at all
+- [x] DNS rebinding on outbound fetches — ADR-040. Reproduced (the validator
+      allowed a URL and the connection returned a loopback service's body), then
+      closed by pinning every outbound connection to a validated address
+- [x] Redis fail-open on the authentication limiter — ADR-040. Capacity limits
+      still fail open; credential limits fall back to a bounded process-local
+      counter. Failing closed was rejected as attacker-triggerable
+- [x] `POST /auth/logout` rate-limited, and deliberately still unauthenticated
+- [x] Re-verify a number already held — ADR-041. Rows claimed before ADR-037 had
+      no way to gain proof except release-and-reclaim, which frees the number
+      platform-wide in between
+- [ ] Re-verify number ownership on a *schedule*. The mechanism now exists
+      (ADR-041); only the trigger is missing, so a number that moves at Meta
+      after the fact still goes unnoticed
 - [ ] Streaming size cap on media download: the limit is enforced once the body
       is in memory rather than while it arrives
-- [ ] DNS rebinding on outbound fetches, which needs the connection pinned to the
-      address that was validated
+- [ ] Registration account enumeration (W-12) — accepted, not fixed. Needs the
+      same email delivery channel password reset is blocked on; see ADR-040 for
+      why merging the conflict messages would be theatre

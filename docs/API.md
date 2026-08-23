@@ -81,6 +81,7 @@ Only the hash of an invitation token is stored, so a database disclosure does no
 | GET | `/api/v1/whatsapp/accounts` | List connected numbers | Workspace member |
 | POST | `/api/v1/whatsapp/accounts/{account_id}/disable` | Stop accepting traffic | Tenant admin |
 | POST | `/api/v1/whatsapp/accounts/{account_id}/enable` | Resume accepting traffic | Tenant admin |
+| POST | `/api/v1/whatsapp/accounts/{account_id}/verify` | Prove control of a number already held (ADR-041) | Tenant admin |
 | POST | `/api/v1/whatsapp/accounts/{account_id}/release` | Give the number up, keeping its history | Tenant admin |
 
 `phone_number_id` is unique across the platform, not per workspace: it is how an inbound webhook is attributed to a workspace, so two workspaces claiming one number would make attribution ambiguous.

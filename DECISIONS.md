@@ -1054,3 +1054,83 @@ Logging out and then refreshing with the same token is treated as a replay, beca
 `RefreshTokenStore.spend` is the refresh path's primitive; `revoke` remains for logout, where "it was already revoked" is not an error and there is nothing to detect. `is_revoked` stays as a read for callers that only want to know.
 
 The audit entry is platform-level, with no tenant: an account is a global identity, and a leak is not one workspace's business.
+
+## ADR-040 — A Degraded Dependency Degrades the Limit, It Does Not Remove It
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Split rate-limit policies by what they protect. A limit on shared capacity keeps failing open when Redis is unreachable. A limit in front of a credential falls back to a bounded process-local counter. Pin every outbound HTTP connection to an address that was validated, rather than validating a name and connecting to it. Rate-limit `POST /auth/logout` instead of authenticating it. Accept registration enumeration as a bounded, documented leak.
+
+Context:
+Four of the residual findings from the previous pass turned out to share one question — *what should happen when the control cannot be applied?* — and the honest answer differs by control, so they are recorded together.
+
+**DNS rebinding was real, not theoretical.** `validate_outbound_url` resolved a host, refused private addresses, and then handed the *name* to httpx, which resolved it again when it opened the socket. Reproduced against this codebase with a resolver answering public once and loopback afterwards: the validator allowed the URL and the connection returned the body of a service on 127.0.0.1.
+
+**The rate limiter failed open on every Redis failure** — connection refused, timeout and authentication failure alike, all measured. That included the two policies in front of `/auth/login`, which are the only anti-automation controls the product has.
+
+**`/auth/logout` was unauthenticated and unlimited.** **Registration answers 409 for a taken address**, which is an enumeration oracle.
+
+Reason:
+**A name is not a destination, so the connection must be pinned.** Validating a hostname proves something about a lookup, not about a socket. `GuardedTransport` resolves once, judges every address the name answers with, and rewrites the request to an address literal — which anyio connects to directly. The decisive property is not that a rebind is refused but that **there is no second resolution to poison**, and that is what the regression test asserts: zero resolutions at the connection layer.
+
+**Pinning the route must not weaken the identity check.** The `Host` header keeps the original authority and `sni_hostname` keeps the original server name, so the certificate is still verified against the host the caller asked for. A transport that connected to an IP and verified against that IP would have traded one hole for a larger one.
+
+**Every outbound client is guarded, not only the one that needs it.** Only the WhatsApp media fetch uses a URL this application did not build. The others are guarded anyway so that "which of our clients can be aimed at the deployment network?" has the answer "none" rather than a list that goes stale the first time somebody adds an integration.
+
+**Fail-open and fail-closed are both wrong answers to "Redis is down"; the right one depends on the control.** A workspace throughput limit protects shared capacity, and refusing a paying customer's colleagues in order to protect capacity that is not currently contended *is* the outage. A login limit protects a credential, and allowing it means unlimited password attempts for the duration. Failing closed on the credential path was considered and rejected twice over: it makes signing in impossible whenever the cache is down, and it is *attacker-triggerable* — anyone able to degrade Redis would convert that into a denial of service against authentication.
+
+**So the credential policies count in-process instead.** It is not a distributed limit and does not pretend to be: with N API processes an attacker gets N budgets. What it does is turn "unlimited until somebody notices" into a small bounded number, and it can never cause an outage of its own because it refuses nothing the policy would not already refuse. The store is capacity-bounded and prunes expired windows before live ones, so it cannot become a memory-exhaustion primitive.
+
+**Refresh-token spending stays fail-closed, and that asymmetry is the point.** Reuse detection *is* the atomic write, so when Redis cannot answer, whether a token has been spent is unknowable — and issuing a fresh pair on an unknown is precisely the case ADR-039 exists to catch. It raises, the request becomes a 5xx, and nothing is issued.
+
+**Logout is limited rather than authenticated.** Requiring an access token would break it exactly when it is used: the access token has expired, which is why somebody is signing out. And it would add nothing against the adversary it appears to guard — somebody holding a victim's refresh token can exchange it for a live session, which is strictly worse than revoking it. What was actually missing is a budget, because the endpoint verifies a JWT signature for any caller.
+
+**Registration enumeration is accepted, and merging the error messages was rejected as theatre.** The attacker chooses the workspace slug, so a unique slug makes a 409 mean "that address exists" whatever the wording says — while a merged message would leave a real person unable to tell which of their two fields was wrong. The only real fix is to stop creating the account synchronously and confirm through the address instead, which needs a delivery channel this deployment does not have (see ADR-036 on password reset, for the same reason). Security theatre that costs usability is worse than an honest bounded leak.
+
+Consequences:
+The exposure that remains on registration is bounded by the client-address limit, and since this ADR that bound survives a Redis outage too. It discloses account *existence* and nothing else — no tenant data, no identifiers — and a test pins the blast radius so it cannot silently widen.
+
+Login and invitation acceptance were measured and are not enumerable: identical status, code and message, and a timing gap of 0.76 ms against a 58 ms verification, because a miss spends the same Argon2 work against a dummy hash.
+
+`docs/SECURITY.md` carries the final policy table. The one operational note is that the local fallback is per process, so the effective budget during a Redis outage scales with the number of API processes — deliberate, and preferable to either alternative.
+
+## ADR-041 — A Number Already Held Is Proven In Place, Never By Giving It Up
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Add `POST /whatsapp/accounts/{id}/verify`, which proves control of a number the workspace already holds and stamps `ownership_verified_at`. The number comes from the row rather than from the request. Expose `ownership_verified` on the API. Do not refuse unverified numbers at send time.
+
+Context:
+ADR-037 made a claim on a number require proof, and migration 0022 left every row claimed before it with `ownership_verified_at IS NULL`. Those rows were deliberately not back-dated — a manufactured timestamp would erase exactly the list an operator needs — and deliberately not refused, because breaking every existing deployment's traffic to close a claim-time hole is the worse outage.
+
+Walking every path such a row can take turned up the gap. It can send, it can receive, and no other workspace can claim it — all correct. But `connect` refuses a number that is already claimed, so **there was no way to attach proof to it at all**. The only route was to release the number and claim it again, which frees it to the entire platform in between and hands anybody watching a race worth running.
+
+That is the worst shape a migration story can have: the safe-looking action is the dangerous one, and the administrator doing the right thing is the one exposed.
+
+Reason:
+**The number is not a parameter, and that is what keeps this from being a second way in.** It is read from the row being verified, so an administrator proving control of a number they hold can never move a claim the way `connect` grants one. A `verify` that accepted a `phone_number_id` would be `connect` with the uniqueness check removed.
+
+**Meta's answer overwrites what is stored, exactly as at claim time.** For a legacy row the business account was typed in when nothing checked it, so Meta's reply is the first trustworthy value that row has ever had. The audit entry records the previous value and whether it changed — on a legacy row that usually means the typed value was simply wrong; on an already-proven one it means the number moved, which somebody should know about.
+
+**The stored business account is not passed as an assertion to check.** Doing so would refuse precisely the rows this exists to rescue.
+
+**Released numbers cannot be verified.** Proof on a row that no longer entitles the workspace to anything is meaningless, and if somebody else now holds the number it would be a claim about their traffic.
+
+**It is not only a migration tool.** Re-proving is also how an operator establishes that a number they still hold is still theirs at Meta, and it is the only path by which a legacy row can acquire a stored credential — there is no update-credential endpoint, and `connect` refuses an already-claimed number.
+
+**The state is exposed as a boolean, not left as a null timestamp.** The security state of a number is not something an operator should have to deduce, and the set of unverified rows is the migration list.
+
+Consequences:
+An unverified number keeps working. That is the deliberate half, and a test pins it so nobody "fixes" it into an outage: the migration path is re-verification, not amputation.
+
+Ownership is still proven at a point in time rather than continuously. A number that moves at Meta after the fact is not noticed, and re-verification on a schedule remains the obvious next step — it is now cheap to build, because the mechanism exists and only the trigger is missing.

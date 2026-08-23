@@ -330,19 +330,53 @@ Confirmed behaviourally during this audit rather than by reading:
   asymmetric families were both configurable — the latter meaning the
   application would verify with `jwt_secret` as a public key.
 
+- **DNS rebinding is closed** (ADR-040). It was not theoretical: validating a
+  hostname and then handing the *name* to httpx meant two independent
+  resolutions, and a resolver answering public once and loopback afterwards got
+  the body of a service on 127.0.0.1 back. `GuardedTransport` resolves once,
+  judges every address, and connects to a literal — so there is no second
+  resolution to poison. `Host` and the TLS server name keep the original
+  hostname, because pinning the route must not weaken the identity check. Every
+  outbound client is guarded, not only the media fetch.
+- **A Redis outage no longer removes the login limit** (ADR-040). Measured
+  across connection-refused, timeout and authentication failure. Capacity limits
+  still fail open — refusing signed-in colleagues to protect uncontended
+  capacity *is* the outage — while the credential limits fall back to a bounded
+  process-local counter. Failing closed was rejected: it makes signing in
+  impossible whenever the cache is down, and anyone able to degrade Redis could
+  trigger it. Refresh-token spending was already fail-closed and stays that way.
+- **`POST /auth/logout` is rate-limited** (ADR-040), and deliberately still
+  unauthenticated: requiring an access token would break logout exactly when it
+  is used, and adds nothing against somebody holding a victim's refresh token —
+  they can exchange it, which is worse than revoking it.
+- **A number claimed before ADR-037 can be proven in place** (ADR-041). It could
+  previously only be established by releasing the number and claiming it again,
+  which frees it to the whole platform in between — the safe-looking action was
+  the dangerous one. `POST /whatsapp/accounts/{id}/verify` reads the number from
+  the row, so it cannot move a claim, and `ownership_verified` is now on the API.
+
 ## Still open
 
 - **No password reset** — blocked on email delivery, above.
-- **Ownership is proven once, at claim time.** A number that moves at Meta
-  afterwards is not noticed, and rows claimed before ADR-037 have a null
-  `ownership_verified_at`. Those are not refused at send time: breaking every
-  existing deployment's traffic to close a claim-time hole would be the worse
-  outage. The null is the list an operator re-verifies from, which is why it was
-  not back-dated. Re-verification on a schedule is the obvious next step.
+- **Ownership is proven at a point in time, not continuously.** A number that
+  moves at Meta after the fact is not noticed. Re-verification on a schedule is
+  the obvious next step and is now cheap: ADR-041 built the mechanism, and only
+  the trigger is missing. Rows claimed before ADR-037 keep working and report
+  `ownership_verified: false` until an administrator proves them.
+- **Registration discloses whether an address is taken** (W-12), accepted rather
+  than fixed. The attacker chooses the workspace slug, so a unique slug makes a
+  409 mean "that address exists" whatever the message says — merging the two
+  conflict messages would be theatre that costs a real person the ability to
+  tell which field was wrong. The only real fix is not creating the account
+  synchronously and confirming through the address, which needs the delivery
+  channel that password reset is also blocked on. Bounded by the client-address
+  limit, and that bound now survives a Redis outage (ADR-040).
+- **The credential rate-limit fallback is per process**, so the effective budget
+  during a Redis outage scales with the number of API processes. Deliberate, and
+  preferable to either alternative.
 - **Session revocation is per-user, not per-session** (ADR-036). Membership
   revocation is per-membership and does not touch tokens; the two are different
   operations on different objects.
 - **Media download is bounded after the fact**, not while streaming: the size cap
   is checked once the body is in memory. The declared size is checked first, but
   a lying server is only caught afterwards.
-- **DNS rebinding**, above.

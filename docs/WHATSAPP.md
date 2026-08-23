@@ -12,6 +12,7 @@
 | `GET /api/v1/whatsapp/accounts` | Any member | List connected numbers |
 | `POST /api/v1/whatsapp/accounts/{id}/disable` | Owner, admin | Stop accepting and sending traffic |
 | `POST /api/v1/whatsapp/accounts/{id}/enable` | Owner, admin | Resume traffic |
+| `POST /api/v1/whatsapp/accounts/{id}/verify` | Owner, admin | Prove control of a number already held |
 | `POST /api/v1/whatsapp/accounts/{id}/release` | Owner, admin | Give the number up so another workspace can claim it |
 
 The webhook sits under the versioned prefix too, so the callback URL configured in the Meta app dashboard is `https://<host>/api/v1/webhooks/whatsapp`.
@@ -68,7 +69,13 @@ It is not reversible from here. Taking the number back means proving control of 
 
 ### Numbers claimed before this existed
 
-`ownership_verified_at` is null on them, and they are left that way rather than back-dated: that null is exactly the list an operator needs in order to re-verify, and inventing a timestamp would erase it. They are not refused at send time — breaking every existing deployment's traffic to close a claim-time hole would be the worse outage. The field is returned by the API so the list is findable.
+`ownership_verified_at` is null on them and `ownership_verified` reads `false`, and they are left that way rather than back-dated: that null is exactly the list an operator needs in order to re-verify, and inventing a timestamp would erase it. They are not refused at send time — breaking every existing deployment's traffic to close a claim-time hole would be the worse outage.
+
+**`POST /whatsapp/accounts/{id}/verify` is how such a number is established** (ADR-041). Before it existed there was no way at all: `connect` refuses a number that is already claimed, so the only route was to release the number and claim it again — which frees it to the entire platform in between and hands anybody watching a race worth running. The safe-looking action was the dangerous one.
+
+The number is **not** a parameter. It is read from the row, so proving control of a number you hold can never move a claim the way connecting grants one. Everything Meta returns overwrites what is stored, exactly as at claim time — for a legacy row the business account was typed in when nothing checked it, so Meta's reply is the first trustworthy value that row has ever had, and the audit entry records what changed.
+
+It is not only a migration tool. Re-proving is how an operator establishes that a number they still hold is still theirs at Meta, and it is the only path by which a legacy number can acquire a stored credential: there is no update-credential endpoint, and `connect` refuses an already-claimed number.
 
 ## Subscription verification
 
