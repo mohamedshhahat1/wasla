@@ -44,6 +44,7 @@ from app.db.models.billing import (
     Plan,
     Subscription,
 )
+from app.db.models.enums import MembershipStatus
 from app.db.models.knowledge import Document
 from app.db.models.membership import Membership
 from app.db.models.usage import UsageEventType
@@ -210,11 +211,25 @@ class EntitlementService:
     async def _resource_count(self, key: LimitKey) -> int:
         """How many of this resource the workspace has right now.
 
-        A disabled *number* does not occupy a slot: it is connected to nothing,
-        and charging for it would be charging for nothing. Agents and documents
-        are counted whatever their state, and the asymmetry is deliberate - a
-        draft agent is still a configured agent, and a limit that ignored them
-        would be satisfied by twenty agents somebody toggles.
+        The rule is "does this still occupy something?", not "does a row
+        exist". Three cases where those differ:
+
+        A **disabled number** is connected to nothing, and a **released** one
+        has been handed back to the platform (ADR-037) - the row survives only
+        because a customer's conversations hang off it. Charging for either
+        would be charging for nothing, and counting a released number would
+        make giving a number up cost a slot forever.
+
+        A **revoked membership** is somebody who no longer has access
+        (ADR-038). Counting it would mean a workspace on a two-seat plan that
+        removed a colleague could never hire a replacement - the seat would be
+        consumed by a person who cannot sign in. Worse, it turns removal into a
+        one-way door: the fix is an upgrade, for capacity nobody is using.
+
+        Agents and documents are counted whatever their state, and the
+        asymmetry is deliberate - a draft agent is still a configured agent,
+        and a limit that ignored them would be satisfied by twenty agents
+        somebody toggles.
         """
         statement: Select[tuple[int]]
         match key:
@@ -224,6 +239,10 @@ class EntitlementService:
                     .select_from(WhatsAppAccount)
                     .where(WhatsAppAccount.tenant_id == self._tenant_id)
                     .where(WhatsAppAccount.status != WhatsAppAccountStatus.DISABLED)
+                    # Belt and braces with the status check above: `released_at`
+                    # is what the uniqueness index reads, so it is the column
+                    # that decides whether the number is actually held.
+                    .where(WhatsAppAccount.released_at.is_(None))
                 )
             case LimitKey.AGENTS:
                 statement = (
@@ -236,6 +255,7 @@ class EntitlementService:
                     select(func.count())
                     .select_from(Membership)
                     .where(Membership.tenant_id == self._tenant_id)
+                    .where(Membership.status == MembershipStatus.ACTIVE)
                 )
             case LimitKey.KNOWLEDGE_DOCUMENTS:
                 statement = (

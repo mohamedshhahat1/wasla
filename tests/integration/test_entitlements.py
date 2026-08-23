@@ -22,8 +22,11 @@ from app.db.models.billing import (
     Plan,
     SubscriptionStatus,
 )
+from app.db.models.enums import MembershipStatus, TenantRole
+from app.db.models.membership import Membership
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEventType
+from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
 from app.services.entitlement_service import EntitlementService
@@ -346,3 +349,71 @@ async def test_a_snapshot_reports_every_limit(db_session):
     assert {item.key for item in snapshot} == set(LimitKey)
     # Nothing is refused by asking: a snapshot adds nothing.
     assert all(item.allowed for item in snapshot)
+
+
+async def test_a_released_number_frees_its_slot(db_session):
+    """Giving a number back must not cost a slot forever.
+
+    A released row survives only because a customer's conversations hang off it
+    (ADR-037). Its status is `released`, not `disabled`, so the disabled check
+    above does not cover it - and a version of this that counted released rows
+    would make handing a number back a permanent charge.
+    """
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, **{LimitKey.WHATSAPP_NUMBERS: 1})
+    await _subscribe(db_session, tenant, plan)
+    db_session.add(
+        WhatsAppAccount(
+            tenant_id=tenant.id,
+            phone_number_id=f"phone-{uuid.uuid4().hex[:8]}",
+            waba_id="555000111",
+            display_phone_number="+201000000000",
+            status=WhatsAppAccountStatus.RELEASED,
+            released_at=datetime(2026, 8, 23, tzinfo=UTC),
+        )
+    )
+    await db_session.flush()
+
+    assert (await _service(db_session, tenant).check(LimitKey.WHATSAPP_NUMBERS)).used == 0
+
+
+async def test_a_revoked_member_frees_their_seat(db_session):
+    """Otherwise removal is a one-way door.
+
+    A workspace on a two-seat plan that removes a colleague could never hire a
+    replacement: the seat would be held by somebody who cannot sign in, and the
+    only fix would be paying for capacity nobody is using (ADR-038).
+    """
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, **{LimitKey.TEAM_MEMBERS: 2})
+    await _subscribe(db_session, tenant, plan)
+    present = User(email=f"present-{uuid.uuid4().hex[:8]}@example.test", is_active=True)
+    gone = User(email=f"gone-{uuid.uuid4().hex[:8]}@example.test", is_active=True)
+    db_session.add_all([present, gone])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            Membership(
+                tenant_id=tenant.id,
+                user_id=present.id,
+                role=TenantRole.TENANT_OWNER,
+                status=MembershipStatus.ACTIVE,
+            ),
+            Membership(
+                tenant_id=tenant.id,
+                user_id=gone.id,
+                role=TenantRole.MEMBER,
+                status=MembershipStatus.REVOKED,
+                revoked_at=datetime(2026, 8, 23, tzinfo=UTC),
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    entitlement = await _service(db_session, tenant).check(LimitKey.TEAM_MEMBERS)
+
+    # One seat occupied, not two: the removed person does not hold one, so the
+    # second seat is free for their replacement.
+    assert entitlement.used == 1
+    assert entitlement.allowed is True
+    assert entitlement.remaining == 1
