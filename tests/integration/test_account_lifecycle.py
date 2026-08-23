@@ -58,8 +58,23 @@ class _Redis:
         self.counters: dict[str, int] = {}
         self.expiries: dict[str, int] = {}
 
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
+    async def set(
+        self,
+        key: str,
+        value: str,
+        ex: int | None = None,
+        nx: bool = False,
+    ) -> bool | None:
+        """`nx` behaves as Redis does: no write, and None, if the key exists.
+
+        That return value is what makes `RefreshTokenStore.spend` able to
+        detect a replay, so a fake that ignored `nx` would report every test
+        green while the real detection was broken.
+        """
+        if nx and key in self.values:
+            return None
         self.values[key] = value
+        return True
 
     async def exists(self, key: str) -> int:
         return 1 if key in self.values else 0

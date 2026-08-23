@@ -87,6 +87,12 @@ class AuditAction(StrEnum):
     USER_SESSIONS_REVOKED = "user_sessions_revoked"
     # The name of an event, not a credential. Nothing here ever holds one.
     PASSWORD_CHANGED = "password_changed"  # noqa: S105
+    # A refresh token that had already been spent was presented again
+    # (ADR-039). The most security-relevant entry in this vocabulary: it is
+    # either a leak being replayed or a client bug, and the first is worth
+    # waking somebody for. The token itself is never recorded - only that a
+    # replay happened and what the version was raised to.
+    REFRESH_TOKEN_REUSED = "refresh_token_reused"  # noqa: S105
 
     # The channel a business talks to its customers through
     WHATSAPP_ACCOUNT_CONNECTED = "whatsapp_account_connected"

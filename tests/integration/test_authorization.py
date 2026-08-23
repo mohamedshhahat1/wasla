@@ -48,8 +48,14 @@ class FakeCommands:
     def __init__(self):
         self.values = {}
 
-    async def set(self, key, value, ex=None):
+    async def set(self, key, value, ex=None, nx=False):
+        # `nx` returns None without writing when the key is already there,
+        # exactly as Redis does. `RefreshTokenStore.spend` reads that to tell a
+        # first use from a replay.
+        if nx and key in self.values:
+            return None
         self.values[key] = value
+        return True
 
     async def exists(self, key):
         return 1 if key in self.values else 0

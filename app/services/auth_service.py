@@ -35,12 +35,14 @@ from app.core.security import (
 )
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, Tenant, TenantRole, User
+from app.db.models.audit import AuditAction, AuditActorKind
 from app.repositories import (
     MembershipRepository,
     TenantRepository,
     UserMembershipRepository,
     UserRepository,
 )
+from app.services.audit_service import AuditTrail
 from app.services.subscription_service import SubscriptionService
 
 logger = get_logger(__name__)
@@ -233,22 +235,41 @@ class AuthService:
         refresh_token: str,
         workspace_slug: str | None = None,
     ) -> AuthenticatedSession:
-        """Exchange a refresh token for a new pair, rotating the old one out."""
+        """Exchange a refresh token for a new pair, rotating the old one out.
+
+        The order here is the security property, not an implementation detail
+        (ADR-039).
+
+        **The token is spent before anything else happens.** `spend` is a single
+        atomic write that reports whether this caller was the first to present
+        it. Checking a denylist and then writing to it is a race: two requests
+        carrying the same token both read "unspent" and both get a fresh pair,
+        which is exactly what a stolen token used alongside the real one looks
+        like. Spending first means one of the two loses whatever the
+        interleaving, and losing *is* the detection.
+
+        **Losing tears the estate down.** A refresh token presented twice is
+        either a leak being replayed or a client bug, and there is no way to
+        tell which from here. Rotation alone would only spend whichever copy
+        arrived - usually the victim's, since the thief is the one racing - so
+        the response is to raise `token_version`, invalidating every access and
+        refresh token the account holds. Both parties are signed out; the real
+        person signs in again, and the thief has nothing left.
+        """
         claims = decode_token(
             refresh_token,
             settings=self._settings,
             expected_type=TokenType.REFRESH,
         )
-        if await self._token_store.is_revoked(claims.token_id):
-            # A spent token being presented means it leaked, or someone is
-            # replaying it. Either way nothing is issued.
-            logger.warning(
-                "auth.spent_refresh_token_presented",
-                extra={
-                    "event": "auth.spent_refresh_token_presented",
-                    "user_id": str(claims.subject),
-                },
-            )
+
+        # Spend first. Everything below this line is reached only by a caller
+        # that was the first to present this token.
+        first = await self._token_store.spend(
+            claims.token_id,
+            ttl_seconds=claims.seconds_until_expiry,
+        )
+        if not first:
+            await self._tear_down_after_reuse(claims.subject)
             raise AuthenticationError(INVALID_CREDENTIALS)
 
         user = await self._users.get_by_id(claims.subject)
@@ -256,10 +277,11 @@ class AuthService:
             raise AuthenticationError(INVALID_CREDENTIALS)
 
         if claims.token_version != user.token_version:
-            # Revocation (ADR-036), and this is the check that matters most: a
-            # refresh token lives for weeks, so rotation alone only ever spends
-            # the copy that is presented. Bumping the version is what kills the
-            # thief's chain rather than the victim's.
+            # Revocation (ADR-036). A version-stale token is not a replay: it is
+            # a token that was valid and has since been invalidated wholesale -
+            # by a password change, a sign-out-everywhere, or an earlier
+            # teardown. Refusing is enough, and bumping again would punish the
+            # holder of a merely old session for something already handled.
             logger.warning(
                 "auth.revoked_refresh_token_presented",
                 extra={
@@ -269,15 +291,68 @@ class AuthService:
             )
             raise AuthenticationError(INVALID_CREDENTIALS)
 
-        # Rotation: the presented token is spent immediately, so a stolen copy
-        # stops working as soon as the real holder refreshes once.
-        await self._token_store.revoke(
-            claims.token_id,
-            ttl_seconds=claims.seconds_until_expiry,
-        )
-
         workspace = await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
         return self._issue(user=user, workspace=workspace)
+
+    async def _tear_down_after_reuse(self, user_id: uuid.UUID) -> None:
+        """End every session this account holds, and record why.
+
+        Committed here rather than left to the request, and that is the whole
+        reason this method exists. The caller raises immediately afterwards, and
+        an exception rolls the request's transaction back - so a teardown staged
+        the ordinary way would be undone by the very refusal it accompanies. The
+        revocation has to outlive the failed request, because the failed request
+        is what triggered it.
+
+        The increment is a single ``UPDATE ... RETURNING``. Two replays arriving
+        together therefore raise the version twice rather than racing to write
+        the same number, and neither can leave the account on a version that an
+        outstanding token still matches.
+
+        Nothing here touches token material. The audit entry names the account
+        and the new version; the token that was replayed is identified nowhere,
+        because an audit log is read by people and a log of credentials is a
+        second copy of them.
+        """
+        version = await self._users.bump_token_version(user_id)
+        if version is None:
+            # No such account. The token was signed by us, so this is a deleted
+            # user rather than a forgery - there is nothing left to revoke, and
+            # nothing to record it against.
+            logger.warning(
+                "auth.refresh_token_reused_for_unknown_account",
+                extra={"event": "auth.refresh_token_reused_for_unknown_account"},
+            )
+            return
+
+        # Loaded after the update so the entry carries the address a person
+        # reading the trail will recognise, and so the in-memory row does not
+        # disagree with the column that was just written.
+        user = await self._users.get_by_id(user_id)
+        if user is not None:
+            await self._session.refresh(user)
+        AuditTrail(self._session).record(
+            AuditAction.REFRESH_TOKEN_REUSED,
+            actor=user,
+            # The account did not do this; something holding its credential did.
+            # Recorded as a system observation so the trail does not read as an
+            # action the person took.
+            actor_kind=AuditActorKind.SYSTEM,
+            target_type="user",
+            target_id=user_id,
+            target_label=user.email if user is not None else None,
+            meta={"token_version": version},
+        )
+        await self._session.commit()
+
+        logger.warning(
+            "auth.refresh_token_reused",
+            extra={
+                "event": "auth.refresh_token_reused",
+                "user_id": str(user_id),
+                "token_version": version,
+            },
+        )
 
     async def logout(self, *, refresh_token: str) -> None:
         """Revoke a refresh token.
