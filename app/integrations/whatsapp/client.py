@@ -32,7 +32,7 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.core.logging import get_logger
-from app.core.net import MAX_REDIRECTS, UnsafeUrlError, validate_outbound_url
+from app.core.net import MAX_REDIRECTS, UnsafeUrlError, build_guarded_client, validate_outbound_url
 
 logger = get_logger(__name__)
 
@@ -92,12 +92,21 @@ class SentMessage:
 
 
 def build_http_client() -> httpx.AsyncClient:
-    """An HTTP client with a bounded timeout.
+    """An HTTP client with a bounded timeout, aimed only at public addresses.
+
+    Two properties, neither of which a caller should have to remember.
 
     A client without a timeout will eventually hang a worker on a provider
     stall, so the timeout is set here rather than left to callers.
+
+    The transport resolves each request's host once and connects to a validated
+    address rather than to a name (`app.core.net`). That matters most on this
+    client, which is the one that fetches a URL it did not build - the media
+    location arrives in a provider response - but it is applied to sends too:
+    "which of our clients can be aimed at the deployment network?" should have
+    the answer "none" rather than a list somebody has to keep current.
     """
-    return httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS))
+    return build_guarded_client(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS))
 
 
 class WhatsAppClient:

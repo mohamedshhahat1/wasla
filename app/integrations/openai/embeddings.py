@@ -25,6 +25,7 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.core.logging import get_logger
+from app.core.net import build_guarded_client
 
 logger = get_logger(__name__)
 
@@ -43,8 +44,11 @@ MAX_BATCH: Final = 96
 
 
 def build_http_client(*, seconds: float = REQUEST_TIMEOUT_SECONDS) -> httpx.AsyncClient:
-    """An HTTP client with a bounded timeout, so a stall cannot pin a worker."""
-    return httpx.AsyncClient(timeout=httpx.Timeout(seconds))
+    """An HTTP client with a bounded timeout, so a stall cannot pin a worker.
+
+    Guarded like every other outbound client (`app.core.net`).
+    """
+    return build_guarded_client(timeout=httpx.Timeout(seconds))
 
 
 class EmbeddingsClient:

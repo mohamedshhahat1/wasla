@@ -37,6 +37,7 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.core.logging import get_logger
+from app.core.net import build_guarded_client
 from app.integrations.openai.types import (
     AgentReply,
     StructuredFormat,
@@ -60,12 +61,17 @@ CLIENT_ERROR_FLOOR: Final = 400
 
 
 def build_http_client(*, seconds: float = REQUEST_TIMEOUT_SECONDS) -> httpx.AsyncClient:
-    """An HTTP client with a bounded timeout.
+    """An HTTP client with a bounded timeout, aimed only at public addresses.
 
     Inference is slow enough that the default is generous, but never absent: a
     provider stall must not pin a worker indefinitely.
+
+    The guarded transport is not needed here in the sense that every URL this
+    client builds comes from a constant - and it is used anyway, so that the
+    answer to "which clients are guarded?" is "all of them" rather than a list
+    that goes stale the first time somebody adds an integration.
     """
-    return httpx.AsyncClient(timeout=httpx.Timeout(seconds))
+    return build_guarded_client(timeout=httpx.Timeout(seconds))
 
 
 class ResponsesClient:

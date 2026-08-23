@@ -52,6 +52,7 @@ import httpx
 
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
+from app.core.net import build_guarded_client
 
 logger = get_logger(__name__)
 
@@ -156,8 +157,10 @@ class MetaOwnershipVerifier:
             return await self._verify_with(self._http, token, number_id, claimed_waba_id)
         # No shared client: open one for this call. The timeout is set here
         # rather than left to a default, because a verification that hangs
-        # holds a worker and a person's browser tab open together.
-        async with httpx.AsyncClient(timeout=httpx.Timeout(VERIFY_TIMEOUT_SECONDS)) as http:
+        # holds a worker and a person's browser tab open together. Guarded like
+        # every other outbound client, so a Graph host that somehow resolved
+        # inward could not be reached even with a credential attached.
+        async with build_guarded_client(timeout=httpx.Timeout(VERIFY_TIMEOUT_SECONDS)) as http:
             return await self._verify_with(http, token, number_id, claimed_waba_id)
 
     async def _verify_with(
