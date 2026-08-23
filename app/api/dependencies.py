@@ -45,6 +45,7 @@ from app.services.invoice_service import InvoiceService
 from app.services.knowledge_service import KnowledgeService
 from app.services.lead_service import LeadService
 from app.services.media_service import MediaService
+from app.services.membership_service import MembershipService
 from app.services.messaging_service import MessagingService
 from app.services.sentiment_service import SentimentService
 from app.services.subscription_service import SubscriptionService
@@ -194,14 +195,21 @@ async def get_active_workspace(
     """Resolve the workspace named by the token, re-checking membership.
 
     The membership is loaded on every request rather than trusted from the
-    token, so withdrawing someone's access takes effect at once instead of
-    whenever their access token happens to expire.
+    token, and only an *active* one is loaded, so withdrawing someone's access
+    takes effect at once instead of whenever their access token happens to
+    expire. That is what makes revocation immediate without touching the token
+    estate - which matters, because a token bump would sign the person out of
+    every other workspace they belong to as well (ADR-038).
     """
     tenant_id = current_user.claims.tenant_id
     if tenant_id is None:
         raise PermissionDeniedError("No workspace is selected for this session.")
 
     memberships = MembershipRepository(session, tenant_id=tenant_id)
+    # Active memberships only. This is the single enforcement point for
+    # revocation (ADR-038): a withdrawn membership is not found here, so every
+    # workspace-scoped route below refuses at once rather than waiting for an
+    # access token to expire.
     membership = await memberships.require_for_user(current_user.user.id)
 
     tenant = await TenantRepository(session).get_by_id(tenant_id)
@@ -215,6 +223,22 @@ async def get_active_workspace(
 
 
 ActiveWorkspaceDep = Annotated[ActiveWorkspace, Depends(get_active_workspace)]
+
+
+def get_membership_service(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> MembershipService:
+    """Workspace-scoped, so no route can name a tenant of its own choosing.
+
+    The role rules for removal are not expressible as a dependency - they depend
+    on who the *target* is - so they live in the service. What is expressible is
+    the workspace, and that is fixed here from the authenticated context.
+    """
+    return MembershipService(session=session, tenant_id=workspace.tenant.id)
+
+
+MembershipServiceDep = Annotated[MembershipService, Depends(get_membership_service)]
 
 
 def get_agent_service(

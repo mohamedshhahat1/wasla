@@ -70,6 +70,13 @@ class AuditAction(StrEnum):
     MEMBER_INVITED = "member_invited"
     INVITATION_REVOKED = "invitation_revoked"
     INVITATION_ACCEPTED = "invitation_accepted"
+    # Withdrawing and restoring access (ADR-038). `MEMBER_LEFT` is separate
+    # from `MEMBER_REMOVED` on purpose: "who threw them out" and "they walked"
+    # are different answers to the same question, and collapsing them would
+    # make an administrator look responsible for somebody else's decision.
+    MEMBER_REMOVED = "member_removed"
+    MEMBER_LEFT = "member_left"
+    MEMBER_REINSTATED = "member_reinstated"
 
     # The account itself, and the sessions it holds (ADR-036). Platform-level
     # rather than workspace-level: an account is a global identity, so disabling

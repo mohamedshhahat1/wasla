@@ -38,6 +38,19 @@ class TenantRole(StrEnum):
     MEMBER = "member"
 
 
+class MembershipStatus(StrEnum):
+    """Whether a membership still grants anything.
+
+    Two states, not three. "Suspended" was considered and dropped: it would
+    behave identically to revoked at every decision point in the product, and a
+    status whose only difference is the word used to describe it invites a call
+    site to treat one of them as harmless.
+    """
+
+    ACTIVE = "active"
+    REVOKED = "revoked"
+
+
 class InvitationStatus(StrEnum):
     """Lifecycle state of a tenant invitation."""
 
@@ -68,3 +81,4 @@ TENANT_STATUS_TYPE = _enum_type(TenantStatus, name="tenant_status")
 PLATFORM_ROLE_TYPE = _enum_type(PlatformRole, name="platform_role")
 TENANT_ROLE_TYPE = _enum_type(TenantRole, name="tenant_role")
 INVITATION_STATUS_TYPE = _enum_type(InvitationStatus, name="invitation_status")
+MEMBERSHIP_STATUS_TYPE = _enum_type(MembershipStatus, name="membership_status")

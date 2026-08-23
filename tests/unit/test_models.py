@@ -15,6 +15,7 @@ from app.db.models import (
     Base,
     InvitationStatus,
     Membership,
+    MembershipStatus,
     PlatformRole,
     Tenant,
     TenantInvitation,
@@ -112,7 +113,23 @@ def test_platform_role_is_opt_in():
     ],
 )
 def test_only_owners_and_admins_administer_a_tenant(role, expected):
-    assert Membership(role=role).can_administer_tenant is expected
+    membership = Membership(role=role, status=MembershipStatus.ACTIVE)
+    assert membership.can_administer_tenant is expected
+
+
+def test_a_revoked_membership_administers_nothing_whatever_its_role():
+    """The role survives revocation on the row - it is what somebody is
+    readmitted at - so the property has to check the status as well.
+
+    A revoked owner answering True here would be an administrator with no
+    membership, which is the exact failure ADR-038 exists to prevent.
+    """
+    membership = Membership(
+        role=TenantRole.TENANT_OWNER,
+        status=MembershipStatus.REVOKED,
+    )
+    assert membership.is_active is False
+    assert membership.can_administer_tenant is False
 
 
 def test_invitation_is_open_until_revoked_or_expired():

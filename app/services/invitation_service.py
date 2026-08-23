@@ -22,7 +22,15 @@ from app.core.security import (
     hash_password,
     validate_password_strength,
 )
-from app.db.models import InvitationStatus, Membership, Tenant, TenantInvitation, TenantRole, User
+from app.db.models import (
+    InvitationStatus,
+    Membership,
+    MembershipStatus,
+    Tenant,
+    TenantInvitation,
+    TenantRole,
+    User,
+)
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.repositories import (
     InvitationRepository,
@@ -56,6 +64,13 @@ class InvitationService:
     Accepting prepares the account and the membership but mints no session.
     Signing in stays a separate step, so a leaked invitation link cannot by
     itself hand out a live session.
+
+    Invitations and revocation (ADR-038) interact in exactly one place, and it
+    is deliberate that there is only one. Revoking a membership leaves any
+    invitation alone: there cannot be a pending one for an active member, since
+    `issue` refuses that, and an invitation issued *after* a removal is how
+    somebody is asked back. Acceptance then reactivates the existing membership
+    row rather than adding a second one.
     """
 
     def __init__(self, *, session: AsyncSession) -> None:
@@ -184,9 +199,21 @@ class InvitationService:
             user.hashed_password = hash_password(password)
 
         memberships = MembershipRepository(self._session, tenant_id=invitation.tenant_id)
-        membership = await memberships.get_for_user(user.id)
+        # Deliberately the read that sees revoked rows. Somebody removed from a
+        # workspace and invited back has a membership already, and the unique
+        # constraint on `(user_id, tenant_id)` means a second one cannot be
+        # inserted - so an invitation that ignored the old row would fail at
+        # flush with an integrity error instead of readmitting them (ADR-038).
+        membership = await memberships.get_any_for_user(user.id)
         if membership is None:
             membership = await memberships.add_member(user_id=user.id, role=invitation.role)
+        elif not membership.is_active:
+            # Readmission. The invitation's role wins over the one they held
+            # before: whoever issued it decided what they are coming back as.
+            membership.status = MembershipStatus.ACTIVE
+            membership.role = invitation.role
+            membership.revoked_at = None
+            membership.revoked_by_id = None
 
         invitation.status = InvitationStatus.ACCEPTED
         invitation.accepted_at = now

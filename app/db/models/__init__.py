@@ -35,7 +35,13 @@ from .conversation import (
     MessageKind,
     MessageStatus,
 )
-from .enums import InvitationStatus, PlatformRole, TenantRole, TenantStatus
+from .enums import (
+    InvitationStatus,
+    MembershipStatus,
+    PlatformRole,
+    TenantRole,
+    TenantStatus,
+)
 from .follow_up import (
     MAX_ATTEMPTS,
     TERMINAL_FOLLOW_UP_STATUSES,
@@ -168,6 +174,7 @@ __all__ = [
     "LimitKey",
     "MediaStatus",
     "Membership",
+    "MembershipStatus",
     "Message",
     "MessageDirection",
     "MessageKind",

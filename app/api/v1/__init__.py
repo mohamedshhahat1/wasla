@@ -18,8 +18,8 @@ routers are limited is the decision worth being able to read in one place
 
 from fastapi import APIRouter, Depends
 
-from app.api.route import CommittingRoute
 from app.api.rate_limits import campaign_rate_limit, workspace_rate_limit
+from app.api.route import CommittingRoute
 from app.api.v1 import (
     agents,
     analytics,
@@ -34,6 +34,7 @@ from app.api.v1 import (
     invoices,
     knowledge,
     leads,
+    members,
     platform,
     templates,
     usage,
@@ -58,6 +59,7 @@ WORKSPACE_ROUTERS = (
     invoices.router,
     knowledge.router,
     leads.router,
+    members.router,
     usage.router,
     whatsapp.router,
 )
