@@ -10,6 +10,7 @@ one transaction that either all happens or none of it does.
 
 from __future__ import annotations
 
+import secrets
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -69,7 +70,10 @@ def _settings(**overrides) -> Settings:
         "log_format": "console",
         "log_level": "WARNING",
         "cors_origins": [],
-        "jwt_secret": "a-test-secret-that-is-long-enough-32",
+        # Generated rather than written down. Nothing here depends on its value,
+        # and a literal long enough to satisfy the setting is also long enough to
+        # look like a leaked credential to a secret scanner.
+        "jwt_secret": secrets.token_urlsafe(32),
     }
     values.update(overrides)
     return Settings(**values)
