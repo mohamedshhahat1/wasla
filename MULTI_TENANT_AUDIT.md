@@ -305,3 +305,41 @@ Three choices keep a pass meaningful rather than accidental:
 What it will catch: a new route that forgets its scoped service; a repository that loses its predicate; a handler that answers 403 and opens an oracle; a listing that widens; a body identifier accepted without re-resolution; a nested route that trusts its child id.
 
 What it will not catch: M-01, which needs no cross-tenant request; anything in the worker path; and anything reaching the database other than through a route.
+
+---
+
+## Resolution status — updated 2026-08-23 (`worktree-security-audit`)
+
+This report is a record of what was true when it was written and is not rewritten
+in place. What has since changed:
+
+| Finding | Status | Where |
+|---|---|---|
+| **M-01 / W-02** — a WhatsApp number could be claimed with no proof of ownership | **Closed** | ADR-037. The connect request carries a Meta access token; the claim is verified against the Graph API for that exact `phone_number_id` before anything is written, and the business account, display number and verified name come from Meta's answer rather than the request. The platform credential is deliberately not a route to it. `tests/unit/test_number_ownership.py`, `tests/integration/test_whatsapp_ownership.py` |
+| **M-02 / W-03a** — no member removal, suspension or role change | **Closed for removal and readmission** | ADR-038. `memberships.status`, enforced in `get_active_workspace`. Role *change* on an existing membership is still only expressible through remove-and-reinstate. `tests/integration/test_membership_revocation.py` |
+| **W-05** — Redis unauthenticated | **Closed for the production stack** | `REDIS_PASSWORD` is required by `docker-compose.prod.yml`, and the healthcheck authenticates. Job signing remains unbuilt and unneeded while the transport is authenticated |
+| **W-10** — refresh-token reuse detected but the family not revoked | **Closed** | ADR-039. Spending is a single atomic `SET NX`; losing that race raises `users.token_version` and audits it, committed before the refusal is raised. `tests/integration/test_refresh_reuse.py` |
+| GitHub Actions pinned by mutable tag | **Closed** | Every `uses:` is pinned to a commit SHA with the tag kept as a trailing comment |
+| `JWT_ALGORITHM` unvalidated | **Closed** | Constrained to `{HS256, HS384, HS512}` at startup, so `none` and the asymmetric families cannot be configured. `tests/unit/test_config.py` |
+| **W-12** — registration discloses whether an address or slug is taken | Open | Deliberate: the alternative is an unhelpful signup flow, and the disclosure is bounded by the client-address limit |
+| **W-14** — the limiter fails open on a Redis error | Open, deliberate | ADR-032 |
+
+Found while closing the above, and fixed here rather than deferred:
+
+- **Revoked memberships and released numbers still consumed plan capacity.**
+  `TEAM_MEMBERS` counted every membership row, so removing a colleague on a
+  two-seat plan would have consumed the seat permanently. `WHATSAPP_NUMBERS`
+  excluded `disabled` but not `released`.
+- **`TemplateService.sync` read a workspace's templates with the platform
+  credential**, against a `waba_id` the workspace had typed in. Both halves are
+  fixed: the id is now Meta's own answer, and the sync resolves the credential
+  the same way a send does.
+- **The review's own dependency-graph walker read the wrong tree.** Run as a
+  script file from a scratch directory, `import app` resolved to the installed
+  package in the main checkout rather than to the worktree under review. It
+  reported 98 operations against a tree containing 106, and every route added in
+  this change was silently absent. Re-run with `PYTHONPATH` pinned and
+  cross-checked against `app.openapi()`.
+
+The full current position is in [docs/AUTHORIZATION.md](docs/AUTHORIZATION.md) §6
+and §7.

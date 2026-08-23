@@ -12,6 +12,7 @@
 | `GET /api/v1/whatsapp/accounts` | Any member | List connected numbers |
 | `POST /api/v1/whatsapp/accounts/{id}/disable` | Owner, admin | Stop accepting and sending traffic |
 | `POST /api/v1/whatsapp/accounts/{id}/enable` | Owner, admin | Resume traffic |
+| `POST /api/v1/whatsapp/accounts/{id}/release` | Owner, admin | Give the number up so another workspace can claim it |
 
 The webhook sits under the versioned prefix too, so the callback URL configured in the Meta app dashboard is `https://<host>/api/v1/webhooks/whatsapp`.
 
@@ -26,11 +27,48 @@ The webhook sits under the versioned prefix too, so the callback URL configured 
 
 ## Connecting a number
 
-The identifiers are copied from the Meta app dashboard, so they are stripped on the way in: a trailing space in `phone_number_id` would silently break webhook resolution for every inbound message.
+**A number is claimed by proving control of it, not by naming it** (ADR-037). The request carries a Meta access token, and before anything is written the platform reads `GET /{phone_number_id}` from the Graph API with *that* token and requires the node that comes back to be the node that was asked for. A token that can read a phone number node is a token the owning business issued; nothing else can read it.
 
-The workspace comes from the access token — these payloads carry no tenant field, and an unknown field is rejected with `422` rather than ignored. `phone_number_id` is unique platform-wide, so a duplicate answers `409` saying only that the number is already connected; naming the workspace that holds it would be a disclosure. Disabling an account owned by another workspace answers `404` through the same scoped lookup that protects every other row.
+The reason this exists: `phone_number_id` is not secret. It appears in every webhook payload, in Meta's dashboard, and in support threads. Platform-wide uniqueness decides who claimed a number *first*, not who is entitled to it — so before ownership proof, a workspace that knew a competitor's number could claim it and become the tenant every inbound message for that number resolved to.
+
+| Field | Required | What happens to it |
+| --- | --- | --- |
+| `phone_number_id` | yes | Stripped, then verified. A trailing space copied from the dashboard would silently break webhook resolution for every inbound message |
+| `access_token` | yes | The proof. Encrypted and stored if this deployment has a credential key (ADR-034), discarded otherwise. Never returned by any response model, never logged |
+| `waba_id` | no | An assertion to **check**, not a value to store. Meta names the owning business account; a mismatch is refused rather than quietly corrected |
+| `display_name` | no | The workspace's own label — "Support", "Sales". Cosmetic and local, which is why it is still an input |
+
+`display_phone_number` and `verified_name` are no longer accepted at all: they come back from Meta during verification, so there is nothing for a caller to get wrong and nothing to spoof.
+
+**The platform credential is deliberately not a route to this.** `META_ACCESS_TOKEN` can read every number the platform is connected to, so a claim proven with it would succeed for every workspace and prove nothing about any of them. The connect service is built with a verifier that holds no credential and has no access to settings, so the bypass is closed structurally rather than by a condition somebody could invert.
+
+**Storage is a separate question from proof.** Verification needs the plaintext for the length of one call; storing it needs `CREDENTIAL_ENCRYPTION_KEYS`. A deployment without a key still connects numbers — proof happens, the token is discarded, and sending falls back to the platform credential as before.
+
+### What a failure looks like
+
+| Situation | Answer |
+| --- | --- |
+| Wrong number, revoked token, no permission, Graph outage, timeout, malformed reply | `422 whatsapp_ownership_unverified` — **one** message for all of them. Distinguishing them would turn the endpoint into an oracle for mapping other businesses' numbers |
+| The number is already held by somebody | `409`, saying only that it is connected. Naming the workspace that holds it would be a disclosure |
+| Two claims arriving at once | One `201` and one `409`, in either order. The read check gives the clean answer in the ordinary case; the partial unique index is the guarantee, and its violation is translated rather than surfacing as a `500` |
+| This deployment cannot verify | `503`. Our misconfiguration, not the caller's mistake — and it refuses rather than accepting an unproven claim |
+| Another workspace's account id | `404`, through the same scoped lookup that protects every other row |
+
+Meta's own error text is logged with its numeric code and never returned: provider error strings quote the request back, and this request carries a live credential.
+
+### Disable, enable, release
 
 Disable and enable are named transitions rather than a general `PATCH` on status, because status is the only field with an operational meaning and the named transition keeps the audit trail readable.
+
+**Release is a different act and is kept separate.** Disabling pauses traffic while the workspace keeps the claim; releasing hands the number back so another workspace can prove and claim it. A support request to "turn it off for a week" and one to "hand it back" have opposite consequences for everyone else on the platform.
+
+Releasing is not a delete. The account row carries the workspace's conversations and messages by foreign key, and destroying a customer's history is not an acceptable price for moving a phone number. Setting `released_at` takes the row out of the partial uniqueness index instead — the claim ends, the history stays — and the same column removes it from inbound resolution, from `is_active`, and from the plan's number count. The stored credential is dropped on the way out, because a credential for a number the workspace no longer holds is a live sending capability retained past any authority to use it.
+
+It is not reversible from here. Taking the number back means proving control of it again, at the bar anybody else has to clear — otherwise "release" becomes a way to hold a number in reserve without holding it.
+
+### Numbers claimed before this existed
+
+`ownership_verified_at` is null on them, and they are left that way rather than back-dated: that null is exactly the list an operator needs in order to re-verify, and inventing a timestamp would erase it. They are not refused at send time — breaking every existing deployment's traffic to close a claim-time hole would be the worse outage. The field is returned by the API so the list is findable.
 
 ## Subscription verification
 

@@ -281,20 +281,67 @@ Confirmed behaviourally during this audit rather than by reading:
 - **CI permissions are minimal** — `contents: read`, with `packages: write` only
   on the deploy workflow.
 
+## Closed since the last review
+
+- **A WhatsApp number is claimed by proving control of it** (W-02 / M-01,
+  ADR-037). The connect request carries a Meta access token; the claim is
+  verified against the Graph API for that exact `phone_number_id` before
+  anything is written, and the business account, display number and verified
+  name come from Meta's answer rather than the request. The platform credential
+  is deliberately not a route to this: it can read every number the platform is
+  connected to, so a claim proven with it would prove nothing about the
+  workspace making it. Every failure — wrong number, revoked token, Graph
+  outage, malformed reply — is one refusal with one message, and Meta's error
+  text is logged with its numeric code and never returned.
+- **A workspace can withdraw one member's access** (W-03a, ADR-038).
+  `memberships.status`, enforced in `get_active_workspace`, which every
+  workspace-scoped route already resolves — so it takes effect on the next
+  request without touching that person's account, their other workspaces, or
+  their tokens.
+- **A replayed refresh token tears the session estate down** (W-10, ADR-039).
+  Spending is a single atomic `SET NX`; losing that race raises
+  `users.token_version` and writes an audit entry, committed before the refusal
+  is raised so the revocation survives the failed request.
+- **GitHub Actions are pinned by commit SHA**, with the tag kept as a trailing
+  comment. A retagged or compromised action can no longer run with the
+  workflow's token — which matters most on the deploy workflow, where that token
+  has `packages: write` and the job holds a deployment SSH key.
+- **Redis requires a password in production** (W-05). The private network was the
+  old argument for leaving it open, and it is not enough given what this Redis
+  holds: the spent-refresh-token denylist. Anything that can write to it can
+  delete a key and turn a revoked token back into a live one — undoing a logout,
+  an ADR-036 sign-out-everywhere, and the ADR-039 teardown. It also holds the
+  agent queue, so write access is enough to make a worker send messages of
+  somebody's choosing. `REDIS_PASSWORD` is required by
+  `docker-compose.prod.yml`, and the healthcheck authenticates too, so a
+  misconfigured password fails the check rather than reporting a healthy server
+  that refuses every real client.
+- **A response is no longer sent before its write has committed.** The session
+  committed in a `yield` dependency's teardown, which runs after the response
+  has reached the client — a 25–75 ms window against a containerised
+  PostgreSQL, during which a token from `POST /auth/register` was refused. The
+  timing was the symptom; the defect was answering `201 Created` before the
+  write was durable, so a commit failing afterwards left the caller holding a
+  success for something that never happened. `CommittingRoute` now commits
+  inside the handler chain. Only a real socket can observe this, so the
+  regression test runs one.
+- **`JWT_ALGORITHM` is validated to the HMAC family.** It was a free string
+  passed straight into PyJWT's `algorithms=` allowlist, so `none` and the
+  asymmetric families were both configurable — the latter meaning the
+  application would verify with `jwt_secret` as a public key.
+
 ## Still open
 
-- **GitHub Actions are pinned by mutable tag**, not by SHA (`actions/checkout@v4`,
-  `aquasecurity/trivy-action@v0.36.0`). A retagged or compromised action would
-  run with the workflow's token. The token is scoped to `contents: read` on CI,
-  which bounds it. Pinning by digest is the fix and is deferred rather than done.
-- **A workspace still cannot remove one member** (W-03a) — the largest remaining
-  access-control gap; see `AUTHORIZATION.md`.
-- **Redis is unauthenticated** (W-05). Job payloads carry tenant authority, and
-  the application validates them, but nothing authenticates the transport.
-- **A WhatsApp number can be claimed without proof of ownership** (W-02) — the
-  only finding in these audits that crosses a tenant boundary through ordinary
-  use.
 - **No password reset** — blocked on email delivery, above.
+- **Ownership is proven once, at claim time.** A number that moves at Meta
+  afterwards is not noticed, and rows claimed before ADR-037 have a null
+  `ownership_verified_at`. Those are not refused at send time: breaking every
+  existing deployment's traffic to close a claim-time hole would be the worse
+  outage. The null is the list an operator re-verifies from, which is why it was
+  not back-dated. Re-verification on a schedule is the obvious next step.
+- **Session revocation is per-user, not per-session** (ADR-036). Membership
+  revocation is per-membership and does not touch tokens; the two are different
+  operations on different objects.
 - **Media download is bounded after the fact**, not while streaming: the size cap
   is checked once the body is in memory. The declared size is checked first, but
   a lying server is only caught afterwards.

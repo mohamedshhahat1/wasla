@@ -67,6 +67,9 @@ sent to an address the caller controls, and this deployment cannot send email. S
 | GET | `/api/v1/invitations` | List open invitations | Tenant admin |
 | DELETE | `/api/v1/invitations/{invitation_id}` | Revoke an invitation | Tenant admin |
 | POST | `/api/v1/invitations/accept` | Redeem an invitation token | Public |
+| GET | `/api/v1/workspace/members` | Who is in this workspace (`?include_revoked=true` for the full history) | Workspace member |
+| DELETE | `/api/v1/workspace/members/{user_id}` | Withdraw access, or leave by naming yourself | Workspace member (see below) |
+| POST | `/api/v1/workspace/members/{user_id}/reinstate` | Readmit somebody who was removed | Tenant admin |
 
 Only the hash of an invitation token is stored, so a database disclosure does not yield usable invitations.
 
@@ -78,6 +81,7 @@ Only the hash of an invitation token is stored, so a database disclosure does no
 | GET | `/api/v1/whatsapp/accounts` | List connected numbers | Workspace member |
 | POST | `/api/v1/whatsapp/accounts/{account_id}/disable` | Stop accepting traffic | Tenant admin |
 | POST | `/api/v1/whatsapp/accounts/{account_id}/enable` | Resume accepting traffic | Tenant admin |
+| POST | `/api/v1/whatsapp/accounts/{account_id}/release` | Give the number up, keeping its history | Tenant admin |
 
 `phone_number_id` is unique across the platform, not per workspace: it is how an inbound webhook is attributed to a workspace, so two workspaces claiming one number would make attribution ambiguous.
 
@@ -310,6 +314,27 @@ workspaces that administrator has nothing to do with. Removing a person from a s
 workspace is a different operation against a different object, and does not exist yet.
 `enable` raises the token version as well as restoring the account, so tokens issued
 before a suspension do not come back with it.
+
+### Removing a member
+
+`DELETE /workspace/members/{user_id}` is guarded by the workspace dependency rather than by the admin one, and that is deliberate: leaving needs no permission, so a member must be able to call it on themselves. A dependency is evaluated before the path parameter is bound, so it cannot tell "remove my colleague" from "leave" — the role rules therefore live in the service, where the target is known (ADR-038).
+
+| Case | Answer |
+| --- | --- |
+| Removing yourself | Allowed at any role |
+| Removing somebody else | Owner or admin only, otherwise `403` |
+| An admin removing an owner | `403` — otherwise an administrator promotes themselves by subtraction |
+| Removing the last active owner, including yourself | `409` — a workspace with no owner has nobody who can invite one |
+| Somebody already removed | `409`, so a caller looking at a stale roster sees it refreshed |
+| Somebody who is not a member here | `422`, saying nothing about whether they exist elsewhere |
+
+Revocation takes effect on the **next request**: authorization loads the membership every time rather than trusting the token. It does not touch the person's account, their sessions, or their other workspaces — being removed from one company is not a reason to be signed out of another.
+
+Readmission reuses the same membership row, so the removal and the return are both visible on one record, and it counts against the plan's seat limit exactly as an invitation does.
+
+### Connecting a WhatsApp number
+
+`POST /whatsapp/accounts` requires an `access_token` and verifies it against Meta for the `phone_number_id` being claimed before writing anything (ADR-037). `waba_id` is optional and checked rather than trusted; `display_phone_number` is no longer accepted, because it comes back from Meta. See [WHATSAPP.md](WHATSAPP.md) for the failure table.
 
 Platform authority is a property of the user, not of a membership. Owning a workspace grants nothing here, and holding a platform role grants nothing inside a workspace — a platform administrator reading these figures still cannot open a customer's inbox.
 

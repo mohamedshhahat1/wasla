@@ -38,10 +38,13 @@ Every secret in the production file is required and interpolated from the deploy
 
 | Variable | Omitted means |
 | --- | --- |
-| `CREDENTIAL_ENCRYPTION_KEYS` | Every workspace sends through `META_ACCESS_TOKEN`; a workspace trying to store its own credential is refused rather than having it stored in the clear |
+| `REDIS_PASSWORD` | **Compose refuses to start.** Required, not optional: Redis holds the spent-refresh-token denylist, so anything able to write to it can delete a key and turn a revoked token back into a live one — undoing a logout, a sign-out-everywhere (ADR-036) and the reuse teardown (ADR-039). It also holds the agent queue, so write access is enough to make a worker send messages of somebody's choosing. Put the same value in `REDIS_URL` as `redis://:PASSWORD@redis:6379/0` |
+| `CREDENTIAL_ENCRYPTION_KEYS` | Every workspace sends through `META_ACCESS_TOKEN`; a workspace trying to store its own credential is refused rather than having it stored in the clear. **Connecting a number still works** — ownership is proven with the supplied token and the token is then discarded (ADR-037) |
 | `DEFAULT_PLAN_CODE` | New workspaces start on `starter` |
 | `RATE_LIMIT_*` | Limiting is on, at the application defaults |
 | `MAX_REQUEST_BYTES`, `REQUEST_TIMEOUT_SECONDS` | 32 MB and 60 seconds |
+
+`REDIS_PASSWORD` is consumed twice on purpose: as the server's `--requirepass` and as the credential inside `REDIS_URL`. The healthcheck authenticates too, so a mismatch fails the check rather than reporting a healthy server that refuses every real client.
 
 `CREDENTIAL_ENCRYPTION_KEYS` **must be identical for the API and the worker.** The worker decrypts a workspace's credential in order to send with it, so a worker missing a key the API used cannot send for that workspace at all.
 

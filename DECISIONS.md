@@ -938,3 +938,119 @@ The refresh denylist in Redis stays. It handles the ordinary rotation case withi
 One deploy-time cost, stated plainly: applying migration `0021` signs out every existing session.
 
 **Password reset remains absent, and is deferred rather than faked** — see `docs/SECURITY.md`. A reset serves somebody who cannot sign in, so its token has to reach an address they control, and this repository has no email delivery of any kind. The invitation flow returns its token through the API because an administrator is already trusted to hold it; doing the same for a reset would let anybody request a token for any address and read it out of the response, which is account takeover with extra steps. A password *change* is shipped instead, because the current password is proof enough and needs nobody's help to deliver.
+
+## ADR-037 — A Number Is Claimed by Proving Control of It, Not by Naming It
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Require a Meta access token on `POST /whatsapp/accounts` and verify it against the Graph API for the `phone_number_id` being claimed before writing anything. Take the owning business account, the display number and the verified name from Meta's answer rather than from the request. Never accept the platform credential as proof. Change the platform-wide uniqueness of `phone_number_id` from a `UNIQUE` constraint to a partial unique index over live claims, and add a `release` operation that gives a number up without deleting its history.
+
+Context:
+`phone_number_id` was unique platform-wide, and that uniqueness was the only thing standing between a workspace and somebody else's number. The connect endpoint validated shape and role and wrote the row.
+
+A unique constraint answers "has anybody claimed this?" It does not answer "may *you* claim it?", and those are different questions. The identifier is not secret: it appears in every webhook payload, in Meta's dashboard, and in support threads. A workspace that knew a competitor's `phone_number_id` could claim it first, and from that moment every inbound message for that number resolved to the attacker's tenant — conversations, contacts, leads, the lot. That is the product's isolation boundary defeated by typing a published number, and it was reachable by any workspace administrator through ordinary use. It is the finding recorded as W-02 / M-01.
+
+The `waba_id` on the request was worse than useless: it was stored and then used to read the account's message templates from Meta, so a workspace could name a business account it had nothing to do with and have the *platform* credential fetch that account's template list.
+
+Reason:
+**The credential is the proof, because nothing else is.** A Meta access token that can read a phone number node is a token the owning business issued; no other party can read it. So the check is: read `GET /{phone_number_id}` with the caller's token, and require the node that comes back to be the node that was asked for. Everything else — a challenge code sent to the number, a DNS record, a support ticket — is either something Meta does not offer or something that costs a person a day.
+
+**The platform token can never be the proof, and removing that path was the point.** It can read every number the platform is connected to, so a claim verified with it would succeed for every workspace and prove nothing about any of them. The connect service is therefore built with a verifier that holds no credential of its own and has no access to settings; the bypass is closed structurally rather than by a condition somebody could invert later.
+
+**Nothing user-supplied survives as an identifier.** The business account, display number and verified name are overwritten with Meta's answer. A supplied `waba_id` is treated as an assertion to check — a mismatch is a refusal, not a correction, because a mismatch means the person connecting believes something untrue about where the number sits.
+
+**Every failure is the same failure.** A wrong id, a revoked token, a Graph outage, a malformed reply and a timeout all raise one error with one message. Distinguishing them would turn the endpoint into an oracle for mapping which numbers exist and which credentials reach them. Meta's own error text is logged with its numeric code and never returned: provider error strings quote the request back, and this request carries a live credential.
+
+**A verification that did not complete did not succeed.** The timeout case is the one it would be most tempting to answer optimistically, and answering it optimistically would make an outage at Meta into an open claim window.
+
+**Proof and storage are separate questions with separate answers.** Verification needs the plaintext for the length of one call; storing it needs a configured encryption key (ADR-034). A deployment without a key still connects numbers — proof happens, the plaintext is discarded, and sending falls back to the platform credential as before. Refusing to store a secret we do not need to keep is not a reason to refuse the claim.
+
+**Uniqueness became a partial index so that a number can move.** A plain `UNIQUE(phone_number_id)` forces a choice between never letting a number change hands and deleting the row — which cascades to every conversation and message the workspace ever had on it. Neither is acceptable. `released_at IS NULL` in the index predicate means a released row keeps its history while no longer occupying the number, and the same column takes it out of inbound resolution, out of `is_active`, and out of the plan's number count.
+
+**Releasing is not reversible from inside.** Taking a number back means proving control of it again, at the bar anybody else has to clear. Otherwise "release" becomes a way to hold a number in reserve without holding it.
+
+**The read check stays, and the index is the guarantee.** Two claims arriving together both see the number free, both insert, and one loses at flush. That loss is translated to the same 409 the read produces, on the same index, so the racing callers get one success and one conflict in either order — rather than a 500 for a situation that is neither internal nor an error.
+
+Consequences:
+Connecting a number now requires a workspace access token with permission to read it, and the API contract changed: `access_token` is required, `waba_id` is optional and checked, `display_phone_number` is no longer accepted at all. `ownership_verified_at` and `verified_name` are recorded on the row and returned by the API.
+
+Rows claimed before this existed have a null `ownership_verified_at`. They are left alone rather than back-dated, because that null is exactly the list an operator needs in order to re-verify them, and inventing a timestamp would erase it. They are not refused at send time: breaking every existing deployment's traffic to close a claim-time hole would be a worse outage than the hole.
+
+A deployment whose verifier cannot be constructed answers 503 to a connect rather than accepting an unproven claim.
+
+## ADR-038 — Membership Revocation Is a Status, Enforced Where the Membership Is Loaded
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Add `memberships.status` with `revoked_at` and `revoked_by_id`. Filter every membership read to active rows by default, with two explicitly named exceptions for administration. Enforce revocation in `get_active_workspace`, which every workspace-scoped route already resolves. Do not delete the row, and do not touch `users.token_version`.
+
+Context:
+A workspace could invite people and could not remove them. `memberships` had no status column and there was no members router at all. Since ADR-036 platform staff could disable a whole *account* and a person could end their own sessions, but a workspace owner had no way to withdraw one colleague's access to one workspace — the ordinary case, and the one that comes up the day somebody leaves.
+
+Reason:
+**A status, not a delete.** Deleting the row works and takes three things with it: who removed whom and when, the difference between a re-invitation and a first invitation, and any way back from a mistake. A revoked membership is kept and ignored.
+
+**Not a token bump.** Raising `token_version` would end every session that person holds — including the ones for other workspaces they belong to, and their own account. Being removed from one company is not a reason to be signed out of another. The status is per-membership, so the blast radius matches the act.
+
+**One enforcement point, and it was already there.** `get_active_workspace` re-reads the membership on every request rather than trusting the token, so filtering that read to active rows makes revocation take effect on the next request with no new query, no token operation and nothing to expire. The dependency graph was walked mechanically to confirm that every workspace-scoped route resolves it; the test that proves it walks the graph too, so a route added later is covered without anybody remembering.
+
+**The default read hides revoked rows; the exceptions are named.** `get_for_user` and `list_members` are the access decisions and see only active rows. `get_any_for_user` and `list_members(include_revoked=True)` exist for administration and readmission and are named so they cannot be reached for by accident.
+
+**The rules are about not stranding a workspace.** Leaving needs no permission — a member may remove themselves. Removing somebody else needs owner or admin, or the role boundary is decorative. Only an owner may remove an owner, or an administrator promotes themselves by subtraction. The last active owner cannot be removed, by anybody including themselves: a workspace with no owner has nobody who can invite one, it is not recoverable from inside, and the person who did it usually did not mean to.
+
+**Readmission reuses the row.** `UNIQUE(user_id, tenant_id)` requires it, and a second grant would give authorization two rows to rank. Both the invitation path and the explicit reinstate endpoint reactivate the existing membership; the role on the new invitation wins, because whoever issued it decided what the person is coming back as.
+
+**A revoked member does not occupy a seat.** The plan's team-member count reads active memberships. Counting revoked ones would make removal a one-way door: a workspace on a two-seat plan that removed a colleague could never hire a replacement, and the only fix would be paying for capacity nobody is using.
+
+**The removal route is not behind the admin guard, deliberately.** A dependency is evaluated before the path parameter is bound, so it cannot tell "remove my colleague" from "leave". The role rules therefore live in the service, where the target is known, and the route carries only the workspace guard.
+
+Consequences:
+`GET /workspace/members`, `DELETE /workspace/members/{user_id}` and `POST /workspace/members/{user_id}/reinstate`. Removals and departures are separate audit actions, because "who threw them out" and "they walked" are different answers to the same question.
+
+Revocation is immediate and scoped: the person keeps their account, their other workspaces and their sessions. What they lose is one workspace, at the next request.
+
+## ADR-039 — A Replayed Refresh Token Tears Down the Whole Session Estate
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Spend a refresh token with a single atomic `SET NX` rather than a denylist read followed by a write. Losing that race *is* the detection: raise `users.token_version` with one `UPDATE ... RETURNING`, record a `refresh_token_reused` audit entry, commit that before raising, and return the ordinary credential failure.
+
+Context:
+Reuse was detected and the presented token refused — and nothing else happened. A thief who had refreshed once held an independent chain that the victim's own activity never disturbed, so the refusal punished whichever party arrived second, usually the victim. ADR-036 built the lever that kills a whole estate; it was simply not pulled here. Recorded as W-10.
+
+Reason:
+**Detection depends on atomicity, and the read-then-write version cannot detect the thing it exists for.** Two requests carrying the same token both read "unspent", both write, and both are issued a fresh pair. That interleaving is precisely what a stolen token used alongside the real one looks like. `SET NX` lets exactly one caller win no matter how the two requests interleave, and whether the key already existed is the answer.
+
+**The response has to be heavy, because a light one leaves the thief holding a live chain.** Rotation spends only the copy that is presented. Raising the version invalidates every access and refresh token the account holds, so both parties are signed out; the real person signs in again with a password the thief does not have, and the thief has nothing. There is no way from inside the request to tell a leak from a client bug, and the cost of being wrong is one sign-in.
+
+**The teardown commits before the refusal is raised.** The caller raises immediately afterwards and an exception rolls the request's transaction back, so a revocation staged the ordinary way would be undone by the very refusal that accompanies it — leaving an audit entry describing something that did not happen and an estate still live.
+
+**The increment is a single statement.** `token_version += 1` in Python reads a value and writes it back, so simultaneous teardowns would collapse into one and could leave the account on a version an outstanding token still matches. `UPDATE ... RETURNING` makes concurrent replays compose.
+
+**A version-stale token is not a replay.** It is a token that was valid and has since been invalidated wholesale — by a password change, a sign-out-everywhere, or an earlier teardown. Refusing is enough; bumping again would punish the holder of a merely old session for something already handled.
+
+**Signature verification happens first.** An unsigned string never reaches the teardown, so this cannot be turned into a denial-of-service against any account whose id an attacker can guess.
+
+**The refusal says nothing.** A caller replaying a token learns only that it did not work. Naming the teardown would tell a thief to move faster. Nothing here logs or records token material: the audit entry names the account and the new version, and the token that was replayed is identified nowhere, because an audit log is read by people and a log of credentials is a second copy of them.
+
+Consequences:
+Logging out and then refreshing with the same token is treated as a replay, because it is one by the same definition — the token is on the denylist. The account's other sessions end. That is the right answer for a client that is either confused or not the client.
+
+`RefreshTokenStore.spend` is the refresh path's primitive; `revoke` remains for logout, where "it was already revoked" is not an error and there is nothing to detect. `is_revoked` stays as a read for callers that only want to know.
+
+The audit entry is platform-level, with no tenant: an account is a global identity, and a leak is not one workspace's business.

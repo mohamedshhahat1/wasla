@@ -21,7 +21,11 @@ An account that exists but is disabled is only told so **after** its password is
 
 Tokens are typed (`typ`), so a refresh token cannot be presented where an access token is required, and each carries a unique `jti`.
 
-**Refresh tokens rotate.** Presenting one spends it: a new pair is issued and the old identifier is written to a Redis denylist that expires alongside the token it revokes, so the list cannot grow without bound. A stolen refresh token therefore stops working as soon as the legitimate holder refreshes once, and a replayed token is logged as the leak signal it is.
+**Refresh tokens rotate, and spending one is atomic.** Presenting a token writes its identifier to a Redis denylist with `SET NX` — a single operation whose result says whether this caller was the first. A new pair is issued only to the winner, and the entry expires alongside the token it revokes, so the list cannot grow without bound.
+
+The atomicity is the security property, not an optimisation (ADR-039). Checking a denylist and then writing to it is a race that both parties win: two requests carrying the same token both read "unspent" and both get a fresh pair, which is exactly what a stolen token used alongside the real one looks like. Losing the `SET NX` race *is* the detection.
+
+**A replayed token tears the whole session estate down.** Rotation alone spends only the copy that is presented — usually the victim's, since the thief is the one racing — so the response to a replay is to raise `users.token_version`, which invalidates every access and refresh token the account holds. Both parties are signed out; the real person signs in again with a password the thief does not have. A `refresh_token_reused` audit entry is written and committed *before* the refusal is raised, because an exception would otherwise roll back the revocation that accompanies it. The caller learns only that the credentials are not valid: naming the teardown would tell a thief to move faster, and nothing on this path logs or records token material.
 
 **Access tokens are deliberately not revocable.** They live for minutes, and checking a denylist on every request would surrender the whole benefit of stateless verification for very little. Immediate withdrawal of access is handled where it actually belongs — see below.
 
@@ -66,4 +70,4 @@ Unknown, spent, revoked, and expired invitations all answer identically, so the 
 
 ## Testing
 
-RBAC per role, cross-tenant access attempts, platform-versus-tenant boundaries, refresh rotation and replay, and invitation expiry and reuse are tested against a real PostgreSQL database in `tests/integration/test_authorization.py`. The HTTP surface and the role guards are tested separately with a stubbed service in `tests/integration/test_auth_endpoints.py`. Membership suspension and removal, and rate limiting, arrive with phase 14. See [SECURITY.md](SECURITY.md).
+RBAC per role, cross-tenant access attempts, platform-versus-tenant boundaries, refresh rotation and replay, and invitation expiry and reuse are tested against a real PostgreSQL database in `tests/integration/test_authorization.py`. The HTTP surface and the role guards are tested separately with a stubbed service in `tests/integration/test_auth_endpoints.py`. Membership revocation is covered in `tests/integration/test_membership_revocation.py`, which walks the dependency graph and calls every workspace-scoped route with a revoked member's genuine token; refresh reuse in `tests/integration/test_refresh_reuse.py`. See [SECURITY.md](SECURITY.md).

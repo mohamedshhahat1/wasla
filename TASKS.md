@@ -439,15 +439,23 @@ metadata), and CI token permissions.
 
 Deferred by decision, not unfinished:
 
-- [ ] Pin GitHub Actions by SHA rather than by mutable tag. A retagged action
-      would run with the workflow token; that token is `contents: read` on CI,
-      which bounds the exposure
-- [ ] Redis authentication (W-05). Job payloads carry tenant authority and the
-      application validates them, but nothing authenticates the transport
-- [ ] WhatsApp number ownership verification (W-02) — still the only finding that
-      crosses a tenant boundary through ordinary use
-- [ ] Per-workspace member removal (W-03a) — the largest remaining access-control
-      gap
+- [x] Pin GitHub Actions by SHA rather than by mutable tag — done; the tag is
+      kept as a trailing comment so a human can still read the version
+- [x] Redis authentication (W-05) — `REDIS_PASSWORD` required in production, and
+      the healthcheck authenticates so a bad password fails it rather than
+      reporting a server that refuses every real client
+- [x] WhatsApp number ownership verification (W-02 / M-01) — ADR-037. Proven
+      against the Graph API with the workspace's own credential, before anything
+      is written; the platform token is deliberately not a route to it
+- [x] Per-workspace member removal (W-03a) — ADR-038. A membership status,
+      enforced at the one place every workspace route already resolves
+- [x] Refresh-token reuse teardown (W-10) — ADR-039. Atomic spend, and losing the
+      race invalidates the account's whole token estate
+- [x] `JWT_ALGORITHM` constrained to the HMAC family, so `none` and the
+      asymmetric families cannot be configured
+- [ ] Re-verify number ownership on a schedule. It is proven once, at claim time;
+      a number that moves at Meta afterwards is not noticed, and rows claimed
+      before ADR-037 carry no proof at all
 - [ ] Streaming size cap on media download: the limit is enforced once the body
       is in memory rather than while it arrives
 - [ ] DNS rebinding on outbound fetches, which needs the connection pinned to the
