@@ -46,6 +46,18 @@ Liveness deliberately does not touch PostgreSQL: a database outage must not make
 | POST | `/api/v1/auth/logout` | Revoke a refresh token (`204`) | Public |
 | POST | `/api/v1/auth/workspace` | Switch the active workspace | Authenticated |
 | GET | `/api/v1/auth/me` | The caller and their memberships | Authenticated |
+| POST | `/api/v1/auth/logout-all` | End **every** session this account holds | Authenticated |
+| POST | `/api/v1/auth/password` | Change the password, ending every session | Authenticated |
+
+`logout` revokes one refresh token; `logout-all` revokes the whole estate by raising
+`users.token_version`, which every token is checked against (ADR-036). The calling
+session is ended too - exempting it would leave the one an attacker is most likely to
+be holding. Both return the account's new state, never a token.
+
+`password` is a *change*, not a reset: the current password is the proof, so nothing has
+to be delivered anywhere. **There is no password reset**, deliberately - it needs a token
+sent to an address the caller controls, and this deployment cannot send email. See
+[SECURITY.md](SECURITY.md).
 
 ## Invitations
 
@@ -286,6 +298,18 @@ Open to every member, unlike usage: these are the numbers that tell the people s
 | --- | --- | --- |
 | GET | `/api/v1/platform/overview` | Platform owner or admin |
 | GET | `/api/v1/platform/tenants` | Platform owner or admin |
+| POST | `/api/v1/platform/users/{user_id}/disable` | Platform owner or admin |
+| POST | `/api/v1/platform/users/{user_id}/enable` | Platform owner or admin |
+| POST | `/api/v1/platform/invoices/{invoice_id}/payments` | Platform owner or admin |
+| POST | `/api/v1/platform/invoices/{invoice_id}/void` | Platform owner or admin |
+| GET | `/api/v1/platform/audit-logs` | Platform owner or admin |
+
+**Disabling an account is a platform action, not a workspace one.** An account is a
+global identity, so a tenant administrator able to suspend one could evict somebody from
+workspaces that administrator has nothing to do with. Removing a person from a single
+workspace is a different operation against a different object, and does not exist yet.
+`enable` raises the token version as well as restoring the account, so tokens issued
+before a suspension do not come back with it.
 
 Platform authority is a property of the user, not of a membership. Owning a workspace grants nothing here, and holding a platform role grants nothing inside a workspace — a platform administrator reading these figures still cannot open a customer's inbox.
 

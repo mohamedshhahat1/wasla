@@ -71,6 +71,16 @@ class AuditAction(StrEnum):
     INVITATION_REVOKED = "invitation_revoked"
     INVITATION_ACCEPTED = "invitation_accepted"
 
+    # The account itself, and the sessions it holds (ADR-036). Platform-level
+    # rather than workspace-level: an account is a global identity, so disabling
+    # one reaches every workspace that person belongs to. Recorded with no
+    # tenant, which is what makes them visible in the platform trail.
+    USER_DISABLED = "user_disabled"
+    USER_ENABLED = "user_enabled"
+    USER_SESSIONS_REVOKED = "user_sessions_revoked"
+    # The name of an event, not a credential. Nothing here ever holds one.
+    PASSWORD_CHANGED = "password_changed"  # noqa: S105
+
     # The channel a business talks to its customers through
     WHATSAPP_ACCOUNT_CONNECTED = "whatsapp_account_connected"
     WHATSAPP_ACCOUNT_DISABLED = "whatsapp_account_disabled"

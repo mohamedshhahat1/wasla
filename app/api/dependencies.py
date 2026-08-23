@@ -30,6 +30,7 @@ from app.repositories.audit_repository import (
     PlatformAuditLogRepository,
 )
 from app.repositories.billing_repository import PlanRepository
+from app.services.account_service import AccountService
 from app.services.agent_service import AgentService
 from app.services.analytics_service import AnalyticsService
 from app.services.auth_service import AuthService
@@ -79,6 +80,19 @@ def get_auth_service(
 
 
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
+
+
+def get_account_service(session: SessionDep) -> AccountService:
+    """Account lifecycle and session revocation (ADR-036).
+
+    Not workspace-scoped, and deliberately: an account is a global identity,
+    so the authority to suspend one is the platform's rather than any
+    workspace's. The routes decide who may call it.
+    """
+    return AccountService(session)
+
+
+AccountServiceDep = Annotated[AccountService, Depends(get_account_service)]
 
 
 def get_invitation_service(session: SessionDep) -> InvitationService:
@@ -134,6 +148,15 @@ async def get_current_user(
     if user is None or not user.is_active:
         # The token is still signed and unexpired, but the account behind it is
         # gone or disabled, so it stops working now rather than at expiry.
+        raise AuthenticationError("The credentials are not valid.")
+    if claims.token_version != user.token_version:
+        # Revocation (ADR-036). The row is already loaded to check `is_active`
+        # above, so this comparison costs no extra query - which is the whole
+        # reason revocation can be immediate rather than waiting out the access
+        # token's fifteen minutes.
+        #
+        # A token minted before the column existed carries no version at all and
+        # lands here too, which is correct: it cannot be shown to be current.
         raise AuthenticationError("The credentials are not valid.")
     return CurrentUser(user=user, claims=claims)
 

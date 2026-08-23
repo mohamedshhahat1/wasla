@@ -63,6 +63,40 @@ class WorkspaceSwitchRequest(_Payload):
     workspace_slug: str = Field(min_length=2, max_length=MAXIMUM_SLUG_LENGTH)
 
 
+class PasswordChangeRequest(_Payload):
+    """Changing a password from inside a session.
+
+    The current password is the proof, which is what makes this reachable
+    without an email provider - unlike a reset, which has to send a token to an
+    address somebody controls. See docs/SECURITY.md.
+
+    `current_password` carries no minimum: restating the policy on the way in
+    would describe the rules to somebody guessing, and it is compared against a
+    hash rather than a rule. The maximum is enforced on both, because an
+    unbounded string reaching Argon2 is a way to spend CPU.
+    """
+
+    current_password: str = Field(min_length=1, max_length=MAXIMUM_PASSWORD_LENGTH)
+    new_password: str = Field(
+        min_length=MINIMUM_PASSWORD_LENGTH,
+        max_length=MAXIMUM_PASSWORD_LENGTH,
+    )
+
+
+class AccountStateResponse(BaseModel):
+    """What an account lifecycle action left behind.
+
+    Carries the version so an administrator can see that a revocation took
+    effect. The number says nothing about any token - it is a counter, not a
+    secret - and no token is ever returned here or written to a log.
+    """
+
+    id: uuid.UUID
+    email: str
+    is_active: bool
+    token_version: int
+
+
 class WorkspaceSummary(BaseModel):
     """A workspace as seen by one member, including their role in it."""
 

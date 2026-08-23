@@ -277,7 +277,15 @@ async def _seed(session: AsyncSession, settings: Settings, *, slug: str) -> Work
     )
     await session.flush()
 
-    token, _ = create_access_token(settings=settings, subject=user.id, tenant_id=tenant.id)
+    # The version is stamped in because authentication now compares it against
+    # the user row (ADR-036). A token minted without one is refused as revoked,
+    # which would make every assertion below pass for the wrong reason.
+    token, _ = create_access_token(
+        settings=settings,
+        subject=user.id,
+        tenant_id=tenant.id,
+        token_version=user.token_version,
+    )
     return Workspace(
         tenant=tenant,
         user=user,
@@ -683,6 +691,10 @@ async def test_a_token_naming_a_workspace_the_user_never_joined_is_refused(
         settings=settings,
         subject=attacker.user.id,
         tenant_id=victim.tenant.id,
+        # Deliberately correct, so the refusal below can only come from the
+        # missing membership. A stale version would refuse it one step earlier
+        # and prove nothing about workspace isolation.
+        token_version=attacker.user.token_version,
     )
     headers = {"Authorization": f"Bearer {forged}"}
 
@@ -761,6 +773,7 @@ async def test_platform_staff_are_recognised_by_role_not_by_membership(
         settings=settings,
         subject=attacker.user.id,
         tenant_id=attacker.tenant.id,
+        token_version=attacker.user.token_version,
     )
     response = await http.get(
         f"{API}/platform/tenants",

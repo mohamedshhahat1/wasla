@@ -255,6 +255,20 @@ class AuthService:
         if user is None or not user.is_active:
             raise AuthenticationError(INVALID_CREDENTIALS)
 
+        if claims.token_version != user.token_version:
+            # Revocation (ADR-036), and this is the check that matters most: a
+            # refresh token lives for weeks, so rotation alone only ever spends
+            # the copy that is presented. Bumping the version is what kills the
+            # thief's chain rather than the victim's.
+            logger.warning(
+                "auth.revoked_refresh_token_presented",
+                extra={
+                    "event": "auth.revoked_refresh_token_presented",
+                    "user_id": str(user.id),
+                },
+            )
+            raise AuthenticationError(INVALID_CREDENTIALS)
+
         # Rotation: the presented token is spent immediately, so a stolen copy
         # stops working as soon as the real holder refreshes once.
         await self._token_store.revoke(
@@ -360,8 +374,13 @@ class AuthService:
             settings=self._settings,
             subject=user.id,
             tenant_id=workspace.tenant.id if workspace else None,
+            token_version=user.token_version,
         )
-        refresh_token, _ = create_refresh_token(settings=self._settings, subject=user.id)
+        refresh_token, _ = create_refresh_token(
+            settings=self._settings,
+            subject=user.id,
+            token_version=user.token_version,
+        )
         return AuthenticatedSession(
             user=user,
             access_token=access_token,

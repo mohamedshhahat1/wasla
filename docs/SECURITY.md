@@ -79,3 +79,93 @@ Four properties, each chosen against a specific failure:
 - **The platform is not exempt.** A payment recorded or an invoice voided by platform staff is written to *that workspace's* trail, attributed to the staff member. The customer is entitled to see who marked their invoice paid.
 
 Reads are deliberately not audited: they would bury the entries that matter, and they are the wrong tool for that question.
+
+## Sessions and revocation
+
+Tokens carry a `ver` claim holding the value of `users.token_version` when they
+were minted, and both the access token and the refresh token are checked against
+that column on use (ADR-036). Raising it by one ends every session that person
+holds.
+
+The access-token check rides the user row `get_current_user` already loads to
+verify `is_active`, so it costs no extra query — which is why revocation is
+immediate rather than waiting out the fifteen-minute access lifetime.
+
+| Action | Who may do it | Effect |
+|---|---|---|
+| `POST /auth/logout-all` | The account holder | Ends every session, including the calling one. The account stays usable; sign in again. |
+| `POST /auth/password` | The account holder, proving the current password | Replaces the password and ends every session. |
+| `POST /platform/users/{id}/disable` | Platform staff | Suspends the account and ends every session. |
+| `POST /platform/users/{id}/enable` | Platform staff | Restores the account **and bumps again**, so tokens from before the suspension stay dead. |
+| `POST /auth/logout` | Anyone holding the token | Revokes that one refresh token via the Redis denylist. |
+
+Three properties worth stating because they are easy to get wrong:
+
+- **Re-enabling bumps the version.** Without it, a disable/enable cycle would
+  hand pre-suspension tokens their authority back — resurrecting exactly the
+  credentials the disable existed to kill.
+- **A token with no `ver` claim is refused.** Tokens minted before migration
+  `0021` stop working, so applying it signs out every open session once.
+  Treating them as current would exempt precisely the tokens this mechanism
+  exists to revoke.
+- **Disabling an account is a platform action, not a workspace one.** An account
+  is a global identity; a tenant administrator able to disable one could evict
+  somebody from workspaces that administrator has nothing to do with.
+
+The Redis refresh denylist still handles ordinary rotation within a session.
+Neither replaces the other, and because the version check reads PostgreSQL, a
+Redis outage no longer makes revocation impossible.
+
+## Password reset — deliberately absent
+
+**There is no password reset flow, and one must not be added until this
+repository can send email.**
+
+A reset serves somebody who *cannot* sign in. Its one-time token therefore has
+to reach an address that person controls, and delivery is the security control —
+without it there is no proof of ownership at all. This repository has no email
+capability: no SMTP, no provider client, no queue for it. The only mail-adjacent
+dependency is `email-validator`, which validates the shape of an address and
+sends nothing.
+
+The tempting shortcut is the one the invitation flow already takes — return the
+token in the API response. That is sound for an invitation, because the caller
+is an authenticated administrator who is already trusted to hold it and pass it
+on. It is catastrophic for a reset: the request is unauthenticated by necessity,
+so anyone could ask for a token for any address and read it straight out of the
+response. That is account takeover with extra steps, and it would be worse than
+having no reset at all, because it would look like a feature.
+
+**Shipped instead: `POST /auth/password`**, an authenticated password *change*.
+The current password is the proof, so nothing needs to be delivered anywhere. It
+ends every session on success, which covers the common case — "I think something
+was taken, rotate my credential and kill what is out there."
+
+What a reset will need when email exists, recorded now so it is not redesigned
+under pressure: a one-time token stored only as a hash, a short expiry,
+single-use invalidation, an identical response whether or not the address is
+registered, a rate limit on requests, a session bump on success, the token never
+logged and never returned through the API, and tests covering replay and
+expiry. That is a separate capability with an infrastructure dependency, not an
+oversight in this one.
+
+## Account lifecycle — what is still missing
+
+Stated rather than carried silently.
+
+- **A workspace cannot remove or suspend a member.** `memberships` has no
+  `status` column and there is no `/members` router. Platform staff can disable
+  a person's whole account, and a person can end their own sessions, but a
+  workspace owner cannot withdraw one colleague's access to one workspace. This
+  is the tenant-scoped counterpart to what ADR-036 built, and it is the largest
+  remaining gap in access control.
+- **Refresh-token families are not revoked on reuse.** Presenting a spent token
+  is detected and refused, but the chain a thief already established is not torn
+  down by it. Bumping the version does tear it down, so the lever exists — it is
+  simply not pulled automatically on reuse.
+- **`POST /auth/logout` is unauthenticated and unlimited.** Revoking a token you
+  hold is legitimate, but so is revoking one you stole.
+- **No password reset.** See above.
+- **Revocation is per-user, not per-session.** Signing one device out while
+  leaving another alone would need a session table (ADR-036 records why one was
+  not built).

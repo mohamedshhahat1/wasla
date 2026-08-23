@@ -27,6 +27,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from app.api.dependencies import (
+    AccountServiceDep,
     PlatformAnalyticsServiceDep,
     PlatformAuditLogRepositoryDep,
     PlatformInvoiceServiceDep,
@@ -36,6 +37,7 @@ from app.db.models.audit import AuditAction
 from app.db.models.enums import TenantStatus
 from app.platform.platform_analytics import DEFAULT_PAGE, MAX_PAGE
 from app.schemas.audit import AuditEntryRead
+from app.schemas.auth import AccountStateResponse
 from app.schemas.invoice import (
     InvoiceRead,
     InvoiceVoidRequest,
@@ -165,3 +167,60 @@ async def platform_audit_logs(
         limit=limit,
     )
     return [AuditEntryRead.from_model(row) for row in rows]
+
+
+@router.post(
+    "/users/{user_id}/disable",
+    response_model=AccountStateResponse,
+    summary="Suspend an account and end every session it holds",
+)
+async def disable_user(
+    user_id: uuid.UUID,
+    staff: PlatformStaffDep,
+    accounts: AccountServiceDep,
+) -> AccountStateResponse:
+    """Platform-authorized, and deliberately not available to a workspace.
+
+    An account is a **global identity**: one person reaches every workspace they
+    belong to through it. A tenant administrator able to disable one could evict
+    somebody from workspaces that administrator has nothing to do with - which
+    is why removing a person from *one* workspace is a different operation
+    against a different object, and is still missing (see docs/SECURITY.md).
+
+    Ends every session immediately rather than at token expiry, because
+    `users.token_version` is checked on the row that authentication already
+    loads (ADR-036).
+    """
+    user = await accounts.disable(user_id=user_id, actor=staff.user)
+    return AccountStateResponse(
+        id=user.id,
+        email=user.email,
+        is_active=user.is_active,
+        token_version=user.token_version,
+    )
+
+
+@router.post(
+    "/users/{user_id}/enable",
+    response_model=AccountStateResponse,
+    summary="Restore an account without restoring its old sessions",
+)
+async def enable_user(
+    user_id: uuid.UUID,
+    staff: PlatformStaffDep,
+    accounts: AccountServiceDep,
+) -> AccountStateResponse:
+    """Re-enabling bumps the version too, and that is the point.
+
+    A token minted before the suspension may still be signed and unexpired.
+    Without the bump, restoring the account would hand that token its authority
+    back - so a disable/enable cycle would resurrect exactly the credentials the
+    disable existed to kill. Somebody returning from suspension signs in again.
+    """
+    user = await accounts.enable(user_id=user_id, actor=staff.user)
+    return AccountStateResponse(
+        id=user.id,
+        email=user.email,
+        is_active=user.is_active,
+        token_version=user.token_version,
+    )

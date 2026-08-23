@@ -898,3 +898,43 @@ The deploy job is written and has never run against a real host. It is gated on 
 The workflows themselves are now under test (`tests/unit/test_delivery_pipeline.py`). YAML is the one part of this repository nothing else checks — it is not imported and not typed — and the failure mode is a broken release rather than a red build. The tests assert rules rather than contents, so renaming a step does not break them.
 
 **TLS is documented and not shipped.** A certificate is issued to a domain this repository does not know. The nginx configuration contains the HTTP listener, the ACME challenge path served *before* the redirect (a redirect to a certificate that does not exist yet cannot be verified — that deadlock is the usual first-issuance failure), and a complete but commented TLS server block. A self-signed certificate shipped here would be worse than none: it would look like TLS while failing every client that checks.
+
+---
+
+## ADR-036 — Revocation Is a Version on the User, Checked on a Row Already Loaded
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Add `users.token_version`, an integer stamped into every access and refresh token as a `ver` claim and compared against the row on use. Raising it by one ends every session that person holds. Bump it when an account is disabled, when it is re-enabled, when the person revokes their sessions, and when they change their password. Do **not** introduce a session table.
+
+Context:
+Session revocation did not exist. `users.is_active` was checked on every request by `get_current_user`, but the only write to it anywhere in the application was `is_active=True` in `UserRepository.create` — so the check guarded a column no code path could change. There was no member-removal API, no password reset, and no password change. Refresh tokens live fourteen days.
+
+Rotation was already in place and does not help: it spends the token that is *presented*, which is the victim's, never the thief's. A stolen refresh token could therefore be exchanged indefinitely, and the victim's own activity would not disturb it.
+
+That left exactly one lever: rotating `JWT_SECRET`. It works, and it signs out every user of every tenant at once. That is an outage, not a revocation, and `docs/RUNBOOK.md` already said so.
+
+Reason:
+**The check is free, which is what makes it immediate.** `get_current_user` already loads the user row on every request to check `is_active`. Comparing an integer on a row that is already in hand costs no additional query, so revocation does not have to wait out the access token's fifteen minutes — it takes effect on the next request. Had the lookup not already existed, the honest choice would have been to accept a bounded window rather than add a per-request query solely for revocation.
+
+**Per-user, not per-session, and that is a real limitation.** Bumping the version signs out every device that person has. "Sign the stolen laptop out and leave the phone alone" is not expressible. Getting that needs a row per refresh token, which means a write on every rotation, a cleanup job for expired rows, and a new failure mode when that table is unavailable — capability built for a device-management surface this product does not have. The threat that actually exists is "a token leaked and I need it dead now", and the coarse lever closes it completely. If per-session revocation is ever needed, this column survives beside it as the "everything" lever rather than being replaced.
+
+**Re-enabling bumps too, and this is the part that is easy to get wrong.** A token minted before a suspension is still signed and may still be inside its lifetime. If only `disable` bumped, restoring the account would hand that token its authority back — so a disable/enable cycle would resurrect precisely the credentials the disable existed to kill. Somebody returning from suspension signs in again.
+
+**Authority follows the object.** An account is a global identity: one person reaches every workspace they belong to through it. Disabling one is therefore a platform action, because a tenant administrator able to do it could evict somebody from workspaces that administrator has nothing to do with. What a person does to their own account — revoke my sessions, change my password — needs no administrator at all. Removing a person from *one* workspace is a different operation against a different object, and it is still missing.
+
+**A token with no version is refused.** Tokens minted before the column existed carry no `ver` claim, so the comparison fails and they stop working. Every session open at deploy time therefore ends and everybody signs in once. That is the correct direction to fail: treating an unversioned token as current would leave exactly the tokens this mechanism exists to revoke permanently exempt from it. The migration says so in its docstring.
+
+Consequences:
+Revocation is one `UPDATE`. `POST /auth/logout-all` and `POST /auth/password` are self-service; `POST /platform/users/{id}/disable` and `/enable` are platform-authorized and audited with the resulting version in the entry, so a revocation is provable afterwards. The version is a counter rather than a secret — it discloses nothing about any token — which is why it is safe in an audit entry and in a response body.
+
+The refresh denylist in Redis stays. It handles the ordinary rotation case within a session; this column handles the case where somebody needs a whole estate gone. Neither replaces the other, and the denylist failing open on a Redis outage no longer means revocation is impossible, because this check reads PostgreSQL.
+
+One deploy-time cost, stated plainly: applying migration `0021` signs out every existing session.
+
+**Password reset remains absent, and is deferred rather than faked** — see `docs/SECURITY.md`. A reset serves somebody who cannot sign in, so its token has to reach an address they control, and this repository has no email delivery of any kind. The invitation flow returns its token through the API because an administrator is already trusted to hold it; doing the same for a reset would let anybody request a token for any address and read it out of the response, which is account takeover with extra steps. A password *change* is shipped instead, because the current password is proof enough and needs nobody's help to deliver.

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from fastapi import APIRouter, status
 
-from app.api.dependencies import AuthServiceDep, CurrentUserDep
+from app.api.dependencies import AccountServiceDep, AuthServiceDep, CurrentUserDep
 from app.api.rate_limits import AuthRateLimit
+from app.db.models import User
 from app.schemas.auth import (
     AccessTokenResponse,
+    AccountStateResponse,
     LoginRequest,
     LogoutRequest,
+    PasswordChangeRequest,
     ProfileResponse,
     RefreshRequest,
     RegistrationRequest,
@@ -149,3 +152,66 @@ async def me(current_user: CurrentUserDep, service: AuthServiceDep) -> ProfileRe
         platform_role=user.platform_role,
         workspaces=[_summarise(workspace) for workspace in workspaces],
     )
+
+
+def _account_state(user: User) -> AccountStateResponse:
+    return AccountStateResponse(
+        id=user.id,
+        email=user.email,
+        is_active=user.is_active,
+        token_version=user.token_version,
+    )
+
+
+@router.post(
+    "/logout-all",
+    response_model=AccountStateResponse,
+    summary="Sign out of every session",
+)
+async def logout_everywhere(
+    current_user: CurrentUserDep,
+    accounts: AccountServiceDep,
+) -> AccountStateResponse:
+    """End every session this account holds, including the one calling (ADR-036).
+
+    The self-service half of revocation, and the reason it is not behind an
+    administrator: somebody who thinks a token leaked needs to act now, and
+    should not have to lose their account to do it. Signing in again immediately
+    afterwards is expected - the account is untouched, only its sessions end.
+
+    The token used to make this call is invalidated too. Exempting it would
+    leave the one session an attacker is most likely to be holding.
+    """
+    user = await accounts.revoke_sessions(user=current_user.user)
+    return _account_state(user)
+
+
+@router.post(
+    "/password",
+    response_model=AccountStateResponse,
+    summary="Change the password, ending every session",
+)
+async def change_password(
+    payload: PasswordChangeRequest,
+    current_user: CurrentUserDep,
+    accounts: AccountServiceDep,
+    # Limited by client address like the rest of the credential surface: the
+    # current password is guessable in principle, and this route verifies one.
+    limit: AuthRateLimit,
+) -> AccountStateResponse:
+    """Replace the password, proving the current one first.
+
+    Not a reset. A reset serves somebody who *cannot* sign in and needs a token
+    sent to an address they control, which this deployment has no way to send -
+    see docs/SECURITY.md. This serves somebody already signed in, so the proof
+    is the password itself.
+
+    Every session ends on success, this one included, because the usual reason
+    to change a password is that something may have been taken.
+    """
+    user = await accounts.change_password(
+        user=current_user.user,
+        current_password=payload.current_password,
+        new_password=payload.new_password,
+    )
+    return _account_state(user)

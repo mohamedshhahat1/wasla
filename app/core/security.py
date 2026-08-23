@@ -50,6 +50,10 @@ class TokenClaims:
     issued_at: datetime
     expires_at: datetime
     tenant_id: uuid.UUID | None = None
+    # The value of `users.token_version` when this token was minted (ADR-036).
+    # Optional only so a token issued before the column existed decodes rather
+    # than raising; such a token is treated as stale by the checks that read it.
+    token_version: int | None = None
 
     @property
     def seconds_until_expiry(self) -> int:
@@ -137,6 +141,7 @@ def _create_token(
     token_type: TokenType,
     lifetime: timedelta,
     tenant_id: uuid.UUID | None = None,
+    token_version: int | None = None,
 ) -> tuple[str, TokenClaims]:
     issued_at = datetime.now(UTC)
     expires_at = issued_at + lifetime
@@ -152,6 +157,10 @@ def _create_token(
     }
     if tenant_id is not None:
         payload["tid"] = str(tenant_id)
+    if token_version is not None:
+        # Short name for the same reason the others are short: it rides in every
+        # request header, and a JWT is not a place to be verbose.
+        payload["ver"] = int(token_version)
 
     token = jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
     claims = TokenClaims(
@@ -161,6 +170,7 @@ def _create_token(
         issued_at=issued_at,
         expires_at=expires_at,
         tenant_id=tenant_id,
+        token_version=token_version,
     )
     return token, claims
 
@@ -170,6 +180,7 @@ def create_access_token(
     settings: Settings,
     subject: uuid.UUID,
     tenant_id: uuid.UUID | None = None,
+    token_version: int | None = None,
 ) -> tuple[str, TokenClaims]:
     """Mint a short-lived access token.
 
@@ -183,10 +194,16 @@ def create_access_token(
         token_type=TokenType.ACCESS,
         lifetime=timedelta(seconds=settings.access_token_ttl_seconds),
         tenant_id=tenant_id,
+        token_version=token_version,
     )
 
 
-def create_refresh_token(*, settings: Settings, subject: uuid.UUID) -> tuple[str, TokenClaims]:
+def create_refresh_token(
+    *,
+    settings: Settings,
+    subject: uuid.UUID,
+    token_version: int | None = None,
+) -> tuple[str, TokenClaims]:
     """Mint a long-lived refresh token.
 
     No workspace is embedded: which tenant to open is decided when an access
@@ -197,6 +214,7 @@ def create_refresh_token(*, settings: Settings, subject: uuid.UUID) -> tuple[str
         subject=subject,
         token_type=TokenType.REFRESH,
         lifetime=timedelta(seconds=settings.refresh_token_ttl_seconds),
+        token_version=token_version,
     )
 
 
@@ -232,6 +250,7 @@ def decode_token(token: str, *, settings: Settings, expected_type: TokenType) ->
             issued_at=datetime.fromtimestamp(int(payload["iat"]), tz=UTC),
             expires_at=datetime.fromtimestamp(int(payload["exp"]), tz=UTC),
             tenant_id=uuid.UUID(str(payload["tid"])) if payload.get("tid") else None,
+            token_version=int(payload["ver"]) if payload.get("ver") is not None else None,
         )
     except (KeyError, TypeError, ValueError) as error:
         raise AuthenticationError("The credentials are not valid.") from error

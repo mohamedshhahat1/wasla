@@ -62,6 +62,7 @@ Four gates. Each would have to fail independently.
 | Access lifetime | 900s, carries `tid` |
 | Refresh lifetime | 14 days, carries **no** `tid` — so switching workspace never needs a new refresh token |
 | Refresh rotation | The presented token is denylisted in Redis on use |
+| Revocation | `ver` claim compared against `users.token_version` on **both** token kinds (ADR-036) |
 | Audience | Not used, and no `aud` claim is issued — nothing to validate |
 
 There is exactly one `jwt.decode` in the codebase and it verifies. No code path
@@ -72,7 +73,7 @@ this was previously enforced only when `ENVIRONMENT` was literally `production`.
 
 ## 4. The enforced matrix
 
-95 operations. Generated from the dependency graph; "Minimum principal" is the
+99 operations. Generated from the dependency graph; "Minimum principal" is the
 weakest principal that reaches the handler.
 
 | Method | Path | Minimum principal | Workspace-scoped | Rate limit | Plan limit |
@@ -91,7 +92,9 @@ weakest principal that reaches the handler.
 | `GET` | `/api/v1/audit-logs` | **TENANT_ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/auth/login` | **Anonymous** | no | client | - |
 | `POST` | `/api/v1/auth/logout` | **Anonymous** | no | none | - |
+| `POST` | `/api/v1/auth/logout-all` | **User** | no | none | - |
 | `GET` | `/api/v1/auth/me` | **User** | no | none | - |
+| `POST` | `/api/v1/auth/password` | **User** | no | client | - |
 | `POST` | `/api/v1/auth/refresh` | **Anonymous** | no | client | - |
 | `POST` | `/api/v1/auth/register` | **Anonymous** | no | client | - |
 | `POST` | `/api/v1/auth/workspace` | **User** | no | none | - |
@@ -161,6 +164,8 @@ weakest principal that reaches the handler.
 | `POST` | `/api/v1/platform/invoices/{invoice_id}/void` | **PLATFORM_STAFF** | no | none | - |
 | `GET` | `/api/v1/platform/overview` | **PLATFORM_STAFF** | no | none | - |
 | `GET` | `/api/v1/platform/tenants` | **PLATFORM_STAFF** | no | none | - |
+| `POST` | `/api/v1/platform/users/{user_id}/disable` | **PLATFORM_STAFF** | no | none | - |
+| `POST` | `/api/v1/platform/users/{user_id}/enable` | **PLATFORM_STAFF** | no | none | - |
 | `GET` | `/api/v1/templates` | **MEMBER** | yes | workspace + campaign | - |
 | `POST` | `/api/v1/templates/sync` | **TENANT_ADMIN** | yes | workspace + campaign | - |
 | `GET` | `/api/v1/templates/{template_id}` | **MEMBER** | yes | workspace + campaign | - |
@@ -172,6 +177,8 @@ weakest principal that reaches the handler.
 | `POST` | `/api/v1/whatsapp/accounts` | **TENANT_ADMIN** | yes | workspace | whatsapp_numbers |
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/disable` | **TENANT_ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/enable` | **TENANT_ADMIN** | yes | workspace | - |
+
+<!-- 99 operations -->
 
 ### The seven unauthenticated routes
 
@@ -288,17 +295,22 @@ authority is used, not only where the menu is written.
 
 Recorded rather than silently carried.
 
-- **Access cannot be withdrawn.** `memberships` has no `status` column and there
-  is no `/members` router, so a workspace cannot remove or suspend anyone
-  (W-03a). Worse, `is_active=True` in `UserRepository.create` is the **only**
-  write to `users.is_active` anywhere in the application — the account-disable
-  check in `get_current_user` guards a column nothing can set. There is no
-  password-change or reset endpoint either, so a leaked refresh token cannot be
-  revoked by anyone except its holder; the only lever is rotating `JWT_SECRET`,
-  which signs out every user of every tenant at once.
+- **A workspace still cannot withdraw one colleague's access.** `memberships`
+  has no `status` column and there is no `/members` router (W-03a). This is now
+  the *largest* remaining gap: since ADR-036, platform staff can disable a whole
+  account and a person can end their own sessions, but a workspace owner cannot
+  remove one member from one workspace.
 - **Refresh-token families are not revoked on reuse** (W-10). Reuse is detected
   and the presented token refused, but a thief who refreshed once holds an
-  independent chain that the victim's own activity never disturbs.
+  independent chain that the victim's own activity never disturbs. Bumping the
+  token version does tear that chain down, so the lever now exists — it is
+  simply not pulled automatically on reuse.
+- **No password reset**, deliberately: it needs a token delivered to an address
+  the caller controls and this deployment has no email capability at all. A
+  password *change* is shipped instead. See [SECURITY.md](SECURITY.md).
+- **Revocation is per-user, not per-session.** Signing one device out while
+  leaving another alone needs a session table; ADR-036 records why one was not
+  built.
 - **`POST /auth/logout` is unauthenticated and unlimited.** Revoking a token you
   hold is legitimate, but anyone who obtains a victim's refresh token can also
   revoke it.
