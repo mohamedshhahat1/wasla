@@ -28,6 +28,7 @@ from app.repositories.audit_repository import (
 from app.services.audit_service import AuditTrail
 from app.services.subscription_service import SubscriptionService
 from app.services.whatsapp_account_service import WhatsAppAccountService
+from tests.fake_ownership import FakeOwnershipVerifier
 
 pytestmark = pytest.mark.integration
 
@@ -136,6 +137,19 @@ async def test_an_entry_that_rolled_back_did_not_happen(db_session):
     assert await AuditLogRepository(db_session, tenant_id=tenant_id).list_entries() == []
 
 
+def _account_service(session) -> WhatsAppAccountService:
+    """The real service, with ownership verification faked but still required.
+
+    Built through the fake rather than omitted, because a service with no
+    verifier refuses to connect anything - which is the behaviour under test
+    elsewhere, and would make these audit assertions unreachable.
+    """
+    return WhatsAppAccountService(
+        session=session,
+        ownership=FakeOwnershipVerifier().owns("109876543210"),
+    )
+
+
 # -------------------------------------------------- written by real actions
 
 
@@ -143,11 +157,11 @@ async def test_connecting_a_number_is_recorded(db_session):
     tenant = await _tenant(db_session)
     user = await _user(db_session)
 
-    await WhatsAppAccountService(session=db_session).connect(
+    await _account_service(db_session).connect(
         tenant_id=tenant.id,
         phone_number_id="109876543210",
+        access_token="a-token-the-fake-verifier-accepts",
         waba_id="555000111",
-        display_phone_number="+201000000000",
         actor=user,
     )
     await db_session.flush()
@@ -161,12 +175,12 @@ async def test_connecting_a_number_is_recorded(db_session):
 async def test_disabling_a_number_is_a_different_action_from_enabling(db_session):
     tenant = await _tenant(db_session)
     user = await _user(db_session)
-    service = WhatsAppAccountService(session=db_session)
+    service = _account_service(db_session)
     account = await service.connect(
         tenant_id=tenant.id,
         phone_number_id="109876543210",
+        access_token="a-token-the-fake-verifier-accepts",
         waba_id="555000111",
-        display_phone_number="+201000000000",
         actor=user,
     )
 

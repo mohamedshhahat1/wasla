@@ -34,6 +34,7 @@ from app.db.models.whatsapp_template import (
 from app.integrations.whatsapp.client import WhatsAppClient, build_http_client
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
+from app.services.credential_service import CredentialService
 
 logger = get_logger(__name__)
 
@@ -104,6 +105,11 @@ class TemplateService:
         self._tenant_id = tenant_id
         self._settings = settings
         self._whatsapp = whatsapp
+        # The same resolver the send path uses, so a sync reads the registry
+        # with whichever credential that number sends with (ADR-034). Reading a
+        # workspace's templates through the *platform* token when the workspace
+        # has its own is a wider credential than the operation needs.
+        self._credentials = CredentialService(settings)
         self._templates = WhatsAppTemplateRepository(session, tenant_id=tenant_id)
         self._accounts = WhatsAppAccountRepository(session, tenant_id=tenant_id)
 
@@ -145,15 +151,24 @@ class TemplateService:
         `DISABLED` rather than deleted: a campaign may reference it, and the row
         is the only place a workspace can read why its template stopped working.
         """
-        account = await self._accounts.require_by_id(account_id)
+        # Live claims only. Syncing a number the workspace has given up would
+        # read a business account it no longer holds, and would refill a
+        # registry that nothing may send from.
+        account = await self._accounts.require_live_by_id(account_id)
 
         if self._whatsapp is not None:
             payloads = await self._whatsapp.list_templates(waba_id=account.waba_id)
         else:
+            # `account.waba_id` is Meta's own answer from the ownership check,
+            # not a value the workspace typed (ADR-037). That matters here more
+            # than anywhere else: before proof existed, a workspace could name
+            # any business account it liked and this call would read that
+            # account's templates with whatever credential it ran under.
+            token = self._credentials.resolve(account).token
             async with build_http_client() as http:
                 client = WhatsAppClient(
                     http=http,
-                    access_token=self._settings.meta_access_token or "",
+                    access_token=token,
                     api_version=self._settings.meta_api_version,
                 )
                 payloads = await client.list_templates(waba_id=account.waba_id)

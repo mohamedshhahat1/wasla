@@ -85,6 +85,9 @@ class AuditAction(StrEnum):
     WHATSAPP_ACCOUNT_CONNECTED = "whatsapp_account_connected"
     WHATSAPP_ACCOUNT_DISABLED = "whatsapp_account_disabled"
     WHATSAPP_ACCOUNT_ENABLED = "whatsapp_account_enabled"
+    # The claim on a number was given up, freeing it for another workspace to
+    # prove and claim (ADR-037). Distinct from disabling, which keeps it.
+    WHATSAPP_ACCOUNT_RELEASED = "whatsapp_account_released"
 
     # Money
     SUBSCRIPTION_STARTED = "subscription_started"

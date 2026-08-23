@@ -22,6 +22,7 @@ from app.core.storage import LocalMediaStorage, MediaStorage
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.db.models.billing import LimitKey
+from app.integrations.whatsapp.ownership import MetaOwnershipVerifier
 from app.platform.platform_analytics import PlatformAnalyticsService
 from app.platform.platform_billing import PlatformBillingService
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
@@ -106,13 +107,22 @@ def get_whatsapp_account_service(
     settings: SettingsDep,
     session: SessionDep,
 ) -> WhatsAppAccountService:
-    """Built with a credential service, so a workspace can supply its own token.
+    """Built with an ownership verifier and a credential service.
 
-    A deployment with no encryption key configured still connects numbers - it
-    simply refuses to store a credential rather than storing one in the clear.
+    The verifier is what makes a claim on a number provable rather than merely
+    unique (ADR-037); without one the service refuses to connect anything, which
+    is the intended failure. It is constructed from settings only for the Graph
+    API version - it holds no credential of its own, and deliberately cannot
+    reach the platform token, because a claim proven with the platform's
+    credential would prove nothing about the workspace making it.
+
+    A deployment with no encryption key configured still connects numbers: proof
+    happens, the credential is simply not kept, and sending falls back to the
+    platform token as it did before per-workspace credentials existed.
     """
     return WhatsAppAccountService(
         session=session,
+        ownership=MetaOwnershipVerifier(api_version=settings.meta_api_version),
         credentials=CredentialService(settings),
     )
 

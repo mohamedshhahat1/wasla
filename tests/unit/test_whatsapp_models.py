@@ -10,7 +10,9 @@ with the migrated schema.
 
 from __future__ import annotations
 
-from sqlalchemy import Table, UniqueConstraint
+from datetime import UTC, datetime
+
+from sqlalchemy import Index, Table, UniqueConstraint
 
 from app.db.models import (
     Base,
@@ -33,6 +35,13 @@ ENCRYPTED_COLUMN = "access_token_encrypted"
 
 def _index_names(table: Table) -> set[str]:
     return {index.name for index in table.indexes if index.name is not None}
+
+
+def _index(table: Table, name: str) -> Index:
+    for index in table.indexes:
+        if index.name == name:
+            return index
+    raise AssertionError(f"{table.name} has no index named {name}")
 
 
 def _unique_columns(table: Table, name: str) -> tuple[str, ...]:
@@ -76,8 +85,12 @@ def test_every_table_with_a_tenant_column_indexes_it():
     assert missing == []
 
 
-def test_whatsapp_tables_declare_the_indexes_migration_0003_creates():
-    assert _index_names(WhatsAppAccount.__table__) == {"ix_whatsapp_accounts_tenant_id"}
+def test_whatsapp_tables_declare_the_indexes_the_migrations_create():
+    assert _index_names(WhatsAppAccount.__table__) == {
+        "ix_whatsapp_accounts_tenant_id",
+        # Migration 0022. Unique, and partial: one *live* claim per number.
+        "uq_whatsapp_accounts_live_phone_number_id",
+    }
     assert _index_names(WhatsAppEvent.__table__) == {
         "ix_whatsapp_events_tenant_id",
         "ix_whatsapp_events_account_id",
@@ -86,7 +99,14 @@ def test_whatsapp_tables_declare_the_indexes_migration_0003_creates():
 
 
 def test_enum_values_match_the_migration_literals():
-    assert [member.value for member in WhatsAppAccountStatus] == ["active", "disabled"]
+    assert [member.value for member in WhatsAppAccountStatus] == [
+        "active",
+        "disabled",
+        # Migration 0022. Order matters: PostgreSQL appends new enum labels, so
+        # a value inserted in the middle here would not match the type on a
+        # database that has been upgraded rather than built fresh.
+        "released",
+    ]
     assert [member.value for member in WhatsAppEventKind] == [
         "message",
         "status",
@@ -99,13 +119,50 @@ def test_enum_values_match_the_migration_literals():
     ]
 
 
-def test_phone_number_id_is_unique_platform_wide():
-    """Not (tenant_id, phone_number_id): tenant resolution depends on this."""
-    columns = _unique_columns(
-        WhatsAppAccount.__table__,
-        "uq_whatsapp_accounts_phone_number_id",
+def test_one_live_claim_per_number_platform_wide():
+    """Not (tenant_id, phone_number_id): tenant resolution depends on this.
+
+    A partial unique index rather than a constraint, so that releasing a number
+    frees it without deleting the row - and with it every conversation and
+    message that cascades from the account (ADR-037).
+    """
+    index = _index(WhatsAppAccount.__table__, "uq_whatsapp_accounts_live_phone_number_id")
+
+    assert index.unique is True
+    assert [column.name for column in index.columns] == ["phone_number_id"]
+    # The predicate is what makes it partial. Without it a released row would
+    # still occupy the number.
+    predicate = index.dialect_options["postgresql"]["where"]
+    assert "released_at IS NULL" in str(predicate)
+
+
+def test_a_released_row_no_longer_counts_as_active():
+    """`is_active` gates sending and inbound resolution, so it has to see the
+    release rather than only the status."""
+    account = WhatsAppAccount(
+        phone_number_id="1",
+        waba_id="2",
+        display_phone_number="+20 100 000 0000",
+        status=WhatsAppAccountStatus.ACTIVE,
     )
-    assert columns == ("phone_number_id",)
+    assert account.is_active is True
+    assert account.is_released is False
+
+    account.status = WhatsAppAccountStatus.RELEASED
+    account.released_at = datetime(2026, 8, 23, tzinfo=UTC)
+
+    assert account.is_active is False
+    assert account.is_released is True
+
+
+def test_ownership_proof_is_recorded_on_the_row():
+    """A claim without a recorded proof is a claim an operator cannot audit,
+    and the column is what makes the pre-ADR-037 rows findable."""
+    columns = WhatsAppAccount.__table__.columns
+    assert "ownership_verified_at" in columns
+    # Nullable, because rows claimed before proof existed genuinely have none
+    # and back-dating them would erase exactly that list.
+    assert columns["ownership_verified_at"].nullable is True
 
 
 def test_event_idempotency_is_scoped_to_one_workspace():

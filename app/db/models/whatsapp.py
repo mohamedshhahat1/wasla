@@ -1,9 +1,16 @@
 """WhatsApp Business accounts and the raw inbound event log.
 
-The account row carries no Meta credential on purpose. A per-workspace access
-token in a plain column would hand a live sending capability to anyone with a
-database dump; until there is encryption at rest, outbound calls use the
-platform credential from configuration. See ADR-009.
+Two rules govern the account row.
+
+**The credential is encrypted or absent, never plaintext.** ADR-009 refused to
+store a Meta token here at all until encryption at rest existed; ADR-034 built
+it. The column name says so, because a query result or a support screenshot
+must not be mistakable for a usable credential.
+
+**A claim on a number is backed by proof, and the proof is recorded.** The
+platform-wide uniqueness of `phone_number_id` says only that nobody else holds
+the number; `ownership_verified_at` says the workspace holding it proved
+control of it to Meta at claim time. See ADR-037.
 """
 
 from __future__ import annotations
@@ -13,7 +20,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,10 +29,19 @@ from app.db.models.enums import _enum_type
 
 
 class WhatsAppAccountStatus(StrEnum):
-    """Whether Wasla should accept and send traffic for this number."""
+    """Whether Wasla should accept and send traffic for this number.
+
+    `DISABLED` is a pause: the workspace still holds the claim, and nobody else
+    may take the number. `RELEASED` gives the claim up - the row stays so its
+    conversations and messages survive, but the number is free for another
+    workspace to prove and claim. The two are kept apart because a support
+    request to "turn it off for a week" and one to "hand it back" have opposite
+    consequences for everyone else on the platform.
+    """
 
     ACTIVE = "active"
     DISABLED = "disabled"
+    RELEASED = "released"
 
 
 class WhatsAppEventKind(StrEnum):
@@ -55,9 +71,16 @@ WHATSAPP_EVENT_STATE_TYPE = _enum_type(WhatsAppEventState, name="whatsapp_event_
 class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     """A WhatsApp Business phone number connected by one workspace.
 
-    `phone_number_id` is unique platform-wide, not per workspace. That is the
-    property the tenant resolver depends on: one number can never belong to two
-    workspaces, so inbound traffic is attributed with certainty.
+    `phone_number_id` is unique among *live* claims, not per workspace. That is
+    the property the tenant resolver depends on: one number can never be held by
+    two workspaces at once, so inbound traffic is attributed with certainty.
+
+    The uniqueness is a partial index rather than a constraint, and that is what
+    makes handing a number back possible. A released row keeps its history -
+    conversations and messages cascade from this table - while no longer
+    occupying the number. A plain `UNIQUE(phone_number_id)` would force the
+    choice between deleting a customer's conversation history and never letting
+    a number move, which is not a choice anyone should have to make.
     """
 
     __tablename__ = "whatsapp_accounts"
@@ -66,7 +89,12 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
     # contributes, so omitting it drops the index from the metadata while
     # migration 0003 still creates it, and `alembic check` fails.
     __table_args__ = (
-        UniqueConstraint("phone_number_id", name="uq_whatsapp_accounts_phone_number_id"),
+        Index(
+            "uq_whatsapp_accounts_live_phone_number_id",
+            "phone_number_id",
+            unique=True,
+            postgresql_where=text("released_at IS NULL"),
+        ),
         Index("ix_whatsapp_accounts_tenant_id", "tenant_id"),
     )
 
@@ -74,10 +102,28 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
     waba_id: Mapped[str] = mapped_column(String(64), nullable=False)
     display_phone_number: Mapped[str] = mapped_column(String(32), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # What Meta calls this business on this number. Recorded from the ownership
+    # check rather than typed by the person connecting, so it can be shown next
+    # to the number as something the platform confirmed rather than something a
+    # customer asserted.
+    verified_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[WhatsAppAccountStatus] = mapped_column(
         WHATSAPP_ACCOUNT_STATUS_TYPE,
         nullable=False,
         default=WhatsAppAccountStatus.ACTIVE,
+    )
+    # When this workspace last proved to Meta that it controls this number
+    # (ADR-037). Nullable only for rows written before ownership proof existed;
+    # every new claim sets it, and nothing may connect without it.
+    ownership_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    # Set when the workspace gives the number up. Non-null takes the row out of
+    # the uniqueness index above, which is what frees the number.
+    released_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     # The workspace's own Meta token, encrypted (ADR-034, superseding ADR-009).
@@ -91,7 +137,12 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
 
     @property
     def is_active(self) -> bool:
-        return self.status is WhatsAppAccountStatus.ACTIVE
+        return self.status is WhatsAppAccountStatus.ACTIVE and self.released_at is None
+
+    @property
+    def is_released(self) -> bool:
+        """Whether the claim on this number has been given up."""
+        return self.released_at is not None
 
     @property
     def has_own_credential(self) -> bool:
