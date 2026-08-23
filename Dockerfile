@@ -62,10 +62,17 @@ ENV PATH="/opt/venv/bin:$PATH"
 # imports them - msgpack and setuptools were both found that way. Deleting code
 # that never runs is a better answer than carrying a package installer into
 # production in order to keep it patched.
+# The console scripts go with the package. Deleting only `site-packages/pip`
+# leaves `/opt/venv/bin/pip` behind as a shim that fails on its first import -
+# harmless, and misleading in the way that matters: `command -v pip` succeeds,
+# so an operator checking the image is told pip is present when it cannot
+# install anything.
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip \
            /usr/local/lib/python3.12/site-packages/pip-*.dist-info \
            /opt/venv/lib/python3.12/site-packages/pip \
-           /opt/venv/lib/python3.12/site-packages/pip-*.dist-info
+           /opt/venv/lib/python3.12/site-packages/pip-*.dist-info \
+ && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.* \
+          /opt/venv/bin/pip /opt/venv/bin/pip3 /opt/venv/bin/pip3.*
 
 COPY app ./app
 COPY alembic ./alembic

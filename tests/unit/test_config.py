@@ -194,3 +194,36 @@ def test_an_unset_list_is_empty_rather_than_an_error(monkeypatch):
     monkeypatch.delenv("CREDENTIAL_ENCRYPTION_KEYS", raising=False)
 
     assert _settings().credential_encryption_keys == []
+
+
+# ------------------------------------------------------------ signing algorithm
+
+
+@pytest.mark.parametrize("algorithm", ["none", "None", "RS256", "ES256", "PS256", "HS255", ""])
+def test_an_algorithm_outside_the_hmac_family_is_refused(algorithm):
+    """Two failures, both configuration-only and both silent without this.
+
+    `none` would be listed in the `algorithms=` allowlist that is otherwise the
+    whole defence against algorithm confusion. And an asymmetric family would
+    have the application verify with `jwt_secret` as a public key - the classic
+    confusion, where anyone who learns the "public" key can sign. There is no
+    key-pair configuration here, so an asymmetric algorithm cannot be set up
+    correctly, only incorrectly.
+    """
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, environment="test", jwt_algorithm=algorithm)
+
+
+@pytest.mark.parametrize("algorithm", ["HS256", "HS384", "HS512"])
+def test_the_hmac_family_is_accepted(algorithm):
+    """The control. A guard that refused everything would pass the test above."""
+    settings = Settings(_env_file=None, environment="test", jwt_algorithm=algorithm)
+
+    assert settings.jwt_algorithm == algorithm
+
+
+def test_the_algorithm_is_normalised_to_upper_case():
+    """`hs256` in an environment file is a typo, not a different algorithm."""
+    settings = Settings(_env_file=None, environment="test", jwt_algorithm="hs512")
+
+    assert settings.jwt_algorithm == "HS512"

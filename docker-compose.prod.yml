@@ -25,14 +25,39 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    # A password, and it is required rather than optional.
+    #
+    # The network is private, which is the usual argument for leaving Redis
+    # open, and it is not enough here because of *what this Redis holds*: the
+    # spent-refresh-token denylist. Anything that can reach it can delete a key
+    # and turn a revoked token back into a live one - undoing a logout, an
+    # ADR-036 sign-out-everywhere, and the ADR-039 teardown that fires when a
+    # leaked token is replayed. It also holds the agent queue, so write access
+    # is enough to make a worker send WhatsApp messages of somebody's choosing.
+    #
+    # "Private network" means one compromised container, one misconfigured
+    # `networks:` entry, or one sidecar somebody adds next quarter. The password
+    # is one line and does not depend on that staying true.
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--requirepass"
+      - "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # Authenticated, or the check passes while the server is refusing every
+      # real client - which reads as "Redis is fine" during exactly the outage
+      # a misconfigured password would cause.
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
+    environment:
+      # For the healthcheck only. `redis-cli -a` on the command line would put
+      # the password in the process list of every container that can read it.
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     networks:
       - internal
     restart: always

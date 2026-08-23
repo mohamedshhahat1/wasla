@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -20,6 +20,10 @@ LogFormat = Literal["json", "console"]
 # Sentinel, not a credential: production configuration rejects this value.
 PLACEHOLDER_SECRET = "change-me"  # noqa: S105
 MINIMUM_SECRET_LENGTH = 32
+# The only algorithms this application can be configured with. HMAC only:
+# the signing key is a shared secret, so an asymmetric algorithm could only
+# ever be configured wrongly here, and `none` is not an algorithm.
+ALLOWED_JWT_ALGORITHMS: Final = frozenset({"HS256", "HS384", "HS512"})
 VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"})
 
 
@@ -51,6 +55,10 @@ class Settings(BaseSettings):
 
     # Security
     jwt_secret: str = PLACEHOLDER_SECRET
+    # Constrained to symmetric HMAC, and validated below. The setting exists so
+    # a deployment can move to a longer digest, not so it can choose a family:
+    # `jwt_secret` is a shared secret, and handing an asymmetric algorithm a
+    # shared secret is how key-confusion bugs are built.
     jwt_algorithm: str = "HS256"
     access_token_ttl_seconds: int = Field(default=900, gt=0)
     refresh_token_ttl_seconds: int = Field(default=1_209_600, gt=0)
@@ -224,6 +232,39 @@ class Settings(BaseSettings):
                 return json.loads(raw)
             return [item.strip() for item in raw.split(",") if item.strip()]
         return value
+
+    @field_validator("jwt_algorithm", mode="before")
+    @classmethod
+    def _validate_jwt_algorithm(cls, value: Any) -> Any:
+        """Refuse anything but the HMAC family.
+
+        Two failures this closes, both configuration-only and both silent.
+
+        **`none`.** PyJWT registers the null algorithm, and a deployment that
+        set `JWT_ALGORITHM=none` would be listing it in the `algorithms=`
+        allowlist that is otherwise the defence against algorithm confusion.
+        The library happens to refuse a non-empty key for it today; relying on
+        that is relying on somebody else's implementation detail to protect the
+        thing that decides who a request is.
+
+        **The asymmetric families.** `jwt_secret` is a shared secret. Naming
+        `RS256` here would have the application verify with that string as a
+        public key, which is the classic confusion: anyone who learns the
+        "public" key can sign. There is no key-pair configuration in this
+        application, so an asymmetric algorithm cannot be configured correctly -
+        only incorrectly.
+
+        Refused at startup, so a misconfiguration is a container that will not
+        boot rather than an authentication system that quietly stops meaning
+        anything.
+        """
+        if not isinstance(value, str):
+            return value
+        algorithm = value.strip().upper()
+        if algorithm not in ALLOWED_JWT_ALGORITHMS:
+            allowed = ", ".join(sorted(ALLOWED_JWT_ALGORITHMS))
+            raise ValueError(f"jwt_algorithm must be one of: {allowed}")
+        return algorithm
 
     @field_validator("log_level", mode="before")
     @classmethod
