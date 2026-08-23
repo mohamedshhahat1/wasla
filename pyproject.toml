@@ -38,7 +38,7 @@ dependencies = [
     # and an undeclared import is a deployment that works until the package that
     # happened to pull it in is removed. The floor is the security floor - this
     # library is where the project's cryptography actually lives (ADR-017).
-    "cryptography>=44,<49",
+    "cryptography>=50,<51",
     # PDF text extraction, for documents customers send over WhatsApp and for
     # the knowledge base, which has refused PDFs since phase 6 for want of a
     # parser. Pure Python and dependency-free, which matters for a library that
