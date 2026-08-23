@@ -15,26 +15,46 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import get_entitlement_service
 from app.core.config import Settings
 from app.core.exceptions import DependencyUnavailableError
+from app.db.models.billing import LimitKey
 from app.main import create_app
+from app.services.entitlement_service import Entitlement
 
 
 class FakeRedisCommands:
-    """The only Redis command a request issues: enqueueing work.
+    """The Redis commands a request issues: enqueueing work, and counting it.
 
     Reserving, releasing and dead-lettering belong to the worker, which is
     covered by its own fake. Implementing them here would invite a route to
     start using them.
+
+    The counter commands exist because the rate limiter runs inside the request
+    path. They are only reached by tests that switch limiting on - the default
+    settings fixture leaves it off.
     """
 
     def __init__(self) -> None:
         self.pushed: dict[str, list[str]] = {}
+        self.counters: dict[str, int] = {}
+        self.expiries: dict[str, int] = {}
 
     async def rpush(self, key: str, value: str) -> int:
         queue = self.pushed.setdefault(key, [])
         queue.append(value)
         return len(queue)
+
+    async def incr(self, key: str) -> int:
+        self.counters[key] = self.counters.get(key, 0) + 1
+        return self.counters[key]
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        self.expiries[key] = seconds
+        return True
+
+    async def ttl(self, key: str) -> int:
+        return self.expiries.get(key, -1)
 
 
 class FakeDependency:
@@ -90,6 +110,11 @@ def settings() -> Settings:
         log_format="console",
         log_level="WARNING",
         cors_origins=[],
+        # Off by default here, and deliberately. A limiter counting across a
+        # file makes every test in it order-dependent: the eleventh login would
+        # fail for a reason the test never mentions. The limiter has its own
+        # tests, which switch it on.
+        rate_limit_enabled=False,
     )
 
 
@@ -103,6 +128,34 @@ def fake_redis() -> FakeDependency:
     return FakeDependency(name="redis")
 
 
+class AllowingEntitlements:
+    """An entitlement service that permits everything, and queries nothing.
+
+    Routes that create a limited resource declare a plan-limit guard, and that
+    guard reads the database - a count of agents, a sum of usage. The fake
+    session here is deliberately unbound, so without this override every
+    endpoint test that merely stubs its own service would fail on a query it is
+    not about.
+
+    Allowing by default is the right bias for these tests: they exist to pin
+    routing, shapes and roles. What a limit actually does is proved against real
+    rows in `tests/integration/test_entitlements.py`, and the refusals are
+    proved in `test_plan_enforcement.py` by overriding this again.
+    """
+
+    async def check(self, key, *, additional: int = 1) -> Entitlement:
+        return Entitlement(key=key, limit=None, used=0, allowed=True)
+
+    async def require(self, key, *, additional: int = 1) -> Entitlement:
+        return await self.check(key, additional=additional)
+
+    async def allows(self, key, *, additional: int = 1) -> bool:
+        return True
+
+    async def snapshot(self, keys=None) -> list[Entitlement]:
+        return [await self.check(key, additional=0) for key in LimitKey]
+
+
 @pytest.fixture
 def app(
     settings: Settings,
@@ -112,6 +165,7 @@ def app(
     application = create_app(settings)
     application.state.database = fake_database
     application.state.redis = fake_redis
+    application.dependency_overrides[get_entitlement_service] = AllowingEntitlements
     return application
 
 

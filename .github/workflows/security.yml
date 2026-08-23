@@ -69,3 +69,55 @@ jobs:
               --redact \
               --no-banner \
               --verbose
+
+  image:
+    name: Container scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the runtime image
+        # Built here rather than pulled: this workflow runs on pull requests,
+        # where the image a change would produce has not been published and is
+        # exactly the thing worth scanning.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          push: false
+          load: true
+          tags: wasla:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan the image for known vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: wasla:scan
+          format: table
+          exit-code: "1"
+          # Findings with no fix available are reported by the scheduled run
+          # below but do not fail a pull request: there is nothing the author
+          # of that change can do about a base-image CVE with no patch, and a
+          # gate nobody can pass is a gate people learn to bypass.
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          vuln-type: os,library
+
+      - name: Report everything, including what cannot be fixed
+        # Never fails. Its job is visibility: an unfixable critical in the base
+        # image is a reason to change base image, and that decision needs to be
+        # visible somewhere before it becomes urgent.
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: wasla:scan
+          format: table
+          exit-code: "0"
+          ignore-unfixed: false
+          severity: CRITICAL,HIGH,MEDIUM
+          vuln-type: os,library

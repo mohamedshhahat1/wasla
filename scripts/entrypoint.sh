@@ -28,6 +28,12 @@ case "${command}" in
     # what the opt-in flag on the API exists to avoid.
     exec python -m app.workers.runner
     ;;
+  worker-health)
+    # The worker serves no HTTP, so its health check is a command rather than a
+    # request: it asks Redis whether every loop this container is configured to
+    # run has beaten recently. Exits non-zero when one has not.
+    exec python -m app.workers.health
+    ;;
   migrate)
     exec alembic upgrade head
     ;;

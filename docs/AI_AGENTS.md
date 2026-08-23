@@ -1,6 +1,6 @@
 # AI Agents
 
-**Status: Implemented** — an agent answers a customer end to end. Knowledge retrieval (Phase 6), usage recording (Phase 12) and a worker process of its own (Phase 8) are not built. Decisions: ADR-007, ADR-014, ADR-015.
+**Status: Implemented** — an agent answers a customer end to end, in a worker of its own, grounded in the workspace's own documents, and every provider call it makes is metered. Decisions: ADR-007, ADR-014, ADR-015, ADR-027.
 
 Scope: agent configuration, orchestration, tool calling, and conversation memory. What an agent sees of an attached file is covered in [MEDIA.md](MEDIA.md); when an agent is stopped from replying at all, in [SENTIMENT.md](SENTIMENT.md).
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Final
 
@@ -12,6 +13,7 @@ from app.core.exceptions import (
     AuthenticationError,
     PermissionDeniedError,
     TenantIsolationError,
+    ValidationError,
 )
 from app.core.logging import get_logger
 from app.core.security import (
@@ -33,6 +35,7 @@ from app.repositories import (
     UserMembershipRepository,
     UserRepository,
 )
+from app.services.subscription_service import SubscriptionService
 
 logger = get_logger(__name__)
 
@@ -117,6 +120,8 @@ class AuthService:
         )
         await self._session.flush()
 
+        await self._start_subscription(tenant_id=tenant.id)
+
         logger.info(
             "auth.registered",
             extra={
@@ -127,6 +132,30 @@ class AuthService:
         )
         workspace = WorkspaceContext(membership=membership, tenant=tenant)
         return self._issue(user=user, workspace=workspace)
+
+    async def _start_subscription(self, *, tenant_id: uuid.UUID) -> None:
+        """Put the new workspace on the default plan, if there is one.
+
+        Registration must not fail because a catalogue row is missing. A
+        workspace without a subscription is still entitled to the default plan
+        by the same code (ADR-029), so the worst case is a missing row rather
+        than a customer who cannot sign up - and a signup that 500s over
+        billing configuration is the least forgivable failure in the product.
+        """
+        code = self._settings.default_plan_code
+        if not code:
+            return
+        try:
+            await SubscriptionService(self._session, tenant_id=tenant_id).start(plan_code=code)
+        except ValidationError:
+            logger.warning(
+                "billing.default_plan_missing",
+                extra={
+                    "event": "billing.default_plan_missing",
+                    "tenant_id": str(tenant_id),
+                    "plan_code": code,
+                },
+            )
 
     async def login(
         self,

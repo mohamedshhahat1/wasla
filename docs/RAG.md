@@ -1,6 +1,6 @@
 # Knowledge Base and RAG
 
-**Status: Implemented** — ingestion, tenant-scoped retrieval and the `search_knowledge` tool exist and are exercised against real PostgreSQL with pgvector. PDF extraction arrived with phase 9. An approximate vector index and usage metering are Planned. See [../TASKS.md](../TASKS.md) phase 6. Storage decision: ADR-008. Embedding width: ADR-018. Queue separation: ADR-019.
+**Status: Implemented** — ingestion, tenant-scoped retrieval and the `search_knowledge` tool exist and are exercised against real PostgreSQL with pgvector. PDF extraction arrived with phase 9, and each search is metered as a `rag_query` (phase 12). An approximate vector index is Planned. See [../TASKS.md](../TASKS.md) phase 6. Storage decision: ADR-008. Embedding width: ADR-018. Queue separation: ADR-019.
 
 Scope: knowledge sources, ingestion, embeddings, and tenant-scoped retrieval.
 

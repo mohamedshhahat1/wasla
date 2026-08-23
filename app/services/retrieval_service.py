@@ -24,8 +24,10 @@ from typing import Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.db.models.usage import UsageEventType
 from app.integrations.openai.embeddings import EmbeddingsClient
 from app.repositories.knowledge_repository import DocumentChunkRepository, ScoredChunk
+from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
@@ -104,6 +106,7 @@ class RetrievalService:
         self._tenant_id = tenant_id
         self._embeddings = embeddings
         self._chunks = DocumentChunkRepository(session, tenant_id=tenant_id)
+        self._usage = UsageRecorder(session, tenant_id=tenant_id)
 
     async def search(
         self,
@@ -120,6 +123,10 @@ class RetrievalService:
 
         limit = max(1, min(top_k, MAX_TOP_K))
         vector = await self._embeddings.embed_one(cleaned)
+        # Counted once the embedding call has been paid for, and regardless of
+        # whether anything was found: a search that returns nothing consumed the
+        # same provider call as one that returns four passages.
+        self._usage.record(UsageEventType.RAG_QUERY)
         scored = await self._chunks.search(
             embedding=vector,
             limit=limit,

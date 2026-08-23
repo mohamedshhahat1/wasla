@@ -6,7 +6,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 
 ## Project status
 
-**Phases 0 through 11 are complete.** Phase 12 (analytics and usage) is next. The table below reflects the actual state of the code, not the roadmap.
+**Phases 0 through 15 are complete.** The table below reflects the actual state of the code, not the roadmap. One caveat is worth stating up front: the delivery pipeline builds, scans and publishes images and can deploy one, but it has never run against a real host — no production deployment exists yet, and nothing here pretends otherwise.
 
 | Area | Status |
 | --- | --- |
@@ -14,7 +14,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Documentation protocol (`Documentation_Protocol.md`) | Implemented |
 | Project memory (`README` / `ARCHITECTURE` / `TASKS` / `DECISIONS`, `docs/`) | Implemented |
 | Application foundation (FastAPI, config, logging, errors, DB, Redis, health, Docker, CI) | Implemented |
-| Domain models and migrations (`0001`–`0013`) | Implemented |
+| Domain models and migrations (`0001`–`0020`) | Implemented |
 | Multi-tenancy, authentication, workspace RBAC, invitations | Implemented |
 | WhatsApp Cloud API (webhook, signatures, idempotency, outbound client) | Implemented |
 | Conversations, inbox, human handoff, templates, cursor paging | Implemented |
@@ -25,10 +25,18 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Media (download, storage, vision, transcription, documents, outbound attachments) | Implemented |
 | Sentiment, priority and automatic escalation to a human | Implemented |
 | Campaigns and templates (approved-template registry, audiences, rate-limited sending, opt-out) | Implemented |
-| Usage, analytics, plans, subscriptions, billing | Planned |
-| Platform owner administration layer | Planned |
+| Usage metering, and tenant analytics derived from the domain tables | Implemented |
+| Platform owner view across every workspace (read-only) | Implemented |
+| Plans, subscriptions, entitlements enforced against usage, invoices and payment records | Implemented |
+| A live payment provider (the boundary and a manual implementation exist) | Planned |
+| Production hardening: rate limits, audit trail, request limits, encrypted workspace credentials, worker liveness | Implemented |
 | Worker process (media, agent, ingestion, follow-up and campaign loops in one container) | Implemented |
-| Deployment automation | Planned |
+| Container publishing, image provenance and vulnerability scanning | Implemented |
+| Deployment automation (CI-gated, digest-pinned, migrate-then-serve, readiness-checked) | Implemented |
+| A production deployment it has actually run against | Planned |
+| Production TLS (documented and configured; certificates are the operator's) | Implemented |
+| Operational runbook | Implemented |
+| Backups, alerting and zero-downtime releases | Planned |
 
 Status vocabulary used across all documentation: **Implemented**, **In Progress**, **Planned**, **Blocked**.
 
@@ -70,7 +78,8 @@ Planned for later phases:
 | [docs/BILLING.md](docs/BILLING.md) | Plans, subscriptions, entitlements, invoicing |
 | [docs/ANALYTICS.md](docs/ANALYTICS.md) | Analytics events, usage tracking, dashboards |
 | [docs/API.md](docs/API.md) | API conventions and endpoint catalogue |
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker, Nginx, CI/CD, production deployment |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker, Nginx, TLS, CI/CD, production deployment |
+| [docs/RUNBOOK.md](docs/RUNBOOK.md) | Operating it: triage, symptoms, procedures, what to watch |
 | [docs/SECURITY.md](docs/SECURITY.md) | Security model, secrets, isolation, auditing |
 
 ## Local development

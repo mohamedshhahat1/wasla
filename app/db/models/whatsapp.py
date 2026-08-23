@@ -13,7 +13,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -80,9 +80,27 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
         default=WhatsAppAccountStatus.ACTIVE,
     )
 
+    # The workspace's own Meta token, encrypted (ADR-034, superseding ADR-009).
+    # Never plaintext, never returned by any API, and never logged: the column
+    # name says "encrypted" so a query result, a backup or a support screenshot
+    # cannot be mistaken for a usable credential.
+    #
+    # Nullable, because a workspace without one falls back to the platform
+    # token - which is how every workspace worked before this column existed.
+    access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     @property
     def is_active(self) -> bool:
         return self.status is WhatsAppAccountStatus.ACTIVE
+
+    @property
+    def has_own_credential(self) -> bool:
+        """Whether this number sends with the workspace's own token.
+
+        The only thing about the credential any caller outside the messaging
+        path is allowed to learn.
+        """
+        return self.access_token_encrypted is not None
 
 
 class WhatsAppEvent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):

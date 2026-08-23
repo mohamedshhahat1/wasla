@@ -153,6 +153,10 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         Index("ix_conversations_tenant_id_last_message_at", "tenant_id", "last_message_at"),
         Index("ix_conversations_tenant_id_priority", "tenant_id", "priority"),
         Index("ix_conversations_contact_id", "contact_id"),
+        # Analytics: conversations opened in a window. The tenant index
+        # alone finds the workspace and then discards most of what it read
+        # by filter, which costs more the longer a workspace has existed.
+        Index("ix_conversations_tenant_id_created_at", "tenant_id", "created_at"),
     )
 
     contact_id: Mapped[uuid.UUID] = mapped_column(
@@ -239,6 +243,11 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         ),
         Index("ix_messages_tenant_id", "tenant_id"),
         Index("ix_messages_conversation_id_created_at", "conversation_id", "created_at"),
+        # Analytics: traffic in a window. Distinct from the index above,
+        # which serves one conversation's transcript rather than a
+        # workspace-wide count, and this is the largest table in the schema
+        # after usage events.
+        Index("ix_messages_tenant_id_created_at", "tenant_id", "created_at"),
     )
 
     conversation_id: Mapped[uuid.UUID] = mapped_column(

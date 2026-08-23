@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, status
 
 from app.api.dependencies import AuthServiceDep, CurrentUserDep
+from app.api.rate_limits import AuthRateLimit
 from app.schemas.auth import (
     AccessTokenResponse,
     LoginRequest,
@@ -45,7 +46,13 @@ def _session_response(result: AuthenticatedSession) -> SessionResponse:
     status_code=status.HTTP_201_CREATED,
     summary="Create an account and its first workspace",
 )
-async def register(payload: RegistrationRequest, service: AuthServiceDep) -> SessionResponse:
+async def register(
+    payload: RegistrationRequest,
+    service: AuthServiceDep,
+    # Counted per client address: a caller creating an account has no
+    # identity yet, so where the request came from is all there is.
+    limit: AuthRateLimit,
+) -> SessionResponse:
     result = await service.register(
         email=payload.email,
         password=payload.password,
@@ -61,7 +68,11 @@ async def register(payload: RegistrationRequest, service: AuthServiceDep) -> Ses
     response_model=SessionResponse,
     summary="Exchange credentials for a token pair",
 )
-async def login(payload: LoginRequest, service: AuthServiceDep) -> SessionResponse:
+async def login(
+    payload: LoginRequest,
+    service: AuthServiceDep,
+    limit: AuthRateLimit,
+) -> SessionResponse:
     result = await service.login(
         email=payload.email,
         password=payload.password,
@@ -75,7 +86,13 @@ async def login(payload: LoginRequest, service: AuthServiceDep) -> SessionRespon
     response_model=SessionResponse,
     summary="Rotate a refresh token for a new pair",
 )
-async def refresh(payload: RefreshRequest, service: AuthServiceDep) -> SessionResponse:
+async def refresh(
+    payload: RefreshRequest,
+    service: AuthServiceDep,
+    # Limited too. A refresh token is a credential, and a script holding a
+    # stolen one should not get unlimited attempts to find a live workspace.
+    limit: AuthRateLimit,
+) -> SessionResponse:
     result = await service.refresh(
         refresh_token=payload.refresh_token,
         workspace_slug=payload.workspace_slug,

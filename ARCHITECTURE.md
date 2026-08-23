@@ -11,11 +11,11 @@ Technical source of truth for the current system architecture. Every section car
 
 ## 1. System overview
 
-**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport, conversations, the agent orchestrator with its queue and worker, tenant-scoped knowledge retrieval, lead management, scheduled follow-ups, media understanding, sentiment and escalation, and campaigns with an approved-template registry all exist. Usage metering and billing do not.
+**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport, conversations, the agent orchestrator with its queue and worker, tenant-scoped knowledge retrieval, lead management, scheduled follow-ups, media understanding, sentiment and escalation, campaigns with an approved-template registry, usage metering with tenant and platform analytics, and plans, subscriptions and enforced entitlements all exist. Invoices and a payment provider do not.
 
 Wasla is an API-first, multi-tenant backend. A business (tenant) connects one or more WhatsApp Business phone numbers. Inbound customer messages arrive as Meta webhooks, are resolved to a tenant, persisted, and queued for asynchronous AI processing. An agent orchestrator loads the conversation, retrieves tenant-scoped knowledge, calls the OpenAI Responses API with a controlled tool set, and replies through the WhatsApp Cloud API.
 
-The whole of that pipeline is built, and a worker process runs the five loops that feed it. What is not built is measurement: usage metering, analytics events and billing arrive in Phases 12 and 13, so nothing yet counts what a workspace consumes.
+The whole of that pipeline is built, and a worker process runs the six loops that feed it. Everything it does is metered in the transaction that did it, reported back through tenant and platform analytics, and bounded by the plan the workspace is on. What is not built is money changing hands: invoices and a payment provider are the remainder of Phase 13.
 
 ```
 WhatsApp
@@ -431,15 +431,19 @@ Opt-out lives in the base population of `AudienceRepository` rather than as a fi
 
 ## 14. Background jobs and Redis usage
 
-**Status: Implemented** — the Redis client, its health probe, the refresh-token denylist, the agent, ingestion and media job queues, and the AI, ingestion, follow-up, media and campaign workers, all run by one worker process.
+**Status: Implemented** — the Redis client, its health probe, the refresh-token denylist, the agent, ingestion and media job queues, and the AI, ingestion, follow-up, media, campaign and billing workers, all run by one worker process.
 
-All five workers run in **one container**, concurrently in one event loop, selected by `WORKER_KINDS` (empty means all). Each is I/O-bound — waiting on Redis, PostgreSQL, OpenAI or Meta — so they interleave rather than compete, and one process is markedly simpler to deploy and watch than five. Splitting them apart later is an environment variable, not another image; `campaign` is the one that most often wants a replica of its own, because a workspace mid-broadcast is bandwidth against Meta rather than inference.
+All six workers run in **one container**, concurrently in one event loop, selected by `WORKER_KINDS` (empty means all). Each is I/O-bound — waiting on Redis, PostgreSQL, OpenAI or Meta — so they interleave rather than compete, and one process is markedly simpler to deploy and watch than six. Splitting them apart later is an environment variable, not another image; `campaign` is the one that most often wants a replica of its own, because a workspace mid-broadcast is bandwidth against Meta rather than inference.
+
+Each loop publishes a heartbeat to Redis — one key per kind, short expiry, refreshed on a timer — and the container's health check (`scripts/entrypoint.sh worker-health`) exits non-zero unless every loop this container is configured to run has beaten recently. Before this the image's HEALTHCHECK curled the API's liveness endpoint, which a process serving no HTTP could never answer, so the worker reported unhealthy for its entire life; both compose files disabled it rather than fake it.
+
+What the heartbeat proves is that the process is up and its event loop is scheduling: the beat is an ordinary task, so a crash, a hang or a blocking call in async code stops it. What it does not prove is that any loop is making progress — a worker waiting on a query that never returns keeps beating. That needs the in-flight reaper, which will read the same keys.
 
 SIGTERM asks each loop to stop and each finishes the job in its hand before returning, so a deploy does not dead-letter work that was about to succeed. The production compose gives the worker a longer `stop_grace_period` than the API: a worker mid-inference holds an HTTP call and an open transaction.
 
 One constraint binds the two together and is easy to get wrong. redis-py applies `socket_timeout` to *every* read, including the blocking `BLMOVE` a reserve is deliberately waiting on, so the read timeout has to outlast the block or an idle worker dies on its own patience. `MAX_BLOCKING_SECONDS` lives in `app/core/redis.py` beside the client that sizes its timeout around it, and the queues take their block duration from there.
 
-Redis provides job queues, caching, rate limiting and temporary state. The two *time*-triggered workers — follow-ups and campaigns — poll PostgreSQL instead (ADR-022): their work is a durable row a person can see and cancel, and a schedule held in Redis as well would be a second source of truth that drifts from the first the moment one is written without the other.
+Redis provides job queues, caching, rate limiting and temporary state. The three *time*-triggered workers — follow-ups, campaigns and billing — poll PostgreSQL instead (ADR-022): their work is a durable row a person can see and cancel, and a schedule held in Redis as well would be a second source of truth that drifts from the first the moment one is written without the other.
 
 There are three queues, not one, and the separation is deliberate (ADR-019). An agent job is a customer waiting for a reply; an ingestion job is a document that will be searchable in a minute; a media job is a customer waiting whose reply cannot even be composed yet. Sharing one list would let a bulk upload of a hundred documents sit in front of somebody's question, and a worker pool sized for downloading is the wrong shape for one doing inference.
 
@@ -449,9 +453,9 @@ Two gaps are known and recorded rather than implied away. Nothing reaps the in-f
 
 ## 15. Database architecture
 
-**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, and the identity, tenancy, WhatsApp, conversation, agent, knowledge, CRM, follow-up and media tables are Implemented; campaign, usage and billing tables arrive in later phases.
+**Status: In Progress** — engine, session scope, declarative base, shared mixins, migration tooling, and the identity, tenancy, WhatsApp, conversation, agent, knowledge, CRM, follow-up, media, sentiment, template, campaign, usage, analytics, plan and subscription tables are Implemented; invoices and payment records arrive with a provider.
 
-PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically; migration `0002` creates `tenants`, `users`, `memberships`, and `tenant_invitations`; migration `0003` creates `whatsapp_accounts` and `whatsapp_events`; migration `0004` creates `contacts`, `conversations`, and `messages`; migration `0005` creates `agents` and `agent_tools`; `0006` records template messages; `0007` creates the knowledge tables; `0008` the lead tables; `0009` the follow-up table; and `0010` creates `message_media`.
+PostgreSQL with SQLAlchemy 2.0 async sessions and Alembic migrations. The declarative base fixes an explicit constraint naming convention so autogenerated migrations stay stable and reviewable. Shared mixins provide UUID primary keys, `created_at`/`updated_at` timestamps, optional soft deletion, and the tenant foreign key plus index for tenant-owned tables. Migration `0001` enables the `pgcrypto` and `vector` extensions so every environment is provisioned identically; migration `0002` creates `tenants`, `users`, `memberships`, and `tenant_invitations`; migration `0003` creates `whatsapp_accounts` and `whatsapp_events`; migration `0004` creates `contacts`, `conversations`, and `messages`; migration `0005` creates `agents` and `agent_tools`; `0006` records template messages; `0007` creates the knowledge tables; `0008` the lead tables; `0009` the follow-up table; `0010` creates `message_media`; `0011` the sentiment tables and escalation columns; `0012` the WhatsApp template registry; `0013` the campaign tables and contact opt-out; `0014` creates `usage_events`; `0015` creates `analytics_events`; and `0016` creates `plans` and `subscriptions`, seeding the documented catalogue.
 
 Sessions are request-scoped and commit on success or roll back on failure. Connections use pre-ping, bounded pooling, recycling, and an explicit connect timeout.
 
@@ -463,7 +467,11 @@ One pitfall is recorded here because it already produced a defect. A model that 
 
 The schema carries one deliberate denormalisation. `conversations.last_inbound_at` duplicates the timestamp of the customer's most recent message, which could be derived from the `messages` table instead. It is stored because the 24-hour service window is checked on every outbound send and returned on every conversation read, so deriving it would make that the most frequent query in the system. The projection is the only writer.
 
-Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, the unique invitation token hash, `whatsapp_accounts (tenant_id)`, a platform-wide `UNIQUE(phone_number_id)`, `whatsapp_events (tenant_id)`, `whatsapp_events (account_id)`, `whatsapp_events (tenant_id, state)`, `UNIQUE(tenant_id, event_id)`, `contacts (tenant_id)`, `UNIQUE(tenant_id, wa_id)`, `conversations (tenant_id)`, `conversations (tenant_id, status)`, `conversations (tenant_id, last_message_at)`, `conversations (contact_id)`, `UNIQUE(tenant_id, contact_id, account_id)`, `messages (tenant_id)`, `messages (conversation_id, created_at)`, `UNIQUE(tenant_id, wa_message_id)`, `agents (tenant_id)`, `agents (tenant_id, status)`, `UNIQUE(tenant_id, name)` on agents, `agent_tools (tenant_id)`, `agent_tools (agent_id)`, and `UNIQUE(tenant_id, agent_id, name)`. Media adds `message_media (tenant_id)`, `message_media (tenant_id, status)`, `message_media (conversation_id)` and `UNIQUE(message_id)`. The conversation index is not an optimisation: before an agent is allowed to answer, the worker asks whether anything on the conversation is still unread, and it asks once per file that arrives. The unique constraint is what makes a webhook replay a no-op and the download job safe to retry. Further indexes are planned on usage and analytics `(tenant_id, created_at)`.
+Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, the unique invitation token hash, `whatsapp_accounts (tenant_id)`, a platform-wide `UNIQUE(phone_number_id)`, `whatsapp_events (tenant_id)`, `whatsapp_events (account_id)`, `whatsapp_events (tenant_id, state)`, `UNIQUE(tenant_id, event_id)`, `contacts (tenant_id)`, `UNIQUE(tenant_id, wa_id)`, `conversations (tenant_id)`, `conversations (tenant_id, status)`, `conversations (tenant_id, last_message_at)`, `conversations (contact_id)`, `UNIQUE(tenant_id, contact_id, account_id)`, `messages (tenant_id)`, `messages (conversation_id, created_at)`, `UNIQUE(tenant_id, wa_message_id)`, `agents (tenant_id)`, `agents (tenant_id, status)`, `UNIQUE(tenant_id, name)` on agents, `agent_tools (tenant_id)`, `agent_tools (agent_id)`, and `UNIQUE(tenant_id, agent_id, name)`. Media adds `message_media (tenant_id)`, `message_media (tenant_id, status)`, `message_media (conversation_id)` and `UNIQUE(message_id)`. The conversation index is not an optimisation: before an agent is allowed to answer, the worker asks whether anything on the conversation is still unread, and it asks once per file that arrives. The unique constraint is what makes a webhook replay a no-op and the download job safe to retry.
+
+Migration `0019` closed a gap phase 12 left. Every tenant analytics figure is "this workspace, this window", and `conversations`, `messages`, `message_sentiments` and `campaign_recipients` each had a `(tenant_id)` index carrying no timestamp — so the workspace's rows were found and then most of them discarded by filter. The waste grew with how long a workspace had existed, making the dashboard slowest for the longest-paying customers. Measured on fifty workspaces and fifty thousand messages, the message count went from a bitmap heap scan touching 772 buffers and discarding 850 of 1,000 rows to an index-only scan touching 6 with no heap fetches at all. `leads` already had the index, which is why the lead figures were the only ones that were fast.
+
+Usage adds four indexes to `usage_events`, and they are the three queries that exist rather than a guess: `(tenant_id, occurred_at)` for a workspace's dashboard summary, `(tenant_id, event_type, occurred_at)` for one meter at a time — a plan limit, a chart series — `(occurred_at)` for the platform total, which spans every workspace and can use no tenant-leading index at all, and `(tenant_id)` for the tenant scope every workspace-owned table carries. That table will be the largest in the schema, so its row is deliberately narrow and it carries no `updated_at`: nothing updates a usage row, and a correction is another row. Analytics indexes arrive with the analytics table.
 
 ## 16. Multi-tenancy
 
@@ -479,9 +487,17 @@ Cross-tenant reads answer `not_found`, never `forbidden`, so error codes cannot 
 
 ## 17. SaaS owner architecture
 
-**Status: In Progress** — the platform role authorization layer is Implemented; the `app/platform/` surface is Planned.
+**Status: In Progress** — the platform role authorization layer and a read-only reporting surface in `app/platform/` are Implemented; tenant administration, billing and audit logs are Planned.
 
-Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated: a platform role grants nothing inside a workspace, which is tested. The platform layer lives in `app/platform/` and is exposed under `/api/v1/platform/*` for tenant administration, usage, revenue, plans, subscriptions, system health, and audit logs. Privileged platform actions are always audit-logged.
+Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated: a platform role grants nothing inside a workspace, and owning a workspace grants nothing across the platform. Both directions are tested.
+
+`app/platform/` is a package rather than a few methods on existing services, and that is the point: every other query in this codebase is built so it *cannot* cross a tenant boundary, so the exception belongs somewhere a reviewer looks for it. A cross-tenant read outside this package is a bug.
+
+What it answers today, under `/api/v1/platform/*` and behind the platform-role dependency: how many workspaces exist and in what state, how many WhatsApp numbers are connected and live, what the platform consumed in a window, and what each workspace consumed — the last computed from the same counters that workspace sees, so an operator and a customer quote the same number.
+
+What it deliberately does not answer: revenue, MRR, ARR and churn, which are questions about subscriptions that do not exist until Phase 13; and estimated AI cost, which would need per-model prices stored nowhere — token counts are real, and a cost derived from invented prices would not be. A plausible zero on a dashboard is worse than an absent field.
+
+It is also read-only. Suspending or deleting a workspace is precisely the action that must be audit-logged, and there is no audit log until Phase 14; shipping the action first would mean a period in which the most consequential operations in the product left no trace.
 
 ## 18. Authentication and authorization
 
@@ -491,13 +507,96 @@ Argon2id password hashing with rehash-on-login, typed access and refresh tokens,
 
 Conversation routes are open to every workspace member rather than to admins only, because restricting them would exclude the people who staff an inbox. Reading agent configuration is open for the same reason. Role gates stay on administrative actions: connecting a number, inviting a colleague, revoking an invitation, and changing what an agent says to customers.
 
-## 19. Billing and usage tracking
+## 19. Usage metering and billing
 
-**Status: Planned**
+**Status: In Progress** — usage metering (migration `0014`, ADR-027), plans, subscriptions and enforced entitlements (migration `0016`, ADR-029, ADR-030), and invoices with payment records behind a one-method provider boundary (migration `0017`, ADR-031) are Implemented. A live payment provider is Planned.
 
-Usage is a first-class subsystem of append-only usage events (`tenant_id`, `event_type`, `quantity`, `unit`, `metadata`, `created_at`) aggregated for dashboards and billing. Plans and limits are stored and configurable, enforced through a central entitlement service. Billing models are provider-agnostic behind an abstraction.
+Metering came first because entitlements read it: a period limit is a sum over `usage_events` between the subscription's period bounds, which is what makes "1,000 messages a month" reset rather than accumulate forever. Resource limits — numbers, agents, colleagues, documents — are counted from the rows themselves.
 
-Token usage is already returned by the provider client and logged per turn, so the recorder has a source when it is built.
+Where a limit is enforced is a decision recorded in ADR-030, and the short version is: refuse the person who chose, never the customer who wrote. Creating something answers 402 from a dependency in the route signature; scheduling a campaign is checked for its whole audience at once; an agent turn with no allowance left stops without failing its job; and the inbound webhook path carries no check at all, because those words belong to a customer who owes us nothing and a non-2xx to Meta eventually disables the integration.
+
+```
+period ends
+    |
+billing worker claims the subscription
+    |
+invoice the period that is closing  <- before the roll: afterwards the row
+    |                                  describes the next month
+roll over: cancel, expire, or open the next period
+```
+
+An invoice is a record rather than a calculation (ADR-031): the plan code and the amounts are copied at issue time, so a repricing cannot rewrite last month, and an issued invoice is voided rather than edited. Usage lines carry a quantity and no amount, because no per-unit price is stored anywhere and inventing one would put a number on a bill nothing stands behind. `UNIQUE(tenant_id, period_start)` makes double-billing a period impossible across replicas.
+
+The payment provider boundary is a single `charge` method. Subscriptions, plans and periods stay Wasla's, because a service that knows what a "payment intent" is belongs to that processor. The shipped `ManualProvider` records that an invoice awaits payment and never claims to have collected; a workspace reads its own invoices, and only platform staff record a payment or void one.
+
+Usage is a first-class subsystem of append-only rows in `usage_events` (`tenant_id`, `event_type`, `quantity`, `unit`, `metadata`, `occurred_at`), aggregated on read rather than maintained as counters.
+
+```
+service consuming something (send, agent turn, retrieval, ingestion)
+    |
+UsageRecorder.record(...)          <- session.add, no I/O, no await
+    |
+the caller's transaction
+    |
+commit ------> the work and its meter are the same commit
+rollback ----> neither survives
+```
+
+Three properties are load-bearing, and each is a failure mode chosen against (ADR-027):
+
+**The meter shares the caller's transaction.** A rolled-back agent turn is not billed, and a message that committed is always counted. A meter on its own connection would survive the rollback of the work it measured, which is the failure a customer notices on an invoice.
+
+**The unit belongs to the event type, not to the caller.** `EVENT_UNITS` maps every meter to `count`, `token`, `byte` or `second`, and the recorder applies it. A caller that could pass a unit is a caller that can put seconds into a token total, and no aggregate afterwards can tell that happened.
+
+**Exactly-once comes from upstream.** Nothing deduplicates here. Every metered path already has an idempotency key — the WhatsApp event id, the message row, the media row, `UNIQUE(campaign_id, contact_id)` — so a retry that skips the work skips the meter, and a retry that redoes the work counts it because it consumed something.
+
+Where each meter fires, and what it is careful about:
+
+| Meter | Written by | The mistake it avoids |
+| --- | --- | --- |
+| `whatsapp_message_received`, `conversation_created` | The conversation projection | Counted on the *message*, not the delivery: one webhook can carry several, and a replay never reaches here because the event id already deduplicated it |
+| `whatsapp_message_sent` | The messaging service, after Meta accepts | A refused send is not counted. The failed row still records that the attempt happened |
+| `ai_request`, `ai_input_token`, `ai_output_token` | The agent worker, once a turn completes | `requests` is the number of provider calls, not turns — three tool rounds are three calls — and a turn that ended in a handoff is still metered, because it cost the same inference |
+| `ai_request` (again) | The sentiment service | The classification is a provider call of its own, on its own model. The caller never sees it, so the caller cannot count it |
+| `rag_query` | The retrieval service | Counted once the embedding is paid for, whether or not anything was found |
+| `media_processing`, `voice_transcription` | The media service, when a file is read | A file already read is not read again, so a retried job does not pay twice. Transcription is a count of recordings, not seconds — see below |
+| `storage_used` | The media service, when bytes are written | Written on the write, not by sweeping the store: a sweep reports a level, and a level cannot be billed for a period that has closed |
+| `lead_created` | The lead service | Only the branch that created one. An extraction that updated an existing lead has captured nothing new |
+| `campaign_message` | The campaign dispatcher | Deliberately alongside `whatsapp_message_sent`: an allowance is spent by every message, and a broadcast's own cost is a separate question. The recipient row moving to `sent` in the same transaction is what keeps the pair from double counting |
+
+Two meters are declared and deliberately unwritten. `voice_transcription` counts recordings rather than seconds, because the configured transcription models report no duration and the verbose format that carries one is refused by them — a number inferred from a compressed byte count would be a fabrication in a bill. `api_request` waits for a plan that prices requests, since a row per HTTP request on the largest table in the schema buys nothing until something reads it.
+
+Reads are aggregates only. `UsageService` returns named counters for a half-open window `[since, until)` and a daily series for charts; `PlatformUsageRepository` is the one reader that deliberately spans workspaces, and it is constructed only by the platform layer. The half-open window is what makes two adjacent months sum to the pair.
+
+Plans and limits will be stored and configurable, enforced through a central entitlement service reading these aggregates. Billing models are provider-agnostic behind an abstraction (Phase 13).
+
+## 19a. Analytics
+
+**Status: In Progress** — the analytics event table, handoff recording and the tenant reporting APIs are Implemented (migration `0015`, ADR-028); the platform surface follows in this phase.
+
+Analytics are **derived from the domain tables**, not from a parallel event stream. Messages, conversations, leads, lead activities, sentiment readings and campaign recipients are already timestamped and tenant-scoped, so a count is a grouped query over rows that exist rather than a second write that can drift from them. Deriving is also retroactive: a metric defined next month can be computed for last month.
+
+`analytics_events` exists for what the domain does not record — currently the handoff:
+
+```
+conversation moves to a person
+    |
+    +-- an agent asked          -> source = agent
+    +-- a reading escalated it  -> source = sentiment
+    +-- a colleague took it     -> source = user, actor_id = them
+    |
+analytics_events (append-only, staged in the same transaction)
+```
+
+`conversations.mode` is a current state: it cannot say when a conversation moved, how often, or who decided, and those three causes are indistinguishable afterwards while being the most important distinction on the dashboard. Only a real change is recorded — setting `human` on a conversation a colleague already owns is somebody editing a reason. Events and distinct conversations are counted separately, because a conversation handed over three times is three handoffs and one conversation.
+
+Reporting is `TenantMetricsRepository`: one grouped query per metric family, each an indexed range scan over one workspace's rows. Several queries rather than one, deliberately — a single statement joining messages to leads to sentiment produces a plan nobody can read and a cartesian product somebody eventually has to debug. `AnalyticsService` composes them into one report over the same half-open window usage uses.
+
+Two definitions carry the numbers and are written down beside the queries, because a metric whose definition is unwritten is one two people will read differently. **Average response time** measures from a customer message that started a burst to the next business message: a customer who sends four messages in a row waited once, and measuring each would divide the same wait by four exactly when service is worst. **AI resolution rate** counts conversations, not handoff events, so one conversation bounced between agent and colleague three times is one conversation the AI did not resolve.
+
+`GET /usage` is administrators only and `GET /analytics` is open to every member. That line is the product's, not an accident: usage is the input to a bill, while analytics is how the inbox is doing, and restricting the second would hide the team's own work from the team.
+
+The two tables have deliberately opposite policies. `usage_events` must be reproducible exactly as recorded, because it is billing input; analytics should reflect what the data says now.
 
 ## 20. Observability
 
@@ -521,7 +620,7 @@ An agent turn logs one summary event carrying the rounds taken, the tools run, w
 
 ## 21. CI/CD and production deployment
 
-**Status: In Progress** — CI is Implemented; deployment automation and worker containers are Planned.
+**Status: Implemented** — with the honest caveat that no production deployment exists: the pipeline is written and gated on secrets that are not set, so it fails rather than pretending to ship.
 
 GitHub Actions runs three jobs: quality (Ruff, Black, MyPy), tests (pytest with coverage against PostgreSQL with pgvector and Redis service containers, including authorization, tenant-isolation, model-metadata parity, conversation projection, and agent memory, registry, orchestrator and queue tests that need neither a database nor a provider, plus an application startup check, migration upgrade/downgrade/upgrade validation, and model drift detection via `alembic check`), and a Docker build that boots the runtime image and asserts it answers liveness. A separate security workflow scans dependencies (`pip-audit`, including the development extra, since build and test tooling is part of the supply chain that produces the image) and the repository history for secrets. It also runs weekly on a cron, because advisories are published without this repository changing — which is the gate that keeps the pinned versions below from quietly rotting (ADR-016, ADR-017). Starlette is declared as a direct dependency rather than inherited from FastAPI, so the ASGI layer serving the webhook carries a security floor this repository controls.
 
@@ -531,4 +630,14 @@ PostgreSQL-backed tests build the schema once per session and run each test insi
 
 `tests/`, `tests/unit/` and `tests/integration/` are Python packages. Two test modules may otherwise share a basename - the conversation projection has both a pure-logic and a PostgreSQL-backed module - and without a package name to qualify them the second import collides with the first and *the entire suite fails to collect*. That failure mode is silent in the sense that matters: it reports one collection error rather than a test failure, and nothing else runs.
 
-The runtime image is multi-stage and runs as a non-root user with a liveness-based container health check. Migrations are opt-in through `RUN_MIGRATIONS` so a release applies them once as an explicit step rather than racing across replicas. Production runs the API behind Nginx with health checks, restart policies, resource limits, an isolated network, and persistent volumes; workers join this topology in Phase 8. Details in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+The runtime image is multi-stage and runs as a non-root user with a liveness-based container health check. It carries OCI labels naming the commit, version and build time it was produced from, and the revision is also an environment variable inside the container — so an operator can answer "what is running" from `docker inspect` without the deployment pipeline's help. Migrations are opt-in through `RUN_MIGRATIONS` so a release applies them once as an explicit step rather than racing across replicas. Production runs the API and the workers behind Nginx with health checks, restart policies, resource limits, an isolated network, and persistent volumes.
+
+Releases follow one path (ADR-035). CI concluding successfully on `main` triggers a publish job, which checks out **the commit CI verified** rather than the branch head — between the two runs `main` can move, and building the newer commit would ship something no test ever saw — builds it, pushes it to GitHub Container Registry tagged `sha-<commit>`, and scans it. The scan runs *after* the push on purpose: blocking the push would mean a critical CVE in a base image also destroys the ability to publish the commit that fixes it. Deployment consumes the image **by digest**, never by a tag, so a rollback names exactly one set of bytes and the thing scanned is provably the thing deployed. Migrations run as their own step before the new version serves, and the job finishes by checking readiness — a deployment is finished when what it started answers, not when the command that started it exits zero.
+
+The registry credential is the workflow's own token, so there is no registry secret to rotate. The deploy job's target is a set of repository secrets; with none configured it exits non-zero and names what is missing, because a workflow that succeeds without touching a server is read as "it shipped".
+
+The workflows are themselves under test (`tests/unit/test_delivery_pipeline.py`): they are the one part of the repository that is neither imported nor typed, and a mistake in them surfaces as a broken release rather than a failing build. The tests pin rules — deployment waits on CI, the image is a digest, the host key is pinned, migrations precede serving — rather than step names, so ordinary edits do not break them.
+
+TLS is documented rather than shipped, because a certificate is issued to a domain this repository does not know and a self-signed one would look like TLS while failing every client that checks. `nginx/nginx.conf` contains the HTTP listener with the ACME challenge served *before* the redirect to HTTPS — a redirect to a certificate that does not yet exist cannot be verified, which is the deadlock a first issuance runs into — and a complete TLS server block, commented out so that `nginx -t` fails loudly if it is enabled before certificates exist rather than silently serving plaintext.
+
+Details in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); what to do when it goes wrong is in [docs/RUNBOOK.md](docs/RUNBOOK.md).

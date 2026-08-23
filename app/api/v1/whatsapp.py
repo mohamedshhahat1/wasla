@@ -13,6 +13,7 @@ from fastapi import APIRouter, status
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
+    NumberSlotDep,
     TenantAdminDep,
     WhatsAppAccountServiceDep,
 )
@@ -35,13 +36,20 @@ async def connect_account(
     payload: WhatsAppAccountConnectRequest,
     workspace: TenantAdminDep,
     service: WhatsAppAccountServiceDep,
+    slot: NumberSlotDep,
 ) -> WhatsAppAccountResponse:
     account = await service.connect(
+        # Named, so the trail says who claimed this number rather than only
+        # that it appeared.
+        actor=workspace.user,
         tenant_id=workspace.tenant.id,
         phone_number_id=payload.phone_number_id,
         waba_id=payload.waba_id,
         display_phone_number=payload.display_phone_number,
         display_name=payload.display_name,
+        # Encrypted by the service; the plaintext goes no further than this
+        # call, and no response model can return it.
+        access_token=payload.access_token,
     )
     return WhatsAppAccountResponse.model_validate(account)
 
@@ -67,6 +75,7 @@ async def disable_account(
     service: WhatsAppAccountServiceDep,
 ) -> WhatsAppAccountResponse:
     account = await service.set_status(
+        actor=workspace.user,
         tenant_id=workspace.tenant.id,
         account_id=account_id,
         status=WhatsAppAccountStatus.DISABLED,
@@ -81,6 +90,7 @@ async def enable_account(
     service: WhatsAppAccountServiceDep,
 ) -> WhatsAppAccountResponse:
     account = await service.set_status(
+        actor=workspace.user,
         tenant_id=workspace.tenant.id,
         account_id=account_id,
         status=WhatsAppAccountStatus.ACTIVE,

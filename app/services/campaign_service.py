@@ -42,6 +42,8 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
+from app.db.models.audit import AuditAction
+from app.db.models.billing import LimitKey
 from app.db.models.campaign import (
     DEFAULT_MESSAGES_PER_MINUTE,
     MAX_CAMPAIGN_NAME_LENGTH,
@@ -55,6 +57,8 @@ from app.db.models.campaign import (
     RecipientStatus,
 )
 from app.db.models.conversation import Contact, MessageStatus
+from app.db.models.usage import UsageEventType
+from app.db.models.user import User
 from app.repositories.campaign_repository import (
     DEFAULT_RECIPIENT_BATCH,
     AudienceFilter,
@@ -66,8 +70,11 @@ from app.repositories.campaign_repository import (
 from app.repositories.conversation_repository import ContactRepository, ConversationRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
+from app.services.audit_service import AuditTrail
+from app.services.entitlement_service import EntitlementService
 from app.services.messaging_service import MessagingService
 from app.services.template_service import refusal_reason_for
+from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
@@ -128,8 +135,16 @@ class CampaignService:
         session: AsyncSession,
         tenant_id: uuid.UUID,
         messaging: MessagingService | None = None,
+        entitlements: EntitlementService | None = None,
     ) -> None:
         """`messaging` is needed only to send.
+
+        `entitlements` is needed only to schedule. A campaign is the one place a
+        limit depends on *how much* is being asked for - ten thousand recipients
+        is ten thousand messages - so it cannot be a route-level guard the way
+        creating an agent can, and it is checked here instead. Without one, a
+        campaign schedules unchecked: that is what the worker wants, having
+        already been let through once.
 
         Composing, scheduling and cancelling touch nothing outside the database,
         so a request constructs this without one. The worker supplies it, and a
@@ -139,6 +154,7 @@ class CampaignService:
         self._session = session
         self._tenant_id = tenant_id
         self._messaging = messaging
+        self._entitlements = entitlements
         self._campaigns = CampaignRepository(session, tenant_id=tenant_id)
         self._recipients = CampaignRecipientRepository(session, tenant_id=tenant_id)
         self._audience = AudienceRepository(session, tenant_id=tenant_id)
@@ -146,6 +162,8 @@ class CampaignService:
         self._templates = WhatsAppTemplateRepository(session, tenant_id=tenant_id)
         self._contacts = ContactRepository(session, tenant_id=tenant_id)
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
+        self._usage = UsageRecorder(session, tenant_id=tenant_id)
+        self._audit = AuditTrail(session, tenant_id=tenant_id)
 
     # ------------------------------------------------------------------ reads
 
@@ -307,6 +325,7 @@ class CampaignService:
         *,
         campaign_id: uuid.UUID,
         scheduled_at: datetime | None = None,
+        actor: User | None = None,
     ) -> Campaign:
         """Hand the campaign to the worker, now or at a moment in the future.
 
@@ -322,6 +341,16 @@ class CampaignService:
         if pending == 0:
             raise ValidationError("This campaign has nobody left to send to.")
 
+        if self._entitlements is not None:
+            # Checked for the whole audience at once, before a single message
+            # goes out. Refusing halfway through a broadcast would leave a
+            # workspace having written to some of its customers and not others,
+            # which is worse than refusing it outright (ADR-030).
+            await self._entitlements.require(
+                LimitKey.PERIOD_CAMPAIGN_MESSAGES,
+                additional=pending,
+            )
+
         now = datetime.now(UTC)
         when = now if scheduled_at is None else _aware(scheduled_at)
         if when - now > MAX_SCHEDULE_AHEAD:
@@ -333,6 +362,17 @@ class CampaignService:
         campaign.scheduled_at = max(when, now)
         campaign.next_send_at = None
         campaign.last_error = None
+        # Writing to thousands of people who did not just say something is the
+        # single most consequential thing a workspace can do here, so who
+        # authorised it and how many it would reach are both recorded.
+        self._audit.record(
+            AuditAction.CAMPAIGN_SCHEDULED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={"recipients": pending, "scheduled_at": campaign.scheduled_at.isoformat()},
+        )
         logger.info(
             "campaign.scheduled",
             extra={
@@ -359,7 +399,7 @@ class CampaignService:
         logger.info("campaign.paused", extra={"campaign_id": str(campaign.id)})
         return campaign
 
-    async def cancel(self, campaign_id: uuid.UUID) -> Campaign:
+    async def cancel(self, campaign_id: uuid.UUID, *, actor: User | None = None) -> Campaign:
         """Finish the campaign where it stands. What was sent stays sent.
 
         A failed campaign can be cancelled, unlike a completed or an already
@@ -373,6 +413,13 @@ class CampaignService:
 
         campaign.status = CampaignStatus.CANCELLED
         campaign.cancelled_at = datetime.now(UTC)
+        self._audit.record(
+            AuditAction.CAMPAIGN_CANCELLED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+        )
         logger.info("campaign.cancelled", extra={"campaign_id": str(campaign.id)})
         return campaign
 
@@ -531,6 +578,18 @@ class CampaignService:
         recipient.sent_at = now
         recipient.message_id = message.id
         recipient.last_error = None
+        # A campaign message is metered twice on purpose, and the two figures
+        # answer different questions. The messaging service already counted it
+        # as a message sent, which is what a messaging allowance is spent from;
+        # this counts it as campaign traffic, which is what a workspace looks at
+        # when a broadcast costs more than it expected. The recipient row is
+        # what makes the pair safe from double counting: it moves to SENT in
+        # this same transaction and is never claimed again.
+        self._usage.record(
+            UsageEventType.CAMPAIGN_MESSAGE,
+            occurred_at=now,
+            meta={"campaign_id": str(campaign.id), "message_id": str(message.id)},
+        )
         return RecipientStatus.SENT
 
     def _skip(self, recipient: CampaignRecipient, detail: str) -> RecipientStatus:

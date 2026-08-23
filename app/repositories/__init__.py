@@ -6,7 +6,15 @@ be scoped live in their own small classes so they stay visible.
 """
 
 from .agent_repository import AgentRepository, AgentToolRepository
+from .analytics_repository import AnalyticsEventRepository, EventCount
+from .audit_repository import AuditLogRepository, PlatformAuditLogRepository
 from .base import BaseRepository, TenantScopedRepository
+from .billing_repository import (
+    PlanRepository,
+    PlatformSubscriptionRepository,
+    SubscriptionCount,
+    SubscriptionRepository,
+)
 from .conversation_repository import (
     ContactRepository,
     ConversationRepository,
@@ -14,6 +22,12 @@ from .conversation_repository import (
 )
 from .follow_up_repository import DueFollowUpClaim, FollowUpRepository
 from .invitation_repository import InvitationRepository, InvitationTokenRepository
+from .invoice_repository import (
+    InvoiceRepository,
+    PaymentRepository,
+    PlatformInvoiceRepository,
+    RevenueTotal,
+)
 from .knowledge_repository import (
     DocumentChunkRepository,
     DocumentRepository,
@@ -29,6 +43,13 @@ from .lead_repository import (
 )
 from .membership_repository import MembershipRepository, UserMembershipRepository
 from .tenant_repository import TenantRepository
+from .usage_repository import (
+    PlatformUsageRepository,
+    TenantUsageTotal,
+    UsageEventRepository,
+    UsagePoint,
+    UsageTotal,
+)
 from .user_repository import UserRepository
 from .whatsapp_repository import (
     WhatsAppAccountDirectory,
@@ -39,15 +60,19 @@ from .whatsapp_repository import (
 __all__ = [
     "AgentRepository",
     "AgentToolRepository",
+    "AnalyticsEventRepository",
+    "AuditLogRepository",
     "BaseRepository",
     "ContactRepository",
     "ConversationRepository",
     "DocumentChunkRepository",
     "DocumentRepository",
     "DueFollowUpClaim",
+    "EventCount",
     "FollowUpRepository",
     "InvitationRepository",
     "InvitationTokenRepository",
+    "InvoiceRepository",
     "KnowledgeBaseRepository",
     "LeadActivityRepository",
     "LeadFilters",
@@ -56,9 +81,22 @@ __all__ = [
     "LeadStatistics",
     "MembershipRepository",
     "MessageRepository",
+    "PaymentRepository",
+    "PlanRepository",
+    "PlatformAuditLogRepository",
+    "PlatformInvoiceRepository",
+    "PlatformSubscriptionRepository",
+    "PlatformUsageRepository",
+    "RevenueTotal",
     "ScoredChunk",
+    "SubscriptionCount",
+    "SubscriptionRepository",
     "TenantRepository",
     "TenantScopedRepository",
+    "TenantUsageTotal",
+    "UsageEventRepository",
+    "UsagePoint",
+    "UsageTotal",
     "UserMembershipRepository",
     "UserRepository",
     "WhatsAppAccountDirectory",

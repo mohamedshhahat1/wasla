@@ -7,7 +7,7 @@ could forge to aim a route at another workspace's data.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -20,19 +20,33 @@ from app.core.security import TokenClaims, TokenType, decode_token
 from app.core.storage import LocalMediaStorage, MediaStorage
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
+from app.db.models.billing import LimitKey
+from app.platform.platform_analytics import PlatformAnalyticsService
+from app.platform.platform_billing import PlatformBillingService
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
+from app.repositories.audit_repository import (
+    AuditLogRepository,
+    PlatformAuditLogRepository,
+)
+from app.repositories.billing_repository import PlanRepository
 from app.services.agent_service import AgentService
+from app.services.analytics_service import AnalyticsService
 from app.services.auth_service import AuthService
 from app.services.campaign_service import CampaignService
+from app.services.credential_service import CredentialService
+from app.services.entitlement_service import Entitlement, EntitlementService
 from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
 from app.services.invitation_service import InvitationService
+from app.services.invoice_service import InvoiceService
 from app.services.knowledge_service import KnowledgeService
 from app.services.lead_service import LeadService
 from app.services.media_service import MediaService
 from app.services.messaging_service import MessagingService
 from app.services.sentiment_service import SentimentService
+from app.services.subscription_service import SubscriptionService
 from app.services.template_service import TemplateService
+from app.services.usage_service import UsageService
 from app.services.whatsapp_account_service import WhatsAppAccountService
 from app.workers.ingestion_queue import IngestionQueue
 
@@ -65,8 +79,19 @@ def get_invitation_service(session: SessionDep) -> InvitationService:
 InvitationServiceDep = Annotated[InvitationService, Depends(get_invitation_service)]
 
 
-def get_whatsapp_account_service(session: SessionDep) -> WhatsAppAccountService:
-    return WhatsAppAccountService(session=session)
+def get_whatsapp_account_service(
+    settings: SettingsDep,
+    session: SessionDep,
+) -> WhatsAppAccountService:
+    """Built with a credential service, so a workspace can supply its own token.
+
+    A deployment with no encryption key configured still connects numbers - it
+    simply refuses to store a credential rather than storing one in the clear.
+    """
+    return WhatsAppAccountService(
+        session=session,
+        credentials=CredentialService(settings),
+    )
 
 
 WhatsAppAccountServiceDep = Annotated[
@@ -166,6 +191,7 @@ AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 
 
 def get_campaign_service(
+    settings: SettingsDep,
     session: SessionDep,
     workspace: ActiveWorkspaceDep,
 ) -> CampaignService:
@@ -175,7 +201,17 @@ def get_campaign_service(
     targeting and scheduling are all database work; the sending happens in the
     worker, where ten thousand messages cannot hold a request open.
     """
-    return CampaignService(session=session, tenant_id=workspace.tenant.id)
+    return CampaignService(
+        session=session,
+        tenant_id=workspace.tenant.id,
+        # Scheduling is where a campaign's cost is committed, and the limit
+        # depends on how many people it will reach.
+        entitlements=EntitlementService(
+            session,
+            tenant_id=workspace.tenant.id,
+            default_plan_code=settings.default_plan_code,
+        ),
+    )
 
 
 CampaignServiceDep = Annotated[CampaignService, Depends(get_campaign_service)]
@@ -319,6 +355,140 @@ def get_template_service(
 TemplateServiceDep = Annotated[TemplateService, Depends(get_template_service)]
 
 
+def get_usage_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> UsageService:
+    """Workspace-scoped, and read-only.
+
+    The recorder is deliberately absent: nothing a request does is metered by a
+    route. Meters belong to the services that consume something, which is what
+    keeps a meter in the same transaction as the work it measures (ADR-027).
+    """
+    return UsageService(session, tenant_id=workspace.tenant.id)
+
+
+UsageServiceDep = Annotated[UsageService, Depends(get_usage_service)]
+
+
+def get_analytics_service(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> AnalyticsService:
+    """Workspace-scoped reporting. Recording happens in the services that act."""
+    return AnalyticsService(session, tenant_id=workspace.tenant.id)
+
+
+AnalyticsServiceDep = Annotated[AnalyticsService, Depends(get_analytics_service)]
+
+
+def get_audit_log_repository(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> AuditLogRepository:
+    """Workspace-scoped, so no route can read another workspace's trail."""
+    return AuditLogRepository(session, tenant_id=workspace.tenant.id)
+
+
+AuditLogRepositoryDep = Annotated[AuditLogRepository, Depends(get_audit_log_repository)]
+
+
+def get_platform_audit_log_repository(session: SessionDep) -> PlatformAuditLogRepository:
+    """Every entry, including the platform's own. Behind the platform role.
+
+    The entries this exists to show are precisely the ones the people reading
+    it generate, which is the point: the platform owner is not exempt.
+    """
+    return PlatformAuditLogRepository(session)
+
+
+PlatformAuditLogRepositoryDep = Annotated[
+    PlatformAuditLogRepository,
+    Depends(get_platform_audit_log_repository),
+]
+
+
+def get_plan_repository(session: SessionDep) -> PlanRepository:
+    """The catalogue. Not workspace-scoped, because a plan belongs to nobody."""
+    return PlanRepository(session)
+
+
+PlanRepositoryDep = Annotated[PlanRepository, Depends(get_plan_repository)]
+
+
+def get_subscription_service(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> SubscriptionService:
+    """Workspace-scoped, so no route can name a tenant of its own choosing."""
+    return SubscriptionService(session, tenant_id=workspace.tenant.id)
+
+
+SubscriptionServiceDep = Annotated[SubscriptionService, Depends(get_subscription_service)]
+
+
+def get_entitlement_service(
+    settings: SettingsDep,
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> EntitlementService:
+    """The one authority on what this workspace may do.
+
+    The default plan code comes from settings rather than from a caller: it is
+    what a workspace without a subscription is held to, and a route able to name
+    it is a route able to grant itself a better plan.
+    """
+    return EntitlementService(
+        session,
+        tenant_id=workspace.tenant.id,
+        default_plan_code=settings.default_plan_code,
+    )
+
+
+EntitlementServiceDep = Annotated[EntitlementService, Depends(get_entitlement_service)]
+
+
+def get_invoice_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> InvoiceService:
+    """Workspace-scoped, and deliberately without a payment provider.
+
+    Nothing reachable by a workspace collects money. Reading an invoice back is
+    database work; issuing and collecting happen in the worker and the platform
+    layer.
+    """
+    return InvoiceService(session, tenant_id=workspace.tenant.id)
+
+
+InvoiceServiceDep = Annotated[InvoiceService, Depends(get_invoice_service)]
+
+
+def get_platform_billing_service(session: SessionDep) -> PlatformBillingService:
+    """Invoice administration across workspaces, for platform staff only.
+
+    Recording a payment asserts that somebody has seen the money, and voiding
+    withdraws a bill. A workspace able to do either pays nothing.
+    """
+    return PlatformBillingService(session)
+
+
+PlatformInvoiceServiceDep = Annotated[
+    PlatformBillingService,
+    Depends(get_platform_billing_service),
+]
+
+
+def get_platform_analytics_service(session: SessionDep) -> PlatformAnalyticsService:
+    """Cross-tenant reporting, and the only service here built without a workspace.
+
+    Nothing narrows it, by design: it is the platform view. The routes that use
+    it are guarded by the platform-role dependency below, which is a property of
+    the user rather than of a membership.
+    """
+    return PlatformAnalyticsService(session)
+
+
+PlatformAnalyticsServiceDep = Annotated[
+    PlatformAnalyticsService,
+    Depends(get_platform_analytics_service),
+]
+
+
 def require_tenant_roles(*roles: TenantRole) -> Callable[[ActiveWorkspace], ActiveWorkspace]:
     """Build a dependency that admits only these workspace roles.
 
@@ -333,6 +503,35 @@ def require_tenant_roles(*roles: TenantRole) -> Callable[[ActiveWorkspace], Acti
         return workspace
 
     return guard
+
+
+def require_entitlement(
+    key: LimitKey,
+) -> Callable[[EntitlementService], Awaitable[Entitlement]]:
+    """Build a dependency that refuses an action the plan does not allow.
+
+    Shaped exactly like `require_tenant_roles`, and for the same reason: a check
+    written inside a handler is a check the next handler forgets. Declaring it in
+    the signature means the route cannot run without it.
+
+    It is a limit on *creating* something, so it belongs only on the routes that
+    create. Nothing here is on the inbound path - see ADR-030 for why a customer's
+    message is never refused for a business's billing.
+    """
+
+    async def guard(entitlements: EntitlementServiceDep) -> Entitlement:
+        return await entitlements.require(key)
+
+    return guard
+
+
+AgentSlotDep = Annotated[Entitlement, Depends(require_entitlement(LimitKey.AGENTS))]
+NumberSlotDep = Annotated[Entitlement, Depends(require_entitlement(LimitKey.WHATSAPP_NUMBERS))]
+SeatDep = Annotated[Entitlement, Depends(require_entitlement(LimitKey.TEAM_MEMBERS))]
+DocumentSlotDep = Annotated[
+    Entitlement,
+    Depends(require_entitlement(LimitKey.KNOWLEDGE_DOCUMENTS)),
+]
 
 
 def require_platform_roles(*roles: PlatformRole) -> Callable[[CurrentUser], CurrentUser]:

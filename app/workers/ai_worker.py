@@ -23,14 +23,17 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
 from app.db.models.agent import Agent
+from app.db.models.billing import LimitKey
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.db.session import Database
 from app.integrations.openai.client import ResponsesClient, build_http_client
 from app.integrations.openai.embeddings import EmbeddingsClient
 from app.repositories.agent_repository import AgentRepository
+from app.services.entitlement_service import EntitlementService
 from app.services.messaging_service import MessagingService
 from app.services.sentiment_reader import SentimentAnalyzer
 from app.services.sentiment_service import SentimentService
+from app.services.usage_service import UsageRecorder
 from app.workers.queue import BLOCK_SECONDS, AgentJob, AgentQueue, MalformedJobError
 
 logger = get_logger(__name__)
@@ -118,6 +121,27 @@ class AgentWorker:
 
     async def _handle(self, job: AgentJob) -> None:
         async with self._database.session() as session:
+            entitlements = EntitlementService(
+                session,
+                tenant_id=job.tenant_id,
+                default_plan_code=self._settings.default_plan_code,
+            )
+            if not await entitlements.allows(LimitKey.PERIOD_AI_REQUESTS):
+                # Checked, and *not* raised. A workspace out of AI requests has
+                # a billing problem; its customer has a question. The message is
+                # already stored and the conversation is waiting for a person,
+                # which is the honest outcome - failing the job would dead-letter
+                # it and lose that (ADR-030).
+                logger.warning(
+                    "billing.ai_allowance_exhausted",
+                    extra={
+                        "event": "billing.ai_allowance_exhausted",
+                        "tenant_id": str(job.tenant_id),
+                        "conversation_id": str(job.conversation_id),
+                    },
+                )
+                return
+
             agent: Agent | None = None
             if job.agent_id is not None:
                 agents = AgentRepository(session, tenant_id=job.tenant_id)
@@ -165,6 +189,24 @@ class AgentWorker:
                     conversation_id=job.conversation_id,
                     agent=agent,
                 )
+
+            # Metered before the reply is sent, and outside the branch that
+            # returns early. A turn that ended in a handoff or in silence still
+            # called the provider, and a meter that only counted turns which
+            # produced words would under-count exactly the conversations that
+            # cost the most attention.
+            UsageRecorder(session, tenant_id=job.tenant_id).ai_request(
+                input_tokens=outcome.usage.input_tokens,
+                output_tokens=outcome.usage.output_tokens,
+                # One per provider call, not one per turn: an agent that ran
+                # three tool rounds called the provider three times.
+                requests=outcome.rounds,
+                # From the outcome, not from `agent`: a job naming no agent
+                # is answered by the workspace default, and that is the
+                # model the tokens were spent on.
+                model=outcome.model,
+                conversation_id=job.conversation_id,
+            )
 
             reply = outcome.reply
             if outcome.handed_off or not reply:

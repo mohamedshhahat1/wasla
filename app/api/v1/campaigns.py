@@ -150,6 +150,7 @@ async def schedule_campaign(
     campaign = await campaigns.schedule(
         campaign_id=campaign_id,
         scheduled_at=payload.scheduled_at,
+        actor=workspace.user,
     )
     return CampaignRead.from_model(campaign)
 
@@ -171,7 +172,7 @@ async def cancel_campaign(
     campaigns: CampaignServiceDep,
 ) -> CampaignRead:
     """Finish the campaign where it stands. What has been sent stays sent."""
-    return CampaignRead.from_model(await campaigns.cancel(campaign_id))
+    return CampaignRead.from_model(await campaigns.cancel(campaign_id, actor=workspace.user))
 
 
 @router.get("/{campaign_id}/statistics", summary="Delivery and failure counts")

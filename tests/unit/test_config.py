@@ -76,3 +76,35 @@ def test_production_accepts_hardened_configuration():
 
 def test_get_settings_is_cached():
     assert get_settings() is get_settings()
+
+
+def test_a_comma_separated_list_survives_the_environment(monkeypatch):
+    """Read from the environment, not passed to the constructor, because those
+    are different code paths and only one of them is how a container starts.
+
+    pydantic-settings JSON-decodes a list field straight from the environment
+    before any validator runs, so a plain comma-separated value raises at
+    start-up unless the field is annotated `NoDecode`. Every list setting here
+    is read that way in production, and a constructor-only test cannot see it -
+    which is exactly how this shipped and was caught by a container refusing to
+    boot rather than by the suite.
+    """
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEYS", "first-key,second-key")
+    monkeypatch.setenv("CORS_ORIGINS", "https://app.wasla.test,https://admin.wasla.test")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.credential_encryption_keys == ["first-key", "second-key"]
+    assert settings.cors_origins == ["https://app.wasla.test", "https://admin.wasla.test"]
+
+
+def test_a_json_array_also_survives_the_environment(monkeypatch):
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEYS", '["first-key"]')
+
+    assert Settings(_env_file=None).credential_encryption_keys == ["first-key"]
+
+
+def test_an_unset_list_is_empty_rather_than_an_error(monkeypatch):
+    monkeypatch.delenv("CREDENTIAL_ENCRYPTION_KEYS", raising=False)
+
+    assert Settings(_env_file=None).credential_encryption_keys == []

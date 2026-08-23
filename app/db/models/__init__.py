@@ -3,6 +3,19 @@
 from app.db.base import Base
 
 from .agent import Agent, AgentStatus, AgentTool
+from .analytics import AnalyticsEvent, AnalyticsEventType, AnalyticsSource
+from .audit import AuditAction, AuditActorKind, AuditLog
+from .billing import (
+    PERIOD_LIMITS,
+    RESOURCE_LIMITS,
+    SERVING_STATUSES,
+    TERMINAL_SUBSCRIPTION_STATUSES,
+    BillingInterval,
+    LimitKey,
+    Plan,
+    Subscription,
+    SubscriptionStatus,
+)
 from .campaign import (
     MAX_RECIPIENT_ATTEMPTS,
     TERMINAL_CAMPAIGN_STATUSES,
@@ -30,6 +43,13 @@ from .follow_up import (
     FollowUpStatus,
 )
 from .invitation import TenantInvitation
+from .invoice import (
+    TERMINAL_INVOICE_STATUSES,
+    Invoice,
+    InvoiceStatus,
+    Payment,
+    PaymentStatus,
+)
 from .knowledge import (
     EMBEDDING_DIMENSIONS,
     Document,
@@ -66,6 +86,13 @@ from .sentiment import (
     raised_priority,
 )
 from .tenant import Tenant
+from .usage import (
+    EVENT_UNITS,
+    UsageEvent,
+    UsageEventType,
+    UsageUnit,
+    unit_for,
+)
 from .user import User
 from .whatsapp import (
     WhatsAppAccount,
@@ -85,22 +112,35 @@ __all__ = [
     "AGENT_WRITABLE_FIELDS",
     "ALLOWED_TRANSITIONS",
     "EMBEDDING_DIMENSIONS",
+    "EVENT_UNITS",
     "MAX_ATTEMPTS",
     "MAX_RECIPIENT_ATTEMPTS",
     "MAX_SCORE",
     "MIN_SCORE",
+    "PERIOD_LIMITS",
     "PRIORITY_RANK",
+    "RESOURCE_LIMITS",
     "SENTIMENT_PRIORITY",
     "SENTIMENT_SEVERITY",
+    "SERVING_STATUSES",
     "TERMINAL_CAMPAIGN_STATUSES",
     "TERMINAL_FOLLOW_UP_STATUSES",
+    "TERMINAL_INVOICE_STATUSES",
     "TERMINAL_STATUSES",
+    "TERMINAL_SUBSCRIPTION_STATUSES",
     "UNRESOLVED_MEDIA_STATUSES",
     "ActorKind",
     "Agent",
     "AgentStatus",
     "AgentTool",
+    "AnalyticsEvent",
+    "AnalyticsEventType",
+    "AnalyticsSource",
+    "AuditAction",
+    "AuditActorKind",
+    "AuditLog",
     "Base",
+    "BillingInterval",
     "Campaign",
     "CampaignRecipient",
     "CampaignStatus",
@@ -116,6 +156,8 @@ __all__ = [
     "FollowUp",
     "FollowUpStatus",
     "InvitationStatus",
+    "Invoice",
+    "InvoiceStatus",
     "KnowledgeBase",
     "Lead",
     "LeadActivity",
@@ -123,6 +165,7 @@ __all__ = [
     "LeadNote",
     "LeadSource",
     "LeadStatus",
+    "LimitKey",
     "MediaStatus",
     "Membership",
     "Message",
@@ -132,15 +175,23 @@ __all__ = [
     "MessageSentiment",
     "MessageStatus",
     "OptOutSource",
+    "Payment",
+    "PaymentStatus",
+    "Plan",
     "PlatformRole",
     "RecipientStatus",
     "SentimentLabel",
+    "Subscription",
+    "SubscriptionStatus",
     "TemplateCategory",
     "TemplateStatus",
     "Tenant",
     "TenantInvitation",
     "TenantRole",
     "TenantStatus",
+    "UsageEvent",
+    "UsageEventType",
+    "UsageUnit",
     "User",
     "WhatsAppAccount",
     "WhatsAppAccountStatus",
@@ -152,4 +203,5 @@ __all__ = [
     "count_placeholders",
     "is_at_least",
     "raised_priority",
+    "unit_for",
 ]

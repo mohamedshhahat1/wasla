@@ -168,7 +168,10 @@ Date:
 2026-08-21
 
 Status:
-Accepted
+Superseded by ADR-034 (2026-08-23), which adds the encryption at rest and key
+management this record made a precondition. The reasoning below is why the
+column did not exist for thirteen phases, and it still explains the shape of
+what replaced it.
 
 Decision:
 The `whatsapp_accounts` row stores no Meta access token or app secret. Outbound calls use the platform credential held in configuration. Per-workspace credentials are deferred until encryption at rest exists (Phase 14).
@@ -581,3 +584,317 @@ Precision is bounded by the poll interval: a campaign sends at or slightly under
 The worker holds no campaign state at all, so scaling `WORKER_KINDS=campaign` across replicas needs no coordination beyond what PostgreSQL already provides.
 
 The rate is per campaign rather than per number. Two campaigns running at once on the same number can therefore exceed either one's rate. That is recorded as a limit rather than solved: a per-number budget needs a shared counter, and the workspace that runs two simultaneous broadcasts on one number has made a decision this system can surface but should not silently override.
+
+## ADR-027 — Usage Is Metered in the Transaction That Consumed It
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Record usage as append-only rows in `usage_events`, staged through the same `AsyncSession` — and therefore the same transaction — as the work being measured. No worker, no queue, no second connection, no `updated_at`. The unit of each meter is a property of its event type rather than an argument a caller passes, and exactly-once comes from the idempotency keys each metered path already has.
+
+Context:
+Usage is the input to billing and to plan limits, so two failures matter more than throughput: charging for work that never happened, and under-counting work that did. Every metered path already runs inside a transaction — the webhook's, the agent worker's, the campaign worker's — and each of those transactions can roll back after the point where the meter would fire.
+
+The alternatives were a fire-and-forget write on its own connection, a Redis counter flushed periodically, or an event stream consumed by an aggregation worker. All three decouple the meter from the work.
+
+Reason:
+Decoupling is exactly what must not happen here. A usage row written on its own connection survives the rollback of the turn it measured: the customer never got a reply, and the bill says they did. A Redis counter loses whatever was in it when the process dies, which is under-counting with no record that it happened. An event stream has both properties and adds a component that has to be running for the bill to be right.
+
+Sharing the caller's transaction makes the invariant structural rather than procedural: the metered work and its meter are the same commit. A rolled-back agent turn is not billed because the row went with it, and a message that committed is always counted because the row could not have been left behind.
+
+The cost is that a metering bug can fail a request that would otherwise have succeeded. That is the right direction to fail. Staging performs no I/O — `session.add` is in-memory — so the realistic failure is a constraint violation at flush, which means the row was wrong and the alternative was a wrong bill.
+
+Aggregation is a `GROUP BY` over an indexed range, not a maintained counter. Counters drift, and a drifted counter cannot be recomputed from anything; a sum over rows can be re-run for any window, which is what makes a disputed invoice answerable months later. When aggregation becomes the bottleneck, rollups are added *beside* the rows rather than instead of them.
+
+Consequences:
+`usage_events` becomes the largest table in the schema. Its indexes are chosen for the three queries that exist — one workspace over a window, one meter over a window, and the platform total — and the row is deliberately narrow.
+
+There is no `updated_at`, because nothing updates a row. A correction is a new row, which is what keeps last month's figure reproducible after the fact.
+
+Deduplication is not attempted here. Every metered path has an idempotency key upstream — the WhatsApp event id, the message row, the media row, `UNIQUE(campaign_id, contact_id)` — so a retry that skips the work also skips the meter. A retry that genuinely re-does the work is genuinely counted, because it genuinely consumed something.
+
+Retention is not solved. Nothing sweeps old rows, and nothing should until a billing period is closed and the figures for it are stored somewhere a sweep cannot change. That belongs with Phase 13.
+
+## ADR-028 — Analytics Are Derived From the Domain, Except What It Forgets
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Compute tenant analytics from the domain tables that already hold the facts — `messages`, `conversations`, `leads`, `lead_activities`, `message_sentiments`, `campaign_recipients` — and record analytics events only for occurrences that leave no other trace. Today that is exactly one thing: a handoff, in `analytics_events`, with the source that decided it.
+
+Context:
+The product specification lists a dozen analytics events: `message_received`, `message_sent`, `conversation_created`, `lead_created`, `lead_qualified`, `handoff`, `follow_up_sent`, `agent_response`, `customer_angry`, `campaign_sent`, `campaign_delivered`. The obvious reading is a table with a row per occurrence, written alongside the domain write.
+
+Every one of those except the handoff is already a timestamped, tenant-scoped row. A message received is a row in `messages`. A lead qualified is a row in `lead_activities`. An angry customer is a row in `message_sentiments`, carrying the label, the score and whether it escalated. A campaign delivered is a recipient row joined to its message's status.
+
+Reason:
+A second copy of a fact is a second thing to keep true. Two writes in one transaction can still diverge — one path updated and the other not, a backfill applied to one shape, a bug fixed in one query — and when they diverge there is no way to tell which number is right, because both were derived from the same event and only one was wrong. Every count in this system would then have two possible answers.
+
+Deriving is also *retroactive*, and that matters more than it sounds. A metric defined next month can be computed for last month, because the rows it reads have been there all along. An event stream can only answer questions somebody thought to emit an event for.
+
+The objection to deriving is cost: aggregating raw rows is slower than reading a counter. That is true and not yet relevant. These are indexed range scans over one workspace's rows for a bounded window, and when they stop being fast enough the answer is a rollup built *from* the rows — which is only possible because the rows exist.
+
+The handoff is the exception that proves the rule. `conversations.mode` is a current state, not a history: it cannot say when a conversation moved, how many times, or who decided. And the three causes — an agent giving up, a classifier judging a customer angry, a colleague taking over — are indistinguishable afterwards, while being the most important distinction on the dashboard. A business whose agents hand over half their conversations has a different problem from one whose staff take them over by hand.
+
+Consequences:
+`analytics_events` starts with two event types and will grow slowly, by the same test each time: does anything else record this? A member added to mirror a count that `messages` already answers is a bug, not a feature.
+
+Analytics reads are a handful of grouped queries rather than one scan of an event table. They are written in the repository layer like every other query, and they are tenant-scoped by the same mechanism.
+
+Metrics have to be *defined*, not merely counted, and the definitions live with the queries: average response time means the first business reply to a customer message that started a burst; AI resolution rate means conversations created in the window that were never handed to a person. Both are stated in the code and in `docs/ANALYTICS.md`, because a number whose definition is unwritten is a number two people will read differently.
+
+`usage_events` remains a separate table with the opposite policy (ADR-027), and the difference is deliberate. Usage is billing input: it must be reproducible exactly as it was recorded, even after the domain rows it describes are edited or deleted. Analytics is reporting: it should reflect what the data says now.
+
+## ADR-029 — Plan Limits Are Data With a Closed Vocabulary, and Absent Means Unlimited
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Store a plan's limits as JSONB on the `plans` row, keyed by a closed vocabulary (`LimitKey`), with an absent key meaning *unlimited*. Give every workspace at most one subscription, enforced by a unique index. Where a workspace has no subscription, entitle it to a configured default plan; where that plan is missing too, do not enforce limits at all and log it.
+
+Context:
+Plan limits appear in three shapes across the specification — a marketing table, a check before an action, and a figure on a settings page — and the requirement is explicit that they must not be hardcoded. The obvious implementations are a column per limit, a `plan_limits` child table, or a JSON document.
+
+Reason:
+A column per limit is the wrong unit of change. The set of things worth limiting grows with the product — documents arrived with the knowledge base, campaign messages with broadcasts — and a schema migration per pricing idea is a tax on exactly the experiments a SaaS needs to run. A child table avoids the migrations but buys a join and a second thing to keep referentially tidy for what is, in practice, a dictionary of at most a dozen small integers read as a unit.
+
+JSONB carries the obvious risk that a typo becomes a silently missing limit. `LimitKey` is what removes it: keys are validated against the enum at the service boundary, a limit is only ever read through `Plan.limit_for`, and nothing outside the entitlement service reads the dictionary at all. A key nobody recognises therefore cannot grant an allowance; it simply is not a limit.
+
+Absent-means-unlimited is the load-bearing convention, and the alternatives are all worse. A magic sentinel (`-1`, `999999`) is a number somebody eventually compares, sums or displays. A nullable column per limit is the column-per-limit problem with extra steps. And "unlimited" is not an edge case here — it is the definition of the Enterprise plan, so the encoding for it should be the simplest thing in the file. A malformed value is read as unlimited for the same reason: a plan edited badly must not lock a paying customer out of their own product, and zero is never what a broken row was trying to say.
+
+One subscription per workspace is a unique index rather than a service rule because two subscriptions give two answers to "what am I allowed to do" and there is no correct way to choose between them. A workspace on bespoke terms gets its own plan row, not an override on its subscription, so there is exactly one place that answers the question.
+
+The fallback matters more than it looks. Every workspace that existed before this phase has no subscription, and a limit check that refused them would take a working product away from paying customers on deployment day. Falling back to the configured default plan keeps limits meaningful for them. If that plan is missing as well — a fresh database, a mistyped code — limits are not enforced and a warning is logged, because a catalogue row failing to exist should not be able to take a deployment offline.
+
+Consequences:
+Adding a limit is a new `LimitKey` member, a branch in the entitlement service saying how to count it, and an edit to the plans that use it. No migration.
+
+Limits cannot be queried in SQL as conveniently as columns — "which plans allow more than 10 agents" is a JSONB expression rather than a comparison. That query is a platform reporting question about a handful of rows, and it is not on any hot path.
+
+Because limits are data, a plan edited in the database changes what a workspace may do immediately, with no deploy. That is the point, and it is also the risk: there is no approval workflow around a plan edit, which is acceptable while only platform staff can reach the rows, and becomes a real requirement the moment plans are editable through an API.
+
+## ADR-030 — Limits Are Enforced Where Somebody Chooses, Never on the Inbound Path
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Enforce plan limits as a route dependency on the actions that *create* something a plan counts — an agent, a number, a colleague, a document — and inside the service for the one action whose cost depends on its size, scheduling a campaign. Check the AI allowance in the agent worker and stop quietly when it is gone. Enforce nothing on the inbound webhook path, on any read, or on a message a person sends by hand.
+
+Context:
+Once limits exist, the tempting rule is "check everywhere something is consumed". Usage is metered at nine places (ADR-027), and each is a candidate for a check. But a limit is a refusal, and a refusal has a victim: the question is always *who* is stopped, and whether they are the person with the billing problem.
+
+Reason:
+Three groups, and they need three different answers.
+
+**Somebody in the workspace choosing to add something.** Creating an agent, connecting a number, inviting a colleague, uploading a document. The person acting is the person who can fix it, the refusal is immediate and comprehensible, and nothing is half-done. These get a hard 402. The check is a dependency in the route signature rather than a call inside the handler, exactly like the role guard: a check written in a body is a check the next handler forgets, and a declared one cannot be skipped without deleting it.
+
+**A customer writing to the business.** The inbound webhook carries no limit check at all, and that is the most important line in this record. The words belong to a customer who owes us nothing; refusing them would lose a message a business needed. Worse, refusing means a non-2xx to Meta, which retries and eventually disables the subscription — so a billing problem would become a permanently broken integration. Inbound messages are metered and counted against the allowance; they are never rejected because of it.
+
+**Work a worker was already asked to do.** An agent job whose workspace is out of AI requests returns without composing a reply, and does not raise. Raising would dead-letter the job, which loses the customer's turn permanently for a problem that will be fixed by a card being updated. The message is stored, the conversation is waiting for a person, and a warning is logged. Silence from the agent is the honest outcome of an exhausted allowance; a lost message is not.
+
+Campaigns sit between the first and the third and are checked for the whole audience at once, at scheduling, in the service. The limit depends on how many people it will reach, so no static route guard can express it — and checking per recipient in the worker would refuse a broadcast halfway, leaving a workspace having written to some of its customers and not others. That is worse than refusing it outright.
+
+Reads are never refused, including reads of usage and of the entitlements themselves. Locking somebody out of their own data over a bill is not a limit; it is a hostage, and it removes the very screens that explain the charge.
+
+Consequences:
+A workspace can exceed a period limit, and by design: the inbound messages that push it over are never refused, and a person's own reply is never blocked. The overage is visible in usage and is the platform's to price or to chase, which is a commercial decision rather than an engineering one.
+
+A workspace that downgrades keeps every resource it already has. Its limits stop it adding more; nothing deletes an agent or disconnects a number, because a plan change is not a reason to destroy somebody's work.
+
+The dependency guards are static, one per limit key, so a route that creates something new must declare the right one. Nothing detects a route that forgets — the same gap the role guards have — and `tests/integration/test_plan_enforcement.py` is where each is pinned.
+
+## ADR-031 — An Invoice Is a Record, and the Provider Boundary Is One Method
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Store issued invoices with their amounts **copied**, never joined for, and never edit one after it is issued — a mistake is voided, not corrected. Record every payment attempt as its own row. Reduce the payment provider interface to a single operation, `charge`, and ship a `ManualProvider` that records what a human collected rather than pretending to collect anything.
+
+Context:
+Two designs were available for invoicing. One computes a bill on demand from the plan, the subscription and the usage rows — no invoice table, no duplication, always consistent with configuration. The other writes the figures down at the end of a period and never touches them again.
+
+For the provider, the pull is the opposite: processors have large APIs (customers, payment methods, intents, captures, webhooks, disputes), and adopting their vocabulary is the fastest way to get billing working.
+
+Reason:
+Computing a bill on demand fails the only question anybody asks about an invoice, which is "why was I charged this in March". A figure derived from today's configuration cannot answer it: the plan may have been repriced, the workspace may have changed plans, the limits may have moved. Worse, the answer would silently *change* — a customer looking at the same invoice twice would see two numbers, and the second one would be indefensible. So amounts and the plan code are copied onto the row at issue time, and a test asserts that repricing the plan afterwards leaves the invoice alone.
+
+Never editing follows from the same place. The customer has seen it. A bill that quietly changes is worse than one visibly withdrawn, so a mistake is voided and reissued, and a paid invoice cannot be voided at all — that is a refund, a different operation and a different conversation.
+
+Payments are rows rather than a status on the invoice because a failed attempt is not forgotten when a later one succeeds. The history is precisely what a dispute, a chargeback and an angry email turn on, and a status field keeps only the last thing that happened.
+
+On the provider: the moment a service knows what a payment intent is, the system belongs to that processor. So the interface is one method that takes an amount, a currency, an idempotency key and a description, and returns an outcome. Subscriptions, plans, periods and entitlements stay Wasla's, because they are what the product *means* and every processor models them slightly differently. A decline is an outcome rather than an exception, since it is an ordinary answer that produces a row and a message for the customer; only an unreachable provider raises.
+
+`ManualProvider` is not a stub. A great deal of business-to-business SaaS is invoiced and paid by bank transfer weeks later, and this models that honestly: `charge` returns `PENDING`, and only a person who has seen the money marks the invoice paid. A provider that reported success would put a paid invoice in front of a finance team that has not paid, which is worse than no billing at all — and it is the same reason the platform overview still shows no revenue figures it cannot substantiate.
+
+Consequences:
+Usage lines on an invoice carry a quantity and **no amount**. Nothing stores a per-unit overage price, and inventing one would put a number on a bill that no pricing decision stands behind. When overage pricing exists, those lines gain amounts and nothing else changes.
+
+`UNIQUE(tenant_id, period_start)` makes billing a period twice impossible rather than unlikely, which matters because the caller is a sweep that may run on two replicas. `UNIQUE(provider, provider_reference)` does the same for a processor's idempotency key.
+
+Adding a real processor means writing one class and choosing it in configuration. What it cannot do is change the meaning of a subscription, because it is never asked about one.
+
+Refunds, credits, proration and tax are all absent, and each is absent for the same reason as the rest of this record: they are decisions about money that nobody has made yet, and a system that guesses at them produces numbers a customer is asked to pay.
+
+## ADR-032 — Rate Limits Fail Open, and Never Touch the Webhook
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Limit requests with a fixed window counted in Redis, applied as router-level dependencies. Count authentication by client address and everything a workspace does by workspace. **Allow the request when Redis is unavailable**, and apply **no limit at all** to the WhatsApp webhook.
+
+Context:
+The product has three kinds of caller with genuinely different risks: somebody trying passwords, a signed-in workspace making ordinary requests, and Meta delivering webhooks. A single limiter over all of them is either too loose to stop the first or tight enough to break the third.
+
+Reason:
+**The webhook is the important one.** Meta retries anything that is not a 2xx and eventually disables a subscription that keeps failing. A 429 there does not shed load — it loses a customer's message, and if the condition persists it removes the integration entirely. So the webhook routers carry no limiter, and a test asserts that twenty consecutive deliveries all get the same answer. The webhook is protected instead by the things that actually bound its cost: signature verification, idempotency on the event id, and doing no inference on the request path.
+
+**Failing open is the same argument in a different place.** A limiter that refuses when Redis is down converts a cache outage into a total outage of a product whose critical path — storing an inbound message — does not need Redis at all. The exception is caught inside the limiter, so no caller has to remember.
+
+**Authentication counts by address** because the caller has no identity yet; that is what they are trying to establish. It is the weakest identity in this system and it is still the right one, because the traffic being stopped is a script and a script has an address. It limits attempts rather than authorising anything, so trusting `X-Forwarded-For` here is a bounded risk rather than a hole.
+
+**Workspace traffic counts by workspace, not by user.** The limit protects shared platform resources, and a workspace with fifty colleagues legitimately generates fifty times the load of one with a single person. Counting per user would let a large customer exhaust the platform while every individual stayed politely under their own limit.
+
+A fixed window rather than a sliding one or a token bucket: both alternatives smooth bursts better and both need a sorted set per caller or a Lua script to stay atomic. A fixed window is `INCR` plus `EXPIRE`, is obviously correct under concurrency, and its worst case — twice the limit across a boundary — is not a failure mode that matters for logins or dashboard traffic.
+
+Consequences:
+Limits are attached to routers rather than routes, so `app/api/v1/__init__.py` is the one place that answers "what is limited". A router must therefore be uniformly scoped: mixing workspace routes and platform routes on one router breaks under a workspace-scoped guard, which is exactly what happened to the invoice routes and is why recording a payment and voiding a bill moved to `/platform/invoices/*` — where the authority they need was always visible in the path anyway.
+
+A refusal carries `Retry-After`, because a client told to back off without being told for how long retries immediately. `WaslaError` grew an optional `headers` for it.
+
+Limiting is off in the test suite by default. A limiter counting across a file makes every test in it order-dependent, and the eleventh login failing for a reason the test never mentions is a debugging session nobody should have to have. It has its own tests, which switch it on.
+
+Platform administration is unlimited: it is a handful of staff, and a limit there would first bite during an incident, which is when it is least welcome.
+
+## ADR-033 — The Audit Trail Copies What Was True, and the Platform Is Not Exempt
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Record deliberate acts in an append-only `audit_logs` table, staged in the same transaction as the act. Copy the actor's and target's labels onto the row rather than joining for them. Make `tenant_id` nullable so a platform action is recorded the same way a workspace one is, and record a platform action *against* a workspace in that workspace's own trail. Offer no update or delete path anywhere.
+
+Context:
+An audit log is read when somebody is asking a hostile question: who disconnected that number, who let this person in, who marked that invoice paid. The specification requires that platform actions are always logged and that the platform owner cannot bypass it (claude.md §8).
+
+The tempting implementation is a normalised one: foreign keys to the actor and the target, joined at read time, with a generic `entity_type`/`entity_id` pair.
+
+Reason:
+Joining fails at exactly the moment the log matters. The interesting entries are about accounts that have since been deleted, workspaces that have been closed and leads that were merged away — a join produces a blank column for precisely the row somebody is asking about, and `actor_id 8f3c… did something to 91ab…` answers nothing. So the email and a human label are copied at write time, and `actor_id` is `SET NULL` rather than `CASCADE`: deleting an account must not erase what that account did, which is exactly what somebody would do if it worked.
+
+Staging in the caller's transaction is the same argument the usage recorder makes (ADR-027), with the sign flipped. There, an over-count is the danger; here it is a *claim*: an entry that survives the rollback of the thing it describes says somebody did something they did not do, which is worse than no log because it is believed. And nothing swallows an exception on the way in — if we cannot record who disconnected the number, we do not disconnect it.
+
+A closed `AuditAction` vocabulary rather than free text, because an audit log is read by filtering. Free-text actions become a dozen spellings of one event and a search that silently misses half of them. The vocabulary is deliberately narrow: only acts somebody could be asked about later. Reads are not audited — that would bury the entries that matter under a million that do not, and it is the wrong tool for that question anyway.
+
+A platform action taken against a workspace is written to *that workspace's* trail, attributed to the staff member. The customer is entitled to see who marked their invoice paid; hiding it in a platform-only log would make the trail a tool for the platform's convenience rather than a record.
+
+Consequences:
+There is no route, repository method or service call that edits or deletes an entry. Handing somebody the ability to rewrite the record of what they did defeats the point, so the capability does not exist to be misused.
+
+`audit_logs` grows without bound and nothing prunes it. That is correct for now: retention is a legal question rather than a storage one, and deleting audit history to save disk is the decision most likely to be regretted.
+
+This is not an analytics event. `analytics_events` counts things for a dashboard and is derived from the domain where possible (ADR-028); this records deliberate acts by people, is never derived, and is kept after the thing it describes is gone.
+
+The guard asserting every tenant-scoped table has a tenant index was refined here rather than satisfied. It demanded an index *named* `ix_<table>_tenant_id`; it now demands an index whose first column is `tenant_id`, which is the property that actually makes a workspace's rows findable — `audit_logs` leads with `(tenant_id, occurred_at)`, and adding a redundant bare index alongside it would cost every write for nothing.
+
+## ADR-034 — Per-Workspace Credentials, Encrypted and Bound to Their Workspace
+
+Date:
+2026-08-23
+
+Status:
+Accepted (supersedes ADR-009)
+
+Decision:
+Store a workspace's own Meta token on the account row, encrypted with AES-256-GCM under a key ring, with the workspace id as additional authenticated data. Resolve the token per send: a workspace that supplied one sends as itself, one that did not sends through the platform credential. Refuse to store a credential at all when no encryption key is configured, and never fall back to the platform token when a stored credential cannot be read.
+
+Context:
+ADR-009 refused this column outright — a plaintext token puts a live, customer-visible sending capability into every backup, read replica and over-broad support query — and was explicit that lifting the ban required encryption at rest and key management first. This is that work. Until now every workspace sent through one platform Meta app, so no workspace had its own sender identity or its own rate limits.
+
+Reason:
+**GCM rather than an unauthenticated mode**, because the threat is not only reading the column but writing to it. Authenticated encryption makes a tampered ciphertext fail rather than decrypt into attacker-chosen bytes that are then used as a bearer token against Meta.
+
+**The workspace is authenticated data.** Once a column of tokens exists, the obvious attack is not breaking the cipher — it is copying one row's ciphertext into another row. Binding the tenant id into the encryption makes those bytes useless anywhere but where they were written, and costs one string.
+
+**A key ring rather than a key.** Rotation is the half of "encryption at rest" that gets deferred and then cannot be added, because there is nowhere to record which key encrypted what. The envelope names its key by digest — not by position, so reordering configuration cannot orphan every ciphertext — and `needs_rotation` exists so a sweep can find the stragglers even though nothing sweeps yet.
+
+**No key configured is a supported state, storing plaintext is not.** A deployment without a key connects numbers and sends through the platform token exactly as before; an attempt to store a workspace credential is refused with an explanation. "Store it in the clear for now" is precisely how a plaintext token column comes to exist, and ADR-009 spent thirteen phases refusing it.
+
+**An unreadable credential does not fall back.** Sending as the platform when a workspace asked to send as itself is a different act with a different sender identity, and doing it silently because a key was rotated badly is the kind of failure nobody notices until a customer does. The send fails loudly and a person re-enters the token.
+
+Consequences:
+The plaintext exists only inside a single call: it arrives in a request, is encrypted, and is discarded; it is decrypted at the moment a send needs it. No response model contains it — a caller can learn only *whether* a number has its own credential — and `ResolvedCredential.__repr__` hides it so a traceback or a debugger cannot print one.
+
+`cryptography` is now a declared dependency rather than one that happened to be installed. An undeclared import is a deployment that works until whatever pulled it in is removed.
+
+The guard from ADR-009 survives the change rather than being deleted with it. It asserted that no column looked like a credential; it now asserts that the only column which does is the encrypted one, so a plaintext `access_token` cannot be added later without a test failing.
+
+Key management stops at the process boundary: keys come from configuration, which means they are in the environment of every API and worker container. That is a real limit — a KMS or a secret manager would be better — and it is the same limit `JWT_SECRET` already has, so it is not a new class of exposure.
+
+Rotation is possible but not automated. Prepending a key makes new credentials use it; old ones keep working until somebody rewrites them, and nothing does that yet.
+
+---
+
+## ADR-035 — A Release Is a Digest, and CI Is the Gate Rather Than a Second Opinion
+
+Date:
+2026-08-23
+
+Status:
+Accepted
+
+Decision:
+Publish every commit on `main` to GitHub Container Registry as an image tagged `sha-<commit>`, triggered by the CI workflow *concluding successfully* rather than by the push itself. Deploy by digest, never by tag. Scan the published image after the push, not before it. Build the commit CI verified, not the branch head.
+
+Context:
+Phase 15 is the first time this project ships anything anywhere. Everything before it ran on a developer's machine or in a CI runner that threw itself away afterwards. The decisions here are cheap now and expensive to reverse once a deployment exists that people depend on.
+
+Reason:
+**`workflow_run` rather than a duplicated test job.** "Do not deploy if tests fail" can be expressed as a dependency or as a copy of the test suite inside the deploy workflow. The copy drifts: someone adds a check to CI and not to deploy, and the release path is quietly weaker than the pull-request path. Waiting on the CI workflow's conclusion means there is exactly one definition of "passing".
+
+**The commit CI verified, not the branch head.** Between CI finishing and the publish job starting, `main` can move. Checking out `main` would build a commit no test ever saw while reporting the green tick of the one that was tested. `workflow_run.head_sha` is the commit that was actually verified.
+
+**A digest, not a tag.** `latest` and `main` are conveniences for a human reading a registry listing. A digest names exactly one set of bytes and cannot be moved, so "roll back to what was running yesterday" is an exact instruction rather than a hope that nobody re-pushed the tag. This is also what makes the scan meaningful: the thing scanned and the thing deployed are provably the same image.
+
+**Scan after the push, not before.** Blocking the push on a scan sounds stricter and is worse. A critical CVE published against the base image would then mean nothing can be published *at all* — including the commit that fixes it. Publishing first and failing the job second leaves the image available (for a rollback, for inspection) while making the finding visible and stopping the deploy job that depends on it. The pull-request scan in the security workflow is the one that catches this earlier, and it deliberately ignores unfixed findings so that a gate nobody can pass does not become a gate people learn to bypass.
+
+**A missing deployment target fails the job.** A workflow that "succeeds" without touching a server is worse than one that fails, because a green tick is read as "it shipped". With no `DEPLOY_HOST` configured the job exits non-zero and names what is missing.
+
+**Migrations are a step, not a container's startup.** `RUN_MIGRATIONS` already exists so a release applies them once instead of racing across replicas; the deploy job runs `migrate` as its own command and only then starts the new version. Rolling *back* deliberately does not run it — that is in the runbook, because `alembic downgrade` over live data drops columns.
+
+Consequences:
+The registry is GitHub's, and the credential is the workflow's own token. No registry secret exists to leak or rotate. Moving to another registry is a change to two `env` values and a login step.
+
+Every image carries OCI labels naming its commit, version and build time, and the revision is also an environment variable inside the container — so `docker inspect` answers "what is running" without the pipeline's help, and so can a log line.
+
+The deploy job is written and has never run against a real host. It is gated on secrets that do not exist yet, so it fails rather than pretending; what it does is documented in `docs/DEPLOYMENT.md` and what to do when it goes wrong is in `docs/RUNBOOK.md`. Both say plainly that no production deployment exists.
+
+The workflows themselves are now under test (`tests/unit/test_delivery_pipeline.py`). YAML is the one part of this repository nothing else checks — it is not imported and not typed — and the failure mode is a broken release rather than a red build. The tests assert rules rather than contents, so renaming a step does not break them.
+
+**TLS is documented and not shipped.** A certificate is issued to a domain this repository does not know. The nginx configuration contains the HTTP listener, the ACME challenge path served *before* the redirect (a redirect to a certificate that does not exist yet cannot be verified — that deadlock is the usual first-issuance failure), and a complete but commented TLS server block. A self-signed certificate shipped here would be worse than none: it would look like TLS while failing every client that checks.

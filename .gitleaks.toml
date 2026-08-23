@@ -23,4 +23,9 @@ regexes = [
   # Local Compose credentials for a database that only exists on a laptop.
   '''postgresql\+asyncpg://wasla:wasla@''',
   '''POSTGRES_PASSWORD: wasla''',
+  # A test fixture's JWT signing value, long enough to satisfy the setting and
+  # therefore long enough to look like a credential. The working tree generates
+  # this value now (tests/integration/test_billing_worker.py); the literal
+  # survives in commit 420ea01, which the history scan still reaches.
+  '''a-test-secret-that-is-long-enough-32''',
 ]

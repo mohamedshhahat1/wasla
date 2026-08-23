@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
+from app.db.models.analytics import AnalyticsSource
 from app.db.models.conversation import (
     Conversation,
     ConversationMode,
@@ -21,6 +22,7 @@ from app.db.models.conversation import (
 from app.db.models.sentiment import ConversationPriority
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.services.analytics_service import AnalyticsRecorder
 
 logger = get_logger(__name__)
 
@@ -33,6 +35,7 @@ class InboxService:
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._memberships = MembershipRepository(session, tenant_id=tenant_id)
+        self._analytics = AnalyticsRecorder(session, tenant_id=tenant_id)
 
     async def list_conversations(
         self,
@@ -86,15 +89,42 @@ class InboxService:
         conversation_id: uuid.UUID,
         mode: ConversationMode,
         handoff_reason: str | None = None,
+        source: AnalyticsSource = AnalyticsSource.USER,
+        actor_id: uuid.UUID | None = None,
     ) -> Conversation:
         """Hand a conversation to a human, or give it back to the AI.
 
         The reason belongs to the handoff, so returning to AI clears it rather
         than leaving a stale explanation attached.
+
+        `source` says who decided, because this method is the funnel for two
+        very different events: a colleague taking a conversation over, and an
+        agent deciding it cannot help. The conversation row cannot tell them
+        apart afterwards, so the analytics event is where that is preserved.
         """
         conversation = await self._conversations.require_by_id(conversation_id)
+        changed = conversation.mode is not mode
         conversation.mode = mode
         conversation.handoff_reason = handoff_reason if mode is ConversationMode.HUMAN else None
+
+        if changed:
+            # Only a real change is an event. Setting HUMAN on a conversation a
+            # colleague already owns is somebody editing a reason, not a second
+            # handoff, and counting it would inflate the one number this table
+            # exists to report.
+            if mode is ConversationMode.HUMAN:
+                self._analytics.handoff(
+                    conversation_id=conversation_id,
+                    source=source,
+                    reason=handoff_reason,
+                    actor_id=actor_id,
+                )
+            else:
+                self._analytics.handoff_resumed(
+                    conversation_id=conversation_id,
+                    actor_id=actor_id,
+                )
+
         logger.info(
             "conversation.mode_changed",
             extra={"conversation_id": str(conversation_id), "mode": mode.value},

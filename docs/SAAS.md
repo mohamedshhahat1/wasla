@@ -1,8 +1,8 @@
 # SaaS Model
 
-**Status: Planned** — no tenancy code exists yet. See [../TASKS.md](../TASKS.md) phases 1-3 and 13.
+**Status: In Progress** — tenants, global users, memberships, invitations, workspace switching and the platform role layer are Implemented (phases 1-2), as is a read-only platform reporting surface (phase 12). Plans, entitlements and billing are Planned (phase 13). Decisions: ADR-001, ADR-002, ADR-003.
 
-Scope: tenancy, workspaces, platform administration, plans, and entitlements. Decisions are recorded as ADR-001, ADR-002, and ADR-003 in [../DECISIONS.md](../DECISIONS.md).
+Scope: tenancy, workspaces, platform administration, plans, and entitlements.
 
 ## Tenants
 
@@ -31,7 +31,11 @@ A request executes in exactly one workspace. The authorization chain is `User ->
 
 ## Platform owner
 
-Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles. Capabilities: list, search, create, suspend, activate, and safely deactivate tenants; inspect tenant users, WhatsApp accounts, agents, conversations, and leads; view usage, billing, subscriptions, plans, system health, audit logs, and platform analytics including token usage, estimated AI cost, revenue, MRR, and ARR. Platform actions are always audit-logged.
+Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles, in both directions: a platform role grants nothing inside a workspace, and owning a workspace grants nothing across the platform.
+
+**Implemented today**, under `/api/v1/platform/*` and in `app/platform/`: an overview of how many workspaces exist and in what state, how many WhatsApp numbers are connected and live, what the platform consumed in a window, and a searchable list of workspaces with each one's usage. The package exists so the one legitimate cross-tenant read in the codebase is visible; a cross-tenant query outside it is a bug.
+
+**Planned**, and each for a stated reason rather than for want of time: revenue, MRR, ARR and churn need subscriptions (phase 13); estimated AI cost needs per-model prices that are stored nowhere, and inventing them would put a fabricated figure on a dashboard; and tenant administration — create, suspend, activate, deactivate — needs the audit log that arrives in phase 14, because those are exactly the actions that must never happen untraced.
 
 ## Plans and entitlements
 

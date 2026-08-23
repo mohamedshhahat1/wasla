@@ -30,6 +30,11 @@ class WhatsAppAccountConnectRequest(_Payload):
     waba_id: str = Field(min_length=1, max_length=64)
     display_phone_number: str = Field(min_length=1, max_length=32)
     display_name: str | None = Field(default=None, max_length=200)
+    # Write-only, and it appears in no response model anywhere (ADR-034). It is
+    # encrypted before it reaches the session and the plaintext lives only for
+    # the length of the request. Optional: a workspace that omits it sends
+    # through the platform credential, as every workspace did before this.
+    access_token: str | None = Field(default=None, min_length=1, max_length=512)
 
 
 class WhatsAppAccountResponse(BaseModel):
@@ -42,6 +47,11 @@ class WhatsAppAccountResponse(BaseModel):
     display_name: str | None
     status: WhatsAppAccountStatus
     created_at: datetime
+    # Whether this number sends with the workspace's own credential. The
+    # *existence* of a credential is operationally useful - somebody has to be
+    # able to tell whether a number is configured - and is the only thing about
+    # it any response ever discloses.
+    has_own_credential: bool = False
 
 
 class WhatsAppAccountListResponse(BaseModel):

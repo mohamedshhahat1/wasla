@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ExternalServiceError, RateLimitedError
 from app.core.logging import get_logger
+from app.db.models.analytics import AnalyticsSource
 from app.db.models.conversation import Conversation, ConversationMode
 from app.db.models.sentiment import (
     ConversationPriority,
@@ -35,7 +36,9 @@ from app.db.models.sentiment import (
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
 from app.repositories.media_repository import MediaRepository
 from app.repositories.sentiment_repository import SentimentRepository
+from app.services.analytics_service import AnalyticsRecorder
 from app.services.sentiment_reader import SentimentAnalyzer, SentimentReading
+from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
@@ -92,6 +95,8 @@ class SentimentService:
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._media = MediaRepository(session, tenant_id=tenant_id)
         self._readings = SentimentRepository(session, tenant_id=tenant_id)
+        self._usage = UsageRecorder(session, tenant_id=tenant_id)
+        self._analytics = AnalyticsRecorder(session, tenant_id=tenant_id)
 
     async def assess(
         self,
@@ -146,11 +151,35 @@ class SentimentService:
             )
             return SentimentOutcome()
 
+        # Metered here rather than by the caller, because the caller never sees
+        # this call: an assessment is a provider request of its own, on a model
+        # of its own, and folding it into the agent turn's figures would hide a
+        # cost from the workspace paying it.
+        self._usage.ai_request(
+            input_tokens=reading.usage.input_tokens,
+            output_tokens=reading.usage.output_tokens,
+            model=reading.model,
+            conversation_id=conversation_id,
+        )
+
         escalated = self._should_escalate(reading, threshold=escalation_sentiment)
         self._apply(conversation, reading)
         if escalated:
             conversation.mode = ConversationMode.HUMAN
             conversation.handoff_reason = _reason(reading)
+            # Unconditional, and safe to be: a conversation a person already
+            # owns returned right at the top of this method, so reaching here
+            # means the mode really did change.
+            #
+            # Recorded here rather than through the inbox service, which is the
+            # funnel for handoffs somebody *asked* for. This one is decided by a
+            # reading, and it is the source a business most wants to see on its
+            # own: the count of how often the product judged a customer angry.
+            self._analytics.handoff(
+                conversation_id=conversation_id,
+                source=AnalyticsSource.SENTIMENT,
+                reason=conversation.handoff_reason,
+            )
 
         await self._readings.record(
             message_id=message.id,

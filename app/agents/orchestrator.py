@@ -62,6 +62,10 @@ class AgentOutcome:
     # A handoff the classifier decided rather than one the model asked for.
     # Both stop the reply; only this one happened before a word was composed.
     escalated: bool = False
+    # The model that was actually called, which is not always the one the job
+    # asked for: a job naming no agent is answered by the workspace default.
+    # Carried out so usage can be attributed to the model that was billed.
+    model: str | None = None
 
     @property
     def should_send(self) -> bool:
@@ -271,6 +275,7 @@ class AgentOrchestrator:
             ),
             rounds=rounds,
             agent_id=resolved.id,
+            model=resolved.model,
         )
 
     async def _run(self, call: ToolCall, context: ToolContext) -> str:

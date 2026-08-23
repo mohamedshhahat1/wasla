@@ -50,6 +50,7 @@ from app.db.models.lead import (
     LeadStatus,
     clamp_score,
 )
+from app.db.models.usage import UsageEventType
 from app.repositories.conversation_repository import ContactRepository, ConversationRepository
 from app.repositories.lead_repository import (
     LeadActivityRepository,
@@ -59,6 +60,7 @@ from app.repositories.lead_repository import (
     LeadStatistics,
 )
 from app.repositories.membership_repository import MembershipRepository
+from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
@@ -143,6 +145,7 @@ class LeadService:
         self._contacts = ContactRepository(session, tenant_id=tenant_id)
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._memberships = MembershipRepository(session, tenant_id=tenant_id)
+        self._usage = UsageRecorder(session, tenant_id=tenant_id)
 
     # ------------------------------------------------------------------ reads
 
@@ -269,6 +272,11 @@ class LeadService:
             actor_id=actor_id,
             actor_kind=ActorKind.USER,
             data={"source": source.value},
+        )
+        self._usage.record(
+            UsageEventType.LEAD_CREATED,
+            occurred_at=now,
+            meta={"lead_id": str(lead.id), "source": source.value},
         )
         logger.info(
             "lead.created",
@@ -539,6 +547,13 @@ class LeadService:
                 summary="Lead created from a conversation.",
                 actor_kind=ActorKind.AGENT,
                 data={"conversation_id": str(conversation.id), "fields": sorted(fields)},
+            )
+            # Only the branch that created one. An extraction that updated an
+            # existing lead has captured nothing new, and counting it would
+            # make "leads created" grow every time a customer says anything.
+            self._usage.record(
+                UsageEventType.LEAD_CREATED,
+                meta={"lead_id": str(lead.id), "source": LeadSource.AGENT.value},
             )
             logger.info(
                 "lead.captured",

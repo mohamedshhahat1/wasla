@@ -31,8 +31,14 @@ from app.core.logging import configure_logging, get_logger
 from app.core.redis import RedisClient
 from app.db.session import Database
 from app.workers.ai_worker import AgentWorker
+from app.workers.billing_worker import BillingWorker
 from app.workers.campaign_worker import CampaignWorker
 from app.workers.follow_up_worker import FollowUpWorker
+from app.workers.heartbeat import (
+    DEFAULT_INTERVAL_SECONDS,
+    Heartbeat,
+    all_alive,
+)
 from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_worker import MediaWorker
 
@@ -43,10 +49,12 @@ INGESTION: Final = "ingestion"
 FOLLOW_UP: Final = "follow_up"
 MEDIA: Final = "media"
 CAMPAIGN: Final = "campaign"
+BILLING: Final = "billing"
 # Media comes before agent deliberately. It is the order the work flows in -
 # a file is read, then answered - and the order the log lines appear in at
-# startup, which is worth having match.
-ALL_KINDS: Final = (MEDIA, AGENT, INGESTION, FOLLOW_UP, CAMPAIGN)
+# startup, which is worth having match. Billing is last: it is the only loop
+# whose period is measured in days, and nothing else waits on it.
+ALL_KINDS: Final = (MEDIA, AGENT, INGESTION, FOLLOW_UP, CAMPAIGN, BILLING)
 
 KINDS_VARIABLE: Final = "WORKER_KINDS"
 
@@ -107,6 +115,8 @@ def build_workers(
             workers.append(MediaWorker(database=database, redis=redis, settings=settings))
         elif kind == CAMPAIGN:
             workers.append(CampaignWorker(database=database, settings=settings))
+        elif kind == BILLING:
+            workers.append(BillingWorker(database=database, settings=settings))
     return workers
 
 
@@ -143,6 +153,43 @@ def _install_signal_handlers(workers: list[Worker]) -> None:
             loop.add_signal_handler(sig, request_stop, sig.name)
 
 
+async def beat_while_running(
+    redis: RedisClient,
+    kinds: Iterable[str],
+    *,
+    stopping: asyncio.Event,
+    interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
+) -> None:
+    """Refresh this process's liveness keys until it is asked to stop.
+
+    One task for every kind rather than one per worker loop, and the difference
+    is the honest part: this proves the process is up and its event loop is
+    scheduling, not that any particular loop is making progress. Anything that
+    stops the loop - a crash, a hang, a blocking call in async code - stops the
+    beat, which is exactly what a container liveness probe should assert.
+    """
+    heartbeats = [Heartbeat(redis, kind=kind) for kind in kinds]
+    while not stopping.is_set():
+        for heartbeat in heartbeats:
+            await heartbeat.beat()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stopping.wait(), timeout=interval_seconds)
+
+
+async def check_health() -> bool:
+    """Whether this container's configured loops are all beating.
+
+    Run by the image's HEALTHCHECK. It builds its own Redis client and closes
+    it, because it is a separate process from the worker it is asking about.
+    """
+    settings = get_settings()
+    redis = RedisClient(settings)
+    try:
+        return await all_alive(redis, selected_kinds())
+    finally:
+        await redis.close()
+
+
 async def main() -> None:
     """Entry point for the worker container."""
     settings = get_settings()
@@ -168,6 +215,9 @@ async def main() -> None:
     )
     _install_signal_handlers(workers)
 
+    stopping = asyncio.Event()
+    heartbeat = asyncio.create_task(beat_while_running(redis, kinds, stopping=stopping))
+
     try:
         await run(workers)
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -175,6 +225,12 @@ async def main() -> None:
         for worker in workers:
             worker.stop()
     finally:
+        # Stopped before Redis closes, so the beat does not fail on a client
+        # that is already going away and log a warning nobody should act on.
+        stopping.set()
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
         await redis.close()
         await database.dispose()
         logger.info("worker.shutdown", extra={"event": "worker.shutdown"})

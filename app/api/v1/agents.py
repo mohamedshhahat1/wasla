@@ -11,7 +11,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, status
 
-from app.api.dependencies import AgentServiceDep, TenantAdminDep
+from app.api.dependencies import AgentServiceDep, AgentSlotDep, TenantAdminDep
 from app.schemas.agent import (
     AgentCreate,
     AgentRead,
@@ -38,6 +38,9 @@ async def create_agent(
     payload: AgentCreate,
     service: AgentServiceDep,
     admin: TenantAdminDep,
+    # Declared, not called inside the handler: a limit checked in a body is a
+    # limit the next handler forgets. Answers 402 when the plan is full.
+    slot: AgentSlotDep,
 ) -> AgentRead:
     agent = await service.create(
         name=payload.name,

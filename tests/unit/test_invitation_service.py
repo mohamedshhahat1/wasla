@@ -101,7 +101,10 @@ async def test_the_invitation_is_staged_pending_and_scoped_to_the_workspace(invi
 
     invitation, _ = await _issue(session, inviter)
 
-    assert session.added == [invitation]
+    # The invitation and its audit entry are staged together, in that order:
+    # letting somebody into a workspace is a recorded act (phase 14).
+    assert session.added[0] is invitation
+    assert [type(row).__name__ for row in session.added] == ["TenantInvitation", "AuditLog"]
     assert invitation.tenant_id == TENANT_ID
     assert invitation.status is InvitationStatus.PENDING
     assert invitation.email == "invited@example.com"

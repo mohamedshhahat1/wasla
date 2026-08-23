@@ -20,7 +20,33 @@ RUN pip install --upgrade pip && pip install .
 
 
 FROM base AS runtime
+
+# Provenance. A container answering a pager at three in the morning has to be
+# traceable to the commit that built it, and `docker inspect` is the only place
+# an operator can look without the deployment pipeline's help. Build arguments
+# rather than baked constants, so a local build says so instead of lying about
+# a revision it does not have.
+ARG WASLA_VERSION="0.0.0-local"
+ARG WASLA_REVISION="unknown"
+ARG WASLA_BUILT_AT="unknown"
+LABEL org.opencontainers.image.title="Wasla" \
+      org.opencontainers.image.description="Multi-tenant AI customer engagement platform for WhatsApp Business" \
+      org.opencontainers.image.source="https://github.com/mohamedshhahat1/wasla" \
+      org.opencontainers.image.licenses="LicenseRef-Proprietary" \
+      org.opencontainers.image.version="${WASLA_VERSION}" \
+      org.opencontainers.image.revision="${WASLA_REVISION}" \
+      org.opencontainers.image.created="${WASLA_BUILT_AT}"
+# Readable from inside the process too, so a log line or a health response can
+# name the build without shelling out to the container runtime.
+ENV WASLA_BUILD_REVISION="${WASLA_REVISION}"
+
+# `upgrade` as well as `install`: the base image is rebuilt on its own schedule,
+# so between rebuilds it carries whatever security updates Debian has published
+# since. Without this the image ships known-fixed CVEs - util-linux alone
+# accounted for four of them across nine packages - and the container scan
+# fails the release over something a package update fixes.
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 1001 wasla \
@@ -28,6 +54,18 @@ RUN apt-get update \
 
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+
+# A production container has no business installing packages, and pip is on no
+# path this image runs: the entrypoint calls uvicorn, alembic and `python -m`.
+# Removing it also removes the libraries pip vendors, which a scanner reads out
+# of its vendor manifest and reports against the image even though nothing
+# imports them - msgpack and setuptools were both found that way. Deleting code
+# that never runs is a better answer than carrying a package installer into
+# production in order to keep it patched.
+RUN rm -rf /usr/local/lib/python3.12/site-packages/pip \
+           /usr/local/lib/python3.12/site-packages/pip-*.dist-info \
+           /opt/venv/lib/python3.12/site-packages/pip \
+           /opt/venv/lib/python3.12/site-packages/pip-*.dist-info
 
 COPY app ./app
 COPY alembic ./alembic

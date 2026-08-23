@@ -121,6 +121,9 @@ class MessageSentiment(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMi
         Index("ix_message_sentiments_tenant_id", "tenant_id"),
         Index("ix_message_sentiments_tenant_id_label", "tenant_id", "label"),
         Index("ix_message_sentiments_conversation_id", "conversation_id"),
+        # Analytics: readings in a window, and the unhappy conversations
+        # among them. The label index answers a different question.
+        Index("ix_message_sentiments_tenant_id_created_at", "tenant_id", "created_at"),
     )
 
     message_id: Mapped[uuid.UUID] = mapped_column(

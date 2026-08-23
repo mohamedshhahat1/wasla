@@ -96,12 +96,78 @@ class Settings(BaseSettings):
     # discover there was nothing to read.
     media_max_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
 
+    # Credential encryption at rest (ADR-034). A key ring: the first key
+    # encrypts, every key decrypts, so rotation is prepending one. Each is 32
+    # random bytes, base64. Empty means a workspace cannot store its own Meta
+    # token at all - the platform token is used instead, and an attempt to
+    # supply one is refused rather than stored in the clear.
+    # `NoDecode` for the same reason `cors_origins` has it: without it
+    # pydantic-settings tries to JSON-decode a list field straight from the
+    # environment and raises before any validator runs, so a plain
+    # comma-separated value - the only thing a container environment can
+    # comfortably express - fails at start-up.
+    credential_encryption_keys: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
+    # Request limits, enforced by the application rather than only by nginx.
+    # nginx is one deployment topology, not a property of the software: run the
+    # container directly and every limit configured there disappears.
+    # Comfortably above the media cap, so an attachment upload is bounded by the
+    # rule that understands attachments rather than by this blunt one.
+    max_request_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
+    # How long a handler may take. Bounds a pooled database connection being
+    # held, not the client's patience. The WhatsApp webhook is exempt.
+    request_timeout_seconds: float = Field(default=60.0, gt=0)
+
+    # Rate limiting
+    # Off by default in tests and on everywhere else, because a limiter that is
+    # on in the suite makes every test order-dependent: the twentieth login in a
+    # file would fail for a reason the test never mentions.
+    rate_limit_enabled: bool = True
+    # Authentication: per client address, since the caller has no identity yet.
+    # Ten attempts a minute is generous for a person and hostile to a script.
+    rate_limit_auth_per_minute: int = Field(default=10, gt=0)
+    # Everything else a workspace does, counted per workspace rather than per
+    # user: the limit protects the platform's shared resources, and a workspace
+    # with fifty colleagues is fifty times the load of one with one.
+    rate_limit_workspace_per_minute: int = Field(default=300, gt=0)
+    # Broadcasts and template syncs, which are expensive per request and rare
+    # per person. Deliberately much lower than the general workspace limit.
+    rate_limit_campaign_per_minute: int = Field(default=30, gt=0)
+
+    # Billing
+    # The plan a workspace is entitled to when it has no subscription of its
+    # own: every workspace that predates billing, and any created before one is
+    # chosen. Named by code rather than by id so it is the same string in every
+    # environment. A code that matches no plan leaves limits unenforced and logs
+    # it, which is a better failure than taking a working deployment offline
+    # over a missing catalogue row.
+    default_plan_code: str = "starter"
+
     # Meta / WhatsApp: configuration only until the WhatsApp phase lands
     meta_app_id: str | None = None
     meta_app_secret: str | None = None
     meta_verify_token: str | None = None
     meta_access_token: str | None = None
     meta_api_version: str = "v21.0"
+
+    @field_validator("credential_encryption_keys", mode="before")
+    @classmethod
+    def _parse_encryption_keys(cls, value: Any) -> Any:
+        """Accept a JSON array, a comma-separated string, or a list.
+
+        Comma-separated is what a container environment can actually express,
+        and the order matters: the first key is the one that encrypts.
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                return json.loads(raw)
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        return value
 
     @field_validator("cors_origins", mode="before")
     @classmethod
