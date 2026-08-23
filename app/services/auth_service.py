@@ -16,6 +16,12 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.core.logging import get_logger
+from app.core.rate_limit import (
+    LOGIN_ACCOUNT_POLICY,
+    RateLimiter,
+    RateLimitPolicy,
+    account_identity,
+)
 from app.core.security import (
     TokenType,
     create_access_token,
@@ -85,10 +91,16 @@ class AuthService:
         session: AsyncSession,
         settings: Settings,
         token_store: RefreshTokenStore,
+        limiter: RateLimiter | None = None,
     ) -> None:
         self._session = session
         self._settings = settings
         self._token_store = token_store
+        # Optional so a unit test can construct this service without Redis. When
+        # absent the per-account login limit simply does not run - the route
+        # always supplies one, and `tests/integration/test_auth_hardening.py`
+        # asserts that it does.
+        self._limiter = limiter
         self._users = UserRepository(session)
         self._tenants = TenantRepository(session)
         self._memberships = UserMembershipRepository(session)
@@ -164,6 +176,13 @@ class AuthService:
         password: str,
         workspace_slug: str | None = None,
     ) -> AuthenticatedSession:
+        # Counted before anything is looked up, so the budget is spent whether
+        # or not the address exists - which is what keeps this from becoming an
+        # enumeration oracle of its own - and so a password sprayer cannot buy
+        # extra attempts by rotating source addresses. This is the limit that
+        # survives a botnet; the per-address one counts the attacker's machines.
+        await self._limit_by_account(email)
+
         user = await self._users.get_by_email(email)
         if user is None or user.hashed_password is None:
             # Spend the time a real verification would: response time discloses
@@ -189,6 +208,24 @@ class AuthService:
             extra={"event": "auth.logged_in", "user_id": str(user.id)},
         )
         return self._issue(user=user, workspace=workspace)
+
+    async def _limit_by_account(self, email: str) -> None:
+        """Refuse a login that has already used up this account's attempts.
+
+        Raises `RateLimitedError` (429) rather than an authentication error, and
+        that distinction is deliberate even though it tells a caller the limit
+        exists: the alternative is answering 401 to somebody whose own account
+        is under attack, which would send a real user to reset a password that
+        was never compromised.
+        """
+        if self._limiter is None or not self._settings.rate_limit_enabled:
+            return
+        policy = RateLimitPolicy(
+            name=LOGIN_ACCOUNT_POLICY,
+            limit=self._settings.rate_limit_login_per_account_per_minute,
+            window_seconds=60,
+        )
+        await self._limiter.enforce(policy, account_identity(email))
 
     async def refresh(
         self,

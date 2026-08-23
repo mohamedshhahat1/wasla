@@ -26,7 +26,7 @@ it loses a customer's message and then the integration.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -42,22 +42,46 @@ from app.core.rate_limit import RateLimitDecision, RateLimiter, RateLimitPolicy
 UNKNOWN_CLIENT = "unknown"
 
 
-def client_identity(request: Request) -> str:
+def client_identity(request: Request, *, trusted_proxies: Collection[str] = ()) -> str:
     """The address a request came from, as far as this process can tell.
 
-    `X-Forwarded-For` is read only because the deployment puts nginx in front
-    (`proxy_set_header X-Forwarded-For`), and the first entry is the client the
-    proxy saw. Behind no proxy the header is attacker-controlled and this is
-    weaker than it looks - which is why it limits *authentication attempts*
-    rather than authorising anything.
+    The rule is: **believe a forwarding header only when the connection came
+    from a proxy we listed.** Everything else is the socket address.
+
+    The earlier version read the first entry of `X-Forwarded-For`
+    unconditionally, and that was wrong in both topologies. Behind no proxy the
+    header is simply attacker-supplied. Behind the shipped nginx it is *still*
+    attacker-supplied, because `$proxy_add_x_forwarded_for` **appends** the real
+    peer to whatever arrived - so a request sent with `X-Forwarded-For: 10.0.0.7`
+    reaches this function as `10.0.0.7, <real peer>` and `[0]` is the value the
+    caller chose. Rotating it per request put every attempt in its own bucket and
+    made authentication rate limiting inert, which is the only anti-automation
+    control in front of `/auth/login`.
+
+    So when the peer is trusted we prefer `X-Real-IP`, which nginx sets from
+    `$remote_addr` and a client cannot influence. Failing that we walk
+    `X-Forwarded-For` from the right and take the last entry that is not itself
+    a trusted proxy - the address the outermost proxy we control actually saw.
+    A caller can prepend as many forged entries as they like and never reach
+    that position.
     """
+    peer = request.client.host if request.client and request.client.host else None
+    if peer is None or peer not in trusted_proxies:
+        # No proxy in front of us, or one we were not told about. The socket is
+        # the only thing here that cannot be forged.
+        return peer or UNKNOWN_CLIENT
+
+    real_ip = (request.headers.get("X-Real-IP") or "").strip()
+    if real_ip:
+        return real_ip
+
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first
-    client = request.client
-    return client.host if client and client.host else UNKNOWN_CLIENT
+        for entry in reversed([part.strip() for part in forwarded.split(",")]):
+            if entry and entry not in trusted_proxies:
+                return entry
+
+    return peer
 
 
 def get_rate_limiter(redis: RedisDep) -> RateLimiter:
@@ -84,7 +108,8 @@ def _limit_by_client(
             limit=per_minute(settings),
             window_seconds=60,
         )
-        return await limiter.enforce(policy, client_identity(request))
+        identity = client_identity(request, trusted_proxies=settings.trusted_proxy_ips)
+        return await limiter.enforce(policy, identity)
 
     return guard
 

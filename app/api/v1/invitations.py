@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, status
 
 from app.api.dependencies import InvitationServiceDep, SeatDep, TenantAdminDep
+from app.api.rate_limits import auth_rate_limit, workspace_rate_limit
 from app.db.models import TenantInvitation
 from app.schemas.auth import WorkspaceSummary
 from app.schemas.invitation import (
@@ -18,6 +19,12 @@ from app.schemas.invitation import (
 )
 
 router = APIRouter(prefix="/invitations", tags=["Invitations"])
+
+# Declared per route rather than on the router, because `/accept` must stay
+# reachable without credentials and the workspace guard resolves the whole
+# authentication chain. See the note in `app/api/v1/__init__.py`.
+_WORKSPACE_LIMIT = Depends(workspace_rate_limit)
+_CLIENT_LIMIT = Depends(auth_rate_limit)
 
 
 def _response(invitation: TenantInvitation) -> InvitationResponse:
@@ -36,6 +43,7 @@ def _response(invitation: TenantInvitation) -> InvitationResponse:
     response_model=InvitationCreatedResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Invite somebody to this workspace",
+    dependencies=[_WORKSPACE_LIMIT],
 )
 async def issue_invitation(
     payload: InvitationCreateRequest,
@@ -63,6 +71,7 @@ async def issue_invitation(
     "",
     response_model=list[InvitationResponse],
     summary="List invitations still awaiting acceptance",
+    dependencies=[_WORKSPACE_LIMIT],
 )
 async def list_invitations(
     workspace: TenantAdminDep,
@@ -76,6 +85,7 @@ async def list_invitations(
     "/{invitation_id}",
     response_model=InvitationResponse,
     summary="Revoke an invitation",
+    dependencies=[_WORKSPACE_LIMIT],
 )
 async def revoke_invitation(
     invitation_id: uuid.UUID,
@@ -93,6 +103,10 @@ async def revoke_invitation(
     "/accept",
     response_model=InvitationAcceptedResponse,
     summary="Accept an invitation",
+    # Unauthenticated and credential-bearing, so it is limited by client
+    # address on the authentication budget: the token in the body is guessable
+    # only by brute force, and this is what makes brute force expensive.
+    dependencies=[_CLIENT_LIMIT],
 )
 async def accept_invitation(
     payload: InvitationAcceptRequest,

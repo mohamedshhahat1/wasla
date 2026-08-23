@@ -24,6 +24,7 @@ there does not shed load - it loses customer messages and then the integration
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Final
 
@@ -38,6 +39,25 @@ logger = get_logger(__name__)
 # Every key is namespaced, so a limiter can never collide with a queue or a
 # token denylist sharing the same Redis.
 KEY_PREFIX: Final = "ratelimit"
+
+# Login attempts counted against one account, whatever address they arrive from.
+# Lives here rather than in the API layer because the service applies it: the
+# identity is inside the request body, and a route dependency that read the body
+# to find it would consume the stream before the handler saw it.
+LOGIN_ACCOUNT_POLICY: Final = "auth:account"
+
+
+def account_identity(email: str) -> str:
+    """The bucket a login attempt is counted in, derived from the account named.
+
+    Hashed rather than stored raw. The key lives in Redis, which is shared
+    infrastructure and shows up in slow-log output, `KEYS` dumps and support
+    screenshots; an email address is personal data and does not need to be
+    legible there for a counter to work. Lower-cased first, so `A@b.com` and
+    `a@b.com` cannot be spent as two budgets against one account.
+    """
+    normalised = email.strip().lower().encode("utf-8")
+    return hashlib.sha256(normalised).hexdigest()[:32]
 
 
 @dataclass(frozen=True, slots=True)

@@ -16,6 +16,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.dependencies import RedisDep, SessionDep, SettingsDep
 from app.core.exceptions import AuthenticationError, PermissionDeniedError
+from app.core.rate_limit import RateLimiter
 from app.core.security import TokenClaims, TokenType, decode_token
 from app.core.storage import LocalMediaStorage, MediaStorage
 from app.core.token_store import RefreshTokenStore
@@ -62,10 +63,18 @@ def get_auth_service(
     session: SessionDep,
     redis: RedisDep,
 ) -> AuthService:
+    """Built with a limiter as well as a token store.
+
+    The limiter is for the per-account login budget, which the service applies
+    rather than the route: the account it counts by is inside the request body,
+    and a dependency that read the body to find it would consume the stream
+    before the handler saw it.
+    """
     return AuthService(
         session=session,
         settings=settings,
         token_store=RefreshTokenStore(redis),
+        limiter=RateLimiter(redis),
     )
 
 

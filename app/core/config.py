@@ -118,6 +118,21 @@ class Settings(BaseSettings):
     # held, not the client's patience. The WhatsApp webhook is exempt.
     request_timeout_seconds: float = Field(default=60.0, gt=0)
 
+    # Which immediate peers are allowed to speak for the client behind them.
+    # Empty is the safe default and means "there is no proxy": forwarding
+    # headers are ignored entirely and the socket address is the client.
+    #
+    # This is not a convenience toggle. `X-Forwarded-For` is attacker-supplied
+    # unless a proxy we control appended to it, and the shipped nginx uses
+    # `$proxy_add_x_forwarded_for`, which *appends* - so the first entry is
+    # whatever the caller sent. Trusting it lets anyone forge the identity that
+    # authentication rate limiting counts by. Only when the connection actually
+    # comes from a listed address is a forwarding header believed.
+    #
+    # `NoDecode` for the reason `cors_origins` has it: a comma-separated value
+    # is the only thing a container environment expresses comfortably.
+    trusted_proxy_ips: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
     # Rate limiting
     # Off by default in tests and on everywhere else, because a limiter that is
     # on in the suite makes every test order-dependent: the twentieth login in a
@@ -126,6 +141,12 @@ class Settings(BaseSettings):
     # Authentication: per client address, since the caller has no identity yet.
     # Ten attempts a minute is generous for a person and hostile to a script.
     rate_limit_auth_per_minute: int = Field(default=10, gt=0)
+    # Authentication, counted per *account* rather than per address. This is the
+    # limit that survives a botnet: an address-based one counts the attacker's
+    # machines, and they have more machines than we have patience. Deliberately
+    # tighter than the address limit, because one person signing in does not
+    # need many attempts a minute and a password sprayer needs exactly this.
+    rate_limit_login_per_account_per_minute: int = Field(default=5, gt=0)
     # Everything else a workspace does, counted per workspace rather than per
     # user: the limit protects the platform's shared resources, and a workspace
     # with fifty colleagues is fifty times the load of one with one.
@@ -184,6 +205,21 @@ class Settings(BaseSettings):
             return [item.strip() for item in raw.split(",") if item.strip()]
         return value
 
+    @field_validator("trusted_proxy_ips", mode="before")
+    @classmethod
+    def _parse_trusted_proxy_ips(cls, value: Any) -> Any:
+        """Accept a JSON array, a comma-separated string, or a list."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                return json.loads(raw)
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        return value
+
     @field_validator("log_level", mode="before")
     @classmethod
     def _normalise_log_level(cls, value: Any) -> Any:
@@ -204,21 +240,57 @@ class Settings(BaseSettings):
         return self.environment == "test"
 
     @model_validator(mode="after")
-    def _validate_production_hardening(self) -> Settings:
-        """Fail fast rather than serve production traffic with unsafe defaults."""
-        if not self.is_production:
-            return self
+    def _validate_hardening(self) -> Settings:
+        """Fail fast rather than serve traffic with unsafe defaults.
 
+        The signing-key rule deliberately applies to **every environment except
+        `test`**, and that is a change from an earlier version which only checked
+        it when `environment` was literally `production`.
+
+        The old shape was unsafe in two ways that were easy to miss. `staging` is
+        a first-class tier here - reachable from the internet, because Meta has
+        to deliver webhooks to it - and it skipped the check entirely, so it ran
+        on whatever `.env.example` shipped. And `environment` itself defaults to
+        `local`, so a container started without `ENVIRONMENT` set skipped the
+        check too: the guard protecting the key was opt-in through a field that
+        defaults to the unprotected side.
+
+        `jwt_secret` is not one credential among several. It is the only thing
+        standing between a stranger and a token that names any user - including
+        one carrying a platform role - because `get_current_user` trusts a valid
+        signature completely. A key that ships in the repository is not a secret,
+        it is a checksum, and no downstream check can compensate for it.
+
+        `test` is exempt so the suite can build settings without ceremony. It is
+        the one environment that never listens on a network.
+        """
         problems: list[str] = []
-        if self.jwt_secret == PLACEHOLDER_SECRET or len(self.jwt_secret) < MINIMUM_SECRET_LENGTH:
+
+        if not self.is_testing and (
+            self.jwt_secret == PLACEHOLDER_SECRET or len(self.jwt_secret) < MINIMUM_SECRET_LENGTH
+        ):
             problems.append(
                 "JWT_SECRET must be a random value of at least "
-                f"{MINIMUM_SECRET_LENGTH} characters"
+                f"{MINIMUM_SECRET_LENGTH} characters; generate one with "
+                "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
             )
-        if self.debug:
-            problems.append("DEBUG must be disabled")
+
+        if self.is_production:
+            if self.debug:
+                problems.append("DEBUG must be disabled")
+            if self.docs_enabled:
+                problems.append(
+                    "DOCS_ENABLED must be false: the interactive reference publishes "
+                    "every route and schema, including platform administration"
+                )
+            if not self.meta_app_secret:
+                # Without it the webhook cannot verify a Meta signature, and the
+                # endpoint answers 503 to every delivery - a silent integration
+                # outage that looks like Meta's fault.
+                problems.append("META_APP_SECRET must be set so webhook signatures can be verified")
+
         if problems:
-            raise ValueError("invalid production configuration: " + "; ".join(problems))
+            raise ValueError(f"invalid {self.environment} configuration: " + "; ".join(problems))
         return self
 
 

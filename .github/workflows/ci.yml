@@ -123,9 +123,14 @@ jobs:
 
       - name: Container serves liveness
         run: |
+          # Generated per run rather than written down. This container starts as
+          # `staging`, which the settings validator now holds to the same signing
+          # key rule as production - a committed value would both fail that check
+          # and teach the wrong habit.
+          RUN_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
           docker run -d --name wasla-ci -p 8000:8000 \
             -e ENVIRONMENT=staging \
-            -e JWT_SECRET=continuous-integration-secret-value-not-for-deployment \
+            -e JWT_SECRET="$RUN_SECRET" \
             wasla:ci
           for attempt in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8000/health/live; then

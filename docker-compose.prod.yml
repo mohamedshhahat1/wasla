@@ -57,13 +57,22 @@ services:
     environment:
       ENVIRONMENT: production
       DEBUG: "false"
+      # The interactive reference publishes every route and schema, platform
+      # administration included. Stated here rather than left to the default,
+      # and the production validator refuses to boot without it.
+      DOCS_ENABLED: "false"
+      # Which peers may speak for the client behind them. nginx on the compose
+      # network is the only one; without this the application ignores every
+      # forwarding header and rate-limits by the socket address, which behind a
+      # proxy would be one bucket for the whole internet.
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-nginx}
       LOG_FORMAT: json
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      META_APP_SECRET: ${META_APP_SECRET:-}
+      META_APP_SECRET: ${META_APP_SECRET:?META_APP_SECRET is required to verify webhook signatures}
       META_VERIFY_TOKEN: ${META_VERIFY_TOKEN:-}
       MEDIA_STORAGE_PATH: ${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
       # A key ring for workspace credentials at rest (ADR-034). Optional, and

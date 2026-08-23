@@ -54,13 +54,25 @@ WORKSPACE_ROUTERS = (
     contacts.router,
     conversations.router,
     follow_ups.router,
-    invitations.router,
     invoices.router,
     knowledge.router,
     leads.router,
     usage.router,
     whatsapp.router,
 )
+
+# Routers where the limit cannot be applied to the whole router, because not
+# every route on them is authenticated. Their limits are declared per route.
+#
+# `invitations` is the only one, and it is here because of a real defect this
+# structure now prevents: applying the workspace limit at router level resolved
+# `ActiveWorkspaceDep` - and therefore the entire authentication chain - for
+# *every* route on the router, including `/accept`, which exists precisely for
+# somebody who has no account yet. Onboarding answered 401 in production while
+# a test that overrode the workspace dependency reported it working. A guard
+# whose signature pulls in authentication cannot be attached to a group that
+# contains an unauthenticated route.
+MIXED_ROUTERS = (invitations.router,)
 
 # Expensive and rare: a broadcast, a template sync against Meta.
 CAMPAIGN_ROUTERS = (
@@ -83,6 +95,11 @@ for router in WORKSPACE_ROUTERS:
 
 for router in CAMPAIGN_ROUTERS:
     api_router.include_router(router, dependencies=[_WORKSPACE_LIMIT, _CAMPAIGN_LIMIT])
+
+# No router-level dependency: each route declares its own, because one of them
+# must stay reachable without credentials.
+for router in MIXED_ROUTERS:
+    api_router.include_router(router)
 
 for router in UNLIMITED_ROUTERS:
     api_router.include_router(router)

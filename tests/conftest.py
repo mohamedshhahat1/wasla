@@ -7,6 +7,17 @@ PostgreSQL, Redis, Meta or OpenAI credentials.
 
 from __future__ import annotations
 
+import os
+
+# Set before anything imports `app`, and that ordering is load-bearing.
+# `app/main.py` builds a `Settings` at module scope, and the settings validator
+# now requires a real `JWT_SECRET` in every environment except `test` - so
+# importing the application with no `ENVIRONMENT` set would raise during
+# collection rather than run the suite. Pinning it here makes the suite
+# self-sufficient no matter what the developer's shell happens to hold, and
+# `setdefault` leaves an explicit override alone.
+os.environ.setdefault("ENVIRONMENT", "test")
+
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 

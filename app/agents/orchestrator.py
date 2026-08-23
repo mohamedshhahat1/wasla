@@ -12,6 +12,7 @@ project and lets a worker decide whether a turn is kept or rolled back.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Set
 from dataclasses import dataclass
 from typing import Final
 
@@ -187,6 +188,11 @@ class AgentOrchestrator:
             return _nothing(agent_id=resolved.id)
 
         grants = await self._grants.list_for_agent(agent_id=resolved.id, enabled_only=True)
+        # Kept as a set as well as a spec list, because these are two different
+        # questions and only one of them was being asked. `specs` decides what
+        # the model is *offered*; `granted` decides what it is allowed to
+        # actually run. See `_run`.
+        granted = {grant.name for grant in grants}
         specs = self._registry.specs(grant.name for grant in grants)
 
         turns = list(window.turns)
@@ -232,7 +238,9 @@ class AgentOrchestrator:
                 embeddings=self._embeddings,
             )
             for call in reply.tool_calls:
-                results.append(ToolResult.for_call(call, output=await self._run(call, context)))
+                results.append(
+                    ToolResult.for_call(call, output=await self._run(call, context, granted))
+                )
                 tools_run.append(call.name)
                 if call.name == HANDOFF_TOOL:
                     handed_off = True
@@ -278,13 +286,46 @@ class AgentOrchestrator:
             model=resolved.model,
         )
 
-    async def _run(self, call: ToolCall, context: ToolContext) -> str:
+    async def _run(
+        self,
+        call: ToolCall,
+        context: ToolContext,
+        granted: Set[str],
+    ) -> str:
         """Run one call, turning refusals into output the model can learn from.
 
         Neither a rejected argument nor a failed operation should end the turn.
         The model is told what went wrong and gets a chance to adapt, which is
         the whole reason tool output exists.
+
+        **The grant is re-checked here, and that is the point of this method.**
+        Offering a tool and permitting a tool were previously the same act: only
+        granted tools were described to the model, but `ToolRegistry.run` looks a
+        name up in the whole deployment registry, so any tool the deployment
+        implements would execute if the model named it. A model naming a tool it
+        was never offered is not hypothetical - the tool names are ordinary
+        English, and the conversation contains text written by a stranger whose
+        message is read as instructions.
+        The exposure was real: an agent granted nothing but a handoff could be
+        talked into calling `search_knowledge`, which reads the workspace's
+        private documents and returns them into a reply the customer receives.
+        A grant is an authorization decision, so it is enforced where the
+        authority is used rather than only where the menu is written.
         """
+        if call.name not in granted:
+            logger.warning(
+                "agent.tool_not_granted",
+                extra={
+                    "event": "agent.tool_not_granted",
+                    "tool": call.name,
+                    "agent_id": str(context.conversation_id),
+                    "tenant_id": str(context.tenant_id),
+                },
+            )
+            # Phrased for the model rather than for a log reader: it gets a
+            # chance to answer without the tool instead of the turn collapsing.
+            return f"The tool {call.name} is not available to this agent."
+
         try:
             return await self._registry.run(
                 name=call.name,

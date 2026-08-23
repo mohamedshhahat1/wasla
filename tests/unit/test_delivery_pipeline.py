@@ -166,20 +166,45 @@ def test_the_deployment_workflows_write_no_credential_literally():
             ), f"{name} may assign a literal credential: {stripped}"
 
 
-def test_the_only_literal_secret_in_ci_says_it_is_not_for_deployment():
-    """The value CI boots with announces itself, which is what stops it being
-    copied somewhere that matters."""
-    text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
-    literals = [
-        line.strip()
-        for line in text.splitlines()
-        if "JWT_SECRET=" in line and "${{" not in line and not line.strip().startswith("#")
-    ]
+def test_every_ci_jwt_secret_is_generated_or_announces_itself():
+    """Two assignment forms, and they now answer to different rules.
 
-    assert literals, "CI no longer sets a JWT secret; this guard needs updating"
-    for line in literals:
+    The pytest job sets `JWT_SECRET:` as YAML env and runs as `ENVIRONMENT=test`,
+    the one environment exempt from the signing-key rule; its literal is allowed
+    because it says out loud that it is not for deployment, which is what stops
+    it being copied somewhere that matters.
+
+    The container smoke test passes `JWT_SECRET=` as a docker argument and boots
+    as `staging`, which the settings validator now holds to the same rule as
+    production. That one must be generated per run - a written-down value would
+    fail the check and teach the wrong habit at once.
+    """
+    text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+
+    assignments = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or "JWT_SECRET" not in stripped:
+            continue
+        # Trailing line-continuation backslashes belong to the shell, not to
+        # the value, so they are trimmed before the value is judged.
+        match = re.search(r"JWT_SECRET\s*[:=]\s*(.+?)\s*\\?$", stripped)
+        if match:
+            assignments.append((stripped, match.group(1).strip().strip('"')))
+
+    assert assignments, "CI no longer sets a JWT secret; this guard needs updating"
+
+    generated = [value for _, value in assignments if value.startswith("$")]
+    assert generated, (
+        "no CI job generates its JWT secret any more. The container smoke test "
+        "runs as staging, which must not boot on a value from the repository."
+    )
+
+    for line, value in assignments:
+        if value.startswith("$") or "${{" in value:
+            continue
         assert any(
-            value in line for value in CI_ONLY_VALUES
+            allowed in value for allowed in CI_ONLY_VALUES
         ), f"an unrecognised literal secret appeared in ci.yml: {line}"
 
 
