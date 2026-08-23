@@ -226,6 +226,9 @@ class AuthService:
             name=LOGIN_ACCOUNT_POLICY,
             limit=self._settings.rate_limit_login_per_account_per_minute,
             window_seconds=60,
+            # In front of a credential, so a Redis outage must not mean
+            # unlimited attempts (ADR-040).
+            local_fallback=True,
         )
         await self._limiter.enforce(policy, account_identity(email))
 

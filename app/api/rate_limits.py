@@ -94,7 +94,13 @@ RateLimiterDep = Annotated[RateLimiter, Depends(get_rate_limiter)]
 def _limit_by_client(
     name: str, per_minute: Callable[[SettingsDep], int]
 ) -> Callable[..., Awaitable[RateLimitDecision | None]]:
-    """Build a dependency limiting by client address."""
+    """Build a dependency limiting by client address.
+
+    Every policy counted this way sits in front of a credential - signing in,
+    refreshing, changing a password, redeeming an invitation - so all of them
+    carry the process-local fallback. A Redis outage degrades the limit; it does
+    not remove it (ADR-040).
+    """
 
     async def guard(
         request: Request,
@@ -107,6 +113,7 @@ def _limit_by_client(
             name=name,
             limit=per_minute(settings),
             window_seconds=60,
+            local_fallback=True,
         )
         identity = client_identity(request, trusted_proxies=settings.trusted_proxy_ips)
         return await limiter.enforce(policy, identity)

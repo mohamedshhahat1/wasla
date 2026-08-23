@@ -232,3 +232,40 @@ async def test_limiting_can_be_switched_off(client, app):
     statuses = [(await client.get("/api/v1/agents")).status_code for _ in range(30)]
 
     assert set(statuses) == {200}
+
+
+async def test_logout_shares_the_authentication_budget(limited_app, limited_client):
+    """Logout is limited rather than authenticated (ADR-040).
+
+    Requiring an access token would break it exactly when people use it - the
+    access token has expired, which is why they are signing out - and would add
+    nothing against the adversary it looks like it guards: somebody holding a
+    victim's refresh token can exchange it for a live session, which is strictly
+    worse than revoking it.
+
+    What was missing is a budget. The endpoint verifies a JWT signature for any
+    caller, so unlimited it is free signature work for anybody who asks.
+    """
+    limited_app.dependency_overrides[get_auth_service] = RefusingAuth
+    body = {"email": "someone@example.com", "password": "a-very-long-password-1"}
+    for _ in range(3):
+        await limited_client.post("/api/v1/auth/login", json=body)
+
+    refused = await limited_client.post(
+        "/api/v1/auth/logout", json={"refresh_token": "anything-at-all"}
+    )
+
+    assert refused.status_code == 429
+
+
+async def test_logout_needs_no_credential_beyond_the_token_itself(client, app):
+    """The property that must survive the limit: no authentication.
+
+    A caller whose access token has already expired must still be able to revoke
+    their refresh token, and a token that is already spent, revoked or invalid
+    is not an error - answering differently would make this an oracle for
+    whether a token is still live.
+    """
+    for token in ("not-a-real-token", "", "x" * 40):
+        response = await client.post("/api/v1/auth/logout", json={"refresh_token": token})
+        assert response.status_code in (204, 422), token

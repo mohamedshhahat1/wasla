@@ -113,7 +113,28 @@ async def refresh(
     response_model=None,
     summary="Revoke a refresh token",
 )
-async def logout(payload: LogoutRequest, service: AuthServiceDep) -> None:
+async def logout(
+    payload: LogoutRequest,
+    service: AuthServiceDep,
+    # Limited by client address, and deliberately *not* authenticated.
+    #
+    # Requiring an access token would break logout exactly when people use it:
+    # the access token has expired, which is why they are signing out rather
+    # than continuing. And it would add nothing against the adversary it looks
+    # like it guards - somebody holding a victim's refresh token can already
+    # exchange it for a live session, which is strictly worse than revoking it.
+    #
+    # What was actually missing is a budget. The endpoint decodes a JWT for any
+    # caller, so it was a free endpoint doing signature work, and the limit is
+    # the proportionate answer (ADR-040).
+    limit: AuthRateLimit,
+) -> None:
+    """Revoke a refresh token. No credential beyond the token itself.
+
+    Presenting a token that is already spent, revoked or expired is not an
+    error: logging out twice is a thing clients do, and answering differently
+    would turn this into an oracle for whether a token is still live.
+    """
     await service.logout(refresh_token=payload.refresh_token)
 
 
