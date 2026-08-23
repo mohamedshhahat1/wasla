@@ -40,7 +40,13 @@ LABEL org.opencontainers.image.title="Wasla" \
 # name the build without shelling out to the container runtime.
 ENV WASLA_BUILD_REVISION="${WASLA_REVISION}"
 
+# `upgrade` as well as `install`: the base image is rebuilt on its own schedule,
+# so between rebuilds it carries whatever security updates Debian has published
+# since. Without this the image ships known-fixed CVEs - util-linux alone
+# accounted for four of them across nine packages - and the container scan
+# fails the release over something a package update fixes.
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 1001 wasla \
@@ -48,6 +54,18 @@ RUN apt-get update \
 
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+
+# A production container has no business installing packages, and pip is on no
+# path this image runs: the entrypoint calls uvicorn, alembic and `python -m`.
+# Removing it also removes the libraries pip vendors, which a scanner reads out
+# of its vendor manifest and reports against the image even though nothing
+# imports them - msgpack and setuptools were both found that way. Deleting code
+# that never runs is a better answer than carrying a package installer into
+# production in order to keep it patched.
+RUN rm -rf /usr/local/lib/python3.12/site-packages/pip \
+           /usr/local/lib/python3.12/site-packages/pip-*.dist-info \
+           /opt/venv/lib/python3.12/site-packages/pip \
+           /opt/venv/lib/python3.12/site-packages/pip-*.dist-info
 
 COPY app ./app
 COPY alembic ./alembic
