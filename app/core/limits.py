@@ -40,6 +40,9 @@ logger = get_logger(__name__)
 # Paths that must never be cut off mid-flight. Prefix-matched, so the
 # verification handshake and the delivery endpoint are both covered.
 TIMEOUT_EXEMPT_PREFIXES: Final[tuple[str, ...]] = ("/api/v1/webhooks",)
+# Same path, a different rule: exempt from the timeout, and held to a
+# *tighter* body cap than everything else.
+WEBHOOK_PREFIX: Final = "/api/v1/webhooks"
 
 
 async def _refuse(
@@ -80,18 +83,47 @@ class BodySizeLimitMiddleware:
     to measure it has already done the thing the limit exists to prevent.
     """
 
-    def __init__(self, app: ASGIApp, *, max_bytes: int) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        max_bytes: int,
+        webhook_max_bytes: int | None = None,
+    ) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        # The webhook gets its own, much smaller cap. It is the one endpoint
+        # that is unauthenticated, unlimited by policy (ADR-032) and reachable
+        # by anybody who finds the URL, and a WhatsApp delivery is a few
+        # kilobytes of JSON - so the general 32 MB allowance, which exists for
+        # media uploads by signed-in colleagues, is three orders of magnitude
+        # more than it can legitimately need. Signature verification happens
+        # after the body is read, so without this the cost of making the server
+        # buffer 32 MB is one unsigned request.
+        self.webhook_max_bytes = webhook_max_bytes or max_bytes
+
+    def _cap_for(self, path: str) -> int:
+        """The smaller of the two caps for a webhook path, never the larger.
+
+        `min` rather than a straight substitution, and an existing test caught
+        why: an operator who lowers `MAX_REQUEST_BYTES` below the webhook's own
+        setting would otherwise have *raised* the limit on the one endpoint an
+        unauthenticated caller can reach. A cap named for one endpoint should
+        only ever tighten the general one.
+        """
+        if path.startswith(WEBHOOK_PREFIX):
+            return min(self.webhook_max_bytes, self.max_bytes)
+        return self.max_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
+        cap = self._cap_for(scope.get("path", ""))
         headers = Headers(scope=scope)
         declared = headers.get("content-length")
-        if declared is not None and declared.isdigit() and int(declared) > self.max_bytes:
+        if declared is not None and declared.isdigit() and int(declared) > cap:
             # Refused without reading a byte of it.
             logger.warning(
                 "request.body_too_large",
@@ -112,7 +144,7 @@ class BodySizeLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_bytes:
+                if received > cap:
                     # A request that lied about its length, or sent none at all.
                     # Counted as it streams and cut off at the same cap.
                     exceeded = True

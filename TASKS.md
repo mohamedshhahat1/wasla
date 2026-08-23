@@ -395,3 +395,60 @@ Deferred by decision, not unfinished:
 - [ ] Refresh-token family revocation on reuse. Reuse is detected and the presented token refused; the chain a thief already established is not torn down automatically. Bumping the version does tear it down, so the lever exists and is simply not pulled by the reuse path yet
 - [ ] Per-session revocation. `token_version` is per user, so signing one device out while leaving another alone is not expressible. That needs a row per refresh token — a write on every rotation, a cleanup job, and a new failure mode — for a device-management surface this product does not have (ADR-036)
 - [ ] Rate-limiting `POST /auth/logout`, which is unauthenticated and unlimited. Revoking a token you hold is legitimate; so is revoking one you stole
+
+## Phase 17 — Final security audit
+
+A repository-wide adversarial review that trusted no previous report, including
+this file. Findings were verified behaviourally — against a production-configured
+application and a running container — rather than by reading the code that was
+supposed to implement them.
+
+- [x] **Validation errors no longer echo the submitted value.** Confirmed live in
+      production configuration before the fix: an over-length password came back
+      in full in the 422 body. `input`, `url` and `ctx` are stripped; `loc`,
+      `type` and `msg` remain, because those are what make an error actionable
+- [x] **Security headers set by the application**, not only by nginx — CSP, HSTS,
+      `nosniff`, `DENY`, `no-referrer`, `no-store`. HSTS only over real HTTPS,
+      and the forwarded protocol believed only from a trusted peer
+- [x] **SSRF guard on the one URL this application does not construct.** Every
+      redirect hop validated, judged by resolved address rather than hostname,
+      IPv4-mapped forms handled. Corrects the earlier claim that the fetch
+      carries a bearer token across redirects — httpx strips it, and a test now
+      pins that
+- [x] **A tighter body cap on the webhook** (1 MB), applied as a `min` so
+      lowering the general cap can never loosen it. An existing test caught that
+      regression during the work
+- [x] **Production refuses `CORS_ORIGINS=*`**, which Starlette answers by echoing
+      any origin when credentials are allowed
+- [x] **Container hardening**: `cap_drop: ALL` and `no-new-privileges` on the
+      three application services
+- [x] 56 new tests, including a mutation check — a guard whose removal the suite
+      cannot detect is weak evidence
+
+**COMPLETE.** Verified 2026-08-23: 1484 tests pass, 0 failed, 0 skipped; Ruff,
+Black and MyPy clean; migrations apply from empty, downgrade to base and reapply
+with `alembic check` reporting no drift; the runtime image builds, the container
+reports **healthy** and runs as uid 1001, all five security headers were observed
+over real HTTP, and production was observed refusing to boot with docs enabled
+and with a CORS wildcard.
+
+Verified sound and left alone: credential encryption at rest (AAD binding,
+unknown key, corrupted ciphertext and malformed envelope all refused
+behaviourally), logging (no secret reaches a log line, a schema or audit
+metadata), and CI token permissions.
+
+Deferred by decision, not unfinished:
+
+- [ ] Pin GitHub Actions by SHA rather than by mutable tag. A retagged action
+      would run with the workflow token; that token is `contents: read` on CI,
+      which bounds the exposure
+- [ ] Redis authentication (W-05). Job payloads carry tenant authority and the
+      application validates them, but nothing authenticates the transport
+- [ ] WhatsApp number ownership verification (W-02) — still the only finding that
+      crosses a tenant boundary through ordinary use
+- [ ] Per-workspace member removal (W-03a) — the largest remaining access-control
+      gap
+- [ ] Streaming size cap on media download: the limit is enforced once the body
+      is in memory rather than while it arrives
+- [ ] DNS rebinding on outbound fetches, which needs the connection pinned to the
+      address that was validated

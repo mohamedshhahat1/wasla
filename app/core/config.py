@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     # Comfortably above the media cap, so an attachment upload is bounded by the
     # rule that understands attachments rather than by this blunt one.
     max_request_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
+    # The webhook's own cap. Far smaller because a WhatsApp delivery is a few
+    # kilobytes of JSON, and it is the one endpoint an unauthenticated caller
+    # can reach - the 32 MB above exists for media uploads by signed-in
+    # colleagues, which is not what arrives here.
+    webhook_max_request_bytes: int = Field(default=1024 * 1024, gt=0)
     # How long a handler may take. Bounds a pooled database connection being
     # held, not the client's patience. The WhatsApp webhook is exempt.
     request_timeout_seconds: float = Field(default=60.0, gt=0)

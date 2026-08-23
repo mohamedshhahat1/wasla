@@ -281,3 +281,61 @@ async def test_an_untrusted_peer_cannot_induce_an_hsts_pin(http: AsyncClient) ->
     )
 
     assert "Strict-Transport-Security" not in response.headers
+
+
+# ------------------------------------------------------- the webhook's cap
+
+
+@pytest_asyncio.fixture
+async def capped(production_settings: Settings) -> AsyncIterator[AsyncClient]:
+    """A small, explicit pair of caps so the test states its own numbers."""
+    settings = production_settings.model_copy(
+        update={"max_request_bytes": 2048, "webhook_max_request_bytes": 256}
+    )
+    app = create_app(settings)
+    app.state.database = FakeDependency(name="postgresql")
+    app.state.redis = FakeDependency(name="redis")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://wasla.test") as c:
+        yield c
+
+
+async def test_the_webhook_is_held_to_a_tighter_body_cap(capped: AsyncClient) -> None:
+    """The one endpoint an unauthenticated caller can reach.
+
+    Signature verification happens after the body is read, so without a cap of
+    its own the cost of making the server buffer the full 32 MB allowance - which
+    exists for media uploads by signed-in colleagues - is one unsigned request.
+    """
+    response = await capped.post(
+        f"{API}/webhooks/whatsapp",
+        content=b"x" * 512,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 413
+
+
+async def test_a_payload_under_the_webhook_cap_still_reaches_the_endpoint(
+    capped: AsyncClient,
+) -> None:
+    """The control. A cap that refused everything would lose customer messages,
+    which is the failure ADR-032 exists to prevent."""
+    response = await capped.post(
+        f"{API}/webhooks/whatsapp",
+        content=b'{"object":"whatsapp_business_account","entry":[]}',
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code != 413
+
+
+async def test_other_routes_keep_the_larger_cap(capped: AsyncClient) -> None:
+    """The webhook's cap is tighter than the general one, not a replacement for
+    it: an upload of 512 bytes is refused at the webhook and fine elsewhere."""
+    response = await capped.post(
+        f"{API}/auth/login",
+        content=b'{"email":"a@b.com","password":"' + b"z" * 400 + b'"}',
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code != 413

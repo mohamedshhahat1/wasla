@@ -40,6 +40,19 @@ services:
   migrate:
     image: ${WASLA_IMAGE:?WASLA_IMAGE is required}
     command: ["migrate"]
+    # Container hardening. The image already runs as an unprivileged user
+    # (Dockerfile: USER wasla, uid 1001); these bound what that user could do if
+    # the process were taken over.
+    #
+    # `no-new-privileges` stops a setuid binary inside the image regaining
+    # privilege - it is the one that makes dropping capabilities durable rather
+    # than advisory. `cap_drop: ALL` is safe because nothing here binds a
+    # privileged port: the application listens on 8000 and nginx is the only
+    # thing in front of it.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       ENVIRONMENT: production
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
@@ -54,6 +67,19 @@ services:
 
   api:
     image: ${WASLA_IMAGE:?WASLA_IMAGE is required}
+    # Container hardening. The image already runs as an unprivileged user
+    # (Dockerfile: USER wasla, uid 1001); these bound what that user could do if
+    # the process were taken over.
+    #
+    # `no-new-privileges` stops a setuid binary inside the image regaining
+    # privilege - it is the one that makes dropping capabilities durable rather
+    # than advisory. `cap_drop: ALL` is safe because nothing here binds a
+    # privileged port: the application listens on 8000 and nginx is the only
+    # thing in front of it.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       ENVIRONMENT: production
       DEBUG: "false"
@@ -132,6 +158,19 @@ services:
       timeout: 10s
       start_period: 45s
       retries: 3
+    # Container hardening. The image already runs as an unprivileged user
+    # (Dockerfile: USER wasla, uid 1001); these bound what that user could do if
+    # the process were taken over.
+    #
+    # `no-new-privileges` stops a setuid binary inside the image regaining
+    # privilege - it is the one that makes dropping capabilities durable rather
+    # than advisory. `cap_drop: ALL` is safe because nothing here binds a
+    # privileged port: the application listens on 8000 and nginx is the only
+    # thing in front of it.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       ENVIRONMENT: production
       DEBUG: "false"

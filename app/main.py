@@ -81,7 +81,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         RequestTimeoutMiddleware,
         timeout_seconds=resolved.request_timeout_seconds,
     )
-    app.add_middleware(BodySizeLimitMiddleware, max_bytes=resolved.max_request_bytes)
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_bytes=resolved.max_request_bytes,
+        webhook_max_bytes=resolved.webhook_max_request_bytes,
+    )
     if resolved.cors_origins:
         app.add_middleware(
             CORSMiddleware,

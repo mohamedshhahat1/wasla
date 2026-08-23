@@ -169,3 +169,133 @@ Stated rather than carried silently.
 - **Revocation is per-user, not per-session.** Signing one device out while
   leaving another alone would need a session table (ADR-036 records why one was
   not built).
+
+## Response surface
+
+**Validation errors do not repeat what was sent.** Pydantic's `errors()` carries
+an `input` key holding the offending value verbatim; it was serialised straight
+into the 422 body in every environment, and a rejected over-length password came
+back in full. A 422 travels — reverse-proxy access logs, APM payloads, browser
+HAR captures, client-side reporters — so that was a credential in all of them.
+`loc`, `type` and `msg` are kept; `input`, `url` and `ctx` are stripped.
+
+**Security headers are set by the application, not only by nginx.** nginx is one
+deployment topology: `docker-compose.prod.yml` runs the API as its own container
+and the image can be run directly, and in both, a header configured only in the
+proxy is absent.
+
+| Header | Value | Why |
+|---|---|---|
+| `X-Content-Type-Options` | `nosniff` | Customer-uploaded media is served through the API; sniffing is the difference between download and execution on this origin |
+| `X-Frame-Options` | `DENY` | With `frame-ancestors 'none'` |
+| `Referrer-Policy` | `no-referrer` | URLs here carry conversation, lead and media identifiers |
+| `Content-Security-Policy` | `default-src 'none'` + narrow allowances | A JSON API; the allowances exist only for the Swagger UI in non-production |
+| `Cache-Control` | `no-store` | Responses carry workspace data and access tokens |
+| `Strict-Transport-Security` | 1 year | **Only when the request arrived over HTTPS**, and the forwarded protocol is believed only from a peer in `TRUSTED_PROXY_IPS` |
+
+## Outbound requests and SSRF
+
+One URL is not constructed here: the WhatsApp media location, which arrives in a
+provider response. It passes through `app/core/net.py` before it is fetched, and
+so does every redirect hop.
+
+Correcting an earlier audit note: it claimed the fetch carries a bearer token
+across redirects. **It does not** — httpx strips `Authorization` when the origin
+changes, and `tests/unit/test_outbound_url_safety.py` pins that against the
+installed version. What is real is that the request happens at all: the worker
+sits inside the deployment network where `169.254.169.254` answers with instance
+credentials and `127.0.0.1:6379` is the Redis holding the refresh-token denylist,
+and the fetched body is stored as media and readable back through the API.
+
+Enforced: `https` only; every hop validated, not just the first; judged by
+resolved **address** rather than hostname, so a name pointing at metadata does
+not pass; IPv4-mapped IPv6 forms handled; at most three redirects.
+
+**Not defeated: DNS rebinding.** A name resolving public here and private when
+the socket opens would pass. Closing it needs the connection pinned to the
+checked address, which means a custom transport. Deferred deliberately — the
+caller is a provider URL rather than a user-supplied one.
+
+## Request limits
+
+The webhook has its own, tighter body cap (`WEBHOOK_MAX_REQUEST_BYTES`, 1 MB)
+because it is the one endpoint an unauthenticated caller can reach and signature
+verification happens *after* the body is read. The general 32 MB allowance exists
+for media uploads by signed-in colleagues. The cap is applied as a `min`, so
+lowering `MAX_REQUEST_BYTES` can never loosen the webhook — an existing test
+caught that exact regression.
+
+The webhook remains exempt from the request **timeout** and from rate limiting
+(ADR-032): a non-2xx is retried by Meta and eventually costs the subscription.
+
+## Production fails closed
+
+`Settings` refuses to start when configuration would be unsafe. Verified in a
+container, not only in tests:
+
+| Condition | Environments | Result |
+|---|---|---|
+| `JWT_SECRET` missing, placeholder, or under 32 chars | all except `test` | refuses to start |
+| `DEBUG` enabled | production | refuses to start |
+| `DOCS_ENABLED` true | production | refuses to start |
+| `META_APP_SECRET` missing | production | refuses to start |
+| `CORS_ORIGINS` contains `*` | production | refuses to start |
+
+The CORS rule exists because the middleware sets `allow_credentials=True`, and
+Starlette answers wildcard-plus-credentials by echoing whatever `Origin` arrives.
+Bearer-token authentication limits the damage, but "the other control saves us"
+is not a reason to ship the combination.
+
+## CSRF
+
+**Not applicable, and this is a conclusion rather than an omission.**
+Authentication is `Authorization: Bearer` only — there is no cookie anywhere in
+the application, no session cookie, and no `Set-Cookie` on any response. A
+browser does not attach an `Authorization` header to a cross-site request on its
+own, so there is nothing for a forged request to ride. If a cookie transport is
+ever added, CSRF protection has to be added with it.
+
+## Container hardening
+
+The image runs as an unprivileged user (`USER wasla`, uid 1001), verified in a
+running container. The three application services in `docker-compose.prod.yml`
+additionally carry `cap_drop: ALL` and `no-new-privileges:true` — the latter is
+what makes the former durable rather than advisory. PostgreSQL, Redis and nginx
+keep their defaults: the databases write their own data directories and nginx
+binds 80/443.
+
+## Verified controls
+
+Confirmed behaviourally during this audit rather than by reading:
+
+- **Credential encryption at rest** — AES-256-GCM, per-encryption random nonce,
+  versioned envelope, key ring. A ciphertext moved to another workspace is
+  refused (AAD binding), an unknown key is refused, corrupted ciphertext is
+  refused, a malformed envelope is refused, and identical plaintext encrypts
+  differently each time.
+- **Logging carries no secrets.** Every logger call was traced: the hits on
+  credential-shaped names are event *names* (`password_changed`) or identifiers
+  (`jti`, `key_id`), never values. No schema exposes `hashed_password`,
+  `token_hash` or `access_token_encrypted`. Audit metadata carries only a
+  version counter.
+- **CI permissions are minimal** — `contents: read`, with `packages: write` only
+  on the deploy workflow.
+
+## Still open
+
+- **GitHub Actions are pinned by mutable tag**, not by SHA (`actions/checkout@v4`,
+  `aquasecurity/trivy-action@v0.36.0`). A retagged or compromised action would
+  run with the workflow's token. The token is scoped to `contents: read` on CI,
+  which bounds it. Pinning by digest is the fix and is deferred rather than done.
+- **A workspace still cannot remove one member** (W-03a) — the largest remaining
+  access-control gap; see `AUTHORIZATION.md`.
+- **Redis is unauthenticated** (W-05). Job payloads carry tenant authority, and
+  the application validates them, but nothing authenticates the transport.
+- **A WhatsApp number can be claimed without proof of ownership** (W-02) — the
+  only finding in these audits that crosses a tenant boundary through ordinary
+  use.
+- **No password reset** — blocked on email delivery, above.
+- **Media download is bounded after the fact**, not while streaming: the size cap
+  is checked once the body is in memory. The declared size is checked first, but
+  a lying server is only caught afterwards.
+- **DNS rebinding**, above.

@@ -76,46 +76,46 @@ this was previously enforced only when `ENVIRONMENT` was literally `production`.
 99 operations. Generated from the dependency graph; "Minimum principal" is the
 weakest principal that reaches the handler.
 
-| Method | Path | Minimum principal | Workspace-scoped | Rate limit | Plan limit |
+| Method | Path | Principal | Tenant scope | Rate limit | Plan limit |
 |---|---|---|---|---|---|
 | `GET` | `/api/v1/agents` | **MEMBER** | yes | workspace | - |
-| `POST` | `/api/v1/agents` | **TENANT_ADMIN** | yes | workspace | agents |
+| `POST` | `/api/v1/agents` | **ADMIN** | yes | workspace | agents |
 | `GET` | `/api/v1/agents/available-tools` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/agents/{agent_id}` | **MEMBER** | yes | workspace | - |
-| `PATCH` | `/api/v1/agents/{agent_id}` | **TENANT_ADMIN** | yes | workspace | - |
-| `POST` | `/api/v1/agents/{agent_id}/default` | **TENANT_ADMIN** | yes | workspace | - |
+| `PATCH` | `/api/v1/agents/{agent_id}` | **ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/agents/{agent_id}/default` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/agents/{agent_id}/tools` | **MEMBER** | yes | workspace | - |
-| `PUT` | `/api/v1/agents/{agent_id}/tools` | **TENANT_ADMIN** | yes | workspace | - |
-| `DELETE` | `/api/v1/agents/{agent_id}/tools/{name}` | **TENANT_ADMIN** | yes | workspace | - |
+| `PUT` | `/api/v1/agents/{agent_id}/tools` | **ADMIN** | yes | workspace | - |
+| `DELETE` | `/api/v1/agents/{agent_id}/tools/{name}` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/analytics` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/analytics/conversations/{conversation_id}/events` | **MEMBER** | yes | workspace | - |
-| `GET` | `/api/v1/audit-logs` | **TENANT_ADMIN** | yes | workspace | - |
-| `POST` | `/api/v1/auth/login` | **Anonymous** | no | client | - |
-| `POST` | `/api/v1/auth/logout` | **Anonymous** | no | none | - |
-| `POST` | `/api/v1/auth/logout-all` | **User** | no | none | - |
-| `GET` | `/api/v1/auth/me` | **User** | no | none | - |
-| `POST` | `/api/v1/auth/password` | **User** | no | client | - |
-| `POST` | `/api/v1/auth/refresh` | **Anonymous** | no | client | - |
-| `POST` | `/api/v1/auth/register` | **Anonymous** | no | client | - |
-| `POST` | `/api/v1/auth/workspace` | **User** | no | none | - |
+| `GET` | `/api/v1/audit-logs` | **ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/auth/login` | **ANON** | no | client | - |
+| `POST` | `/api/v1/auth/logout` | **ANON** | no | none | - |
+| `POST` | `/api/v1/auth/logout-all` | **USER** | no | none | - |
+| `GET` | `/api/v1/auth/me` | **USER** | no | none | - |
+| `POST` | `/api/v1/auth/password` | **USER** | no | client | - |
+| `POST` | `/api/v1/auth/refresh` | **ANON** | no | client | - |
+| `POST` | `/api/v1/auth/register` | **ANON** | no | client | - |
+| `POST` | `/api/v1/auth/workspace` | **USER** | no | none | - |
 | `GET` | `/api/v1/billing/entitlements` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/billing/plans` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/billing/subscription` | **MEMBER** | yes | workspace | - |
-| `POST` | `/api/v1/billing/subscription` | **TENANT_OWNER** | yes | workspace | - |
-| `POST` | `/api/v1/billing/subscription/cancel` | **TENANT_OWNER** | yes | workspace | - |
-| `POST` | `/api/v1/billing/subscription/plan` | **TENANT_OWNER** | yes | workspace | - |
-| `POST` | `/api/v1/billing/subscription/resume` | **TENANT_OWNER** | yes | workspace | - |
-| `GET` | `/api/v1/campaigns` | **MEMBER** | yes | workspace + campaign | - |
-| `POST` | `/api/v1/campaigns` | **TENANT_ADMIN** | yes | workspace + campaign | - |
-| `POST` | `/api/v1/campaigns/audience/preview` | **TENANT_ADMIN** | yes | workspace + campaign | - |
-| `GET` | `/api/v1/campaigns/{campaign_id}` | **MEMBER** | yes | workspace + campaign | - |
-| `POST` | `/api/v1/campaigns/{campaign_id}/audience` | **TENANT_ADMIN** | yes | workspace + campaign | - |
-| `POST` | `/api/v1/campaigns/{campaign_id}/cancel` | **TENANT_ADMIN** | yes | workspace + campaign | - |
-| `POST` | `/api/v1/campaigns/{campaign_id}/pause` | **TENANT_ADMIN** | yes | workspace + campaign | - |
-| `GET` | `/api/v1/campaigns/{campaign_id}/recipients` | **MEMBER** | yes | workspace + campaign | - |
-| `POST` | `/api/v1/campaigns/{campaign_id}/schedule` | **TENANT_ADMIN** | yes | workspace + campaign | - |
-| `GET` | `/api/v1/campaigns/{campaign_id}/statistics` | **MEMBER** | yes | workspace + campaign | - |
-| `DELETE` | `/api/v1/contacts/{contact_id}/opt-out` | **TENANT_ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/billing/subscription` | **OWNER** | yes | workspace | - |
+| `POST` | `/api/v1/billing/subscription/cancel` | **OWNER** | yes | workspace | - |
+| `POST` | `/api/v1/billing/subscription/plan` | **OWNER** | yes | workspace | - |
+| `POST` | `/api/v1/billing/subscription/resume` | **OWNER** | yes | workspace | - |
+| `GET` | `/api/v1/campaigns` | **MEMBER** | yes | workspace+campaign | - |
+| `POST` | `/api/v1/campaigns` | **ADMIN** | yes | workspace+campaign | - |
+| `POST` | `/api/v1/campaigns/audience/preview` | **ADMIN** | yes | workspace+campaign | - |
+| `GET` | `/api/v1/campaigns/{campaign_id}` | **MEMBER** | yes | workspace+campaign | - |
+| `POST` | `/api/v1/campaigns/{campaign_id}/audience` | **ADMIN** | yes | workspace+campaign | - |
+| `POST` | `/api/v1/campaigns/{campaign_id}/cancel` | **ADMIN** | yes | workspace+campaign | - |
+| `POST` | `/api/v1/campaigns/{campaign_id}/pause` | **ADMIN** | yes | workspace+campaign | - |
+| `GET` | `/api/v1/campaigns/{campaign_id}/recipients` | **MEMBER** | yes | workspace+campaign | - |
+| `POST` | `/api/v1/campaigns/{campaign_id}/schedule` | **ADMIN** | yes | workspace+campaign | - |
+| `GET` | `/api/v1/campaigns/{campaign_id}/statistics` | **MEMBER** | yes | workspace+campaign | - |
+| `DELETE` | `/api/v1/contacts/{contact_id}/opt-out` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/contacts/{contact_id}/opt-out` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/conversations` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/conversations/{conversation_id}` | **MEMBER** | yes | workspace | - |
@@ -133,52 +133,52 @@ weakest principal that reaches the handler.
 | `POST` | `/api/v1/follow-ups` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/follow-ups/{follow_up_id}` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/follow-ups/{follow_up_id}/cancel` | **MEMBER** | yes | workspace | - |
-| `GET` | `/api/v1/invitations` | **TENANT_ADMIN** | yes | none | - |
-| `POST` | `/api/v1/invitations` | **TENANT_ADMIN** | yes | none | team_members |
-| `POST` | `/api/v1/invitations/accept` | **Anonymous** | no | client | - |
-| `DELETE` | `/api/v1/invitations/{invitation_id}` | **TENANT_ADMIN** | yes | none | - |
-| `GET` | `/api/v1/invoices` | **TENANT_OWNER** | yes | workspace | - |
-| `GET` | `/api/v1/invoices/{invoice_id}` | **TENANT_OWNER** | yes | workspace | - |
-| `GET` | `/api/v1/invoices/{invoice_id}/payments` | **TENANT_OWNER** | yes | workspace | - |
+| `GET` | `/api/v1/invitations` | **ADMIN** | yes | none | - |
+| `POST` | `/api/v1/invitations` | **ADMIN** | yes | none | team_members |
+| `POST` | `/api/v1/invitations/accept` | **ANON** | no | client | - |
+| `DELETE` | `/api/v1/invitations/{invitation_id}` | **ADMIN** | yes | none | - |
+| `GET` | `/api/v1/invoices` | **OWNER** | yes | workspace | - |
+| `GET` | `/api/v1/invoices/{invoice_id}` | **OWNER** | yes | workspace | - |
+| `GET` | `/api/v1/invoices/{invoice_id}/payments` | **OWNER** | yes | workspace | - |
 | `GET` | `/api/v1/knowledge/bases` | **MEMBER** | yes | workspace | - |
-| `POST` | `/api/v1/knowledge/bases` | **TENANT_ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/knowledge/bases` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/knowledge/bases/{knowledge_base_id}` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/knowledge/bases/{knowledge_base_id}/documents` | **MEMBER** | yes | workspace | - |
-| `POST` | `/api/v1/knowledge/bases/{knowledge_base_id}/documents` | **TENANT_ADMIN** | yes | workspace | knowledge_documents |
-| `DELETE` | `/api/v1/knowledge/documents/{document_id}` | **TENANT_ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/knowledge/bases/{knowledge_base_id}/documents` | **ADMIN** | yes | workspace | knowledge_documents |
+| `DELETE` | `/api/v1/knowledge/documents/{document_id}` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/knowledge/documents/{document_id}` | **MEMBER** | yes | workspace | - |
-| `POST` | `/api/v1/knowledge/documents/{document_id}/ingest` | **TENANT_ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/knowledge/documents/{document_id}/ingest` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/leads` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/leads` | **MEMBER** | yes | workspace | - |
-| `GET` | `/api/v1/leads/statistics` | **TENANT_ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/leads/statistics` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/leads/{lead_id}` | **MEMBER** | yes | workspace | - |
 | `PATCH` | `/api/v1/leads/{lead_id}` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/leads/{lead_id}/activity` | **MEMBER** | yes | workspace | - |
-| `POST` | `/api/v1/leads/{lead_id}/assignment` | **TENANT_ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/leads/{lead_id}/assignment` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/leads/{lead_id}/notes` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/leads/{lead_id}/notes` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/leads/{lead_id}/score` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/leads/{lead_id}/status` | **MEMBER** | yes | workspace | - |
-| `GET` | `/api/v1/platform/audit-logs` | **PLATFORM_STAFF** | no | none | - |
-| `POST` | `/api/v1/platform/invoices/{invoice_id}/payments` | **PLATFORM_STAFF** | no | none | - |
-| `POST` | `/api/v1/platform/invoices/{invoice_id}/void` | **PLATFORM_STAFF** | no | none | - |
-| `GET` | `/api/v1/platform/overview` | **PLATFORM_STAFF** | no | none | - |
-| `GET` | `/api/v1/platform/tenants` | **PLATFORM_STAFF** | no | none | - |
-| `POST` | `/api/v1/platform/users/{user_id}/disable` | **PLATFORM_STAFF** | no | none | - |
-| `POST` | `/api/v1/platform/users/{user_id}/enable` | **PLATFORM_STAFF** | no | none | - |
-| `GET` | `/api/v1/templates` | **MEMBER** | yes | workspace + campaign | - |
-| `POST` | `/api/v1/templates/sync` | **TENANT_ADMIN** | yes | workspace + campaign | - |
-| `GET` | `/api/v1/templates/{template_id}` | **MEMBER** | yes | workspace + campaign | - |
-| `GET` | `/api/v1/usage` | **TENANT_ADMIN** | yes | workspace | - |
-| `GET` | `/api/v1/usage/daily` | **TENANT_ADMIN** | yes | workspace | - |
-| `GET` | `/api/v1/webhooks/whatsapp` | **Anonymous** | no | none | - |
-| `POST` | `/api/v1/webhooks/whatsapp` | **Anonymous** | no | none | - |
+| `GET` | `/api/v1/platform/audit-logs` | **PLATFORM** | no | none | - |
+| `POST` | `/api/v1/platform/invoices/{invoice_id}/payments` | **PLATFORM** | no | none | - |
+| `POST` | `/api/v1/platform/invoices/{invoice_id}/void` | **PLATFORM** | no | none | - |
+| `GET` | `/api/v1/platform/overview` | **PLATFORM** | no | none | - |
+| `GET` | `/api/v1/platform/tenants` | **PLATFORM** | no | none | - |
+| `POST` | `/api/v1/platform/users/{user_id}/disable` | **PLATFORM** | no | none | - |
+| `POST` | `/api/v1/platform/users/{user_id}/enable` | **PLATFORM** | no | none | - |
+| `GET` | `/api/v1/templates` | **MEMBER** | yes | workspace+campaign | - |
+| `POST` | `/api/v1/templates/sync` | **ADMIN** | yes | workspace+campaign | - |
+| `GET` | `/api/v1/templates/{template_id}` | **MEMBER** | yes | workspace+campaign | - |
+| `GET` | `/api/v1/usage` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/usage/daily` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/webhooks/whatsapp` | **ANON** | no | none | - |
+| `POST` | `/api/v1/webhooks/whatsapp` | **ANON** | no | none | - |
 | `GET` | `/api/v1/whatsapp/accounts` | **MEMBER** | yes | workspace | - |
-| `POST` | `/api/v1/whatsapp/accounts` | **TENANT_ADMIN** | yes | workspace | whatsapp_numbers |
-| `POST` | `/api/v1/whatsapp/accounts/{account_id}/disable` | **TENANT_ADMIN** | yes | workspace | - |
-| `POST` | `/api/v1/whatsapp/accounts/{account_id}/enable` | **TENANT_ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/whatsapp/accounts` | **ADMIN** | yes | workspace | whatsapp_numbers |
+| `POST` | `/api/v1/whatsapp/accounts/{account_id}/disable` | **ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/whatsapp/accounts/{account_id}/enable` | **ADMIN** | yes | workspace | - |
 
-<!-- 99 operations -->
+<!-- 99 operations; 7 unauthenticated -->
 
 ### The seven unauthenticated routes
 
