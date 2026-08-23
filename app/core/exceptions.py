@@ -7,6 +7,7 @@ stack traces or internal details in production.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Final, cast
 
 from fastapi import FastAPI
@@ -160,6 +161,38 @@ def error_payload(
     return {"error": error}
 
 
+# Keys pydantic puts in a validation error that must never reach a response.
+# `input` is the submitted value itself - the password, the invitation token,
+# the Meta access token - and `url` is a link to pydantic's documentation for
+# the error type, which tells a caller nothing and pins our error shape to
+# theirs. `ctx` can carry fragments of the value for some error types.
+_UNSAFE_ERROR_KEYS: Final = frozenset({"input", "url", "ctx"})
+
+
+def _safe_validation_errors(errors: Sequence[Any]) -> list[dict[str, Any]]:
+    """Describe what was wrong without repeating what was sent.
+
+    Pydantic's `errors()` includes an `input` key holding the offending value
+    verbatim. Returning it means a request that fails validation has its own
+    payload read back to it - and a 422 body travels: reverse-proxy access
+    logs, APM and error-tracking payloads, browser HAR captures, client-side
+    reporters. A rejected over-length password was being handed back in full,
+    in every environment including production, which contradicts the project's
+    own rule that a credential is never logged.
+
+    `loc` and `type` are kept because they are what makes an error actionable -
+    which field, and what rule it broke - and neither contains caller data.
+    `msg` is pydantic's own English and is kept for the same reason; it
+    describes the constraint rather than the value.
+    """
+    safe: list[dict[str, Any]] = []
+    for entry in errors:
+        if not isinstance(entry, dict):
+            continue
+        safe.append({key: value for key, value in entry.items() if key not in _UNSAFE_ERROR_KEYS})
+    return cast(list[dict[str, Any]], jsonable_encoder(safe))
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Map exceptions to consistent HTTP responses."""
     settings = cast(Settings, app.state.settings)
@@ -196,7 +229,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             content=error_payload(
                 "validation_error",
                 "The request payload is invalid.",
-                details={"errors": jsonable_encoder(error.errors())},
+                details={"errors": _safe_validation_errors(error.errors())},
                 request_id=_request_id(request),
             ),
         )

@@ -19,7 +19,7 @@ from app.core.config import Settings, get_settings
 from app.core.exceptions import register_exception_handlers
 from app.core.limits import BodySizeLimitMiddleware, RequestTimeoutMiddleware
 from app.core.logging import configure_logging, get_logger
-from app.core.middleware import RequestContextMiddleware
+from app.core.middleware import RequestContextMiddleware, SecurityHeadersMiddleware
 from app.core.redis import RedisClient
 from app.db.session import Database
 
@@ -69,6 +69,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # anything else touches it, including the request logger. The timeout sits
     # inside it, and the request context innermost, so a timed-out request still
     # gets a request id in its log line.
+    # Innermost of the three, so every response leaves with these headers -
+    # including the ones an exception handler produces, which is where a
+    # stack trace would otherwise be served without them.
+    app.add_middleware(
+        SecurityHeadersMiddleware,
+        trusted_proxies=frozenset(resolved.trusted_proxy_ips),
+    )
     app.add_middleware(RequestContextMiddleware, header_name=resolved.request_id_header)
     app.add_middleware(
         RequestTimeoutMiddleware,

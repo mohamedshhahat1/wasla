@@ -32,8 +32,12 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.core.logging import get_logger
+from app.core.net import MAX_REDIRECTS, UnsafeUrlError, validate_outbound_url
 
 logger = get_logger(__name__)
+
+# Followed by hand so each hop can be validated; see `_get`.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 GRAPH_BASE_URL: Final = "https://graph.facebook.com"
 MESSAGING_PRODUCT: Final = "whatsapp"
@@ -319,6 +323,20 @@ class WhatsAppClient:
         if not isinstance(url, str) or not url:
             raise ExternalServiceError("WhatsApp did not return a location for this file.")
 
+        # The trust boundary. Every other URL this client fetches is built here
+        # from `GRAPH_BASE_URL`; this one arrives in a provider response, so it
+        # is the one a compromised or spoofed reply could aim at the deployment
+        # network. Validated before the first request rather than only on
+        # redirects, because the first hop is a hop like any other.
+        try:
+            validate_outbound_url(url)
+        except UnsafeUrlError as error:
+            logger.warning(
+                "whatsapp.media_url_refused",
+                extra={"event": "whatsapp.media_url_refused"},
+            )
+            raise ExternalServiceError("WhatsApp could not return this file.") from error
+
         mime_type = descriptor.get("mime_type")
         declared = descriptor.get("file_size")
 
@@ -397,14 +415,45 @@ class WhatsAppClient:
         Wider than the send path deliberately. A repeated read has no
         customer-visible effect, so every transient failure is worth another
         attempt - including the timeouts and 5xx that a send must never retry.
+
+        **Redirects are followed by hand, and every hop is validated.** The URL
+        of a media file is not one this application builds - it arrives in a
+        provider response - and `follow_redirects=True` would take the worker
+        wherever that response, or anything it redirects to, points. The worker
+        sits inside the deployment network, so "wherever" includes the cloud
+        metadata endpoint, the Redis holding the token denylist, and PostgreSQL;
+        the body it fetches is stored as media and can be read back through the
+        API. Checking only the first URL would check the one hop that is least
+        likely to be hostile, so the loop below re-validates each `Location`.
         """
+        for _ in range(MAX_REDIRECTS + 1):
+            response = await self._get_once(url)
+            if response.status_code not in _REDIRECT_STATUSES:
+                return response
+            location = response.headers.get("Location")
+            if not location:
+                return response
+            url = str(response.url.join(location))
+            try:
+                validate_outbound_url(url)
+            except UnsafeUrlError as error:
+                logger.warning(
+                    "whatsapp.media_redirect_refused",
+                    extra={"event": "whatsapp.media_redirect_refused"},
+                )
+                raise ExternalServiceError("WhatsApp could not return this file.") from error
+
+        raise ExternalServiceError("WhatsApp could not return this file.")
+
+    async def _get_once(self, url: str) -> httpx.Response:
+        """One hop, with the retry policy above and no redirect following."""
         attempt = 1
         while True:
             try:
                 response = await self._http.get(
                     url,
                     headers={"Authorization": f"Bearer {self._access_token}"},
-                    follow_redirects=True,
+                    follow_redirects=False,
                 )
             except httpx.HTTPError as error:
                 if attempt >= self._max_attempts:

@@ -288,6 +288,18 @@ class Settings(BaseSettings):
                 # endpoint answers 503 to every delivery - a silent integration
                 # outage that looks like Meta's fault.
                 problems.append("META_APP_SECRET must be set so webhook signatures can be verified")
+            if "*" in self.cors_origins:
+                # The middleware is configured with `allow_credentials=True`, and
+                # Starlette answers a wildcard-plus-credentials configuration by
+                # echoing whatever `Origin` arrives - so every site on the
+                # internet becomes an allowed origin. This API authenticates with
+                # a bearer token rather than a cookie, which limits the damage,
+                # but "the other control saves us" is not a reason to ship the
+                # combination. Name the origins.
+                problems.append(
+                    "CORS_ORIGINS must name each allowed origin explicitly; "
+                    "'*' is not permitted with credentialed requests"
+                )
 
         if problems:
             raise ValueError(f"invalid {self.environment} configuration: " + "; ".join(problems))
