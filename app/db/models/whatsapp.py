@@ -145,6 +145,21 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
         return self.released_at is not None
 
     @property
+    def ownership_verified(self) -> bool:
+        """Whether control of this number has been proven to Meta (ADR-037).
+
+        False on rows claimed before proof existed. Named to match the API
+        field exactly, like `has_own_credential`, because it is one of the few
+        properties a response reads straight off the row.
+
+        Exposed as a boolean rather than left for a caller to infer from a null
+        timestamp: the security state of a number is not something an operator
+        should have to deduce, and the set of unverified rows is the migration
+        list (ADR-041).
+        """
+        return self.ownership_verified_at is not None
+
+    @property
     def has_own_credential(self) -> bool:
         """Whether this number sends with the workspace's own token.
 

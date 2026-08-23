@@ -28,6 +28,7 @@ from app.schemas.whatsapp import (
     WhatsAppAccountConnectRequest,
     WhatsAppAccountListResponse,
     WhatsAppAccountResponse,
+    WhatsAppAccountVerifyRequest,
 )
 
 router = APIRouter(route_class=CommittingRoute, prefix="/whatsapp/accounts", tags=["WhatsApp"])
@@ -104,6 +105,38 @@ async def enable_account(
         tenant_id=workspace.tenant.id,
         account_id=account_id,
         status=WhatsAppAccountStatus.ACTIVE,
+    )
+    return WhatsAppAccountResponse.model_validate(account)
+
+
+@router.post(
+    "/{account_id}/verify",
+    summary="Prove control of a number this workspace already holds",
+    responses={
+        422: {"description": "Control of the number could not be proven with this credential."},
+    },
+)
+async def verify_account(
+    account_id: uuid.UUID,
+    payload: WhatsAppAccountVerifyRequest,
+    workspace: TenantAdminDep,
+    service: WhatsAppAccountServiceDep,
+) -> WhatsAppAccountResponse:
+    """Attach proof to a number claimed before proof was required (ADR-041).
+
+    Numbers connected before ADR-037 have no `ownership_verified_at`. Without
+    this route the only way to establish one is to release the number and claim
+    it again - which frees it to the entire platform in between, and hands an
+    attacker a race worth running. The safe-looking route was the dangerous one.
+
+    The number itself is not a parameter: it comes from the row. This proves
+    control of something the workspace already holds, and cannot move a claim.
+    """
+    account = await service.reverify(
+        actor=workspace.user,
+        tenant_id=workspace.tenant.id,
+        account_id=account_id,
+        access_token=payload.access_token,
     )
     return WhatsAppAccountResponse.model_validate(account)
 

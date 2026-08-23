@@ -101,6 +101,10 @@ class AuditAction(StrEnum):
     # The claim on a number was given up, freeing it for another workspace to
     # prove and claim (ADR-037). Distinct from disabling, which keeps it.
     WHATSAPP_ACCOUNT_RELEASED = "whatsapp_account_released"
+    # Control of a number already held was proven to Meta (ADR-041). The entry
+    # that closes out a row claimed before proof existed, and the one an
+    # operator reads to show that a legacy number has since been established.
+    WHATSAPP_ACCOUNT_VERIFIED = "whatsapp_account_verified"
 
     # Money
     SUBSCRIPTION_STARTED = "subscription_started"

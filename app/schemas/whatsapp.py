@@ -48,6 +48,16 @@ class WhatsAppAccountConnectRequest(_Payload):
     display_name: str | None = Field(default=None, max_length=200)
 
 
+class WhatsAppAccountVerifyRequest(_Payload):
+    """Prove control of a number this workspace already holds (ADR-041).
+
+    No `phone_number_id`: the number comes from the row being verified, so this
+    cannot be used to move a claim. Only `connect` claims a number.
+    """
+
+    access_token: str = Field(min_length=1, max_length=512)
+
+
 class WhatsAppAccountResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -64,6 +74,9 @@ class WhatsAppAccountResponse(BaseModel):
     # claimed before ownership proof existed, which is exactly the set an
     # operator needs to be able to find.
     ownership_verified_at: datetime | None = None
+    # The same fact as a boolean, because the security state of a number should
+    # be readable without reasoning about a null timestamp (ADR-041).
+    ownership_verified: bool = False
     # Whether this number sends with the workspace's own credential. The
     # *existence* of a credential is operationally useful - somebody has to be
     # able to tell whether a number is configured - and is the only thing about

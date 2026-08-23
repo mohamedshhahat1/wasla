@@ -14,6 +14,12 @@ claim any of them, which is the hole ownership proof exists to close. A
 deployment can therefore connect a number only when the workspace supplies its
 own token.
 
+A number claimed before proof existed carries no `ownership_verified_at`, and
+`reverify` is how it gets one without giving the number up first (ADR-041).
+Releasing and re-claiming would work too, and would free the number to the whole
+platform in between - so the safe-looking route is the dangerous one, and this
+method exists so nobody has to take it.
+
 Storing that token is a separate question with a separate answer. Verification
 needs the plaintext for the length of one call; storage needs a configured
 encryption key (ADR-034). A deployment without a key still connects numbers -
@@ -160,6 +166,95 @@ class WhatsAppAccountService:
         logger.info(
             "whatsapp.account_connected",
             extra={"phone_number_id": account.phone_number_id},
+        )
+        return account
+
+    async def reverify(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        account_id: uuid.UUID,
+        access_token: str,
+        actor: User | None = None,
+    ) -> WhatsAppAccount:
+        """Prove control of a number this workspace already holds (ADR-041).
+
+        The migration path for rows claimed before ownership proof existed, and
+        the reason it has to exist: without it the only way to attach proof to
+        such a row is to release it and claim it again - which frees the number
+        to the entire platform in between, a race an attacker can win. Refusing
+        to build this would have made the safe action the dangerous one.
+
+        **The number is not a parameter.** It is read from the row, so this
+        cannot move a claim: an administrator proving control of a number they
+        hold is a different act from claiming a new one, and only `connect`
+        does the latter. That is what keeps this from being a second, softer
+        way in.
+
+        Everything Meta returns overwrites what is stored, exactly as at claim
+        time. For a legacy row the stored business account was never verified -
+        it was typed in - so Meta's answer is the first trustworthy value the
+        row has ever had.
+        """
+        if self._ownership is None:
+            raise DependencyUnavailableError(
+                "WhatsApp number verification is not available in this deployment."
+            )
+
+        # Live claims only. Re-proving a number this workspace has given up
+        # would write proof onto a row that no longer entitles it to anything,
+        # and if somebody else now holds the number it would be a claim about
+        # their traffic.
+        account = await self._accounts(tenant_id).require_live_by_id(account_id)
+        previous_waba = account.waba_id
+
+        verified = await self._ownership.verify(
+            access_token=access_token,
+            phone_number_id=account.phone_number_id,
+            # Not passed as an assertion to check. The stored value may predate
+            # any verification, so checking against it would refuse exactly the
+            # rows this exists to rescue.
+            claimed_waba_id=None,
+        )
+
+        account.waba_id = verified.waba_id
+        account.display_phone_number = verified.display_phone_number
+        account.verified_name = verified.verified_name
+        account.ownership_verified_at = datetime.now(UTC)
+
+        if self._credentials is not None and self._credentials.can_store:
+            account.access_token_encrypted = self._credentials.seal(
+                access_token,
+                tenant_id=tenant_id,
+            )
+
+        await self._session.flush()
+        await self._session.refresh(account)
+
+        AuditTrail(self._session, tenant_id=tenant_id).record(
+            AuditAction.WHATSAPP_ACCOUNT_VERIFIED,
+            actor=actor,
+            actor_kind=AuditActorKind.USER if actor is not None else AuditActorKind.SYSTEM,
+            target_type="whatsapp_account",
+            target_id=account.id,
+            target_label=account.display_phone_number,
+            # A business account that changed is worth seeing. On a legacy row
+            # it usually means the typed-in value was simply wrong; on a
+            # verified one it means the number moved, which somebody should
+            # know about. No part of the credential appears here.
+            meta={
+                "waba_id": account.waba_id,
+                "previous_waba_id": previous_waba,
+                "waba_changed": previous_waba != account.waba_id,
+            },
+        )
+
+        logger.info(
+            "whatsapp.account_verified",
+            extra={
+                "event": "whatsapp.account_verified",
+                "phone_number_id": account.phone_number_id,
+            },
         )
         return account
 

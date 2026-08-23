@@ -95,6 +95,7 @@ class StubAccounts:
         self.connect_calls = []
         self.status_calls = []
         self.released = []
+        self.verified = []
         self.listed = []
         self.conflict = False
         self.unverified = False
@@ -125,6 +126,14 @@ class StubAccounts:
             raise TenantIsolationError("That WhatsApp account could not be found.")
         self.status_calls.append(kwargs)
         return _account(status=kwargs["status"])
+
+    async def reverify(self, **kwargs):
+        if self.missing:
+            raise TenantIsolationError("That WhatsApp account could not be found.")
+        if self.unverified:
+            raise NumberOwnershipError()
+        self.verified.append(kwargs)
+        return _account()
 
     async def release(self, **kwargs):
         if self.missing:
@@ -384,3 +393,82 @@ async def test_a_malformed_account_id_is_rejected(app, client, accounts):
 
     assert response.status_code == 422
     assert accounts.status_calls == []
+
+
+async def test_an_admin_can_prove_a_number_they_already_hold(app, client, accounts):
+    """The migration path for a number claimed before proof existed (ADR-041)."""
+    _as(app, TenantRole.TENANT_ADMIN)
+
+    response = await client.post(
+        f"{PATH}/{ACCOUNT_ID}/verify",
+        json={"access_token": TOKEN},
+    )
+
+    assert response.status_code == 200
+    assert accounts.verified[0]["tenant_id"] == TENANT_ID
+    assert accounts.verified[0]["access_token"] == TOKEN
+    assert TOKEN not in response.text
+
+
+async def test_the_number_cannot_be_named_when_verifying(app, client, accounts):
+    """It comes from the row. Accepting one would make this a second way to
+    claim a number rather than a way to prove one already held."""
+    _as(app, TenantRole.TENANT_ADMIN)
+
+    response = await client.post(
+        f"{PATH}/{ACCOUNT_ID}/verify",
+        json={"access_token": TOKEN, "phone_number_id": "somebody-elses-number"},
+    )
+
+    assert response.status_code == 422
+    assert accounts.verified == []
+
+
+async def test_a_member_cannot_verify_a_number(app, client, accounts):
+    _as(app, TenantRole.MEMBER)
+
+    response = await client.post(f"{PATH}/{ACCOUNT_ID}/verify", json={"access_token": TOKEN})
+
+    assert response.status_code == 403
+    assert accounts.verified == []
+
+
+async def test_verifying_without_a_credential_is_rejected(app, client, accounts):
+    _as(app, TenantRole.TENANT_ADMIN)
+
+    response = await client.post(f"{PATH}/{ACCOUNT_ID}/verify", json={})
+
+    assert response.status_code == 422
+    assert accounts.verified == []
+
+
+async def test_an_unprovable_verification_is_refused_without_saying_why(app, client, accounts):
+    _as(app, TenantRole.TENANT_ADMIN)
+    accounts.unverified = True
+
+    response = await client.post(f"{PATH}/{ACCOUNT_ID}/verify", json={"access_token": TOKEN})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "whatsapp_ownership_unverified"
+    assert TOKEN.lower() not in response.text.lower()
+
+
+async def test_another_workspaces_number_cannot_be_verified(app, client, accounts):
+    """Stamping somebody else's row would be a claim about their traffic."""
+    _as(app, TenantRole.TENANT_ADMIN)
+    accounts.missing = True
+
+    response = await client.post(f"{PATH}/{ACCOUNT_ID}/verify", json={"access_token": TOKEN})
+
+    assert response.status_code == 404
+    assert accounts.verified == []
+
+
+async def test_the_listing_says_whether_a_number_is_proven(app, client, accounts):
+    """The security state of a number is readable without reasoning about a
+    null timestamp."""
+    _as(app, TenantRole.MEMBER)
+
+    response = await client.get(PATH)
+
+    assert response.json()["accounts"][0]["ownership_verified"] is True
