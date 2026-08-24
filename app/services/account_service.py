@@ -9,7 +9,7 @@ it false, so the check guarded a column no code path could change, and the only
 way to end a session was to rotate `JWT_SECRET`, which signs out every user of
 every tenant at once. That is an outage, not a revocation.
 
-Three rules hold across everything here:
+Four rules hold across everything here:
 
 **Every state change bumps the version.** Disabling, re-enabling, revoking
 sessions and changing a password all raise it by one. Re-enabling is the one
@@ -25,6 +25,12 @@ administrator at all.
 
 **Nothing here logs a token, and nothing returns one.** Revocation is expressed
 as a version number; the tokens it invalidates are never named.
+
+**Every state change tells the account holder.** The audit trail tells staff;
+it does not tell the person whose sessions just ended, and they are the one who
+knows whether they did it. The notice is queued on this session (ADR-042), so
+it commits with the change or not at all - and it is addressed to the row's own
+`email`, never to anything from the request.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings, get_settings
 from app.core.exceptions import AuthenticationError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.core.security import (
@@ -44,6 +51,8 @@ from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.user import User
 from app.repositories import UserRepository
 from app.services.audit_service import AuditTrail
+from app.services.email_service import EmailOutbox
+from app.services.email_templates import EmailTemplate
 
 logger = get_logger(__name__)
 
@@ -53,14 +62,25 @@ class AccountService:
 
     Owns no transaction. The request-scoped session commits when the request
     succeeds, which matters here more than usual: an audit entry describing a
-    revocation that rolled back would be a log of something that did not happen.
+    revocation that rolled back would be a log of something that did not happen,
+    and an email announcing it would be worse - unlike a log line, it cannot be
+    taken back.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        settings: Settings | None = None,
+    ) -> None:
         self._session = session
+        # Defaulted rather than required so existing construction sites keep
+        # working; the request-scoped provider passes the real settings in.
+        self._settings = settings if settings is not None else get_settings()
         self._users = UserRepository(session)
         # No tenant: these are platform-level acts on a global identity.
         self._audit = AuditTrail(session)
+        self._outbox = EmailOutbox(session, self._settings)
 
     async def _require(self, user_id: uuid.UUID) -> User:
         user = await self._users.get_by_id(user_id)
@@ -79,6 +99,25 @@ class AccountService:
         """
         user.token_version += 1
         return user.token_version
+
+    async def _notify(self, user: User, template: EmailTemplate, *, version: int) -> None:
+        """Queue the notice for a security change on this account.
+
+        Keyed on the *new* version, so each act notifies once however many
+        times the request is retried, and no two acts can share a key. None of
+        these templates take a variable, so there is nothing to pass and
+        nothing caller-influenced to escape.
+
+        Not tenant-scoped: an account is a global identity, and a workspace
+        stamped on the row would misattribute a platform act to whichever
+        workspace the person happened to be using.
+        """
+        await self._outbox.enqueue(
+            template=template,
+            recipient=user.email,
+            idempotency_key=f"security-{template.value}:{user.id}:{version}",
+            user_id=user.id,
+        )
 
     async def disable(self, *, user_id: uuid.UUID, actor: User) -> User:
         """Suspend an account and end every session it holds.
@@ -105,6 +144,7 @@ class AccountService:
             target_label=user.email,
             meta={"token_version": version},
         )
+        await self._notify(user, EmailTemplate.ACCOUNT_DISABLED, version=version)
         logger.info(
             "account.disabled",
             extra={
@@ -135,6 +175,7 @@ class AccountService:
             target_label=user.email,
             meta={"token_version": version},
         )
+        await self._notify(user, EmailTemplate.ACCOUNT_ENABLED, version=version)
         logger.info(
             "account.enabled",
             extra={
@@ -163,6 +204,10 @@ class AccountService:
             target_label=user.email,
             meta={"token_version": version},
         )
+        # Worth sending even though the person just asked for it: if they did
+        # not, this is the only signal they get, and the request needed only a
+        # live access token - which is exactly what a leaked session is.
+        await self._notify(user, EmailTemplate.SESSIONS_REVOKED, version=version)
         logger.info(
             "account.sessions_revoked",
             extra={"event": "account.sessions_revoked", "user_id": str(user.id)},
@@ -181,8 +226,8 @@ class AccountService:
         Not a reset. A reset is for somebody who cannot sign in and needs a
         message sent to an address they control; this is for somebody already
         signed in, so the proof is the current password rather than an emailed
-        token. That distinction is why this can exist today and a reset cannot -
-        see `docs/SECURITY.md`.
+        token. Both now notify the account afterwards, and both do it through
+        the outbox - see `password_reset_service` for the other half.
 
         Ending every session on success is what makes this useful against a
         leaked token rather than merely tidy: the usual reason to change a
@@ -214,6 +259,10 @@ class AccountService:
             target_label=user.email,
             meta={"token_version": version},
         )
+        # The notice a compromised account depends on. Whoever changed the
+        # password now holds every session; this message is addressed to the
+        # mailbox on the account, which is the one thing they may not hold.
+        await self._notify(user, EmailTemplate.PASSWORD_CHANGED, version=version)
         logger.info(
             "account.password_changed",
             extra={"event": "account.password_changed", "user_id": str(user.id)},

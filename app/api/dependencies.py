@@ -84,14 +84,19 @@ def get_auth_service(
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 
 
-def get_account_service(session: SessionDep) -> AccountService:
+def get_account_service(settings: SettingsDep, session: SessionDep) -> AccountService:
     """Account lifecycle and session revocation (ADR-036).
 
     Not workspace-scoped, and deliberately: an account is a global identity,
     so the authority to suspend one is the platform's rather than any
     workspace's. The routes decide who may call it.
+
+    Settings are supplied because every state change here queues a notice to
+    the account holder. That is an outbox row on this request's session
+    (ADR-042), not a call to a provider, so the service still reaches nothing
+    outside PostgreSQL.
     """
-    return AccountService(session)
+    return AccountService(session, settings=settings)
 
 
 AccountServiceDep = Annotated[AccountService, Depends(get_account_service)]
