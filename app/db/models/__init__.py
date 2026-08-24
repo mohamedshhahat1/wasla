@@ -35,6 +35,12 @@ from .conversation import (
     MessageKind,
     MessageStatus,
 )
+from .email import (
+    TERMINAL_EMAIL_STATUSES,
+    EmailStatus,
+    EmailSuppression,
+    OutboundEmail,
+)
 from .enums import (
     InvitationStatus,
     MembershipStatus,
@@ -130,6 +136,7 @@ __all__ = [
     "SENTIMENT_SEVERITY",
     "SERVING_STATUSES",
     "TERMINAL_CAMPAIGN_STATUSES",
+    "TERMINAL_EMAIL_STATUSES",
     "TERMINAL_FOLLOW_UP_STATUSES",
     "TERMINAL_INVOICE_STATUSES",
     "TERMINAL_STATUSES",
@@ -159,6 +166,8 @@ __all__ = [
     "DocumentChunk",
     "DocumentSource",
     "DocumentStatus",
+    "EmailStatus",
+    "EmailSuppression",
     "FollowUp",
     "FollowUpStatus",
     "InvitationStatus",
@@ -182,6 +191,7 @@ __all__ = [
     "MessageSentiment",
     "MessageStatus",
     "OptOutSource",
+    "OutboundEmail",
     "Payment",
     "PaymentStatus",
     "Plan",

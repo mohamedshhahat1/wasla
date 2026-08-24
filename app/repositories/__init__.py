@@ -20,6 +20,7 @@ from .conversation_repository import (
     ConversationRepository,
     MessageRepository,
 )
+from .email_repository import EmailOutboxRepository
 from .follow_up_repository import DueFollowUpClaim, FollowUpRepository
 from .invitation_repository import InvitationRepository, InvitationTokenRepository
 from .invoice_repository import (
@@ -68,6 +69,7 @@ __all__ = [
     "DocumentChunkRepository",
     "DocumentRepository",
     "DueFollowUpClaim",
+    "EmailOutboxRepository",
     "EventCount",
     "FollowUpRepository",
     "InvitationRepository",
