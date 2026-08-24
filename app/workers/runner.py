@@ -33,6 +33,7 @@ from app.db.session import Database
 from app.workers.ai_worker import AgentWorker
 from app.workers.billing_worker import BillingWorker
 from app.workers.campaign_worker import CampaignWorker
+from app.workers.email_worker import EmailWorker
 from app.workers.follow_up_worker import FollowUpWorker
 from app.workers.heartbeat import (
     DEFAULT_INTERVAL_SECONDS,
@@ -50,11 +51,13 @@ FOLLOW_UP: Final = "follow_up"
 MEDIA: Final = "media"
 CAMPAIGN: Final = "campaign"
 BILLING: Final = "billing"
+EMAIL: Final = "email"
 # Media comes before agent deliberately. It is the order the work flows in -
 # a file is read, then answered - and the order the log lines appear in at
-# startup, which is worth having match. Billing is last: it is the only loop
-# whose period is measured in days, and nothing else waits on it.
-ALL_KINDS: Final = (MEDIA, AGENT, INGESTION, FOLLOW_UP, CAMPAIGN, BILLING)
+# startup, which is worth having match. Billing and email come last: billing
+# is the only loop whose period is measured in days, and email consumes what
+# the others (and the API) produce, so nothing upstream waits on either.
+ALL_KINDS: Final = (MEDIA, AGENT, INGESTION, FOLLOW_UP, CAMPAIGN, BILLING, EMAIL)
 
 KINDS_VARIABLE: Final = "WORKER_KINDS"
 
@@ -117,6 +120,19 @@ def build_workers(
             workers.append(CampaignWorker(database=database, settings=settings))
         elif kind == BILLING:
             workers.append(BillingWorker(database=database, settings=settings))
+        elif kind == EMAIL:
+            if not settings.email_enabled:
+                # A deployment without email configured runs no email loop and
+                # is healthy without one. The heartbeat still beats for the
+                # kind - process liveness is what it asserts - and the outbox
+                # is empty by construction, because enqueue is a no-op when
+                # email is disabled.
+                logger.info("worker.email_disabled", extra={"event": "worker.email_disabled"})
+                continue
+            # Constructing the worker builds the provider, so a container
+            # missing RESEND_API_KEY refuses to boot here rather than
+            # claiming rows it can never send (ADR-042).
+            workers.append(EmailWorker(database=database, settings=settings))
     return workers
 
 
