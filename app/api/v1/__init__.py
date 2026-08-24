@@ -9,11 +9,16 @@ routers are limited is the decision worth being able to read in one place
 - **Campaign and template routers** carry a second, much smaller budget on top
   of it: each request is expensive to serve and rare to make legitimately.
 - **The webhook, authentication and platform routers carry neither**, each for
-  its own reason. The webhook must never be refused - Meta retries a non-2xx
-  and eventually disables the subscription, so a 429 loses a customer's message
-  and then the integration. Authentication is limited by client address inside
-  its own routes instead, since a caller who has not signed in has no workspace
-  to count against. Platform administration is a handful of staff.
+  its own reason. A webhook must never be refused - a provider retries a
+  non-2xx and eventually disables the subscription, so a 429 loses a customer's
+  message, or a delivery report, and then the integration. Authentication is
+  limited by client address inside its own routes instead, since a caller who
+  has not signed in has no workspace to count against. Platform administration
+  is a handful of staff.
+
+Both webhook routers are unauthenticated and both defend themselves with an
+HMAC over the raw request body rather than with a credential: Meta's
+`X-Hub-Signature-256` and Resend's Svix headers respectively.
 """
 
 from fastapi import APIRouter, Depends
@@ -29,6 +34,7 @@ from app.api.v1 import (
     campaigns,
     contacts,
     conversations,
+    email_webhooks,
     follow_ups,
     invitations,
     invoices,
@@ -84,11 +90,13 @@ CAMPAIGN_ROUTERS = (
 )
 
 # Deliberately unlimited. See the module docstring - each for a different
-# reason, and the webhook's is the one that would cost customer messages.
+# reason, and the webhooks' is the one that would cost customer messages and
+# delivery reports.
 UNLIMITED_ROUTERS = (
     auth.router,
     platform.router,
     webhooks.router,
+    email_webhooks.router,
 )
 
 api_router = APIRouter(route_class=CommittingRoute)
