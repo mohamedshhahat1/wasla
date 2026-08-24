@@ -227,3 +227,144 @@ def test_the_algorithm_is_normalised_to_upper_case():
     settings = Settings(_env_file=None, environment="test", jwt_algorithm="hs512")
 
     assert settings.jwt_algorithm == "HS512"
+
+
+# --- Email configuration (ADR-042) ---------------------------------------
+#
+# Email fails closed where it is *required*: a deployment that turned it on
+# and half-configured it refuses to boot rather than queueing rows that render
+# a broken link, send from nobody, or record no bounces.
+
+
+def _email_production(**overrides):
+    """A production configuration with email on, and one thing at a time wrong."""
+    fields = {
+        "_env_file": None,
+        "environment": "production",
+        "jwt_secret": VALID_SECRET,
+        "docs_enabled": False,
+        "meta_app_secret": "an-app-secret",
+        "email_enabled": True,
+        "email_provider": "resend",
+        "email_from": "no-reply@example.com",
+        "app_public_url": "https://app.example.com",
+        "resend_webhook_secret": "whsec_abc",
+    }
+    fields.update(overrides)
+    return Settings(**fields)
+
+
+def test_email_off_needs_no_email_configuration():
+    """A deployment that sends nothing must not be forced to configure sending."""
+    settings = Settings(
+        _env_file=None,
+        environment="production",
+        jwt_secret=VALID_SECRET,
+        docs_enabled=False,
+        meta_app_secret="an-app-secret",
+        email_enabled=False,
+    )
+
+    assert not settings.email_enabled
+
+
+def test_production_accepts_a_complete_email_configuration():
+    settings = _email_production()
+
+    assert settings.email_enabled
+    assert settings.email_provider == "resend"
+
+
+def test_email_on_requires_a_sender():
+    with pytest.raises(ValidationError, match="EMAIL_FROM"):
+        _email_production(email_from=None)
+
+
+def test_email_on_requires_a_sender_that_is_an_address():
+    """A sender the provider rejects fails *every* row, permanently."""
+    with pytest.raises(ValidationError, match="EMAIL_FROM"):
+        _email_production(email_from="not-an-address")
+
+
+def test_a_display_name_in_the_sender_is_refused():
+    with pytest.raises(ValidationError, match="EMAIL_FROM"):
+        _email_production(email_from="Wasla <no-reply@example.com>")
+
+
+def test_email_on_requires_a_public_url():
+    with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
+        _email_production(app_public_url=None)
+
+
+def test_production_refuses_a_plaintext_public_url():
+    """Reset and invitation tokens travel in these links."""
+    with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
+        _email_production(app_public_url="http://app.example.com")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "file:///etc/passwd",
+        "ftp://example.com",
+    ],
+)
+def test_a_public_url_on_a_dangerous_scheme_is_refused(url):
+    """Whatever this holds is prefixed onto every link a recipient clicks."""
+    with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
+        _email_production(app_public_url=url)
+
+
+def test_a_public_url_without_a_host_is_refused():
+    with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
+        _email_production(app_public_url="https://")
+
+
+def test_a_public_url_carrying_a_query_is_refused():
+    """Templates append their own path and query; a base with one is broken."""
+    with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
+        _email_production(app_public_url="https://app.example.com/?next=/x")
+
+
+def test_production_refuses_the_fake_provider():
+    """It delivers nothing and says it succeeded."""
+    with pytest.raises(ValidationError, match="EMAIL_PROVIDER"):
+        _email_production(email_provider="fake")
+
+
+def test_production_requires_a_webhook_secret():
+    """Without it no bounce or complaint is ever recorded, and the platform
+    keeps writing to dead mailboxes until the sending domain is what fails."""
+    with pytest.raises(ValidationError, match="RESEND_WEBHOOK_SECRET"):
+        _email_production(resend_webhook_secret=None)
+
+
+def test_a_non_production_environment_may_use_the_fake_over_plain_http():
+    """Local development sends nothing and needs no certificate to do it."""
+    settings = Settings(
+        _env_file=None,
+        environment="local",
+        jwt_secret=VALID_SECRET,
+        email_enabled=True,
+        email_provider="fake",
+        email_from="no-reply@example.com",
+        app_public_url="http://localhost:3000",
+    )
+
+    assert settings.email_provider == "fake"
+
+
+def test_a_dangerous_public_url_is_refused_outside_production_too():
+    """The scheme allowlist is not a production-only courtesy."""
+    with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
+        Settings(
+            _env_file=None,
+            environment="local",
+            jwt_secret=VALID_SECRET,
+            email_enabled=True,
+            email_provider="fake",
+            email_from="no-reply@example.com",
+            app_public_url="javascript:alert(1)",
+        )

@@ -122,7 +122,8 @@ def test_a_delivery_inside_the_window_still_verifies():
 
 
 def test_an_unparseable_timestamp_does_not_verify():
-    assert not _verify(timestamp="not-a-timestamp", signature_header=_sign(timestamp="not-a-timestamp"))
+    stamp = "not-a-timestamp"
+    assert not _verify(timestamp=stamp, signature_header=_sign(timestamp=stamp))
 
 
 def test_missing_headers_are_a_failure_not_a_pass():

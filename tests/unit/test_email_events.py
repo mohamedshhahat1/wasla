@@ -103,7 +103,8 @@ async def test_an_event_naming_a_message_we_never_sent_changes_nothing():
     # attacker-chosen input to a write.
     repository = _StubRepository(row=None)
 
-    outcome = await _service(repository).record(_event("email.bounced", bounce={"type": "Permanent"}))
+    event = _event("email.bounced", bounce={"type": "Permanent"})
+    outcome = await _service(repository).record(event)
 
     assert outcome == UNKNOWN
     assert repository.suppressed == []
