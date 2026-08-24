@@ -29,6 +29,7 @@ MINIMUM_PASSWORD_LENGTH: Final = 12
 # size, so an unbounded password is a denial-of-service vector.
 MAXIMUM_PASSWORD_LENGTH: Final = 128
 INVITATION_TOKEN_BYTES: Final = 32
+RESET_TOKEN_BYTES: Final = 32
 
 _hasher = PasswordHasher()
 
@@ -275,3 +276,26 @@ def generate_invitation_token() -> tuple[str, str]:
     """
     raw_token = secrets.token_urlsafe(INVITATION_TOKEN_BYTES)
     return raw_token, hash_invitation_token(raw_token)
+
+
+def hash_reset_token(raw_token: str) -> str:
+    """Hash a password reset token for storage and lookup.
+
+    SHA-256 for the invitation token's reason: 256 bits of randomness leave
+    nothing to brute-force, so a deliberately slow hash would only slow the
+    lookup. The hash is what the unique index compares, which also means the
+    comparison cost never depends on how much of a guessed token matches.
+    """
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def generate_reset_token() -> tuple[str, str]:
+    """Return the reset token to email, and the hash to store.
+
+    Only the hash is persisted (ADR-042). A stolen database cannot reset
+    anybody's password: the value that can exists solely in the message sent
+    to the address on file, which is the proof of ownership the whole flow
+    rests on.
+    """
+    raw_token = secrets.token_urlsafe(RESET_TOKEN_BYTES)
+    return raw_token, hash_reset_token(raw_token)

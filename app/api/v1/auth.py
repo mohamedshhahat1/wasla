@@ -8,6 +8,7 @@ from app.api.dependencies import AccountServiceDep, AuthServiceDep, CurrentUserD
 from app.api.rate_limits import AuthRateLimit
 from app.api.route import CommittingRoute
 from app.db.models import User
+from app.core.dependencies import SessionDep, SettingsDep
 from app.schemas.auth import (
     AccessTokenResponse,
     AccountStateResponse,
@@ -21,7 +22,16 @@ from app.schemas.auth import (
     WorkspaceSummary,
     WorkspaceSwitchRequest,
 )
+from app.schemas.password_reset import (
+    PasswordResetConfirmPayload,
+    PasswordResetRequestedResponse,
+    PasswordResetRequestPayload,
+)
 from app.services.auth_service import AuthenticatedSession, WorkspaceContext
+from app.services.password_reset_service import (
+    RESET_REQUESTED_MESSAGE,
+    PasswordResetService,
+)
 
 router = APIRouter(route_class=CommittingRoute, prefix="/auth", tags=["Authentication"])
 
@@ -234,6 +244,58 @@ async def change_password(
     user = await accounts.change_password(
         user=current_user.user,
         current_password=payload.current_password,
+        new_password=payload.new_password,
+    )
+    return _account_state(user)
+
+
+@router.post(
+    "/password-reset/request",
+    response_model=PasswordResetRequestedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Request a password reset link by email",
+)
+async def request_password_reset(
+    payload: PasswordResetRequestPayload,
+    session: SessionDep,
+    settings: SettingsDep,
+    # Counted per client address with the process-local Redis fallback, like
+    # the rest of the credential surface (ADR-040): this route stands in
+    # front of a credential and in front of somebody else's inbox.
+    limit: AuthRateLimit,
+) -> PasswordResetRequestedResponse:
+    """One answer for every address, whatever the database says.
+
+    202 with the same body whether the address is registered, unknown,
+    suspended or passwordless - the response must not be an oracle for which
+    addresses have accounts (docs/SECURITY.md). The token travels only in
+    the email; nothing about it appears here.
+    """
+    service = PasswordResetService(session=session, settings=settings)
+    await service.request(email=payload.email)
+    return PasswordResetRequestedResponse(detail=RESET_REQUESTED_MESSAGE)
+
+
+@router.post(
+    "/password-reset/confirm",
+    response_model=AccountStateResponse,
+    summary="Redeem a reset token for a new password",
+)
+async def confirm_password_reset(
+    payload: PasswordResetConfirmPayload,
+    session: SessionDep,
+    settings: SettingsDep,
+    limit: AuthRateLimit,
+) -> AccountStateResponse:
+    """Set a new password, proving ownership with the emailed token.
+
+    Single use, 30-minute expiry, and every session ends on success - a
+    reset exists because something may have been taken. Unknown, expired,
+    superseded and replayed tokens all receive the same refusal.
+    """
+    service = PasswordResetService(session=session, settings=settings)
+    user = await service.confirm(
+        raw_token=payload.token,
         new_password=payload.new_password,
     )
     return _account_state(user)

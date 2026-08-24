@@ -87,6 +87,11 @@ class AuditAction(StrEnum):
     USER_SESSIONS_REVOKED = "user_sessions_revoked"
     # The name of an event, not a credential. Nothing here ever holds one.
     PASSWORD_CHANGED = "password_changed"  # noqa: S105
+    # A reset token from the email flow was consumed and the password replaced
+    # (ADR-042). Only completion is audited: the request is unauthenticated,
+    # so recording it would let anyone write into a stranger's trail, and its
+    # volume would bury the entries that matter.
+    PASSWORD_RESET_COMPLETED = "password_reset_completed"  # noqa: S105
     # A refresh token that had already been spent was presented again
     # (ADR-039). The most security-relevant entry in this vocabulary: it is
     # either a leak being replayed or a client bug, and the first is worth

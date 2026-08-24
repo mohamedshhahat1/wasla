@@ -43,6 +43,7 @@ from .lead_repository import (
     LeadStatistics,
 )
 from .membership_repository import MembershipRepository, UserMembershipRepository
+from .password_reset_repository import PasswordResetTokenRepository
 from .tenant_repository import TenantRepository
 from .usage_repository import (
     PlatformUsageRepository,
@@ -83,6 +84,7 @@ __all__ = [
     "LeadStatistics",
     "MembershipRepository",
     "MessageRepository",
+    "PasswordResetTokenRepository",
     "PaymentRepository",
     "PlanRepository",
     "PlatformAuditLogRepository",

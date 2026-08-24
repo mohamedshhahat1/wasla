@@ -87,6 +87,7 @@ from .lead import (
 )
 from .media import UNRESOLVED_MEDIA_STATUSES, MediaStatus, MessageMedia
 from .membership import Membership
+from .password_reset import PasswordResetToken
 from .sentiment import (
     PRIORITY_RANK,
     SENTIMENT_PRIORITY,
@@ -192,6 +193,7 @@ __all__ = [
     "MessageStatus",
     "OptOutSource",
     "OutboundEmail",
+    "PasswordResetToken",
     "Payment",
     "PaymentStatus",
     "Plan",
