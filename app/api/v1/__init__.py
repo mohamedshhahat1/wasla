@@ -34,6 +34,7 @@ from app.api.v1 import (
     campaigns,
     contacts,
     conversations,
+    email_verification,
     email_webhooks,
     follow_ups,
     invitations,
@@ -89,11 +90,20 @@ CAMPAIGN_ROUTERS = (
     templates.router,
 )
 
-# Deliberately unlimited. See the module docstring - each for a different
-# reason, and the webhooks' is the one that would cost customer messages and
-# delivery reports.
+# Deliberately unlimited *at router level*. See the module docstring - each for
+# a different reason, and the webhooks' is the one that would cost customer
+# messages and delivery reports.
+#
+# `email_verification` is here for the reason recorded above `MIXED_ROUTERS`,
+# not because it is unguarded. Both its routes require a session, and both
+# carry their own per-account limits applied inside the service. What it must
+# not carry is the workspace limit: that guard resolves `ActiveWorkspaceDep`,
+# so attaching it would make proving your own email address require a selected
+# workspace and an active membership - neither of which has anything to do with
+# owning an inbox, and both of which a person may legitimately lack.
 UNLIMITED_ROUTERS = (
     auth.router,
+    email_verification.router,
     platform.router,
     webhooks.router,
     email_webhooks.router,
