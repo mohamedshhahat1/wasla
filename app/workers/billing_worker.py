@@ -31,6 +31,9 @@ from app.repositories.billing_repository import (
     PlanRepository,
     PlatformSubscriptionRepository,
 )
+from app.repositories.tenant_repository import TenantRepository
+from app.services.email_service import EmailOutbox
+from app.services.email_templates import EmailTemplate
 from app.services.invoice_service import InvoiceService
 from app.services.subscription_service import roll_over
 
@@ -127,6 +130,15 @@ class BillingWorker:
                     now=moment,
                 )
                 await roll_over(subscription, plan=plan, now=moment)
+                if (
+                    previous is SubscriptionStatus.TRIALING
+                    and subscription.status is SubscriptionStatus.EXPIRED
+                ):
+                    # The one transition nobody chose, so the owners are the
+                    # last to know unless they are told. Queued on the sweep's
+                    # own session, so the notice and the expiry commit
+                    # together (ADR-042).
+                    await self._notify_trial_expired(session, subscription=subscription)
                 handled += 1
                 logger.info(
                     "billing.subscription_advanced",
@@ -180,6 +192,23 @@ class BillingWorker:
             return
 
         if created:
+            # Keyed to the invoice row, so a sweep that runs twice over the
+            # same period notifies once. No payment link: the template says so
+            # and means it, because a bill with a link in it is the shape every
+            # invoice-phishing email takes.
+            await EmailOutbox(session, self._settings).enqueue_for_tenant_owners(
+                tenant_id=subscription.tenant_id,
+                template=EmailTemplate.INVOICE_ISSUED,
+                idempotency_prefix=f"invoice-issued:{invoice.id}",
+                context={
+                    # Numeric(12, 2) already, so it is formatted rather than
+                    # scaled: money is never divided on its way into a notice.
+                    "amount_due": f"{invoice.amount_due:.2f}",
+                    "currency": invoice.currency,
+                    "period_start": invoice.period_start.date().isoformat(),
+                    "period_end": invoice.period_end.date().isoformat(),
+                },
+            )
             logger.info(
                 "billing.invoice_issued_by_sweep",
                 extra={
@@ -188,6 +217,25 @@ class BillingWorker:
                     "invoice_id": str(invoice.id),
                 },
             )
+
+    async def _notify_trial_expired(
+        self,
+        session: AsyncSession,
+        *,
+        subscription: Subscription,
+    ) -> None:
+        """Tell a workspace's owners that its trial has ended.
+
+        Keyed to the subscription rather than the moment: a trial expires
+        once, so a sweep replayed against the same row must not send twice.
+        """
+        tenant = await TenantRepository(session).get_by_id(subscription.tenant_id)
+        await EmailOutbox(session, self._settings).enqueue_for_tenant_owners(
+            tenant_id=subscription.tenant_id,
+            template=EmailTemplate.TRIAL_EXPIRED,
+            idempotency_prefix=f"trial-expired:{subscription.id}",
+            context={"workspace_name": tenant.name if tenant is not None else "your workspace"},
+        )
 
 
 __all__ = ["CLAIM_LIMIT", "POLL_SECONDS", "BillingWorker"]

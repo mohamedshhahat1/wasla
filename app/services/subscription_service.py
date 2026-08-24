@@ -29,6 +29,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings, get_settings
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.db.models.audit import AuditAction
@@ -40,7 +41,10 @@ from app.db.models.billing import (
 )
 from app.db.models.user import User
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
+from app.repositories.tenant_repository import TenantRepository
 from app.services.audit_service import AuditTrail
+from app.services.email_service import EmailOutbox
+from app.services.email_templates import EmailTemplate
 
 logger = get_logger(__name__)
 
@@ -77,14 +81,35 @@ def _same_day(moment: datetime, *, year: int, month: int) -> datetime:
 class SubscriptionService:
     """Subscription operations for one workspace."""
 
-    def __init__(self, session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: uuid.UUID,
+        settings: Settings | None = None,
+    ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self._subscriptions = SubscriptionRepository(session, tenant_id=tenant_id)
         self._plans = PlanRepository(session)
+        self._tenants = TenantRepository(session)
         # Every operation here changes what the workspace pays, which is the
         # definition of an action somebody is asked about later.
         self._audit = AuditTrail(session, tenant_id=tenant_id)
+        # Defaulted rather than required so existing construction sites keep
+        # working; the request-scoped provider passes the real settings in.
+        self._outbox = EmailOutbox(session, settings if settings is not None else get_settings())
+
+    async def _workspace_name(self) -> str:
+        """The tenant's own name, for a template that mentions it.
+
+        Read from the row rather than taken from a caller: it is the only
+        variable any billing template carries, and a workspace name that came
+        from a request would be a tenant-controlled string in somebody's
+        inbox.
+        """
+        tenant = await self._tenants.get_by_id(self._tenant_id)
+        return tenant.name if tenant is not None else "your workspace"
 
     async def get(self) -> Subscription | None:
         return await self._subscriptions.get()
@@ -240,6 +265,15 @@ class SubscriptionService:
             target_type="subscription",
             target_id=subscription.id,
             meta={"immediately": immediately},
+        )
+        # Queued on this session, so the notice and the cancellation commit
+        # together (ADR-042). Keyed on the moment it happened, so cancelling
+        # again after a resume notifies again while a retried request does not.
+        await self._outbox.enqueue_for_tenant_owners(
+            tenant_id=self._tenant_id,
+            template=EmailTemplate.SUBSCRIPTION_CANCELLED,
+            idempotency_prefix=f"subscription-cancelled:{subscription.id}:{moment.isoformat()}",
+            context={"workspace_name": await self._workspace_name()},
         )
         logger.info(
             "billing.subscription_cancelled",
