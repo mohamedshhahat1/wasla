@@ -188,6 +188,95 @@ That stops inbound and outbound traffic for one number and is audit-logged. Its 
 
 ---
 
+### Email is not being delivered
+
+Work down this list; the first three cost nothing to check.
+
+1. **Is email even on?** `EMAIL_ENABLED=false` makes every enqueue a silent
+   no-op — password reset answers 202 and does nothing. This is the most
+   common cause and does not look like a fault anywhere.
+2. **Is the email worker running?** It is one kind among the set; a
+   `WORKER_KINDS` that excludes `email` queues rows nobody drains.
+3. **What does the queue look like?**
+
+```sql
+SELECT status, count(*), min(created_at) AS oldest
+FROM email_messages
+GROUP BY status ORDER BY status;
+```
+
+`pending` growing with `sent` flat means nothing is draining — worker down,
+or the provider refusing everything. `sending` rows older than ten minutes
+mean no worker is alive to recover them; they return to `pending`
+automatically once one is.
+
+4. **Why did the failures fail?**
+
+```sql
+SELECT last_error_code, count(*)
+FROM email_messages
+WHERE status = 'failed' AND failed_at > now() - interval '1 day'
+GROUP BY last_error_code ORDER BY 2 DESC;
+```
+
+`suppressed` means the address bounced or complained earlier — the row is
+doing its job. `render_error` is a bug: a template got a context it could not
+render. An `http_4xx` or a provider error name usually means the sending
+domain is not verified, or `EMAIL_FROM` is not on it.
+
+**Retrying a failed row is deliberately not an API operation**, and there is
+no admin endpoint for it. It would be a way to make the platform re-send mail
+on demand, and the usual reason a row failed is that the address does not
+work. If a batch failed for a cause since fixed, re-queue them deliberately
+in SQL with a fresh idempotency key, and know how many you are about to send.
+
+### An address has stopped receiving mail
+
+It is probably suppressed. Suppression is written by a hard bounce or a
+complaint and is never undone automatically.
+
+```sql
+SELECT recipient, reason, created_at FROM email_suppressions
+WHERE recipient = lower('person@example.com');
+```
+
+Removing a suppression is a deliberate act, taken only when the mailbox is
+known to work again — a fixed typo, a mailbox restored. Re-sending into a
+hard bounce is how a sending reputation dies.
+
+```sql
+DELETE FROM email_suppressions WHERE recipient = lower('person@example.com');
+```
+
+Suppression is **global, not per-workspace**, because a dead mailbox is dead
+for everyone. It never disables an account, never bumps `token_version` and
+never denies a sign-in (ADR-042) — so a suppressed address is a delivery
+problem, never an access one.
+
+### Rotating the Resend credentials
+
+**The API key** is used only by the worker. Issue a new key in the Resend
+dashboard, deploy it to the worker, confirm `email.sent` events resume, then
+revoke the old one. In-flight sends fail transiently and retry, so nothing is
+lost.
+
+**The webhook secret** is used only by the API. Resend's signature header
+carries a space-separated list and verification accepts any entry that
+matches, which is what makes rotation possible without dropping deliveries —
+but this application reads a single `RESEND_WEBHOOK_SECRET`, so the change is
+still a deploy. Expect `email.webhook_invalid_signature` between the secret
+changing at Resend and the deploy landing; bounces in that window are lost,
+not queued, so rotate at a quiet time.
+
+### The provider is down
+
+Nothing needs doing. Transient failures back off exponentially with jitter to
+a one-hour ceiling and keep trying up to `EMAIL_MAX_ATTEMPTS` (default 8),
+which spans roughly a day. Domain actions are unaffected — an invitation
+still commits, its delivery is just late. Watch for rows reaching `failed`
+with `exhausted: true`, which is the point at which the outage became data
+loss.
+
 ## What to watch
 
 Nothing here ships a metrics stack ([ARCHITECTURE.md §20](../ARCHITECTURE.md) — OpenTelemetry and Prometheus are Planned). These are the log events worth alerting on with whatever aggregator is in front of them.
@@ -201,6 +290,12 @@ Nothing here ships a metrics stack ([ARCHITECTURE.md §20](../ARCHITECTURE.md) �
 | `credential.decryption_failed` | A stored credential is unreadable — check key configuration | High |
 | `worker.heartbeat_failed` | A loop cannot reach Redis | High |
 | `campaign.sweep_failed` | A broadcast is stalled | Medium |
+| `email.sweep_failed` | The email worker's sweep threw; nothing is being delivered | High |
+| `email.failed_permanently` | A message will never be sent — check `error_code` | Medium, High if sustained |
+| `email.webhook_invalid_signature` | Rotated Resend secret, or somebody probing | High if sustained |
+| `email.webhook_unconfigured` | `RESEND_WEBHOOK_SECRET` is unset — **no bounce or complaint is being recorded** | High |
+| `email.stuck_recovered` | A worker died mid-send; the message is being re-sent | Medium |
+| `email.suppressed_skipped` | A message was not sent because its address is suppressed | Low, High if sudden and widespread |
 | `request.timed_out` | A handler exceeded its budget while holding a connection | Medium |
 
 Every log line carries `request_id`, and `tenant_id`, `user_id` and `conversation_id` where they apply. Fields whose names suggest secrets are redacted before serialisation, so a token cannot reach the logs even when a payload is logged whole.
@@ -212,6 +307,12 @@ Every log line carries `request_id`, and `tenant_id`, `user_id` and `conversatio
 Stated plainly, because a runbook that pretends to cover everything is one that gets trusted where it should not be:
 
 - **No production deployment exists yet.** Every procedure here has been executed against local containers and real PostgreSQL. None has been run under load, against real customer traffic, or during an actual incident.
+- **No message has ever been delivered by Resend from this repository.** The
+  email procedures above are written from the code and exercised against a
+  fake provider and a mock transport. No real API key has been used and no
+  delivery event has arrived from Resend's own infrastructure, so the first
+  production send is also the first test of the DNS, the webhook endpoint and
+  the sending reputation.
 - **There is no backup or restore procedure**, because there is no backup system. `postgres-data` is a Docker volume. Before any real traffic: scheduled `pg_dump`, tested restores, and a documented recovery objective.
 - **There is no alerting.** The table above lists what to alert on, not a configured alert.
 - **Media files are not replicated.** They live on one host's volume ([ADR-023](../DECISIONS.md)). Losing it loses every attachment customers sent.

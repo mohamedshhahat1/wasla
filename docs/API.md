@@ -48,6 +48,8 @@ Liveness deliberately does not touch PostgreSQL: a database outage must not make
 | GET | `/api/v1/auth/me` | The caller and their memberships | Authenticated |
 | POST | `/api/v1/auth/logout-all` | End **every** session this account holds | Authenticated |
 | POST | `/api/v1/auth/password` | Change the password, ending every session | Authenticated |
+| POST | `/api/v1/auth/password-reset/request` | Ask for a reset link by email (`202`, always the same body) | Public |
+| POST | `/api/v1/auth/password-reset/confirm` | Redeem the emailed token for a new password | Public |
 
 `logout` revokes one refresh token; `logout-all` revokes the whole estate by raising
 `users.token_version`, which every token is checked against (ADR-036). The calling
@@ -92,6 +94,7 @@ Only the hash of an invitation token is stored, so a database disclosure does no
 | --- | --- | --- | --- |
 | GET | `/api/v1/webhooks/whatsapp` | Subscription verification challenge | Public |
 | POST | `/api/v1/webhooks/whatsapp` | Message and status events | Signature |
+| POST | `/api/v1/webhooks/email` | Resend delivery, bounce and complaint events | Signature |
 
 The POST always answers `200` unless the signature check fails, which answers `403`. Meta retries anything else, and retrying a payload we could not understand would not help. See [WHATSAPP.md](WHATSAPP.md).
 

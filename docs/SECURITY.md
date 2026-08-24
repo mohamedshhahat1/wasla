@@ -116,38 +116,52 @@ The Redis refresh denylist still handles ordinary rotation within a session.
 Neither replaces the other, and because the version check reads PostgreSQL, a
 Redis outage no longer makes revocation impossible.
 
-## Password reset — deliberately absent
+## Password reset — shipped, and built to the list written before it
 
-**There is no password reset flow, and one must not be added until this
-repository can send email.**
+**`POST /auth/password-reset/request` and `POST /auth/password-reset/confirm`
+exist** (ADR-042). They were blocked until this repository could send email,
+because a reset serves somebody who *cannot* sign in: its one-time token has to
+reach an address that person controls, and delivery is the security control.
 
-A reset serves somebody who *cannot* sign in. Its one-time token therefore has
-to reach an address that person controls, and delivery is the security control —
-without it there is no proof of ownership at all. This repository has no email
-capability: no SMTP, no provider client, no queue for it. The only mail-adjacent
-dependency is `email-validator`, which validates the shape of an address and
-sends nothing.
+This section previously recorded what a reset would need before it was written,
+so that it would not be redesigned under pressure. That list is now the
+implementation, item for item:
 
-The tempting shortcut is the one the invitation flow already takes — return the
-token in the API response. That is sound for an invitation, because the caller
-is an authenticated administrator who is already trusted to hold it and pass it
-on. It is catastrophic for a reset: the request is unauthenticated by necessity,
-so anyone could ask for a token for any address and read it straight out of the
-response. That is account takeover with extra steps, and it would be worse than
-having no reset at all, because it would look like a feature.
+- **A one-time token stored only as a hash.** 32 random bytes; only its SHA-256
+  reaches `password_reset_tokens`. A stolen database yields nothing usable.
+- **A short expiry.** 30 minutes.
+- **Single-use invalidation.** `consumed_at` is written by an atomic `UPDATE`,
+  so racing confirmations produce exactly one winner.
+- **Superseding.** Issuing a new token, or completing a reset, marks every other
+  outstanding token for the account `superseded_at` — asking repeatedly narrows
+  the live surface to one link rather than accumulating them.
+- **An identical response either way.** Registered, unknown, suspended and
+  passwordless addresses all receive `202` with the same body, so the endpoint
+  is not an oracle for which addresses have accounts.
+- **A rate limit on requests.** Both routes carry the client-address credential
+  limit, which degrades rather than disappears when Redis does (ADR-040).
+- **A session bump on success.** `token_version` is raised, so every access and
+  refresh token dies with the old password (ADR-036), and the account is told
+  through the outbox in the same transaction.
+- **The token never logged and never returned through the API.** It exists in
+  the emailed link and in the outbox row carrying it, and that row's context is
+  cleared the moment the message is sent or permanently fails.
+- **Tests covering replay and expiry.** `tests/integration/test_password_reset.py`
+  covers reuse, expiry, supersession, enumeration, the constant refusal, and
+  that no token reaches the audit trail.
 
-**Shipped instead: `POST /auth/password`**, an authenticated password *change*.
-The current password is the proof, so nothing needs to be delivered anywhere. It
-ends every session on success, which covers the common case — "I think something
-was taken, rotate my credential and kill what is out there."
+The shortcut deliberately *not* taken is the one the invitation flow takes —
+returning the token in the API response. That is sound for an invitation, whose
+caller is an authenticated administrator already trusted to hold it, and
+catastrophic for a reset, whose request is unauthenticated by necessity.
 
-What a reset will need when email exists, recorded now so it is not redesigned
-under pressure: a one-time token stored only as a hash, a short expiry,
-single-use invalidation, an identical response whether or not the address is
-registered, a rate limit on requests, a session bump on success, the token never
-logged and never returned through the API, and tests covering replay and
-expiry. That is a separate capability with an infrastructure dependency, not an
-oversight in this one.
+**`POST /auth/password`** remains the authenticated password *change*: the
+current password is the proof, so nothing has to be delivered anywhere. Both now
+notify the account holder afterwards.
+
+**Email verification is deliberately absent**, and that is a decision rather
+than a gap — nothing in the authorization model reads a verified flag. See
+ADR-042 for the reasoning and the residual account-squatting risk.
 
 ## Account lifecycle — what is still missing
 
@@ -165,7 +179,7 @@ Stated rather than carried silently.
   simply not pulled automatically on reuse.
 - **`POST /auth/logout` is unauthenticated and unlimited.** Revoking a token you
   hold is legitimate, but so is revoking one you stole.
-- **No password reset.** See above.
+- **No email verification.** A decision, not a gap; see ADR-042.
 - **Revocation is per-user, not per-session.** Signing one device out while
   leaving another alone would need a session table (ADR-036 records why one was
   not built).
@@ -357,7 +371,7 @@ Confirmed behaviourally during this audit rather than by reading:
 
 ## Still open
 
-- **No password reset** — blocked on email delivery, above.
+- **No email verification** — a decision recorded in ADR-042, not an omission.
 - **Ownership is proven at a point in time, not continuously.** A number that
   moves at Meta after the fact is not noticed. Re-verification on a schedule is
   the obvious next step and is now cheap: ADR-041 built the mechanism, and only

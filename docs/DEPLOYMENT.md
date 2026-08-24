@@ -91,6 +91,60 @@ Set a calendar reminder for the first expiry regardless. Renewal automation fail
 
 A load balancer or ingress terminating TLS should leave the redirect in `nginx.conf` commented out and **must** set `X-Forwarded-Proto`. Without it the application believes every request arrived in plaintext. It must also set `X-Forwarded-For`: the authentication rate limiter counts by client address, and without it every user shares one identity and one budget ([ADR-032](../DECISIONS.md)).
 
+## Email sending domain
+
+Email is off unless `EMAIL_ENABLED=true`, and turning it on without the DNS
+below produces a deployment that boots, queues rows, and has every one of
+them permanently rejected. Do the DNS first.
+
+**1. Verify the sending domain with Resend.** In the Resend dashboard, add
+the domain that `EMAIL_FROM` sits on and publish the records it gives you:
+
+- **DKIM** — a `TXT` (or `CNAME`, depending on what Resend issues) on a
+  selector subdomain. This is what signs the mail; without it, delivery to
+  most large mailbox providers fails or lands in spam.
+- **SPF** — a `TXT` on the sending domain authorising Resend's senders. If
+  the domain already has an SPF record, **merge** into it. Two SPF records on
+  one domain is a permanent error, not two policies.
+- **MX** — only if Resend asks for one on the sending subdomain.
+
+Wait for the dashboard to report the domain verified before enabling email.
+
+**2. Publish a DMARC policy.** A `TXT` at `_dmarc.<domain>`. Start at
+`p=none` with a reporting address, read the reports for a week or two, and
+only then tighten to `p=quarantine` and `p=reject`. Going straight to
+`p=reject` before SPF and DKIM are confirmed aligned bounces your own mail.
+
+**3. Prefer a subdomain for transactional mail** — `mail.example.com` or
+similar. Sender reputation is per-domain, so keeping product mail off the
+apex protects everything else that domain sends.
+
+**4. Configure the delivery webhook.** In Resend, add an endpoint pointing at
+`https://<your-host>/api/v1/webhooks/email` and subscribe it to at least
+`email.delivered`, `email.bounced` and `email.complained`. Copy the signing
+secret it issues — it starts with `whsec_` — into `RESEND_WEBHOOK_SECRET`.
+
+The route is unauthenticated by necessity and defends itself with the Svix
+HMAC, so it must be reachable from the internet and must **not** be behind
+the proxy's auth or IP allowlist. It is exempt from rate limiting and from
+the request timeout for the same reason the Meta webhook is: a non-2xx makes
+a provider retry and eventually disable the endpoint.
+
+**5. Split the credentials by process.** `RESEND_API_KEY` is needed by the
+**worker** only — the API never talks to a provider. `RESEND_WEBHOOK_SECRET`
+is needed by the **API** only. Giving each container only the one it uses
+means a compromised API container holds no sending credential.
+
+**6. Run the email worker.** It is one kind among the existing set, so
+`WORKER_KINDS` must include `email` (the default set includes it). A
+deployment with email enabled and no email worker queues rows nobody
+delivers.
+
+Verify before announcing anything: register a throwaway workspace, request a
+password reset for it, and confirm the message arrives, that its link opens
+your `APP_PUBLIC_URL`, and that the row reaches `delivered` — which only
+happens if the webhook is wired correctly.
+
 ## CI/CD
 
 | Workflow | Responsibility | Status |

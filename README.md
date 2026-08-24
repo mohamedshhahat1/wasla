@@ -14,7 +14,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Documentation protocol (`Documentation_Protocol.md`) | Implemented |
 | Project memory (`README` / `ARCHITECTURE` / `TASKS` / `DECISIONS`, `docs/`) | Implemented |
 | Application foundation (FastAPI, config, logging, errors, DB, Redis, health, Docker, CI) | Implemented |
-| Domain models and migrations (`0001`–`0020`) | Implemented |
+| Domain models and migrations (`0001`–`0027`) | Implemented |
 | Multi-tenancy, authentication, workspace RBAC, invitations | Implemented |
 | WhatsApp Cloud API (webhook, signatures, idempotency, outbound client) | Implemented |
 | Conversations, inbox, human handoff, templates, cursor paging | Implemented |
@@ -28,9 +28,12 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Usage metering, and tenant analytics derived from the domain tables | Implemented |
 | Platform owner view across every workspace (read-only) | Implemented |
 | Plans, subscriptions, entitlements enforced against usage, invoices and payment records | Implemented |
+| Transactional email (outbox, Resend provider, delivery webhooks, bounce suppression) | Implemented |
+| Password reset, invitation delivery and account security notices | Implemented |
+| A message actually delivered by Resend (DNS, webhook and reputation are the operator's) | Planned |
 | A live payment provider (the boundary and a manual implementation exist) | Planned |
 | Production hardening: rate limits, audit trail, request limits, encrypted workspace credentials, worker liveness | Implemented |
-| Worker process (media, agent, ingestion, follow-up and campaign loops in one container) | Implemented |
+| Worker process (media, agent, ingestion, follow-up, campaign, billing and email loops in one container) | Implemented |
 | Container publishing, image provenance and vulnerability scanning | Implemented |
 | Deployment automation (CI-gated, digest-pinned, migrate-then-serve, readiness-checked) | Implemented |
 | A production deployment it has actually run against | Planned |
@@ -77,6 +80,7 @@ Planned for later phases:
 | [docs/CAMPAIGNS.md](docs/CAMPAIGNS.md) | Templates, campaigns, audiences, marketing opt-out |
 | [docs/BILLING.md](docs/BILLING.md) | Plans, subscriptions, entitlements, invoicing |
 | [docs/ANALYTICS.md](docs/ANALYTICS.md) | Analytics events, usage tracking, dashboards |
+| [docs/EMAIL.md](docs/EMAIL.md) | Transactional email: outbox, provider, webhooks, suppression |
 | [docs/API.md](docs/API.md) | API conventions and endpoint catalogue |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker, Nginx, TLS, CI/CD, production deployment |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Operating it: triage, symptoms, procedures, what to watch |

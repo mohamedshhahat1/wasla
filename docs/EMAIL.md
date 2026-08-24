@@ -96,6 +96,16 @@ messages silently, which for a password reset means somebody locked out with
 a row claiming their email went out. **Duplicate email is the acceptable
 failure. Lost email is not.**
 
+**The window is one message, not one sweep.** A sweep runs in two phases.
+Recovery and the claim share one transaction that marks a batch `sending`
+with the attempt counted, and it commits *before* anything reaches the
+provider; each message is then delivered in a transaction of its own. An
+earlier version committed the whole sweep at the end, which meant a worker
+killed on the fiftieth message re-sent the forty-nine before it - duplicate
+mail measured in batches rather than in ones. The cost of the split is a
+transaction per message, which is the right trade at transactional-email
+volume.
+
 Provider-side idempotency reduces the window but does not own the guarantee:
 the adapter sends the row's key as an `Idempotency-Key` header, so a re-send
 inside the provider's dedupe window is collapsed on their side. Database
@@ -253,10 +263,31 @@ from the database.
 | `EMAIL_WORKER_POLL_SECONDS` | Default 10 |
 
 Configuration **fails closed**. With `EMAIL_ENABLED=true` outside the test
-suite, startup requires `EMAIL_FROM` and `APP_PUBLIC_URL`; in production it
-additionally refuses the fake provider and requires `APP_PUBLIC_URL` to be
-HTTPS. A misconfigured deployment does not boot, rather than booting and
-silently not sending password resets.
+suite, startup requires:
+
+- `EMAIL_FROM`, and that it is a bare address — `no-reply@example.com`, not
+  `Wasla <no-reply@example.com>`. A sender the provider rejects is a
+  *permanent* failure on every row, so a typo in this one value silently
+  discards every email the deployment ever queues.
+- `APP_PUBLIC_URL`, on an `http`/`https` scheme with a host and no query or
+  fragment. The scheme is an allowlist rather than a prefix check because
+  whatever this holds is prefixed onto every link a recipient clicks, and
+  `javascript:` is a link too.
+
+In production it additionally refuses the fake provider, requires
+`APP_PUBLIC_URL` to be HTTPS, and requires `RESEND_WEBHOOK_SECRET` — without
+it the delivery endpoint answers 503 to every bounce, so no suppression is
+ever recorded and the platform keeps writing to dead mailboxes until the
+sending domain is the thing that fails.
+
+A misconfigured deployment does not boot, rather than booting and silently
+not sending password resets.
+
+**`EMAIL_ENABLED=false` is a real operational state, not a safe default to
+leave in production.** Enqueue becomes a no-op, so password reset accepts the
+request, answers 202 and does nothing at all. That is deliberate — a
+deployment that has not configured a sender should not accumulate rows — but
+it means turning email off silently disables account recovery.
 
 The key is never a Docker build argument and is not in any image layer. It
 is never in a frontend bundle, and no endpoint - `/health` included -
@@ -288,14 +319,11 @@ is usually that the address does not work.
 Honest list. Do not read the sections above as a claim that every message
 is wired.
 
-- **Billing emails are queued by nothing.** `INVOICE_ISSUED`,
-  `TRIAL_EXPIRED` and `SUBSCRIPTION_CANCELLED` exist as templates with no
-  caller; the invoice and subscription services do not enqueue. Wiring them
-  needs `invoice:{invoice_id}` and `subscription:{subscription_id}:{state}`
-  keys and a decision about which recipients in a workspace get billing mail.
 - **Templates absent from the enum:** invitation accepted, membership
   revoked, role change, subscription started, trial *ending* (as opposed to
-  expired), payment succeeded, payment failed, payment pending.
+  expired), payment succeeded, payment failed, payment pending. Each needs a
+  domain event that does not exist yet; none was invented to give a template
+  a caller.
 - **No email verification flow**, and this is a decision rather than an
   omission. Nothing in Wasla's authorization model grants anything on the
   basis of a verified address: workspace access comes from a membership row,
@@ -306,11 +334,14 @@ is wired.
   something before an invitation - at which point it belongs behind
   `POST /auth/email-verification/{request,confirm}` with the same hashed
   single-use token handling as reset.
-- **Tests:** the provider, outbox, worker, password reset and webhook
-  handling have unit coverage of the signature scheme and the event trust
-  boundary. There are **no** integration tests against PostgreSQL, no Redis
-  degradation tests for the reset limiter, no concurrent-worker test, no
-  transaction-rollback test and no container-level HTTP test for the webhook
-  route.
+- **Redis degradation of the reset rate limiter is untested.** The limiter
+  itself degrades rather than disappears (ADR-040) and is covered there; what
+  is not covered is that path specifically through the reset endpoints.
 - **Real provider delivery has never been observed** from this repository.
-  Everything above describes code, not a delivered message.
+  No message has been handed to Resend, no `RESEND_API_KEY` has been used,
+  and no delivery event has arrived from Resend's own infrastructure.
+  Everything above the webhook boundary is exercised against a mock
+  transport and the fake provider. **Read every claim in this document as a
+  claim about code, not about a delivered message.** Before the first
+  production send, the checklist in *Operating* has to be walked with real
+  credentials against a real mailbox.

@@ -391,7 +391,7 @@ Opened by the authentication review, which found that `users.is_active` was chec
 Deferred by decision, not unfinished:
 
 - [ ] Per-workspace member removal and suspension. `memberships` has no `status` column and there is no `/members` router. This is now the **largest** remaining gap in access control: platform staff can disable a whole account and a person can end their own sessions, but a workspace owner still cannot withdraw one colleague's access to one workspace
-- [ ] Password reset, blocked on email delivery as described above
+- [x] Password reset — **shipped in Phase 18** once email delivery existed (ADR-042), built to the list `docs/SECURITY.md` wrote down in advance
 - [ ] Refresh-token family revocation on reuse. Reuse is detected and the presented token refused; the chain a thief already established is not torn down automatically. Bumping the version does tear it down, so the lever exists and is simply not pulled by the reuse path yet
 - [ ] Per-session revocation. `token_version` is per user, so signing one device out while leaving another alone is not expressible. That needs a row per refresh token — a write on every rotation, a cleanup job, and a new failure mode — for a device-management surface this product does not have (ADR-036)
 - [ ] Rate-limiting `POST /auth/logout`, which is unauthenticated and unlimited. Revoking a token you hold is legitimate; so is revoking one you stole
@@ -471,3 +471,96 @@ Deferred by decision, not unfinished:
 - [ ] Registration account enumeration (W-12) — accepted, not fixed. Needs the
       same email delivery channel password reset is blocked on; see ADR-040 for
       why merging the conflict messages would be theatre
+
+## Phase 18 — Email infrastructure
+
+Wasla could not send email at all. Four things were blocked on that: invitations
+minted a token nobody could deliver, password reset was deferred in
+`docs/SECURITY.md` for exactly that reason, account security changes told the
+audit trail but never the person, and billing events reached nobody. ADR-042
+records the architecture.
+
+- [x] Provider abstraction (`EmailProvider`) with a Resend adapter spoken to
+      over plain HTTPS — no SDK, no supply-chain entry for one JSON POST. The
+      API key exists only in an `Authorization` header; provider error bodies
+      are truncated before they reach a log or a row, because provider errors
+      quote the credentialed request back
+- [x] Transactional outbox (`email_messages`, migration `0026`). The action that
+      decides an email should exist writes the row on its own session, so the
+      two commit or roll back together. The idempotency key is a unique
+      constraint, so racing callers produce one row rather than two
+- [x] Email worker as one `WORKER_KINDS` entry, claiming with
+      `FOR UPDATE SKIP LOCKED`, exponential backoff with jitter, and recovery of
+      rows a killed worker left `sending`
+- [x] Delivery is **at-least-once**, and the window is **one message**: the
+      claim commits before any network call and each message is delivered in its
+      own transaction. The first implementation committed the whole sweep at the
+      end, so a worker killed on the fiftieth message re-sent the forty-nine
+      before it
+- [x] Resend delivery-event webhook, Svix-verified: HMAC over the exact bytes,
+      a replay window in both directions, constant-time comparison, and multiple
+      signatures so a secret can be rotated without dropping deliveries
+- [x] Bounce and complaint suppression. **The address suppressed is the one our
+      own row recorded, never one from the payload** — a verified delivery proves
+      who sent the request, not that its contents are true
+- [x] Password reset (migration `0027`), built to the list `docs/SECURITY.md`
+      wrote down before it: hashed single-use token, 30-minute expiry,
+      supersession, a constant response, a session bump, and the token never
+      logged nor returned
+- [x] Invitation, password-change, sessions-revoked, account-disabled and
+      account-enabled notices, all queued transactionally and all addressed to
+      the row's own `email` rather than anything from the request
+- [x] Billing notices wired to the domain events that already existed: invoice
+      issued and trial expired from the billing sweep, subscription cancelled
+      from the subscription service. No business logic was invented to give a
+      template a caller
+- [x] Production fails closed on a half-configured setup: missing sender, a
+      sender that is not an address, a missing or dangerously-schemed
+      `APP_PUBLIC_URL`, the fake provider, or a missing `RESEND_WEBHOOK_SECRET`
+- [x] 220 email tests — provider failure classes, header-injection refusals,
+      template escaping and link construction, outbox idempotency and recovery,
+      webhook forgery and replay, suppression, password reset replay and
+      enumeration, transactional rollback, and cross-workspace isolation
+
+**Corrections to the work as first committed.** The nine commits this phase
+inherited had never been run through the verification gate, and it found real
+defects rather than only style ones:
+
+- `alembic check` **failed**: migration `0026` declared server defaults the
+  model did not, so autogenerate saw permanent drift. The model now declares
+  them, matching the convention the rest of `app/db/models/` follows
+- The worker committed one transaction per **sweep**, so a crash re-sent the
+  whole claimed batch. Split into claim-then-per-message
+- Suppression compared addresses case-sensitively while nothing normalised the
+  recipient on the way in. Both ends now normalise
+- Production did not require `RESEND_WEBHOOK_SECRET`, so a deployment could run
+  with the delivery endpoint answering 503 to every bounce — recording no
+  suppressions until the sending domain was what failed
+- `EMAIL_FROM` was checked for presence but not shape, and a sender the provider
+  rejects fails *every* row permanently
+- `APP_PUBLIC_URL` was checked for an `https://` prefix in production only,
+  leaving `javascript:` and `data:` acceptable elsewhere
+- The three billing templates and `enqueue_for_tenant_owners` were dead code
+- ADR-042 was referenced fourteen times in the code and had never been written
+- Ruff (7), Black (10 files) and MyPy (2) all failed
+
+**Verified 2026-08-24 against PostgreSQL 16** — see the Phase 18 report for the
+exact figures, including what was *not* verified.
+
+**Not verified: real Resend delivery.** No message has been handed to Resend, no
+`RESEND_API_KEY` has been used, and no delivery event has arrived from Resend's
+own infrastructure. Everything above the webhook boundary is exercised against a
+mock transport and the fake provider. The first production send still has to
+walk the checklist in `docs/EMAIL.md` with real credentials.
+
+Deferred by decision, not unfinished:
+
+- [ ] Email verification. Nothing in the authorization model reads a verified
+      flag, so adding one would be an account state with no meaning (ADR-042).
+      The trigger to revisit is the day an unverified address grants a capability
+- [ ] Templates whose domain events do not exist yet: invitation accepted,
+      membership revoked, role change, subscription started, trial *ending*,
+      payment succeeded, failed and pending
+- [ ] Redis degradation of the reset limiter specifically. The limiter degrades
+      rather than disappears (ADR-040); that path through the reset endpoints is
+      not separately covered

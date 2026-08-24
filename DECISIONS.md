@@ -1134,3 +1134,47 @@ Consequences:
 An unverified number keeps working. That is the deliberate half, and a test pins it so nobody "fixes" it into an outage: the migration path is re-verification, not amputation.
 
 Ownership is still proven at a point in time rather than continuously. A number that moves at Meta after the fact is not noticed, and re-verification on a schedule remains the obvious next step — it is now cheap to build, because the mechanism exists and only the trigger is missing.
+
+## ADR-042 — Email Is an Outbox Row, Delivered At Least Once, and Events Are Believed About Nothing But Delivery
+
+Date:
+2026-08-24
+
+Status:
+Accepted
+
+Decision:
+Send transactional email through a provider abstraction (`EmailProvider`) with Resend behind it, spoken to over plain HTTPS with no SDK. Never send inside a request or a domain transaction: the action that decides an email should exist writes a row to `email_messages` on its own session, and a separate email worker claims and delivers it. Delivery is **at least once**, stated rather than discovered. Verify Resend's Svix-signed delivery events, and let a verified event change exactly two things — the status of the row it names, and the suppression of the address *that row* recorded. Store password reset tokens only as SHA-256 hashes. Do not implement email verification.
+
+Context:
+Four things needed email before this existed: invitations carried a token nobody could deliver, password reset was deferred in `docs/SECURITY.md` for exactly that reason, account security changes told the audit trail but never the person, and billing events reached no one.
+
+The obvious implementation — call the provider from the handler — fails in both directions. A provider outage becomes a failed invitation. A transaction that rolls back after the call has already sent the mail, and mail cannot be rolled back.
+
+Reason:
+**The outbox row commits with the action or not at all.** That is the whole guarantee, and it is why `EmailOutbox.enqueue` takes the caller's session and writes nothing else. An invitation that rolled back was never announced; an announced invitation exists.
+
+**The idempotency key is a unique constraint, not a convention.** Every business email is keyed to the domain row that caused it — `invitation:{id}`, `security-password_changed:{user}:{version}`. Two racing callers both see no row, and the constraint rather than the check decides which one wins.
+
+**At-least-once, and the window is one message.** Nothing lets PostgreSQL and a provider commit together, so a duplicate is possible by construction. The claim is committed *before* any network call, and each message is then delivered in its own transaction — so a worker killed mid-batch re-sends one message rather than the batch. Exactly-once is not on offer and is not claimed anywhere.
+
+**A verified webhook proves the delivery, not the payload.** This is the load-bearing distinction. An address inside a bounce event could be anybody's, including a mailbox an attacker wants this platform to stop writing to. So the only field taken from an event is the provider's message id, looked up against a row we issued; the address suppressed is the one *our* row recorded. A forged event about a stranger's mailbox suppresses nothing.
+
+**Suppression is a mail-delivery fact and nothing else.** It never touches `is_active`, never bumps `token_version`, and never denies a sign-in. An account that could be disabled by bouncing its mail would be an account anybody could disable.
+
+**Opens and clicks are dropped rather than stored.** An image proxy fetches pixels and a scanner follows links, so neither is evidence a person read anything — and anything stored is eventually treated as proof.
+
+**No SDK.** One endpoint and one JSON POST does not justify a supply-chain entry the scanner must watch (ADR-017's reasoning, applied in the other direction). The API key appears only in an `Authorization` header, and provider error bodies are truncated before they reach a log or a row, because provider errors quote the credentialed request back.
+
+**Every emailed link is `APP_PUBLIC_URL` plus a literal path.** No variable is ever a URL, so no template value can redirect a link; the origin is configuration and never derived from a request `Host`. The scheme is checked against an allowlist at startup, because whatever it holds is what a recipient clicks.
+
+**Email verification is deliberately not implemented.** Nothing in the authorization model reads a verified flag: a membership decides what a user may do, an invitation proves inbox control before it grants anything, and a reset proves it again. Adding a flag no decision consults would be ceremony. The residual risk is account squatting — registering an address one does not own — and the mitigation is that a reset by the real owner bumps `token_version`, ending every session the squatter holds. The day an unverified address grants a capability, this decision has to be revisited, and that is the trigger to watch for.
+
+Consequences:
+Duplicate mail is possible and accepted. Every template is written so a second copy is an annoyance rather than a harm, and no template says anything that is only true once.
+
+Production fails closed on a half-configured email setup: no sender, no public URL, an unusable sender address, a dangerous scheme, the fake provider, or a missing webhook secret each refuse the boot. A deployment with `EMAIL_ENABLED=false` sends nothing at all — and password reset silently does nothing, which is the cost of the no-op and is documented in `docs/EMAIL.md` rather than hidden.
+
+Bounce and complaint handling depends on the webhook actually being configured at Resend. Until it is, suppression never populates and the platform keeps writing to dead addresses — which is why the secret is required in production rather than optional.
+
+The provider boundary is one method. Swapping Resend for another provider is a new adapter and a configuration value; nothing in the services, templates or outbox names a provider.

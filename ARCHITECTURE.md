@@ -598,6 +598,62 @@ Two definitions carry the numbers and are written down beside the queries, becau
 
 The two tables have deliberately opposite policies. `usage_events` must be reproducible exactly as recorded, because it is billing input; analytics should reflect what the data says now.
 
+## 19b. Email
+
+The one channel Wasla speaks that is not WhatsApp, and the only one addressed
+to a *user* rather than a customer contact. Full detail in
+[docs/EMAIL.md](docs/EMAIL.md); the decision is ADR-042.
+
+```
+domain action (invitation, reset, security change, invoice)
+        |
+        v
+EmailOutbox.enqueue  ---- writes on the CALLER'S session
+        |
+        v
+email_messages (pending)        <-- commits with the action, or not at all
+        |
+        v
+email worker: claim (FOR UPDATE SKIP LOCKED) -> commit
+        |
+        v
+per message, in its own transaction: render -> provider -> record
+        |
+        v
+Resend  ------ delivery event ------> POST /api/v1/webhooks/email
+                                              |
+                                    Svix HMAC over the raw bytes
+                                              |
+                                  status, and suppression of the
+                                  address OUR OWN ROW recorded
+```
+
+Four properties carry it:
+
+**Nothing sends inside a request.** The action that decides an email should
+exist writes a row on its own session, so an invitation that rolled back was
+never announced and a provider outage delays delivery instead of failing the
+action.
+
+**Idempotency is a unique constraint.** Every business email is keyed to the
+domain row that caused it, so racing callers produce one row rather than two.
+
+**Delivery is at-least-once, and the window is one message.** The claim
+commits before any network call; each message is then delivered in its own
+transaction. Exactly-once would need PostgreSQL and an HTTP API to commit
+together, which nothing offers, so the duplicate is accepted and stated
+rather than denied.
+
+**A verified webhook proves the delivery, not the payload.** The only field
+taken from an event is the provider's message id, looked up against a row we
+issued. The address suppressed is the one that row recorded — never one from
+the event body — so a forged bounce naming a stranger's mailbox suppresses
+nothing. Suppression is a mail-delivery fact: it never disables an account.
+
+The provider is behind one method (`EmailProvider.send`). No service,
+template or outbox row names Resend, and there is no SDK — one endpoint and
+one JSON POST does not justify a supply-chain entry.
+
 ## 20. Observability
 
 **Status: Implemented** — structured logging, request IDs, and health endpoints exist and are tested. OpenTelemetry, Prometheus, and Sentry remain Planned.
