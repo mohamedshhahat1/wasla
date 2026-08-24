@@ -7,8 +7,8 @@ from fastapi import APIRouter, status
 from app.api.dependencies import AccountServiceDep, AuthServiceDep, CurrentUserDep
 from app.api.rate_limits import AuthRateLimit
 from app.api.route import CommittingRoute
-from app.db.models import User
 from app.core.dependencies import SessionDep, SettingsDep
+from app.db.models import User
 from app.schemas.auth import (
     AccessTokenResponse,
     AccountStateResponse,

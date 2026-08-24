@@ -52,8 +52,4 @@ class PasswordResetToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Evaluated against a caller-supplied clock, like the invitation's
         `is_open`, so the rule stays testable.
         """
-        return (
-            self.consumed_at is None
-            and self.superseded_at is None
-            and self.expires_at > now
-        )
+        return self.consumed_at is None and self.superseded_at is None and self.expires_at > now

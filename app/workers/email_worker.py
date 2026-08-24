@@ -28,8 +28,6 @@ import random
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.db.models.email import OutboundEmail
@@ -107,45 +105,69 @@ class EmailWorker:
     async def run_once(self, *, now: datetime | None = None) -> int:
         """Send every email currently due. Returns how many were handled.
 
-        One session for the sweep, committed at the end, like the follow-up
-        and billing sweeps. The claimed rows stay locked until the commit,
-        which is what keeps another replica off them, so the sweep is bounded
-        by `claim_limit` rather than draining the whole backlog under one
-        lock.
+        Two phases, and the split is what bounds the duplicate window.
+
+        The claim is committed *before* any network call: recovery and
+        ``claim_due`` share one transaction that marks a batch `sending` with
+        the attempt counted, and it commits on its own. Only then does
+        anything reach a provider. A worker that dies mid-batch therefore
+        leaves the rows it had not reached still `sending` rather than
+        rolling the whole claim back.
+
+        Each message is then delivered in a transaction of its own, so the
+        crash window is one message rather than the batch. Doing the whole
+        sweep under a single commit - which this once did - meant a process
+        killed on the fiftieth message re-sent the forty-nine before it, and
+        that is duplicate mail measured in batches instead of in ones.
+
+        The cost is a transaction per message, which is the right trade at
+        this volume: transactional email is low-rate and a duplicated
+        password reset is worth more than a saved round trip. Delivery stays
+        at-least-once either way (ADR-042) - the window is narrowed, not
+        closed.
         """
         moment = now or datetime.now(UTC)
-        handled = 0
 
         async with self._database.session() as session:
             repository = EmailOutboxRepository(session)
 
             recovered = await repository.recover_stuck(now=moment)
             if recovered:
-                # Defence in depth: with a single commit per sweep a crash
-                # rolls claims back to pending, so a persisted `sending` row
-                # means something unusual happened and is worth a loud line.
+                # A row left `sending` by a process that died between the
+                # claim and its result. Expected after a crash, worth a loud
+                # line at any other time.
                 logger.warning(
                     "email.stuck_recovered",
                     extra={"event": "email.stuck_recovered", "recovered": recovered},
                 )
 
-            claimed = await repository.claim_due(now=moment, limit=self._claim_limit)
-            if not claimed:
-                return 0
+            due = await repository.claim_due(now=moment, limit=self._claim_limit)
+            claimed = [row.id for row in due]
 
-            for email in claimed:
-                try:
+        if not claimed:
+            return 0
+
+        handled = 0
+        for email_id in claimed:
+            try:
+                async with self._database.session() as session:
+                    repository = EmailOutboxRepository(session)
+                    email = await repository.get_claimed(email_id)
+                    if email is None:
+                        # Recovered and re-claimed by another sweep, or the
+                        # account it belonged to was deleted underneath us.
+                        continue
                     await self._handle(repository, email, now=moment)
-                except Exception:
-                    # Contained to the one row. It stays claimed in this
-                    # transaction and lands wherever the commit leaves it;
-                    # the next sweep's recovery returns it to the queue.
-                    logger.exception(
-                        "email.dispatch_failed",
-                        extra={"email_message_id": str(email.id)},
-                    )
-                    continue
-                handled += 1
+            except Exception:
+                # Contained to the one row, which rolls back to `sending` and
+                # returns to the queue through recovery. One poisonous
+                # message must not strand every other workspace's mail.
+                logger.exception(
+                    "email.dispatch_failed",
+                    extra={"email_message_id": str(email_id)},
+                )
+                continue
+            handled += 1
 
         logger.info("email.sweep_completed", extra={"handled": handled})
         return handled

@@ -27,7 +27,15 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Final
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -108,13 +116,19 @@ class OutboundEmail(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     subject: Mapped[str] = mapped_column(String(200), nullable=False)
     # String values only, written by `EmailOutbox`. Cleared on terminal
     # transitions - see the module docstring for why.
-    context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
     status: Mapped[EmailStatus] = mapped_column(
         EMAIL_STATUS_TYPE,
         nullable=False,
         default=EmailStatus.PENDING,
+        server_default=EmailStatus.PENDING.value,
     )
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     # When the next attempt may happen. Enqueue sets it to now; a transient
     # failure pushes it into the future with backoff.
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -151,9 +165,7 @@ class EmailSuppression(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """
 
     __tablename__ = "email_suppressions"
-    __table_args__ = (
-        UniqueConstraint("recipient", name="uq_email_suppressions_recipient"),
-    )
+    __table_args__ = (UniqueConstraint("recipient", name="uq_email_suppressions_recipient"),)
 
     recipient: Mapped[str] = mapped_column(String(320), nullable=False)
     reason: Mapped[str] = mapped_column(String(MAX_SUPPRESSION_REASON_LENGTH), nullable=False)

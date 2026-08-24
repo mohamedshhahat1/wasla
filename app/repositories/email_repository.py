@@ -14,19 +14,33 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from datetime import datetime, timedelta
-from typing import Final
+from typing import Any, Final, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.email import (
     MAX_ERROR_CODE_LENGTH,
     MAX_ERROR_MESSAGE_LENGTH,
+    MAX_SUPPRESSION_REASON_LENGTH,
     EmailStatus,
     EmailSuppression,
     OutboundEmail,
 )
+
+
+def normalise_recipient(recipient: str) -> str:
+    """The form an address is stored and compared in.
+
+    Mail domains are case-insensitive and every address this system holds is
+    already lower-cased on the way into `users` and `tenant_invitations`. The
+    same rule is applied here rather than assumed, because suppression is a
+    string comparison and a single mixed-case caller would otherwise write to
+    an address a bounce had already closed.
+    """
+    return recipient.strip().lower()
+
 
 DEFAULT_CLAIM_LIMIT: Final = 50
 # A `sending` row older than this was claimed by a process that died between
@@ -67,7 +81,7 @@ class EmailOutboxRepository:
                 id=uuid.uuid4(),
                 tenant_id=tenant_id,
                 user_id=user_id,
-                recipient=recipient,
+                recipient=normalise_recipient(recipient),
                 template=template,
                 subject=subject,
                 context=dict(context),
@@ -131,7 +145,7 @@ class EmailOutboxRepository:
             )
             .values(status=EmailStatus.PENDING, available_at=now)
         )
-        result = await self._session.execute(statement)
+        result = cast("CursorResult[Any]", await self._session.execute(statement))
         return int(result.rowcount or 0)
 
     async def mark_sent(
@@ -193,23 +207,41 @@ class EmailOutboxRepository:
             email.status = EmailStatus.DELIVERED
             await self._session.flush()
 
-    async def get_by_provider_message_id(
-        self, provider_message_id: str
-    ) -> OutboundEmail | None:
+    async def get_claimed(self, email_id: uuid.UUID) -> OutboundEmail | None:
+        """Re-read one claimed row in a fresh transaction, for dispatch.
+
+        The worker claims a batch and commits, then delivers each message in
+        its own transaction; this is how that second transaction gets its
+        row. Restricted to `sending` so a row another sweep already recovered
+        and re-queued is not sent twice over.
+        """
+        statement = select(OutboundEmail).where(
+            OutboundEmail.id == email_id,
+            OutboundEmail.status == EmailStatus.SENDING,
+        )
+        return (await self._session.execute(statement)).scalars().first()
+
+    async def get_by_provider_message_id(self, provider_message_id: str) -> OutboundEmail | None:
         statement = select(OutboundEmail).where(
             OutboundEmail.provider_message_id == provider_message_id
         )
         return (await self._session.execute(statement)).scalars().first()
 
     async def is_suppressed(self, recipient: str) -> bool:
-        statement = select(EmailSuppression.id).where(EmailSuppression.recipient == recipient)
+        statement = select(EmailSuppression.id).where(
+            EmailSuppression.recipient == normalise_recipient(recipient)
+        )
         return (await self._session.execute(statement)).first() is not None
 
     async def suppress(self, recipient: str, *, reason: str) -> None:
         """Record that an address must not be written to again. Repeat-safe."""
         statement = (
             pg_insert(EmailSuppression)
-            .values(id=uuid.uuid4(), recipient=recipient, reason=reason[:50])
+            .values(
+                id=uuid.uuid4(),
+                recipient=normalise_recipient(recipient),
+                reason=reason[:MAX_SUPPRESSION_REASON_LENGTH],
+            )
             .on_conflict_do_nothing(index_elements=["recipient"])
         )
         await self._session.execute(statement)

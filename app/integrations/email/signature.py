@@ -29,7 +29,7 @@ ID_HEADER: Final = "svix-id"
 TIMESTAMP_HEADER: Final = "svix-timestamp"
 SIGNATURE_HEADER: Final = "svix-signature"
 
-SECRET_PREFIX: Final = "whsec_"
+SECRET_PREFIX: Final = "whsec_"  # noqa: S105 - a prefix, not a credential
 # The only signature version Svix emits today. An unrecognised version is
 # skipped rather than trusted: a scheme this code cannot verify is not a
 # scheme it accepts.
@@ -71,9 +71,7 @@ def compute_signature(
     key = _hmac_key(secret)
     if key is None:
         return None
-    signed = b".".join(
-        (message_id.encode("utf-8"), timestamp.encode("utf-8"), payload)
-    )
+    signed = b".".join((message_id.encode("utf-8"), timestamp.encode("utf-8"), payload))
     return base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest()).decode("ascii")
 
 

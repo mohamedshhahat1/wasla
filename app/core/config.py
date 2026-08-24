@@ -8,8 +8,10 @@ while placeholder values are still in place.
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 from typing import Annotated, Any, Final, Literal
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -20,6 +22,34 @@ LogFormat = Literal["json", "console"]
 # Sentinel, not a credential: production configuration rejects this value.
 PLACEHOLDER_SECRET = "change-me"  # noqa: S105
 MINIMUM_SECRET_LENGTH = 32
+# A shape check for the configured sender, not RFC 5322. It exists to catch a
+# typo and a pasted display name ("Wasla <no-reply@x.com>"), both of which the
+# provider refuses permanently.
+_EMAIL_SHAPE: Final = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+$")
+# The only schemes an emailed link may be built on. `javascript:` and `data:`
+# are the reason this is an allowlist: APP_PUBLIC_URL is prefixed onto every
+# reset and invitation link, so whatever it holds is what a recipient clicks.
+_PUBLIC_URL_SCHEMES: Final = frozenset({"http", "https"})
+
+
+def _public_url_problems(value: str) -> list[str]:
+    """Whether APP_PUBLIC_URL can safely be the base of an emailed link."""
+    parsed = urlparse(value.strip())
+    if parsed.scheme.lower() not in _PUBLIC_URL_SCHEMES:
+        return [
+            "APP_PUBLIC_URL must be an http or https URL; emailed links are built "
+            "by prefixing it, so any other scheme becomes the link a recipient clicks"
+        ]
+    if not parsed.netloc:
+        return ["APP_PUBLIC_URL must include a host, such as https://app.example.com"]
+    if parsed.query or parsed.fragment:
+        # Templates append their own path and query. A base carrying either
+        # produces a malformed link rather than an unsafe one, but a malformed
+        # reset link is a reset that cannot be completed.
+        return ["APP_PUBLIC_URL must be an origin and optional path, with no query or fragment"]
+    return []
+
+
 # The only algorithms this application can be configured with. HMAC only:
 # the signing key is a shared secret, so an asymmetric algorithm could only
 # ever be configured wrongly here, and `none` is not an algorithm.
@@ -375,11 +405,23 @@ class Settings(BaseSettings):
             # rows that render broken links or send from nobody (ADR-042).
             if not self.email_from:
                 problems.append("EMAIL_FROM must be set when EMAIL_ENABLED is true")
+            elif not _EMAIL_SHAPE.match(self.email_from.strip()):
+                # Checked here rather than discovered by the worker. A sender
+                # the provider rejects is a *permanent* failure on every row,
+                # so a typo in this one value silently discards every email
+                # the deployment ever queues.
+                problems.append(
+                    "EMAIL_FROM must be a bare email address such as " "no-reply@example.com"
+                )
+
             if not self.app_public_url:
                 problems.append(
                     "APP_PUBLIC_URL must be set when EMAIL_ENABLED is true: emailed "
                     "links need a configured origin, never one derived from a request"
                 )
+            else:
+                problems.extend(_public_url_problems(self.app_public_url))
+
             if self.is_production:
                 if self.email_provider != "resend":
                     problems.append(
@@ -390,6 +432,16 @@ class Settings(BaseSettings):
                     problems.append(
                         "APP_PUBLIC_URL must be https in production: reset and "
                         "invitation tokens travel in these links"
+                    )
+                if not self.resend_webhook_secret:
+                    # Without it the delivery-event endpoint answers 503 to
+                    # every call, so bounces and complaints are never recorded
+                    # and the platform keeps writing to dead mailboxes until
+                    # the sending domain is the thing that fails. The same
+                    # reasoning META_APP_SECRET is required on.
+                    problems.append(
+                        "RESEND_WEBHOOK_SECRET must be set so delivery events can be "
+                        "verified; without it bounces and complaints are never recorded"
                     )
 
         if problems:

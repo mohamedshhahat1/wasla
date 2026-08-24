@@ -32,8 +32,8 @@ class EmailTemplate(StrEnum):
     """Everything the product knows how to say by email."""
 
     WORKSPACE_INVITATION = "workspace_invitation"
-    PASSWORD_RESET = "password_reset"
-    PASSWORD_CHANGED = "password_changed"
+    PASSWORD_RESET = "password_reset"  # noqa: S105 - a template name
+    PASSWORD_CHANGED = "password_changed"  # noqa: S105 - a template name
     SESSIONS_REVOKED = "sessions_revoked"
     ACCOUNT_DISABLED = "account_disabled"
     ACCOUNT_ENABLED = "account_enabled"
@@ -145,16 +145,14 @@ def render(
     """
     missing = sorted(_REQUIRED_KEYS[template] - set(context))
     if missing:
-        raise ValueError(
-            f"template {template.value} is missing context keys: {', '.join(missing)}"
-        )
+        raise ValueError(f"template {template.value} is missing context keys: {', '.join(missing)}")
     subject = _SUBJECTS[template]
 
     if template is EmailTemplate.WORKSPACE_INVITATION:
         workspace = context["workspace_name"]
         link = _link(public_url, "/invitations/accept", token=context["token"])
         text = (
-            f"You have been invited to join the workspace \"{workspace}\" on Wasla.\n\n"
+            f'You have been invited to join the workspace "{workspace}" on Wasla.\n\n'
             f"Accept the invitation:\n{link}\n\n"
             "The invitation expires in 7 days and can be used once. If you were not "
             "expecting it, ignore this message and nothing will happen."
@@ -274,7 +272,7 @@ def render(
     elif template is EmailTemplate.TRIAL_EXPIRED:
         workspace = context["workspace_name"]
         text = (
-            f"The trial for your workspace \"{workspace}\" on Wasla has ended.\n\n"
+            f'The trial for your workspace "{workspace}" on Wasla has ended.\n\n'
             "Sign in and choose a plan to continue where you left off."
         )
         html_body = _layout(
@@ -289,7 +287,7 @@ def render(
     else:  # EmailTemplate.SUBSCRIPTION_CANCELLED
         workspace = context["workspace_name"]
         text = (
-            f"The subscription for your workspace \"{workspace}\" on Wasla has "
+            f'The subscription for your workspace "{workspace}" on Wasla has '
             "been cancelled.\n\n"
             "Your data is retained; sign in and choose a plan at any time to "
             "continue."
@@ -300,8 +298,7 @@ def render(
                 "The subscription for your workspace "
                 f"<strong>{html.escape(workspace)}</strong> on Wasla has been "
                 "cancelled.",
-                "Your data is retained; sign in and choose a plan at any time to "
-                "continue.",
+                "Your data is retained; sign in and choose a plan at any time to " "continue.",
             ],
             None,
         )

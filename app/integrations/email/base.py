@@ -109,9 +109,7 @@ class EmailMessage:
             raise ValueError("email message has no recipients")
         if len(self.to) > MAX_RECIPIENTS:
             raise ValueError("email message has too many recipients")
-        object.__setattr__(
-            self, "to", tuple(validate_address(recipient) for recipient in self.to)
-        )
+        object.__setattr__(self, "to", tuple(validate_address(recipient) for recipient in self.to))
         if self.reply_to is not None:
             object.__setattr__(self, "reply_to", validate_address(self.reply_to))
 

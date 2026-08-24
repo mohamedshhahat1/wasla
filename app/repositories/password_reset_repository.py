@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.password_reset import PasswordResetToken
@@ -37,9 +38,7 @@ class PasswordResetTokenRepository:
         return token
 
     async def get_by_token_hash(self, token_hash: str) -> PasswordResetToken | None:
-        statement = select(PasswordResetToken).where(
-            PasswordResetToken.token_hash == token_hash
-        )
+        statement = select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash)
         return (await self._session.execute(statement)).scalars().first()
 
     async def consume(self, *, token_id: uuid.UUID, now: datetime) -> bool:
@@ -78,5 +77,5 @@ class PasswordResetTokenRepository:
             )
             .values(superseded_at=now)
         )
-        result = await self._session.execute(statement)
+        result = cast("CursorResult[Any]", await self._session.execute(statement))
         return int(result.rowcount or 0)

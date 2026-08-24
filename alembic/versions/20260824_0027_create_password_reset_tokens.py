@@ -66,9 +66,7 @@ def upgrade() -> None:
     # `ADD VALUE` cannot run inside the migration's transaction; `IF NOT
     # EXISTS` makes it re-runnable after a partial failure (see 0025).
     with op.get_context().autocommit_block():
-        op.execute(
-            "ALTER TYPE audit_action ADD VALUE IF NOT EXISTS 'password_reset_completed'"
-        )
+        op.execute("ALTER TYPE audit_action ADD VALUE IF NOT EXISTS 'password_reset_completed'")
 
 
 def downgrade() -> None:
