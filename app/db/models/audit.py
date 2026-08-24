@@ -64,6 +64,11 @@ class AuditAction(StrEnum):
     Deliberately narrow: only actions somebody could be *asked about later*.
     Reading a page is not audited - it would bury the entries that matter under
     a million that do not, and it is the wrong tool for that question anyway.
+
+    Where a family of outcomes shares one question - "did this verification
+    fail, and why" - the family gets one action and the outcome travels in
+    `meta`. Splitting it into a member per reason would grow this enum without
+    making any query easier to write.
     """
 
     # Access to a workspace
@@ -98,6 +103,22 @@ class AuditAction(StrEnum):
     # waking somebody for. The token itself is never recorded - only that a
     # replay happened and what the version was raised to.
     REFRESH_TOKEN_REUSED = "refresh_token_reused"  # noqa: S105
+
+    # Proving control of the address on an account
+    # (docs/EMAIL_VERIFICATION.md). Unlike a password reset, the request half
+    # *is* audited: sending requires a session, so nobody can write into a
+    # stranger's trail by asking, and "who asked for a code" is a real question
+    # when an address turns out to be wrong.
+    EMAIL_VERIFICATION_REQUESTED = "email_verification_requested"
+    # A code was accepted and `users.email_verified_at` was set. Grants
+    # nothing: this records an account-integrity fact, not a privilege change.
+    EMAIL_VERIFIED = "email_verified"
+    # A code was rejected. `meta["reason"]` separates a wrong code from an
+    # expired one, an exhausted challenge, a superseded one, a malformed
+    # submission and a refused rate limit - one action, because they are all
+    # answers to "why did verification not work", and a burst of them against
+    # one account is the signal worth alerting on whatever the reason says.
+    EMAIL_VERIFICATION_FAILED = "email_verification_failed"
 
     # The channel a business talks to its customers through
     WHATSAPP_ACCOUNT_CONNECTED = "whatsapp_account_connected"
