@@ -4,12 +4,16 @@ Proving that the person holding an account can read mail at the address on
 it. A six-digit code, sent through the existing outbox, verified against the
 account that requested it.
 
-This document is the security design. It is written before the flow exists so
-that the answers below constrain the implementation rather than describing it
-afterwards.
+This document is the security design. It was written before the flow existed,
+so that the answers below constrained the implementation rather than
+describing it afterwards. Where implementation showed an answer to be wrong,
+the answer has been corrected here rather than left standing - three were,
+and they are called out in [Build state](#build-state).
 
-**Status: schema and crypto only.** The service, endpoints, template and
-tests are not built yet. See [Build state](#build-state).
+**Status: implemented, unexecuted.** Schema, crypto, repository, service,
+template and endpoints exist. Configuration settings, registration
+integration and tests do not. Nothing in this phase has been run. See
+[Build state](#build-state).
 
 ## What this is, and is not
 
@@ -47,6 +51,11 @@ inventing a product rule that nobody has asked for.
 > Email verification is currently an account-integrity primitive and does not
 > independently grant or revoke authorization.
 
+This is verifiable rather than aspirational: `email_verified_at` is written in
+exactly one place, `EmailVerificationService.confirm`, and read in exactly
+one, the same service's short-circuit for an already-verified address. No
+dependency in `app/api/dependencies.py` consults it.
+
 **4. What remains available before verification?** Everything. Registration,
 login, workspace creation, invitations, billing, every API route. An
 unverified account is a fully functional account.
@@ -55,13 +64,15 @@ unverified account is a fully functional account.
 email-change flow in this repository today. When one is added it must set
 `email_verified_at = NULL`. It does not need to remember to invalidate
 outstanding challenges: each challenge stores the address it was issued for,
-and verification compares that to the account's current address, so a code
-sent to the old mailbox cannot verify a new one. The binding is enforced by
-the data rather than by the diligence of whoever writes that flow.
+and both `is_usable` and the consuming UPDATE compare that to the account's
+current address, so a code sent to the old mailbox cannot verify a new one.
+The binding is enforced by the data rather than by the diligence of whoever
+writes that flow.
 
 **6. What happens when an OTP expires?** It stops verifying. `expires_at` is
-checked on every attempt. Nothing deletes the row; an expired challenge is
-inert, and the next send supersedes it.
+checked on every attempt and again inside the consuming UPDATE, so a
+challenge that lapses mid-request does not verify. Nothing deletes the row;
+an expired challenge is inert, and the next send supersedes it.
 
 **7. What happens when a new OTP is requested?** Every live challenge for
 that account is superseded in the same transaction that creates the new one.
@@ -71,8 +82,10 @@ than by service logic.
 **8. How is brute force prevented?** Three independent bounds. The code space
 is a million values; `attempts` is capped at 5 per challenge, after which the
 challenge is dead even for the correct code; and the verify endpoint is rate
-limited. Argon2 also makes each guess cost real CPU, which matters for an
-offline attack on a stolen database.
+limited to ten attempts per fifteen minutes per account. An attempt is
+counted *before* the code is compared, so concurrent guesses cannot slip
+between a read and an increment. Argon2 also makes each guess cost real CPU,
+which matters for an offline attack on a stolen database.
 
 **9. How is enumeration prevented?** The send endpoint is **authenticated**,
 which removes the enumeration surface rather than mitigating it: the target
@@ -99,21 +112,35 @@ attacker-triggerable by anyone who can degrade Redis.
 
 **13. What happens if Resend is unavailable?** Nothing, from the caller's
 perspective. The send endpoint writes an outbox row in its own transaction
-and returns. The worker retries with backoff. This is why the request never
-touches the provider (ADR-042).
+and returns 202. The worker retries with backoff. This is why the request
+never touches the provider (ADR-042).
 
 **14. What happens if the email worker crashes?** The challenge already
 exists and stays valid until it expires. The outbox row is recovered by the
 existing stuck-row sweep and re-sent. Delivery is at-least-once, so a person
 may receive the same code twice - harmless, since it is one challenge.
 
-**15. What is audited?** Requested, succeeded, failed, and
-rate-limited - plus supersession implicitly, since a request supersedes.
-Never the code.
+**15. What is audited?** Three actions in the closed `AuditAction`
+vocabulary: `EMAIL_VERIFICATION_REQUESTED`, `EMAIL_VERIFIED`, and
+`EMAIL_VERIFICATION_FAILED`. The failure action carries a `reason` category
+in its metadata - `malformed`, `no_active_challenge`, `expired`,
+`attempts_exhausted`, `address_changed`, `wrong_code`, `lost_race` - rather
+than being split into an action per reason, because they are all answers to
+the same question and a burst of them against one account is the signal worth
+alerting on whatever the reason says. The request action records how many
+challenges it superseded. Never the code, and never a hash of one.
 
-**16. What may appear in logs?** `user_id`, `challenge_id`, attempt number,
-outcome category. **Never** the code, and not the address either - the
-account id identifies the account.
+> **Known gap.** A rate-limited request is **not** audited. `RateLimiter`
+> raises before the service records anything, so a throttled attempt produces
+> a 429 and a log line but no audit row. Closing this means either auditing
+> inside the limiter - which would make every throttled route in the
+> application write audit rows - or catching and re-raising in the service.
+> Neither was done, and the gap is recorded here rather than left for
+> somebody to discover while investigating an incident.
+
+**16. What may appear in logs?** `user_id`, `challenge_id`, the number of
+challenges superseded, and an outcome category. **Never** the code, and not
+the address either - the account id identifies the account.
 
 **17. What happens to old challenges?** Superseded, then left. They are
 small, they carry no usable secret once dead, and adding a cleanup job for
@@ -121,11 +148,15 @@ them would be inventing operational work this repository does not otherwise
 have. If retention ever matters they can be swept on age.
 
 **18. Does verification affect workspace membership?** No. Membership is a
-row in `memberships`; nothing in this feature reads or writes it.
+row in `memberships`; nothing in this feature reads or writes it. The
+endpoints deliberately sit outside the workspace router group so that they do
+not even resolve a membership - see
+[Why these routes are not workspace-scoped](#why-these-routes-are-not-workspace-scoped).
 
 **19. Does verification affect authentication?** No. Login, refresh, logout
 and `token_version` are untouched. An unverified account signs in normally.
-Verifying does not mint, revoke or alter any token.
+Verifying does not mint, revoke or alter any token, and the verify response
+contains a timestamp rather than a credential.
 
 **20. Does verification affect password reset?** No, and deliberately not.
 Reset already treats delivery to the address on file as proof of control -
@@ -143,6 +174,10 @@ touch `token_version`, or offer any passwordless path. There is no endpoint
 that exchanges a code for a session. The only state it writes is one
 timestamp.
 
+This is structural rather than merely intended: `TokenClaims` carries no
+verification field, so verification cannot reach an authorization decision
+without somebody deliberately adding it to the token.
+
 ## Why the send endpoint is authenticated
 
 The target address is read from the session, never from the request. This
@@ -157,6 +192,29 @@ kills three problems at once rather than mitigating them:
 
 An unauthenticated send would be needed only if verification gated something
 before first login. It gates nothing, so it is not needed.
+
+The request body of the verify route sets `extra="forbid"`, so a client that
+sends `user_id` or `email` beside its code receives a 422 rather than having
+the field silently ignored. A quietly dropped parameter is how somebody comes
+to believe they can verify another account.
+
+## Why these routes are not workspace-scoped
+
+The router is registered in `UNLIMITED_ROUTERS`, which sounds like an absence
+of protection and is not. Both routes require a session, and both carry
+per-account rate limits applied inside the service.
+
+What they must not carry is the workspace limit, because that guard's
+signature resolves `ActiveWorkspaceDep` - a selected tenant in the access
+token and an active membership. Neither has anything to do with owning an
+inbox, and a person may legitimately lack both: newly registered, workspace
+not yet chosen, or membership withdrawn. Attaching it would make proving your
+own email address fail for reasons unrelated to email.
+
+This is the same defect the comment above `MIXED_ROUTERS` records having
+already shipped once, when a router-level guard pulled the authentication
+chain onto `/invitations/accept` and broke onboarding in production while the
+tests passed.
 
 ## Storage
 
@@ -173,10 +231,20 @@ Two consequences, both acceptable:
   hashes differently every time. The challenge is found by account and the
   submitted code is verified against it - which is the right shape anyway,
   because verification acts on the authenticated caller's own account.
-- **Verification costs CPU.** Bounded by the attempt cap and the rate limit.
+- **Verification costs CPU.** Bounded by the attempt cap, the rate limit, and
+  a length bound on the request body so Argon2 is never reachable with
+  arbitrary input.
 
 Comparison is Argon2's own verify, which is constant-time with respect to the
 stored value. No hand-rolled comparison, no custom scheme.
+
+A submitted code is accepted only if it is exactly six **ASCII** digits. The
+ASCII part is deliberate: `"١٢٣٤٥٦".isdigit()` is `True` in Python and
+`int()` parses it, so a check written as `.isdigit()` alone would accept
+Arabic-Indic numerals in a product whose users type Arabic, hash them,
+compare against a verifier built from Western digits, and fail - burning an
+attempt and looking, to somebody holding the right code, exactly like a
+broken system.
 
 ## The email-change binding
 
@@ -204,32 +272,54 @@ of data - it is already in `users.email` and in `email_messages.recipient`.
 | Two sends at once | Both supersede, both insert; the partial unique index lets one row live. The loser's IntegrityError is the correct outcome |
 | Two verifies with the correct code | `UPDATE ... WHERE consumed_at IS NULL RETURNING` - one wins, the loser is refused (the ADR-039 shape) |
 | Verify racing a send | The new challenge supersedes the old; a code for a superseded challenge fails |
-| Attempt counting | A conditional UPDATE, so concurrent wrong guesses cannot both read the same count and write the same increment |
+| Wrong guess racing a correct one | The consuming UPDATE re-reads `attempts` against the cap, so a concurrent guess that exhausts the challenge defeats an already-validated correct code |
+| Attempt counting | `attempts = attempts + 1` evaluated by the database, so concurrent guesses cannot all read the same count and write the same increment |
+
+The Argon2 comparison necessarily happens in Python, between reading the
+challenge and writing to it. The consuming UPDATE therefore trusts nothing
+the read established and re-asserts every precondition - unconsumed,
+unsuperseded, unexpired, under the cap, same address - inside its WHERE
+clause. That single statement is the security boundary of the feature.
 
 ## Rate limiting
 
 Two separate policies, because they defend different things: sending is an
 abuse and cost control, verifying is an anti-guessing control.
 
+| Policy | Budget |
+| --- | --- |
+| `auth:verification_send` | 3 per 15 minutes |
+| `auth:verification_attempt` | 10 per 15 minutes |
+
 Both are keyed by **account**, not by client address. Keying by address would
-let an attacker rotate source addresses to buy attempts, and keying a lockout
-by account is only safe because neither policy locks anything - they refuse
+let an attacker rotate source addresses to buy attempts, and keying by
+account is only safe because neither policy locks anything - they refuse
 requests for a window, and the attempt cap that does end a challenge is
 per-challenge, so a stranger cannot burn an account's ability to verify by
 spending its budget. Requesting a fresh code is always available.
 
 Both set `local_fallback=True` per ADR-040.
 
+Malformed input is not counted against the challenge's attempt budget. A typo
+is not a guess, and letting bad formatting burn the budget would let a broken
+client lock somebody out of verifying their own address. It still costs the
+time a real check costs, so it cannot be distinguished by timing.
+
 ## Observability
 
-Events: `email_verification.requested`, `.sent`, `.verified`, `.failed`,
-`.rate_limited`, `.superseded`.
+Events emitted: `email_verification.requested`,
+`email_verification.verified`, `email_verification.failed`, and
+`email_verification.already_verified`.
 
-Carrying `user_id`, `challenge_id`, `attempt`, and an outcome category.
+Carrying `user_id`, `challenge_id`, the count of superseded challenges, and a
+reason category on failure. There is no `.sent`, `.rate_limited` or
+`.superseded` event - supersession is a field on the requested event, and a
+rate-limited request is logged by the limiter.
 
 **Never logged:** the code, in any form - not truncated, not hashed, not in
-an exception message, not in audit metadata, not in a trace. The template
-renders it at send time from the outbox context, and the outbox clears
+an exception message, not in audit metadata, not in a trace. Not the
+submitted value either, since a near-miss narrows the keyspace. The template
+renders the code at send time from the outbox context, and the outbox clears
 context on terminal transition, so the plaintext code's persisted lifetime is
 bounded by delivery.
 
@@ -240,17 +330,53 @@ unavoidable given that the worker, not the request, renders the message; the
 same is already true of reset and invitation tokens (ADR-042). It is bounded
 by delivery, never logged, and exposed by no endpoint.
 
+## Lifetime and configuration
+
+A code lives ten minutes by default. The service refuses a lifetime below one
+minute or above one hour at construction, rather than clamping it: silently
+correcting configuration is how an operator comes to believe a code lives for
+a day when it lives for an hour.
+
+**The environment settings are not wired.** The default comes from
+`DEFAULT_VERIFICATION_TTL_SECONDS` on the model and the service accepts a
+`ttl_seconds` argument, but no `EMAIL_VERIFICATION_OTP_TTL_SECONDS` exists in
+`app/core/config.py` and nothing passes one. The bound exists; the knob does
+not. This is the open half of the configuration requirement.
+
 ## Build state
 
-Honest accounting.
+Honest accounting, corrected after implementation.
 
-**Built:** the `email_verified_at` column, the
-`email_verification_challenges` table with its constraints and indexes,
-migration 0028, and the OTP generation and hashing helpers.
+**Built:** the `email_verified_at` column and `is_email_verified` property;
+the `email_verification_challenges` table with its partial unique index,
+user index and cascade; migration 0028; migration 0029 for the audit enum;
+the four crypto helpers in `app/core/security.py`; the
+`EmailVerificationRepository` with its atomic consume, atomic attempt
+increment and supersede; the `EmailVerificationService`; the
+`EMAIL_VERIFICATION` template; the three audit actions; the two rate-limit
+policies; and the two endpoints under `/auth/email/verification`.
 
-**Not built:** the service, the repository, the two endpoints, the
-`EMAIL_VERIFICATION` template, the configuration settings, the audit actions,
-the rate-limit policies, registration integration, and every test.
+**Not built:**
 
-**Not verified:** nothing in this phase has been executed, linted,
-type-checked or migrated. No test has run. No code has been emailed.
+- environment settings for TTL and attempt cap (see above)
+- registration integration - `AuthService.register` still enqueues nothing,
+  so a new account has no challenge until it asks for one
+- `email_verified_at` is not reported by `/auth/me`, so a client cannot see
+  whether it needs to ask for a code
+- an audit row for rate-limited attempts (see question 15)
+- **every test.** No unit test, no integration test, no adversarial matrix,
+  no canary-OTP log regression test, no property test
+- sections in `docs/EMAIL.md`, `docs/SECURITY.md`, `docs/AUTHORIZATION.md`,
+  `API.md`, `RUNBOOK.md`, `DEPLOYMENT.md`, `TASKS.md`, and an ADR entry in
+  `DECISIONS.md`
+
+**Corrected in this document after implementation:** it previously claimed
+rate-limit refusals are audited (they are not), listed six log events where
+four exist, and described the service, endpoints, template, repository and
+audit actions as unbuilt.
+
+**Not verified.** Nothing in this phase has been executed. Not linted, not
+type-checked, not migrated against a database, not started in a container, no
+test run, no code emailed. The environment this was written in has no
+network, no Docker, no PostgreSQL and no Redis. Every claim above about
+*behaviour* is a claim about what the code says, not about anything observed.
