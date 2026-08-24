@@ -97,8 +97,16 @@ def get_account_service(session: SessionDep) -> AccountService:
 AccountServiceDep = Annotated[AccountService, Depends(get_account_service)]
 
 
-def get_invitation_service(session: SessionDep) -> InvitationService:
-    return InvitationService(session=session)
+def get_invitation_service(
+    settings: SettingsDep,
+    session: SessionDep,
+) -> InvitationService:
+    """Built with settings because issuing an invitation queues its email.
+
+    Delivery is an outbox row on this request's session (ADR-042), not a call
+    to a provider, so the service still reaches nothing outside PostgreSQL.
+    """
+    return InvitationService(session=session, settings=settings)
 
 
 InvitationServiceDep = Annotated[InvitationService, Depends(get_invitation_service)]

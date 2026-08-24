@@ -9,6 +9,7 @@ from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings, get_settings
 from app.core.exceptions import (
     AuthenticationError,
     ConflictError,
@@ -40,6 +41,8 @@ from app.repositories import (
     UserRepository,
 )
 from app.services.audit_service import AuditTrail
+from app.services.email_service import EmailOutbox
+from app.services.email_templates import EmailTemplate
 
 logger = get_logger(__name__)
 
@@ -71,13 +74,26 @@ class InvitationService:
     `issue` refuses that, and an invitation issued *after* a removal is how
     somebody is asked back. Acceptance then reactivates the existing membership
     row rather than adding a second one.
+
+    Delivery goes through the outbox on the caller's session (ADR-042), so an
+    invitation and the email announcing it commit together or not at all. This
+    service never reaches a provider.
     """
 
-    def __init__(self, *, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        *,
+        session: AsyncSession,
+        settings: Settings | None = None,
+    ) -> None:
         self._session = session
+        # Defaulted rather than required so existing construction sites keep
+        # working; the request-scoped provider passes the real settings in.
+        self._settings = settings if settings is not None else get_settings()
         self._users = UserRepository(session)
         self._tenants = TenantRepository(session)
         self._tokens = InvitationTokenRepository(session)
+        self._outbox = EmailOutbox(session, self._settings)
 
     async def issue(
         self,
@@ -88,7 +104,12 @@ class InvitationService:
         email: str,
         role: TenantRole,
     ) -> tuple[TenantInvitation, str]:
-        """Create an invitation and return it with its one-time token."""
+        """Create an invitation, queue its email, and return the one-time token.
+
+        The email is queued on this session rather than sent, so a caller whose
+        transaction rolls back later - a seat check, an integrity error - does
+        not leave an invitation announced to somebody who cannot accept it.
+        """
         if role is TenantRole.TENANT_OWNER and inviter_role is not TenantRole.TENANT_OWNER:
             # Otherwise the boundary between admin and owner is decorative: any
             # administrator could mint themselves a peer with full authority.
@@ -110,6 +131,23 @@ class InvitationService:
             invited_by_id=inviter.id,
         )
         await self._session.flush()
+
+        tenant = await self._tenants.get_by_id(tenant_id)
+        # Keyed to the invitation row, so re-issuing against the same row cannot
+        # produce a second message however often the request is repeated. The
+        # workspace name is read from the tenant row rather than taken from the
+        # request, and it is the only caller-influenced value in the template.
+        await self._outbox.enqueue(
+            template=EmailTemplate.WORKSPACE_INVITATION,
+            recipient=invitation.email,
+            idempotency_key=f"invitation:{invitation.id}",
+            context={
+                "workspace_name": tenant.name if tenant is not None else "a workspace",
+                "token": raw_token,
+            },
+            tenant_id=tenant_id,
+            user_id=existing.id if existing is not None else None,
+        )
 
         AuditTrail(self._session, tenant_id=tenant_id).record(
             AuditAction.MEMBER_INVITED,
@@ -151,6 +189,11 @@ class InvitationService:
             raise ConflictError("That invitation is no longer pending.")
         invitation.status = InvitationStatus.REVOKED
         await self._session.flush()
+        # Deliberately no email. Revoking an invitation the person may never
+        # have seen, to a workspace they were never in, would be telling a
+        # stranger they had been un-invited - and if the outbox row is still
+        # pending, revocation does not unsend it: the token it carries is dead
+        # either way, which is what makes an undelivered revocation harmless.
         logger.info(
             "invitation.revoked",
             extra={
