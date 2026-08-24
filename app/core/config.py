@@ -184,6 +184,28 @@ class Settings(BaseSettings):
     meta_access_token: str | None = None
     meta_api_version: str = "v21.0"
 
+    # Email (ADR-042). Off by default: a deployment that has not configured a
+    # sender is a deployment that sends nothing, and every enqueue is a no-op
+    # rather than a row that waits forever. Delivery is asynchronous through
+    # the outbox and the email worker; the API process never sends, which is
+    # why RESEND_API_KEY is validated by the sending process at startup
+    # (integrations.email.build_email_provider) rather than here - requiring
+    # it globally would force a credential into a container that never uses it.
+    email_enabled: bool = False
+    email_provider: Literal["resend", "fake"] = "resend"
+    resend_api_key: str | None = None
+    # Verifies Resend webhook signatures (Svix scheme). Absent means the
+    # webhook endpoint refuses every delivery rather than trusting any.
+    resend_webhook_secret: str | None = None
+    email_from: str | None = None
+    email_reply_to: str | None = None
+    # The public origin emailed links point at. Configured, never derived
+    # from a request: a reset link built from a Host header is a reset link
+    # an attacker can aim at their own origin.
+    app_public_url: str | None = None
+    email_max_attempts: int = Field(default=8, gt=0)
+    email_worker_poll_seconds: float = Field(default=10.0, gt=0)
+
     @field_validator("credential_encryption_keys", mode="before")
     @classmethod
     def _parse_encryption_keys(cls, value: Any) -> Any:
@@ -346,6 +368,29 @@ class Settings(BaseSettings):
                     "CORS_ORIGINS must name each allowed origin explicitly; "
                     "'*' is not permitted with credentialed requests"
                 )
+
+        if self.email_enabled and not self.is_testing:
+            # Fail closed where email is *required*: a deployment that turned
+            # it on and half-configured it should refuse to boot, not enqueue
+            # rows that render broken links or send from nobody (ADR-042).
+            if not self.email_from:
+                problems.append("EMAIL_FROM must be set when EMAIL_ENABLED is true")
+            if not self.app_public_url:
+                problems.append(
+                    "APP_PUBLIC_URL must be set when EMAIL_ENABLED is true: emailed "
+                    "links need a configured origin, never one derived from a request"
+                )
+            if self.is_production:
+                if self.email_provider != "resend":
+                    problems.append(
+                        "EMAIL_PROVIDER must be a real provider in production; "
+                        "the fake delivers nothing and says it succeeded"
+                    )
+                if self.app_public_url and not self.app_public_url.startswith("https://"):
+                    problems.append(
+                        "APP_PUBLIC_URL must be https in production: reset and "
+                        "invitation tokens travel in these links"
+                    )
 
         if problems:
             raise ValueError(f"invalid {self.environment} configuration: " + "; ".join(problems))
