@@ -41,6 +41,11 @@ from .email import (
     EmailSuppression,
     OutboundEmail,
 )
+from .email_verification import (
+    DEFAULT_VERIFICATION_TTL_SECONDS,
+    MAX_VERIFICATION_ATTEMPTS,
+    EmailVerificationChallenge,
+)
 from .enums import (
     InvitationStatus,
     MembershipStatus,
@@ -124,11 +129,13 @@ from .whatsapp_template import (
 __all__ = [
     "AGENT_WRITABLE_FIELDS",
     "ALLOWED_TRANSITIONS",
+    "DEFAULT_VERIFICATION_TTL_SECONDS",
     "EMBEDDING_DIMENSIONS",
     "EVENT_UNITS",
     "MAX_ATTEMPTS",
     "MAX_RECIPIENT_ATTEMPTS",
     "MAX_SCORE",
+    "MAX_VERIFICATION_ATTEMPTS",
     "MIN_SCORE",
     "PERIOD_LIMITS",
     "PRIORITY_RANK",
@@ -169,6 +176,7 @@ __all__ = [
     "DocumentStatus",
     "EmailStatus",
     "EmailSuppression",
+    "EmailVerificationChallenge",
     "FollowUp",
     "FollowUpStatus",
     "InvitationStatus",

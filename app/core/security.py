@@ -31,6 +31,12 @@ MAXIMUM_PASSWORD_LENGTH: Final = 128
 INVITATION_TOKEN_BYTES: Final = 32
 RESET_TOKEN_BYTES: Final = 32
 
+# Length of an email verification code. Six digits is a million values, which
+# is small enough that the attempt cap and the rate limit - not the keyspace -
+# are what make guessing hopeless.
+VERIFICATION_CODE_DIGITS: Final = 6
+_VERIFICATION_CODE_SPACE: Final = 10**VERIFICATION_CODE_DIGITS
+
 _hasher = PasswordHasher()
 
 
@@ -299,3 +305,94 @@ def generate_reset_token() -> tuple[str, str]:
     """
     raw_token = secrets.token_urlsafe(RESET_TOKEN_BYTES)
     return raw_token, hash_reset_token(raw_token)
+
+
+def hash_verification_code(code: str) -> str:
+    """Hash an email verification code for storage.
+
+    Argon2, and this is the one place that departs from the two functions above
+    - so the reason matters. They are SHA-256 *because* their input is 256 bits
+    of randomness: nothing to brute-force, and slowness would only tax the
+    lookup. A six-digit code inverts every part of that. Its keyspace is a
+    million values, so a leaked database of SHA-256 digests is not a database of
+    unguessable secrets - it is a database of codes recoverable in the time it
+    takes to hash a million short strings, which is not long enough to matter.
+
+    Argon2 makes each candidate cost real work, which is the only thing that
+    makes a twenty-bit secret survive disclosure of its verifier.
+
+    The cost is that this cannot be a lookup key. Argon2 salts every hash, so
+    the same code hashes differently each time and no index can be built on it;
+    the challenge is located by account and this only ever confirms or denies.
+    """
+    return _hasher.hash(code)
+
+
+def verify_verification_code(*, code: str, code_hash: str) -> bool:
+    """Whether the submitted code matches the stored verifier.
+
+    Never raises, for `verify_password`'s reason: a wrong code and an
+    unreadable stored value are both a failed attempt. Argon2's own comparison
+    does the work, so there is no hand-rolled equality here to get wrong.
+    """
+    try:
+        return _hasher.verify(code_hash, code)
+    except (Argon2Error, ValueError):
+        return False
+
+
+def generate_verification_code() -> tuple[str, str]:
+    """Return the six-digit code to email, and the hash to store.
+
+    `secrets` rather than `random`, because a code produced by a predictable
+    generator is not a secret at all - and it is derived from nothing: not the
+    account, not the address, not the clock. Anything derived from those is
+    reproducible by whoever knows them.
+
+    Formatted to width rather than assembled arithmetically, so `000042` is a
+    perfectly ordinary code. Building digits by division tends to drop leading
+    zeroes, which quietly removes a tenth of the keyspace for each one lost.
+
+    Only the hash is persisted. The plaintext returned here has exactly one
+    legitimate destination - the message sent to the address being proven - and
+    must reach no log, no audit entry, no response body and no URL.
+    """
+    code = f"{secrets.randbelow(_VERIFICATION_CODE_SPACE):0{VERIFICATION_CODE_DIGITS}d}"
+    return code, hash_verification_code(code)
+
+
+def normalise_verification_code(submitted: str) -> str | None:
+    """Clean up a submitted code, or `None` if it cannot be one.
+
+    Spaces and hyphens are stripped because people paste `482 731` out of a
+    mail client, and refusing that teaches them the product is broken rather
+    than that they mistyped.
+
+    The digit test is deliberately ASCII-only. `"\u0661\u0662\u0663\u0664\u0665\u0666".isdigit()` is `True`
+    in Python and `int()` parses it happily, and this product's users type
+    Arabic. A check written as `.isdigit()` alone would accept Arabic-Indic
+    numerals, hash them, compare against a verifier built from Western digits,
+    and fail - burning an attempt and looking, to the person holding the right
+    code, exactly like a broken system. Rejecting them here means the caller is
+    told the format is wrong instead.
+
+    Returning `None` rather than raising keeps the decision with the caller,
+    which needs malformed input to look identical to a wrong code.
+    """
+    candidate = submitted.strip().replace(" ", "").replace("-", "")
+    if len(candidate) != VERIFICATION_CODE_DIGITS:
+        return None
+    if not (candidate.isascii() and candidate.isdigit()):
+        return None
+    return candidate
+
+
+def spend_code_verification_time(code: str) -> None:
+    """Do the work of a code check that cannot succeed.
+
+    `spend_verification_time` for verification codes. Used when the account has
+    no live challenge, so that "nothing outstanding" and "wrong code" take the
+    same time to answer. A small oracle, but Argon2 is slow enough that its
+    absence would be plainly measurable.
+    """
+    verify_verification_code(code=code, code_hash=_unusable_hash())
