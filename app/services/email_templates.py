@@ -37,6 +37,10 @@ class EmailTemplate(StrEnum):
     SESSIONS_REVOKED = "sessions_revoked"
     ACCOUNT_DISABLED = "account_disabled"
     ACCOUNT_ENABLED = "account_enabled"
+    # Proving control of the address on an account
+    # (docs/EMAIL_VERIFICATION.md). The only template whose secret is meant to
+    # be read and retyped rather than clicked.
+    EMAIL_VERIFICATION = "email_verification"
     INVOICE_ISSUED = "invoice_issued"
     TRIAL_EXPIRED = "trial_expired"
     SUBSCRIPTION_CANCELLED = "subscription_cancelled"
@@ -58,6 +62,10 @@ _SUBJECTS: Final[dict[EmailTemplate, str]] = {
     EmailTemplate.SESSIONS_REVOKED: "You were signed out of every Wasla session",
     EmailTemplate.ACCOUNT_DISABLED: "Your Wasla account has been suspended",
     EmailTemplate.ACCOUNT_ENABLED: "Your Wasla account has been restored",
+    # Constant, and in particular *not* the code. A subject line is the one
+    # part of a message that shows up on a lock screen, in a notification
+    # preview and in somebody else's shoulder-surfing line of sight.
+    EmailTemplate.EMAIL_VERIFICATION: "Verify your email address for Wasla",
     EmailTemplate.INVOICE_ISSUED: "Your Wasla invoice is ready",
     EmailTemplate.TRIAL_EXPIRED: "Your Wasla trial has ended",
     EmailTemplate.SUBSCRIPTION_CANCELLED: "Your Wasla subscription has been cancelled",
@@ -70,6 +78,10 @@ _REQUIRED_KEYS: Final[dict[EmailTemplate, frozenset[str]]] = {
     EmailTemplate.SESSIONS_REVOKED: frozenset(),
     EmailTemplate.ACCOUNT_DISABLED: frozenset(),
     EmailTemplate.ACCOUNT_ENABLED: frozenset(),
+    # Two keys and no more. Not the account id, not the workspace, not the
+    # address itself - a message proving control of an inbox does not need to
+    # tell that inbox anything about the account it belongs to.
+    EmailTemplate.EMAIL_VERIFICATION: frozenset({"code", "expires_minutes"}),
     EmailTemplate.INVOICE_ISSUED: frozenset(
         {"amount_due", "currency", "period_start", "period_end"}
     ),
@@ -245,6 +257,37 @@ def render(
                 "Your Wasla account has been restored.",
                 "Sessions from before the suspension remain signed out; sign in "
                 "again to continue.",
+            ],
+            None,
+        )
+    elif template is EmailTemplate.EMAIL_VERIFICATION:
+        code = context["code"]
+        minutes = context["expires_minutes"]
+        # No link, and that is the point. Every other secret-bearing template
+        # here builds a URL; a code in a URL is a code in browser history, in a
+        # `Referer` header and in whatever proxy logged the request. This one is
+        # text to be read and retyped.
+        text = (
+            "Use this code to verify your email address on Wasla:\n\n"
+            f"    {code}\n\n"
+            f"The code expires in {minutes} minutes and can be used once. Enter "
+            "it in the tab you started from. Wasla will never ask you to send "
+            "this code to anyone, by email, message or phone.\n\n"
+            "If you did not request this, ignore this message. Nothing on your "
+            "account has changed."
+        )
+        html_body = _layout(
+            subject,
+            [
+                "Use this code to verify your email address on Wasla:",
+                '<strong style="font-size:28px;letter-spacing:6px;'
+                f'font-family:monospace;color:#111827;">{html.escape(code)}</strong>',
+                f"The code expires in {html.escape(minutes)} minutes and can be "
+                "used once. Enter it in the tab you started from. Wasla will "
+                "never ask you to send this code to anyone, by email, message or "
+                "phone.",
+                "If you did not request this, ignore this message. Nothing on "
+                "your account has changed.",
             ],
             None,
         )
