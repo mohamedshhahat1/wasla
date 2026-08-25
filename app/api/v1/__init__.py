@@ -37,6 +37,7 @@ from app.api.v1 import (
     email_verification,
     email_webhooks,
     follow_ups,
+    google_oauth,
     invitations,
     invoices,
     knowledge,
@@ -101,9 +102,16 @@ CAMPAIGN_ROUTERS = (
 # so attaching it would make proving your own email address require a selected
 # workspace and an active membership - neither of which has anything to do with
 # owning an inbox, and both of which a person may legitimately lack.
+#
+# `google_oauth` is here for the same reason and is emphatically not unguarded:
+# every one of its five routes declares `GoogleOAuthRateLimit`, counted by
+# client address through the trusted-proxy logic. It cannot take the workspace
+# limit because two of its routes are reachable by somebody who has no account
+# at all - which is the point of them.
 UNLIMITED_ROUTERS = (
     auth.router,
     email_verification.router,
+    google_oauth.router,
     platform.router,
     webhooks.router,
     email_webhooks.router,
