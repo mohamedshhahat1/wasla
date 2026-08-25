@@ -13,7 +13,10 @@ from typing import Any, cast
 
 from sqlalchemy import CursorResult, delete, func, select, update
 
-from app.db.models import FederatedIdentity, IdentityProvider
+# Imported from the defining module rather than the package, so this does not
+# depend on what `app.db.models.__init__` happens to re-export. The model is
+# still registered there, because Alembic needs it on `Base.metadata`.
+from app.db.models.identity import FederatedIdentity, IdentityProvider
 from app.repositories.base import BaseRepository
 
 

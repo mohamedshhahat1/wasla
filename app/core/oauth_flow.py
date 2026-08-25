@@ -65,12 +65,18 @@ VERIFIER_BYTES: Final = 32
 # anybody reads it.
 FLOW_TTL_SECONDS: Final = 600
 
-# Checked before the value is used to build a Redis key. `token_urlsafe(32)`
-# produces 43 characters from this alphabet, so this accepts everything this
-# module issues and refuses a megabyte of caller-supplied junk becoming a
-# lookup. A state that fails this never existed, which is the same answer as a
-# state that expired.
-_STATE_SHAPE: Final = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+# What a state may look like, checked before the value is used to build a Redis
+# key. `token_urlsafe(32)` produces 43 characters from this alphabet, so this
+# accepts everything this module issues and refuses a megabyte of
+# caller-supplied junk becoming a lookup. A state that fails this never existed,
+# which is the same answer as a state that expired.
+#
+# `MAX_STATE_LENGTH` is exported because the request schema bounds the field with
+# it too. One constant, so the edge and the store cannot disagree about how long
+# a state may be.
+MIN_STATE_LENGTH: Final = 16
+MAX_STATE_LENGTH: Final = 128
+_STATE_SHAPE: Final = re.compile(rf"^[A-Za-z0-9_-]{{{MIN_STATE_LENGTH},{MAX_STATE_LENGTH}}}$")
 
 
 class FlowKind(StrEnum):
