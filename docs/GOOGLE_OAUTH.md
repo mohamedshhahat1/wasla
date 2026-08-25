@@ -1,448 +1,493 @@
-# Google Sign-In
+# Google sign-in
 
-**Build state: design only. Nothing described below is implemented yet.** This
-document is committed ahead of the code so the decisions can be argued with on
-their own terms instead of being reverse-engineered from an implementation. Each
-subsequent commit moves items from "designed" to "built", and the final section
-is the honest ledger of which is which.
+How somebody signs in to Wasla with a Google account, why the flow is shaped
+the way it is, and what has and has not been proven about it.
 
----
+> **Build state.** Every piece described here is written and committed. **None
+> of it has been executed.** There was no Python interpreter, no PostgreSQL, no
+> Redis, no Docker and no network available while it was written, so no test
+> has run, no migration has been applied and no request has been served. The
+> table at the end of this document says which claims are code and which are
+> observations. Read it before deploying anything.
 
 ## What this is, and is not
 
-This is a second way to *prove who you are*. It is not a second session system,
-not a second token format, and not a second authorization model.
+It is the OAuth 2.0 authorization-code flow with PKCE, and OpenID Connect on
+top of it, against Google as the issuer. A Google sign-in produces the same
+session as a password sign-in: the same access token, the same refresh token,
+the same claims, the same issuer, the same `token_version`, the same rotation
+and reuse detection. There is exactly one session model in Wasla and this does
+not add a second.
 
-After Google has been believed, the code path rejoins password login at exactly
-the point where password login stops caring how the person was identified: the
-same `AuthenticatedSession`, minted by the same `AuthService`, carrying the same
-claims, the same issuer, the same `token_version`, and the same refresh
-rotation and reuse detection. A Google session and a password session are
-indistinguishable downstream, which is the property that keeps every existing
-authorization dependency, tenant isolation check and membership rule applicable
-without modification. Anything that had to be taught about Google would be a
-place where Google could bypass it.
-
-It is also not multi-factor authentication and not email verification. It
-replaces the password step, nothing more.
+It is not a way to accept an identity assertion from a browser. Nothing in the
+system trusts a client-supplied email address, a client-supplied `sub`, or a
+client-supplied `email_verified`. An endpoint that took an address and returned
+a session would not be authentication, and none exists.
 
 ---
 
-## ADR-043: Wasla is a confidential OIDC client, and uses PKCE anyway
+## ADR-043 — Wasla is a confidential client, and uses PKCE anyway
 
-**Decision.** Authorization Code Flow, server-side, with a client secret held
-only by the API - a confidential client. PKCE is used on top of it.
+**Decision.** The API is a confidential server-side client. It holds
+`GOOGLE_CLIENT_SECRET`, it performs the token exchange itself, and the browser
+never holds a credential. PKCE is used in addition to the client secret.
 
-**Why confidential.** The secret lives in `GOOGLE_CLIENT_SECRET`, is read by the
-API process, and is sent only in the direct server-to-server token exchange. It
-is never in a response body, never in a frontend bundle, never in a redirect
-URL. There is a server that can keep a secret, so the client is confidential;
-claiming otherwise would mean giving up client authentication for nothing.
+**Why confidential.** The exchange happens in a process we run, so a secret can
+actually be kept. The alternative - a public client where the browser redeems
+the code - means the browser holds tokens Google issued, and this application
+has no reason to put a Google token in a browser.
 
-**Why PKCE regardless.** PKCE is not *required* for a confidential client, and a
-reading of the specification alone would skip it. It is implemented because it
-defends against a different attack than client authentication does:
-authorization-code injection, where an attacker who obtains a code by some other
-means redeems it in a flow they control. The client secret does not stop that -
-the attacker is talking to the same client. The code verifier does, because the
-verifier is generated per flow and never leaves the server. RFC 9700 recommends
-PKCE for all clients for this reason, and it costs one random string.
+**Why PKCE as well, when the secret already authenticates the client.** RFC
+9700 recommends PKCE for every client type, and the reason is code injection
+rather than client authentication. An authorization code that leaks - through a
+referrer, a proxy log, a shared browser, a redirect the operating system
+handled oddly - is redeemable by anybody holding the client secret, and the
+client secret is not what a code leak compromises. With PKCE the code is only
+redeemable alongside a verifier that never left this process. The cost is one
+hash. There is no argument for skipping it.
 
-**Rejected: accepting an ID token from the frontend.** A `POST` carrying a
-Google ID token would still need full cryptographic validation, so it is not
-insecure by construction - but it moves the authorization code into the browser,
-loses client authentication, and makes the API's trust boundary the frontend's
-correctness. It also has no way to bind a nonce it did not issue.
-
-**Rejected outright: `POST /auth/google {"email": ..., "name": ...}`.** This is
-not authentication. It is a request to be issued a session for an arbitrary
-address. It is recorded here only so that nobody later mistakes it for a
-simplification.
+**Rejected: accepting a Google ID token from the frontend.** It looks simpler
+and it moves the trust boundary into the browser. The server would then have to
+validate a token it did not request, with no nonce it chose, meaning any token
+Google ever issued for this client id would be accepted - including one
+obtained by a different application the user also signed into, if it shares an
+audience. The nonce is what closes that, and a nonce only means something when
+the party checking it is the party that generated it.
 
 ### The deviation: the callback is a POST, and the redirect URI is the frontend
 
-The brief asked for `GET /auth/google/callback` as the registered redirect URI.
-This implementation does something different and the difference is deliberate.
+The conventional shape is `GET /auth/google/callback` on the API, with Google
+redirecting the browser straight there. **This implementation does not do that**
+and the reason is structural rather than stylistic.
 
-This API is cookieless. It authenticates with bearer tokens and returns them in
-response bodies. If Google redirected a top-level browser navigation straight to
-an API endpoint, that endpoint's only way to deliver a session would be to
-render a document containing an access token and a refresh token - visible on
-screen, unreadable by the single-page application that actually needs it, and
-present in whatever screenshots and screen recordings follow.
+This API is cookieless. Every existing authentication route returns tokens in a
+JSON response body, and the SPA holds them. A `GET` callback reached by
+top-level browser navigation would therefore have to render a document
+containing a refresh token. That document is not readable by the SPA that needs
+the token, and it *is* readable by anything that can see the page - a
+screenshot, a shoulder, a browser extension, a shared screen.
 
 So: `GOOGLE_REDIRECT_URI` points at a frontend route. Google redirects the
-browser there. The frontend reads `code` and `state` out of its own URL and
-posts them to `POST /auth/google/callback`, which is a `fetch` whose response
-body never becomes a rendered document.
+browser there with `code` and `state` in the query string. The frontend posts
+those two values to `POST /auth/google/callback`, which exchanges the code
+server-side using the client secret and the PKCE verifier, and answers with the
+same body `/auth/login` answers.
 
-Nothing security-relevant moves to the browser. The authorization code is still
-exchanged server-side, still authenticated with the client secret, still bound to
-the PKCE verifier that only the server holds. The browser sees a single-use code
-that is worthless without that verifier. The redirect URI is still fixed
-configuration, still exact-matched by Google against its registered value, and
-still sent unchanged in the token exchange as RFC 6749 requires.
+What this preserves: the redirect URI is still fixed configuration, still
+exact-matched by Google, and still sent verbatim in the token exchange as RFC
+6749 requires. The frontend never sees an ID token, an access token or the
+client secret. The authorization code is worthless without the verifier.
 
-The alternative that keeps a `GET` callback is to set an `HttpOnly` cookie, or
-to redirect onward with a one-time handoff code. Both are defensible. Both
-introduce machinery this codebase does not currently have, which is a larger
-change than this feature should make unilaterally.
-
----
-
-## ADR-044: Identity lives in its own table, keyed by issuer subject
-
-**Decision.** A `user_identities` table holding `(user_id, provider,
-provider_subject, created_at, updated_at, last_login_at)`. No Google columns on
-`users`.
-
-**The key is `sub`, and only `sub`.** Google's subject identifier is stable for
-the life of the account and is the only field in the token that is. The email
-address can be renamed. The display name changes on a whim. The picture URL
-rotates. A hosted-domain account can be moved between domains. Keying on any of
-those means that an attribute change silently becomes an identity change, which
-in the best case locks someone out and in the worst case hands their account to
-whoever inherits the old address.
-
-**Two constraints carry the policy.**
-
-- `(provider, provider_subject)` unique. The same Google account can never be
-  two Wasla accounts. This is also what makes the concurrent first-login race
-  safe: two callbacks for one subject both see no identity, both insert, one
-  commits, and the loser is told by PostgreSQL rather than by luck.
-- `(user_id, provider)` unique. One issuer per account. This settles what
-  "unlink Google" means - there is exactly one row - and makes duplicate linking
-  a database error rather than a code path.
-
-**Multiple identities per user: supported by shape, bounded by policy.** The
-table can hold several rows per user, one per provider, so adding a second
-issuer later is a new enum label and no schema change. What is deliberately
-*not* supported is two Google accounts on one Wasla user. It is a real use case
-and a rare one, and allowing it makes unlinking ambiguous for everybody in order
-to serve it. Revisit if users actually ask.
-
-**Stored: nothing that could be replayed.** No id token, no access token, no
-Google refresh token. There is no feature that calls a Google API on a user's
-behalf, so there is nothing to store them *for* - and an unused credential in a
-database is pure liability. The provider's copy of the email address is also
-absent: it is a second copy of personal data that goes stale on rename, and its
-presence would invite the exact mistake this design exists to prevent.
+**What this costs, stated plainly.** Without a cookie, the `state` cannot prove
+that the browser finishing the flow is the browser that started it. It is
+unpredictable, single-use, short-lived, server-side, and it carries the nonce
+and the PKCE verifier - which closes code injection and replay. It does not
+close "an attacker induces a victim's browser to complete an authorization the
+attacker began". Adding a browser-bound cookie would close it, and would mean
+introducing `SameSite`, domain and CSRF decisions across an API that currently
+has none of them. The residual exposure is narrower than it sounds, because the
+callback sets no browser state: a victim tricked into completing the attacker's
+flow receives tokens in a response body their own page reads, rather than
+acquiring a session silently. For the **link** flow there is no gap at all, as
+the flow record holds the initiating account and the identity can only ever
+attach to it. This is a known, deliberate, documented limitation rather than an
+oversight.
 
 ---
 
-## ADR-045: A matching email address never links an account
+## ADR-044 — Identity lives in its own table, keyed on the Google subject
 
-**Decision.** When a validated Google token presents an email that already
-belongs to a Wasla account, and no identity row connects them, authentication is
-**refused**. No silent attach, no silent login, no merge, no password change.
-Linking requires an authenticated request from the account itself.
+**Decision.** A `user_identities` table. Columns: `id`, `user_id`, `provider`,
+`provider_subject`, `created_at`, `updated_at`, `last_login_at`. Unique on
+`(provider, provider_subject)` and on `(user_id, provider)`. No Google columns
+on `users`.
 
-**Why this is not paranoia.** "Google says this person controls
-`user@example.com`" and "this person controls the Wasla account registered as
-`user@example.com`" are different statements. They come apart whenever an
-address has changed hands - a former employee's corporate address reissued to a
-new hire, a lapsed domain re-registered, a recycled address at a consumer
-provider. Treating the first as proof of the second means that whoever holds the
-mailbox *today* inherits the Wasla account of whoever held it *before*, without
-ever seeing a password.
+**Why the subject and nothing else.** Google's `sub` is stable for the lifetime
+of the account and is the only claim documented as such. An email address is
+not: people change them, corporate domains change hands, and a Workspace
+administrator can reassign one to a different human being. A display name, a
+picture and a username are not identifiers at all. Keying on anything but the
+subject means an address change silently orphans an account, or - far worse - an
+address reassignment silently hands one over.
 
-**The enumeration question, answered rather than waved at.** The refusal has to
-say something useful, and "an account already exists with this address" is
-literally an existence oracle. It is nonetheless the right response, under one
-condition: the caller has just proved to Google that they read mail at that
-address. Someone who controls the mailbox can already obtain that account
-through password reset. Disclosing existence to them reveals nothing they could
-not otherwise get, and withholding it produces a support ticket instead of a
-resolution.
+**Why a separate table rather than `users.google_sub`.** A column would model
+"a user has at most one Google account, forever". A table models "a user has
+some identities", which is what is actually true the moment a second provider
+is added, and costs one join today. The `(user_id, provider)` constraint is what
+keeps one account from accumulating two Google identities; `(provider,
+provider_subject)` is what keeps one Google account from opening two Wasla
+accounts. The second is the security-relevant one and it is also the race
+backstop for concurrent first logins.
 
-That argument depends entirely on mailbox control being proved, which leads
-directly to the next decision.
+**Delete behaviour.** `ON DELETE CASCADE` from `users`. An identity has no
+meaning without the account it opens, so a stranded row would be a row that
+grants access to nothing while occupying a unique constraint that would block
+the rightful owner from reconnecting.
 
-**When `email_verified` is false, nothing is disclosed and nothing is created.**
-The address is refused with a message about Google, not about Wasla, and the
-check happens *before* any lookup - so the response is identical whether or not
-an account exists. An unverified claim proves nothing about a mailbox, so it may
-neither create an account nor reveal one.
+**Nothing from Google is stored.** No ID token, no access token, no refresh
+token, no authorization code. Wasla calls no Google API on a user's behalf, so a
+stored token would be a credential held for no purpose - and the authorization
+request asks for `access_type=online`, which means Google does not issue a
+refresh token at all. That is deliberately structural: "do not store it" is a
+rule somebody has to remember, "it is never issued" is not.
 
-**Once an identity exists, the email claim is not consulted at all.** Subsequent
-logins resolve on `sub`. A user who renames their Gmail keeps signing in; a
-renamed address does not reopen the collision question.
+### Audit vocabulary
+
+Five actions: `GOOGLE_LOGIN_SUCCEEDED`, `GOOGLE_LOGIN_FAILED`,
+`GOOGLE_IDENTITY_LINKED`, `GOOGLE_IDENTITY_LINK_FAILED`,
+`GOOGLE_IDENTITY_UNLINKED`.
+
+Two deliberate departures from the obvious list.
+
+**There is no `GOOGLE_LOGIN_STARTED`.** A row written when a browser is
+redirected is a row written before anybody is identified, so there is no actor
+to attribute it to - and an audit row an anonymous stranger can create on
+demand is a way to flood a trail colleagues have to read. It is a log line
+instead.
+
+**`GOOGLE_LOGIN_FAILED` is written only when the refusal names a real account**
+- a disabled account, or an address that already has one. Cryptographic
+failures get log lines, for the same flooding reason: a forged token must not
+be able to write to the audit trail.
+
+**The provider subject is not in `meta`.** It is a stable identifier that
+correlates a person across every service using the same Google account, the row
+it would duplicate is already in `user_identities`, and audit logs are read by
+people. `meta` carries the provider and a reason.
 
 ---
 
-## ADR-046: Google's verified email is trusted, because the column it writes grants nothing
+## ADR-045 — A matching email address never links anything
 
-**Decision.** A cryptographically validated `email_verified: true`, for an
-address matching the Wasla account's own, sets `users.email_verified_at` if it
-is currently `NULL`. It never clears it and never overwrites an earlier one.
+**Decision.** When a Google subject nobody has seen before presents a verified
+address that already belongs to a Wasla account, the request is **refused**.
+Not merged, not attached, not signed in, and the password is not touched. The
+response says an account exists and that Google must be connected from account
+settings after signing in normally.
 
-**Why this is safe here specifically.** `app/db/models/user.py` is explicit that
-this column grants nothing: no route reads it, no permission depends on it,
+**Why refusing is the only safe answer.** Silently signing them in treats
+control of a mailbox today as proof of who opened an account under that address
+previously. Those are different claims. Addresses get reassigned - most commonly
+when an employee leaves and their Workspace address is reissued - and the person
+holding it now may have no relationship at all to the account.
+
+**The enumeration question, and how the ordering answers it.** Naming the
+collision does disclose that an account exists. That is acceptable *because of
+where the check sits*: `email_verified` is validated **before any account
+lookup happens**. Anybody who reaches the lookup has cryptographically proven
+that Google considers them the owner of that mailbox, so they are being told
+something they could already have learned by asking for a password reset.
+Reverse the two checks and the endpoint becomes a directory: create a Google
+account claiming any address, submit a callback, read the answer. The order is
+the control, and it is asserted in the service's module docstring so that
+somebody refactoring it sees why before moving it.
+
+**Linking is bound to the account, not the address.** `POST
+/auth/identities/google/authorize` requires a session and writes the caller's
+user id into the server-side flow record. The eventual link attaches the
+identity to *that* account. There is no request field a caller can set to
+redirect it, and the token's email address is never consulted.
+
+**A Google account already connected elsewhere is not moved.** Moving it would
+let anybody who can reach a Google account walk it off the Wasla account it
+currently opens and lock out the rightful owner. The attempt is audited. The
+message does not say whose account holds it.
+
+**Unlinking.** Refused when it would leave the account with no way in: no
+password hash and no other identity. A person who signed up with Google and
+never set a password would otherwise be able to lock themselves out with one
+button. If it happens anyway - through direct database access, say - the
+recovery path is an ordinary password reset, which works because a
+Google-first account still owns its mailbox. An account **with** a password can
+always unlink.
+
+---
+
+## ADR-046 — Google's `email_verified` is trusted, because it buys nothing
+
+**Decision.** A validated `email_verified: true` sets `users.email_verified_at`.
+
+**The analysis that makes this safe, and it is not about Google.** It is about
+what the column does. `app/db/models/user.py` records that `email_verified_at`
+**grants nothing**: no route reads it, no permission depends on it, and
 authentication does not consult it. It is an account-integrity fact. So the
-worst case of trusting Google wrongly is a wrong fact in a support tool, not an
-escalation - and that asymmetry is the whole basis of this decision. Were the
-column ever to become an authorization input, this ADR must be reopened before
-that change lands, not after.
+question is not "is Google's claim strong enough to authorize something" - it
+authorizes nothing - but "is it strong enough to record as true". A claim inside
+a token whose signature, issuer, audience, expiry and nonce have all been
+verified is stronger evidence than a six-digit code emailed to the same address,
+which is what the alternative would require.
 
-**Why the claim is worth something.** After full OIDC validation the claim
-arrives inside a token signed by Google, issued to this client, for this nonce.
-For a consumer account, `email_verified: true` means Google owns the mailbox.
-For a hosted domain it means the domain's administrator asserts it - and that
-administrator controls the mailbox anyway, so nothing is gained by disbelieving
-them. Either way the assertion is at least as strong as Wasla's own six-digit
-code, which proves only that somebody read one message.
+**When it does not apply.** On the **link** path the column is set only if the
+validated Google address equals the account's current address. Google proving
+that somebody owns `other@example.com` says nothing about whether this account
+owns the one it is registered under, and stamping it from a mismatched claim
+would be verifying the wrong mailbox.
 
-**Bounds, because a claim about the wrong address proves nothing.** The
-verification is recorded only when the validated Google address equals the
-user's current Wasla address. Linking a Google account under a different address
-sets nothing. This matters because the same model file warns that a future email
-change must reset the column to `NULL`; recording a verification sourced from a
-different address would defeat that.
+**The trigger to reopen this.** If any future route makes a decision based on
+`email_verified_at`, this decision must be re-examined before that route ships.
+The premise here is "the column grants nothing", and the day that stops being
+true is the day this becomes a grant of access on a third party's assertion.
 
-**Source of record.** The verification source is recorded in the audit trail,
-not in a new column. A `verification_source` column would be a schema change to
-store something asked about roughly never, and the audit log is where "how did
-this become true" already lives.
-
-**Never from the frontend.** No request body may assert `email_verified`. The
-only path to this column via Google is a token that passed signature, issuer,
-audience, expiry and nonce validation.
+**Never from the frontend.** `email_verified` is read only from a validated ID
+token, and the comparison is `is True` rather than a truthiness test - the
+string `"false"` is truthy in Python, and a non-conforming issuer sending one
+would otherwise read as verified.
 
 ---
 
-## ADR-047: State and nonce are Redis-only, and a Redis outage refuses the callback
+## ADR-047 — State and nonce live in Redis, and refuse when it is gone
 
-**Decision.** Every authorization attempt stores a flow record in Redis under an
-unpredictable `state`, holding the nonce, the PKCE verifier, the flow kind, and
-for a link flow the authenticated user id. The callback consumes it atomically.
-If Redis is unavailable, the callback fails closed.
+**Decision.** One Redis record per authorization attempt, holding the nonce, the
+PKCE verifier, the flow kind and - for a link - the initiating account. Keyed by
+a 256-bit `state`. Ten-minute expiry. Spent with `GET` and `DEL` inside
+`MULTI`/`EXEC`. **A Redis outage refuses the flow.**
 
-**Single use is one operation.** `GET` then `DEL` inside a `MULTI`/`EXEC`, so of
-two concurrent callbacks presenting the same state exactly one sees the delete
-succeed. Reading, validating and then deleting would be a race whose losing
-branch is a replayed authorization. This is the same reasoning as
-`RefreshTokenStore.spend` under ADR-039: whether the key was still there *is*
-the answer. `GETDEL` would be one round trip instead of two but requires Redis
-6.2, and the deployment's server version is not something this code can assume.
+**Why one record.** Three separate stores would be three chances to validate one
+value and forget another. Here they arrive as one object or not at all, so there
+is no code path that checks the state and skips the nonce.
 
-**Why not the local fallback.** ADR-040 lets a rate limiter fall back to a
-process-local window when Redis is down, because refusing traffic on an
-infrastructure outage is worse than allowing it. That reasoning does not
-transfer. A process-local state store breaks the moment uvicorn runs more than
-one worker: the callback lands on a process that never issued the state, and
-"not found" would have to mean "accept anyway" for the flow to work at all. That
-is not degraded capacity, it is a disabled CSRF and replay control. ADR-040
-itself says security controls must not fail open, so state and nonce live in
-Redis alone and a Redis outage means Google sign-in is unavailable. Password
-login is unaffected.
+**Why `GET` + `DEL` atomically.** Read, validate, then delete is a race whose
+losing branch is a replayed authorization: two callbacks both read "valid" and
+both proceed. In one transaction, exactly one sees the delete return 1, and
+whether the key was still there *is* the answer - the same shape
+`RefreshTokenStore.spend` uses under ADR-039. `GETDEL` would be one round trip
+instead of two but requires Redis 6.2, which this code cannot assume.
 
-**The residual gap, stated plainly.** State is unpredictable, single-use,
-short-lived and server-side, and the PKCE verifier and nonce are bound to it -
-which closes code injection and replay. What it does not do, for a login flow,
-is prove that the browser finishing the flow is the browser that started it.
-That binding needs a cookie, and this API has no cookie infrastructure.
-Introducing one touches `SameSite`, domains and CSRF posture for every other
-endpoint, which is a larger change than this feature should make on its own.
+**Why this fails closed when the rate limiter does not.** ADR-040 lets a limiter
+degrade to a process-local window, because refusing all traffic during an
+infrastructure outage is worse than allowing some. That argument does not carry
+over. A process-local state store breaks the moment uvicorn runs more than one
+worker: the callback lands on a process that never issued the state, so "not
+found" would have to mean "accept anyway" for the feature to work at all. That
+is not degraded capacity, it is a disabled replay control - and ADR-040 itself
+says security controls must not fail open. Google sign-in becomes unavailable;
+password login is untouched.
 
-The practical consequence is narrower than it sounds, because the callback
-returns tokens in a `fetch` response body and sets nothing in the browser. The
-classic OAuth CSRF - victim silently signed into the attacker's account by a
-forced callback - depends on the callback establishing browser state, which this
-one does not. For the **link** flow the binding is strong regardless: the flow
-record holds the user id of the caller who created it, so a link can only ever
-attach to that account.
+**The flow kind is checked.** A flow begun as a login cannot be completed at the
+linking endpoint, or the reverse. Without it the two endpoints would share a
+state namespace and an attacker could start whichever flow has the weaker checks
+and finish it at the other.
 
 ---
 
 ## The flow, end to end
 
-### Login
+### Signing in
 
-1. `POST /auth/google/authorize`. Unauthenticated. Generates `state`, `nonce`
-   and a PKCE verifier, stores the flow in Redis with a short TTL, returns the
-   Google authorization URL. `POST` rather than `GET` because it writes server
-   state, and a state-creating `GET` is prefetchable.
-2. The browser goes to Google. Google authenticates the person and redirects to
-   the configured frontend redirect URI with `code` and `state`.
-3. `POST /auth/google/callback` with `{code, state}`. The flow record is
-   consumed atomically. The code is exchanged server-side for an ID token. The
-   ID token is validated in full. Only then is any claim in it believed.
-4. Resolution, in this order:
-   - identity exists for `(google, sub)` -> load that user, enforce account
-     status, open a session, stamp `last_login_at`.
-   - no identity, `email_verified` false -> refuse.
-   - no identity, address belongs to an existing account -> refuse, and say
-     that Google must be linked from inside that account (ADR-045).
-   - no identity, address unknown -> create the user with no password hash,
-     create the identity, record the email verification, open a session.
-5. The session is the ordinary one. Access token, refresh token, current
-   `token_version`, `active_workspace` if the person belongs to one.
+1. `POST /auth/google/authorize` — unauthenticated. Mints `state`, `nonce` and a
+   PKCE verifier; stores them; returns Google's authorization URL. A `POST`
+   because it writes server state, and a state-writing `GET` is something a link
+   preview will fetch on its own.
+2. The browser goes to Google. Google redirects to `GOOGLE_REDIRECT_URI` - a
+   frontend route - with `code` and `state`.
+3. `POST /auth/google/callback` with `{code, state}`.
+   1. Spend the state. **Before the exchange**, so a replay never reaches the
+      network.
+   2. Exchange the code for an ID token, server-side, with the client secret and
+      the verifier.
+   3. Validate the ID token: signature against Google's published JWKS,
+      algorithm `RS256` from a literal allowlist, issuer in the two spellings
+      Google uses, audience equal to our client id, expiry with 30 seconds of
+      leeway, required claims present, nonce compared with `compare_digest`,
+      non-empty subject, non-empty email.
+   4. Resolve: **identity exists** → load the user, enforce status, open a
+      session, stamp `last_login_at`. **No identity and `email_verified` false**
+      → refuse. **No identity and the address is taken** → refuse with linking
+      guidance. **No identity and the address is unknown** → create a user with
+      no password hash, create the identity, record verification, open a
+      session.
 
-### Linking an existing account
+Once an identity row exists the email claim is never consulted again. A Google
+account whose address changes keeps working; one that acquires somebody else's
+address gains nothing.
 
-1. `POST /auth/identities/google/authorize`. Authenticated. Same as above, but
-   the flow record carries the caller's user id and is marked as a link flow.
-2. `POST /auth/identities/google/link` with `{code, state}`. Authenticated. The
-   caller must be the user the flow was issued to - a flow started by one
-   account cannot be finished by another, and a login flow cannot be finished as
-   a link.
-3. The identity is attached to *that* user. Never to whichever user matches the
-   email address. If the Google subject already belongs to someone else the
-   attempt is refused and audited, and the response says only that the Google
-   account is unavailable for linking.
+### Connecting Google to an existing account
 
-### Unlinking
+1. `POST /auth/identities/google/authorize` — **authenticated**. The caller's
+   user id goes into the flow record.
+2. Google, as above.
+3. `POST /auth/identities/google/link` — authenticated. Validates the token,
+   checks the flow was started by *this* account, refuses if the Google account
+   is connected anywhere, refuses if this account already has one, then inserts.
 
-`DELETE /auth/identities/google`. Authenticated. Refused if it would leave the
-account with no way to sign in - which is exactly the case where the user has no
-password hash and this is their only identity. The recovery path for a
-Google-only account that wants to stop using Google is: request a password
-reset, set a password, then unlink.
+### Disconnecting
+
+`DELETE /auth/identities/google` — authenticated. Refused when it would leave the
+account unreachable.
 
 ---
 
 ## Outbound requests to Google
 
-Two, both to fixed literal endpoints, neither influenced by request input.
+| Purpose | Endpoint | Timeout | Body cap |
+| --- | --- | --- | --- |
+| Token exchange | `https://oauth2.googleapis.com/token` | 10s | 64 KiB |
+| Signing keys | `https://www.googleapis.com/oauth2/v3/certs` | 5s | 64 KiB |
 
-| Purpose | Endpoint | When |
-| --- | --- | --- |
-| Token exchange | `https://oauth2.googleapis.com/token` | Once per callback |
-| Signing keys | `https://www.googleapis.com/oauth2/v3/certs` | On cache miss or unknown `kid` |
+Both are module constants. Both go through `build_guarded_client`, which
+resolves the host, refuses any answer that is not globally routable, and pins
+the connection to the address it judged while preserving `Host` and SNI so
+certificate verification still binds to the name - the DNS-rebinding defence
+`app/core/net.py` was written for. Both read incrementally against the cap
+rather than trusting `Content-Length`.
 
-Both go through `build_guarded_client` from `app/core/net.py`, which resolves the
-host once, refuses any answer that is not globally routable, and pins the
-connection to the address it judged while preserving the `Host` header and SNI so
-certificate verification still binds to the name. That closes DNS rebinding,
-which the module's docstring records as having been reproduced against an earlier
-version of itself.
-
-No discovery document is fetched. OIDC discovery would be a third network
-dependency whose only output is two URLs that have not changed in a decade, and
-it would put the JWKS URI under the control of whatever the discovery response
-said. The endpoints are constants. **The client can never supply a JWKS URL.**
+**No discovery document.** It would be a third dependency whose only output is
+two URLs that have not changed in a decade, and it would put the key document's
+location under the control of whatever the discovery response said.
 
 **Userinfo is not called.** The ID token already carries `sub`, `email`,
-`email_verified` and `name`, and it carries them inside a signature. The
-userinfo endpoint returns the same fields with the authenticity of an HTTPS
-connection and an access token instead - weaker evidence, one more request, one
-more failure mode, one more timeout. There is no field this feature needs that
-only userinfo has. If one ever appears, the ID token remains authoritative for
-identity and userinfo may supplement it for profile decoration only.
+`email_verified` and `name`, inside a signature. Userinfo carries the same
+things without one, requires an extra round trip on the critical path of every
+login, and would add a failure mode. There is no question it could answer that
+the ID token has not already answered better.
 
-Responses are read with a byte cap. An unbounded read from a host that has
-stopped behaving is a memory exhaustion vector, and "it is Google" is not an
-argument that survives a hijacked resolver.
-
-Google's error bodies are never returned to the caller. They are provider
-internals, they occasionally contain the request that produced them, and a
-caller who can read them learns about the client configuration.
+**Google's error bodies are never returned to a caller and never logged.** They
+are provider internals, they sometimes echo the request that produced them, and
+a caller who can read them learns about this deployment's configuration.
 
 ---
 
 ## What is never written down
 
-Not logged, not audited, not stored in any table:
-
-- the client secret
-- authorization codes
-- ID tokens, in whole or in part
-- Google access tokens and Google refresh tokens
-- `state`, `nonce`, and the PKCE verifier
-
-The audit trail records the action, the account, and a reason category. It does
-not record the provider subject: it is a stable cross-service identifier, the
-row it would duplicate already exists in `user_identities`, and an audit log is
-read by people. A log line may name a `kid` or an error class, never a token.
+Not in the database, not in an audit row, not in a log line, not in a response
+body: the client secret, an authorization code, an ID token, an access token, a
+Google refresh token (none is issued), the nonce, the state, and the PKCE
+verifier. Rejection reasons are logged as short categories - `wrong_nonce`,
+`bad_signature`, `unknown_key_id` - which is the difference between a
+diagnosable outage and a mystery, and none of them is token material.
 
 ---
 
 ## Rate limiting and degradation
 
-Authorization initiation, callbacks, and linking are limited per client identity
-using `client_identity` from `app/api/rate_limits.py`, which believes a
-forwarding header only when the immediate peer is a configured trusted proxy and
-then walks `X-Forwarded-For` from the *right*. `X-Forwarded-For[0]` is chosen by
-the caller; the module's docstring records that trusting it once made
-authentication rate limiting inert in production.
+All five routes carry a per-client-address limit on its own policy name
+(`auth:google`), sharing the `RATE_LIMIT_AUTH_PER_MINUTE` budget without sharing
+the counter. The address comes from `client_identity`, which believes a
+forwarding header only when the peer is a configured trusted proxy, prefers
+`X-Real-IP`, and otherwise walks `X-Forwarded-For` **from the right** - because
+nginx appends, so `[0]` is caller-chosen.
 
-These are credential-adjacent limits, so they use the ADR-040 local fallback:
-when Redis is unavailable, counting continues in-process rather than stopping.
-That is weaker than a shared counter and stronger than nothing.
+Separate bucket rather than shared: an attacker gets two buckets instead of one,
+in exchange for a burst of failed callbacks not consuming the budget somebody
+signing in with a password from the same address needs. Acceptable because both
+are per-address anyway and the control that actually stops credential stuffing
+is the per-account limit inside `AuthService.login`.
 
-Note the deliberate asymmetry with ADR-047. A rate limiter that loses Redis
-degrades to a local approximation, because its job is to slow an attacker down
-and refusing all traffic would be the worse failure. The state store that loses
-Redis refuses, because its job is to make a replay impossible and a local
-approximation of it is not weaker but absent.
+Under a Redis outage the **limiter** degrades to a process-local window
+(ADR-040) and the **flow store** refuses (ADR-047). The asymmetry is deliberate
+and argued above.
 
 ---
 
 ## Failure modes
 
-| Situation | Behaviour |
+| What happened | What the caller sees |
 | --- | --- |
-| Google configuration incomplete | Startup fails in production; endpoints answer 404 when disabled |
-| Redis unavailable | Google sign-in unavailable; password login unaffected |
-| JWKS unreachable, cache warm and fresh | Cached keys used |
-| JWKS unreachable, cache stale or empty | Authentication refused |
-| Unknown `kid` | One bounded refresh, then refused |
-| Google outage on token exchange | Refused with a generic message; no partial account created |
-| Account disabled | Refused, audited, no tokens issued, account not reactivated |
-| Address belongs to another account | Refused with linking guidance (ADR-045) |
-| Subject already linked elsewhere | Link refused and audited; the existing link is not moved |
+| Feature not configured | 404. A feature nobody enabled is not here, rather than temporarily unwell |
+| Bad, replayed, expired or cross-kind state | 401, one message |
+| Google refused the code | 401, one message |
+| Forged, expired, wrong-audience, wrong-issuer or wrong-nonce token | 401, one message |
+| Google's keys unreachable | 503. Not 401 - a good account was not refused |
+| Redis unreachable | 503 |
+| Account disabled | 403, audited |
+| Verified Google address already has an account | 409 with linking guidance, audited |
+| Concurrent first login, loser | 409, retryable |
+| Google account already connected elsewhere | 409, audited, not moved |
+| Unlink would strand the account | 403 |
 
 ---
 
 ## Operating it
 
-**Google Cloud setup.** Create an OAuth 2.0 Client ID of type *Web application*.
-Register the exact redirect URI, including scheme, host, port and path - Google
-exact-matches it, so a trailing slash is a different URI. Request the `openid`,
-`email` and `profile` scopes and nothing else: a scope that is not requested is
-a scope that cannot be abused.
+### Google Cloud setup
 
-**Client secret handling.** `GOOGLE_CLIENT_SECRET` belongs to the API process
-only. Never a Docker build argument, never in an image layer, never in a
-frontend bundle, returned by no endpoint including `/health`. Rotating it is a
-configuration change and a restart; Google permits two secrets briefly, so
-rotate by adding, deploying, then removing.
+1. APIs & Services → Credentials → Create credentials → OAuth client ID → Web
+   application.
+2. Authorised redirect URI: exactly the value of `GOOGLE_REDIRECT_URI`. Google
+   matches it as a literal string - trailing slashes and scheme matter.
+3. Configure the consent screen. Only `openid`, `email` and `profile` are
+   requested, all non-sensitive, so no verification review is required.
+4. Copy the client id and secret into the deployment's environment.
 
-**Key rotation.** Google rotates signing keys without notice. Nothing here
-pins a key. An unknown `kid` triggers one bounded refresh, and a rotation is
-therefore invisible apart from a single cache miss. A `kid` that is still
-unknown after refresh is refused - it is either a forgery or a key Google has
-not published.
+### Configuration
 
-**Google outage.** Sign-in fails; nothing else does. Password login, refresh,
-and every workspace endpoint are unaffected, because no request path other than
-these endpoints talks to Google.
+| Variable | Notes |
+| --- | --- |
+| `GOOGLE_ENABLED` | Default `false`. The feature answers 404 while it is off |
+| `GOOGLE_CLIENT_ID` | Must end `.apps.googleusercontent.com` |
+| `GOOGLE_CLIENT_SECRET` | Must differ from the client id |
+| `GOOGLE_REDIRECT_URI` | Absolute, no fragment, HTTPS in production |
 
-**Recovery when Google access is lost** - account deleted, domain moved, or the
-organisation drops Google. If the user has a password, they sign in with it and
-unlink. If they do not, the path is password reset to the verified address, then
-unlink. If the address itself is gone, this becomes a support operation against
-the database, and that is the honest answer: an account whose only credential is
-an issuer nobody controls any more cannot be recovered by self-service.
+With `GOOGLE_ENABLED=true` and any of these missing or malformed, startup fails
+in production. Half-configured authentication is worse than none, because it
+looks available.
+
+### Secret handling and rotation
+
+The secret exists only in the deployment environment. It is never in a response,
+a log, a client bundle or the database. To rotate: add a second client secret in
+Google Cloud, deploy the new value, then delete the old one. Google allows both
+briefly, so this needs no downtime. `.env.example` carries placeholders only.
+
+### Google's key rotation
+
+Automatic and needs no operator action. Keys are cached for an hour, refetched
+when a `kid` is unknown, and refresh attempts are capped at one a minute so a
+stream of forged key ids cannot make this process hammer Google. During a
+rotation a small number of logins may fail for up to a minute.
+
+### Google outage
+
+Token exchange or key fetch failures answer 503, not 401. Cached keys keep
+working for up to 24 hours; past that they are refused, because a key old enough
+to have been withdrawn without our hearing about it is not a fallback. Password
+login is unaffected throughout.
+
+### Recovery if Google access is lost
+
+A user who loses their Google account and has a password signs in normally and
+can unlink. A user with no password requests a password reset - which reaches
+their mailbox, and a Google-first account owns its mailbox - sets a password,
+then unlinks. Support needs no special tooling for either.
 
 ---
 
 ## Build state
 
-Design committed. **No implementation exists at this commit.**
+What is in the tree:
 
-| Piece | State |
-| --- | --- |
-| ADR-043 through ADR-047 | Written |
-| `user_identities` table and `IdentityProvider` | Built (migration 0030) |
-| Audit vocabulary | Not built |
-| Configuration and validation | Not built |
-| OIDC validation and JWKS cache | Not built |
-| State/nonce/PKCE store | Not built |
-| Endpoints | Not built |
-| Linking and unlinking | Not built |
-| Rate limits | Not built |
-| Tests | Not built |
+| Piece | Written | Executed |
+| --- | --- | --- |
+| `user_identities` model and migration 0030 | yes | **no** |
+| Audit actions and migration 0031 | yes | **no** |
+| Configuration and fail-closed validation | yes | **no** |
+| ID token verifier and JWKS key ring | yes | **no** |
+| Flow store, PKCE, Google client | yes | **no** |
+| Identity repository | yes | **no** |
+| `AuthService.authenticate_federated` | yes | **no** |
+| `GoogleAuthService` | yes | **no** |
+| Five endpoints, registered and rate limited | yes | **no** |
+| Adversarial tests, ~60 functions | yes | **no** |
 
-Nothing in this repository has been executed for this feature. No linter, type
-checker, test run, or migration has been observed against it.
+What has **not** been done, and must be before this is deployed:
+
+- No test has run. Ruff, Black, MyPy and pytest have never been invoked.
+- No migration has been applied. `alembic upgrade`, `check`, `downgrade` and
+  re-`upgrade` are unrun, so drift is unproven either way.
+- No container has been built or booted. No endpoint has served a request.
+- **No real Google authentication has been performed.** The cryptography is
+  exercised with controlled fixtures - real RSA keys, real signatures - and that
+  is a genuine test of the verifier. It is not a test of Google.
+- No integration or HTTP-level tests exist for the identity paths: first login,
+  existing identity, collision refusal, disabled account, linking, unlinking,
+  audit rows. Those need database fixtures, and writing them against fixtures
+  that could not be read would have produced tests that fail for reasons
+  unrelated to this feature.
+- `DECISIONS.md`, `docs/SECURITY.md`, `docs/AUTHORIZATION.md`, `docs/API.md`,
+  `docs/DEPLOYMENT.md`, `docs/RUNBOOK.md` and `docs/ARCHITECTURE.md` are **not**
+  updated. ADR-043 to ADR-047 live in this file only.
+- A Google-first account is created with **no workspace**, because `register`
+  needs a name and slug Google does not supply and `SLUG_PATTERN` is strict
+  ASCII. Such an account holds a valid session and cannot open any
+  workspace-scoped endpoint until it is invited somewhere. This is a real
+  product gap, not a rounding error.

@@ -99,10 +99,6 @@ def _service(settings: SettingsDep, session: SessionDep, redis: RedisDep) -> Goo
     )
 
 
-def _identity_response(identity_provider: str, connected_at: object, last: object) -> None:
-    """Placeholder removed at review; see `_as_identity` below."""
-
-
 @router.post("/google/authorize", response_model=GoogleAuthorizationResponse)
 async def start_google_login(
     settings: SettingsDep,

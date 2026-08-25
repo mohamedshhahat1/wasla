@@ -39,7 +39,13 @@ from app.core.exceptions import (
     PermissionDeniedError,
 )
 from app.core.logging import get_logger
-from app.core.oauth_flow import FlowKind, OAuthFlow, OAuthFlowStore, code_challenge
+from app.core.oauth_flow import (
+    FLOW_TTL_SECONDS,
+    FlowKind,
+    OAuthFlow,
+    OAuthFlowStore,
+    code_challenge,
+)
 from app.db.models import FederatedIdentity, User
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.identity import IdentityProvider
@@ -136,8 +142,6 @@ class GoogleAuthService:
                 "user_id": str(user.id) if user else None,
             },
         )
-        from app.core.oauth_flow import FLOW_TTL_SECONDS
-
         return url, FLOW_TTL_SECONDS
 
     async def complete_login(
@@ -433,12 +437,13 @@ class GoogleAuthService:
         if identity is None:
             raise NotFoundError("No Google account is connected.")
 
-        if user.hashed_password is None and await self._identities.count_for_user(
-            user_id=user.id
-        ) <= 1:
-            raise PermissionDeniedError(
-                "Set a password before disconnecting Google, or you will not be able to sign in."
-            )
+        if user.hashed_password is None:
+            remaining = await self._identities.count_for_user(user_id=user.id)
+            if remaining <= 1:
+                raise PermissionDeniedError(
+                    "Set a password before disconnecting Google, "
+                    "or you will not be able to sign in."
+                )
 
         # One conditional DELETE. Two concurrent requests cannot both believe
         # they were the one that removed it.
