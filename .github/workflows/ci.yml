@@ -1,13 +1,26 @@
 name: CI
 
 on:
+  # Every branch, not only the default one. A push to a feature branch used to
+  # match nothing at all, which meant the gate below did not exist for any
+  # branch without an open pull request.
+  #
+  # "**" rather than an omitted filter: it matches branch names containing
+  # slashes, and it does not also fire on tag pushes. Tags are deploy.yml's
+  # trigger and do not need a second run of these jobs.
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Keyed so a push and its pull request share one group. `github.ref` does not:
+  # it reports refs/heads/x for the push and refs/pull/N/merge for the pull
+  # request, so with the push filter above matching every branch, one commit
+  # under review would start two full runs - two sets of service containers and
+  # two image builds for one diff. `head_ref` is set only on pull_request and
+  # holds the branch name, which is what `ref_name` holds on a push.
+  group: ci-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
