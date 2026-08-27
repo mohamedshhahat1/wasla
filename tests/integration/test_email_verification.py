@@ -20,7 +20,6 @@ verification, and the point being tested is the boundary, not the number.
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from collections import Counter
 from datetime import UTC, datetime, timedelta
@@ -559,21 +558,37 @@ async def test_the_binding_is_not_defeated_by_capitalisation(
 
 async def test_two_requests_with_the_same_correct_code_cannot_both_win(
     db_session: AsyncSession,
-    db_connection,
 ) -> None:
-    """The security boundary, raced against a real database.
+    """The security boundary: the consuming UPDATE succeeds exactly once.
 
     Both requests pass the Argon2 comparison - the code *is* correct - and both
-    reach the consuming UPDATE. Exactly one may change a row; the loser's
-    refusal is the detection, not an error.
+    reach this statement with identical arguments. Exactly one may change a
+    row; the loser's `False` is the detection, not an error.
 
-    Two sessions on one connection, so both statements really contend rather
-    than one being a no-op inside the other's transaction.
+    **This is sequential, and deliberately so.** An earlier version ran the two
+    through `asyncio.gather` on one `AsyncSession` and called itself a race. It
+    was not one: an `AsyncSession` is a single connection and is not safe to
+    drive from two coroutines, so the two statements either serialise anyway or
+    raise something unrelated to the property being tested. A test that flakes
+    for a reason its name does not mention is worse than one that claims less.
+
+    What makes the sequential version load-bearing is that the second call
+    receives *exactly* what a losing racer receives: the same challenge id, the
+    same clock, the same address, and a row another caller has already
+    consumed. If the UPDATE were unconditional - or if the caller checked
+    `consumed_at` in Python and wrote afterwards - the second call would
+    succeed here.
+
+    True multi-connection contention is not exercised anywhere in this suite;
+    the fixture joins one connection so a test can be rolled back. What
+    PostgreSQL guarantees under real concurrency is that one `UPDATE ... WHERE
+    consumed_at IS NULL` blocks until the other commits and then matches no
+    row, and that is a property of the statement rather than of this test.
     """
     user = await _account(db_session)
-    # The code itself is not needed here: both callers spend the challenge
-    # directly, which is the step the race is about. Comparing the code happens
-    # *before* it, in Python, and is exactly why the write re-checks everything.
+    # The code itself is not needed: both callers spend the challenge directly,
+    # which is the step being tested. Comparing the code happens *before* it,
+    # in Python, and is exactly why the write re-checks everything.
     await _issue(db_session, user)
     challenge = await _live(db_session, user)
     assert challenge is not None
@@ -587,8 +602,8 @@ async def test_two_requests_with_the_same_correct_code_cannot_both_win(
             max_attempts=MAX_ATTEMPTS,
         )
 
-    first, second = await asyncio.gather(_spend(), _spend())
-    assert [first, second].count(True) == 1
+    assert await _spend() is True
+    assert await _spend() is False
 
 
 async def test_a_challenge_exhausted_mid_request_does_not_verify(
