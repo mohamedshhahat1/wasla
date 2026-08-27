@@ -49,7 +49,14 @@ async def _tenant(session, slug: str = "acme") -> Tenant:
     return tenant
 
 
-async def _plan(session, *, code: str, trial_days: int = 0, **limits) -> Plan:
+async def _plan(
+    session,
+    *,
+    code: str,
+    trial_days: int = 0,
+    is_public: bool = True,
+    **limits,
+) -> Plan:
     plan = Plan(
         code=code,
         name=code.title(),
@@ -57,6 +64,7 @@ async def _plan(session, *, code: str, trial_days: int = 0, **limits) -> Plan:
         currency="USD",
         interval=BillingInterval.MONTHLY,
         trial_days=trial_days,
+        is_public=is_public,
         limits={key.value: value for key, value in limits.items()},
     )
     session.add(plan)
@@ -115,6 +123,72 @@ async def test_a_plan_nobody_offers_is_refused(db_session):
         await service.start(plan_code="old", now=NOW)
     with pytest.raises(ValidationError):
         await service.start(plan_code="imaginary", now=NOW)
+
+
+async def test_a_private_plan_cannot_be_self_selected(db_session):
+    """The catalogue filter was standing in for an authorization rule.
+
+    `GET /billing/plans` has always excluded non-public plans, so Enterprise
+    never appears in the list a customer sees. Nothing stopped an owner from
+    posting its code anyway, and `start` moved them onto it - with its limits,
+    and at whatever price it was negotiated at for somebody else.
+    """
+    tenant = await _tenant(db_session)
+    await _plan(db_session, code="enterprise", is_public=False)
+
+    service = SubscriptionService(db_session, tenant_id=tenant.id)
+    with pytest.raises(ValidationError):
+        await service.start(plan_code="enterprise", now=NOW)
+
+
+async def test_a_private_plan_cannot_be_switched_to_either(db_session):
+    """`change_plan` is the same hole by another door."""
+    tenant = await _tenant(db_session)
+    await _plan(db_session, code="pro")
+    await _plan(db_session, code="enterprise", is_public=False)
+
+    service = SubscriptionService(db_session, tenant_id=tenant.id)
+    await service.start(plan_code="pro", now=NOW)
+    with pytest.raises(ValidationError):
+        await service.change_plan(plan_code="enterprise", now=NOW)
+
+
+async def test_a_private_plan_is_refused_exactly_like_one_that_does_not_exist(
+    db_session,
+):
+    """Same message, deliberately.
+
+    A distinct refusal would confirm that a private plan code is real, which is
+    what somebody guessing codes is trying to learn.
+    """
+    tenant = await _tenant(db_session)
+    await _plan(db_session, code="enterprise", is_public=False)
+    service = SubscriptionService(db_session, tenant_id=tenant.id)
+
+    with pytest.raises(ValidationError) as private:
+        await service.start(plan_code="enterprise", now=NOW)
+    with pytest.raises(ValidationError) as absent:
+        await service.start(plan_code="imaginary", now=NOW)
+
+    assert str(private.value) == str(absent.value)
+
+
+async def test_the_platform_can_still_assign_a_private_plan(db_session):
+    """`self_service=False` is the door registration comes through.
+
+    A deployment whose configured default plan is private is making a
+    deliberate choice, and signup must not start failing because of it.
+    """
+    tenant = await _tenant(db_session)
+    await _plan(db_session, code="enterprise", is_public=False)
+
+    subscription = await SubscriptionService(db_session, tenant_id=tenant.id).start(
+        plan_code="enterprise",
+        now=NOW,
+        self_service=False,
+    )
+
+    assert subscription.status is SubscriptionStatus.ACTIVE
 
 
 async def test_changing_plan_restarts_the_period_and_ends_the_trial(db_session):

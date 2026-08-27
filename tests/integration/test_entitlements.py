@@ -417,3 +417,89 @@ async def test_a_revoked_member_frees_their_seat(db_session):
     assert entitlement.used == 1
     assert entitlement.allowed is True
     assert entitlement.remaining == 1
+
+
+# ------------------------------------------------- entitlements follow status
+
+
+@pytest.mark.parametrize(
+    "status",
+    [SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED],
+)
+async def test_a_subscription_that_has_ended_stops_granting_its_plan(
+    db_session,
+    status: SubscriptionStatus,
+):
+    """Cancelling was a way to keep the entitlements and stop the invoices.
+
+    `SERVING_STATUSES` and `Subscription.is_serving` both existed from the
+    start and neither was read, so entitlement resolution loaded the plan off
+    whatever subscription row was there whatever state it was in. A workspace
+    could subscribe to the most expensive plan, cancel it, and keep its limits
+    for as long as nobody deleted the row.
+    """
+    tenant = await _tenant(db_session)
+    await _plan(db_session, code="starter", **{LimitKey.AGENTS: 1})
+    expensive = await _plan(db_session, code="enterprise", **{LimitKey.AGENTS: 500})
+    subscription = await _subscribe(db_session, tenant, expensive)
+
+    service = _service(db_session, tenant, default_plan_code="starter")
+    assert (await service.check(LimitKey.AGENTS)).limit == 500
+
+    subscription.status = status
+    await db_session.flush()
+
+    # A fresh service: the resolution is cached per instance, as a request's is.
+    after = _service(db_session, tenant, default_plan_code="starter")
+    assert (await after.check(LimitKey.AGENTS)).limit == 1
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        SubscriptionStatus.ACTIVE,
+        SubscriptionStatus.TRIALING,
+        SubscriptionStatus.PAST_DUE,
+    ],
+)
+async def test_a_serving_subscription_still_grants_its_plan(
+    db_session,
+    status: SubscriptionStatus,
+):
+    """`PAST_DUE` is in the serving set deliberately (see the model).
+
+    A failed payment is a conversation to have with a customer, not a decision
+    to cut them off mid-sentence, and this pins that so the check added above
+    cannot quietly become a lockout on the first declined card.
+    """
+    tenant = await _tenant(db_session)
+    await _plan(db_session, code="starter", **{LimitKey.AGENTS: 1})
+    paid = await _plan(db_session, code="pro", **{LimitKey.AGENTS: 50})
+    subscription = await _subscribe(db_session, tenant, paid)
+    subscription.status = status
+    await db_session.flush()
+
+    service = _service(db_session, tenant, default_plan_code="starter")
+    assert (await service.check(LimitKey.AGENTS)).limit == 50
+
+
+async def test_an_ended_subscription_falls_back_rather_than_locking_out(db_session):
+    """Dropping to the free tier, not to nothing.
+
+    With no default plan configured there is no plan at all and limits go
+    unenforced, which is the existing behaviour for a workspace that never
+    subscribed; with one, a cancelled workspace keeps working at its limits.
+    Losing access outright would make cancelling unrecoverable.
+    """
+    tenant = await _tenant(db_session)
+    await _plan(db_session, code="starter", **{LimitKey.AGENTS: 1})
+    plan = await _plan(db_session, code="pro", **{LimitKey.AGENTS: 50})
+    subscription = await _subscribe(db_session, tenant, plan)
+    subscription.status = SubscriptionStatus.CANCELLED
+    await db_session.flush()
+
+    entitlement = await _service(db_session, tenant, default_plan_code="starter").check(
+        LimitKey.AGENTS,
+    )
+    assert entitlement.limit == 1
+    assert entitlement.allowed is True

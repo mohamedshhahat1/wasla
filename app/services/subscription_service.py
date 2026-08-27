@@ -126,6 +126,7 @@ class SubscriptionService:
         plan_code: str,
         now: datetime | None = None,
         actor: User | None = None,
+        self_service: bool = True,
     ) -> Subscription:
         """Give a workspace its first subscription.
 
@@ -136,7 +137,7 @@ class SubscriptionService:
         if await self._subscriptions.get() is not None:
             raise ConflictError("This workspace already has a subscription.")
 
-        plan = await self._require_plan(plan_code)
+        plan = await self._require_plan(plan_code, self_service=self_service)
         trialing = plan.trial_days > 0
         period_end = (
             moment + timedelta(days=plan.trial_days)
@@ -179,6 +180,7 @@ class SubscriptionService:
         plan_code: str,
         now: datetime | None = None,
         actor: User | None = None,
+        self_service: bool = True,
     ) -> Subscription:
         """Move to another plan, effective immediately.
 
@@ -193,7 +195,7 @@ class SubscriptionService:
         """
         moment = now if now is not None else datetime.now(UTC)
         subscription = await self._require_subscription()
-        plan = await self._require_plan(plan_code)
+        plan = await self._require_plan(plan_code, self_service=self_service)
 
         if subscription.plan_id == plan.id:
             raise ConflictError("This workspace is already on that plan.")
@@ -316,11 +318,33 @@ class SubscriptionService:
             raise NotFoundError("This workspace has no subscription.")
         return subscription
 
-    async def _require_plan(self, plan_code: str) -> Plan:
+    async def _require_plan(self, plan_code: str, *, self_service: bool = True) -> Plan:
+        """The plan a caller named, if they are allowed to name it.
+
+        `is_active` was always checked: a retired plan is invisible to a chooser
+        even though existing subscriptions still point at it.
+
+        `is_public` was **not**, and that was a hole rather than an oversight in
+        naming. `GET /billing/plans` filters the catalogue down to public plans,
+        so a private one - Enterprise, or anything negotiated for one customer -
+        never appears in the list. Nothing stopped a workspace owner from
+        posting its code anyway, and `start` and `change_plan` would move them
+        onto it with its limits and its price. The catalogue was a display
+        filter standing in for an authorization rule.
+
+        `self_service=False` is how a plan that is not on offer is still
+        assignable by something inside the platform - the registration path
+        putting a new workspace on the configured default, and any future
+        operator action. It has to be passed explicitly, so the permissive path
+        is never the one a caller gets by forgetting.
+        """
         plan = await self._plans.get_by_code(plan_code)
         if plan is None or not plan.is_active:
-            # A retired plan is invisible to a chooser even though existing
-            # subscriptions still point at it.
+            raise ValidationError("No such plan.")
+        if self_service and not plan.is_public:
+            # Deliberately the same refusal as a plan that does not exist. A
+            # distinct message would confirm that a private plan code is real,
+            # which is exactly what somebody guessing codes wants to learn.
             raise ValidationError("No such plan.")
         return plan
 

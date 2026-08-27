@@ -128,11 +128,28 @@ class EntitlementService:
         if self._resolved is not None:
             return self._resolved
 
-        subscription = await self._subscriptions.get()
+        stored = await self._subscriptions.get()
+        # A subscription only grants its plan while it is *serving*. Before this
+        # check existed, `SERVING_STATUSES` was defined, exported and read by
+        # nothing: a cancelled or expired subscription still resolved its plan,
+        # so a workspace that cancelled an expensive plan kept that plan's
+        # limits for as long as the row existed. Cancelling was a way to keep
+        # the entitlements and stop the invoices.
+        #
+        # `PAST_DUE` is deliberately inside the serving set (see the model): a
+        # failed payment is a conversation, not a cut-off, and the platform
+        # decides separately when that grace has run out.
+        subscription = stored if stored is not None and stored.is_serving else None
+
         plan: Plan | None = None
         if subscription is not None:
             plan = await self._plans.get_by_id(subscription.plan_id)
         elif self._default_plan_code:
+            # Including the case just filtered out. A workspace whose
+            # subscription has ended falls back to the default plan rather than
+            # losing access outright - the product keeps working at free-tier
+            # limits, which is what "cancelled" should mean and is a great deal
+            # easier to recover from than a lockout.
             plan = await self._plans.get_by_code(self._default_plan_code)
 
         if plan is None:

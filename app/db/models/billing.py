@@ -261,7 +261,13 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     @property
     def is_serving(self) -> bool:
-        """Whether the workspace may use the product right now."""
+        """Whether the workspace may use the product right now.
+
+        Read by `EntitlementService` when it resolves which plan applies. That
+        it is read at all is recent: this property and `SERVING_STATUSES` both
+        existed from the start and neither was consulted, so a cancelled
+        subscription kept granting its plan.
+        """
         return self.status in SERVING_STATUSES
 
     @property

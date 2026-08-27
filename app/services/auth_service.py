@@ -204,7 +204,15 @@ class AuthService:
         if not code:
             return
         try:
-            await SubscriptionService(self._session, tenant_id=tenant_id).start(plan_code=code)
+            # `self_service=False`: this is the platform putting a new workspace
+            # on the plan an operator configured as the default, not a customer
+            # choosing from the catalogue. A deployment whose default plan is
+            # private is making a deliberate choice, and registration should not
+            # start failing because of it.
+            await SubscriptionService(self._session, tenant_id=tenant_id).start(
+                plan_code=code,
+                self_service=False,
+            )
         except ValidationError:
             logger.warning(
                 "billing.default_plan_missing",
