@@ -236,6 +236,27 @@ class Settings(BaseSettings):
     email_max_attempts: int = Field(default=8, gt=0)
     email_worker_poll_seconds: float = Field(default=10.0, gt=0)
 
+    # Email verification (docs/EMAIL_VERIFICATION.md). Both bounds are enforced
+    # by the field rather than by the production validator below, and that is
+    # the stronger choice: an unusable lifetime is unsafe in staging and in a
+    # developer's container too, so the value is refused wherever it is set.
+    #
+    # Refused rather than clamped, for the reason the service gives: silently
+    # correcting configuration is how an operator comes to believe a code lives
+    # for a day when it lives for an hour.
+    #
+    # The floor is a minute because anything shorter expires while somebody
+    # switches to their mail client. The ceiling is an hour because the entire
+    # security argument for six digits is that the window is small - a code
+    # valid for a day is a password with twenty bits of entropy.
+    email_verification_ttl_seconds: int = Field(default=600, ge=60, le=3600)
+    # Wrong answers one challenge tolerates before it is dead even for the
+    # right code. Capped at ten: the code space is a million values, so a
+    # ceiling an operator could raise to a thousand would turn the challenge
+    # into something worth guessing. One is permitted because a deployment that
+    # wants no second chances is making a defensible choice.
+    email_verification_max_attempts: int = Field(default=5, ge=1, le=10)
+
     @field_validator("credential_encryption_keys", mode="before")
     @classmethod
     def _parse_encryption_keys(cls, value: Any) -> Any:

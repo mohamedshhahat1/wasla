@@ -22,10 +22,7 @@ from typing import Any, cast
 from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models.email_verification import (
-    MAX_VERIFICATION_ATTEMPTS,
-    EmailVerificationChallenge,
-)
+from app.db.models.email_verification import EmailVerificationChallenge
 
 
 class EmailVerificationRepository:
@@ -119,6 +116,7 @@ class EmailVerificationRepository:
         challenge_id: uuid.UUID,
         email: str,
         now: datetime,
+        max_attempts: int,
     ) -> bool:
         """Spend a challenge exactly once, however many requests race.
 
@@ -132,11 +130,21 @@ class EmailVerificationRepository:
           correct code both pass the comparison; exactly one changes a row.
         - **not expired**, re-evaluated against `now` rather than trusted from
           the read, so a challenge that lapsed mid-request does not verify.
-        - **under the attempt cap** - a concurrent wrong guess may have
+        - **within the attempt cap** - a concurrent wrong guess may have
           exhausted the challenge after the correct code was validated. Without
           this the last guess of an exhausted challenge could still win.
         - **still bound to the same address**, so a code cannot survive an
           email change and verify an address it was never sent to.
+
+        The attempt comparison is ``<=`` here where `is_usable` uses ``<``, and
+        the difference is not a slip. The caller counts this attempt *before*
+        comparing the code, so by the time this statement runs the row already
+        includes the attempt being adjudicated. Against a ceiling of five,
+        somebody typing their fifth and final answer arrives here with
+        `attempts = 5`; a strict comparison would reject the correct code on
+        the last permitted try and report it as a lost race. What must still be
+        refused is a total that *exceeds* the ceiling, which is what a
+        concurrent guess arriving in the meantime produces.
 
         Returning `False` is a refusal, not an error. It means another request
         got there first, or one of the conditions stopped holding.
@@ -148,7 +156,7 @@ class EmailVerificationRepository:
                 EmailVerificationChallenge.consumed_at.is_(None),
                 EmailVerificationChallenge.superseded_at.is_(None),
                 EmailVerificationChallenge.expires_at > now,
-                EmailVerificationChallenge.attempts < MAX_VERIFICATION_ATTEMPTS,
+                EmailVerificationChallenge.attempts <= max_attempts,
                 EmailVerificationChallenge.email == email.strip().lower(),
             )
             .values(consumed_at=now)

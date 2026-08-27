@@ -49,12 +49,13 @@ from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 # Wrong answers a single challenge tolerates before it is spent. Five is enough
 # for somebody mistyping a code off their phone and nowhere near enough to
 # search a million values - the point is that the ceiling exists, not its exact
-# height.
-MAX_VERIFICATION_ATTEMPTS: Final = 5
+# height. `EMAIL_VERIFICATION_MAX_ATTEMPTS` overrides it; this is the default
+# and the value used wherever a caller has no settings to hand.
+DEFAULT_MAX_VERIFICATION_ATTEMPTS: Final = 5
 
 # Ten minutes. Long enough to switch to a mail client and back, short enough
-# that a code intercepted later is worthless. The service reads this from
-# configuration; it is the floor-and-default, not the only value.
+# that a code intercepted later is worthless. `EMAIL_VERIFICATION_TTL_SECONDS`
+# overrides it.
 DEFAULT_VERIFICATION_TTL_SECONDS: Final = 600
 
 # Argon2 output with its parameters and salt encoded in it, like
@@ -106,7 +107,7 @@ class EmailVerificationChallenge(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    def is_usable(self, *, now: datetime, email: str) -> bool:
+    def is_usable(self, *, now: datetime, email: str, max_attempts: int) -> bool:
         """Whether this challenge can still verify an address.
 
         Against a caller-supplied clock, like `PasswordResetToken.is_usable`,
@@ -115,12 +116,17 @@ class EmailVerificationChallenge(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         `email` is the account's *current* address and is required rather than
         optional: a caller that forgets to pass it would otherwise silently get
         the weaker check, and the whole point of the column is that the strong
-        one cannot be skipped by accident.
+        one cannot be skipped by accident. `max_attempts` is required for the
+        same reason - a default here would be a second, quieter policy
+        disagreeing with the configured one.
+
+        `attempts` is the count of answers *already* given, so the comparison
+        is strict: at the ceiling there is no attempt left to make.
         """
         return (
             self.consumed_at is None
             and self.superseded_at is None
             and self.expires_at > now
-            and self.attempts < MAX_VERIFICATION_ATTEMPTS
+            and self.attempts < max_attempts
             and self.email == email.strip().lower()
         )

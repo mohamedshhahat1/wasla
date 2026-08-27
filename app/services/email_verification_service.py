@@ -21,7 +21,7 @@ from typing import Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.exceptions import ValidationError
+from app.core.exceptions import RateLimitedError, ValidationError
 from app.core.logging import get_logger
 from app.core.rate_limit import RateLimiter, RateLimitPolicy
 from app.core.security import (
@@ -32,7 +32,11 @@ from app.core.security import (
 )
 from app.db.models import User
 from app.db.models.audit import AuditAction, AuditActorKind
-from app.db.models.email_verification import DEFAULT_VERIFICATION_TTL_SECONDS
+from app.db.models.email_verification import (
+    DEFAULT_MAX_VERIFICATION_ATTEMPTS,
+    DEFAULT_VERIFICATION_TTL_SECONDS,
+    EmailVerificationChallenge,
+)
 from app.repositories.email_verification_repository import EmailVerificationRepository
 from app.services.audit_service import AuditTrail
 from app.services.email_service import EmailOutbox
@@ -56,8 +60,19 @@ VERIFICATION_SENT_MESSAGE: Final = (
 # Bounds on the configured lifetime. Under a minute is unusable by a person
 # reading mail on a phone; over an hour is not a short-lived code, and the
 # whole security argument for six digits rests on the window being small.
+#
+# `Settings` enforces the same bounds on the field, so a deployment configured
+# outside them fails to start rather than reaching this. These stay because the
+# service is constructible without settings - a unit test, a future worker -
+# and a bound that only one of two doors checks is a bound with a door around
+# it.
 MIN_TTL_SECONDS: Final = 60
 MAX_TTL_SECONDS: Final = 3600
+
+# Bounds on the configured attempt ceiling, mirroring the field for the same
+# reason. Above ten, a million-value code space starts being worth searching.
+MIN_MAX_ATTEMPTS: Final = 1
+MAX_MAX_ATTEMPTS: Final = 10
 
 # Two policies, because they defend different things: one bounds how much mail
 # an account can cause, the other bounds guessing. Both carry `local_fallback`
@@ -89,30 +104,78 @@ class EmailVerificationService:
         settings: Settings,
         limiter: RateLimiter | None = None,
         ttl_seconds: int | None = None,
+        max_attempts: int | None = None,
     ) -> None:
-        """Build the service, refusing an unsafe lifetime.
+        """Build the service, refusing an unsafe lifetime or attempt ceiling.
 
-        `ttl_seconds` is refused rather than clamped when it falls outside the
-        bounds. Silently correcting configuration is how an operator ends up
-        believing a code lives for a day when it lives for an hour, and a
-        misconfiguration that starts cleanly is a misconfiguration nobody finds.
+        Both are read from `settings` when not given explicitly, so the
+        deployment's `EMAIL_VERIFICATION_TTL_SECONDS` and
+        `EMAIL_VERIFICATION_MAX_ATTEMPTS` are what a request actually uses. The
+        arguments remain for tests, which need to drive an expiry or an
+        exhausted challenge without reconstructing a whole `Settings`.
+
+        Values outside the bounds are refused rather than clamped. Silently
+        correcting configuration is how an operator ends up believing a code
+        lives for a day when it lives for an hour, and a misconfiguration that
+        starts cleanly is a misconfiguration nobody finds.
 
         `limiter` is optional for `AuthService`'s reason: a unit test can build
         this without Redis. The route always supplies one.
         """
-        ttl = DEFAULT_VERIFICATION_TTL_SECONDS if ttl_seconds is None else ttl_seconds
+        ttl = self._configured(
+            explicit=ttl_seconds,
+            settings=settings,
+            attribute="email_verification_ttl_seconds",
+            fallback=DEFAULT_VERIFICATION_TTL_SECONDS,
+        )
         if not MIN_TTL_SECONDS <= ttl <= MAX_TTL_SECONDS:
             raise ValidationError(
                 "Email verification code lifetime must be between "
                 f"{MIN_TTL_SECONDS} and {MAX_TTL_SECONDS} seconds.",
             )
+
+        attempts = self._configured(
+            explicit=max_attempts,
+            settings=settings,
+            attribute="email_verification_max_attempts",
+            fallback=DEFAULT_MAX_VERIFICATION_ATTEMPTS,
+        )
+        if not MIN_MAX_ATTEMPTS <= attempts <= MAX_MAX_ATTEMPTS:
+            raise ValidationError(
+                "Email verification attempts must be between "
+                f"{MIN_MAX_ATTEMPTS} and {MAX_MAX_ATTEMPTS}.",
+            )
+
         self._session = session
         self._settings = settings
         self._limiter = limiter
         self._ttl_seconds = ttl
+        self._max_attempts = attempts
         self._challenges = EmailVerificationRepository(session)
         self._outbox = EmailOutbox(session, settings)
         self._audit = AuditTrail(session)
+
+    @staticmethod
+    def _configured(
+        *,
+        explicit: int | None,
+        settings: Settings,
+        attribute: str,
+        fallback: int,
+    ) -> int:
+        """An explicit argument, else the setting, else the module default.
+
+        `getattr` rather than a direct read because several tests and the email
+        worker pass a small stand-in object in place of `Settings` - the same
+        arrangement `tests/integration/test_email_outbox.py` already uses for
+        the outbox. Those objects carry the handful of fields their subject
+        touches, and adding two more to every one of them would couple them to
+        a feature they are not about.
+        """
+        if explicit is not None:
+            return explicit
+        value = getattr(settings, attribute, None)
+        return fallback if value is None else int(value)
 
     async def request(self, *, user: User) -> str:
         """Issue a code for this account's own address, and queue the mail.
@@ -232,9 +295,13 @@ class EmailVerificationService:
             self._fail(user, reason="no_active_challenge", challenge_id=None)
             raise ValidationError(INVALID_CODE)
 
-        if not challenge.is_usable(now=now, email=user.email):
+        if not challenge.is_usable(now=now, email=user.email, max_attempts=self._max_attempts):
             spend_code_verification_time(code)
-            self._fail(user, reason=self._dead_reason(challenge, now=now), challenge_id=challenge.id)
+            self._fail(
+                user,
+                reason=self._dead_reason(challenge, now=now, email=user.email),
+                challenge_id=challenge.id,
+            )
             raise ValidationError(INVALID_CODE)
 
         # Counted before the comparison, so a guess costs an attempt whether or
@@ -255,6 +322,7 @@ class EmailVerificationService:
             challenge_id=challenge.id,
             email=user.email,
             now=now,
+            max_attempts=self._max_attempts,
         ):
             self._fail(user, reason="lost_race", challenge_id=challenge.id)
             raise ValidationError(INVALID_CODE)
@@ -281,21 +349,36 @@ class EmailVerificationService:
         )
         return VerificationOutcome(verified_at=now)
 
-    @staticmethod
-    def _dead_reason(challenge: object, *, now: datetime) -> str:
+    def _dead_reason(
+        self,
+        challenge: EmailVerificationChallenge,
+        *,
+        now: datetime,
+        email: str,
+    ) -> str:
         """Why a challenge that exists cannot be used.
 
-        For the audit entry only. Never reaches a response.
+        For the audit entry only. Never reaches a response - the caller gets
+        `INVALID_CODE` whichever of these it is.
+
+        Each branch tests the condition it names. An earlier version reported
+        `attempts_exhausted` for any challenge with a single failed attempt
+        behind it, which meant an address change on a challenge somebody had
+        mistyped once was filed under brute force - and an operator reading the
+        trail during an incident would have been looking at the wrong thing.
         """
-        expires_at = getattr(challenge, "expires_at", None)
-        attempts = getattr(challenge, "attempts", 0)
-        if expires_at is not None and expires_at <= now:
+        if challenge.expires_at <= now:
             return "expired"
-        if isinstance(attempts, int) and attempts > 0:
+        if challenge.attempts >= self._max_attempts:
             return "attempts_exhausted"
-        # The address moved since the code was issued, so the challenge is bound
-        # to something that is no longer this account's address.
-        return "address_changed"
+        if challenge.email != email.strip().lower():
+            # The address moved since the code was issued, so the challenge is
+            # bound to something that is no longer this account's address.
+            return "address_changed"
+        # `is_usable` also rejects a consumed or superseded challenge, but
+        # `get_active` filters both out, so reaching here means the row changed
+        # underneath this request.
+        return "not_live"
 
     def _fail(self, user: User, *, reason: str, challenge_id: object | None) -> None:
         """Record a rejected attempt.
@@ -336,6 +419,27 @@ class EmailVerificationService:
         only because neither policy locks anything - they refuse for a window,
         while the cap that actually ends a challenge is per-challenge, so nobody
         can spend a stranger's ability to verify.
+
+        A refusal is audited before it is re-raised. `RateLimiter.enforce`
+        raises, so without catching it here a throttled attempt would leave a
+        429, a log line and nothing in the trail - and "was this account being
+        hammered" is exactly the question the trail is read for during an
+        incident. It is recorded as an `EMAIL_VERIFICATION_FAILED` with a
+        `rate_limited` reason rather than as an action of its own, following
+        the vocabulary's rule that one question gets one action.
+
+        The entry is **committed here** rather than left to the request, and
+        that is the whole reason this method is shaped this way. The caller
+        raises immediately afterwards, and an exception unwinds the request's
+        transaction - so an entry staged the ordinary way would be discarded by
+        the very refusal it describes, leaving a 429 and a log line and nothing
+        in the trail. `AuthService._tear_down_after_reuse` commits for exactly
+        this reason.
+
+        Committing here is safe because of *where* here is: both public methods
+        call this first, so the only thing in the session is this row and
+        whatever loading the user read. Nothing half-written is being made
+        durable.
         """
         if self._limiter is None or not self._settings.rate_limit_enabled:
             return
@@ -347,4 +451,9 @@ class EmailVerificationService:
             # unlimited attempts (ADR-040).
             local_fallback=True,
         )
-        await self._limiter.enforce(policy, str(user.id))
+        try:
+            await self._limiter.enforce(policy, str(user.id))
+        except RateLimitedError:
+            self._fail(user, reason="rate_limited", challenge_id=None)
+            await self._session.commit()
+            raise
