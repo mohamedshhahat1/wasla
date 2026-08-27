@@ -18,6 +18,7 @@ from fastapi import APIRouter, status
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
+    CheckoutServiceDep,
     EntitlementServiceDep,
     PlanRepositoryDep,
     SubscriptionServiceDep,
@@ -26,6 +27,8 @@ from app.api.dependencies import (
 from app.api.route import CommittingRoute
 from app.schemas.billing import (
     CancellationRequest,
+    CheckoutRequestPayload,
+    CheckoutStarted,
     EntitlementRead,
     PlanRead,
     PlanSelectionRequest,
@@ -157,6 +160,43 @@ async def resume_subscription(
     subscription = await subscriptions.resume(actor=workspace.user)
     plan = await subscriptions.plan_for(subscription)
     return SubscriptionRead.from_model(subscription, plan=plan)
+
+
+@router.post(
+    "/checkout",
+    response_model=CheckoutStarted,
+    status_code=status.HTTP_201_CREATED,
+    summary="Start a hosted checkout for a plan",
+)
+async def start_checkout(
+    payload: CheckoutRequestPayload,
+    workspace: TenantOwnerDep,
+    checkout: CheckoutServiceDep,
+) -> CheckoutStarted:
+    """Open a payment page for a plan. Owners only.
+
+    The request names a plan and nothing else. The price, the currency and the
+    workspace are read from the database and the authenticated session, so
+    there is no field a client could send to be charged a figure of its
+    choosing - `CheckoutRequestPayload` forbids extras, so trying is a 422
+    rather than a value quietly ignored.
+
+    **This does not subscribe anybody.** It issues an invoice and a pending
+    payment and returns somewhere to pay. The subscription moves when the
+    provider's callback says money arrived (ADR-044), and a customer who
+    abandons the page leaves an unpaid invoice and nothing else.
+
+    Owners only, matching `POST /subscription`: choosing what a workspace pays
+    for is the same authority as choosing its plan.
+    """
+    started = await checkout.start(plan_code=payload.plan_code, actor=workspace.user)
+    return CheckoutStarted(
+        redirect_url=started.redirect_url,
+        payment_id=started.payment_id,
+        invoice_id=started.invoice_id,
+        amount=started.amount,
+        currency=started.currency,
+    )
 
 
 @router.get("/entitlements", response_model=list[EntitlementRead])

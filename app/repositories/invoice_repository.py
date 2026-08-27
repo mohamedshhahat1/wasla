@@ -101,6 +101,16 @@ class PaymentRepository(TenantScopedRepository[Payment]):
     def _tenant_filter(self) -> ColumnElement[bool]:
         return Payment.tenant_id == self.tenant_id
 
+    async def get_by_id(self, payment_id: uuid.UUID) -> Payment | None:
+        """One payment of this workspace's.
+
+        Tenant-scoped like everything on this repository, which is what makes a
+        callback naming another workspace's payment resolve to nothing rather
+        than to that payment. The scoping is the isolation boundary here, not a
+        convenience.
+        """
+        return await self._first(self._select().where(Payment.id == payment_id))
+
     async def list_for_invoice(self, invoice_id: uuid.UUID) -> list[Payment]:
         """Every attempt, oldest first: the history is the point.
 

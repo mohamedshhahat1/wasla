@@ -7,6 +7,7 @@ and may I do one more" — and the raw JSONB answers only the first of those.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Self
@@ -134,6 +135,41 @@ class PlanSelectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     plan_code: str = Field(min_length=1, max_length=MAX_PLAN_CODE_INPUT)
+
+
+class CheckoutRequestPayload(BaseModel):
+    """Starting a hosted checkout.
+
+    The plan code and nothing else, and that is the security property rather
+    than a minimal API. There is deliberately no `amount`, no `currency` and no
+    workspace: every one of those is read from the database and the
+    authenticated session, so a client cannot ask to be charged a figure of its
+    choosing. `extra="forbid"` makes an attempt to send one a 422 rather than a
+    field quietly ignored.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan_code: str = Field(min_length=1, max_length=MAX_PLAN_CODE_INPUT)
+
+
+class CheckoutStarted(BaseModel):
+    """Where to send the customer, and what they are about to pay.
+
+    The amount is echoed so a client can show it before redirecting, and it is
+    the server's figure - a client that displays this is displaying what will
+    actually be charged.
+
+    The provider's client secret is not here. It travels inside
+    `redirect_url` because the customer's browser has to carry it, and putting
+    it in a field of its own would invite a client to store or log it.
+    """
+
+    redirect_url: str
+    payment_id: uuid.UUID
+    invoice_id: uuid.UUID
+    amount: Decimal
+    currency: str
 
 
 class CancellationRequest(BaseModel):

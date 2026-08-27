@@ -216,6 +216,16 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         String(MAX_REFERENCE_LENGTH),
         nullable=True,
     )
+    # The provider's id for the *intended* payment, written when a hosted
+    # checkout is created. Distinct from `provider_reference`, which is the id
+    # of the transaction that eventually settled it and does not exist yet at
+    # the moment a customer is sent to a payment page. Kept so support can find
+    # an abandoned checkout in the provider's dashboard - the commonest real
+    # question being "I started paying and nothing happened".
+    provider_intent_reference: Mapped[str | None] = mapped_column(
+        String(MAX_REFERENCE_LENGTH),
+        nullable=True,
+    )
     # What the provider said when it refused. Kept because "declined" alone
     # tells a customer nothing they can act on.
     failure_reason: Mapped[str | None] = mapped_column(String(MAX_FAILURE_LENGTH), nullable=True)

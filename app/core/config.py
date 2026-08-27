@@ -207,6 +207,34 @@ class Settings(BaseSettings):
     # over a missing catalogue row.
     default_plan_code: str = "starter"
 
+    # Which processor collects money, if any (ADR-044). `manual` is the
+    # existing behaviour and stays the default: it records what is owed and
+    # waits for a human to confirm a bank transfer, which is how this product
+    # has always billed and how every local deployment and test still does.
+    billing_provider: Literal["manual", "paymob"] = "manual"
+
+    # Paymob credentials. All three are separate secrets with separate jobs and
+    # none is interchangeable with another:
+    #   - the secret key authenticates *us to them* when creating an intention
+    #   - the public key is not secret at all and goes in the checkout URL the
+    #     customer's browser follows
+    #   - the HMAC secret authenticates *them to us* on the callback, and is
+    #     the only thing standing between a stranger and a forged payment
+    # None has a default. A deployment that sets `BILLING_PROVIDER=paymob`
+    # without them refuses to boot rather than failing at the first customer.
+    paymob_secret_key: str | None = None
+    paymob_public_key: str | None = None
+    paymob_hmac_secret: str | None = None
+    # The integration id(s) Paymob issues per payment method. Test and live ids
+    # are different values, and the docs are explicit that they must match the
+    # mode of the secret key used with them.
+    paymob_integration_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
+    # Chooses the API host *and* the checkout host, which are different hosts.
+    # There is deliberately no sandbox setting: Paymob's documentation states
+    # that test and live share a regional base URL and the keys decide the
+    # mode, so a `PAYMOB_SANDBOX` flag would be a knob that controls nothing.
+    paymob_region: Literal["egypt", "uae", "oman", "saudi"] = "egypt"
+
     # Meta / WhatsApp: configuration only until the WhatsApp phase lands
     meta_app_id: str | None = None
     meta_app_secret: str | None = None
@@ -256,6 +284,27 @@ class Settings(BaseSettings):
     # into something worth guessing. One is permitted because a deployment that
     # wants no second chances is making a defensible choice.
     email_verification_max_attempts: int = Field(default=5, ge=1, le=10)
+
+    @field_validator("paymob_integration_ids", mode="before")
+    @classmethod
+    def _parse_integration_ids(cls, value: Any) -> Any:
+        """Accept a JSON array, a comma-separated string, or a list of ints.
+
+        Comma-separated because that is what a container environment can
+        express, following `credential_encryption_keys`. A value that is not a
+        number is refused rather than skipped: an integration id with a typo in
+        it is a payment method that silently stops being offered.
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                return json.loads(raw)
+            return [int(item.strip()) for item in raw.split(",") if item.strip()]
+        return value
 
     @field_validator("credential_encryption_keys", mode="before")
     @classmethod
@@ -464,6 +513,42 @@ class Settings(BaseSettings):
                         "RESEND_WEBHOOK_SECRET must be set so delivery events can be "
                         "verified; without it bounces and complaints are never recorded"
                     )
+
+        if self.billing_provider == "paymob" and not self.is_testing:
+            # Fail closed where money is involved, and in every environment
+            # rather than only production: a staging deployment configured to
+            # take payments and missing its HMAC secret would answer 503 to
+            # every callback, so real transactions would complete at Paymob and
+            # never be recorded here. That is the worst failure this subsystem
+            # has - the customer is charged and gets nothing.
+            if not self.paymob_secret_key:
+                problems.append("PAYMOB_SECRET_KEY must be set when BILLING_PROVIDER is paymob")
+            if not self.paymob_public_key:
+                problems.append("PAYMOB_PUBLIC_KEY must be set when BILLING_PROVIDER is paymob")
+            if not self.paymob_hmac_secret:
+                # The one that is not merely configuration. Without it a
+                # callback cannot be authenticated, and an endpoint that cannot
+                # authenticate a payment notification must refuse every one.
+                problems.append(
+                    "PAYMOB_HMAC_SECRET must be set when BILLING_PROVIDER is paymob: "
+                    "callbacks cannot be verified without it"
+                )
+            if not self.paymob_integration_ids:
+                problems.append(
+                    "PAYMOB_INTEGRATION_IDS must name at least one integration id; "
+                    "an intention with no payment method is refused by Paymob"
+                )
+            if not self.app_public_url:
+                # The callback URL is built from it, and a callback URL derived
+                # from a request Host header is a callback an attacker can aim.
+                problems.append(
+                    "APP_PUBLIC_URL must be set when BILLING_PROVIDER is paymob: "
+                    "the callback URL is built from it"
+                )
+            elif self.is_production and not self.app_public_url.startswith("https://"):
+                problems.append(
+                    "APP_PUBLIC_URL must be https in production: payment callbacks travel to it"
+                )
 
         if problems:
             raise ValueError(f"invalid {self.environment} configuration: " + "; ".join(problems))

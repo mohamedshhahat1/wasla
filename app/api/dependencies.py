@@ -22,6 +22,7 @@ from app.core.storage import LocalMediaStorage, MediaStorage
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.db.models.billing import LimitKey
+from app.integrations.billing import build_checkout_provider
 from app.integrations.whatsapp.ownership import MetaOwnershipVerifier
 from app.platform.platform_analytics import PlatformAnalyticsService
 from app.platform.platform_billing import PlatformBillingService
@@ -36,6 +37,7 @@ from app.services.agent_service import AgentService
 from app.services.analytics_service import AnalyticsService
 from app.services.auth_service import AuthService
 from app.services.campaign_service import CampaignService
+from app.services.checkout_service import CheckoutService
 from app.services.credential_service import CredentialService
 from app.services.entitlement_service import Entitlement, EntitlementService
 from app.services.follow_up_service import FollowUpService
@@ -535,6 +537,35 @@ def get_invoice_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> I
 
 
 InvoiceServiceDep = Annotated[InvoiceService, Depends(get_invoice_service)]
+
+
+def get_checkout_service(
+    settings: SettingsDep,
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> CheckoutService:
+    """Workspace-scoped, and built with whatever provider is configured.
+
+    Unlike `get_invoice_service` this one *does* carry a provider, because
+    starting a checkout is the one thing a workspace does that reaches a
+    processor. It still collects nothing itself: the provider is asked for a
+    page to send the customer to, and the money is reported later by callback
+    (ADR-044).
+
+    `build_checkout_provider` returns None when `BILLING_PROVIDER` is manual,
+    which is the default and the state every test and local deployment runs in.
+    The service refuses to start a checkout in that state rather than the
+    dependency failing to resolve - a workspace reading its invoices should not
+    404 because nobody configured Paymob.
+    """
+    return CheckoutService(
+        session,
+        tenant_id=workspace.tenant.id,
+        provider=build_checkout_provider(settings),
+    )
+
+
+CheckoutServiceDep = Annotated[CheckoutService, Depends(get_checkout_service)]
 
 
 def get_platform_billing_service(session: SessionDep) -> PlatformBillingService:

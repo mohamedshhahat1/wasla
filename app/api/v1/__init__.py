@@ -42,6 +42,7 @@ from app.api.v1 import (
     knowledge,
     leads,
     members,
+    payment_webhooks,
     platform,
     templates,
     usage,
@@ -107,6 +108,10 @@ UNLIMITED_ROUTERS = (
     platform.router,
     webhooks.router,
     email_webhooks.router,
+    # A payment provider cannot hold a credential of ours and retries anything
+    # that is not a 2xx, so the same reasoning as the other two: an HMAC is its
+    # authorization, and a 429 here would lose a payment notification.
+    payment_webhooks.router,
 )
 
 api_router = APIRouter(route_class=CommittingRoute)
