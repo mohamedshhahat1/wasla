@@ -555,12 +555,67 @@ walk the checklist in `docs/EMAIL.md` with real credentials.
 
 Deferred by decision, not unfinished:
 
-- [ ] Email verification. Nothing in the authorization model reads a verified
-      flag, so adding one would be an account state with no meaning (ADR-042).
-      The trigger to revisit is the day an unverified address grants a capability
+- [x] ~~Email verification~~ — **built** (ADR-043), and revisited on a different
+      trigger than the one ADR-042 named. No capability came to depend on an
+      unverified address, and none does now; what changed is that account
+      squatting was undetectable, and a verified-at column is what lets the
+      question be asked at all. It still grants nothing
 - [ ] Templates whose domain events do not exist yet: invitation accepted,
       membership revoked, role change, subscription started, trial *ending*,
       payment succeeded, failed and pending
 - [ ] Redis degradation of the reset limiter specifically. The limiter degrades
       rather than disappears (ADR-040); that path through the reset endpoints is
       not separately covered
+
+## Phase 19 — Email verification
+
+Six-digit codes over the existing outbox (ADR-043). `users.email_verified_at`,
+one live challenge per account enforced by a partial unique index, Argon2
+verifiers, a per-challenge attempt cap and two authenticated endpoints under
+`/auth/email/verification`. Registration issues the first code in the same
+transaction as the account.
+
+Found and fixed while finishing work started earlier on this branch:
+
+- **The router had no `route_class=CommittingRoute`** — the only one in
+  `app/api/v1/` without it. Inclusion does not confer it, so verification would
+  have answered `200` with a timestamp while the write was rolled back on the
+  way out. `app/api/route.py` claimed in a docstring that every router carries
+  the class; nothing checked, and now a test walks the whole tree
+- **The attempt ceiling was off by one.** An attempt is counted before the code
+  is compared, so the consuming UPDATE's `attempts < max` rejected the correct
+  code on the last permitted try and filed it as a lost race — a cap of five
+  that allowed four, failing the person who typed carefully after mistyping
+- **A rejected challenge reported the wrong reason.** Any challenge with one
+  failed attempt behind it was recorded as `attempts_exhausted`, so an address
+  change on a mistyped challenge read as brute force in the trail
+- **The TTL and attempt settings did not exist.** The bounds and the default
+  were there and nothing read a setting, so `EMAIL_VERIFICATION_TTL_SECONDS`
+  was inert
+- **Registration queued nothing**, so a new account had no code until it asked
+- **A rate-limited attempt left no audit row.** Closing it needed the service to
+  commit the entry itself: the refusal raises, and an exception discards the
+  transaction the entry was staged in
+- **`/auth/me` did not report verification state**, so a client could only find
+  out by mailing somebody a code
+
+**Verified 2026-08-27 against PostgreSQL 16 and Docker.** Figures in the phase
+report, including what was *not* verified.
+
+**Not verified: real Resend delivery**, unchanged from Phase 18. No code has
+been mailed by Resend and no credential was available in this environment.
+
+Deferred by decision:
+
+- [ ] No email-change flow exists to integrate with. Challenges already record
+      the address they were issued for and both the check and the consuming
+      UPDATE compare it to the current one, so the flow cannot be written in a
+      way that lets an old code verify a new address — but the flow itself is
+      not built, and `email_verified_at = NULL` on change is a rule written down
+      rather than enforced by code that exists
+- [ ] Nothing sweeps dead challenges. They are small and carry no usable secret
+      once superseded; a cleanup job would be operational work this repository
+      does not otherwise have
+- [ ] Invitation acceptance does not mark an address verified, though redeeming
+      a token delivered to it is the same proof. Left alone rather than added
+      speculatively — it is a product decision, not a security gap

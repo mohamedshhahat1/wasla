@@ -253,6 +253,63 @@ for everyone. It never disables an account, never bumps `token_version` and
 never denies a sign-in (ADR-042) — so a suppressed address is a delivery
 problem, never an access one.
 
+### Somebody cannot verify their email address
+
+Work down this list; each step distinguishes a different cause.
+
+**Is email on at all?** With `EMAIL_ENABLED=false` the endpoint answers `202`
+and queues nothing, so the person waits for mail that was never sent. This is
+the first thing to check and the most common cause on a new deployment.
+
+**Is the address suppressed?** A hard bounce or complaint stops every send to
+it, verification included. See *An address has stopped receiving mail* above.
+
+**Is there a live challenge, and what happened to it?**
+
+```sql
+SELECT id, expires_at, attempts, consumed_at, superseded_at, created_at
+FROM email_verification_challenges
+WHERE user_id = '<user-id>'
+ORDER BY created_at DESC LIMIT 5;
+```
+
+`consumed_at` set means it already worked - the person is probably looking at a
+stale tab. `superseded_at` set means they asked again and are typing the older
+code. `attempts` at the ceiling means the challenge is dead even for the right
+code, and the fix is to ask for a new one. An `expires_at` in the past is the
+same fix.
+
+**Did the mail actually go?**
+
+```sql
+SELECT status, attempts, last_error_code, sent_at, provider_message_id
+FROM email_messages
+WHERE idempotency_key = 'email-verification:<challenge-id>';
+```
+
+**Why were their attempts rejected?** The trail carries a category, and this is
+the query worth knowing:
+
+```sql
+SELECT occurred_at, metadata->>'reason' AS reason
+FROM audit_logs
+WHERE target_id = '<user-id>' AND action = 'email_verification_failed'
+ORDER BY occurred_at DESC LIMIT 20;
+```
+
+`wrong_code` repeatedly against one account is the one to escalate - that is
+what guessing looks like. `rate_limited` means they hit the per-account budget;
+it clears on its own within the window and there is nothing to unlock, because
+the limit refuses for a window rather than disabling anything.
+`address_changed` means the code was issued for an address the account no
+longer has.
+
+**What you must not do:** there is no way to read a code, and no endpoint or
+query that will give you one - only an Argon2 verifier is stored. Do not
+"verify them manually" by writing `users.email_verified_at` from a SQL prompt.
+That records a proof that never happened, in the one column whose entire value
+is that it is only ever set by a proof. Have them request a new code.
+
 ### Rotating the Resend credentials
 
 **The API key** is used only by the worker. Issue a new key in the Resend

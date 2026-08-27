@@ -163,6 +163,45 @@ notify the account holder afterwards.
 than a gap — nothing in the authorization model reads a verified flag. See
 ADR-042 for the reasoning and the residual account-squatting risk.
 
+## Email verification — a six-digit code that proves an inbox
+
+**`POST /auth/email/verification/send` and `.../verify` exist** (ADR-043).
+Both require a session and act only on the calling account.
+
+The controls, and why each differs from the reset flow where it does:
+
+- **An Argon2 verifier, not SHA-256.** A reset token is 256 bits of randomness
+  and there is nothing to brute-force. Six digits is a million candidates, so a
+  fast hash over a stolen database would surrender every live code. The price is
+  that a code cannot be a lookup key — challenges are found by account.
+- **A short expiry.** Ten minutes by default, `EMAIL_VERIFICATION_TTL_SECONDS`,
+  bounded to 60–3600 and refused outside that range in every environment rather
+  than clamped.
+- **A per-challenge attempt cap** the reset token does not need, because its
+  token cannot be guessed. `EMAIL_VERIFICATION_MAX_ATTEMPTS`, bounded 1–10,
+  counted by the database and counted *before* the code is compared.
+- **Single use, and superseded on reissue** — the reset flow's two mechanisms,
+  plus a partial unique index so the database itself refuses a second live
+  challenge.
+- **No enumeration surface rather than a mitigated one.** There is no
+  unauthenticated send endpoint. Neither route accepts an address or an account
+  id, so there is nothing to probe and no way to make the platform mail a
+  stranger.
+- **Bound to the address, not only the account.** Each challenge records the
+  address it was issued for. There is no email-change flow yet; when there is,
+  a code sent to the old mailbox already cannot verify the new one.
+- **Rate limited per account, following ADR-040.** Both policies carry the
+  process-local fallback. Keying by account is safe only because the routes
+  require that account's session, so nobody can spend a stranger's budget —
+  the limit is not an attacker-triggerable lockout.
+- **Never logged, never returned, never in a URL.** Covered by a regression
+  test that drives both endpoints with a known code and asserts it appears in
+  no captured log record and in no audit row.
+
+**It grants nothing.** No route reads the column. That is the property most
+worth protecting here: a verified-email check added casually would lock out
+every account created before the column existed.
+
 ## Account lifecycle — what is still missing
 
 Stated rather than carried silently.
@@ -371,7 +410,12 @@ Confirmed behaviourally during this audit rather than by reading:
 
 ## Still open
 
-- **No email verification** — a decision recorded in ADR-042, not an omission.
+- ~~No email verification~~ — **built** (ADR-043), which revisits the ADR-042
+  clause deciding against it. It proves inbox control and grants nothing: no
+  route, permission or entitlement reads `email_verified_at`, and a test
+  asserts an unverified account can use the application. What it closes is
+  account squatting being *undetectable*, not an authorization gap — there was
+  never one. See `docs/EMAIL_VERIFICATION.md`.
 - **Ownership is proven at a point in time, not continuously.** A number that
   moves at Meta after the fact is not noticed. Re-verification on a schedule is
   the obvious next step and is now cheap: ADR-041 built the mechanism, and only

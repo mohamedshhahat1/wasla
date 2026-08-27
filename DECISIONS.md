@@ -1178,3 +1178,51 @@ Production fails closed on a half-configured email setup: no sender, no public U
 Bounce and complaint handling depends on the webhook actually being configured at Resend. Until it is, suppression never populates and the platform keeps writing to dead addresses — which is why the secret is required in production rather than optional.
 
 The provider boundary is one method. Swapping Resend for another provider is a new adapter and a configuration value; nothing in the services, templates or outbox names a provider.
+
+## ADR-043 — Email Verification Is a Six-Digit Code That Proves an Inbox and Grants Nothing
+
+Date:
+2026-08-27
+
+Status:
+Accepted. Supersedes the "do not implement email verification" clause of ADR-042; every other part of ADR-042 stands.
+
+Decision:
+Prove control of the address on an account with a six-digit code, delivered through the existing outbox and Resend adapter, stored only as an Argon2 verifier, single-use, superseded on reissue, capped at a configurable number of attempts, and expiring in ten minutes by default. Record the result in `users.email_verified_at` as a nullable timestamp. Make **both** endpoints authenticated and act only on the calling account. Let verification grant, revoke and gate **nothing**.
+
+Context:
+ADR-042 decided against verification and named the trigger to revisit it: "the day an unverified address grants a capability". That day has not arrived — nothing in the authorization model reads a verified flag, and this ADR does not add one. What arrived instead is the weaker but real problem ADR-042 also named: **account squatting**. Registration is self-service and takes any syntactically valid address, so an account can exist on an address its holder cannot read. Nothing detected that, and nothing recorded which accounts were affected.
+
+The mitigation ADR-042 relied on — a reset by the real owner bumps `token_version` and ends the squatter's sessions — is real and remains true. It is also entirely reactive: it fires only if the real owner happens to try. A verified-at column is what lets the question "which accounts have proven their address" be asked at all, and that is worth building before, not after, a product rule needs the answer.
+
+Reason:
+**A code, not a link, and this is the one place this repository diverges from its own habit.** Every other secret-bearing template builds a URL from `APP_PUBLIC_URL` plus a literal path. A verification link would be a fourth. It was rejected because a code in a URL is a code in browser history, in a `Referer` header, and in whatever proxy logged the request — and because a link verifies whoever *clicks* it, which on a shared or forwarded mailbox is not necessarily the account holder. A code has to be carried back into an authenticated session by hand, which binds the proof to the person holding the account rather than to the person holding the mail.
+
+**Argon2, where the reset token uses SHA-256.** The reset token is 256 bits of randomness: there is nothing to brute-force, and a slow hash would only tax the lookup. Six digits inverts every part of that. A million candidates is not a keyspace, it is a list — a leaked table of SHA-256 digests would be a leaked table of live codes. Argon2 makes each candidate cost real work. The price is that a code cannot be a lookup key, since every hash is salted; the challenge is found by account instead, which is the right shape anyway because verification acts on the authenticated caller.
+
+**Both endpoints are authenticated, which removes the enumeration surface instead of mitigating it.** An unauthenticated send endpoint would have to answer identically for an unknown address, a registered unverified one and an already-verified one — achievable, and permanently one careless change away from becoming an oracle. There is no such endpoint. Neither route accepts an address or an account id: the recipient is the session's own row. There is nothing to probe, and no way to make the platform mail a stranger.
+
+This is possible only because registration already returns a session. An account is authenticated from the moment it exists, so requiring a session to verify locks nobody out. A product that gated sign-in on verification could not make this choice, which is a second reason not to gate sign-in on verification.
+
+**Three independent bounds on guessing, because one is not enough.** The keyspace is a million values; `attempts` is capped per challenge, after which the challenge is dead even for the correct code; and the endpoint is limited to ten attempts per fifteen minutes per account. The attempt is counted *before* the code is compared, so concurrent guesses cannot slip between a read and an increment, and the consuming UPDATE re-checks every precondition — including the ceiling — because the Argon2 comparison happens in Python and the row can move underneath it.
+
+**Keying the limits by account is safe only because neither limit locks anything.** A per-account budget that could be spent by a stranger would be an account lockout anybody could trigger. Nothing here can be: the routes require a session for the account being limited, so only the account holder can spend its budget, and the budget refuses for a window rather than ending anything.
+
+**A challenge records the address it was issued for.** Binding by `user_id` alone leaves a code valid across an email change, which is a genuine bypass: request a code at an address you control, change the account's address to somebody else's, submit the code, and the account claims a verified address its owner never proved. There is no email-change flow in this repository today — this is defence for the one that will exist, enforced by the data rather than by whoever writes it remembering to invalidate anything.
+
+**The plaintext code lives in the outbox context, and that is stated rather than hidden.** The worker renders the message, so the code has to reach it; this is the same arrangement the reset link already uses, and the same bound applies — terminal transitions clear the context, so the exposure is the life of the send rather than the life of the row. No endpoint reads that table, and no log line carries the value.
+
+**Redis degradation follows ADR-040 unchanged.** Both policies stand in front of a guessable secret, so both carry the process-local fallback. An outage makes the limit weaker; it never makes it absent, and it never makes verification impossible — fail-closed here would be attacker-triggerable by anyone who can degrade the cache.
+
+**Verification grants nothing, and that is a decision rather than an omission.** No route reads `email_verified_at`, no permission depends on it, no entitlement consults it. Workspace access is a membership row, platform authority is `platform_role`, and plan limits are a subscription; a verified address is an input to none of them. Wiring it into authorization now would invent a product rule nobody has asked for and would lock out every account created before the column existed. A test asserts that an unverified account can use the application, so the property is enforced rather than merely intended.
+
+Consequences:
+Every account that predates this migration is unverified, and unverified is an ordinary state. There is no backfill, because backfilling them as verified would record a proof that never happened.
+
+The audit vocabulary gains three actions. Unlike password reset — where only completion is recorded, because the request is unauthenticated and would let anyone write into a stranger's trail — the request half is audited here, since sending requires a session. Failures share one action with the reason in `meta`, because "why did verification not work" is one question and a burst of them against one account is the signal worth alerting on whatever the reason says.
+
+A rate-limited attempt is audited, which required the service to catch the refusal and commit the entry itself: the exception discards the request's transaction, so an entry staged the ordinary way would be rolled back by the very refusal it describes.
+
+Delivery is at-least-once, so somebody may receive the same code twice. That is harmless — it is one challenge — and the template says nothing that is only true once.
+
+Nothing sweeps dead challenges. They are small, they carry no usable secret once superseded, and a cleanup job would be operational work this repository does not otherwise have.

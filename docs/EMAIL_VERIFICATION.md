@@ -130,13 +130,13 @@ the same question and a burst of them against one account is the signal worth
 alerting on whatever the reason says. The request action records how many
 challenges it superseded. Never the code, and never a hash of one.
 
-> **Known gap.** A rate-limited request is **not** audited. `RateLimiter`
-> raises before the service records anything, so a throttled attempt produces
-> a 429 and a log line but no audit row. Closing this means either auditing
-> inside the limiter - which would make every throttled route in the
-> application write audit rows - or catching and re-raising in the service.
-> Neither was done, and the gap is recorded here rather than left for
-> somebody to discover while investigating an incident.
+A refused rate limit is audited too, as `EMAIL_VERIFICATION_FAILED` with a
+`rate_limited` reason. Closing that needed more than a `try`: the refusal
+raises, and an exception discards the request's transaction, so an entry
+staged the ordinary way would have been rolled back by the very refusal it
+described. The service commits it itself - safe only because both public
+methods limit first, so the session holds nothing else at that point. It is
+the arrangement `AuthService._tear_down_after_reuse` already uses.
 
 **16. What may appear in logs?** `user_id`, `challenge_id`, the number of
 challenges superseded, and an outcome category. **Never** the code, and not
@@ -337,46 +337,68 @@ minute or above one hour at construction, rather than clamping it: silently
 correcting configuration is how an operator comes to believe a code lives for
 a day when it lives for an hour.
 
-**The environment settings are not wired.** The default comes from
-`DEFAULT_VERIFICATION_TTL_SECONDS` on the model and the service accepts a
-`ttl_seconds` argument, but no `EMAIL_VERIFICATION_OTP_TTL_SECONDS` exists in
-`app/core/config.py` and nothing passes one. The bound exists; the knob does
-not. This is the open half of the configuration requirement.
+Two settings, both read by the service on every request:
+
+| Variable | Default | Bounds |
+| --- | --- | --- |
+| `EMAIL_VERIFICATION_TTL_SECONDS` | 600 | 60-3600 |
+| `EMAIL_VERIFICATION_MAX_ATTEMPTS` | 5 | 1-10 |
+
+The bounds are enforced twice, deliberately. `Settings` refuses an out-of-range
+value in **every** environment, not only production, because an unusable
+lifetime is unsafe on a laptop too - so a misconfigured deployment fails to
+start. The service checks again at construction, because it is constructible
+without settings and a bound only one of two doors checks is a bound with a
+door around it.
+
+The rate-limit numbers are **not** configurable: three sends and ten attempts
+per fifteen minutes per account, as module constants beside
+`RESET_TOKEN_TTL_MINUTES`, which is a constant for the same reason. Nothing
+about a deployment makes one of these right and another wrong.
 
 ## Build state
 
-Honest accounting, corrected after implementation.
+Honest accounting, corrected again after the phase was finished and run.
 
-**Built:** the `email_verified_at` column and `is_email_verified` property;
-the `email_verification_challenges` table with its partial unique index,
-user index and cascade; migration 0028; migration 0029 for the audit enum;
-the four crypto helpers in `app/core/security.py`; the
+**Built and executed:** the `email_verified_at` column and
+`is_email_verified` property; the `email_verification_challenges` table with
+its partial unique index, user index and cascade; migrations 0028 and 0029;
+the crypto helpers in `app/core/security.py`; the
 `EmailVerificationRepository` with its atomic consume, atomic attempt
 increment and supersede; the `EmailVerificationService`; the
 `EMAIL_VERIFICATION` template; the three audit actions; the two rate-limit
-policies; and the two endpoints under `/auth/email/verification`.
+policies; the two endpoints; both settings; the registration integration;
+`email_verified_at` on `GET /auth/me`; and the audit row for a throttled
+attempt.
 
-**Not built:**
+**Defects found by actually running it**, all fixed and each now pinned by a
+test:
 
-- environment settings for TTL and attempt cap (see above)
-- registration integration - `AuthService.register` still enqueues nothing,
-  so a new account has no challenge until it asks for one
-- `email_verified_at` is not reported by `/auth/me`, so a client cannot see
-  whether it needs to ask for a code
-- an audit row for rate-limited attempts (see question 15)
-- **every test.** No unit test, no integration test, no adversarial matrix,
-  no canary-OTP log regression test, no property test
-- sections in `docs/EMAIL.md`, `docs/SECURITY.md`, `docs/AUTHORIZATION.md`,
-  `API.md`, `RUNBOOK.md`, `DEPLOYMENT.md`, `TASKS.md`, and an ADR entry in
-  `DECISIONS.md`
+- The router carried no `route_class=CommittingRoute` - the only router in
+  `app/api/v1/` without one. Verification answered `200` with a timestamp
+  while the write was discarded on the way out.
+- The consuming UPDATE compared `attempts < max` while the caller had already
+  counted the attempt being judged, so the correct code on the last permitted
+  try was refused and recorded as a lost race.
+- `_dead_reason` reported `attempts_exhausted` for any challenge with a single
+  failed attempt, so an address change read as brute force in the trail.
+- The TTL and attempt-cap settings did not exist, so the documented knobs were
+  inert.
+- Registration queued nothing.
 
-**Corrected in this document after implementation:** it previously claimed
-rate-limit refusals are audited (they are not), listed six log events where
-four exist, and described the service, endpoints, template, repository and
-audit actions as unbuilt.
+**Tests.** `tests/unit/test_verification_codes.py` (30) covers generation,
+leading zeroes, the CSPRNG, Argon2 storage and the ASCII-only parser.
+`tests/integration/test_email_verification.py` (35) covers the flow, expiry
+boundaries, the attempt ceiling on both sides, replay, supersession, the
+partial unique index under a real IntegrityError, the address binding, two
+sessions racing one consume, and configuration refusal.
+`tests/integration/test_email_verification_endpoints.py` (29) covers
+authentication, cross-account reach, indistinguishable rejections, malformed
+HTTP, both rate limits, Redis degradation, the registration integration, a
+canary code that must not reach a log or the trail, and the route-class walk.
 
-**Not verified.** Nothing in this phase has been executed. Not linted, not
-type-checked, not migrated against a database, not started in a container, no
-test run, no code emailed. The environment this was written in has no
-network, no Docker, no PostgreSQL and no Redis. Every claim above about
-*behaviour* is a claim about what the code says, not about anything observed.
+**Still not verified.** No code has been delivered by Resend. No
+`RESEND_API_KEY` was available in this environment, so every claim about
+delivery is a claim about the outbox row and the rendered message, not about
+mail that arrived. The first production send has to walk the checklist in
+`docs/EMAIL.md`.

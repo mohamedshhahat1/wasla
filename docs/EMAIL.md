@@ -174,6 +174,32 @@ Redis degradation follows the existing policy (ADR-032): an outage allows
 requests through rather than refusing them. Losing the limiter degrades to
 unmetered resets, not to a platform nobody can sign into.
 
+## Email verification threat model
+
+The flow lives in `docs/EMAIL_VERIFICATION.md` and is decided by ADR-043. What
+belongs here is the part that is about *email*: it is the only template whose
+secret is meant to be read and retyped rather than clicked.
+
+| Concern | Defence |
+| --- | --- |
+| Account enumeration | There is no unauthenticated send endpoint. Neither route takes an address or an account id; the recipient is the session's own row |
+| Mailing a stranger | Same reason. A caller cannot name a recipient, so the endpoint cannot be used as a relay |
+| Code theft from the database | Only an Argon2 verifier is stored, salted per row. Six digits is a million candidates, so SHA-256 would be a list rather than a hash |
+| Code in logs | Never logged. Logs carry `user_id`, `challenge_id`, a supersede count and an outcome category |
+| Code in an API response | Never returned, by either route, and not by registration |
+| Code in a URL | There is no link. A code in a URL is a code in browser history, a `Referer` header and a proxy log |
+| Code in the subject | Subjects are constants. A subject shows on a lock screen |
+| Brute force | Three bounds: the keyspace, a per-challenge attempt cap, and a per-account rate limit. The attempt is counted before the code is compared |
+| Replay / double use | Consumed by one conditional UPDATE; a spent challenge is invalid |
+| Two valid codes at once | A partial unique index on live challenges, so the database refuses a second |
+| Verifying somebody else's address | The challenge is found by account, and the request schema forbids extra fields |
+| Surviving an email change | Each challenge records the address it was issued for, and both the check and the consuming UPDATE compare it to the current one |
+| Code lingering in the outbox | The context carries it so the worker can render the message, and terminal transitions clear it - the reset link's arrangement, unchanged |
+
+Redis degradation follows ADR-040 rather than ADR-032: both policies stand in
+front of a guessable secret, so both carry the process-local fallback. An
+outage weakens the limit and never removes it.
+
 ## Webhook trust boundary
 
 `POST /api/v1/webhooks/email`, unauthenticated - a provider cannot hold a
@@ -324,16 +350,12 @@ is wired.
   expired), payment succeeded, payment failed, payment pending. Each needs a
   domain event that does not exist yet; none was invented to give a template
   a caller.
-- **No email verification flow**, and this is a decision rather than an
-  omission. Nothing in Wasla's authorization model grants anything on the
-  basis of a verified address: workspace access comes from a membership row,
-  platform authority from `platform_role`, and an invitation already proves
-  control of the address by requiring a token delivered to it. Adding
-  verification now would introduce an account state with no authorization
-  meaning. It becomes necessary if self-service registration ever grants
-  something before an invitation - at which point it belongs behind
-  `POST /auth/email-verification/{request,confirm}` with the same hashed
-  single-use token handling as reset.
+- ~~No email verification flow~~ - **built** (ADR-043). Six-digit codes
+  under `POST /auth/email/verification/{send,verify}`, with the same
+  hash-only, single-use, superseded-on-reissue handling as reset, plus an
+  attempt cap the reset token does not need. It still grants nothing:
+  workspace access comes from a membership row and platform authority from
+  `platform_role`, exactly as before. See `docs/EMAIL_VERIFICATION.md`.
 - **Redis degradation of the reset rate limiter is untested.** The limiter
   itself degrades rather than disappears (ADR-040) and is covered there; what
   is not covered is that path specifically through the reset endpoints.

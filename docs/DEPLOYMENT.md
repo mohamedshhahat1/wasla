@@ -119,6 +119,28 @@ only then tighten to `p=quarantine` and `p=reject`. Going straight to
 similar. Sender reputation is per-domain, so keeping product mail off the
 apex protects everything else that domain sends.
 
+### Email verification settings
+
+Two knobs, both optional and both bounded (ADR-043). They are validated by the
+settings field rather than only in production, so an out-of-range value refuses
+to boot in staging and on a developer's laptop too.
+
+| Variable | Default | Bounds | What a wrong value costs |
+| --- | --- | --- | --- |
+| `EMAIL_VERIFICATION_TTL_SECONDS` | `600` | 60-3600 | Too low and codes expire while somebody opens their mail client. Too high and a six-digit code becomes a long-lived password with twenty bits of entropy |
+| `EMAIL_VERIFICATION_MAX_ATTEMPTS` | `5` | 1-10 | Too low and one mistype burns the challenge. Too high and a million-value keyspace starts being worth searching |
+
+Values outside the bounds are **refused, not clamped**: a deployment that
+silently corrected them is a deployment whose operator believes something false
+about how long a code lives.
+
+Verification needs no DNS or provider configuration of its own — it sends
+through the same outbox, worker and Resend adapter as everything else. With
+`EMAIL_ENABLED=false` no code is ever delivered, and the endpoints still answer
+`202`, so a deployment that leaves email off has verification that nobody can
+complete. That is the same no-op the password reset has, and for the same
+reason.
+
 **4. Configure the delivery webhook.** In Resend, add an endpoint pointing at
 `https://<your-host>/api/v1/webhooks/email` and subscribe it to at least
 `email.delivered`, `email.bounced` and `email.complained`. Copy the signing

@@ -50,6 +50,8 @@ Liveness deliberately does not touch PostgreSQL: a database outage must not make
 | POST | `/api/v1/auth/password` | Change the password, ending every session | Authenticated |
 | POST | `/api/v1/auth/password-reset/request` | Ask for a reset link by email (`202`, always the same body) | Public |
 | POST | `/api/v1/auth/password-reset/confirm` | Redeem the emailed token for a new password | Public |
+| POST | `/api/v1/auth/email/verification/send` | Mail a six-digit code to **your own** address (`202`, always the same body) | Authenticated |
+| POST | `/api/v1/auth/email/verification/verify` | Prove control of your own address | Authenticated |
 
 `logout` revokes one refresh token; `logout-all` revokes the whole estate by raising
 `users.token_version`, which every token is checked against (ADR-036). The calling
@@ -57,9 +59,29 @@ session is ended too - exempting it would leave the one an attacker is most like
 be holding. Both return the account's new state, never a token.
 
 `password` is a *change*, not a reset: the current password is the proof, so nothing has
-to be delivered anywhere. **There is no password reset**, deliberately - it needs a token
-sent to an address the caller controls, and this deployment cannot send email. See
+to be delivered anywhere. The reset beside it is for somebody who *cannot* sign in, and
+was unblocked once the repository could send email (ADR-042). See
 [SECURITY.md](SECURITY.md).
+
+The two verification routes take **no address and no account id** (ADR-043). `send`
+mails the address on the calling account; `verify` accepts a `code` and nothing else -
+`{"code": "482731"}`, with spaces and hyphens tolerated. Any extra field is a `422`, so
+an attempt to name somebody else is refused rather than ignored.
+
+```
+POST /api/v1/auth/email/verification/send    -> 202 {"message": "If that address still needs verifying, a code has been sent to it."}
+POST /api/v1/auth/email/verification/verify  -> 200 {"verified_at": "2026-08-27T14:12:03Z"}
+```
+
+`send` answers the same sentence whether a code was queued or the address was already
+verified. `verify` answers the same `422` for every rejection - wrong, expired,
+exhausted, superseded, malformed or never issued - because an error that separates
+"expired" from "wrong" tells somebody guessing whether to continue. The code is never
+in a response, never in a URL and never in the subject line.
+
+Neither route grants anything. `verify` returns a timestamp, not a credential, and
+`GET /auth/me` reports `email_verified_at` so a client can decide whether to prompt.
+No route in this document requires a verified address.
 
 ## Invitations
 
