@@ -633,3 +633,47 @@ Deferred by decision:
 - [ ] Invitation acceptance does not mark an address verified, though redeeming
       a token delivered to it is the same proof. Left alone rather than added
       speculatively — it is a product decision, not a security gap
+
+## Phase 20 — Paymob payments
+
+Card payments through Paymob's Intention API and Unified Checkout (ADR-044),
+behind a second provider protocol so the billing domain cannot see which
+processor is behind it. `BILLING_PROVIDER` defaults to `manual`, so a
+deployment that configures nothing bills exactly as before.
+
+Built to the current official documentation, read 2026-08-27. The details an
+older tutorial gets wrong, and which are pinned by tests: the API host and the
+checkout host differ; test and live share a base URL and the keys decide the
+mode; `special_reference` returns as `order.merchant_order_id`; and the HMAC
+covers twenty named fields in a documented order, verified against the vendor's
+own published worked example rather than against our own function.
+
+Two billing defects found while reading the domain and fixed first, because
+taking payments makes both worse:
+
+- **A cancelled subscription kept granting its plan.** `SERVING_STATUSES` and
+  `Subscription.is_serving` existed from the first billing commit and neither
+  was read, so cancelling was a way to keep the entitlements and stop the
+  invoices
+- **A private plan could be self-selected** by posting its code to
+  `start` or `change_plan`. `GET /billing/plans` filtered the catalogue and
+  nothing enforced it as a rule
+
+Deferred by decision:
+
+- [ ] **Recurring billing.** Paymob documents a Subscription API and card
+      tokenisation; whether either is available depends on merchant
+      configuration that cannot be inspected without an account. Today a
+      customer pays per invoice through a checkout and nothing renews itself
+- [ ] **Refunds.** Paymob documents Refund, Void and Capture. Wasla has
+      `PaymentStatus.REFUNDED` and no flow producing it, which was true before
+      this work; a refund is a product decision nobody has made. A callback
+      reporting `is_refunded` *is* recorded, so a refund issued from Paymob's
+      dashboard is not lost
+- [ ] **PayTabs.** Not started. The provider boundary is where it goes
+
+**Not verified: anything against a live Paymob account.** No intention has been
+created, no callback has arrived from Paymob's infrastructure, and no card has
+been charged. The HTTP boundary is exercised against a mock transport. Every
+claim about behaviour is a claim about code checked against published
+documentation.

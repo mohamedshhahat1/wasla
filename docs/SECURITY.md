@@ -317,6 +317,28 @@ what makes the former durable rather than advisory. PostgreSQL, Redis and nginx
 keep their defaults: the databases write their own data directories and nginx
 binds 80/443.
 
+## Payment callbacks — the one endpoint that decides money moved
+
+`POST /api/v1/webhooks/paymob` is unauthenticated by necessity and settles
+invoices, which makes it the highest-value target in the application: a
+callback that can be forged is a way to get the product for free.
+
+| Concern | Defence |
+| --- | --- |
+| Forged callback | HMAC-SHA512 over the twenty fields Paymob documents, compared with `hmac.compare_digest`. Pinned to the vendor's published worked example, so a wrong field order fails in CI rather than against a live account |
+| Tampered amount | `amount_cents` is inside the signed set, so raising it breaks the digest — and the amount is checked against the invoice afterwards regardless |
+| Replay / provider retry | `UNIQUE(provider, provider_event_id)` on `payment_events`; the insert is the claim, so two simultaneous retries cannot both proceed |
+| Cross-tenant settlement | The payment is matched by a reference *we* generated, then loaded through a tenant-scoped repository — a leaked reference still reaches nothing from another workspace |
+| Customer-chosen price | The checkout request carries a plan code only; the price is read from the database. `extra="forbid"` makes sending `amount` a 422 |
+| Private plan self-selection | `is_public` is enforced on the checkout path as well as on plan selection |
+| Card data | Never touches this infrastructure. Redirection means Paymob collects it; the callback carries the last four digits and they are not persisted |
+| Secret disclosure | The API key appears only in one `Authorization` header; the HMAC secret only inside `compare_digest`. Neither the sent digest nor the expected one is logged — writing the expected value beside a rejected one turns a refusal into an oracle |
+| Misconfiguration | `BILLING_PROVIDER=paymob` without every credential refuses to boot, in every environment. A callback with no provider configured is 503, never 200 |
+
+**The customer's redirect settles nothing.** Paymob sends the browser back with
+the transaction in the query string; anybody can visit a URL, and no endpoint
+reads it. Only the server-to-server callback moves billing state.
+
 ## Verified controls
 
 Confirmed behaviourally during this audit rather than by reading:

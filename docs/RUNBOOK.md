@@ -115,6 +115,56 @@ SELECT status, next_send_at, last_error FROM campaigns WHERE id = '<id>';
 
 ---
 
+### A customer paid and nothing happened
+
+The commonest real payment incident, and the order below is the order that
+distinguishes causes.
+
+**Did the callback arrive at all?** This is the usual answer. The callback goes
+to `APP_PUBLIC_URL` + `/api/v1/webhooks/paymob`, which must be reachable from
+the internet and must *not* sit behind the proxy's auth or IP allowlist.
+
+```sql
+SELECT provider, provider_event_id, outcome, processed_at
+FROM payment_events ORDER BY processed_at DESC LIMIT 20;
+```
+
+Nothing recent means nothing is reaching the endpoint. Check the Paymob
+dashboard's transaction for the callback attempt and its response.
+
+**Was it rejected?** A verification failure logs `billing.callback_rejected`.
+That means the deployment's `PAYMOB_HMAC_SECRET` does not match the one Paymob
+is signing with — usually test credentials against a live account or the
+reverse. It never means "retry with the check off".
+
+**Was it applied to nothing?** `outcome` tells you which refusal fired:
+
+| `outcome` | Meaning |
+| --- | --- |
+| `applied` | Processed. If the invoice is still open, the payment failed rather than the plumbing |
+| `duplicate` | A retry of an event already handled. Correct, and not a problem |
+| `unmatched` | Verified but naming a payment this system did not issue, or one belonging to another workspace |
+| `mismatched` | The reported amount or currency disagreed with the invoice. Investigate before touching anything |
+
+**Where does the payment stand?**
+
+```sql
+SELECT p.status, p.amount, p.currency, p.provider_reference,
+       p.provider_intent_reference, p.failure_reason, i.status AS invoice_status
+FROM payments p JOIN invoices i ON i.id = p.invoice_id
+WHERE p.tenant_id = '<tenant-id>' ORDER BY p.created_at DESC LIMIT 10;
+```
+
+`provider_intent_reference` is the Paymob intention id and is what to search
+their dashboard by when the customer abandoned the page.
+
+**What you must not do:** do not mark an invoice paid by hand to make a
+customer's problem go away. `invoices.status` is the record of whether money
+arrived, and writing it from a SQL prompt records a payment that did not
+happen. If money really did arrive and the callback never will, record it as a
+payment through the platform billing API so there is a row saying who decided
+that and when.
+
 ## Procedures
 
 ### Deploy a specific version

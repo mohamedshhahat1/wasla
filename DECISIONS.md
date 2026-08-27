@@ -1228,3 +1228,43 @@ Delivery is at-least-once, so somebody may receive the same code twice. That is 
 Nothing sweeps dead challenges. They are small, they carry no usable secret once superseded, and a cleanup job would be operational work this repository does not otherwise have.
 
 Delivery through Resend was observed on 2026-08-27 rather than assumed: a code was mailed to a real mailbox, reported `delivered` by Resend's API, and accepted by the endpoint. The send half of ADR-042 is therefore no longer a claim about code. The *receive* half still is — no webhook event has ever arrived from Resend's infrastructure, so the trust boundary this ADR inherits remains exercised only against synthesised payloads.
+
+## ADR-044 — Money Arrives Through a Hosted Checkout and Is Believed Only From a Signed Callback
+
+Date:
+2026-08-27
+
+Status:
+Accepted. Extends ADR-031's provider boundary rather than replacing it; `ManualProvider` is untouched and remains the default.
+
+Decision:
+Collect card payments through Paymob's Intention API and Unified Checkout. Add a second provider protocol, `CheckoutProvider`, alongside the existing `PaymentProvider` rather than widening it. Settle an invoice only from a callback whose HMAC verifies, never from the customer's redirect. Make idempotency a unique constraint on `payment_events` rather than a check. Keep `manual` the default provider, so a deployment that configures nothing bills exactly as it did before.
+
+Context:
+The billing domain was complete and had never taken a payment. `PaymentProvider` existed with one implementation — `ManualProvider`, which records what is owed and waits for a person to confirm a bank transfer — and `Invoice`, `Payment`, `Subscription` and `Entitlement` were all wired to it. What was missing was a way for a customer to pay by card without anybody being involved.
+
+Two defects surfaced while reading that domain, and both are fixed in the commit before this one because payment integration makes them worse rather than because they were found here: a cancelled subscription still granted its plan's entitlements, and a private plan could be self-selected by posting its code. The first decides what somebody keeps after they stop paying; the second decides what they can put themselves on before they pay at all.
+
+Reason:
+**A hosted checkout is a different shape from a charge, so it gets a different protocol.** `PaymentProvider.charge` models a pull: hand a processor an amount, get an outcome in the same call. That is right for a stored card and for the manual provider. A hosted checkout inverts it — nothing is collected during the call we make, and the answer arrives later on a connection the provider opens to us. Forcing it into `charge` would mean returning `PENDING`, a value meaning "ask again later" with no later to ask in. `ManualProvider` cannot host a checkout and should not have to raise `NotImplementedError` to say so, so a provider implements whichever shapes it actually has.
+
+**Redirection rather than an embedded form.** Wasla is a backend; there is deliberately no frontend to embed a card field into, and `docs/PRODUCT.md` keeps it that way. Redirecting also means no card data ever touches this infrastructure: the callback carries the last four digits Paymob puts in `source_data.pan` and nothing else, and even those are not persisted. Pixel would buy a smoother checkout at the price of a PCI surface this product has no reason to take on.
+
+**The browser is never believed.** The request names a plan code; the price, the currency and the workspace come from the database and the authenticated session. Paymob also redirects the customer back with the transaction in the query string, and that redirect settles nothing — anybody can visit a URL. There is deliberately no endpoint that reads it. The server-to-server callback is the authoritative signal, and four refusals stand between a verified one and a paid invoice: it must be new, name a payment we issued by a reference we generated, belong to the workspace that owns that payment, and report the amount and currency we asked for.
+
+**Idempotency is a constraint, not a check.** Every processor retries a callback it did not get a 2xx for, and processing a retry twice settles an invoice twice and extends a billing period twice. `payment_events` carries `UNIQUE(provider, provider_event_id)` and the *insert is the claim*: whoever writes the row owns the event, whoever collides knows somebody already does, and there is no window between a check and a write because there is no check. The id is Paymob's transaction id, which is stable across retries of one notification and different for a later refund — so a refund is a new event rather than a duplicate of the payment it reverses. Hashing the body was rejected: a payload differing by one whitespace character would hash differently and be processed again.
+
+**The signature is pinned to the vendor's own worked example.** A signature test that signs with our function and verifies with our function passes for any consistent field order, including a wrong one, and a wrong order is not discovered until a live callback fails — at which point the tempting fix is to stop verifying. Paymob publishes a sample transaction and the exact concatenated string it produces; that string is asserted verbatim. Twenty fields, SHA-512, hex, booleans spelled as JSON spells them, compared with `hmac.compare_digest`.
+
+**Fail closed everywhere it matters.** A deployment with `BILLING_PROVIDER=paymob` and any credential missing refuses to boot — in every environment, not only production, because a staging deployment taking real payments with no HMAC secret would answer 503 to every callback while transactions completed at Paymob. A callback arriving when no provider is configured gets 503 rather than 200, so the provider retries: answering 200 would report a payment as recorded when nothing was, and it would never be sent again. That is the worst failure this subsystem has, because the customer has already been charged.
+
+Consequences:
+`manual` remains the default, so nothing changes for a deployment that does not configure Paymob — including every test and every local run. The checkout endpoint refuses in that state rather than the dependency failing to resolve; reading an invoice must not 404 because nobody configured a processor.
+
+Recurring billing is **not** implemented. Paymob documents a Subscription API and card tokenisation, and whether either is available depends on merchant configuration that cannot be inspected without an account. A customer today pays per invoice through a checkout; nothing renews itself. That is written down in `docs/BILLING.md` rather than approximated.
+
+Refunds are **not** implemented, and were not before this. Paymob documents Refund, Void and Capture endpoints; Wasla has `PaymentStatus.REFUNDED` and no flow that produces it, and inventing a refund subsystem to match a provider capability would be building for a product decision nobody has made. The provider seam is where one goes.
+
+The `payments` table gains one column, `provider_intent_reference`, holding the provider's id for an *intended* payment — distinct from `provider_reference`, which is the transaction that settled it and does not exist when a customer is sent to a payment page. It is nullable with no backfill, because no payment predating hosted checkout ever had one.
+
+Nothing has been verified against a live Paymob account. Every claim here is a claim about code checked against published documentation, and the HTTP boundary is exercised against a mock transport. The first real transaction still has to be walked through with merchant credentials.

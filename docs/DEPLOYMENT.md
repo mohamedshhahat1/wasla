@@ -91,6 +91,40 @@ Set a calendar reminder for the first expiry regardless. Renewal automation fail
 
 A load balancer or ingress terminating TLS should leave the redirect in `nginx.conf` commented out and **must** set `X-Forwarded-Proto`. Without it the application believes every request arrived in plaintext. It must also set `X-Forwarded-For`: the authentication rate limiter counts by client address, and without it every user shares one identity and one budget ([ADR-032](../DECISIONS.md)).
 
+## Payments
+
+Off unless `BILLING_PROVIDER=paymob`. With it set, all of
+`PAYMOB_SECRET_KEY`, `PAYMOB_PUBLIC_KEY`, `PAYMOB_HMAC_SECRET`,
+`PAYMOB_INTEGRATION_IDS` and `APP_PUBLIC_URL` are required and the application
+refuses to start without them — in staging as well as production, because a
+deployment taking real payments with no HMAC secret answers 503 to every
+callback while transactions complete at Paymob.
+
+**1. Get the credentials.** Paymob dashboard → Settings → Account Info for the
+secret and public keys, and the HMAC secret. Integration ids are per payment
+method under Payment Integrations. Test and live keys are different values and
+must be used with matching integration ids; the base URL is the same either way.
+
+**2. Register the callback URL.** Set the integration's *transaction processed*
+callback to:
+
+```
+https://<your-host>/api/v1/webhooks/paymob
+```
+
+It must be reachable from the internet and must **not** sit behind the proxy's
+auth or IP allowlist — it authenticates itself with an HMAC, and a proxy that
+blocks it turns every payment into a charge nobody records. Like the other two
+webhooks it is exempt from rate limiting: a 429 there loses a payment
+notification.
+
+**3. Set the response callback** (where the customer's browser lands) to a page
+in your frontend. It is for showing a result and is not trusted for anything.
+
+**4. Test before going live.** With test keys, the cards Paymob publishes work
+against the same URLs. Confirm a `payment_events` row appears with
+`outcome = applied` and the invoice moves to `paid`.
+
 ## Email sending domain
 
 Email is off unless `EMAIL_ENABLED=true`, and turning it on without the DNS

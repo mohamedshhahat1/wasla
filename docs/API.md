@@ -110,6 +110,37 @@ Only the hash of an invitation token is stored, so a database disclosure does no
 
 `phone_number_id` is unique across the platform, not per workspace: it is how an inbound webhook is attributed to a workspace, so two workspaces claiming one number would make attribution ambiguous.
 
+## Billing checkout
+
+| Method | Path | Purpose | Access |
+| --- | --- | --- | --- |
+| POST | `/api/v1/billing/checkout` | Open a hosted payment page for a plan (`201`) | Workspace **owner** |
+| POST | `/api/v1/webhooks/paymob` | Receive a payment provider callback | Public, HMAC-verified |
+
+```
+POST /api/v1/billing/checkout   {"plan_code": "pro"}
+  -> 201 {"redirect_url": "https://eg.checkout.paymob.com/?publicKey=...&clientSecret=...",
+          "payment_id": "...", "invoice_id": "...", "amount": "99.00", "currency": "EGP"}
+```
+
+The request names a **plan and nothing else**. Amount, currency and workspace
+come from the database and the access token; the schema forbids extra fields,
+so sending `amount` is a `422` rather than a value quietly ignored. Redirect
+the customer to `redirect_url`.
+
+**A customer returning to your site is not a payment.** Paymob redirects them
+back with the transaction in the query string; use it to show a success,
+pending or failure page and nothing else. Poll `GET /billing/subscription` or
+`GET /invoices` for the real state, which changes only when the signed callback
+arrives. There is deliberately no endpoint that accepts the redirect as proof.
+
+The webhook is unauthenticated by necessity and answers `200 {"status":
+"received"}` to everything it verified — applied, duplicate, unmatched or
+mismatched alike, because a reply that distinguished them would confirm which
+payment references exist. An unverified request is `403`; a deployment with no
+provider configured is `503`, so the provider retries rather than believing a
+payment was recorded.
+
 ## Webhook
 
 | Method | Path | Purpose | Access |

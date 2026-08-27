@@ -102,3 +102,110 @@ A workspace that downgrades keeps everything it already has. Its limits stop it 
 ## Platform revenue reporting
 
 The platform layer exposes MRR, ARR, subscription revenue, active subscriptions, trials, cancellations, failed payments, upgrades and downgrades, estimated AI cost, estimated infrastructure cost, and estimated gross margin, with date-range filtering. Billing-affecting events are idempotent and audit-logged.
+
+## Taking payments (ADR-044)
+
+Card payments go through Paymob's Intention API and Unified Checkout. The
+provider is chosen by `BILLING_PROVIDER`, which defaults to `manual` — a
+deployment that configures nothing bills exactly as it did before, by
+recording what is owed and waiting for a person to confirm a transfer.
+
+### The flow
+
+```
+POST /api/v1/billing/checkout   {"plan_code": "pro"}      owner only
+        │
+        ├─ plan read from the database, priced there
+        ├─ invoice opened (or the period's existing one reused)
+        ├─ payment row written, status pending          ← reference is its id
+        │
+        ↓
+   Paymob POST /v1/intention/    Authorization: Token <secret key>
+        │                        special_reference = our payment id
+        ↓
+   { client_secret, id }
+        │
+        ↓
+   redirect_url = https://eg.checkout.paymob.com/?publicKey=…&clientSecret=…
+        │
+   customer pays on Paymob's page
+        │
+        ├──────────────► redirect back to the app  ← settles NOTHING
+        │
+        ↓
+   POST /api/v1/webhooks/paymob?hmac=…              ← the authoritative signal
+        │
+        ├─ HMAC-SHA512 over 20 fields, compare_digest
+        ├─ payment_events insert  ← UNIQUE(provider, provider_event_id)
+        ├─ payment matched by our own reference, scoped to its tenant
+        ├─ amount and currency checked against the invoice
+        ↓
+   invoice paid · payment succeeded · past_due subscription → active
+```
+
+### What settles an invoice, and what does not
+
+Only a callback whose signature verifies. The customer's redirect back to the
+site is for showing them a success page; anybody can visit a URL, and there is
+deliberately no endpoint that reads it and changes anything.
+
+Four refusals stand between a verified callback and a paid invoice:
+
+| Check | Why |
+| --- | --- |
+| The event is new | `UNIQUE(provider, provider_event_id)`, and the insert *is* the claim — a preceding read is what a retry storm defeats |
+| It names a payment we issued | By our own reference, sent as `special_reference` and returned as `order.merchant_order_id` |
+| That payment is this workspace's | The repository's tenant filter, so a leaked reference still reaches nothing |
+| The amount and currency match | A provider reporting a different figure is not settling this invoice, whatever it says |
+
+### What a payment does to a subscription
+
+Deliberately very little. Paying an invoice settles an invoice; which plan a
+workspace is on is `SubscriptionService`'s decision.
+
+| Before | After a successful payment |
+| --- | --- |
+| `past_due` | `active` — the one state a payment changes on its own |
+| `trialing` | unchanged; a trial is not ended by paying |
+| `active` | unchanged |
+| `cancelled` / `expired` | unchanged — paying is not a request to resubscribe, and reviving would undo a deliberate decision |
+
+A workspace with no subscription at all is not given one. Checkout collects for
+an invoice; starting a subscription is `POST /billing/subscription`.
+
+### Configuration
+
+| Variable | Meaning |
+| --- | --- |
+| `BILLING_PROVIDER` | `manual` (default) or `paymob` |
+| `PAYMOB_SECRET_KEY` | Authenticates **us to Paymob** when creating an intention |
+| `PAYMOB_PUBLIC_KEY` | Not secret; goes in the checkout URL a browser follows |
+| `PAYMOB_HMAC_SECRET` | Authenticates **Paymob to us** on the callback |
+| `PAYMOB_INTEGRATION_IDS` | Comma-separated integration ids, one per payment method |
+| `PAYMOB_REGION` | `egypt`, `uae`, `oman` or `saudi` — picks the API host *and* the checkout host, which differ |
+
+Setting `BILLING_PROVIDER=paymob` without all of them refuses to boot, in every
+environment. Test and live share a base URL: Paymob's documentation states the
+mode is decided by which keys and integration ids are used, so there is no
+sandbox setting.
+
+### What is not built
+
+Honest list.
+
+- **Recurring billing.** Paymob documents a Subscription API and card
+  tokenisation (CIT/MIT), and whether either is available depends on merchant
+  configuration that cannot be inspected without an account. Today a customer
+  pays per invoice through a checkout and nothing renews itself. The billing
+  worker still rolls periods over and issues invoices; collecting them
+  automatically is the missing half.
+- **Refunds.** Paymob documents Refund, Void and Capture. Wasla has
+  `PaymentStatus.REFUNDED` and no flow that produces it — that was true before
+  this work and is unchanged. A refund is a product decision nobody has made,
+  and the provider seam is where one goes when they do. A verified callback
+  reporting `is_refunded` or `is_voided` *is* mapped to `REFUNDED`, so a refund
+  issued from Paymob's dashboard is recorded rather than ignored.
+- **Nothing has been verified against a live Paymob account.** Every claim here
+  is about code checked against published documentation; the HTTP boundary is
+  exercised against a mock transport. Read this section as a description of the
+  implementation, not of a transaction that happened.

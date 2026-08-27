@@ -120,6 +120,12 @@ class CheckoutService:
         subscription = await self._subscriptions.get()
 
         invoice = await self._open_invoice(plan=plan, subscription=subscription, now=moment)
+        # Flushed before `outstanding` is read. Column defaults are applied at
+        # INSERT, so a freshly added invoice has `amount_paid` of None until
+        # then and the subtraction inside `outstanding` fails - which is a
+        # confusing way to learn that the row is not real yet.
+        await self._session.flush()
+
         payment = self._payments.record(
             invoice_id=invoice.id,
             status=PaymentStatus.PENDING,
@@ -209,10 +215,18 @@ class CheckoutService:
         invoice, which is exactly what the payments table is for - attempts are
         rows, and the history is what a dispute turns on.
         """
-        period_start = subscription.current_period_start if subscription else now
-        period_end = (
-            subscription.current_period_end if subscription else add_interval(now, plan.interval)
-        )
+        if subscription is not None:
+            period_start = subscription.current_period_start
+            period_end = subscription.current_period_end
+        else:
+            # Truncated to the day, and that is the whole reason this branch
+            # exists. `UNIQUE(tenant_id, period_start)` is what stops a
+            # workspace being billed twice for one period, and a period start
+            # of `now` defeats it completely: two checkouts a second apart get
+            # timestamps differing by microseconds, so the constraint sees two
+            # different periods and every abandoned attempt leaves an invoice.
+            period_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            period_end = add_interval(period_start, plan.interval)
 
         existing = await self._invoices.get_for_period(period_start=period_start)
         if existing is not None:
@@ -220,6 +234,23 @@ class CheckoutService:
                 raise ConflictError("This period has already been paid.")
             if existing.is_terminal:
                 raise ConflictError("This invoice is settled and cannot be collected.")
+            if existing.plan_code != plan.code:
+                if existing.amount_paid > 0:
+                    # Part-paid against the old plan. Re-pricing would silently
+                    # move money somebody sent for one thing onto another, and
+                    # this system does not issue credits.
+                    raise ConflictError(
+                        "This period has a part-paid invoice for another plan.",
+                    )
+                # Nothing collected yet, so this is still a statement of what
+                # will be owed rather than a record of what was. Somebody who
+                # opened a checkout for one plan and then chose another gets the
+                # one they chose, at its price.
+                existing.plan_code = plan.code
+                existing.amount_due = plan.price
+                existing.currency = plan.currency
+                existing.period_end = period_end
+                existing.lines = self._lines(plan)
             return existing
 
         return self._invoices.create(
@@ -230,14 +261,23 @@ class CheckoutService:
             currency=plan.currency,
             period_start=period_start,
             period_end=period_end,
-            lines=[
-                {
-                    "description": f"{plan.name} plan",
-                    "amount": str(plan.price),
-                    "quantity": 1,
-                }
-            ],
+            lines=self._lines(plan),
         )
+
+    @staticmethod
+    def _lines(plan: Plan) -> list[dict[str, object]]:
+        """The invoice as it will be read back, with the price copied in.
+
+        Copied rather than joined, following the invoice model: a plan repriced
+        next month must not change what this month's invoice says.
+        """
+        return [
+            {
+                "description": f"{plan.name} plan",
+                "amount": str(plan.price),
+                "quantity": 1,
+            }
+        ]
 
     # ------------------------------------------------------------- applying
 
