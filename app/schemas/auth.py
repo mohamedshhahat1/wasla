@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -127,5 +128,15 @@ class ProfileResponse(BaseModel):
     id: uuid.UUID
     email: str
     full_name: str | None = None
+    # When this address was last proven reachable, or None if it never was
+    # (docs/EMAIL_VERIFICATION.md). Reported so a client can decide whether to
+    # offer the "verify your email" prompt at all - without it there is no way
+    # to know, and a client that has to ask for a code to find out would mail
+    # somebody a code they did not need.
+    #
+    # Reporting it is not the same as enforcing it. Nothing server-side reads
+    # this to decide access, and a client that chooses to nag about it is
+    # making a product decision, not an authorization one.
+    email_verified_at: datetime | None = None
     platform_role: PlatformRole | None = None
     workspaces: list[WorkspaceSummary] = Field(default_factory=list)

@@ -43,6 +43,7 @@ from app.repositories import (
     UserRepository,
 )
 from app.services.audit_service import AuditTrail
+from app.services.email_verification_service import EmailVerificationService
 from app.services.subscription_service import SubscriptionService
 
 logger = get_logger(__name__)
@@ -135,6 +136,7 @@ class AuthService:
         await self._session.flush()
 
         await self._start_subscription(tenant_id=tenant.id)
+        await self._request_email_verification(user=user)
 
         logger.info(
             "auth.registered",
@@ -146,6 +148,48 @@ class AuthService:
         )
         workspace = WorkspaceContext(membership=membership, tenant=tenant)
         return self._issue(user=user, workspace=workspace)
+
+    async def _request_email_verification(self, *, user: User) -> None:
+        """Issue the new account's first verification code, in this transaction.
+
+        The challenge and its outbox row are written on the same session as the
+        user, the workspace and the membership, so registration is one unit:
+        a signup that rolls back leaves no challenge and mails nobody, and a
+        signup that succeeds has its code already on the way. That is the whole
+        transactional-outbox point (ADR-042), applied to the one message a new
+        account is certain to want.
+
+        The account is created **unverified** and stays that way until the code
+        comes back. Nothing about the session issued below depends on that: an
+        unverified account signs in and uses every route normally
+        (docs/EMAIL_VERIFICATION.md). Registration does not, and must not,
+        become a flow that returns a code or blocks on one.
+
+        Rate limiting is deliberately not applied. `EmailVerificationService`
+        limits the *endpoint*, where an account can ask repeatedly; this path
+        runs exactly once per account, and counting it would spend part of the
+        budget a person needs for the resend they are most likely to want
+        seconds later. `POST /auth/register` carries its own client-address
+        limit, which is what bounds signup-driven mail.
+
+        Failures are contained for `_start_subscription`'s reason, and the same
+        judgement: a signup that 500s because a verification code could not be
+        queued is a worse outcome than an account whose first code has to be
+        requested from the endpoint that exists for it. `ValidationError` is
+        what a deployment with an out-of-range lifetime raises, and that is a
+        configuration fault to log rather than a reason to refuse customers.
+        """
+        try:
+            service = EmailVerificationService(session=self._session, settings=self._settings)
+            await service.request(user=user)
+        except ValidationError:
+            logger.warning(
+                "email_verification.registration_skipped",
+                extra={
+                    "event": "email_verification.registration_skipped",
+                    "user_id": str(user.id),
+                },
+            )
 
     async def _start_subscription(self, *, tenant_id: uuid.UUID) -> None:
         """Put the new workspace on the default plan, if there is one.

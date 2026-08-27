@@ -368,13 +368,13 @@ def normalise_verification_code(submitted: str) -> str | None:
     mail client, and refusing that teaches them the product is broken rather
     than that they mistyped.
 
-    The digit test is deliberately ASCII-only. `"\u0661\u0662\u0663\u0664\u0665\u0666".isdigit()` is `True`
-    in Python and `int()` parses it happily, and this product's users type
-    Arabic. A check written as `.isdigit()` alone would accept Arabic-Indic
-    numerals, hash them, compare against a verifier built from Western digits,
-    and fail - burning an attempt and looking, to the person holding the right
-    code, exactly like a broken system. Rejecting them here means the caller is
-    told the format is wrong instead.
+    The digit test is deliberately ASCII-only. Arabic-Indic numerals answer
+    `True` to `str.isdigit()` in Python and `int()` parses them happily, and
+    this product's users type Arabic. A check written as `.isdigit()` alone
+    would accept them, hash them, compare against a verifier built from Western
+    digits, and fail - burning an attempt and looking, to the person holding the
+    right code, exactly like a broken system. Rejecting them here means the
+    caller is told the format is wrong instead.
 
     Returning `None` rather than raising keeps the decision with the caller,
     which needs malformed input to look identical to a wrong code.
