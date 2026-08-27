@@ -24,12 +24,23 @@ from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.dependencies import CurrentUserDep
+from app.api.route import CommittingRoute
 from app.core.dependencies import RedisDep, SessionDep, SettingsDep
 from app.core.rate_limit import RateLimiter
 from app.core.security import VERIFICATION_CODE_DIGITS
 from app.services.email_verification_service import EmailVerificationService
 
-router = APIRouter(prefix="/auth/email/verification", tags=["auth"])
+# `route_class=CommittingRoute` like every other router in this package, and it
+# is load-bearing rather than decorative. `include_router` preserves each
+# route's own class rather than adopting the parent's, so a router that omits
+# it does not inherit the commit from `api_router` - it simply never commits.
+# Verification would then answer 200 with a timestamp while `email_verified_at`
+# was rolled back on the way out: a success the database never agreed to.
+router = APIRouter(
+    route_class=CommittingRoute,
+    prefix="/auth/email/verification",
+    tags=["Authentication"],
+)
 
 # Room for the six digits plus the spaces and hyphens people paste in from a
 # mail client, and no more. The bound is here so an oversized body is refused
