@@ -608,8 +608,16 @@ Found and fixed while finishing work started earlier on this branch:
 **Verified 2026-08-27 against PostgreSQL 16 and Docker.** Figures in the phase
 report, including what was *not* verified.
 
-**Not verified: real Resend delivery**, unchanged from Phase 18. No code has
-been mailed by Resend and no credential was available in this environment.
+**Verified: real Resend delivery.** One verification code was mailed through
+Resend to a real mailbox on 2026-08-27 and reported `delivered` by Resend's
+API; the delivered code verified the account over HTTP, a replay was refused,
+and an aged challenge was refused as expired. The outbox context was cleared on
+send, and neither the credential nor the code reached a log.
+
+**Not verified: the delivery webhook.** No event has arrived from Resend's
+infrastructure - that needs a publicly reachable URL this environment does not
+have - so suppression and bounce handling are still exercised only against
+synthesised payloads.
 
 Deferred by decision:
 

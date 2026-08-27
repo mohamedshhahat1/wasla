@@ -359,11 +359,22 @@ is wired.
 - **Redis degradation of the reset rate limiter is untested.** The limiter
   itself degrades rather than disappears (ADR-040) and is covered there; what
   is not covered is that path specifically through the reset endpoints.
-- **Real provider delivery has never been observed** from this repository.
-  No message has been handed to Resend, no `RESEND_API_KEY` has been used,
-  and no delivery event has arrived from Resend's own infrastructure.
-  Everything above the webhook boundary is exercised against a mock
-  transport and the fake provider. **Read every claim in this document as a
-  claim about code, not about a delivered message.** Before the first
-  production send, the checklist in *Operating* has to be walked with real
-  credentials against a real mailbox.
+- ~~Real provider delivery has never been observed~~ - **observed on
+  2026-08-27.** One `EMAIL_VERIFICATION` message was handed to Resend with a
+  real `RESEND_API_KEY`, from `onboarding@resend.dev` to a real mailbox. The
+  provider accepted it, the row moved to `sent` with a
+  `provider_message_id`, Resend's own API reported the message `delivered`,
+  the six digits in the delivered body matched the challenge that issued
+  them, and that code then verified the account over HTTP. The send path is
+  no longer a claim about code.
+
+  Three things were confirmed by that send rather than argued: the outbox
+  `context` was `{}` afterwards, so the plaintext left the database on the
+  terminal transition exactly as this document says; the API key appeared in
+  no log line the worker wrote; and the code appeared in none either.
+- **The delivery webhook has still never fired.** No event has arrived from
+  Resend's infrastructure, because that needs a publicly reachable URL this
+  environment does not have. Suppression, bounce and complaint handling
+  remain exercised only against synthesised, correctly-signed payloads -
+  `delivered` above was read from Resend's API, not received from it. The
+  *Operating* checklist still has to be walked for that half.

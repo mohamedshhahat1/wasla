@@ -423,8 +423,18 @@ refused; attempts accumulate to the ceiling and stop; the correct code is
 refused after exhaustion; a resend supersedes the old code and the new one
 works; and no issued code appears anywhere in the server log.
 
-**Still not verified.** No code has been delivered by Resend. No
-`RESEND_API_KEY` was available in this environment, so every claim about
-delivery is a claim about the outbox row and the rendered message, not about
-mail that arrived. The first production send has to walk the checklist in
-`docs/EMAIL.md`.
+**Verified against real Resend on 2026-08-27.** Registration queued the
+message, the worker delivered it with a real API key, Resend accepted it and
+its API later reported the message `delivered` to the recipient's mailbox. The
+six digits in the delivered body were the ones the challenge issued; that code
+verified the account over HTTP; a wrong code before it and a replay after it
+were both refused; and an aged challenge was refused as `expired`. The outbox
+`context` was empty afterwards, and neither the API key nor the code appeared
+in any log the API or the worker wrote.
+
+**Still not verified: the delivery webhook.** No event has arrived from
+Resend's own infrastructure, which needs a publicly reachable URL this
+environment does not have. `delivered` above was *read from* Resend's API
+rather than *received from* it, and that distinction is the whole of ADR-042's
+webhook trust boundary - so bounce, complaint and suppression handling remain
+exercised only against synthesised payloads.

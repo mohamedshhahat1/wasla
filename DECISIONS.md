@@ -1226,3 +1226,5 @@ The audit vocabulary gains three actions. Unlike password reset — where only c
 Delivery is at-least-once, so somebody may receive the same code twice. That is harmless — it is one challenge — and the template says nothing that is only true once.
 
 Nothing sweeps dead challenges. They are small, they carry no usable secret once superseded, and a cleanup job would be operational work this repository does not otherwise have.
+
+Delivery through Resend was observed on 2026-08-27 rather than assumed: a code was mailed to a real mailbox, reported `delivered` by Resend's API, and accepted by the endpoint. The send half of ADR-042 is therefore no longer a claim about code. The *receive* half still is — no webhook event has ever arrived from Resend's infrastructure, so the trust boundary this ADR inherits remains exercised only against synthesised payloads.
