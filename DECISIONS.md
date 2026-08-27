@@ -1221,7 +1221,7 @@ Every account that predates this migration is unverified, and unverified is an o
 
 The audit vocabulary gains three actions. Unlike password reset — where only completion is recorded, because the request is unauthenticated and would let anyone write into a stranger's trail — the request half is audited here, since sending requires a session. Failures share one action with the reason in `meta`, because "why did verification not work" is one question and a burst of them against one account is the signal worth alerting on whatever the reason says.
 
-A rate-limited attempt is audited, which required the service to catch the refusal and commit the entry itself: the exception discards the request's transaction, so an entry staged the ordinary way would be rolled back by the very refusal it describes.
+**Every refusal commits before it raises**, and this turned out to be load-bearing rather than tidy. `confirm` raises on failure, and an exception unwinds the request's transaction — so a failure recorded the ordinary way is discarded by the very refusal that records it. The consequence is not a missing log line: `attempts` is what ends a challenge, so a counter that rolls back is an attempt cap that does not exist, leaving guessing bounded only by the rate limit. It was found by driving a container over HTTP (seven wrong codes, `attempts` still zero) and was invisible to every service-level test, because those run on a session nobody rolls back. Rate-limit refusals go through the same path.
 
 Delivery is at-least-once, so somebody may receive the same code twice. That is harmless — it is one challenge — and the template says nothing that is only true once.
 

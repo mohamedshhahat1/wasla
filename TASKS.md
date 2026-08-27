@@ -598,6 +598,12 @@ Found and fixed while finishing work started earlier on this branch:
   transaction the entry was staged in
 - **`/auth/me` did not report verification state**, so a client could only find
   out by mailing somebody a code
+- **Every failed attempt rolled back**, so the per-challenge attempt cap did not
+  exist in a deployment. `confirm` raises, an exception unwinds the request's
+  transaction, and the increment and audit entry went with it. Found by driving
+  a container over HTTP - seven wrong codes left `attempts` at zero - and
+  invisible to every session-scoped test, because those drive the service on a
+  session nobody rolls back
 
 **Verified 2026-08-27 against PostgreSQL 16 and Docker.** Figures in the phase
 report, including what was *not* verified.

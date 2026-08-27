@@ -394,6 +394,90 @@ async def test_counting_a_failure_against_a_dead_challenge_reports_nothing(
     assert await repository.register_failure(challenge_id=challenge.id) is None
 
 
+# ------------------------------------------------- durability of a refusal
+
+
+async def test_a_failed_attempt_survives_the_refusal_that_reports_it(
+    db_session: AsyncSession,
+) -> None:
+    """The attempt cap only exists if the count outlives the request.
+
+    Found against a running container, not here: seven wrong codes over real
+    HTTP left `attempts` at zero. `confirm` raises on failure, an exception
+    unwinds the request's transaction, and the rollback took the increment and
+    the audit entry with it - so the per-challenge ceiling, one of the three
+    bounds ADR-043 rests on, did not exist in a deployment at all. Guessing was
+    limited only by the rate limit.
+
+    Every test above this one missed it because they drive the service on a
+    session nobody rolls back, which is exactly what a request does *not* do.
+    The rollback below is what makes this faithful: it discards anything the
+    service left pending, so only what the service committed survives to be
+    counted.
+    """
+    user = await _account(db_session)
+    await _issue(db_session, user)
+    challenge = await _live(db_session, user)
+    assert challenge is not None
+    # Read out before the rollback: it expires every loaded instance, and an
+    # attribute access afterwards would fail as a lazy load rather than as the
+    # assertion this test is about.
+    challenge_id = challenge.id
+
+    with pytest.raises(ValidationError):
+        await _service(db_session).confirm(user=user, submitted="000000")
+
+    # What the request's own unwinding would do.
+    await db_session.rollback()
+
+    persisted = (
+        await db_session.execute(
+            select(EmailVerificationChallenge.attempts).where(
+                EmailVerificationChallenge.id == challenge_id,
+            ),
+        )
+    ).scalar_one()
+    assert persisted == 1, "a wrong guess that costs nothing is not a guess"
+
+    assert await _audit_reasons(db_session, user) == Counter({"wrong_code": 1})
+
+
+async def test_guesses_accumulate_across_refusals_until_the_ceiling(
+    db_session: AsyncSession,
+) -> None:
+    """The cap reached the way an attacker reaches it: one request at a time.
+
+    Each refusal rolls back, so this is the end-to-end version of the property
+    above - and the one that would have caught an attempt counter that resets
+    itself every time it is used.
+    """
+    user = await _account(db_session)
+    code = await _issue(db_session, user)
+    challenge = await _live(db_session, user)
+    assert challenge is not None
+    challenge_id = challenge.id
+
+    for _ in range(MAX_ATTEMPTS):
+        with pytest.raises(ValidationError):
+            await _service(db_session).confirm(user=user, submitted="000000")
+        await db_session.rollback()
+
+    persisted = (
+        await db_session.execute(
+            select(EmailVerificationChallenge.attempts).where(
+                EmailVerificationChallenge.id == challenge_id,
+            ),
+        )
+    ).scalar_one()
+    assert persisted == MAX_ATTEMPTS
+
+    # And the challenge is now dead even for the code that was always correct.
+    with pytest.raises(ValidationError, match=INVALID_CODE):
+        await _service(db_session).confirm(user=user, submitted=code)
+    await db_session.rollback()
+    assert user.email_verified_at is None
+
+
 # -------------------------------------------------------------------- replay
 
 

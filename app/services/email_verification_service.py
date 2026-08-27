@@ -283,7 +283,7 @@ class EmailVerificationService:
             # letting bad formatting burn the budget would let a broken client
             # lock a person out of their own verification.
             spend_code_verification_time(submitted)
-            self._fail(user, reason="malformed", challenge_id=None)
+            await self._reject(user, reason="malformed", challenge_id=None)
             raise ValidationError(INVALID_CODE)
 
         now = datetime.now(UTC)
@@ -292,12 +292,12 @@ class EmailVerificationService:
             # No live challenge. Spend the time a real check would, so this is
             # not distinguishable from a wrong code by how fast it answers.
             spend_code_verification_time(code)
-            self._fail(user, reason="no_active_challenge", challenge_id=None)
+            await self._reject(user, reason="no_active_challenge", challenge_id=None)
             raise ValidationError(INVALID_CODE)
 
         if not challenge.is_usable(now=now, email=user.email, max_attempts=self._max_attempts):
             spend_code_verification_time(code)
-            self._fail(
+            await self._reject(
                 user,
                 reason=self._dead_reason(challenge, now=now, email=user.email),
                 challenge_id=challenge.id,
@@ -311,7 +311,7 @@ class EmailVerificationService:
         await self._challenges.register_failure(challenge_id=challenge.id)
 
         if not verify_verification_code(code=code, code_hash=challenge.code_hash):
-            self._fail(user, reason="wrong_code", challenge_id=challenge.id)
+            await self._reject(user, reason="wrong_code", challenge_id=challenge.id)
             raise ValidationError(INVALID_CODE)
 
         # The security boundary. One conditional UPDATE that re-checks
@@ -324,7 +324,7 @@ class EmailVerificationService:
             now=now,
             max_attempts=self._max_attempts,
         ):
-            self._fail(user, reason="lost_race", challenge_id=challenge.id)
+            await self._reject(user, reason="lost_race", challenge_id=challenge.id)
             raise ValidationError(INVALID_CODE)
 
         # Reached only by the winner, which is what makes this exactly-once
@@ -380,13 +380,26 @@ class EmailVerificationService:
         # underneath this request.
         return "not_live"
 
-    def _fail(self, user: User, *, reason: str, challenge_id: object | None) -> None:
-        """Record a rejected attempt.
+    async def _reject(self, user: User, *, reason: str, challenge_id: object | None) -> None:
+        """Record a rejected attempt, make it durable, and refuse.
 
-        One action with a reason in `meta`, rather than an action per reason -
-        they are all answers to "why did verification not work", and a burst of
-        them against one account is the signal worth alerting on whatever the
-        reason says.
+        **The commit is the point of this method.** Every caller raises
+        immediately afterwards, and an exception unwinds the request's
+        transaction - so without it, both the audit entry and the attempt
+        increment that preceded it are discarded by the very refusal they
+        describe. That is not a missing log line: `attempts` is what ends a
+        challenge, so a counter that rolls back is an attempt cap that does not
+        exist, and a challenge could be guessed at until the rate limit alone
+        stopped it. Seven wrong codes against a running container left
+        `attempts` at zero before this existed.
+
+        Everything written by this point is meant to survive: the increment
+        from `register_failure`, and this entry. `email_verified_at` is set
+        only on the success path, which no failure follows, so there is nothing
+        half-finished to make durable.
+
+        `AuthService._tear_down_after_reuse` commits for the same reason - a
+        consequence that must outlive the request that triggered it.
         """
         meta: dict[str, object] = {"reason": reason}
         if challenge_id is not None:
@@ -410,6 +423,7 @@ class EmailVerificationService:
                 "reason": reason,
             },
         )
+        await self._session.commit()
 
     async def _limit(self, name: str, user: User, limit: int, window_seconds: int) -> None:
         """Apply one of the two policies to this account.
@@ -454,6 +468,5 @@ class EmailVerificationService:
         try:
             await self._limiter.enforce(policy, str(user.id))
         except RateLimitedError:
-            self._fail(user, reason="rate_limited", challenge_id=None)
-            await self._session.commit()
+            await self._reject(user, reason="rate_limited", challenge_id=None)
             raise

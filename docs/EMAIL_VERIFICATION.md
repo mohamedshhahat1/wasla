@@ -130,13 +130,24 @@ the same question and a burst of them against one account is the signal worth
 alerting on whatever the reason says. The request action records how many
 challenges it superseded. Never the code, and never a hash of one.
 
-A refused rate limit is audited too, as `EMAIL_VERIFICATION_FAILED` with a
-`rate_limited` reason. Closing that needed more than a `try`: the refusal
-raises, and an exception discards the request's transaction, so an entry
-staged the ordinary way would have been rolled back by the very refusal it
-described. The service commits it itself - safe only because both public
-methods limit first, so the session holds nothing else at that point. It is
-the arrangement `AuthService._tear_down_after_reuse` already uses.
+**Every refusal is committed before it is raised**, and this is the single
+most important implementation detail in the feature. `confirm` raises on
+failure, and an exception unwinds the request's transaction - so a failure
+recorded the ordinary way is discarded by the very refusal that records it.
+That is not a missing log line. `attempts` is what ends a challenge, so a
+counter that rolls back is an attempt cap that **does not exist**: seven wrong
+codes against a running container left `attempts` at zero, and guessing was
+bounded only by the rate limit.
+
+`_reject` therefore records the entry, commits, and lets the caller raise.
+Everything written by that point is meant to survive - the increment and the
+entry - and `email_verified_at` is set only on the success path, which no
+failure follows, so there is nothing half-finished being made durable. It is
+the arrangement `AuthService._tear_down_after_reuse` already uses for a
+consequence that must outlive the request triggering it.
+
+A refused rate limit goes through the same path, as `EMAIL_VERIFICATION_FAILED`
+with a `rate_limited` reason.
 
 **16. What may appear in logs?** `user_id`, `challenge_id`, the number of
 challenges superseded, and an outcome category. **Never** the code, and not
@@ -385,6 +396,13 @@ test:
 - The TTL and attempt-cap settings did not exist, so the documented knobs were
   inert.
 - Registration queued nothing.
+- **Every failed attempt rolled back.** The increment and the audit entry were
+  staged on the request's session and discarded by the exception that reported
+  the failure, so the per-challenge attempt cap - one of the three bounds this
+  document rests on - did not exist in a deployment. Found by driving a
+  container over HTTP: seven wrong codes, `attempts` still zero. The
+  session-scoped tests could not see it, because they drive the service on a
+  session nobody rolls back.
 
 **Tests.** `tests/unit/test_verification_codes.py` (30) covers generation,
 leading zeroes, the CSPRNG, Argon2 storage and the ASCII-only parser.
@@ -396,6 +414,14 @@ sessions racing one consume, and configuration refusal.
 authentication, cross-account reach, indistinguishable rejections, malformed
 HTTP, both rate limits, Redis degradation, the registration integration, a
 canary code that must not reach a log or the trail, and the route-class walk.
+
+**Verified over real HTTP**, against a container and then a local server, both
+on a migration-built PostgreSQL with Redis: registration queues a challenge and
+its mail atomically; only an Argon2 hash reaches the row; a wrong code is
+refused; the correct code verifies and the write is *durable*; a replay is
+refused; attempts accumulate to the ceiling and stop; the correct code is
+refused after exhaustion; a resend supersedes the old code and the new one
+works; and no issued code appears anywhere in the server log.
 
 **Still not verified.** No code has been delivered by Resend. No
 `RESEND_API_KEY` was available in this environment, so every claim about
