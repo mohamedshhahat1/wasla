@@ -30,6 +30,11 @@ CONTEXTS: dict[EmailTemplate, dict[str, str]] = {
     EmailTemplate.SESSIONS_REVOKED: {},
     EmailTemplate.ACCOUNT_DISABLED: {},
     EmailTemplate.ACCOUNT_ENABLED: {},
+    # The only template whose secret is read and retyped rather than clicked
+    # (ADR-043). A `KeyError` here is this dictionary's whole purpose: adding a
+    # member to the enum without a context is what made these four tests fail
+    # when verification landed.
+    EmailTemplate.EMAIL_VERIFICATION: {"code": "482731", "expires_minutes": "10"},
     EmailTemplate.INVOICE_ISSUED: {
         "amount_due": "49.00",
         "currency": "USD",
@@ -151,6 +156,8 @@ def test_a_trailing_slash_on_the_origin_does_not_double():
         (EmailTemplate.WORKSPACE_INVITATION, "workspace_name"),
         (EmailTemplate.INVOICE_ISSUED, "currency"),
         (EmailTemplate.TRIAL_EXPIRED, "workspace_name"),
+        (EmailTemplate.EMAIL_VERIFICATION, "code"),
+        (EmailTemplate.EMAIL_VERIFICATION, "expires_minutes"),
     ],
 )
 def test_a_missing_context_key_refuses_to_render(template, missing):
@@ -199,3 +206,62 @@ def test_a_security_notice_takes_no_variables_at_all(template):
 
     assert rendered.text.strip()
     assert "href=" not in rendered.html
+
+
+def test_the_verification_code_is_not_in_the_subject():
+    """A subject shows on a lock screen and in a notification preview.
+
+    Subjects are constants throughout this module, so this is really a test
+    that nobody made an exception for the one template where putting the secret
+    there would be convenient.
+    """
+    rendered = _render(EmailTemplate.EMAIL_VERIFICATION)
+
+    assert "482731" not in rendered.subject
+    assert rendered.subject == subject_for(EmailTemplate.EMAIL_VERIFICATION)
+
+
+def test_the_verification_template_builds_no_link_at_all():
+    """The one secret-bearing template with no URL, deliberately (ADR-043).
+
+    A code in a link is a code in browser history, in a `Referer` header and in
+    whatever proxy logged the request - and a link verifies whoever clicks it,
+    which on a forwarded mailbox is not necessarily the account holder.
+    """
+    rendered = _render(EmailTemplate.EMAIL_VERIFICATION)
+
+    assert "href=" not in rendered.html
+    assert "http://" not in rendered.html
+    assert "https://" not in rendered.html
+    assert "http" not in rendered.text
+
+
+def test_the_verification_code_reaches_both_bodies():
+    """A verification email without its code is a broken promise, not a
+    degraded one - the same reasoning the reset template's required key has."""
+    rendered = _render(EmailTemplate.EMAIL_VERIFICATION)
+
+    assert "482731" in rendered.text
+    assert "482731" in rendered.html
+
+
+def test_the_verification_template_is_escaped_like_every_other():
+    """The code is generated, not caller-supplied, so this is defence against a
+    future caller rather than against today's one. It costs nothing to keep."""
+    rendered = _render(EmailTemplate.EMAIL_VERIFICATION, code="<script>x</script>")
+
+    assert "<script>" not in rendered.html
+    assert "&lt;script&gt;" in rendered.html
+
+
+def test_the_verification_template_says_nothing_about_the_account():
+    """Minimal context, asserted (ADR-043).
+
+    A message proving control of an inbox does not need to tell that inbox
+    which account, workspace or person it belongs to - and the mailbox may not
+    be the account holder's yet, which is the entire premise of sending it.
+    """
+    rendered = _render(EmailTemplate.EMAIL_VERIFICATION)
+
+    for leak in ("@", "workspace", "tenant", "password", "token"):
+        assert leak not in rendered.text.lower(), leak
