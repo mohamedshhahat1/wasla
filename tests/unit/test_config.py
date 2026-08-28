@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import secrets
+
 import pytest
 from pydantic import ValidationError
 
@@ -368,3 +370,193 @@ def test_a_dangerous_public_url_is_refused_outside_production_too():
             email_from="no-reply@example.com",
             app_public_url="javascript:alert(1)",
         )
+
+
+# ----------------------------------------------------------- payment provider
+
+PAYMOB = {
+    "billing_provider": "paymob",
+    "paymob_secret_key": "sk_test_notreal000000",
+    "paymob_public_key": "pk_test_notreal000000",
+    "paymob_hmac_secret": "a-test-hmac-secret",
+    "paymob_integration_ids": [4097558],
+    "app_public_url": "https://app.example.com",
+}
+
+
+def _paymob(**overrides):
+    """A staging deployment configured to take payments.
+
+    Staging rather than test, because the test environment is exempt from the
+    fail-closed rules on purpose - and it is precisely those rules being
+    exercised here.
+    """
+    values = {
+        "_env_file": None,
+        "environment": "staging",
+        "jwt_secret": secrets.token_urlsafe(32),
+        **PAYMOB,
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+def test_a_deployment_taking_payments_accepts_a_complete_configuration():
+    """The other half of every refusal below: this is what right looks like."""
+    settings = _paymob()
+
+    assert settings.billing_provider == "paymob"
+    assert settings.paymob_integration_ids == [4097558]
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "paymob_secret_key",
+        "paymob_public_key",
+        "paymob_hmac_secret",
+        "app_public_url",
+    ],
+)
+def test_a_half_configured_payment_provider_refuses_to_boot(missing):
+    """Fail closed in every environment, not only production.
+
+    A staging deployment taking real payments with no HMAC secret answers 503
+    to every callback, so transactions complete at Paymob and are never
+    recorded here. That is the worst failure this subsystem has: the customer
+    is charged and gets nothing.
+    """
+    with pytest.raises(ValidationError):
+        _paymob(**{missing: None})
+
+
+def test_no_integration_id_is_refused():
+    """An intention with no payment method is refused by Paymob itself.
+
+    Discovered at startup rather than at the first customer.
+    """
+    with pytest.raises(ValidationError):
+        _paymob(paymob_integration_ids=[])
+
+
+def test_a_repeated_integration_id_is_refused():
+    """The list is sent as the payment methods to offer on the page.
+
+    A repeated id offers the same method twice, which is a checkout that looks
+    broken to every customer who reaches it.
+    """
+    with pytest.raises(ValidationError):
+        _paymob(paymob_integration_ids=[4097558, 4097558])
+
+
+@pytest.mark.parametrize("value", [[0], [-1], [4097558, 0]])
+def test_an_integration_id_that_cannot_be_real_is_refused(value):
+    """Refused rather than dropped: a payment method that silently stops being
+    offered is a much harder thing to notice than a deployment that will not
+    start."""
+    with pytest.raises(ValidationError):
+        _paymob(paymob_integration_ids=value)
+
+
+def test_mismatched_key_modes_are_refused():
+    """The dangerous case, because both halves look valid on their own.
+
+    A live secret key with a test public key creates a *real* intention and
+    sends the customer to a *test* payment page. Nothing is ever collected,
+    every callback is for money that does not exist, and no other check in the
+    system can see it.
+    """
+    with pytest.raises(ValidationError) as caught:
+        _paymob(paymob_secret_key="sk_live_realone00000")
+
+    assert "different Paymob modes" in str(caught.value)
+
+
+def test_matching_live_keys_are_accepted_in_production():
+    settings = Settings(
+        _env_file=None,
+        environment="production",
+        jwt_secret=secrets.token_urlsafe(32),
+        docs_enabled=False,
+        meta_app_secret="meta-secret",
+        **{
+            **PAYMOB,
+            "paymob_secret_key": "sk_live_realone00000",
+            "paymob_public_key": "pk_live_realone00000",
+        },
+    )
+
+    assert settings.billing_provider == "paymob"
+
+
+def test_test_keys_are_refused_in_production():
+    """A deployment that believes it is live and is not.
+
+    Every payment would be pretend and every customer would get the product
+    free - and the dashboard would look busy while no money arrived.
+    """
+    with pytest.raises(ValidationError) as caught:
+        Settings(
+            _env_file=None,
+            environment="production",
+            jwt_secret=secrets.token_urlsafe(32),
+            docs_enabled=False,
+            meta_app_secret="meta-secret",
+            **PAYMOB,
+        )
+
+    # Asserted on the message, because every other production rule is
+    # satisfied above - so this test fails if the mode check is the thing that
+    # stops working rather than passing on somebody else's refusal.
+    assert "test keys" in str(caught.value)
+
+
+def test_a_regional_key_prefix_is_not_treated_as_a_mismatch():
+    """Some regions prefix the whole key, and the mode is still readable.
+
+    Refusing to boot over a shape this integration has not seen would be worse
+    than the mistake being guarded against, so the mode is searched for rather
+    than required at position zero.
+    """
+    settings = _paymob(
+        paymob_secret_key="egy_sk_test_notreal000",
+        paymob_public_key="egy_pk_test_notreal000",
+    )
+
+    assert settings.paymob_secret_key.startswith("egy_")
+
+
+def test_a_callback_url_must_not_be_plain_http_in_production():
+    """Payment callbacks travel to it, and so does a signed transaction."""
+    with pytest.raises(ValidationError) as caught:
+        Settings(
+            _env_file=None,
+            environment="production",
+            jwt_secret=secrets.token_urlsafe(32),
+            docs_enabled=False,
+            meta_app_secret="meta-secret",
+            **{
+                **PAYMOB,
+                "paymob_secret_key": "sk_live_realone00000",
+                "paymob_public_key": "pk_live_realone00000",
+                "app_public_url": "http://app.example.com",
+            },
+        )
+
+    assert "https" in str(caught.value)
+
+
+def test_the_manual_provider_needs_no_credentials():
+    """The default, and the state every local run and every test is in.
+
+    A deployment that configures nothing bills exactly as it did before hosted
+    checkout existed.
+    """
+    settings = Settings(
+        _env_file=None,
+        environment="staging",
+        jwt_secret=secrets.token_urlsafe(32),
+    )
+
+    assert settings.billing_provider == "manual"
+    assert settings.paymob_secret_key is None

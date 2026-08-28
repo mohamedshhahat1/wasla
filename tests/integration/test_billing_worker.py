@@ -16,19 +16,23 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
 
 from app.core.config import Settings
 from app.core.token_store import RefreshTokenStore
+from app.db.models.audit import AuditAction, AuditLog
 from app.db.models.billing import (
     BillingInterval,
     Plan,
     SubscriptionStatus,
 )
+from app.db.models.invoice import InvoiceStatus
 from app.db.models.tenant import Tenant
 from app.repositories.billing_repository import (
     PlatformSubscriptionRepository,
     SubscriptionRepository,
 )
+from app.repositories.invoice_repository import InvoiceRepository
 from app.services.auth_service import AuthService
 from app.services.subscription_service import SubscriptionService
 from app.workers.billing_worker import BillingWorker
@@ -437,3 +441,208 @@ async def test_an_invoice_that_cannot_be_issued_does_not_stop_the_roll_over(
 
     assert handled == 1
     assert subscription.current_period_end > NOW
+
+
+# --------------------------------------------------------------- the chasing
+
+
+async def _overdue_invoice(session, tenant, subscription, *, issued: datetime, amount="99.00"):
+    """A renewal invoice, as the sweep leaves one when it bills a period."""
+    return InvoiceRepository(session, tenant_id=tenant.id).create(
+        subscription_id=subscription.id,
+        status=InvoiceStatus.OPEN,
+        plan_code="pro",
+        amount_due=Decimal(amount),
+        currency="USD",
+        period_start=issued - timedelta(days=30),
+        period_end=issued,
+        lines=[],
+    )
+
+
+async def _issued(session, invoice, *, at: datetime):
+    """Mark the invoice as actually sent, which is when the grace starts."""
+    invoice.issued_at = at
+    await session.flush()
+    return invoice
+
+
+async def _renewing(session, tenant, plan, *, status=SubscriptionStatus.ACTIVE):
+    """A subscription mid-period, so the roll-over half of the sweep ignores it."""
+    return await _subscription(
+        session,
+        tenant,
+        plan,
+        status=status,
+        end=NOW + timedelta(days=20),
+    )
+
+
+async def _past_due_audits(session):
+    rows = await session.execute(
+        select(AuditLog).where(AuditLog.action == AuditAction.SUBSCRIPTION_PAST_DUE)
+    )
+    return rows.scalars().all()
+
+
+async def test_a_renewal_left_unpaid_past_the_grace_marks_the_workspace_behind(db_session):
+    """The half of recurring billing that was missing entirely.
+
+    Invoices were already being issued at every period end and nothing ever
+    looked at whether they were paid, so a workspace that stopped paying stayed
+    `active` for ever and kept its whole plan. That is not a billing bug, it is
+    the product given away.
+    """
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _renewing(db_session, tenant, plan)
+    invoice = await _overdue_invoice(db_session, tenant, subscription, issued=NOW)
+    await _issued(db_session, invoice, at=NOW - timedelta(days=8))
+
+    handled = await _worker(db_session).run_once(now=NOW)
+
+    assert handled == 1
+    assert subscription.status is SubscriptionStatus.PAST_DUE
+    # Still served: a payment problem is a conversation to have, not a
+    # disconnection, and `PAST_DUE` is in `SERVING_STATUSES` for that reason.
+    assert subscription.is_serving is True
+
+
+async def test_a_renewal_inside_the_grace_is_left_alone(db_session):
+    """Cards expire and finance departments pay on Fridays.
+
+    A customer one working day late has not stopped paying, and marking them
+    behind on the morning the invoice was issued would make the state mean
+    nothing.
+    """
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _renewing(db_session, tenant, plan)
+    invoice = await _overdue_invoice(db_session, tenant, subscription, issued=NOW)
+    await _issued(db_session, invoice, at=NOW - timedelta(days=3))
+
+    handled = await _worker(db_session).run_once(now=NOW)
+
+    assert handled == 0
+    assert subscription.status is SubscriptionStatus.ACTIVE
+
+
+async def test_the_grace_runs_from_when_the_customer_was_asked(db_session):
+    """Not from the period boundary, which the customer never saw.
+
+    An invoice for a period that ended weeks ago is not weeks overdue if it was
+    only issued yesterday - and a sweep that had been down for a fortnight
+    would otherwise mark every one of its customers behind the moment it came
+    back.
+    """
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _renewing(db_session, tenant, plan)
+    invoice = await _overdue_invoice(
+        db_session,
+        tenant,
+        subscription,
+        issued=NOW - timedelta(days=60),
+    )
+    await _issued(db_session, invoice, at=NOW - timedelta(days=1))
+
+    await _worker(db_session).run_once(now=NOW)
+
+    assert subscription.status is SubscriptionStatus.ACTIVE
+
+
+async def test_an_invoice_nobody_was_ever_sent_is_not_chased(db_session):
+    """An abandoned checkout leaves an open invoice with no `issued_at`.
+
+    Chasing somebody for a bill they were never sent is worse than not chasing,
+    and it would mark a workspace behind for clicking Upgrade and changing its
+    mind.
+    """
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _renewing(db_session, tenant, plan)
+    await _overdue_invoice(db_session, tenant, subscription, issued=NOW - timedelta(days=60))
+
+    await _worker(db_session).run_once(now=NOW)
+
+    assert subscription.status is SubscriptionStatus.ACTIVE
+
+
+async def test_a_trial_is_not_marked_behind(db_session):
+    """Nobody agreed to pay for it, so nobody can be late paying for it."""
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session, trial_days=14)
+    subscription = await _renewing(db_session, tenant, plan, status=SubscriptionStatus.TRIALING)
+    invoice = await _overdue_invoice(db_session, tenant, subscription, issued=NOW)
+    await _issued(db_session, invoice, at=NOW - timedelta(days=30))
+
+    await _worker(db_session).run_once(now=NOW)
+
+    assert subscription.status is SubscriptionStatus.TRIALING
+
+
+async def test_a_cancelled_workspace_is_not_chased_for_an_old_bill(db_session):
+    """It is already not being served, and chasing it would serve it again.
+
+    `PAST_DUE` is a serving status, so moving a cancelled subscription into it
+    would hand back the entitlements the cancellation took away - which is the
+    exact bug the previous commit fixed, reintroduced from the other end.
+    """
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _renewing(db_session, tenant, plan, status=SubscriptionStatus.CANCELLED)
+    invoice = await _overdue_invoice(db_session, tenant, subscription, issued=NOW)
+    await _issued(db_session, invoice, at=NOW - timedelta(days=30))
+
+    await _worker(db_session).run_once(now=NOW)
+
+    assert subscription.status is SubscriptionStatus.CANCELLED
+    assert subscription.is_serving is False
+
+
+async def test_a_paid_renewal_is_never_chased(db_session):
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _renewing(db_session, tenant, plan)
+    invoice = await _overdue_invoice(db_session, tenant, subscription, issued=NOW)
+    invoice.status = InvoiceStatus.PAID
+    invoice.amount_paid = Decimal("99.00")
+    await _issued(db_session, invoice, at=NOW - timedelta(days=30))
+
+    await _worker(db_session).run_once(now=NOW)
+
+    assert subscription.status is SubscriptionStatus.ACTIVE
+
+
+async def test_a_workspace_already_behind_is_not_marked_behind_again(db_session):
+    """The sweep runs every ten minutes; it must not audit every ten minutes."""
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _renewing(db_session, tenant, plan)
+    invoice = await _overdue_invoice(db_session, tenant, subscription, issued=NOW)
+    await _issued(db_session, invoice, at=NOW - timedelta(days=30))
+    worker = _worker(db_session)
+
+    first = await worker.run_once(now=NOW)
+    second = await worker.run_once(now=NOW)
+
+    assert (first, second) == (1, 0)
+    assert subscription.status is SubscriptionStatus.PAST_DUE
+    assert len(await _past_due_audits(db_session)) == 1
+
+
+async def test_being_marked_behind_is_audited_with_what_is_owed(db_session):
+    """ "Why did this workspace stop being active" has to have an answer."""
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _renewing(db_session, tenant, plan)
+    invoice = await _overdue_invoice(db_session, tenant, subscription, issued=NOW)
+    await _issued(db_session, invoice, at=NOW - timedelta(days=30))
+
+    await _worker(db_session).run_once(now=NOW)
+
+    rows = await _past_due_audits(db_session)
+    assert len(rows) == 1
+    assert rows[0].tenant_id == tenant.id
+    assert rows[0].meta["outstanding"] == "99.00"
+    assert rows[0].meta["invoice_id"] == str(invoice.id)

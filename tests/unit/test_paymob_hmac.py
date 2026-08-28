@@ -34,7 +34,11 @@ from decimal import Decimal
 import pytest
 
 from app.db.models.invoice import PaymentStatus
-from app.integrations.billing.checkout import CallbackVerificationError
+from app.integrations.billing.checkout import (
+    CallbackEvent,
+    CallbackVerificationError,
+    EventKind,
+)
 from app.integrations.billing.paymob import (
     HMAC_FIELDS,
     PaymobProvider,
@@ -90,6 +94,12 @@ def _provider(**overrides) -> PaymobProvider:
 def _signed(transaction: dict, *, secret: str = SECRET) -> tuple[bytes, str]:
     body = json.dumps({"type": "TRANSACTION", "obj": transaction}).encode("utf-8")
     return body, hmac_signature(transaction, secret=secret)
+
+
+def _verified(transaction: dict) -> CallbackEvent:
+    """Sign a transaction and read the event back out of it."""
+    body, signature = _signed(transaction)
+    return _provider().verify_callback(payload=body, signature=signature)
 
 
 # ------------------------------------------------------- the documented vector
@@ -154,26 +164,121 @@ def test_a_correctly_signed_callback_is_accepted() -> None:
     event = _provider().verify_callback(payload=body, signature=signature)
 
     assert event.status is PaymentStatus.SUCCEEDED
-    assert event.event_id == "192036465"
+    assert event.kind is EventKind.SUCCEEDED
+    assert event.provider_transaction_id == "192036465"
     assert event.amount == Decimal("1000.00")
     assert event.currency == "EGP"
 
 
-def test_a_tampered_amount_is_refused() -> None:
-    """The signature covers `amount_cents`, so raising it breaks the digest.
+def test_the_event_id_pairs_the_transaction_with_what_is_reported() -> None:
+    """Not the bare transaction id, and the reason is idempotency.
 
-    This is the attack the HMAC exists to stop: a forged callback claiming a
-    large payment against a real order.
+    One transaction produces several callbacks over its life. Keying the
+    uniqueness constraint on `obj.id` alone would make every callback after the
+    first a duplicate of it, so a 3-D Secure payment that reported `pending`
+    before it reported `success` would settle nothing at all, and a refund
+    notification on the original transaction would be silently swallowed.
+    """
+    ids = {
+        _verified(DOCUMENTED_TRANSACTION).event_id,
+        _verified({**DOCUMENTED_TRANSACTION, "pending": True}).event_id,
+        _verified({**DOCUMENTED_TRANSACTION, "is_refunded": True}).event_id,
+    }
+
+    assert ids == {
+        "192036465:succeeded",
+        "192036465:pending",
+        "192036465:refunded",
+    }
+
+
+# Every field the documentation lists as signed, with a value of a different
+# shape so tampering is unambiguous. Nested paths are written the way
+# `HMAC_FIELDS` writes them.
+TAMPERINGS: list[tuple[str, object]] = [
+    ("amount_cents", 1),
+    ("created_at", "2020-01-01T00:00:00.000000"),
+    ("currency", "USD"),
+    ("error_occured", True),
+    ("has_parent_transaction", True),
+    ("id", 999999999),
+    ("integration_id", 1),
+    ("is_3d_secure", False),
+    ("is_auth", True),
+    ("is_capture", True),
+    ("is_refunded", True),
+    ("is_standalone_payment", False),
+    ("is_voided", True),
+    ("order.id", 1),
+    ("owner", 1),
+    ("pending", True),
+    ("source_data.pan", "0000"),
+    ("source_data.sub_type", "Visa"),
+    ("source_data.type", "wallet"),
+    ("success", False),
+]
+
+
+@pytest.mark.parametrize(("field", "value"), TAMPERINGS, ids=[item[0] for item in TAMPERINGS])
+def test_changing_any_signed_field_invalidates_the_callback(field: str, value: object) -> None:
+    """The property the whole scheme rests on, asserted field by field.
+
+    A signature that covered nineteen of the twenty fields would pass every
+    happy-path test in this file and leave the twentieth forgeable. This is
+    parameterised over the documented list rather than spot-checking the
+    interesting ones, because the ones nobody thinks to check are exactly the
+    ones an integration gets wrong.
+
+    `amount_cents` and `success` are the two that matter most - together they
+    are a forged callback claiming a large payment succeeded against a real
+    order - but `order.id` is the one that would let somebody replay a genuine
+    signed callback against a different invoice.
     """
     body, signature = _signed(DOCUMENTED_TRANSACTION)
     tampered = json.loads(body)
-    tampered["obj"]["amount_cents"] = 1
+
+    target = tampered["obj"]
+    *parents, leaf = field.split(".")
+    for part in parents:
+        target = target[part]
+    assert target[leaf] != value, "the tampered value must differ from the original"
+    target[leaf] = value
 
     with pytest.raises(CallbackVerificationError):
         _provider().verify_callback(
             payload=json.dumps(tampered).encode("utf-8"),
             signature=signature,
         )
+
+
+def test_every_documented_field_is_covered_by_the_tampering_matrix() -> None:
+    """Stops the matrix above from silently falling behind `HMAC_FIELDS`.
+
+    A field added to the signature without a case here would be untested, and
+    nothing else would say so.
+    """
+    assert {field for field, _ in TAMPERINGS} == set(HMAC_FIELDS)
+
+
+def test_an_unsigned_field_does_not_invalidate_the_callback() -> None:
+    """The other half of the property: the signature covers what it covers.
+
+    Paymob signs twenty fields out of a callback body that is two hundred lines
+    long, so a change to `profile_id` or the acquirer detail must still verify.
+    A test that only asserted refusals would pass for an implementation that
+    refused everything.
+    """
+    body, signature = _signed({**DOCUMENTED_TRANSACTION, "profile_id": 164295})
+    document = json.loads(body)
+    document["obj"]["profile_id"] = 999
+    document["obj"]["is_settled"] = True
+
+    event = _provider().verify_callback(
+        payload=json.dumps(document).encode("utf-8"),
+        signature=signature,
+    )
+
+    assert event.status is PaymentStatus.SUCCEEDED
 
 
 def test_a_signature_from_a_different_secret_is_refused() -> None:
@@ -282,3 +387,73 @@ def test_a_callback_without_our_reference_maps_to_nothing() -> None:
     event = _provider().verify_callback(payload=body, signature=signature)
 
     assert event.reference is None
+
+
+def test_a_refund_wins_over_the_success_flag_it_arrives_with() -> None:
+    """The ordering that stops a refund being filed as a second collection.
+
+    A refund produces a callback for the *parent* transaction carrying
+    `is_refunded: true` - and that transaction still says `success: true`,
+    because it did succeed before the money was given back. An implementation
+    reading `success` first would record the reversal as another payment and
+    settle the invoice twice.
+    """
+    event = _verified({**DOCUMENTED_TRANSACTION, "success": True, "is_refunded": True})
+
+    assert event.kind is EventKind.REFUNDED
+    assert not event.succeeded
+
+
+def test_a_void_is_reported_apart_from_a_refund() -> None:
+    """Both give the money back; only one of them had settled first.
+
+    They map to the same payment status because the row records what a customer
+    has, and an operator reading the ledger needs to know which happened.
+    """
+    event = _verified({**DOCUMENTED_TRANSACTION, "is_voided": True})
+
+    assert event.kind is EventKind.VOIDED
+    assert event.status is PaymentStatus.REFUNDED
+    assert event.event_id.endswith(":voided")
+
+
+def test_a_reversal_carries_the_transaction_it_reverses() -> None:
+    """`parent_transaction` is documented on a refund and a void callback.
+
+    It is the second way a reversal is tied back to a payment, and it matters
+    because the reversal is its own transaction with its own id.
+    """
+    event = _verified(
+        {
+            **DOCUMENTED_TRANSACTION,
+            "id": 579305,
+            "is_refunded": True,
+            "has_parent_transaction": True,
+            "parent_transaction": 192036465,
+        }
+    )
+
+    assert event.parent_transaction_id == "192036465"
+    assert event.provider_transaction_id == "579305"
+
+
+def test_the_running_refunded_total_is_read_when_the_provider_gives_one() -> None:
+    """`refunded_amount_cents` is the cumulative figure across partial refunds.
+
+    Carried so the caller can tell "another 200 came back" from "200 has come
+    back in total", which are different numbers once a payment is reversed
+    twice.
+    """
+    event = _verified({**DOCUMENTED_TRANSACTION, "is_refunded": True, "refunded_amount_cents": 250})
+
+    assert event.refunded_amount == Decimal("2.50")
+
+
+def test_a_payment_callback_carries_no_refunded_total() -> None:
+    """None rather than zero, so the caller can tell absent from nothing.
+
+    The documented sample has `refunded_amount_cents: null` on a fresh payment,
+    and reading that as `0` would be indistinguishable from a provider
+    reporting that nothing has been given back yet.
+    """
+    assert _verified(DOCUMENTED_TRANSACTION).refunded_amount is None
