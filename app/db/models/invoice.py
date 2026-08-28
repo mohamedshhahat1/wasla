@@ -51,6 +51,10 @@ MAX_DESCRIPTION_LENGTH: Final = 300
 # Long enough for a provider's decline text without becoming a place somebody
 # stores a stack trace.
 MAX_FAILURE_LENGTH: Final = 500
+# Bounded because it is caller-supplied and indexed. Generous enough for a
+# UUID, a ULID or a request id, small enough that it is not a place to put a
+# payload.
+MAX_IDEMPOTENCY_KEY_LENGTH: Final = 100
 
 
 class InvoiceStatus(StrEnum):
@@ -88,6 +92,68 @@ TERMINAL_INVOICE_STATUSES: Final[frozenset[InvoiceStatus]] = frozenset(
 
 INVOICE_STATUS_TYPE = _enum_type(InvoiceStatus, name="invoice_status")
 PAYMENT_STATUS_TYPE = _enum_type(PaymentStatus, name="payment_status")
+
+
+# Where one payment attempt may go from where it is. Written down because the
+# statuses arrive from *outside*: a provider decides what a payment did, and a
+# callback is a stranger's assertion until it has been checked against what we
+# already believe. Without this, a forged - or merely late, or merely
+# out-of-order - callback saying `succeeded` about a payment we have already
+# refunded would settle the invoice a second time.
+#
+# A status is absent from its own set on purpose. Restating what a payment
+# already says is neither legal nor illegal; it is nothing, and the caller
+# distinguishes it so the ledger can record that nothing happened rather than
+# recording a change that did not occur.
+PAYMENT_TRANSITIONS: Final[dict[PaymentStatus, frozenset[PaymentStatus]]] = {
+    # In flight. It may still land either way.
+    PaymentStatus.PENDING: frozenset({PaymentStatus.SUCCEEDED, PaymentStatus.FAILED}),
+    # Collected. The only thing that can happen to money we hold is giving it
+    # back.
+    PaymentStatus.SUCCEEDED: frozenset({PaymentStatus.REFUNDED}),
+    # A declined attempt is finished. A customer trying again produces another
+    # attempt and another row, which is what makes the history readable; a
+    # failed row that later says `succeeded` would erase the decline.
+    PaymentStatus.FAILED: frozenset(),
+    # Given back. Nothing follows, and `refunded -> succeeded` in particular
+    # must never happen: it is how a refunded customer keeps the product.
+    PaymentStatus.REFUNDED: frozenset(),
+}
+
+
+# The same for invoices, which move for our own reasons rather than a
+# provider's - except one.
+#
+# `PAID -> OPEN` is that one, and it is only reachable by refunding. It looks
+# wrong and is not: `amount_paid` records money we *hold*, so giving it back
+# means an invoice whose payments no longer cover it, and an invoice that is
+# not covered is not paid. An operator refunding because a customer is leaving
+# voids the invoice afterwards, which is a separate deliberate act rather than
+# something inferred from a reversal.
+INVOICE_TRANSITIONS: Final[dict[InvoiceStatus, frozenset[InvoiceStatus]]] = {
+    InvoiceStatus.DRAFT: frozenset({InvoiceStatus.OPEN, InvoiceStatus.VOID}),
+    InvoiceStatus.OPEN: frozenset(
+        {InvoiceStatus.PAID, InvoiceStatus.UNCOLLECTIBLE, InvoiceStatus.VOID}
+    ),
+    InvoiceStatus.PAID: frozenset({InvoiceStatus.OPEN}),
+    InvoiceStatus.UNCOLLECTIBLE: frozenset({InvoiceStatus.PAID, InvoiceStatus.VOID}),
+    # Withdrawn. A bill the customer was told to ignore does not come back.
+    InvoiceStatus.VOID: frozenset(),
+}
+
+
+def payment_may_move(current: PaymentStatus, target: PaymentStatus) -> bool:
+    """Whether a payment may go from `current` to `target`.
+
+    False for a move to the status it already holds: that is not a move. See
+    `PAYMENT_TRANSITIONS`.
+    """
+    return target in PAYMENT_TRANSITIONS[current]
+
+
+def invoice_may_move(current: InvoiceStatus, target: InvoiceStatus) -> bool:
+    """Whether an invoice may go from `current` to `target`."""
+    return target in INVOICE_TRANSITIONS[current]
 
 
 class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -189,6 +255,16 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "provider_reference",
             name="uq_payments_provider_provider_reference",
         ),
+        # A retried checkout request must not become a second payment page.
+        # Scoped to the workspace because the key comes from that workspace's
+        # client: two customers picking the same string is their business, and
+        # a global constraint would let either of them deny the other a
+        # checkout by guessing.
+        UniqueConstraint(
+            "tenant_id",
+            "idempotency_key",
+            name="uq_payments_tenant_id_idempotency_key",
+        ),
         Index("ix_payments_tenant_id", "tenant_id"),
         Index("ix_payments_invoice_id", "invoice_id"),
         Index("ix_payments_status", "status"),
@@ -230,6 +306,51 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # tells a customer nothing they can act on.
     failure_reason: Mapped[str | None] = mapped_column(String(MAX_FAILURE_LENGTH), nullable=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # How much of this payment has been given back. A column rather than a
+    # boolean because a processor may reverse a payment in parts, and a
+    # workspace asking "what did I actually pay" needs the figure rather than
+    # the fact.
+    refunded_amount: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2),
+        nullable=False,
+        default=Decimal("0.00"),
+    )
+    # When somebody asked the provider to reverse this, as distinct from when
+    # the provider confirmed it. The gap between the two is the state worth
+    # being able to find: a refund requested days ago and never confirmed
+    # usually means the callback URL is wrong, and a customer is waiting.
+    refund_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    refunded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The provider's id for the *reversal*, which is a different transaction
+    # from the one being reversed. Kept so the callback reporting the reversal
+    # can be tied back to the request that caused it.
+    refund_reference: Mapped[str | None] = mapped_column(
+        String(MAX_REFERENCE_LENGTH),
+        nullable=True,
+    )
+    # A caller's own key for the request that created this attempt, so a
+    # retried request is recognised rather than becoming a second payment
+    # page. Nullable: most callers do not send one, and NULLs are distinct
+    # under the unique constraint, so any number of attempts without a key
+    # coexist.
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(MAX_IDEMPOTENCY_KEY_LENGTH),
+        nullable=True,
+    )
+
+    @property
+    def is_refundable(self) -> bool:
+        """Whether there is money here that could be given back.
+
+        Collected, and not already returned. Deliberately a property on the
+        row: the question is asked by the service, by the API and by the tests,
+        and three copies of `status is SUCCEEDED and ...` is how they come to
+        disagree.
+        """
+        return self.status is PaymentStatus.SUCCEEDED and self.refunded_amount < self.amount
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
         return f"Payment(invoice_id={self.invoice_id!r}, status={self.status!r})"

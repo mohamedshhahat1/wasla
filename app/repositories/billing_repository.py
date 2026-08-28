@@ -116,6 +116,21 @@ class PlatformSubscriptionRepository(BaseRepository[Subscription]):
         )
         return [SubscriptionCount(status=row[0], count=int(row[1])) for row in result.all()]
 
+    async def get_by_id(self, subscription_id: uuid.UUID | None) -> Subscription | None:
+        """One subscription by its own id, across every workspace.
+
+        Read by the dunning sweep, which starts from an invoice and needs the
+        subscription behind it. Unscoped like the rest of this class, and
+        reached only from the worker; a request-scoped caller uses
+        `SubscriptionRepository`, which is bound to one tenant.
+
+        Accepts None because `Invoice.subscription_id` is nullable - an invoice
+        outlives the subscription it came from.
+        """
+        if subscription_id is None:
+            return None
+        return await self._first(self._select().where(Subscription.id == subscription_id))
+
     async def due(self, *, now: datetime, limit: int = 100) -> Sequence[Subscription]:
         """Subscriptions whose period has run out and needs attention.
 

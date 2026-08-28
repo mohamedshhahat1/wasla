@@ -14,6 +14,8 @@ that a good API.
 
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, status
 
 from app.api.dependencies import (
@@ -21,6 +23,7 @@ from app.api.dependencies import (
     CheckoutServiceDep,
     EntitlementServiceDep,
     PlanRepositoryDep,
+    RefundServiceDep,
     SubscriptionServiceDep,
     TenantOwnerDep,
 )
@@ -35,6 +38,7 @@ from app.schemas.billing import (
     SubscriptionRead,
     SubscriptionStateRead,
 )
+from app.schemas.invoice import PaymentRead, RefundRequestPayload
 from app.services.entitlement_service import EntitlementService
 from app.services.subscription_service import SubscriptionService
 
@@ -189,7 +193,12 @@ async def start_checkout(
     Owners only, matching `POST /subscription`: choosing what a workspace pays
     for is the same authority as choosing its plan.
     """
-    started = await checkout.start(plan_code=payload.plan_code, actor=workspace.user)
+    started = await checkout.start(
+        plan_code=payload.plan_code,
+        invoice_id=payload.invoice_id,
+        actor=workspace.user,
+        idempotency_key=payload.idempotency_key,
+    )
     return CheckoutStarted(
         redirect_url=started.redirect_url,
         payment_id=started.payment_id,
@@ -197,6 +206,69 @@ async def start_checkout(
         amount=started.amount,
         currency=started.currency,
     )
+
+
+@router.get(
+    "/payments/{payment_id}",
+    response_model=PaymentRead,
+    summary="Read one payment attempt",
+)
+async def read_payment(
+    payment_id: uuid.UUID,
+    workspace: TenantOwnerDep,
+    checkout: CheckoutServiceDep,
+) -> PaymentRead:
+    """Where one payment attempt has got to. Owners only.
+
+    **This is the endpoint a client polls after a customer comes back from the
+    payment page.** The provider redirects them with the result in the query
+    string, and that is worth nothing as evidence - anybody can visit a URL
+    with `success=true` on it, and there is deliberately no endpoint here that
+    reads one. What this returns is derived from a callback the provider sent
+    us directly, over a signature (ADR-044).
+
+    A pending status is a real answer rather than a missing one: 3-D Secure and
+    several local payment methods complete after the customer has already been
+    sent back, so a client that treats `pending` as failure will tell somebody
+    their payment did not work while it is still working.
+
+    Another workspace's payment id answers not-found, like every other resource
+    here.
+    """
+    return PaymentRead.from_model(await checkout.require_payment(payment_id))
+
+
+@router.post(
+    "/payments/{payment_id}/refund",
+    response_model=PaymentRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Refund a payment",
+)
+async def refund_payment(
+    payment_id: uuid.UUID,
+    payload: RefundRequestPayload,
+    workspace: TenantOwnerDep,
+    refunds: RefundServiceDep,
+) -> PaymentRead:
+    """Give a customer back what is left of one payment. Owners only.
+
+    **202, not 200, and the status in the response still says `succeeded`.**
+    This records that the provider accepted the reversal; the money has not
+    moved yet, and it is confirmed by a callback the same way a payment is. A
+    client rendering "refunded" from this response would be telling a customer
+    something that is not true yet - `refund_pending` is the field that says
+    where it actually stands.
+
+    There is no amount in the request. It is the payment's own unreturned
+    balance, computed on the server, so no client can ask for more back than
+    was ever paid.
+    """
+    payment = await refunds.refund(
+        payment_id,
+        actor=workspace.user,
+        reason=payload.reason,
+    )
+    return PaymentRead.from_model(payment)
 
 
 @router.get("/entitlements", response_model=list[EntitlementRead])

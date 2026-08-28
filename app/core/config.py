@@ -32,6 +32,22 @@ _EMAIL_SHAPE: Final = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+$")
 _PUBLIC_URL_SCHEMES: Final = frozenset({"http", "https"})
 
 
+def _key_mode(key: str | None, prefix: str) -> str | None:
+    """Which Paymob mode a key declares, or None if it does not say.
+
+    Documented shapes are `sk_test_…` / `sk_live_…` and `pk_test_…` /
+    `pk_live_…`. Searched rather than matched from position 0 because some
+    regions prefix the whole thing; the point is to read the mode, not to
+    police the format.
+    """
+    if not key:
+        return None
+    for mode in ("test", "live"):
+        if f"{prefix}_{mode}_" in key:
+            return mode
+    return None
+
+
 def _public_url_problems(value: str) -> list[str]:
     """Whether APP_PUBLIC_URL can safely be the base of an emailed link."""
     parsed = urlparse(value.strip())
@@ -306,6 +322,27 @@ class Settings(BaseSettings):
             return [int(item.strip()) for item in raw.split(",") if item.strip()]
         return value
 
+    @field_validator("paymob_integration_ids", mode="after")
+    @classmethod
+    def _check_integration_ids(cls, value: list[int]) -> list[int]:
+        """Refuse ids that cannot be real, and refuse the same one twice.
+
+        A duplicate is not harmless: the list is sent to the provider as the
+        payment methods to offer, and a repeated id offers the same method
+        twice on the checkout page. A non-positive id is a parsing accident -
+        `0` is what an empty field becomes if the split above is ever loosened
+        - and it would silently disable a payment method rather than fail.
+
+        Refused rather than de-duplicated, following the rule this file already
+        follows for a lifetime out of range: silently correcting configuration
+        is how an operator comes to believe something is set that is not.
+        """
+        if any(item <= 0 for item in value):
+            raise ValueError("PAYMOB_INTEGRATION_IDS must all be positive integers")
+        if len(set(value)) != len(value):
+            raise ValueError("PAYMOB_INTEGRATION_IDS must not repeat an id")
+        return value
+
     @field_validator("credential_encryption_keys", mode="before")
     @classmethod
     def _parse_encryption_keys(cls, value: Any) -> Any:
@@ -550,9 +587,54 @@ class Settings(BaseSettings):
                     "APP_PUBLIC_URL must be https in production: payment callbacks travel to it"
                 )
 
+            problems.extend(self._paymob_key_problems())
+
         if problems:
             raise ValueError(f"invalid {self.environment} configuration: " + "; ".join(problems))
         return self
+
+    def _paymob_key_problems(self) -> list[str]:
+        """Catch the two credential mistakes that produce a working-looking mess.
+
+        Paymob issues the secret and public keys per *mode*, prefixed `sk_test_`
+        / `sk_live_` and `pk_test_` / `pk_live_`, and documents that the keys
+        decide whether a transaction is real - there is no sandbox host to point
+        at, which is why this file has no sandbox flag.
+
+        That makes a mismatched pair the dangerous case. A live secret key with
+        a test public key creates a real intention and sends the customer to a
+        test payment page, so nothing is ever collected and every callback is
+        for money that does not exist. Nothing else in the system can notice:
+        both halves look perfectly valid on their own.
+
+        The second is a deployment that believes it is live and is not - test
+        keys in production means every payment is pretend and every customer
+        gets the product free.
+
+        Matched by substring rather than prefix on purpose. Some regions issue
+        keys with a country prefix ahead of the `sk_`, and refusing to boot over
+        a shape this integration has not seen would be worse than the mistake
+        being guarded against. A key with no recognisable mode at all is left
+        alone for the same reason - it is reported only when its partner *does*
+        declare one, because that is when they can be shown to disagree.
+        """
+        modes = {
+            "PAYMOB_SECRET_KEY": _key_mode(self.paymob_secret_key, "sk"),
+            "PAYMOB_PUBLIC_KEY": _key_mode(self.paymob_public_key, "pk"),
+        }
+        declared = {name: mode for name, mode in modes.items() if mode is not None}
+        if len(set(declared.values())) > 1:
+            names = ", ".join(sorted(declared))
+            return [
+                f"{names} are for different Paymob modes; a live secret key with a "
+                "test public key creates real intentions behind a test payment page"
+            ]
+        if self.is_production and "test" in declared.values():
+            return [
+                "Paymob test keys must not be used in production: every payment "
+                "would be pretend and every customer would get the product free"
+            ]
+        return []
 
 
 @lru_cache

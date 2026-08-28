@@ -54,6 +54,9 @@ from app.integrations.billing.checkout import (
     CallbackVerificationError,
     CheckoutRequest,
     CheckoutSession,
+    EventKind,
+    RefundOutcome,
+    RefundRequest,
 )
 
 logger = get_logger(__name__)
@@ -63,6 +66,9 @@ DEFAULT_TIMEOUT_SECONDS: Final = 20.0
 # Enough of a provider error to act on, too little to carry a credential back
 # out through a log. Paymob error bodies quote the request.
 MAX_ERROR_LENGTH: Final = 300
+# A provider's decline text, bounded. Long enough to be actionable, short
+# enough that nobody stores a payload in it.
+MAX_FAILURE_REASON_LENGTH: Final = 200
 
 # The regions Paymob publishes, each with its API base and its checkout host.
 # Both are needed and they are not the same host - see the module docstring.
@@ -74,6 +80,25 @@ REGIONS: Final[dict[str, tuple[str, str]]] = {
 }
 
 INTENTION_PATH: Final = "/v1/intention/"
+# Reversal of a transaction, documented at
+# developers.paymob.com/paymob-docs/developers/manage-payment-apis/refund
+# (read 2026-08-29): POST with the secret key, taking `transaction_id` and
+# `amount_cents`. The same page documents `/api/acceptance/void_refund/void`
+# for a transaction that has not settled yet - deliberately not called here,
+# see `PaymobProvider.refund`.
+REFUND_PATH: Final = "/api/acceptance/void_refund/refund"
+
+# What each reported state means for the payment row. Voiding and refunding
+# both leave a payment that was collected and given back; the difference is
+# whether it had settled first, and that is kept as the event kind rather than
+# flattened into the status.
+_STATUS_FOR_KIND: Final[dict[EventKind, PaymentStatus]] = {
+    EventKind.PENDING: PaymentStatus.PENDING,
+    EventKind.SUCCEEDED: PaymentStatus.SUCCEEDED,
+    EventKind.FAILED: PaymentStatus.FAILED,
+    EventKind.REFUNDED: PaymentStatus.REFUNDED,
+    EventKind.VOIDED: PaymentStatus.REFUNDED,
+}
 
 # The exact keys the HMAC is built from, in the order the documentation lists
 # them, for a *processed POST* callback. Written as a tuple of paths into the
@@ -173,6 +198,20 @@ def _to_cents(amount: Decimal) -> int:
     if cents != cents.to_integral_value():
         raise ProviderError("An amount must be a whole number of cents.")
     return int(cents)
+
+
+def _from_cents(value: Any) -> Decimal:
+    """Integer cents from a payload back into money.
+
+    Anything that is not an integer becomes zero rather than raising. The
+    caller compares this against the invoice and refuses a mismatch, so a
+    malformed amount is refused by that comparison - which is a better failure
+    than an exception inside an already-verified callback, because the event
+    still gets recorded and an operator can see it.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return Decimal("0")
+    return Decimal(value) / 100
 
 
 class PaymobProvider:
@@ -302,6 +341,25 @@ class PaymobProvider:
                 data["last_name"] = last
         return data
 
+    def _redacted(self, text: str) -> str:
+        """This deployment's own secrets taken back out of a provider's text.
+
+        Paymob quotes the request back in its error bodies, and a provider
+        error is carried into an exception message and from there into a log
+        and possibly into an operator's screen. Truncating the body bounds how
+        much comes back; it does nothing about *what*, because a credential
+        echoed in the first two hundred characters survives truncation intact.
+
+        Only values this process holds are removed, which is the only thing
+        that can be done reliably - a general secret-shaped-string scrubber
+        would be guessing. Both are checked because an error about the wrong
+        key is exactly the error most likely to quote it.
+        """
+        for secret in (self._secret_key, self._hmac_secret):
+            if secret and secret in text:
+                text = text.replace(secret, "[redacted]")
+        return text
+
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         """One JSON POST, with the credential in exactly one place.
 
@@ -324,26 +382,41 @@ class PaymobProvider:
                     },
                 )
         except httpx.TimeoutException as error:
-            raise ProviderError("Paymob did not respond in time.") from error
+            # No answer, so the request may well have been carried out.
+            # Retryable, and safe to retry: an intention is keyed on our own
+            # unique reference, and a refund is guarded by the reference stored
+            # before one is believed to have happened.
+            raise ProviderError("Paymob did not respond in time.", retryable=True) from error
         except httpx.HTTPError as error:
             # Deliberately not interpolating the error: httpx puts the request
             # URL in it, and a future signed URL would end up in a log.
-            raise ProviderError("Paymob could not be reached.") from error
+            raise ProviderError("Paymob could not be reached.", retryable=True) from error
 
         if response.status_code >= 400:
-            detail = response.text[:MAX_ERROR_LENGTH]
+            # 5xx is their failure and may pass; 4xx is a statement about this
+            # request - wrong credentials, an unknown integration, an amount
+            # they will not take - and sending it again changes nothing. 429 is
+            # grouped with the first: it is an explicit "later".
+            retryable = response.status_code >= 500 or response.status_code == 429
+            detail = self._redacted(response.text[:MAX_ERROR_LENGTH])
             logger.warning(
                 "billing.paymob_rejected",
                 extra={
                     "event": "billing.paymob_rejected",
                     "status_code": response.status_code,
+                    "retryable": retryable,
                 },
             )
-            raise ProviderError(f"Paymob refused the request ({response.status_code}): {detail}")
+            raise ProviderError(
+                f"Paymob refused the request ({response.status_code}): {detail}",
+                retryable=retryable,
+            )
 
         try:
             payload = response.json()
         except ValueError as error:
+            # A 2xx we cannot read. Not retryable: the same request produces
+            # the same unreadable answer.
             raise ProviderError("Paymob returned a response that was not JSON.") from error
         if not isinstance(payload, dict):
             raise ProviderError("Paymob returned a response of an unexpected shape.")
@@ -394,51 +467,122 @@ class PaymobProvider:
     def _event(transaction: dict[str, Any]) -> CallbackEvent:
         """Translate a verified transaction into the billing vocabulary.
 
-        The status mapping is the only judgement here, and it is deliberately
-        strict: **only an unambiguous success is a success.** `success` true
+        Two judgements, and both decide whether money is believed to have
+        moved.
+
+        **What is being reported.** The reversal flags win over the success
+        flags, because `is_refunded` arrives on a transaction that *did*
+        succeed - the documentation is explicit that a refund produces
+        callbacks for the parent transaction carrying `is_refunded: true`, and
+        that transaction still says `success: true` because it did succeed
+        before the money was given back. Reading `success` first would file a
+        refund as another collection and settle the invoice twice.
+
+        **Whether a success is a success.** Deliberately strict: `success` true
         while `pending` is also true is a transaction still in flight, and
         treating it as collected would activate a subscription for money that
-        has not moved. Everything that is not a clean success and not still
-        pending is a failure, because a payment that is neither succeeded nor
-        in progress did not happen.
+        has not moved. Everything that is neither a clean success nor still in
+        progress is a failure, because a payment that is neither did not
+        happen.
+
+        The event id pairs the transaction with the state - see
+        `CallbackEvent.event_id`. That pairing is the whole reason a refund
+        notification about the original transaction is not swallowed as a
+        duplicate of the payment.
         """
         success = bool(transaction.get("success"))
         pending = bool(transaction.get("pending"))
         error_occured = bool(transaction.get("error_occured"))
 
-        if success and not pending and not error_occured:
-            status = PaymentStatus.SUCCEEDED
+        if transaction.get("is_voided"):
+            kind = EventKind.VOIDED
+        elif transaction.get("is_refunded"):
+            kind = EventKind.REFUNDED
+        elif success and not pending and not error_occured:
+            kind = EventKind.SUCCEEDED
         elif pending and not error_occured:
-            status = PaymentStatus.PENDING
+            kind = EventKind.PENDING
         else:
-            status = PaymentStatus.FAILED
-
-        # `is_refunded` and `is_voided` describe a payment that was collected
-        # and then given back. Reported as refunded so a caller can tell it
-        # apart from a payment that never succeeded.
-        if transaction.get("is_refunded") or transaction.get("is_voided"):
-            status = PaymentStatus.REFUNDED
+            kind = EventKind.FAILED
 
         order = transaction.get("order")
         reference = order.get("merchant_order_id") if isinstance(order, dict) else None
 
-        amount_cents = transaction.get("amount_cents")
-        amount = Decimal(int(amount_cents)) / 100 if isinstance(amount_cents, int) else Decimal("0")
+        transaction_id = str(transaction.get("id"))
+        parent = transaction.get("parent_transaction")
+        refunded_cents = transaction.get("refunded_amount_cents")
 
         failure_reason: str | None = None
-        if status is PaymentStatus.FAILED:
+        if kind is EventKind.FAILED:
             data = transaction.get("data")
             if isinstance(data, dict):
                 message = data.get("message")
                 if isinstance(message, str):
-                    failure_reason = message[:200]
+                    failure_reason = message[:MAX_FAILURE_REASON_LENGTH]
 
         return CallbackEvent(
-            event_id=str(transaction.get("id")),
+            event_id=f"{transaction_id}:{kind.value}",
             reference=str(reference) if reference else None,
-            status=status,
-            amount=amount,
+            kind=kind,
+            status=_STATUS_FOR_KIND[kind],
+            amount=_from_cents(transaction.get("amount_cents")),
             currency=str(transaction.get("currency") or ""),
-            provider_payment_id=str(transaction.get("id")),
+            provider_transaction_id=transaction_id,
+            parent_transaction_id=str(parent) if parent else None,
+            # None rather than zero when absent, so a caller can tell "the
+            # provider did not say" from "the provider says nothing has been
+            # given back". The documented sample carries null on a fresh
+            # payment.
+            refunded_amount=(
+                _from_cents(refunded_cents)
+                if isinstance(refunded_cents, int) and not isinstance(refunded_cents, bool)
+                else None
+            ),
             failure_reason=failure_reason,
+        )
+
+    async def refund(self, request: RefundRequest) -> RefundOutcome:
+        """Reverse a collected payment through the documented refund endpoint.
+
+        `POST /api/acceptance/void_refund/refund`, authenticated with the
+        secret key, taking the transaction id and an amount in cents. The
+        response is a *new* transaction - the reversal - and its id is what a
+        later callback about this refund carries.
+
+        Void is not attempted as a fallback. Paymob documents a separate
+        endpoint for reversing a transaction that has not settled yet, and
+        choosing between the two from an error body would mean guessing at
+        response codes this integration has never seen. A refund the provider
+        refuses surfaces as a `ProviderError` carrying its reason, which is a
+        state an operator can act on.
+        """
+        payload = await self._post(
+            REFUND_PATH,
+            {
+                "transaction_id": request.transaction_reference,
+                "amount_cents": _to_cents(request.amount),
+            },
+        )
+
+        reversal_id = payload.get("id")
+        if reversal_id is None:
+            raise ProviderError("Paymob did not identify the refund transaction.")
+        if payload.get("success") is False:
+            # A 200 that says it did not work. Treated as a refusal rather than
+            # read past: recording a refund the provider declined would tell a
+            # customer their money is coming back when it is not.
+            raise ProviderError("Paymob refused the refund.")
+
+        logger.info(
+            "billing.paymob_refund_accepted",
+            extra={
+                "event": "billing.paymob_refund_accepted",
+                "transaction_id": request.transaction_reference,
+                "refund_transaction_id": str(reversal_id),
+            },
+        )
+        return RefundOutcome(
+            provider_reference=str(reversal_id),
+            amount=request.amount,
+            pending=bool(payload.get("pending")),
         )

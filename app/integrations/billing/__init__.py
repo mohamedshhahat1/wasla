@@ -24,6 +24,9 @@ from app.integrations.billing.checkout import (
     CheckoutProvider,
     CheckoutRequest,
     CheckoutSession,
+    EventKind,
+    RefundOutcome,
+    RefundRequest,
 )
 from app.integrations.billing.manual import MANUAL_PROVIDER, ManualProvider
 from app.integrations.billing.paymob import PAYMOB_PROVIDER, PaymobProvider
@@ -82,9 +85,12 @@ __all__ = [
     "CheckoutProvider",
     "CheckoutRequest",
     "CheckoutSession",
+    "EventKind",
     "ManualProvider",
     "PaymentProvider",
     "PaymobProvider",
     "ProviderError",
+    "RefundOutcome",
+    "RefundRequest",
     "build_checkout_provider",
 ]

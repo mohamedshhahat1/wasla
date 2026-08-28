@@ -22,6 +22,18 @@ def _money(amount: Decimal) -> str:
     return f"{amount:.2f}"
 
 
+def _money_or_zero(amount: Decimal | None) -> str:
+    """The same, for a column whose default has not been applied yet.
+
+    `refunded_amount` is `NOT NULL` with a default, and SQLAlchemy applies
+    defaults at INSERT - so a `Payment` that has been constructed but not
+    flushed reads as None. Zero is the truthful rendering of that state rather
+    than a papering-over: nothing has been given back on a row that does not
+    exist yet.
+    """
+    return _money(amount if amount is not None else Decimal("0.00"))
+
+
 class InvoiceLineRead(BaseModel):
     """One line of an invoice, as it was written at issue time.
 
@@ -38,13 +50,30 @@ class InvoiceLineRead(BaseModel):
 
 
 class PaymentRead(BaseModel):
-    """One attempt at collecting."""
+    """One attempt at collecting, and where it has got to.
+
+    This is what a client polls after sending somebody to a payment page. The
+    provider redirects the customer back with the result in the query string,
+    and **that is not evidence** - anybody can visit a URL with `success=true`
+    on it. A client showing a customer whether they paid must ask for this,
+    because this is derived from a signed callback the provider sent us
+    directly (ADR-044).
+
+    `refund_pending` is the honest middle state: a reversal the provider has
+    accepted but not yet confirmed. A customer in that state has been refunded
+    from our side and has not seen the money, and a page that showed either
+    "refunded" or "paid" would be wrong.
+    """
 
     id: str
     status: PaymentStatus
     amount: str
     currency: str
     provider: str
+    invoice_id: str
+    refunded_amount: str
+    refund_pending: bool
+    refunded_at: datetime | None
     failure_reason: str | None
     processed_at: datetime | None
     created_at: datetime
@@ -57,10 +86,31 @@ class PaymentRead(BaseModel):
             amount=_money(payment.amount),
             currency=payment.currency,
             provider=payment.provider,
+            invoice_id=str(payment.invoice_id),
+            refunded_amount=_money_or_zero(payment.refunded_amount),
+            # Asked for, not yet confirmed by a callback. Reported as a
+            # boolean rather than by exposing the provider's reference: which
+            # transaction id a reversal has is nobody's business outside
+            # support, and it is in the audit log for them.
+            refund_pending=bool(payment.refund_requested_at) and not payment.refunded_amount,
+            refunded_at=payment.refunded_at,
             failure_reason=payment.failure_reason,
             processed_at=payment.processed_at,
             created_at=payment.created_at,
         )
+
+
+class RefundRequestPayload(BaseModel):
+    """Asking for a payment to be given back.
+
+    A reason and nothing else. There is deliberately no `amount`: it is the
+    payment's own unreturned balance, computed on the server, so there is no
+    field anybody can send to be refunded more than they paid.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=300)
 
 
 class InvoiceRead(BaseModel):
@@ -143,4 +193,5 @@ __all__ = [
     "InvoiceVoidRequest",
     "PaymentRead",
     "PaymentRecordRequest",
+    "RefundRequestPayload",
 ]

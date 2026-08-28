@@ -138,7 +138,18 @@ class AuditAction(StrEnum):
     SUBSCRIPTION_CANCELLED = "subscription_cancelled"
     SUBSCRIPTION_RESUMED = "subscription_resumed"
     PAYMENT_RECORDED = "payment_recorded"
+    # Somebody asked a processor to give a customer their money back. Kept
+    # apart from `PAYMENT_RECORDED` because it is the one billing action that
+    # moves money *out*, and "who authorised this refund" is the question the
+    # log exists to answer.
+    PAYMENT_REFUND_REQUESTED = "payment_refund_requested"
+    # The processor confirmed it. Separate from the request because the two can
+    # be days apart, and because a request that is never confirmed is exactly
+    # the state worth being able to find.
+    PAYMENT_REFUNDED = "payment_refunded"
     INVOICE_VOIDED = "invoice_voided"
+    # A renewal went unpaid long enough that the workspace was marked behind.
+    SUBSCRIPTION_PAST_DUE = "subscription_past_due"
 
     # Writing to many customers at once
     CAMPAIGN_SCHEDULED = "campaign_scheduled"

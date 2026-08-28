@@ -12,7 +12,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.db.models.billing import (
     BillingInterval,
@@ -138,19 +138,42 @@ class PlanSelectionRequest(BaseModel):
 
 
 class CheckoutRequestPayload(BaseModel):
-    """Starting a hosted checkout.
+    """Starting a hosted checkout, for a plan or for an invoice already due.
 
-    The plan code and nothing else, and that is the security property rather
-    than a minimal API. There is deliberately no `amount`, no `currency` and no
+    Identifiers and nothing else, and that is the security property rather than
+    a minimal API. There is deliberately no `amount`, no `currency` and no
     workspace: every one of those is read from the database and the
     authenticated session, so a client cannot ask to be charged a figure of its
     choosing. `extra="forbid"` makes an attempt to send one a 422 rather than a
     field quietly ignored.
+
+    `invoice_id` is how a renewal gets paid. The invoice is still looked up
+    tenant-scoped, so naming another workspace's is a not-found rather than a
+    bill somebody else can settle.
+
+    `idempotency_key` lets a caller say "this is the same request as before" so
+    a retry does not open a second payment page. A repeat is refused rather
+    than replayed - the response carries a one-use URL that is deliberately
+    never stored, so there is nothing honest to replay.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    plan_code: str = Field(min_length=1, max_length=MAX_PLAN_CODE_INPUT)
+    plan_code: str | None = Field(default=None, min_length=1, max_length=MAX_PLAN_CODE_INPUT)
+    invoice_id: uuid.UUID | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def _exactly_one_subject(self) -> Self:
+        """One or the other. Both, or neither, is a caller that has not decided.
+
+        Refused here rather than in the service so the answer is a 422 naming
+        the field, which is what a client can act on - and so the service's own
+        check stays as the guarantee rather than as the error message.
+        """
+        if (self.plan_code is None) == (self.invoice_id is None):
+            raise ValueError("Name either plan_code or invoice_id, not both.")
+        return self
 
 
 class CheckoutStarted(BaseModel):

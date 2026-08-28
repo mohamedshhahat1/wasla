@@ -18,20 +18,23 @@ This module is the query, the loop and the commit, and nothing else.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import Plan, Subscription, SubscriptionStatus
 from app.db.session import Database
 from app.repositories.billing_repository import (
     PlanRepository,
     PlatformSubscriptionRepository,
 )
+from app.repositories.invoice_repository import PlatformInvoiceRepository
 from app.repositories.tenant_repository import TenantRepository
+from app.services.audit_service import AuditTrail
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
 from app.services.invoice_service import InvoiceService
@@ -49,6 +52,11 @@ POLL_SECONDS: Final = 600.0
 # rather than one enormous transaction.
 CLAIM_LIMIT: Final = 200
 
+# How long a renewal invoice may go unpaid before the workspace is marked
+# behind. A week rather than a day: cards expire, finance departments pay on
+# Fridays, and a customer who is one working day late has not stopped paying.
+GRACE_DAYS: Final = 7
+
 
 class BillingWorker:
     """Polls for subscriptions whose period has ended and advances them."""
@@ -60,11 +68,13 @@ class BillingWorker:
         settings: Settings,
         poll_seconds: float = POLL_SECONDS,
         claim_limit: int = CLAIM_LIMIT,
+        grace_days: int = GRACE_DAYS,
     ) -> None:
         self._database = database
         self._settings = settings
         self._poll_seconds = poll_seconds
         self._claim_limit = claim_limit
+        self._grace_days = grace_days
         self._running = False
         # Set by stop(), so shutdown does not wait out a ten-minute interval.
         self._stopping = asyncio.Event()
@@ -104,9 +114,6 @@ class BillingWorker:
             subscriptions = PlatformSubscriptionRepository(session)
             plans = PlanRepository(session)
             due = await subscriptions.due(now=moment, limit=self._claim_limit)
-            if not due:
-                return 0
-
             for subscription in due:
                 plan = await plans.get_by_id(subscription.plan_id)
                 if plan is None:
@@ -150,8 +157,86 @@ class BillingWorker:
                     },
                 )
 
+            handled += await self._chase_unpaid(session, now=moment)
+
         logger.info("billing.sweep_completed", extra={"handled": handled})
         return handled
+
+    async def _chase_unpaid(self, session: AsyncSession, *, now: datetime) -> int:
+        """Mark workspaces behind when a renewal has gone unpaid for too long.
+
+        This is the half of recurring billing that is not about issuing a bill.
+        Invoices were already produced at every period end and nothing ever
+        looked at whether they were paid, so a workspace that stopped paying
+        stayed `active` for ever and kept its full plan - which is a product
+        given away rather than a payment problem.
+
+        `PAST_DUE` and not `CANCELLED`, deliberately. It is a state that still
+        serves the customer (`SERVING_STATUSES` includes it) and is the
+        conversation to have before cutting anybody off; a first failed card
+        should not end a relationship. When the invoice is paid, the callback
+        puts the subscription back to `ACTIVE` - see `CheckoutService._settle`,
+        which is the only thing that does.
+
+        Grace runs from `issued_at`, so somebody has the configured number of
+        days from being *asked* rather than from a period boundary they never
+        saw.
+        """
+        grace = timedelta(days=self._grace_days)
+        invoices = await PlatformInvoiceRepository(session).overdue(
+            before=now - grace,
+            limit=self._claim_limit,
+        )
+        if not invoices:
+            return 0
+
+        subscriptions = PlatformSubscriptionRepository(session)
+        marked = 0
+        for invoice in invoices:
+            subscription = await subscriptions.get_by_id(invoice.subscription_id)
+            if subscription is None or subscription.status is not SubscriptionStatus.ACTIVE:
+                # Trials owe nothing, and a cancelled or expired subscription
+                # is already not being served. Only an active workspace can
+                # fall behind.
+                continue
+
+            subscription.status = SubscriptionStatus.PAST_DUE
+            AuditTrail(session, tenant_id=subscription.tenant_id).record(
+                AuditAction.SUBSCRIPTION_PAST_DUE,
+                actor=None,
+                actor_kind=AuditActorKind.SYSTEM,
+                target_type="subscription",
+                target_id=subscription.id,
+                meta={
+                    "invoice_id": str(invoice.id),
+                    "outstanding": str(invoice.outstanding),
+                    "currency": invoice.currency,
+                },
+            )
+            # Keyed to the invoice, so a workspace that stays behind is told
+            # once about this bill rather than once every sweep.
+            await EmailOutbox(session, self._settings).enqueue_for_tenant_owners(
+                tenant_id=subscription.tenant_id,
+                template=EmailTemplate.INVOICE_ISSUED,
+                idempotency_prefix=f"invoice-overdue:{invoice.id}",
+                context={
+                    "amount_due": f"{invoice.outstanding:.2f}",
+                    "currency": invoice.currency,
+                    "period_start": invoice.period_start.date().isoformat(),
+                    "period_end": invoice.period_end.date().isoformat(),
+                },
+            )
+            marked += 1
+            logger.warning(
+                "billing.subscription_past_due",
+                extra={
+                    "event": "billing.subscription_past_due",
+                    "tenant_id": str(subscription.tenant_id),
+                    "invoice_id": str(invoice.id),
+                    "outstanding": str(invoice.outstanding),
+                },
+            )
+        return marked
 
     async def _invoice(
         self,

@@ -4,12 +4,18 @@ Two halves of one flow, kept in one module because they are the two ends of the
 same state machine and reading either without the other is misleading.
 
 The rule that shapes everything here: **the browser is never believed.** The
-customer chooses a plan code and nothing else. The amount, the currency and the
-workspace are read from the database and the authenticated session, the
-reference the provider quotes back is one we generated, and the payment is only
-settled by a callback whose signature checked out. A customer returning to the
-site with `?success=true` changes nothing; there is deliberately no endpoint
-that would let it.
+customer chooses a plan code or names one of their own invoices, and nothing
+else. The amount, the currency and the workspace are read from the database and
+the authenticated session, the reference the provider quotes back is one we
+generated, and the payment is only settled by a callback whose signature
+checked out. A customer returning to the site with `?success=true` changes
+nothing; there is deliberately no endpoint that would let it.
+
+Every state change goes through the transition tables in
+`db/models/invoice.py`. That is not ceremony: the statuses on the applying side
+arrive from *outside*, and a late, out-of-order or forged-but-signed callback
+claiming a payment succeeded after it was refunded would otherwise settle an
+invoice twice.
 
 The word "Paymob" appears nowhere below. This service talks to a
 `CheckoutProvider`, which is a protocol in `integrations/billing/checkout.py`,
@@ -31,14 +37,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.db.models.audit import AuditAction, AuditActorKind
-from app.db.models.billing import Plan, Subscription
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
-from app.db.models.payment_event import PaymentEvent
+from app.db.models.billing import Plan, Subscription, SubscriptionStatus
+from app.db.models.invoice import (
+    Invoice,
+    InvoiceStatus,
+    Payment,
+    PaymentStatus,
+    invoice_may_move,
+    payment_may_move,
+)
+from app.db.models.payment_event import MAX_DETAIL_LENGTH, PaymentEvent
 from app.db.models.user import User
 from app.integrations.billing.checkout import (
     CallbackEvent,
     CheckoutProvider,
     CheckoutRequest,
+    EventKind,
 )
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
 from app.repositories.invoice_repository import InvoiceRepository, PaymentRepository
@@ -48,11 +62,20 @@ from app.services.subscription_service import add_interval
 logger = get_logger(__name__)
 
 # What a recorded callback did, in one word. Read by filtering, so a closed
-# vocabulary rather than a message.
+# vocabulary rather than a message; `PaymentEvent.detail` carries the why.
+#
+# The distinction between the last three is the one worth keeping straight.
+# `MISMATCHED` means the provider told us something about money that disagrees
+# with what we asked for. `NO_CHANGE` means we believed it and it said nothing
+# new. `REFUSED` means we believed it and it asked for a move the rules forbid,
+# which is the interesting one: a signed callback trying to un-refund a payment
+# lands here, and so does a genuine late delivery arriving out of order.
 APPLIED: Final = "applied"
 DUPLICATE: Final = "duplicate"
 UNMATCHED: Final = "unmatched"
 MISMATCHED: Final = "mismatched"
+NO_CHANGE: Final = "no_change"
+REFUSED: Final = "refused"
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,59 +118,74 @@ class CheckoutService:
     async def start(
         self,
         *,
-        plan_code: str,
+        plan_code: str | None = None,
+        invoice_id: uuid.UUID | None = None,
         actor: User | None = None,
+        idempotency_key: str | None = None,
         now: datetime | None = None,
     ) -> StartedCheckout:
-        """Price a plan from the database and open a checkout for it.
+        """Open a payment page, either for a plan or for an invoice already due.
+
+        Exactly one of `plan_code` and `invoice_id`. Naming a plan is somebody
+        choosing what to buy; naming an invoice is somebody paying a renewal
+        this system issued for them, and the second is what makes the billing
+        cycle actually collectible rather than merely recorded.
 
         The order matters. The invoice and the pending payment are written
         *before* the provider is called, so the reference handed to the
         provider is a row that already exists: a callback can never arrive for
         a payment this system has not heard of because the customer was fast.
 
-        The provider call is the last thing, and it is outside no transaction -
-        the caller commits afterwards. A provider that succeeds and a commit
-        that then fails leaves an intention nobody will pay against, which
-        costs nothing; the reverse ordering would leave a customer at a payment
-        page for an invoice that does not exist.
+        The provider call is the last thing, and the caller commits afterwards.
+        A provider that succeeds and a commit that then fails leaves an
+        intention nobody will pay against, which costs nothing; the reverse
+        ordering would leave a customer at a payment page for an invoice that
+        does not exist.
         """
         if self._provider is None:
             raise ValidationError("No payment provider is configured.")
+        if (plan_code is None) == (invoice_id is None):
+            raise ValidationError("Name either a plan or an invoice, not both.")
 
         moment = now if now is not None else datetime.now(UTC)
-        plan = await self._priced_plan(plan_code)
-        subscription = await self._subscriptions.get()
+        await self._refuse_repeat(idempotency_key)
 
-        invoice = await self._open_invoice(plan=plan, subscription=subscription, now=moment)
+        if invoice_id is not None:
+            invoice = await self._collectible_invoice(invoice_id)
+            description = f"{invoice.plan_code} plan"
+        else:
+            plan = await self._priced_plan(str(plan_code))
+            subscription = await self._subscriptions.get()
+            invoice = await self._open_invoice(
+                plan=plan,
+                subscription=subscription,
+                now=moment,
+            )
+            description = f"{plan.name} plan"
+
         # Flushed before `outstanding` is read. Column defaults are applied at
         # INSERT, so a freshly added invoice has `amount_paid` of None until
         # then and the subtraction inside `outstanding` fails - which is a
         # confusing way to learn that the row is not real yet.
         await self._session.flush()
 
-        payment = self._payments.record(
-            invoice_id=invoice.id,
-            status=PaymentStatus.PENDING,
-            amount=invoice.outstanding,
-            currency=invoice.currency,
-            provider=self._provider.name,
-            # No reference yet. It is the *transaction* id, which does not
-            # exist until somebody actually pays; the unique constraint on
-            # (provider, provider_reference) treats NULLs as distinct, so
-            # several abandoned attempts can coexist.
-            provider_reference=None,
+        payment = await self._new_attempt(
+            invoice,
+            provider_name=self._provider.name,
+            idempotency_key=idempotency_key,
         )
-        await self._session.flush()
 
         session = await self._provider.create_checkout(
             CheckoutRequest(
                 # Our id, quoted back by the provider, and the whole mapping
-                # from a callback to this row.
+                # from a callback to this row. Fresh for every attempt because
+                # the provider documents this reference as unique - which is
+                # also why a retried request cannot reuse an earlier page and
+                # is refused instead. See `_refuse_repeat`.
                 reference=str(payment.id),
                 amount=invoice.outstanding,
                 currency=invoice.currency,
-                description=f"{plan.name} plan",
+                description=description,
                 customer_email=actor.email if actor else None,
                 customer_name=actor.full_name if actor else None,
                 # Correlation only, and nothing that would matter if disclosed:
@@ -168,7 +206,8 @@ class CheckoutService:
                 "invoice_id": str(invoice.id),
                 "payment_id": str(payment.id),
                 "provider": self._provider.name,
-                "plan_code": plan.code,
+                "amount": str(invoice.outstanding),
+                "currency": invoice.currency,
                 # Never the redirect URL: it carries the client secret.
             },
         )
@@ -179,6 +218,84 @@ class CheckoutService:
             amount=invoice.outstanding,
             currency=invoice.currency,
         )
+
+    async def _new_attempt(
+        self,
+        invoice: Invoice,
+        *,
+        provider_name: str,
+        idempotency_key: str | None,
+    ) -> Payment:
+        """The pending payment this checkout will collect against.
+
+        Written before the provider is called, so the reference handed over is
+        a row that already exists.
+
+        The savepoint is here for the idempotency key. `_refuse_repeat` reads
+        first and produces the good error message, but a read cannot decide two
+        requests that arrive together - both see nothing and both proceed, and
+        the constraint catches the loser at flush. Left unhandled that surfaces
+        as an integrity error and a 500, which is the wrong answer to a
+        customer whose browser retried: the request was refused for a reason
+        the API has a word for.
+        """
+        try:
+            async with self._session.begin_nested():
+                payment = self._payments.record(
+                    invoice_id=invoice.id,
+                    status=PaymentStatus.PENDING,
+                    amount=invoice.outstanding,
+                    currency=invoice.currency,
+                    provider=provider_name,
+                    # No reference yet. It is the *transaction* id, which does
+                    # not exist until somebody actually pays; the unique
+                    # constraint on (provider, provider_reference) treats NULLs
+                    # as distinct, so several abandoned attempts can coexist.
+                    provider_reference=None,
+                    idempotency_key=idempotency_key,
+                )
+                await self._session.flush()
+        except IntegrityError:
+            if not idempotency_key:
+                # Nothing else on this row is unique while it is pending, so a
+                # violation here with no key is something unexplained rather
+                # than the race this handles. Re-raised rather than reported as
+                # a conflict, because a conflict would be a guess.
+                raise
+            raise ConflictError(
+                "A checkout has already been started for this request. "
+                "Read its status rather than starting another."
+            ) from None
+        return payment
+
+    async def _refuse_repeat(self, idempotency_key: str | None) -> None:
+        """Stop a retried request from becoming a second payment page.
+
+        Refused rather than replayed, and that is forced by a decision made
+        earlier: the response contains a URL carrying the provider's client
+        secret, and that secret is deliberately never stored (ADR-044). A
+        replay would therefore have to fetch a *new* page from the provider
+        under the same reference, and the provider documents that reference as
+        unique - so there is no honest replay available.
+
+        Refusing is the better half of the trade anyway. The caller learns its
+        first request was accepted and can read the payment's status, which is
+        the thing it actually wanted to know; creating a second intention would
+        leave two live payment pages for one invoice and no way to tell a
+        customer which of them to use.
+
+        The read below is a courtesy that produces the good error message. The
+        guarantee is the unique constraint on `(tenant_id, idempotency_key)`,
+        which is what decides two simultaneous retries.
+        """
+        if not idempotency_key:
+            return
+        existing = await self._payments.get_by_idempotency_key(idempotency_key)
+        if existing is not None:
+            raise ConflictError(
+                "A checkout has already been started for this request. "
+                "Read its status rather than starting another."
+            )
 
     async def _priced_plan(self, plan_code: str) -> Plan:
         """The plan a customer may pay for, priced by us.
@@ -198,6 +315,27 @@ class CheckoutService:
             # page for zero is a confusing dead end, and providers refuse it.
             raise ValidationError("That plan does not require payment.")
         return plan
+
+    async def _collectible_invoice(self, invoice_id: uuid.UUID) -> Invoice:
+        """One of this workspace's invoices, if there is money left on it.
+
+        Tenant-scoped through the repository, so another workspace's invoice id
+        is indistinguishable from one that does not exist - a caller must not
+        learn which invoice ids are real by being told a different refusal.
+        """
+        invoice = await self._invoices.get_by_id(invoice_id)
+        if invoice is None:
+            raise NotFoundError("No such invoice.")
+        if invoice.status is InvoiceStatus.PAID:
+            raise ConflictError("This invoice has already been paid.")
+        if invoice.status in (InvoiceStatus.VOID, InvoiceStatus.DRAFT):
+            # A withdrawn bill and an unissued one are both things nobody has
+            # been asked for. Collecting against either would be charging for
+            # something we never sent.
+            raise ConflictError("This invoice cannot be collected.")
+        if invoice.outstanding <= 0:
+            raise ConflictError("Nothing is outstanding on this invoice.")
+        return invoice
 
     async def _open_invoice(
         self,
@@ -230,39 +368,56 @@ class CheckoutService:
 
         existing = await self._invoices.get_for_period(period_start=period_start)
         if existing is not None:
-            if existing.status is InvoiceStatus.PAID:
-                raise ConflictError("This period has already been paid.")
-            if existing.is_terminal:
-                raise ConflictError("This invoice is settled and cannot be collected.")
-            if existing.plan_code != plan.code:
-                if existing.amount_paid > 0:
-                    # Part-paid against the old plan. Re-pricing would silently
-                    # move money somebody sent for one thing onto another, and
-                    # this system does not issue credits.
-                    raise ConflictError(
-                        "This period has a part-paid invoice for another plan.",
-                    )
-                # Nothing collected yet, so this is still a statement of what
-                # will be owed rather than a record of what was. Somebody who
-                # opened a checkout for one plan and then chose another gets the
-                # one they chose, at its price.
-                existing.plan_code = plan.code
-                existing.amount_due = plan.price
-                existing.currency = plan.currency
-                existing.period_end = period_end
-                existing.lines = self._lines(plan)
-            return existing
+            return self._reprice(existing, plan=plan, period_end=period_end)
 
-        return self._invoices.create(
-            subscription_id=subscription.id if subscription else None,
-            status=InvoiceStatus.OPEN,
-            plan_code=plan.code,
-            amount_due=plan.price,
-            currency=plan.currency,
-            period_start=period_start,
-            period_end=period_end,
-            lines=self._lines(plan),
-        )
+        try:
+            async with self._session.begin_nested():
+                created = self._invoices.create(
+                    subscription_id=subscription.id if subscription else None,
+                    status=InvoiceStatus.OPEN,
+                    plan_code=plan.code,
+                    amount_due=plan.price,
+                    currency=plan.currency,
+                    period_start=period_start,
+                    period_end=period_end,
+                    lines=self._lines(plan),
+                )
+                await self._session.flush()
+        except IntegrityError:
+            # Two checkouts started at once and the other one won the period.
+            # The constraint is doing exactly its job; this re-reads rather
+            # than failing, so the loser collects against the same invoice
+            # instead of answering 500 to a customer who did nothing wrong.
+            existing = await self._invoices.get_for_period(period_start=period_start)
+            if existing is None:  # pragma: no cover - the row that just blocked us
+                raise
+            return self._reprice(existing, plan=plan, period_end=period_end)
+        return created
+
+    def _reprice(self, invoice: Invoice, *, plan: Plan, period_end: datetime) -> Invoice:
+        """Point an untouched invoice at the plan the customer actually chose.
+
+        Only while nothing has been collected. Once money has arrived the
+        invoice is a record of what was paid rather than a statement of what
+        will be owed, and re-pricing it would silently move somebody's money
+        from one thing onto another - which this system cannot undo, because it
+        does not issue credits.
+        """
+        if invoice.status is InvoiceStatus.PAID:
+            raise ConflictError("This period has already been paid.")
+        if invoice.is_terminal:
+            raise ConflictError("This invoice is settled and cannot be collected.")
+        if invoice.plan_code != plan.code:
+            if invoice.amount_paid > 0:
+                raise ConflictError(
+                    "This period has a part-paid invoice for another plan.",
+                )
+            invoice.plan_code = plan.code
+            invoice.amount_due = plan.price
+            invoice.currency = plan.currency
+            invoice.period_end = period_end
+            invoice.lines = self._lines(plan)
+        return invoice
 
     @staticmethod
     def _lines(plan: Plan) -> list[dict[str, object]]:
@@ -273,6 +428,7 @@ class CheckoutService:
         """
         return [
             {
+                "kind": "subscription",
                 "description": f"{plan.name} plan",
                 "amount": str(plan.price),
                 "quantity": 1,
@@ -285,7 +441,7 @@ class CheckoutService:
         """Apply one verified callback, exactly once, and say what it did.
 
         The caller has already authenticated the event; everything here is
-        about whether it may be *believed*, which is a different question. Four
+        about whether it may be *believed*, which is a different question. Five
         refusals stand between a verified callback and a settled invoice:
 
         1. **It must be new.** The `payment_events` insert is the claim, and
@@ -293,38 +449,81 @@ class CheckoutService:
         2. **It must name a payment we issued**, by a reference we generated.
         3. **That payment must belong to this workspace.** A callback cannot
            reach across a tenant boundary even if a reference leaked.
-        4. **The amount and currency must match what we asked for.** A provider
-           reporting a different figure is not settling this invoice, whatever
+        4. **The figures must match what we asked for.** A provider reporting a
+           different amount or currency is not settling this invoice, whatever
            it says.
+        5. **The move it asks for must be legal.** A signed callback claiming a
+           refunded payment succeeded is refused by the transition table rather
+           than believed because it was signed.
 
         Returns the outcome word, which the endpoint turns into a response that
         is the same for all of them.
         """
         moment = now if now is not None else datetime.now(UTC)
         payment = await self._matching_payment(event)
-        outcome = await self._claim(event, payment=payment, now=moment)
-        if outcome is not None:
-            return outcome
 
+        record = await self._claim(event, payment=payment, now=moment)
+        if record is None:
+            return DUPLICATE
+
+        outcome, detail = await self._decide(event, payment=payment, now=moment)
+        record.outcome = outcome
+        record.detail = detail[:MAX_DETAIL_LENGTH] if detail else None
+        record.processed_at = moment
+        await self._session.flush()
+
+        logger.info(
+            "billing.callback_processed",
+            extra={
+                "event": "billing.callback_processed",
+                "tenant_id": str(self._tenant_id),
+                "provider_event_id": event.event_id,
+                "event_type": event.event_type,
+                "payment_id": str(payment.id) if payment else None,
+                "outcome": outcome,
+                "detail": detail,
+            },
+        )
+        return outcome
+
+    async def _decide(
+        self,
+        event: CallbackEvent,
+        *,
+        payment: Payment | None,
+        now: datetime,
+    ) -> tuple[str, str | None]:
+        """What this callback is allowed to change, and what it changed."""
         if payment is None:
-            logger.warning(
-                "billing.callback_unmatched",
-                extra={
-                    "event": "billing.callback_unmatched",
-                    "provider": self._provider_name(),
-                    "provider_event_id": event.event_id,
-                },
-            )
-            return UNMATCHED
+            return UNMATCHED, "No payment matches this reference."
 
         invoice = await self._invoices.get_by_id(payment.invoice_id)
         if invoice is None or invoice.tenant_id != self._tenant_id:
-            return UNMATCHED
+            # Belt and braces: the payment repository is already tenant-scoped,
+            # so reaching here means the two disagree, and a disagreement about
+            # who owns money is not something to resolve in favour of acting.
+            return UNMATCHED, "The payment's invoice is not this workspace's."
 
-        if event.currency.upper() != invoice.currency.upper() or event.amount != payment.amount:
-            # Recorded rather than applied. A provider that says it collected a
-            # different amount than we asked for has done something we do not
-            # understand, and settling the invoice anyway would paper over it.
+        if event.currency.upper() != invoice.currency.upper():
+            return MISMATCHED, f"Expected {invoice.currency}, was told {event.currency}."
+
+        if event.kind in (EventKind.REFUNDED, EventKind.VOIDED):
+            return self._apply_reversal(event, payment=payment, invoice=invoice, now=now)
+        return await self._apply_collection(event, payment=payment, invoice=invoice, now=now)
+
+    async def _apply_collection(
+        self,
+        event: CallbackEvent,
+        *,
+        payment: Payment,
+        invoice: Invoice,
+        now: datetime,
+    ) -> tuple[str, str | None]:
+        """A callback reporting what happened to an attempt at collecting."""
+        if event.amount != payment.amount:
+            # A provider that says it collected a different amount than we
+            # asked for has done something we do not understand, and settling
+            # the invoice anyway would paper over it.
             logger.warning(
                 "billing.callback_amount_mismatch",
                 extra={
@@ -332,29 +531,108 @@ class CheckoutService:
                     "payment_id": str(payment.id),
                     "expected_amount": str(payment.amount),
                     "reported_amount": str(event.amount),
-                    "expected_currency": invoice.currency,
-                    "reported_currency": event.currency,
                 },
             )
             payment.failure_reason = "The provider reported a different amount."
-            return MISMATCHED
+            return MISMATCHED, f"Expected {payment.amount}, was told {event.amount}."
 
-        self._apply_to_payment(payment, event=event, now=moment)
-        if event.succeeded:
-            await self._settle(invoice, payment=payment, now=moment)
+        if event.status is payment.status:
+            return NO_CHANGE, f"Already {payment.status.value}."
+        if not payment_may_move(payment.status, event.status):
+            logger.warning(
+                "billing.callback_illegal_transition",
+                extra={
+                    "event": "billing.callback_illegal_transition",
+                    "payment_id": str(payment.id),
+                    "from_status": payment.status.value,
+                    "to_status": event.status.value,
+                },
+            )
+            return REFUSED, f"{payment.status.value} cannot become {event.status.value}."
 
-        await self._session.flush()
+        payment.status = event.status
+        payment.provider_reference = event.provider_transaction_id
+        payment.failure_reason = event.failure_reason
+        payment.processed_at = now
+
+        if not event.succeeded:
+            return APPLIED, f"Payment {event.status.value}."
+        return await self._settle(invoice, payment=payment, now=now)
+
+    def _apply_reversal(
+        self,
+        event: CallbackEvent,
+        *,
+        payment: Payment,
+        invoice: Invoice,
+        now: datetime,
+    ) -> tuple[str, str | None]:
+        """A callback reporting that money we collected has gone back.
+
+        Arrives whether or not this system asked for it: a refund issued from
+        the provider's own dashboard produces the same notification as one
+        `RefundService` requested, and both have to land in the same place or
+        the ledger stops matching the bank.
+
+        The refunded total is taken from the provider's running total where it
+        gives one, because a payment can be reversed in parts and each
+        notification carries the cumulative figure. Falling back to the
+        reversal's own amount covers the callback about the refund transaction
+        itself, which reports what *that* transaction moved.
+        """
+        refunded = event.refunded_amount if event.refunded_amount else event.amount
+        if refunded <= 0 or refunded > payment.amount:
+            return MISMATCHED, f"Refund of {refunded} against a payment of {payment.amount}."
+        if payment.status not in (PaymentStatus.SUCCEEDED, PaymentStatus.REFUNDED):
+            return REFUSED, f"{payment.status.value} was never collected."
+        if refunded <= payment.refunded_amount:
+            return NO_CHANGE, f"Already refunded {payment.refunded_amount}."
+
+        returned = refunded - payment.refunded_amount
+        payment.refunded_amount = refunded
+        payment.refunded_at = now
+        if refunded >= payment.amount and payment_may_move(payment.status, PaymentStatus.REFUNDED):
+            payment.status = PaymentStatus.REFUNDED
+
+        # The invoice holds less money than it did. `amount_paid` is what we
+        # have, not what was once sent, so an invoice no longer covered stops
+        # being paid - see `INVOICE_TRANSITIONS`.
+        invoice.amount_paid = invoice.amount_paid - returned
+        if invoice.amount_paid < 0:  # pragma: no cover - guarded by the checks above
+            invoice.amount_paid = Decimal("0.00")
+        if (
+            invoice.status is InvoiceStatus.PAID
+            and invoice.amount_paid < invoice.amount_due
+            and invoice_may_move(invoice.status, InvoiceStatus.OPEN)
+        ):
+            invoice.status = InvoiceStatus.OPEN
+            invoice.paid_at = None
+
+        self._audit.record(
+            AuditAction.PAYMENT_REFUNDED,
+            actor=None,
+            actor_kind=AuditActorKind.SYSTEM,
+            tenant_id=self._tenant_id,
+            target_type="payment",
+            target_id=payment.id,
+            meta={
+                "amount": str(returned),
+                "refunded_total": str(refunded),
+                "currency": invoice.currency,
+                "kind": event.kind.value,
+            },
+        )
         logger.info(
-            "billing.callback_applied",
+            "billing.refund_applied",
             extra={
-                "event": "billing.callback_applied",
+                "event": "billing.refund_applied",
                 "tenant_id": str(self._tenant_id),
                 "payment_id": str(payment.id),
                 "invoice_id": str(invoice.id),
-                "status": payment.status.value,
+                "amount": str(returned),
             },
         )
-        return APPLIED
+        return APPLIED, f"Refunded {returned}."
 
     def _provider_name(self) -> str:
         return self._provider.name if self._provider is not None else "unknown"
@@ -362,17 +640,38 @@ class CheckoutService:
     async def _matching_payment(self, event: CallbackEvent) -> Payment | None:
         """The payment this callback names, if it is ours.
 
-        By our own reference, never by anything the provider chose. The tenant
-        filter on the repository is what stops a callback naming another
-        workspace's payment from being applied to this one.
+        By our own reference first, and never by anything the provider chose to
+        put in a field we do not control. The tenant filter on the repository
+        is what stops a callback naming another workspace's payment from being
+        applied to this one.
+
+        The fallback matters for reversals. A refund produces a callback about
+        the transaction it reverses, and that notification is documented to
+        carry the parent's id rather than necessarily carrying our reference
+        home - so a payment is also findable by the transaction id we recorded
+        ourselves when the money arrived. Both routes go through identifiers
+        this system wrote down; neither trusts a name the caller invented.
         """
-        if not event.reference:
-            return None
-        try:
-            payment_id = uuid.UUID(event.reference)
-        except ValueError:
-            return None
-        return await self._payments.get_by_id(payment_id)
+        if event.reference:
+            try:
+                payment_id = uuid.UUID(event.reference)
+            except ValueError:
+                payment_id = None
+            if payment_id is not None:
+                found = await self._payments.get_by_id(payment_id)
+                if found is not None:
+                    return found
+
+        for transaction_id in (event.parent_transaction_id, event.provider_transaction_id):
+            if not transaction_id:
+                continue
+            found = await self._payments.get_by_transaction(
+                provider=self._provider_name(),
+                transaction_id=transaction_id,
+            )
+            if found is not None:
+                return found
+        return None
 
     async def _claim(
         self,
@@ -380,8 +679,15 @@ class CheckoutService:
         *,
         payment: Payment | None,
         now: datetime,
-    ) -> str | None:
+    ) -> PaymentEvent | None:
         """Take ownership of this event, or report that somebody already has.
+
+        Returns the row to fill in, or None when another delivery owns it.
+
+        The outcome is written as unresolved and corrected once there is one.
+        Claiming first is what makes two simultaneous deliveries safe, and it
+        is why a crash between the claim and the decision leaves a row saying
+        nothing happened - which is exactly what did happen.
 
         A savepoint, because a unique violation poisons the transaction it
         happens in and this one has an invoice to settle afterwards. The nested
@@ -391,9 +697,12 @@ class CheckoutService:
         record = PaymentEvent(
             provider=self._provider_name(),
             provider_event_id=event.event_id,
+            provider_transaction_id=event.provider_transaction_id,
+            event_type=event.event_type,
             payment_id=payment.id if payment is not None else None,
-            outcome=APPLIED,
-            processed_at=now,
+            outcome=NO_CHANGE,
+            received_at=now,
+            processed_at=None,
         )
         try:
             async with self._session.begin_nested():
@@ -407,17 +716,16 @@ class CheckoutService:
                     "provider_event_id": event.event_id,
                 },
             )
-            return DUPLICATE
-        return None
+            return None
+        return record
 
-    @staticmethod
-    def _apply_to_payment(payment: Payment, *, event: CallbackEvent, now: datetime) -> None:
-        payment.status = event.status
-        payment.provider_reference = event.provider_payment_id
-        payment.failure_reason = event.failure_reason
-        payment.processed_at = now
-
-    async def _settle(self, invoice: Invoice, *, payment: Payment, now: datetime) -> None:
+    async def _settle(
+        self,
+        invoice: Invoice,
+        *,
+        payment: Payment,
+        now: datetime,
+    ) -> tuple[str, str | None]:
         """Money arrived: mark the invoice paid and put the subscription right.
 
         Deliberately does not *create* a subscription. Paying an invoice
@@ -426,22 +734,41 @@ class CheckoutService:
         periods. What this does is the narrow thing a payment means: a
         workspace that was behind is no longer behind.
         """
+        if invoice.is_terminal:
+            # A second payment against an invoice that is already finished.
+            # Recorded and refused rather than added: it means the customer has
+            # paid twice, which is a refund to issue rather than a balance to
+            # increase.
+            logger.warning(
+                "billing.settlement_refused",
+                extra={
+                    "event": "billing.settlement_refused",
+                    "invoice_id": str(invoice.id),
+                    "payment_id": str(payment.id),
+                    "status": invoice.status.value,
+                },
+            )
+            return REFUSED, f"Invoice is already {invoice.status.value}."
+
         invoice.amount_paid = invoice.amount_paid + payment.amount
         invoice.provider_reference = payment.provider_reference
-        if invoice.amount_paid >= invoice.amount_due:
+        if invoice.amount_paid >= invoice.amount_due and invoice_may_move(
+            invoice.status, InvoiceStatus.PAID
+        ):
             invoice.status = InvoiceStatus.PAID
             invoice.paid_at = now
 
         subscription = await self._subscriptions.get()
-        if subscription is not None and subscription.id == invoice.subscription_id:
-            from app.db.models.billing import SubscriptionStatus
-
-            if subscription.status is SubscriptionStatus.PAST_DUE:
-                # The one state a payment changes on its own. A trial stays a
-                # trial and a cancellation stays cancelled: paying an invoice
-                # is not a request to resubscribe, and treating it as one would
-                # revive a subscription somebody deliberately ended.
-                subscription.status = SubscriptionStatus.ACTIVE
+        if (
+            subscription is not None
+            and subscription.id == invoice.subscription_id
+            and subscription.status is SubscriptionStatus.PAST_DUE
+        ):
+            # The one state a payment changes on its own. A trial stays a trial
+            # and a cancellation stays cancelled: paying an invoice is not a
+            # request to resubscribe, and treating it as one would revive a
+            # subscription somebody deliberately ended.
+            subscription.status = SubscriptionStatus.ACTIVE
 
         self._audit.record(
             AuditAction.PAYMENT_RECORDED,
@@ -457,6 +784,17 @@ class CheckoutService:
                 "provider": payment.provider,
             },
         )
+        logger.info(
+            "billing.payment_applied",
+            extra={
+                "event": "billing.payment_applied",
+                "tenant_id": str(self._tenant_id),
+                "payment_id": str(payment.id),
+                "invoice_id": str(invoice.id),
+                "status": invoice.status.value,
+            },
+        )
+        return APPLIED, f"Invoice {invoice.status.value}."
 
     async def require_payment(self, payment_id: uuid.UUID) -> Payment:
         """One payment of this workspace's, or a 404.

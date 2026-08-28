@@ -49,6 +49,7 @@ from app.services.lead_service import LeadService
 from app.services.media_service import MediaService
 from app.services.membership_service import MembershipService
 from app.services.messaging_service import MessagingService
+from app.services.refund_service import RefundService
 from app.services.sentiment_service import SentimentService
 from app.services.subscription_service import SubscriptionService
 from app.services.template_service import TemplateService
@@ -566,6 +567,28 @@ def get_checkout_service(
 
 
 CheckoutServiceDep = Annotated[CheckoutService, Depends(get_checkout_service)]
+
+
+def get_refund_service(
+    settings: SettingsDep,
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> RefundService:
+    """Workspace-scoped reversals, built with whatever provider is configured.
+
+    Same shape as `get_checkout_service` and for the same reason: the provider
+    is optional, and the service refuses rather than the dependency failing to
+    resolve. A deployment billing manually has payments that no processor took,
+    and asking to reverse one answers a conflict that says so.
+    """
+    return RefundService(
+        session,
+        tenant_id=workspace.tenant.id,
+        provider=build_checkout_provider(settings),
+    )
+
+
+RefundServiceDep = Annotated[RefundService, Depends(get_refund_service)]
 
 
 def get_platform_billing_service(session: SessionDep) -> PlatformBillingService:

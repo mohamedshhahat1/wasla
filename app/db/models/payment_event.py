@@ -40,10 +40,19 @@ from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 MAX_EVENT_ID_LENGTH: Final = 200
 MAX_OUTCOME_LENGTH: Final = 50
+MAX_EVENT_TYPE_LENGTH: Final = 100
+MAX_DETAIL_LENGTH: Final = 300
 
 
 class PaymentEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
-    """One callback from a payment provider, and what was done about it."""
+    """One callback from a payment provider, and what was done about it.
+
+    The row is written *before* the decision is made - the insert is the claim
+    - and the outcome is filled in once there is one. That order is what makes
+    two simultaneous deliveries safe; it also means a crash between the two
+    leaves a claimed event whose outcome says nothing happened, which is the
+    correct thing for it to say.
+    """
 
     __tablename__ = "payment_events"
     __table_args__ = (
@@ -56,13 +65,32 @@ class PaymentEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             name="uq_payment_events_provider_provider_event_id",
         ),
         Index("ix_payment_events_payment_id", "payment_id"),
+        # Answering "what has this provider been telling us today", which is
+        # the query an operator runs when payments stop arriving.
+        Index("ix_payment_events_provider_received_at", "provider", "received_at"),
+        Index("ix_payment_events_outcome", "outcome"),
     )
 
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    # The provider's identifier for this event, which for a transaction
+    # callback pairs the transaction with the state being reported. Not the
+    # bare transaction id: one transaction produces several callbacks over its
+    # life, and keying on it alone would file every later one as a duplicate of
+    # the first. See `CallbackEvent.event_id`.
     provider_event_id: Mapped[str] = mapped_column(
         String(MAX_EVENT_ID_LENGTH),
         nullable=False,
     )
+    # The bare transaction id, kept alongside because it is the number the
+    # provider's dashboard and a support conversation both use.
+    provider_transaction_id: Mapped[str | None] = mapped_column(
+        String(MAX_EVENT_ID_LENGTH),
+        nullable=True,
+    )
+    # What the provider reported, from a closed vocabulary the adapter owns -
+    # `transaction.succeeded`, `transaction.refunded`. Stored so the ledger can
+    # be read without re-deriving meaning from flags that have since changed.
+    event_type: Mapped[str] = mapped_column(String(MAX_EVENT_TYPE_LENGTH), nullable=False)
     # CASCADE: the record of a callback about a deleted payment is a record
     # about nothing. Nullable for an event that matched no payment at all.
     payment_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -70,12 +98,23 @@ class PaymentEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         ForeignKey("payments.id", ondelete="CASCADE"),
         nullable=True,
     )
-    # What this system decided, in one word: applied, duplicate, unmatched,
-    # mismatched. Deliberately a short category rather than a message - it is
+    # What this system decided, in one word - see `checkout_service`'s outcome
+    # vocabulary. Deliberately a short category rather than a message: it is
     # read by filtering, and a free-text field becomes a place somebody stores
     # a payload.
     outcome: Mapped[str] = mapped_column(String(MAX_OUTCOME_LENGTH), nullable=False)
-    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Why, when the outcome alone does not say. A refusal names the rule it
+    # broke; a mismatch names the two figures. Bounded and written only by this
+    # application - **no part of the provider's payload is stored here**, which
+    # is deliberate: the callback body carries a masked card number, a
+    # customer's billing details and a redirect URL containing a bearer token,
+    # and none of that is ours to keep.
+    detail: Mapped[str | None] = mapped_column(String(MAX_DETAIL_LENGTH), nullable=True)
+    # When the callback reached us, as distinct from when it was decided. The
+    # two are the same instant today; they stop being when a failed event is
+    # retried, and the gap is the number an operator wants.
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
         return f"PaymentEvent(provider={self.provider!r}, outcome={self.outcome!r})"

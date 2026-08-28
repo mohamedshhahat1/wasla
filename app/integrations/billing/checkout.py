@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from app.db.models.invoice import PaymentStatus
@@ -79,6 +80,29 @@ class CheckoutSession:
     provider_reference: str
 
 
+class EventKind(StrEnum):
+    """What a provider callback is *reporting*, as opposed to what it is about.
+
+    A processor does not send one notification per payment; it sends one per
+    thing that happened to a payment, and the same transaction produces several
+    over its life - in flight, collected, and later given back. This is that
+    distinction, and it exists because idempotency depends on it: two
+    deliveries of "collected" are the same event, and "collected" followed by
+    "refunded" are two.
+
+    `VOIDED` is kept apart from `REFUNDED` even though both map to
+    `PaymentStatus.REFUNDED`. The money moved differently - a void cancels
+    before settlement and a refund returns what was settled - and an operator
+    reading the ledger to answer "where did this go" needs to see which.
+    """
+
+    PENDING = "pending"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    REFUNDED = "refunded"
+    VOIDED = "voided"
+
+
 @dataclass(frozen=True, slots=True)
 class CallbackEvent:
     """A verified statement from the provider about one payment attempt.
@@ -88,10 +112,25 @@ class CallbackEvent:
     caller holding this object is holding something the provider said.
 
     `reference` is the value we sent in `CheckoutRequest.reference` and is how
-    the event is matched to a payment. `event_id` is the provider's identifier
-    for *this event*, and is what the idempotency constraint is built on - two
-    deliveries of one event share it, and a later refund of the same payment
-    does not.
+    the event is matched to a payment.
+
+    `event_id` is what the idempotency constraint is built on, and it is
+    deliberately **not** the raw transaction id. It pairs the transaction with
+    the state being reported, because a processor sends more than one callback
+    about one transaction: in flight, then collected, then - if somebody
+    refunds it - collected-and-refunded. Keying on the transaction id alone
+    would make each of those a duplicate of the first, so a 3-D Secure payment
+    that reported `pending` before it reported `success` would settle nothing,
+    and a refund notification on the original transaction would be silently
+    dropped. Pairing keeps every delivery of one state a duplicate of itself,
+    which is the property the constraint actually needs.
+
+    `provider_transaction_id` is the raw id, kept because it is the number a
+    support conversation and the provider's dashboard both use.
+
+    `parent_transaction_id` is documented as present on a refund or a void: it
+    names the transaction being reversed. It is a second way to find the
+    payment when the reversal does not carry our own reference home.
 
     `amount` and `currency` are what the provider says was actually collected.
     They are carried so the caller can refuse an event that disagrees with the
@@ -101,15 +140,58 @@ class CallbackEvent:
 
     event_id: str
     reference: str | None
+    kind: EventKind
     status: PaymentStatus
     amount: Decimal
     currency: str
-    provider_payment_id: str | None = None
+    provider_transaction_id: str | None = None
+    parent_transaction_id: str | None = None
+    refunded_amount: Decimal | None = None
     failure_reason: str | None = None
 
     @property
     def succeeded(self) -> bool:
         return self.status is PaymentStatus.SUCCEEDED
+
+    @property
+    def event_type(self) -> str:
+        """The ledger's name for this kind of event, namespaced by subject."""
+        return f"transaction.{self.kind.value}"
+
+
+@dataclass(frozen=True, slots=True)
+class RefundRequest:
+    """What the billing domain knows about money it wants returned.
+
+    `transaction_reference` is the provider's own id for the transaction that
+    collected the money, read off the payment row. Never anything a client
+    sent: a caller that could name a transaction could refund somebody else's.
+
+    `amount` is likewise the payment's, computed here rather than accepted.
+    """
+
+    transaction_reference: str
+    amount: Decimal
+    currency: str
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RefundOutcome:
+    """What the provider said when asked to reverse a payment.
+
+    `provider_reference` is the reversal's own identifier, which is a different
+    transaction from the one being reversed. Stored so the callback that
+    reports the reversal can be tied back to the request that caused it.
+
+    `pending` is the honest default for a processor that accepts a reversal and
+    performs it later. A caller must not tell a customer their money is back
+    because this returned.
+    """
+
+    provider_reference: str
+    amount: Decimal
+    pending: bool = False
 
 
 @runtime_checkable
@@ -146,6 +228,24 @@ class CheckoutProvider(Protocol):
         out, and `ValueError` when the body is not a shape this provider
         recognises. It must never return an event for input it could not
         authenticate: failing closed is the whole security property.
+        """
+        ...
+
+    async def refund(self, request: RefundRequest) -> RefundOutcome:
+        """Ask the provider to give a collected payment back.
+
+        Synchronous in the sense that a result comes back on this call, unlike
+        `create_checkout` - the provider either accepts the reversal or refuses
+        it, and there is nobody's browser in the middle. The money still moves
+        on the provider's own schedule, and a callback reporting the reversal
+        arrives afterwards; this outcome says the request was accepted, not
+        that a customer has their money.
+
+        Raises `ProviderError` when the provider cannot be reached or refuses.
+        A refusal is an error here rather than an outcome, and that is the
+        opposite of `PaymentProvider.charge` on purpose: a declined card is an
+        ordinary thing a customer did, while a refund the processor will not
+        perform is a problem an operator has to look at.
         """
         ...
 

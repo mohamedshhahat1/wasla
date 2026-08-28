@@ -126,6 +126,29 @@ class PaymentRepository(TenantScopedRepository[Payment]):
             .order_by(Payment.created_at, Payment.id)
         )
 
+    async def get_by_idempotency_key(self, key: str) -> Payment | None:
+        """A payment already created for this caller's request key.
+
+        Tenant-scoped, matching the unique constraint: one workspace's key
+        never finds another's attempt.
+        """
+        return await self._first(self._select().where(Payment.idempotency_key == key))
+
+    async def get_by_transaction(self, *, provider: str, transaction_id: str) -> Payment | None:
+        """The attempt a provider transaction settled, if we have it.
+
+        The fallback path for a reversal callback. A refund names the
+        transaction it reverses rather than carrying our own reference home, so
+        this is how such an event is tied back to a payment - still by an
+        identifier we recorded ourselves when the money arrived, and still
+        tenant-scoped.
+        """
+        return await self._first(
+            self._select()
+            .where(Payment.provider == provider)
+            .where(Payment.provider_reference == transaction_id)
+        )
+
     async def get_by_reference(self, *, provider: str, reference: str) -> Payment | None:
         """Find an attempt by the provider's own identifier.
 
@@ -148,6 +171,7 @@ class PaymentRepository(TenantScopedRepository[Payment]):
         provider_reference: str | None = None,
         failure_reason: str | None = None,
         processed_at: datetime | None = None,
+        idempotency_key: str | None = None,
     ) -> Payment:
         return self.add(
             Payment(
@@ -160,6 +184,8 @@ class PaymentRepository(TenantScopedRepository[Payment]):
                 provider_reference=provider_reference,
                 failure_reason=failure_reason,
                 processed_at=processed_at,
+                idempotency_key=idempotency_key,
+                refunded_amount=Decimal("0.00"),
             )
         )
 
@@ -223,6 +249,28 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
             RevenueTotal(currency=row[0], amount=Decimal(row[1]), invoices=int(row[2]))
             for row in result.all()
         ]
+
+    async def overdue(self, *, before: datetime, limit: int = 200) -> Sequence[Invoice]:
+        """Open invoices issued before a moment, oldest first.
+
+        What the dunning sweep reads. Keyed on `issued_at` rather than
+        `period_start`, because the grace a customer gets should run from the
+        day they were asked for money - an invoice for a period that ended
+        weeks ago is not weeks overdue if it was only issued yesterday.
+
+        Invoices with no `issued_at` are excluded. Those are drafts and
+        checkout-created rows that nobody has been billed for, and chasing
+        somebody for a bill they were never sent is worse than not chasing.
+        """
+        return await self._all(
+            self._select()
+            .where(Invoice.status == InvoiceStatus.OPEN)
+            .where(Invoice.issued_at.is_not(None))
+            .where(Invoice.issued_at < before)
+            .where(Invoice.subscription_id.is_not(None))
+            .order_by(Invoice.issued_at)
+            .limit(limit)
+        )
 
     async def due_for_period(
         self,
