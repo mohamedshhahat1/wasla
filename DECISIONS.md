@@ -1268,3 +1268,45 @@ Refunds are **not** implemented, and were not before this. Paymob documents Refu
 The `payments` table gains one column, `provider_intent_reference`, holding the provider's id for an *intended* payment — distinct from `provider_reference`, which is the transaction that settled it and does not exist when a customer is sent to a payment page. It is nullable with no backfill, because no payment predating hosted checkout ever had one.
 
 Nothing has been verified against a live Paymob account. Every claim here is a claim about code checked against published documentation, and the HTTP boundary is exercised against a mock transport. The first real transaction still has to be walked through with merchant credentials.
+
+## ADR-045 — A Payment May Only Move Where the Rules Allow, and a Reversal Is a Second Event
+
+Date:
+2026-08-29
+
+Status:
+Accepted. Completes ADR-044 rather than replacing it; the provider boundary, the redirection model and the callback-as-authority rule are all unchanged.
+
+Decision:
+Enforce explicit transition tables for payments and invoices, so a status arriving from a processor is checked against what we already believe rather than applied because it was signed. Key provider events on the transaction *paired with the state reported*, so one transaction can produce several events without any of them being mistaken for a duplicate. Add refunds as request-then-confirm, with the amount computed server-side and `refunded_amount` written only by a callback. Let a checkout collect an invoice that already exists, and mark a workspace `past_due` when a renewal goes unpaid past a grace period. Do not build automatic card debits.
+
+Context:
+ADR-044 left the domain able to take one payment for one plan. Three things were missing before it was a billing cycle, and one thing was quietly wrong.
+
+The wrong thing: `payment_events` recorded every callback with an outcome of `applied`, whatever was actually decided. An event naming an unknown payment, or reporting an amount that disagreed with the invoice, was refused and then filed as a success — so the one table an operator would read to find out why a customer's payment never landed said that it had.
+
+The missing things: a renewal invoice could be issued and never collected, because the only way to open a payment page was to choose a plan; nothing ever looked at whether a renewal was paid, so a workspace that stopped paying stayed `active` for ever and kept its whole plan; and there was no way to give anybody their money back.
+
+Reason:
+**A signed callback is authenticated, not true.** The signature proves who sent it and says nothing about whether what it claims is possible. A late delivery, an out-of-order retry, or a compromised secret can all produce a perfectly valid callback saying a refunded payment succeeded — which would settle the invoice a second time and leave a customer with their money back and a paid invoice. The transition tables are the check that a statement about state is a state this row can reach. `refunded → succeeded` and `failed → succeeded` are the two that matter; both are written down and both are tested.
+
+**One transaction is not one event.** This is the correction that mattered most, and it was not visible from ADR-044. Paymob sends a callback per *thing that happened*: in flight, then collected, then — if somebody refunds it — collected-and-refunded, and the documentation is explicit that the refund notification arrives on the **parent** transaction carrying `is_refunded: true`. Keying idempotency on `obj.id` alone therefore files every callback after the first as a duplicate of it. A 3-D Secure payment that reported `pending` before `success` would settle nothing at all, and a refund would be silently swallowed. So `provider_event_id` is `{transaction}:{state}` — deterministic, so a genuine retry still deduplicates, and distinct, so a progression is not lost. The raw id keeps its own column, because that is the number the provider's dashboard uses.
+
+**A refund is requested here and confirmed elsewhere.** A 200 from a refund API means the reversal was accepted, not that a customer has their money. Writing `refunded_amount` on that response would tell somebody their money is back before it is — and would make the callback that says it *is* look like a duplicate. So the request records `refund_requested_at` and the reversal's reference, and exactly one piece of code writes `refunded_amount`: the callback handler, which is also where a refund issued from Paymob's own dashboard arrives. The gap between the two is a findable state, and it is the state that means the callback URL is wrong and a customer is waiting.
+
+**The refund amount is never asked for.** It is the payment's own unreturned balance. That removes the field somebody would send to be refunded more than they paid, and it settles the partial-refund question honestly: Wasla has no credit notes and no way to render "half of March" on an invoice, so full-remainder semantics is what the model can actually express. Inventing partial refunds to match a provider capability would be building a concept no invoice could show.
+
+**A refund reopens the invoice.** `amount_paid` records money we *hold*, so giving it back leaves an invoice its payments no longer cover, and an invoice that is not covered is not paid. Voiding it afterwards — because the customer is leaving — stays a separate deliberate act rather than something inferred from a reversal.
+
+**Checkout idempotency refuses rather than replays.** A replay would have to return the same URL, and that URL carries the provider's client secret, which ADR-044 decided not to store. Paymob also documents `special_reference` as unique, so the page cannot be re-fetched under the same reference. Refusing with a conflict tells the caller its first request was accepted and points it at the payment's status, which is the thing it wanted; creating a second intention would leave two live payment pages for one invoice and no way to say which one a customer should use. The guarantee is `UNIQUE(tenant_id, idempotency_key)`; the read that produces the good message is a courtesy, and the constraint is what decides two simultaneous retries.
+
+**Dunning is `past_due`, not disconnection.** `PAST_DUE` is in `SERVING_STATUSES` deliberately: a failed payment is a conversation to have, and cutting somebody off over a first expired card is how a relationship ends over an administrative detail. The grace runs from `issued_at` rather than from the period boundary, so a customer gets seven days from being *asked* — and a sweep that had been down for a fortnight does not mark every one of its customers behind the moment it comes back.
+
+Consequences:
+Automatic card debits are **not** built, and that is a decision rather than a gap. Paymob documents a Subscription API and CIT/MIT tokenisation; using either requires a MOTO integration id that Paymob enables per merchant, a Bearer auth token from the older `/api/auth/tokens` flow needing a fourth credential, and a billing frequency expressed as a fixed number of days — 7, 15, 30, 60, 90, 180, 360 — where Wasla bills on calendar months. A Paymob subscription on `30` drifts away from the period this system charges for and the two would disagree about what a customer owes within a year. Writing that adapter against a payload shape nobody here can exercise would be an unverifiable subsystem built to match a provider capability. The remaining dependency is *merchant must enable a MOTO integration and issue an API key*, not missing code.
+
+Void is available at the provider seam and through Paymob's dashboard, and is not wired to an endpoint. Choosing between void and refund needs error semantics this integration has never seen, and guessing at them would mean a reversal that silently does nothing.
+
+`payment_events.processed_at` becomes nullable. The row is claimed before the decision is made — which is what makes two simultaneous deliveries safe — so between the claim and the decision there genuinely is no processing time, and a crash in that window should leave a row that says so.
+
+Nothing here has been verified against a live Paymob account. The refund endpoint, the reversal callbacks and the intention call are exercised against `httpx.MockTransport`; the signature is pinned to the vendor's published worked example. The first real transaction still has to be walked through with merchant credentials.

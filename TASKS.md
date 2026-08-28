@@ -661,15 +661,6 @@ taking payments makes both worse:
 
 Deferred by decision:
 
-- [ ] **Recurring billing.** Paymob documents a Subscription API and card
-      tokenisation; whether either is available depends on merchant
-      configuration that cannot be inspected without an account. Today a
-      customer pays per invoice through a checkout and nothing renews itself
-- [ ] **Refunds.** Paymob documents Refund, Void and Capture. Wasla has
-      `PaymentStatus.REFUNDED` and no flow producing it, which was true before
-      this work; a refund is a product decision nobody has made. A callback
-      reporting `is_refunded` *is* recorded, so a refund issued from Paymob's
-      dashboard is not lost
 - [ ] **PayTabs.** Not started. The provider boundary is where it goes
 
 **Not verified: anything against a live Paymob account.** No intention has been
@@ -677,3 +668,66 @@ created, no callback has arrived from Paymob's infrastructure, and no card has
 been charged. The HTTP boundary is exercised against a mock transport. Every
 claim about behaviour is a claim about code checked against published
 documentation.
+
+## Phase 21 — The rest of the payment lifecycle
+
+Completes phase 20 (ADR-045). Refunds, a renewal that can actually be paid,
+dunning when one is not, and explicit state machines so a callback is checked
+against what we already believe rather than applied because it was signed.
+
+One defect found in phase 20's own work and fixed here:
+
+- **`payment_events` recorded every callback as `applied`,** whatever was
+  decided. An event naming an unknown payment, or reporting an amount that
+  disagreed with the invoice, was refused and then filed as a success — so the
+  one table an operator reads to find out why a payment never landed said that
+  it had
+
+Built:
+
+- **Payment and invoice state machines.** `refunded → succeeded` and
+  `failed → succeeded` are refused, so a signed-but-late callback cannot settle
+  an invoice twice or erase a decline. A paid invoice cannot be settled again
+- **Composite provider event ids.** `{transaction}:{state}`, because one
+  transaction produces several callbacks — `pending` then `success`, and a
+  refund notification that arrives on the *parent* transaction. Keying on the
+  transaction alone filed every later callback as a duplicate of the first
+- **Refunds**, request-then-confirm. The amount is the payment's own unreturned
+  balance and is never accepted from a caller; `refunded_amount` is written only
+  by a verified callback, which is also where a refund issued from Paymob's
+  dashboard arrives
+- **Checkout for an outstanding invoice**, which is what makes a renewal
+  collectible rather than merely recorded
+- **Checkout idempotency**, `UNIQUE(tenant_id, idempotency_key)`. A repeat is
+  refused rather than replayed: the response carries a one-use URL that is
+  deliberately never stored
+- **Dunning.** A renewal unpaid for seven days from `issued_at` moves the
+  workspace to `past_due` — still served, audited, and put right by the
+  settling callback
+- **`GET /billing/payments/{id}`**, so a client can ask the server what
+  happened instead of believing the browser redirect
+- **Configuration hardening.** Mismatched key modes and test keys in production
+  are refused at boot; duplicate and non-positive integration ids are refused
+- **Credential redaction** in provider error text, because Paymob quotes the
+  request back and truncation bounds how much returns, not what
+
+Deferred by decision:
+
+- [ ] **Automatic card debits.** Paymob's Subscription API needs a MOTO
+      integration id enabled per merchant, an API key for their older
+      auth-token flow, and bills on a fixed number of days where Wasla bills on
+      calendar months. The remaining dependency is merchant configuration, not
+      missing code — see ADR-045
+- [ ] **Partial refunds and credit notes.** A refund returns a payment's
+      remaining balance; there is no way to render "half of March" on an
+      invoice, and inventing one to match a provider capability would be
+      building a concept the model cannot show
+- [ ] **Void.** Available at the provider seam and through Paymob's dashboard.
+      Choosing between void and refund needs error semantics this integration
+      has never seen
+
+**Not verified: anything against a live Paymob account.** No intention has been
+created, no callback has arrived from Paymob's infrastructure, no card has been
+charged and no refund has been issued. The HTTP boundary is exercised against
+`httpx.MockTransport` and the signature against the vendor's published worked
+example.

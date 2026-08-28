@@ -125,8 +125,8 @@ to `APP_PUBLIC_URL` + `/api/v1/webhooks/paymob`, which must be reachable from
 the internet and must *not* sit behind the proxy's auth or IP allowlist.
 
 ```sql
-SELECT provider, provider_event_id, outcome, processed_at
-FROM payment_events ORDER BY processed_at DESC LIMIT 20;
+SELECT provider, provider_event_id, event_type, outcome, detail, received_at
+FROM payment_events ORDER BY received_at DESC LIMIT 20;
 ```
 
 Nothing recent means nothing is reaching the endpoint. Check the Paymob
@@ -141,10 +141,20 @@ reverse. It never means "retry with the check off".
 
 | `outcome` | Meaning |
 | --- | --- |
-| `applied` | Processed. If the invoice is still open, the payment failed rather than the plumbing |
+| `applied` | Believed, and something changed. If the invoice is still open, the payment failed rather than the plumbing |
 | `duplicate` | A retry of an event already handled. Correct, and not a problem |
 | `unmatched` | Verified but naming a payment this system did not issue, or one belonging to another workspace |
 | `mismatched` | The reported amount or currency disagreed with the invoice. Investigate before touching anything |
+| `no_change` | Believed, and said nothing new — a second notification of a state already recorded |
+| `refused` | Believed, and asked for a move the rules forbid: a success reported for a refunded payment, or a second settlement of a paid invoice. **Always worth reading.** Either a customer paid twice, or callbacks are arriving out of order |
+
+`detail` says why in a sentence. It is written by this application and never
+copied from the provider's payload, so it is safe to paste into a ticket.
+
+A row with `processed_at` NULL was claimed and never decided — the process died
+between the two. The event is recorded and the payment was not applied; the
+provider's retry will be a `duplicate`, so the money needs recovering by hand
+from the transaction in their dashboard.
 
 **Where does the payment stand?**
 
@@ -157,6 +167,7 @@ WHERE p.tenant_id = '<tenant-id>' ORDER BY p.created_at DESC LIMIT 10;
 
 `provider_intent_reference` is the Paymob intention id and is what to search
 their dashboard by when the customer abandoned the page.
+`provider_reference` is the transaction that settled it.
 
 **What you must not do:** do not mark an invoice paid by hand to make a
 customer's problem go away. `invoices.status` is the record of whether money
@@ -424,3 +435,53 @@ Stated plainly, because a runbook that pretends to cover everything is one that 
 - **There is no alerting.** The table above lists what to alert on, not a configured alert.
 - **Media files are not replicated.** They live on one host's volume ([ADR-023](../DECISIONS.md)). Losing it loses every attachment customers sent.
 - **`usage_events` and `audit_logs` grow without bound.** Neither is swept, deliberately — retention for billing records and audit trails is a legal question, not a disk-space one.
+
+### A refund was issued and the customer says it never arrived
+
+Asking for a refund and the money arriving are separate events, and the gap
+between them is the state to look for.
+
+```sql
+SELECT id, status, amount, refunded_amount,
+       refund_requested_at, refunded_at, refund_reference
+FROM payments WHERE tenant_id = '<tenant-id>' AND refund_requested_at IS NOT NULL
+ORDER BY refund_requested_at DESC;
+```
+
+| What you see | What it means |
+| --- | --- |
+| `refund_requested_at` set, `refund_reference` NULL | The provider never accepted it. Look for `billing.refund_failed`; the refund can simply be requested again |
+| `refund_reference` set, `refunded_at` NULL | Paymob accepted the reversal and no callback has confirmed it. If it is more than a day old, the **callback URL is the first thing to check** — the same cause as a payment that never landed |
+| `refunded_at` set | Confirmed here. The delay from here is the customer's bank, typically several working days, and nothing in this system will change it |
+
+`refund_reference` is the reversal's own transaction id, which is a *different*
+transaction from the one being refunded. Search Paymob's dashboard by it.
+
+**Do not** issue a second refund to make a stuck one move. Reversing the same
+money twice is the failure this subsystem is most careful about, and the
+service refuses it — recording a payment by hand to compensate would make the
+ledger disagree with the bank.
+
+### A workspace was marked past due
+
+```sql
+SELECT s.status, i.id, i.amount_due, i.amount_paid, i.issued_at
+FROM subscriptions s JOIN invoices i ON i.subscription_id = s.id
+WHERE s.tenant_id = '<tenant-id>' AND i.status = 'open' ORDER BY i.issued_at;
+```
+
+The sweep marks a workspace behind when an invoice it was *sent* goes unpaid
+for `GRACE_DAYS` (7) from `issued_at`. The workspace is still served —
+`past_due` is a serving status — so this is a conversation, not an outage.
+
+It resolves itself when the invoice is paid: the customer opens
+`POST /billing/checkout {"invoice_id": ...}` and the settling callback moves
+the subscription back to `active`. That is the only thing that does; changing
+`subscriptions.status` from a SQL prompt records a payment that did not happen.
+
+The audit trail says when and why:
+
+```sql
+SELECT created_at, meta FROM audit_logs
+WHERE tenant_id = '<tenant-id>' AND action = 'subscription_past_due';
+```

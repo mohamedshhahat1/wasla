@@ -334,6 +334,13 @@ callback that can be forged is a way to get the product for free.
 | Card data | Never touches this infrastructure. Redirection means Paymob collects it; the callback carries the last four digits and they are not persisted |
 | Secret disclosure | The API key appears only in one `Authorization` header; the HMAC secret only inside `compare_digest`. Neither the sent digest nor the expected one is logged — writing the expected value beside a rejected one turns a refusal into an oracle |
 | Misconfiguration | `BILLING_PROVIDER=paymob` without every credential refuses to boot, in every environment. A callback with no provider configured is 503, never 200 |
+| Mismatched key modes | A live secret key with a test public key creates a real intention behind a test payment page — nothing is collected and every callback is for money that does not exist. Both halves look valid alone, so the pair is checked at startup |
+| Test keys in production | Refused at startup. Every payment would be pretend and every customer would get the product free, while the dashboard looked busy |
+| Illegal state transitions | `PAYMENT_TRANSITIONS` and `INVOICE_TRANSITIONS`. A signed callback claiming a refunded payment succeeded is refused rather than believed, and a paid invoice cannot be settled twice |
+| Callback progression lost | `provider_event_id` pairs the transaction with the state reported, so `pending` then `success` is two events rather than a duplicate — and a refund notification on the original transaction is not swallowed |
+| Credential echoed in a provider error | Paymob quotes the request back in error bodies. Truncation bounds how much returns and not *what*, so this deployment's own secret and HMAC keys are removed from the text before it reaches an exception or a log |
+| Refund of somebody else's payment | Tenant-scoped lookup answering not-found, and the amount is the payment's own balance rather than anything a caller sends |
+| Stored provider payload | None. `payment_events.detail` is a sentence written by this application; the callback body carries a masked card number, billing details and a redirect URL containing a bearer token, and none of it is persisted |
 
 **The customer's redirect settles nothing.** Paymob sends the browser back with
 the transaction in the query string; anybody can visit a URL, and no endpoint

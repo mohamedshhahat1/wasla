@@ -114,7 +114,9 @@ Only the hash of an invitation token is stored, so a database disclosure does no
 
 | Method | Path | Purpose | Access |
 | --- | --- | --- | --- |
-| POST | `/api/v1/billing/checkout` | Open a hosted payment page for a plan (`201`) | Workspace **owner** |
+| POST | `/api/v1/billing/checkout` | Open a hosted payment page for a plan or an outstanding invoice (`201`) | Workspace **owner** |
+| GET | `/api/v1/billing/payments/{id}` | Where one payment attempt has got to | Workspace **owner** |
+| POST | `/api/v1/billing/payments/{id}/refund` | Give back what is left of a payment (`202`) | Workspace **owner** |
 | POST | `/api/v1/webhooks/paymob` | Receive a payment provider callback | Public, HMAC-verified |
 
 ```
@@ -123,16 +125,48 @@ POST /api/v1/billing/checkout   {"plan_code": "pro"}
           "payment_id": "...", "invoice_id": "...", "amount": "99.00", "currency": "EGP"}
 ```
 
-The request names a **plan and nothing else**. Amount, currency and workspace
-come from the database and the access token; the schema forbids extra fields,
-so sending `amount` is a `422` rather than a value quietly ignored. Redirect
-the customer to `redirect_url`.
+The request names **either a `plan_code` or an `invoice_id`**, and exactly one
+of them — naming a plan is choosing what to buy, naming an invoice is paying a
+renewal the sweep already issued. Amount, currency and workspace come from the
+database and the access token; the schema forbids extra fields, so sending
+`amount` is a `422` rather than a value quietly ignored. Redirect the customer
+to `redirect_url`.
+
+An optional `idempotency_key` makes a retried request safe. A repeat is `409`
+rather than a replay: the response carries a one-use URL that is deliberately
+never stored, so read the payment's status instead of starting another.
 
 **A customer returning to your site is not a payment.** Paymob redirects them
 back with the transaction in the query string; use it to show a success,
-pending or failure page and nothing else. Poll `GET /billing/subscription` or
-`GET /invoices` for the real state, which changes only when the signed callback
-arrives. There is deliberately no endpoint that accepts the redirect as proof.
+pending or failure page and nothing else. Poll
+`GET /billing/payments/{payment_id}` for the real state, which changes only
+when the signed callback arrives. There is deliberately no endpoint that
+accepts the redirect as proof.
+
+```
+GET /api/v1/billing/payments/{payment_id}
+  -> 200 {"status": "pending" | "succeeded" | "failed" | "refunded",
+          "amount": "99.00", "currency": "EGP", "invoice_id": "...",
+          "refunded_amount": "0.00", "refund_pending": false,
+          "failure_reason": null, "processed_at": null}
+```
+
+`pending` is an answer, not a missing one — 3-D Secure and several local
+methods finish after the customer has already been sent back, so treating it
+as failure tells people their payment did not work while it is still working.
+Keep polling; the callback is what resolves it.
+
+```
+POST /api/v1/billing/payments/{payment_id}/refund   {"reason": "..."}
+  -> 202 {"status": "succeeded", "refund_pending": true,
+          "refunded_amount": "0.00", ...}
+```
+
+**202, and the status still says `succeeded`.** This records that the provider
+accepted the reversal; the money moves later and is confirmed by a callback,
+exactly as a payment is. There is no amount in the request — it is the
+payment's own unreturned balance, so no client can ask for more back than was
+paid. Render `refund_pending`, never "refunded", until `refunded_at` is set.
 
 The webhook is unauthenticated by necessity and answers `200 {"status":
 "received"}` to everything it verified — applied, duplicate, unmatched or

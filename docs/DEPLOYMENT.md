@@ -105,6 +105,15 @@ secret and public keys, and the HMAC secret. Integration ids are per payment
 method under Payment Integrations. Test and live keys are different values and
 must be used with matching integration ids; the base URL is the same either way.
 
+The keys carry their mode in them — `sk_test_…` / `sk_live_…` and
+`pk_test_…` / `pk_live_…` — and the application refuses to start if the two
+disagree. That pairing is worth understanding rather than working around: a
+live secret key with a test public key creates a *real* intention and sends the
+customer to a *test* payment page, so nothing is ever collected and every
+callback is for money that does not exist. Both halves look perfectly valid on
+their own, which is why it is checked at boot. Test keys in production are
+refused for the mirror-image reason.
+
 **2. Register the callback URL.** Set the integration's *transaction processed*
 callback to:
 
@@ -124,6 +133,27 @@ in your frontend. It is for showing a result and is not trusted for anything.
 **4. Test before going live.** With test keys, the cards Paymob publishes work
 against the same URLs. Confirm a `payment_events` row appears with
 `outcome = applied` and the invoice moves to `paid`.
+
+Worth doing in the same sitting, because each exercises a path nothing else
+does:
+
+- **Send the same callback twice** (Paymob's webhook testing tool, or replay
+  the request). The second must be `duplicate` and `invoices.amount_paid` must
+  not move.
+- **Refund the test payment** through `POST /billing/payments/{id}/refund`.
+  The response is `202` and says `refund_pending`; the payment only becomes
+  `refunded` when Paymob's callback arrives, which is the thing this step is
+  really testing.
+- **Leave a renewal unpaid** past `GRACE_DAYS` if you can move the clock, and
+  confirm the subscription becomes `past_due` while still serving.
+
+**5. Recurring card debits are not part of this.** Wasla renews on its own
+calendar and emails an invoice; the customer pays it through a checkout. There
+is no card on file, so nothing is charged without somebody choosing to pay.
+Automatic debits would need a MOTO integration id enabled by Paymob for the
+merchant and an API key for their older auth-token flow — see
+[docs/BILLING.md](BILLING.md) for why that is a decision rather than an
+oversight.
 
 ## Email sending domain
 
