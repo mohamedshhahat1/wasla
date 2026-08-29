@@ -22,6 +22,7 @@ from app.api.dependencies import (
     ActiveWorkspaceDep,
     CheckoutServiceDep,
     EntitlementServiceDep,
+    PaymentMethodServiceDep,
     PlanRepositoryDep,
     RefundServiceDep,
     SubscriptionServiceDep,
@@ -38,7 +39,7 @@ from app.schemas.billing import (
     SubscriptionRead,
     SubscriptionStateRead,
 )
-from app.schemas.invoice import PaymentRead, RefundRequestPayload
+from app.schemas.invoice import PaymentMethodRead, PaymentRead, RefundRequestPayload
 from app.services.entitlement_service import EntitlementService
 from app.services.subscription_service import SubscriptionService
 
@@ -283,3 +284,68 @@ async def read_entitlements(
     """
     snapshot = await entitlements.snapshot()
     return [EntitlementRead.from_entitlement(item) for item in snapshot]
+
+
+@router.get(
+    "/payment-methods",
+    response_model=list[PaymentMethodRead],
+    summary="List saved cards",
+)
+async def list_payment_methods(
+    workspace: TenantOwnerDep,
+    methods: PaymentMethodServiceDep,
+) -> list[PaymentMethodRead]:
+    """Cards this workspace has saved. Owners only.
+
+    Owners rather than members, matching invoices: which card the company pays
+    with is not something every colleague staffing an inbox needs to see.
+
+    The provider's token is deliberately absent from the response. It is what
+    charges the card, it is useless to a client, and a field carrying it would
+    be one more place it could be logged.
+    """
+    return [PaymentMethodRead.from_model(method) for method in await methods.list_methods()]
+
+
+@router.post(
+    "/payment-methods/{method_id}/default",
+    response_model=PaymentMethodRead,
+    summary="Choose the card renewals use",
+)
+async def make_payment_method_default(
+    method_id: uuid.UUID,
+    workspace: TenantOwnerDep,
+    methods: PaymentMethodServiceDep,
+) -> PaymentMethodRead:
+    """Point automatic renewals at a different saved card. Owners only.
+
+    A card is added by paying with it and choosing to save it, not by posting
+    one here - a token a client could send is a token somebody could steal from
+    another workspace and charge. All this does is choose between cards the
+    workspace already has.
+
+    Another workspace's card id answers not-found, like every other resource.
+    """
+    return PaymentMethodRead.from_model(await methods.make_default(method_id))
+
+
+@router.delete(
+    "/payment-methods/{method_id}",
+    response_model=PaymentMethodRead,
+    summary="Stop using a saved card",
+)
+async def revoke_payment_method(
+    method_id: uuid.UUID,
+    workspace: TenantOwnerDep,
+    methods: PaymentMethodServiceDep,
+) -> PaymentMethodRead:
+    """Remove a card from future renewals. Owners only.
+
+    Revoked rather than erased: payments point at it, and the record of which
+    card collected last month should survive somebody tidying their account. A
+    revoked card is never chosen for a renewal again.
+
+    Repeating the call is a no-op rather than an error - somebody removing a
+    card twice has got what they wanted both times.
+    """
+    return PaymentMethodRead.from_model(await methods.revoke(method_id))

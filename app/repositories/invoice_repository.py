@@ -250,6 +250,33 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
             for row in result.all()
         ]
 
+    async def collectible(self, *, before: datetime, limit: int = 200) -> Sequence[Invoice]:
+        """Open invoices an automatic charge may be attempted against.
+
+        Deliberately a *wide* net rather than a precise one. Everything about
+        whether a particular invoice should be charged - a live subscription, a
+        usable card, an attempt budget that is not spent - is decided by
+        `RecurringService`, because those are billing rules and belong with the
+        rules. This query's only job is to avoid loading the whole table.
+
+        `next_collection_at IS NULL` is included on purpose: that is the state
+        of an invoice nobody has tried yet, which is exactly the one a first
+        attempt is for. An invoice whose attempts have run out also has NULL
+        there, and is filtered by the attempt count in the service.
+
+        Ordered oldest-first so the longest-outstanding money is chased first,
+        and so a backlog drains in a predictable order rather than by whichever
+        rows the planner happens to return.
+        """
+        return await self._all(
+            self._select()
+            .where(Invoice.status == InvoiceStatus.OPEN)
+            .where(Invoice.subscription_id.is_not(None))
+            .where((Invoice.next_collection_at.is_(None)) | (Invoice.next_collection_at <= before))
+            .order_by(Invoice.period_start)
+            .limit(limit)
+        )
+
     async def overdue(self, *, before: datetime, limit: int = 200) -> Sequence[Invoice]:
         """Open invoices issued before a moment, oldest first.
 

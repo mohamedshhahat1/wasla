@@ -276,6 +276,16 @@ class Settings(BaseSettings):
     # Test and live ids are different values and must match the mode of the
     # secret key used with them.
     paymob_integration_ids: Annotated[list[int | str], NoDecode] = Field(default_factory=list)
+    # The Moto integration id, which is what Paymob gates merchant-initiated
+    # charges on: both the MIT documentation and the Subscriptions Module
+    # require one, and it is a distinct integration type that Paymob issues per
+    # merchant rather than one the dashboard lets you create.
+    #
+    # None is the ordinary state and is not a misconfiguration. Without it,
+    # renewals are collected by invoicing the customer and asking them to pay,
+    # which is how this product billed before saved cards existed. With it,
+    # `RecurringService` can debit a saved card when a renewal falls due.
+    paymob_moto_integration_id: int | None = None
     # Chooses the API host *and* the checkout host, which are different hosts.
     # There is deliberately no sandbox setting: Paymob's documentation states
     # that test and live share a regional base URL and the keys decide the

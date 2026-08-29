@@ -1310,3 +1310,41 @@ Void is available at the provider seam and through Paymob's dashboard, and is no
 `payment_events.processed_at` becomes nullable. The row is claimed before the decision is made — which is what makes two simultaneous deliveries safe — so between the claim and the decision there genuinely is no processing time, and a crash in that window should leave a row that says so.
 
 Nothing here has been verified against a live Paymob account. The refund endpoint, the reversal callbacks and the intention call are exercised against `httpx.MockTransport`; the signature is pinned to the vendor's published worked example. The first real transaction still has to be walked through with merchant credentials.
+
+## ADR-046 — A Renewal May Be Taken From a Saved Card, and Almost Never Is
+
+Date:
+2026-08-29
+
+Status:
+Accepted. Extends ADR-045; the settlement path, the transition tables and the callback-as-authority rule are all unchanged.
+
+Decision:
+Store saved cards as provider tokens in their own table, add a merchant-initiated charge behind a third provider protocol, and let the billing sweep collect a due renewal from a workspace's default card. Gate the whole thing on a capability flag the provider answers, so a deployment without it bills exactly as it did before. Never charge a subscription that is not being served, and bound the attempts.
+
+Context:
+ADR-045 left recurring billing as: issue an invoice at each period end, email it, and wait. That is a renewal cycle a person completes. What was missing is the half where nobody is present.
+
+Two Paymob paths lead there, and the current documentation was read for both rather than trusting an earlier note. The Subscriptions Module creates a plan and attaches subscriptions to intentions; MIT charges a card the customer previously saved. **Both require a Moto integration id**, which the documentation states explicitly in each case, and which the account's own dashboard cannot create - its integration types are PAYPAL, MIGS, UIG, CAGG and CASH. Paymob's overview says as much in general terms: "Not all payment methods are enabled by default. Availability depends on your merchant account setup."
+
+Reason:
+**MIT rather than the Subscriptions Module.** Both are gated identically, so the choice is on fit rather than availability. Paymob's subscription plans bill on a fixed number of days - 7, 15, 30, 60, 90, 180, 360 - and Wasla bills on calendar months. A plan on `30` drifts away from the period this system charges for and the two disagree about what a customer owes within a year. It would also mean mirroring the plan catalogue into Paymob and keeping it in step through `change_plan` and `cancel`, which is a second source of truth for pricing. MIT leaves the schedule here, where the product already decides it, and asks the processor only to move money.
+
+**A capability, not an exception.** `can_charge_saved_methods` is a property the caller reads before doing anything, rather than an error it catches afterwards. Without a Moto integration this is not a failure to handle - it is a deployment that collects renewals by invoicing, which is a supported and previously the only way this product billed. Making it an exception would have meant every renewal producing a stack trace on a perfectly healthy system.
+
+**A cancelled workspace is never charged.** This is the single most important line in the subsystem and it has its own guard, its own test, and a mutation check proving the test fails without it. Every other billing mistake here is recoverable with a refund and an apology; debiting somebody who has left is the one customers do not forgive, and it is the failure a scheme treats as unauthorised.
+
+**Attempts are counted before the provider is called, and bounded at three.** Counting afterwards would let a request that timed out be retried for ever, and a timeout is exactly the case where the charge may already have happened. Three because a decline is usually a fact about the card rather than a moment - expired, blocked, empty - and a merchant that retries indefinitely is one a processor's risk team looks at. The claim is a payment row keyed `auto:{invoice}:{attempt}`, so two sweeps racing cannot both charge: one inserts and the other loses on `UNIQUE(tenant_id, idempotency_key)`.
+
+**The charge settles nothing.** It returns a provider reference and no outcome. Money moving is decided by the same signed callback a customer-initiated payment produces, so an automatic renewal and somebody clicking a link converge on one settlement path with one set of rules - and there is no second place where an invoice can be marked paid.
+
+**Saved cards get their own table and their own signature scheme.** A card belongs to a workspace rather than to a subscription: it outlives the subscription it was added for, a workspace may have several, and replacing one must not lose the record of what paid last month. Paymob signs card-token callbacks over eight fields rather than the transaction's twenty, so verification is separate - checking a token callback against the transaction field list would be computing a digest over the wrong string, which is not a weaker check but no check.
+
+Consequences:
+`payment_methods` stores an opaque token, the provider's id for it, the masked last four digits and the scheme name. **There is no column for a card number, an expiry or a security code**, and there is no code path that could populate one: the customer types those into the provider's page and what returns is a token. A schema with nowhere to put card data is a better guarantee than a rule saying not to store it.
+
+The webhook endpoint now dispatches on the callback's declared `type`. That declaration is trusted for nothing - a body claiming to be a card token is still checked against the card-token signature, so lying about the type only changes which way it is refused.
+
+The first card a workspace saves becomes its default; later ones do not. Silently moving renewals onto a card somebody used for a single payment is a surprise, and the API has an explicit call for changing it.
+
+**Automatic charging has not been exercised against Paymob.** The account this was built against has no Moto integration, so `charge_saved_method` has never run against the live API - only against a mock transport shaped from the documented request and response. Everything up to the charge, including the card-token signature, is pinned to Paymob's published worked examples. The remaining dependency is a merchant capability, not code.

@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -27,7 +28,9 @@ from app.db.models.billing import (
     SubscriptionStatus,
 )
 from app.db.models.invoice import InvoiceStatus
+from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
 from app.db.models.tenant import Tenant
+from app.integrations.billing.paymob import PaymobProvider
 from app.repositories.billing_repository import (
     PlatformSubscriptionRepository,
     SubscriptionRepository,
@@ -646,3 +649,158 @@ async def test_being_marked_behind_is_audited_with_what_is_owed(db_session):
     assert rows[0].tenant_id == tenant.id
     assert rows[0].meta["outstanding"] == "99.00"
     assert rows[0].meta["invoice_id"] == str(invoice.id)
+
+
+# ------------------------------------------------------- automatic renewal
+
+
+def _paymob_settings(moto: int | None):
+    """A worker configured to take renewals from saved cards, or not."""
+    values = {
+        "billing_provider": "paymob",
+        "paymob_secret_key": "sk_test_notreal000000",
+        "paymob_public_key": "pk_test_notreal000000",
+        "paymob_hmac_secret": "a-test-hmac-secret",
+        "paymob_integration_ids": [4097558],
+        "app_public_url": "https://app.example.com",
+    }
+    if moto is not None:
+        values["paymob_moto_integration_id"] = moto
+    return _settings(**values)
+
+
+async def _card(session, tenant, *, token: str = "tok-worker"):  # noqa: S107 - a fixture handle
+    method = PaymentMethod(
+        tenant_id=tenant.id,
+        provider="paymob",
+        provider_token=token,
+        provider_token_id="15978654",
+        masked_pan="xxxx-xxxx-xxxx-2346",
+        brand="MasterCard",
+        status=PaymentMethodStatus.ACTIVE,
+        is_default=True,
+    )
+    session.add(method)
+    await session.flush()
+    return method
+
+
+def _charging_worker(db_session, monkeypatch, *, moto: int | None = 9900001, seen=None):
+    """A worker whose provider answers the two-step charge without a socket."""
+
+    def handler(request):
+        if seen is not None:
+            seen.append(str(request.url))
+        if "intention" in str(request.url):
+            return httpx.Response(
+                201,
+                json={"id": "pi_w", "client_secret": "c", "payment_keys": [{"key": "k"}]},
+            )
+        return httpx.Response(200, json={"id": 910000001, "success": True, "pending": False})
+
+    original = PaymobProvider.__init__
+
+    def patched(self, **kwargs):
+        kwargs.setdefault("transport", httpx.MockTransport(handler))
+        original(self, **kwargs)
+
+    monkeypatch.setattr(PaymobProvider, "__init__", patched)
+    return BillingWorker(
+        database=SessionHandle(db_session),
+        settings=_paymob_settings(moto),
+    )
+
+
+async def test_the_sweep_charges_a_saved_card_for_a_due_renewal(db_session, monkeypatch):
+    """The whole automatic path, driven by the worker rather than the service."""
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _renewing(db_session, tenant, plan)
+    invoice = await _overdue_invoice(db_session, tenant, subscription, issued=NOW)
+    await _issued(db_session, invoice, at=NOW - timedelta(days=1))
+    await _card(db_session, tenant)
+    seen: list[str] = []
+
+    handled = await _charging_worker(db_session, monkeypatch, seen=seen).run_once(now=NOW)
+
+    assert handled >= 1
+    assert any("payments/pay" in url for url in seen)
+    assert invoice.collection_attempts == 1
+    # A request, not a settlement: the callback decides, as it does for a
+    # customer paying a link.
+    assert invoice.status is InvoiceStatus.PAID or invoice.status is InvoiceStatus.OPEN
+
+
+async def test_the_sweep_does_not_charge_without_the_merchant_capability(
+    db_session,
+    monkeypatch,
+):
+    """No Moto integration, so the automatic path is silently skipped.
+
+    This is the state of the account this was built against, and renewals fall
+    back to being invoiced and chased - which is what the rest of the sweep
+    already does.
+    """
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _renewing(db_session, tenant, plan)
+    invoice = await _overdue_invoice(db_session, tenant, subscription, issued=NOW)
+    await _issued(db_session, invoice, at=NOW - timedelta(days=1))
+    await _card(db_session, tenant, token="tok-nomoto")
+    seen: list[str] = []
+
+    await _charging_worker(db_session, monkeypatch, moto=None, seen=seen).run_once(now=NOW)
+
+    assert seen == []
+    assert invoice.collection_attempts == 0
+
+
+async def test_the_sweep_never_charges_a_cancelled_workspace(db_session, monkeypatch):
+    """Belt and braces at the worker level too, because this is the one."""
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _renewing(db_session, tenant, plan, status=SubscriptionStatus.CANCELLED)
+    invoice = await _overdue_invoice(db_session, tenant, subscription, issued=NOW)
+    await _issued(db_session, invoice, at=NOW - timedelta(days=30))
+    await _card(db_session, tenant, token="tok-cancelled")
+    seen: list[str] = []
+
+    await _charging_worker(db_session, monkeypatch, seen=seen).run_once(now=NOW)
+
+    assert seen == []
+    assert invoice.collection_attempts == 0
+    assert subscription.status is SubscriptionStatus.CANCELLED
+
+
+async def test_a_provider_outage_does_not_stop_the_rest_of_the_sweep(
+    db_session,
+    monkeypatch,
+):
+    """One workspace's trouble must not strand every other renewal behind it."""
+    tenant = await _tenant(db_session)
+    plan = await _plan(db_session)
+    subscription = await _renewing(db_session, tenant, plan)
+    invoice = await _overdue_invoice(db_session, tenant, subscription, issued=NOW)
+    await _issued(db_session, invoice, at=NOW - timedelta(days=30))
+    await _card(db_session, tenant, token="tok-outage")
+
+    def exploding(request):
+        raise httpx.ConnectError("provider down", request=request)
+
+    original = PaymobProvider.__init__
+
+    def patched(self, **kwargs):
+        kwargs.setdefault("transport", httpx.MockTransport(exploding))
+        original(self, **kwargs)
+
+    monkeypatch.setattr(PaymobProvider, "__init__", patched)
+    worker = BillingWorker(
+        database=SessionHandle(db_session),
+        settings=_paymob_settings(9900001),
+    )
+
+    # The sweep completes rather than raising, and the dunning half still runs.
+    handled = await worker.run_once(now=NOW)
+
+    assert handled >= 1
+    assert subscription.status is SubscriptionStatus.PAST_DUE

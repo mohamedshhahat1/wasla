@@ -42,8 +42,14 @@ from app.core.exceptions import DependencyUnavailableError, PermissionDeniedErro
 from app.core.logging import get_logger
 from app.db.models.invoice import Payment
 from app.integrations.billing import build_checkout_provider
-from app.integrations.billing.checkout import CallbackVerificationError
+from app.integrations.billing.checkout import (
+    CallbackVerificationError,
+    CheckoutProvider,
+    RecurringProvider,
+)
+from app.integrations.billing.paymob import callback_type
 from app.services.checkout_service import CheckoutService
+from app.services.payment_method_service import remember_saved_method
 
 logger = get_logger(__name__)
 
@@ -55,6 +61,12 @@ router = APIRouter(route_class=CommittingRoute, prefix="/webhooks/paymob", tags=
 # is accepted as well, because the published sample body does not carry one and
 # a provider that starts sending it there should not become an outage.
 SIGNATURE_PARAM: Final = "hmac"
+
+# Paymob marks a saved-card notification with this `type`, as against
+# `"TRANSACTION"` for a payment. Documented at
+# developers.paymob.com/paymob-docs/developers/pay-with-saved-cards/create-card-token
+# (read 2026-08-29).
+SAVED_CARD_CALLBACK: Final = "TOKEN"
 
 
 @router.post(
@@ -83,6 +95,14 @@ async def receive_payment_callback(
 
     body = await request.body()
     signature = hmac or _signature_from_body(body)
+
+    # Paymob sends saved-card notifications to the same endpoint, marked by
+    # `type`, and signs them over a different set of fields. Dispatching on the
+    # declared type trusts it for nothing: a body claiming to be a card token
+    # is still checked against the card-token signature, so lying about the
+    # type only changes which way it is refused.
+    if callback_type(body) == SAVED_CARD_CALLBACK:
+        return await _receive_saved_method(session, provider, body=body, signature=signature)
 
     try:
         event = provider.verify_callback(payload=body, signature=signature)
@@ -160,4 +180,88 @@ async def _tenant_for(session: AsyncSession, reference: str | None) -> uuid.UUID
         return None
 
     result = await session.execute(select(Payment.tenant_id).where(Payment.id == payment_id))
+    return result.scalar_one_or_none()
+
+
+async def _receive_saved_method(
+    session: AsyncSession,
+    provider: CheckoutProvider,
+    *,
+    body: bytes,
+    signature: str | None,
+) -> dict[str, str]:
+    """A customer kept their card, and the provider is telling us the token.
+
+    Verified with the provider's card-token scheme rather than the transaction
+    one - a different field list, so checking it with the wrong list would not
+    be checking it at all.
+
+    The workspace is resolved exactly as a payment is: through the reference
+    *we* generated for the checkout that saved the card. A token arriving with
+    no such reference is recorded in the log and stored nowhere, because a card
+    that cannot be attributed to a workspace is a card nobody may charge.
+    """
+    recurring = provider if isinstance(provider, RecurringProvider) else None
+    if recurring is None:  # pragma: no cover - every real provider implements it
+        raise DependencyUnavailableError("This provider cannot receive saved cards.")
+
+    try:
+        saved = recurring.verify_token_callback(payload=body, signature=signature)
+    except CallbackVerificationError as error:
+        logger.warning(
+            "billing.card_token_rejected",
+            extra={"event": "billing.card_token_rejected", "reason": str(error)},
+        )
+        raise PermissionDeniedError("The callback could not be verified.") from error
+
+    tenant_id = await _tenant_for_order(session, saved.order_reference)
+    if tenant_id is None:
+        # Verified, but naming no checkout of ours. Answered like a success for
+        # the same reason an unmatched payment is - see the module docstring.
+        logger.warning(
+            "billing.card_token_unmatched",
+            extra={
+                "event": "billing.card_token_unmatched",
+                "provider_token_id": saved.provider_token_id,
+            },
+        )
+        return {"status": "received"}
+
+    _, created = await remember_saved_method(
+        session,
+        tenant_id=tenant_id,
+        provider=provider.name,
+        saved=saved,
+    )
+    logger.info(
+        "billing.card_token_processed",
+        extra={
+            "event": "billing.card_token_processed",
+            "tenant_id": str(tenant_id),
+            "created": created,
+        },
+    )
+    return {"status": "received"}
+
+
+async def _tenant_for_order(session: AsyncSession, order_reference: str | None) -> uuid.UUID | None:
+    """Which workspace saved this card, decided by our own intention reference.
+
+    Paymob quotes the order back on the token callback. That order was created
+    from an intention whose id we stored on the payment as
+    `provider_intent_reference`, so the lookup is against something this system
+    wrote down - never against a value the caller invented.
+
+    Deliberately not tenant-scoped, for the same reason `_tenant_for` is not: a
+    callback arrives with no session, so there is no workspace to scope by yet.
+    The tenant is read off the row that the reference resolves to.
+    """
+    if not order_reference:
+        return None
+
+    result = await session.execute(
+        select(Payment.tenant_id)
+        .where(Payment.provider_intent_reference == str(order_reference))
+        .limit(1)
+    )
     return result.scalar_one_or_none()

@@ -48,6 +48,7 @@ from app.core.dependencies import get_session
 from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.db.models.billing import BillingInterval, LimitKey, Plan
 from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
 from app.integrations.billing import paymob
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
@@ -495,3 +496,106 @@ async def test_a_requested_refund_says_pending_rather_than_refunded(http, app, d
     assert body["status"] == "succeeded"
     assert body["refund_pending"] is True
     assert body["refunded_amount"] == "0.00"
+
+
+# ---------------------------------------------------------- saved cards
+
+
+async def _saved_card(session: AsyncSession, tenant: Tenant, *, token: str) -> PaymentMethod:
+    method = PaymentMethod(
+        tenant_id=tenant.id,
+        provider="paymob",
+        provider_token=token,
+        provider_token_id="15978654",
+        masked_pan="xxxx-xxxx-xxxx-2346",
+        brand="MasterCard",
+        status=PaymentMethodStatus.ACTIVE,
+        is_default=True,
+    )
+    session.add(method)
+    await session.flush()
+    return method
+
+
+@pytest.mark.parametrize("role", [TenantRole.MEMBER, TenantRole.TENANT_ADMIN])
+async def test_only_an_owner_may_read_saved_cards(http, app, db_session, role):
+    """Which card the company pays with is not everyone's business.
+
+    The same line invoices draw, and drawn here because a saved card names a
+    scheme and the last four digits.
+    """
+    tenant, user = await _workspace_rows(db_session, "acme")
+    await _saved_card(db_session, tenant, token=f"tok-{uuid.uuid4().hex[:8]}")
+    _act_as(app, tenant, user, role)
+
+    response = await http.get(f"{BILLING}/payment-methods")
+
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("role", [TenantRole.MEMBER, TenantRole.TENANT_ADMIN])
+async def test_only_an_owner_may_change_which_card_renewals_use(http, app, db_session, role):
+    """Pointing automatic renewals at a different card is a billing decision."""
+    tenant, user = await _workspace_rows(db_session, "acme")
+    method = await _saved_card(db_session, tenant, token=f"tok-{uuid.uuid4().hex[:8]}")
+    _act_as(app, tenant, user, role)
+
+    default = await http.post(f"{BILLING}/payment-methods/{method.id}/default")
+    removed = await http.delete(f"{BILLING}/payment-methods/{method.id}")
+
+    assert default.status_code == 403
+    assert removed.status_code == 403
+
+
+async def test_an_owner_may_manage_saved_cards(http, app, db_session):
+    """The other half: the restriction is a role check, not a broken route."""
+    tenant, user = await _workspace_rows(db_session, "acme")
+    method = await _saved_card(db_session, tenant, token=f"tok-{uuid.uuid4().hex[:8]}")
+    _act_as(app, tenant, user, TenantRole.TENANT_OWNER)
+
+    listed = await http.get(f"{BILLING}/payment-methods")
+    default = await http.post(f"{BILLING}/payment-methods/{method.id}/default")
+    removed = await http.delete(f"{BILLING}/payment-methods/{method.id}")
+
+    assert listed.status_code == 200
+    assert listed.json()[0]["masked_pan"] == "xxxx-xxxx-xxxx-2346"
+    assert default.status_code == 200
+    assert removed.status_code == 200
+    assert removed.json()["is_default"] is False
+
+
+async def test_another_workspaces_card_is_not_found(http, app, db_session):
+    """404 on an object that can be charged, which is where it matters most."""
+    acme, acme_user = await _workspace_rows(db_session, "acme")
+    globex, _ = await _workspace_rows(db_session, "globex")
+    method = await _saved_card(db_session, globex, token=f"tok-{uuid.uuid4().hex[:8]}")
+    _act_as(app, acme, acme_user, TenantRole.TENANT_OWNER)
+
+    default = await http.post(f"{BILLING}/payment-methods/{method.id}/default")
+    removed = await http.delete(f"{BILLING}/payment-methods/{method.id}")
+    listed = await http.get(f"{BILLING}/payment-methods")
+
+    assert default.status_code == 404
+    assert removed.status_code == 404
+    assert listed.json() == [], "another workspace's card is invisible, not merely unusable"
+
+
+async def test_the_card_token_never_leaves_through_the_api(http, app, db_session):
+    """It is what charges the card, and a client has no use for it.
+
+    A response carrying it would be one more place it could be logged, cached
+    or copied into a bug report.
+    """
+    tenant, user = await _workspace_rows(db_session, "acme")
+    token = f"tok-secret-{uuid.uuid4().hex[:8]}"
+    method = await _saved_card(db_session, tenant, token=token)
+    _act_as(app, tenant, user, TenantRole.TENANT_OWNER)
+
+    bodies = [
+        (await http.get(f"{BILLING}/payment-methods")).text,
+        (await http.post(f"{BILLING}/payment-methods/{method.id}/default")).text,
+        (await http.delete(f"{BILLING}/payment-methods/{method.id}")).text,
+    ]
+
+    for body in bodies:
+        assert token not in body

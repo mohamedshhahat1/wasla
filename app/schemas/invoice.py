@@ -15,6 +15,7 @@ from typing import Any, Self
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.payment_method import PaymentMethod
 
 
 def _money(amount: Decimal) -> str:
@@ -97,6 +98,31 @@ class PaymentRead(BaseModel):
             failure_reason=payment.failure_reason,
             processed_at=payment.processed_at,
             created_at=payment.created_at,
+        )
+
+
+class PaymentMethodRead(BaseModel):
+    """A saved card, as a customer needs to recognise it.
+
+    Deliberately not the token. That is what charges the card, it is useless to
+    a client, and a response carrying it would be one more place it could be
+    logged or cached. What a person needs is which of their cards this is.
+    """
+
+    id: str
+    brand: str | None
+    masked_pan: str | None
+    is_default: bool
+    created_at: datetime
+
+    @classmethod
+    def from_model(cls, method: PaymentMethod) -> Self:
+        return cls(
+            id=str(method.id),
+            brand=method.brand,
+            masked_pan=method.masked_pan,
+            is_default=method.is_default,
+            created_at=method.created_at,
         )
 
 
@@ -191,6 +217,7 @@ __all__ = [
     "InvoiceLineRead",
     "InvoiceRead",
     "InvoiceVoidRequest",
+    "PaymentMethodRead",
     "PaymentRead",
     "PaymentRecordRequest",
     "RefundRequestPayload",

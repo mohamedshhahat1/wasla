@@ -49,6 +49,7 @@ from app.services.lead_service import LeadService
 from app.services.media_service import MediaService
 from app.services.membership_service import MembershipService
 from app.services.messaging_service import MessagingService
+from app.services.payment_method_service import PaymentMethodService
 from app.services.refund_service import RefundService
 from app.services.sentiment_service import SentimentService
 from app.services.subscription_service import SubscriptionService
@@ -589,6 +590,22 @@ def get_refund_service(
 
 
 RefundServiceDep = Annotated[RefundService, Depends(get_refund_service)]
+
+
+def get_payment_method_service(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> PaymentMethodService:
+    """Saved cards for the active workspace.
+
+    No provider: nothing here reaches a processor. Cards arrive on a signed
+    callback, and all a customer may do through the API is choose between the
+    ones they already have.
+    """
+    return PaymentMethodService(session, tenant_id=workspace.tenant.id)
+
+
+PaymentMethodServiceDep = Annotated[PaymentMethodService, Depends(get_payment_method_service)]
 
 
 def get_platform_billing_service(session: SessionDep) -> PlatformBillingService:

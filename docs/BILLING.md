@@ -419,6 +419,81 @@ an unverifiable subsystem to match a provider capability. The provider seam —
 `CheckoutProvider` — is where it goes if the product decides it wants card-on-
 file renewals, and the merchant-level dependency is the thing to resolve first.
 
+### Automatic renewal (ADR-046)
+
+When the provider can charge a saved card, the sweep collects a due renewal
+without anybody present:
+
+```
+period ends
+    │
+    ├─ invoice issued for the period that ended
+    │
+    ├─ sweep: is there a default card, a serving subscription, an attempt left?
+    │       │
+    │       ├─ no  →  invoice emailed and chased, exactly as before
+    │       │
+    │       └─ yes →  intention on the Moto integration
+    │                 POST /api/acceptance/payments/pay  { token, payment_token }
+    │                        │
+    │                        └─ callback → the same settlement path as a link
+    │
+    └─ declined → attempt counted, retried after 1 then 3 days, then stopped
+```
+
+**Nothing is charged that should not be.** The refusals live in
+`RecurringService` and each has a test:
+
+| Refusal | Why |
+| --- | --- |
+| `not_supported` | No Moto integration — renewals are invoiced instead, which is how this product billed before saved cards |
+| `not_serving` | **Cancelled or expired.** The most important line here: debiting somebody who has left is the failure customers do not forgive |
+| `no_card` | No default card, or the customer removed it |
+| `not_collectible` | The invoice is not open, or nothing is outstanding |
+| `attempts_exhausted` | Three tries is enough; a card that declined three times will not work on the fourth |
+| `not_due` | A retry before its scheduled time |
+
+Attempts are counted **before** the provider is called, because a request that
+timed out may still have been carried out. The claim is a payment row keyed
+`auto:{invoice}:{attempt}`, so two sweeps racing cannot both charge.
+
+### Saved cards
+
+A card is saved when a customer ticks the box on the provider's page. It
+arrives on a signed callback of `type: "TOKEN"` — a **different signature
+scheme** from a transaction, eight fields rather than twenty — and is attached
+to the workspace whose checkout produced it, resolved through the intention
+reference we stored ourselves.
+
+**No card data is stored.** `payment_methods` holds an opaque token, the
+provider's id for it, the masked last four digits and the scheme name, and has
+no column for a PAN, an expiry or a CVV.
+
+| Action | Who |
+| --- | --- |
+| `GET /billing/payment-methods` | Workspace owner |
+| `POST /billing/payment-methods/{id}/default` | Workspace owner |
+| `DELETE /billing/payment-methods/{id}` | Workspace owner |
+
+A card is revoked rather than deleted: payments point at it, and the record of
+what collected last month should survive somebody tidying their account. The
+first card saved becomes the default; later ones do not, because silently
+moving renewals onto a card used once is a surprise.
+
+### Why the Subscriptions Module is not used
+
+Paymob documents one, and it is not the path taken. Both it and MIT require a
+Moto integration, so availability did not decide it — fit did:
+
+- Paymob subscription plans bill on a **fixed number of days** (7, 15, 30, 60,
+  90, 180, 360). Wasla bills on calendar months, so a plan on `30` drifts away
+  from the period this system charges for and the two disagree within a year.
+- It would mean mirroring the plan catalogue into Paymob and keeping it in step
+  through `change_plan` and `cancel` — a second source of truth for pricing.
+
+MIT leaves the schedule here, where the product already decides it, and asks
+the processor only to move money.
+
 ### What is still not built
 
 Honest list.

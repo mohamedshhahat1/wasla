@@ -25,8 +25,12 @@ from app.integrations.billing.checkout import (
     CheckoutRequest,
     CheckoutSession,
     EventKind,
+    RecurringProvider,
+    RecurringUnavailableError,
     RefundOutcome,
     RefundRequest,
+    SavedMethodCharge,
+    SavedPaymentMethod,
 )
 from app.integrations.billing.manual import MANUAL_PROVIDER, ManualProvider
 from app.integrations.billing.paymob import PAYMOB_PROVIDER, PaymobProvider
@@ -66,6 +70,7 @@ def build_checkout_provider(settings: Settings) -> CheckoutProvider | None:
         public_key=public_key,
         hmac_secret=hmac_secret,
         integration_ids=list(settings.paymob_integration_ids),
+        moto_integration_id=settings.paymob_moto_integration_id,
         region=settings.paymob_region,
         # Built from configuration and a literal path, never from a request
         # Host header - a callback URL an attacker can aim is a callback that
@@ -90,7 +95,11 @@ __all__ = [
     "PaymentProvider",
     "PaymobProvider",
     "ProviderError",
+    "RecurringProvider",
+    "RecurringUnavailableError",
     "RefundOutcome",
     "RefundRequest",
+    "SavedMethodCharge",
+    "SavedPaymentMethod",
     "build_checkout_provider",
 ]

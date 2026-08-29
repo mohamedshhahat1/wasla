@@ -250,10 +250,124 @@ class CheckoutProvider(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class SavedPaymentMethod:
+    """A card a customer chose to keep, as the provider describes it.
+
+    Everything here is safe to store. `token` is the provider's opaque handle -
+    it is not a card number, it cannot be used anywhere but this merchant
+    account, and it is what makes charging a renewal possible without anybody
+    holding a PAN. `masked_pan` is the last four digits the provider already
+    prints on receipts.
+
+    There is deliberately no field for a card number, an expiry or a CVV.
+    Those never reach this application: the customer types them into the
+    provider's own page, and what comes back is this.
+    """
+
+    token: str
+    provider_token_id: str
+    masked_pan: str | None = None
+    brand: str | None = None
+    # Ties the saved card back to the checkout that created it, which is how a
+    # token callback is matched to the workspace that owns it. The provider
+    # quotes back the order it was saved against.
+    order_reference: str | None = None
+    email: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SavedMethodCharge:
+    """A renewal we want taken from a card already on file.
+
+    `reference` is ours and is what the resulting callback quotes home, exactly
+    as at checkout. `token` is the provider's, read from a stored payment
+    method - never from a request.
+    """
+
+    reference: str
+    token: str
+    amount: Decimal
+    currency: str
+    description: str
+
+
+@runtime_checkable
+class RecurringProvider(Protocol):
+    """A provider that can charge a card the customer already saved.
+
+    A third shape, and separate for the same reason `CheckoutProvider` is
+    separate from `PaymentProvider`: this is a *merchant-initiated* charge with
+    nobody's browser involved, and a provider may support hosted checkout
+    without supporting it. `ManualProvider` cannot do this and should not have
+    to raise `NotImplementedError` to say so.
+
+    Implementing this protocol is not the same as being able to use it. A
+    provider may require merchant-level capability that a given account does
+    not have, which is why `RecurringUnavailableError` exists as a distinct
+    outcome from "the request failed".
+    """
+
+    @property
+    def name(self) -> str:
+        """Stored on the payment, so a row says who handled it."""
+        ...
+
+    @property
+    def can_charge_saved_methods(self) -> bool:
+        """Whether this deployment is configured to charge without a customer.
+
+        False is a normal, supported state: it means renewals are collected by
+        asking the customer to pay an invoice rather than by debiting a card.
+        Callers check this instead of catching an exception, because "we do not
+        do that here" is a configuration fact rather than a failure.
+        """
+        ...
+
+    def verify_token_callback(
+        self,
+        *,
+        payload: bytes,
+        signature: str | None,
+    ) -> SavedPaymentMethod:
+        """Authenticate a saved-card notification and read the card out of it.
+
+        Separate from `verify_callback` because providers sign these
+        differently - a different field set, and therefore a different string.
+        Fails closed on every path, exactly as the transaction one does.
+        """
+        ...
+
+    async def charge_saved_method(self, request: SavedMethodCharge) -> str:
+        """Debit a stored card and return the provider's reference for it.
+
+        The outcome arrives at the callback endpoint like any other payment,
+        so this returns only what the attempt was called - not whether it
+        worked. A provider that answered "collected" here would be asking to be
+        believed without a signature.
+
+        Raises `RecurringUnavailableError` when the account cannot do this at
+        all, and `ProviderError` when it can and the attempt failed.
+        """
+        ...
+
+
 class CallbackVerificationError(Exception):
     """A callback could not be authenticated as coming from the provider.
 
     Deliberately not an `ExternalServiceError`: nothing external failed. Either
     somebody forged a request, or the deployment's signing secret is wrong, and
     both are refusals rather than outages.
+    """
+
+
+class RecurringUnavailableError(Exception):
+    """This account cannot charge a saved card, however well the code works.
+
+    Deliberately not a `ProviderError`. Nothing failed and nothing is
+    misconfigured on our side: the merchant account lacks a capability the
+    provider gates, and no retry, credential or code change here will alter
+    that. Callers treat it as "collect this renewal the other way" rather than
+    as an outage, so a deployment without the capability bills exactly as it
+    did before.
     """

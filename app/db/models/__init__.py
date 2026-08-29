@@ -94,6 +94,7 @@ from .media import UNRESOLVED_MEDIA_STATUSES, MediaStatus, MessageMedia
 from .membership import Membership
 from .password_reset import PasswordResetToken
 from .payment_event import PaymentEvent
+from .payment_method import PaymentMethod, PaymentMethodStatus
 from .sentiment import (
     PRIORITY_RANK,
     SENTIMENT_PRIORITY,
@@ -205,6 +206,8 @@ __all__ = [
     "PasswordResetToken",
     "Payment",
     "PaymentEvent",
+    "PaymentMethod",
+    "PaymentMethodStatus",
     "PaymentStatus",
     "Plan",
     "PlatformRole",

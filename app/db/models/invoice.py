@@ -31,9 +31,11 @@ from enum import StrEnum
 from typing import Any, Final
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -221,6 +223,18 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=True,
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # How many times the platform has tried to debit a card for this invoice.
+    # On the invoice rather than the subscription because it counts attempts at
+    # collecting *this* bill: a customer who fixes their card next month starts
+    # from zero on next month's invoice, which is what anybody would expect.
+    collection_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # When the next automatic attempt becomes due. NULL means "not scheduled",
+    # which is the state for an invoice nobody is chasing and for one whose
+    # attempts have run out.
+    next_collection_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     @property
     def is_terminal(self) -> bool:
@@ -338,6 +352,20 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # coexist.
     idempotency_key: Mapped[str | None] = mapped_column(
         String(MAX_IDEMPOTENCY_KEY_LENGTH),
+        nullable=True,
+    )
+    # Whether a person was at a payment page for this attempt, or the platform
+    # debited a card on file. Recorded because the two are different events to
+    # a customer and to a card scheme: one they did, one happened to them, and
+    # a dispute turns on which.
+    is_automatic: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # The card this attempt used, when it was taken automatically. SET NULL
+    # rather than CASCADE: a payment outlives the card that made it, and the
+    # record of what was collected must not disappear when somebody removes a
+    # card from their account.
+    payment_method_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("payment_methods.id", ondelete="SET NULL"),
         nullable=True,
     )
 

@@ -55,8 +55,11 @@ from app.integrations.billing.checkout import (
     CheckoutRequest,
     CheckoutSession,
     EventKind,
+    RecurringUnavailableError,
     RefundOutcome,
     RefundRequest,
+    SavedMethodCharge,
+    SavedPaymentMethod,
 )
 
 logger = get_logger(__name__)
@@ -93,6 +96,29 @@ INTENTION_PATH: Final = "/v1/intention/"
 # for a transaction that has not settled yet - deliberately not called here,
 # see `PaymobProvider.refund`.
 REFUND_PATH: Final = "/api/acceptance/void_refund/refund"
+# Charging a card the customer already saved, without them present. Documented
+# at developers.paymob.com/paymob-docs/developers/pay-with-saved-cards/mit
+# (read 2026-08-29): create an intention against a **Moto** integration, take
+# `payment_keys[0].key` from the response, then POST the card token and that
+# payment token here.
+PAY_PATH: Final = "/api/acceptance/payments/pay"
+
+# The fields a *card token* callback is signed over, in the documented order.
+# A different set and therefore a different string from a transaction
+# callback - which is why saved cards need their own verification rather than
+# being squeezed through `verify_callback`.
+# developers.paymob.com/paymob-docs/developers/webhook-callbacks-and-hmac/hmac/hmac-for-card-tokens
+# (read 2026-08-29).
+TOKEN_HMAC_FIELDS: Final[tuple[str, ...]] = (
+    "card_subtype",
+    "created_at",
+    "email",
+    "id",
+    "masked_pan",
+    "merchant_id",
+    "order_id",
+    "token",
+)
 
 # What each reported state means for the payment row. Voiding and refunding
 # both leave a payment that was collected and given back; the difference is
@@ -185,9 +211,30 @@ def hmac_message(transaction: dict[str, Any]) -> str:
 
 def hmac_signature(transaction: dict[str, Any], *, secret: str) -> str:
     """HMAC-SHA512 of the signed string, hex encoded, as documented."""
+    return _digest(hmac_message(transaction), secret=secret)
+
+
+def token_hmac_message(token: dict[str, Any]) -> str:
+    """The exact string Paymob signs for a card-token callback.
+
+    Eight fields rather than twenty, in their own documented order. Public and
+    separately testable for the same reason `hmac_message` is: the
+    documentation publishes a worked example, and a test pins this function
+    against it so a reordered field fails here rather than against a live
+    merchant account.
+    """
+    return "".join(_canonical(_dig(token, field)) for field in TOKEN_HMAC_FIELDS)
+
+
+def token_hmac_signature(token: dict[str, Any], *, secret: str) -> str:
+    """HMAC-SHA512 of the card-token string, hex encoded, as documented."""
+    return _digest(token_hmac_message(token), secret=secret)
+
+
+def _digest(message: str, *, secret: str) -> str:
     return hmac.new(
         secret.encode("utf-8"),
-        hmac_message(transaction).encode("utf-8"),
+        message.encode("utf-8"),
         hashlib.sha512,
     ).hexdigest()
 
@@ -204,6 +251,70 @@ def _to_cents(amount: Decimal) -> int:
     if cents != cents.to_integral_value():
         raise ProviderError("An amount must be a whole number of cents.")
     return int(cents)
+
+
+def _optional_str(value: Any) -> str | None:
+    """A payload field as a string, or None when the provider omitted it."""
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
+def _callback_object(payload: bytes, *, expected: str) -> dict[str, Any]:
+    """The `obj` of a callback of the expected `type`, or a refusal.
+
+    Shared by both verification paths so the parsing rules cannot drift apart,
+    and so neither can be persuaded to read a body of the wrong kind: a card
+    token callback checked against the transaction field list would be
+    verifying a signature over the wrong string, which is not verification.
+    """
+    try:
+        document = json.loads(payload)
+    except ValueError as error:
+        raise CallbackVerificationError("The callback body was not JSON.") from error
+    if not isinstance(document, dict):
+        raise CallbackVerificationError("The callback body was not an object.")
+    if document.get("type") != expected:
+        raise CallbackVerificationError(f"The callback was not a {expected} notification.")
+
+    obj = document.get("obj")
+    if not isinstance(obj, dict):
+        raise CallbackVerificationError("The callback carried no object.")
+    return obj
+
+
+def callback_type(payload: bytes) -> str | None:
+    """What kind of callback this is, without authenticating it.
+
+    Read *before* verification purely to choose which signature scheme applies,
+    and therefore trusted for nothing else: a body claiming to be a card token
+    is still checked against the card-token signature, so lying about the type
+    only changes which way it fails.
+    """
+    try:
+        document = json.loads(payload)
+    except ValueError:
+        return None
+    if not isinstance(document, dict):
+        return None
+    kind = document.get("type")
+    return kind if isinstance(kind, str) else None
+
+
+def _first_payment_key(intention: dict[str, Any]) -> str | None:
+    """`payment_keys[0].key` from an intention response.
+
+    Documented as the token the pay request needs. Read defensively: a 2xx
+    without it is a provider failure rather than something to send onward.
+    """
+    keys = intention.get("payment_keys")
+    if not isinstance(keys, list) or not keys:
+        return None
+    first = keys[0]
+    if not isinstance(first, dict):
+        return None
+    key = first.get("key")
+    return key if isinstance(key, str) and key else None
 
 
 def _from_cents(value: Any) -> Decimal:
@@ -230,6 +341,7 @@ class PaymobProvider:
         public_key: str,
         hmac_secret: str,
         integration_ids: list[int | str],
+        moto_integration_id: int | None = None,
         region: str = "egypt",
         notification_url: str | None = None,
         redirection_url: str | None = None,
@@ -247,6 +359,11 @@ class PaymobProvider:
         self._public_key = public_key
         self._hmac_secret = hmac_secret
         self._integration_ids = integration_ids
+        # Separate from `integration_ids` on purpose. Those are the methods a
+        # customer may choose at checkout; this one is never offered to anybody
+        # - it exists solely so a renewal can be taken from a saved card, and
+        # Paymob issues it as a distinct integration type.
+        self._moto_integration_id = moto_integration_id
         self._api_base, self._checkout_base = REGIONS[region]
         self._notification_url = notification_url
         self._redirection_url = redirection_url
@@ -471,16 +588,7 @@ class PaymobProvider:
         if not signature:
             raise CallbackVerificationError("The callback carried no signature.")
 
-        try:
-            document = json.loads(payload)
-        except ValueError as error:
-            raise CallbackVerificationError("The callback body was not JSON.") from error
-        if not isinstance(document, dict):
-            raise CallbackVerificationError("The callback body was not an object.")
-
-        transaction = document.get("obj")
-        if not isinstance(transaction, dict):
-            raise CallbackVerificationError("The callback carried no transaction.")
+        transaction = _callback_object(payload, expected="TRANSACTION")
 
         expected = hmac_signature(transaction, secret=self._hmac_secret)
         if not hmac.compare_digest(expected, signature):
@@ -568,6 +676,127 @@ class PaymobProvider:
             ),
             failure_reason=failure_reason,
         )
+
+    @property
+    def can_charge_saved_methods(self) -> bool:
+        """Whether this deployment can debit a card with nobody present.
+
+        True only when a Moto integration id is configured, because Paymob
+        gates merchant-initiated transactions on one: the MIT documentation
+        states the intention must use a Moto card integration, and the
+        Subscriptions Module says the same of a subscription plan.
+
+        A Moto integration is issued by Paymob per merchant and cannot be
+        created from the dashboard alongside the ordinary card types, so this
+        being False is an account fact rather than a mistake in configuration.
+        Renewals fall back to invoicing the customer, which is how this product
+        billed before saved cards existed.
+        """
+        return self._moto_integration_id is not None
+
+    def verify_token_callback(
+        self,
+        *,
+        payload: bytes,
+        signature: str | None,
+    ) -> SavedPaymentMethod:
+        """Authenticate a saved-card notification and read the card out of it.
+
+        Arrives at the same endpoint as a transaction callback, distinguished
+        by `type: "TOKEN"`, and signed over a different set of fields - so it
+        cannot be verified by `verify_callback` and must not be, since a
+        signature checked against the wrong field list is not a check.
+
+        Fails closed on every path, exactly as the transaction one does.
+        """
+        document = _callback_object(payload, expected="TOKEN")
+        expected = token_hmac_signature(document, secret=self._hmac_secret)
+        if not signature or not hmac.compare_digest(expected, signature):
+            raise CallbackVerificationError("The card token signature did not match.")
+
+        token = document.get("token")
+        if not isinstance(token, str) or not token:
+            raise CallbackVerificationError("The card token callback carried no token.")
+
+        return SavedPaymentMethod(
+            token=token,
+            provider_token_id=str(document.get("id") or ""),
+            # The provider's own masking. Four digits, never a card number -
+            # see `PaymentMethod`, which has nowhere to put one.
+            masked_pan=_optional_str(document.get("masked_pan")),
+            brand=_optional_str(document.get("card_subtype")),
+            # Ties the card to the checkout that saved it, which is how it is
+            # matched to a workspace.
+            order_reference=_optional_str(document.get("order_id")),
+            email=_optional_str(document.get("email")),
+        )
+
+    async def charge_saved_method(self, request: SavedMethodCharge) -> str:
+        """Debit a saved card, in the two documented steps.
+
+        An intention against the Moto integration, then the pay request
+        carrying the card token and the payment token that intention returned.
+        The *outcome* is not here: it arrives at the callback endpoint like any
+        other payment, which is why this returns the provider's reference and
+        nothing about success.
+        """
+        if self._moto_integration_id is None:
+            raise RecurringUnavailableError(
+                "This Paymob account has no Moto integration, which is what "
+                "merchant-initiated charges require."
+            )
+
+        intention = await self._post(
+            INTENTION_PATH,
+            {
+                "amount": _to_cents(request.amount),
+                "currency": request.currency,
+                "payment_methods": [self._moto_integration_id],
+                "special_reference": request.reference,
+                "items": [
+                    {
+                        "name": request.description,
+                        "amount": _to_cents(request.amount),
+                        "quantity": 1,
+                    }
+                ],
+                "billing_data": {
+                    "email": UNKNOWN_BILLING_FIELD,
+                    "first_name": UNKNOWN_BILLING_FIELD,
+                    "last_name": UNKNOWN_BILLING_FIELD,
+                    "phone_number": UNKNOWN_BILLING_FIELD,
+                },
+                **({"notification_url": self._notification_url} if self._notification_url else {}),
+            },
+        )
+
+        payment_token = _first_payment_key(intention)
+        if payment_token is None:
+            raise ProviderError("Paymob did not return a payment token for the saved card.")
+
+        paid = await self._post(
+            PAY_PATH,
+            {
+                "source": {"identifier": request.token, "subtype": "TOKEN"},
+                "payment_token": payment_token,
+            },
+        )
+
+        reference = paid.get("id")
+        if reference is None:
+            raise ProviderError("Paymob did not identify the saved-card transaction.")
+
+        logger.info(
+            "billing.paymob_saved_method_charged",
+            extra={
+                "event": "billing.paymob_saved_method_charged",
+                "reference": request.reference,
+                "transaction_id": str(reference),
+                # Never the card token: it is a bearer value for charging that
+                # card, and a log is not where it belongs.
+            },
+        )
+        return str(reference)
 
     async def refund(self, request: RefundRequest) -> RefundOutcome:
         """Reverse a collected payment through the documented refund endpoint.

@@ -28,6 +28,8 @@ from app.core.logging import get_logger
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import Plan, Subscription, SubscriptionStatus
 from app.db.session import Database
+from app.integrations.billing import build_checkout_provider
+from app.integrations.billing.checkout import RecurringProvider
 from app.repositories.billing_repository import (
     PlanRepository,
     PlatformSubscriptionRepository,
@@ -38,6 +40,7 @@ from app.services.audit_service import AuditTrail
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
 from app.services.invoice_service import InvoiceService
+from app.services.recurring_service import RecurringService
 from app.services.subscription_service import roll_over
 
 logger = get_logger(__name__)
@@ -157,10 +160,74 @@ class BillingWorker:
                     },
                 )
 
+            # Collect before chasing. An invoice a saved card settles this
+            # sweep should never also produce a past-due notice in the same
+            # pass; charging first means the callback has a chance to arrive
+            # and the chase sees an invoice that is already being dealt with.
+            handled += await self._collect_renewals(session, now=moment)
             handled += await self._chase_unpaid(session, now=moment)
 
         logger.info("billing.sweep_completed", extra={"handled": handled})
         return handled
+
+    async def _collect_renewals(self, session: AsyncSession, *, now: datetime) -> int:
+        """Take due renewals from saved cards, where that is possible at all.
+
+        Silent and free when the provider cannot charge saved cards, which is
+        the ordinary state: the capability is gated per merchant, and without
+        it this returns immediately and renewals are collected by invoicing the
+        customer exactly as before.
+
+        Every refusal lives in `RecurringService`, not here. This is the query
+        and the loop; what may be charged is a billing decision and belongs
+        with the rules that make it.
+        """
+        provider = build_checkout_provider(self._settings)
+        if provider is None or not isinstance(provider, RecurringProvider):
+            return 0
+        if not provider.can_charge_saved_methods:
+            return 0
+
+        invoices = await PlatformInvoiceRepository(session).collectible(
+            before=now,
+            limit=self._claim_limit,
+        )
+        if not invoices:
+            return 0
+
+        subscriptions = PlatformSubscriptionRepository(session)
+        charged = 0
+        for invoice in invoices:
+            subscription = await subscriptions.get_by_id(invoice.subscription_id)
+            service = RecurringService(
+                session,
+                tenant_id=invoice.tenant_id,
+                provider=provider,
+            )
+            try:
+                outcome = await service.collect(invoice, subscription=subscription, now=now)
+            except Exception:
+                # One workspace's provider trouble must not strand every other
+                # renewal behind it. Logged loudly and left for the next sweep,
+                # which is the same contract `_invoice` follows.
+                logger.exception(
+                    "billing.recurring_collection_failed",
+                    extra={"invoice_id": str(invoice.id)},
+                )
+                continue
+
+            if outcome.charged:
+                charged += 1
+            elif outcome.reason is not None:
+                logger.info(
+                    "billing.recurring_skipped",
+                    extra={
+                        "event": "billing.recurring_skipped",
+                        "invoice_id": str(invoice.id),
+                        "reason": outcome.reason,
+                    },
+                )
+        return charged
 
     async def _chase_unpaid(self, session: AsyncSession, *, now: datetime) -> int:
         """Mark workspaces behind when a renewal has gone unpaid for too long.
