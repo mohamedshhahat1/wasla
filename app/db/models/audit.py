@@ -120,6 +120,38 @@ class AuditAction(StrEnum):
     # one account is the signal worth alerting on whatever the reason says.
     EMAIL_VERIFICATION_FAILED = "email_verification_failed"
 
+    # Signing in through an external issuer, and attaching one to an account
+    # (docs/GOOGLE_OAUTH.md).
+    #
+    # Password login is not in this vocabulary and this is, which is a real
+    # asymmetry rather than an oversight. A federated login means somebody
+    # *else* vouched for the person, and "which issuer let someone into my
+    # account, and when" is exactly the question asked after a Google account
+    # turns out to have been compromised. A password login is self-evidenced;
+    # there is no third party to ask about. If password login is ever audited
+    # too, these stay as they are.
+    GOOGLE_LOGIN_SUCCEEDED = "google_login_succeeded"
+    # Recorded only when the refusal names an account: a disabled user, or an
+    # address that already belongs to somebody who must link Google explicitly.
+    # A bad signature, a stale nonce, an unknown key or a failed code exchange
+    # get a log line and no row - the callback is unauthenticated, so an audit
+    # write a stranger can trigger is a way to flood a trail that colleagues
+    # have to read. `meta["reason"]` carries which refusal it was.
+    GOOGLE_LOGIN_FAILED = "google_login_failed"
+    # Something new can now open this account. The archetypal audit question,
+    # and the reason linking is authenticated: the actor is always known.
+    GOOGLE_IDENTITY_LINKED = "google_identity_linked"
+    # An authenticated attempt to attach an identity that was refused -
+    # typically because the Google account already belongs to somebody else.
+    # Worth a row even though the caller learns almost nothing from the
+    # response: the *other* account's owner may later want to know that
+    # somebody tried, and that is a question only the trail can answer.
+    GOOGLE_IDENTITY_LINK_FAILED = "google_identity_link_failed"
+    # Detaching an issuer. Recorded because it changes how an account can be
+    # opened, and because it is the step before an account becomes
+    # password-only - or unreachable, which the service refuses.
+    GOOGLE_IDENTITY_UNLINKED = "google_identity_unlinked"
+
     # The channel a business talks to its customers through
     WHATSAPP_ACCOUNT_CONNECTED = "whatsapp_account_connected"
     WHATSAPP_ACCOUNT_DISABLED = "whatsapp_account_disabled"

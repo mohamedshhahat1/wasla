@@ -1,6 +1,6 @@
 """Where rate limits are applied, and to whom.
 
-Three policies, and the identity each counts by is the decision that matters
+Four policies, and the identity each counts by is the decision that matters
 more than the numbers (ADR-032).
 
 **Authentication** counts by client address. The caller has no identity yet -
@@ -8,6 +8,16 @@ that is what they are trying to establish - so the only thing to count is where
 the request came from. It is the weakest identity in the system, and it is still
 the right one here: the traffic this stops is a script trying passwords, and a
 script has an address.
+
+**Google sign-in** counts by client address too, on its own budget. Separate
+from the one above rather than shared, which is a real trade: an attacker gets
+two buckets instead of one, in exchange for a burst of failed callbacks not
+consuming the budget that somebody signing in with a password from the same
+address needs. Acceptable because both are per-address anyway, and the control
+that actually stops credential stuffing is the per-*account* limit inside
+`AuthService.login`. Worth knowing: a Google callback is the most expensive
+unauthenticated request in the system, because it makes outbound calls to
+Google, so limiting it protects our own dependency as much as our own account.
 
 **Workspace traffic** counts by workspace, not by user. The limit protects
 shared platform resources, and a workspace with fifty colleagues legitimately
@@ -97,9 +107,15 @@ def _limit_by_client(
     """Build a dependency limiting by client address.
 
     Every policy counted this way sits in front of a credential - signing in,
-    refreshing, changing a password, redeeming an invitation - so all of them
-    carry the process-local fallback. A Redis outage degrades the limit; it does
-    not remove it (ADR-040).
+    refreshing, changing a password, redeeming an invitation, starting or
+    finishing a Google authorization - so all of them carry the process-local
+    fallback. A Redis outage degrades the limit; it does not remove it
+    (ADR-040).
+
+    Note that the Google *state store* takes the opposite position and refuses
+    outright when Redis is down (ADR-051). The two are not inconsistent: a
+    degraded limiter still slows an attacker, whereas a process-local
+    approximation of a single-use replay control is not weaker but absent.
     """
 
     async def guard(
@@ -154,6 +170,13 @@ auth_rate_limit = _limit_by_client(
     "auth",
     lambda settings: settings.rate_limit_auth_per_minute,
 )
+# Its own bucket, sharing the authentication *budget* without sharing the
+# counter. No new setting: the number that is right for "attempts to establish
+# an identity per minute" is the same number.
+google_oauth_rate_limit = _limit_by_client(
+    "auth:google",
+    lambda settings: settings.rate_limit_auth_per_minute,
+)
 workspace_rate_limit = _limit_by_workspace(
     "workspace",
     lambda settings: settings.rate_limit_workspace_per_minute,
@@ -164,6 +187,7 @@ campaign_rate_limit = _limit_by_workspace(
 )
 
 AuthRateLimit = Annotated[RateLimitDecision | None, Depends(auth_rate_limit)]
+GoogleOAuthRateLimit = Annotated[RateLimitDecision | None, Depends(google_oauth_rate_limit)]
 WorkspaceRateLimit = Annotated[RateLimitDecision | None, Depends(workspace_rate_limit)]
 CampaignRateLimit = Annotated[RateLimitDecision | None, Depends(campaign_rate_limit)]
 
@@ -171,10 +195,12 @@ __all__ = [
     "ActiveWorkspace",
     "AuthRateLimit",
     "CampaignRateLimit",
+    "GoogleOAuthRateLimit",
     "RateLimiterDep",
     "WorkspaceRateLimit",
     "auth_rate_limit",
     "campaign_rate_limit",
     "client_identity",
+    "google_oauth_rate_limit",
     "workspace_rate_limit",
 ]

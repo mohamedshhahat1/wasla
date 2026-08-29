@@ -29,7 +29,16 @@ _EMAIL_SHAPE: Final = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+$")
 # The only schemes an emailed link may be built on. `javascript:` and `data:`
 # are the reason this is an allowlist: APP_PUBLIC_URL is prefixed onto every
 # reset and invitation link, so whatever it holds is what a recipient clicks.
+# The Google redirect URI is checked against the same set, for the same reason.
 _PUBLIC_URL_SCHEMES: Final = frozenset({"http", "https"})
+# Every OAuth client id Google issues ends with this. Checking it catches the
+# two paste errors that actually happen - the secret in the id field, or the
+# bare project number - at the price of refusing to boot if Google ever changes
+# a suffix that has been stable for over a decade. Worth it: the alternative
+# failure is every login broken with the only error message living on Google's
+# domain, which is far harder to diagnose than a container that says why.
+_GOOGLE_CLIENT_ID_SUFFIX: Final = ".apps.googleusercontent.com"
+
 # Anything that is a number at all, sign included, so a negative integration id
 # is refused as an out-of-range number rather than accepted as a method name.
 _SIGNED_INTEGER: Final = re.compile(r"[+-]?\d+")
@@ -84,6 +93,80 @@ def _public_url_problems(value: str) -> list[str]:
         # reset link is a reset that cannot be completed.
         return ["APP_PUBLIC_URL must be an origin and optional path, with no query or fragment"]
     return []
+
+
+def _google_problems(
+    *,
+    client_id: str | None,
+    client_secret: str | None,
+    redirect_uri: str | None,
+    require_https: bool,
+) -> list[str]:
+    """Whether Google sign-in is configured well enough to be switched on.
+
+    Checked at startup rather than discovered at the first login, because every
+    failure in here is total and invisible from this side: a wrong client id or
+    redirect uri means Google refuses every authorization request, and the only
+    error message the user ever sees is on Google's domain and says nothing
+    about which of our values was wrong.
+
+    Note what is *not* validated, because it is not configuration. The issuer is
+    a constant in the verification module - a configurable trust anchor is not a
+    feature. The audience is the client id itself, so there is nothing separate
+    to check and no way for the two to disagree.
+    """
+    problems: list[str] = []
+
+    if not client_id:
+        problems.append("GOOGLE_CLIENT_ID must be set when GOOGLE_ENABLED is true")
+    elif not client_id.strip().endswith(_GOOGLE_CLIENT_ID_SUFFIX):
+        problems.append(
+            "GOOGLE_CLIENT_ID must be the OAuth client id issued by Google, "
+            f"which ends in {_GOOGLE_CLIENT_ID_SUFFIX}"
+        )
+
+    if not client_secret:
+        problems.append("GOOGLE_CLIENT_SECRET must be set when GOOGLE_ENABLED is true")
+    elif client_id and client_secret.strip() == client_id.strip():
+        # A paste error worth naming, because the resulting failure is an
+        # `invalid_client` from Google that looks like a Google problem.
+        problems.append("GOOGLE_CLIENT_SECRET must not be the same value as GOOGLE_CLIENT_ID")
+
+    if not redirect_uri:
+        problems.append("GOOGLE_REDIRECT_URI must be set when GOOGLE_ENABLED is true")
+        return problems
+
+    parsed = urlparse(redirect_uri.strip())
+    scheme = parsed.scheme.lower()
+    if scheme not in _PUBLIC_URL_SCHEMES:
+        # The allowlist is what refuses `javascript:`, `data:` and a
+        # protocol-relative `//host/path`, which urlparse reports with an empty
+        # scheme. This value is never request input - no code path reads a
+        # redirect target from a caller - so this guards a typo in deployment
+        # configuration rather than an attack.
+        problems.append(
+            "GOOGLE_REDIRECT_URI must be an http or https URL; it is handed to "
+            "Google as the address a browser is returned to"
+        )
+    elif require_https and scheme != "https":
+        problems.append(
+            "GOOGLE_REDIRECT_URI must be https in production: a single-use "
+            "authorization code travels back to it in the query string"
+        )
+
+    if not parsed.netloc:
+        problems.append(
+            "GOOGLE_REDIRECT_URI must include a host, such as "
+            "https://app.example.com/auth/google/callback"
+        )
+
+    if parsed.fragment:
+        problems.append(
+            "GOOGLE_REDIRECT_URI must not contain a fragment: RFC 6749 forbids "
+            "one and Google refuses to register it"
+        )
+
+    return problems
 
 
 # The only algorithms this application can be configured with. HMAC only:
@@ -342,6 +425,28 @@ class Settings(BaseSettings):
     # wants no second chances is making a defensible choice.
     email_verification_max_attempts: int = Field(default=5, ge=1, le=10)
 
+    # Google sign-in (ADR-047, docs/GOOGLE_OAUTH.md). Off by default, and off
+    # means the endpoints answer 404: a feature nobody configured does not
+    # exist in this deployment, which is a different statement from 503's "it
+    # is temporarily unwell, try again".
+    #
+    # Only four settings. The issuer is a constant in the verification module,
+    # because a configurable trust anchor is not a feature anyone wants, and
+    # the audience is the client id below rather than a fifth setting that
+    # could disagree with it.
+    google_enabled: bool = False
+    google_client_id: str | None = None
+    # Read by the API process and used in exactly one place: the direct
+    # server-to-server token exchange. Never a build argument, never in an
+    # image layer, never in a frontend bundle, never in a response body
+    # including /health, and never logged.
+    google_client_secret: str | None = None
+    # Where Google returns the browser. Configuration, never request input:
+    # nothing in this application reads a redirect target from a caller, which
+    # is what makes open redirection structurally impossible here rather than
+    # something a validator has to keep catching.
+    google_redirect_uri: str | None = None
+
     @field_validator("paymob_integration_ids", mode="before")
     @classmethod
     def _parse_integration_ids(cls, value: Any) -> Any:
@@ -469,6 +574,12 @@ class Settings(BaseSettings):
         "public" key can sign. There is no key-pair configuration in this
         application, so an asymmetric algorithm cannot be configured correctly -
         only incorrectly.
+
+        Note that Google ID tokens *are* RS256, and are verified somewhere else
+        entirely: `app/integrations/google/` names its own algorithm as a
+        literal and never reads this setting. The two token families are
+        deliberately not interchangeable - different verifier, different key
+        material, different issuer, different required claims.
 
         Refused at startup, so a misconfiguration is a container that will not
         boot rather than an authentication system that quietly stops meaning
@@ -645,6 +756,19 @@ class Settings(BaseSettings):
                 )
 
             problems.extend(self._paymob_key_problems())
+
+        if self.google_enabled and not self.is_testing:
+            # Fail closed the same way email does, and for a sharper reason:
+            # half-configured Google sign-in is a button that always fails, and
+            # the only error message lives on Google's domain.
+            problems.extend(
+                _google_problems(
+                    client_id=self.google_client_id,
+                    client_secret=self.google_client_secret,
+                    redirect_uri=self.google_redirect_uri,
+                    require_https=self.is_production,
+                )
+            )
 
         if problems:
             raise ValueError(f"invalid {self.environment} configuration: " + "; ".join(problems))

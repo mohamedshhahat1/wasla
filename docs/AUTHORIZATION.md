@@ -108,6 +108,11 @@ authoritative answer is always the dependency tree.
 | `GET` | `/api/v1/audit-logs` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/auth/email/verification/send` | **USER** | no | account | - |
 | `POST` | `/api/v1/auth/email/verification/verify` | **USER** | no | account | - |
+| `POST` | `/api/v1/auth/google/authorize` | **ANON** | no | client | - |
+| `POST` | `/api/v1/auth/google/callback` | **ANON** | no | client | - |
+| `DELETE` | `/api/v1/auth/identities/google` | **USER** | no | client | - |
+| `POST` | `/api/v1/auth/identities/google/authorize` | **USER** | no | client | - |
+| `POST` | `/api/v1/auth/identities/google/link` | **USER** | no | client | - |
 | `POST` | `/api/v1/auth/login` | **ANON** | no | client | - |
 | `POST` | `/api/v1/auth/logout` | **ANON** | no | client | - |
 | `POST` | `/api/v1/auth/logout-all` | **USER** | no | none | - |
@@ -206,7 +211,7 @@ authoritative answer is always the dependency tree.
 
 <!-- 107 operations; 10 unauthenticated -->
 
-### The fourteen unauthenticated routes
+### The sixteen unauthenticated routes
 
 Eleven under `/api/v1`, plus the three health endpoints. Every one is
 deliberate, and each carries a different justification.
@@ -236,6 +241,8 @@ is what removes the enumeration surface rather than mitigating it (ADR-043).
 | `POST /auth/logout` | Revoking a token you hold needs no second credential | Client-address limit — see §7 |
 | `POST /auth/password-reset/request` | The caller cannot sign in; that is what it is for | Client-address limit; one constant 202 whatever the address is |
 | `POST /auth/password-reset/confirm` | The emailed token in the body is the authorization | Client-address limit; one constant refusal for every dead token |
+| `POST /auth/google/authorize` | Somebody with no account starts here; that is the point of it | Google client-address limit, on its own bucket (ADR-032); writes only a single-use flow record with a short TTL |
+| `POST /auth/google/callback` | The signed Google ID token is the authorization | Google client-address limit; RS256 signature checked against Google's published keys, plus a single-use server-side state and nonce (ADR-051) |
 | `POST /invitations/accept` | The invitee may have no account yet; the token in the body is the authorization | Client-address limit |
 | `GET /webhooks/whatsapp` | Meta's subscription challenge | Verify token, compared in constant time |
 | `POST /webhooks/whatsapp` | Meta cannot hold a credential of ours | HMAC-SHA256 signature; **never** rate-limited (ADR-032); 1 MB body cap |
@@ -361,7 +368,7 @@ that was supposed to prove "every workspace route resolves the workspace
 dependency" was proving it about somebody else's code.
 
 **Fixed** by running the generator with `PYTHONPATH` pinned to the tree under
-review, and cross-checked against `app.openapi()` — 106 operations walked, 106
+review, and cross-checked against `app.openapi()` — 124 operations walked, 124
 in the schema, nothing missing in either direction. The lesson generalises: a
 review tool that reads the wrong tree fails silently and in the reassuring
 direction.
@@ -497,7 +504,7 @@ None of these is a vulnerability. Both missing webhooks verify a provider
 signature and refuse with 403 before touching the database — checked live
 against the running application during this review, not merely read. The defect
 is the document: an authorization matrix is what a reviewer trusts *instead of*
-reading 119 routes, and one that understates the open surface by two write
+reading 124 routes, and one that understates the open surface by two write
 endpoints is worse than none.
 
 **Root cause: the table was maintained by hand.** It had already been wrong

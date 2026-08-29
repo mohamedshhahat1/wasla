@@ -241,6 +241,11 @@ class AuthService:
         if user is None or user.hashed_password is None:
             # Spend the time a real verification would: response time discloses
             # whether an address is registered just as a message would.
+            #
+            # `hashed_password is None` is also what makes a Google-only account
+            # unreachable by password without a single extra line: there is no
+            # hash to verify, so the attempt is refused here, in the same breath
+            # and after the same delay as an address that does not exist.
             spend_verification_time(password)
             raise AuthenticationError(INVALID_CREDENTIALS)
 
@@ -283,6 +288,50 @@ class AuthService:
             local_fallback=True,
         )
         await self._limiter.enforce(policy, account_identity(email))
+
+    async def authenticate_federated(
+        self,
+        *,
+        user: User,
+        workspace_slug: str | None = None,
+    ) -> AuthenticatedSession:
+        """Open a session for somebody an external issuer has vouched for.
+
+        The counterpart to :meth:`login`, and deliberately the only other public
+        way into :meth:`_issue`. Everything that makes a session a session
+        happens here rather than in the caller: the account-status check, the
+        workspace resolution, the current ``token_version``, the same claims,
+        the same issuer, the same rotation and reuse detection on the refresh
+        token that comes out of it. A federated session is indistinguishable
+        from a password session downstream, which is precisely what keeps every
+        existing authorization dependency, tenant isolation check and membership
+        rule applicable without any of them being taught that this exists.
+        Anything that had to be taught would be a place this could bypass it.
+
+        What this method does *not* do is decide who the user is. That proof
+        belongs to the caller, which is why the signature takes a ``User`` and
+        not an address: there is no argument here that could be a claim from a
+        stranger. Passing a user resolved from an email address in a token would
+        satisfy the type and defeat the design.
+
+        Naming the disabled account is safe for the same reason it is in
+        :meth:`login` - the caller has already proven control of an identity
+        linked to it, so this discloses nothing they did not know. It must not
+        become reachable from the address-collision path, where the caller has
+        proven control of a *mailbox* and nothing at all about the account.
+        """
+        if not user.is_active:
+            raise PermissionDeniedError("This account has been disabled.")
+
+        workspace = await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
+        logger.info(
+            "auth.federated_session_opened",
+            extra={
+                "event": "auth.federated_session_opened",
+                "user_id": str(user.id),
+            },
+        )
+        return self._issue(user=user, workspace=workspace)
 
     async def refresh(
         self,

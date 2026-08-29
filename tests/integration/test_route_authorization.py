@@ -41,6 +41,13 @@ OPEN_ROUTES: dict[tuple[str, str], str] = {
     ("POST", "/auth/logout"): "revoking a token you hold needs no second credential",
     ("POST", "/auth/password-reset/request"): "the caller cannot sign in",
     ("POST", "/auth/password-reset/confirm"): "the emailed token is the authorization",
+    # The two halves of a Google sign-in. Both must be reachable by somebody
+    # who has no account at all - which is the point of them - so neither can
+    # authenticate. Each carries `GoogleOAuthRateLimit`, counted by client
+    # address, and the callback additionally refuses anything but a
+    # server-verified Google signature over a single-use state (ADR-051).
+    ("POST", "/auth/google/authorize"): "somebody with no account starts here",
+    ("POST", "/auth/google/callback"): "the signed Google ID token is the authorization",
     ("POST", "/invitations/accept"): "the invitee may have no account yet",
     ("GET", "/webhooks/whatsapp"): "Meta's subscription challenge",
     ("POST", "/webhooks/whatsapp"): "Meta cannot hold a credential of ours",
@@ -64,6 +71,13 @@ ACCOUNT_OR_PLATFORM: frozenset[str] = frozenset(
         "/auth/password",
         "/auth/email/verification/send",
         "/auth/email/verification/verify",
+        # Connecting and disconnecting Google is about the account, not about
+        # work inside a workspace: a user with no membership at all must still
+        # be able to attach an identity, and a Google-only account created by
+        # first login is exactly such a user.
+        "/auth/identities/google/authorize",
+        "/auth/identities/google/link",
+        "/auth/identities/google",
     }
 )
 
@@ -137,7 +151,7 @@ def test_no_documented_open_route_has_quietly_been_closed(graph) -> None:
 
 def test_the_documented_count_matches_the_graph(graph) -> None:
     """`docs/AUTHORIZATION.md` states a number. This is that number."""
-    assert len(_open(graph)) == 14
+    assert len(_open(graph)) == 16
 
 
 def test_every_other_route_resolves_a_workspace_or_is_an_account_route(graph) -> None:

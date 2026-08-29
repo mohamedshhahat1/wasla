@@ -59,6 +59,11 @@ from .follow_up import (
     FollowUp,
     FollowUpStatus,
 )
+from .identity import (
+    MAX_PROVIDER_SUBJECT_LENGTH,
+    FederatedIdentity,
+    IdentityProvider,
+)
 from .invitation import TenantInvitation
 from .invoice import (
     TERMINAL_INVOICE_STATUSES,
@@ -136,6 +141,7 @@ __all__ = [
     "EMBEDDING_DIMENSIONS",
     "EVENT_UNITS",
     "MAX_ATTEMPTS",
+    "MAX_PROVIDER_SUBJECT_LENGTH",
     "MAX_RECIPIENT_ATTEMPTS",
     "MAX_SCORE",
     "MIN_SCORE",
@@ -179,8 +185,10 @@ __all__ = [
     "EmailStatus",
     "EmailSuppression",
     "EmailVerificationChallenge",
+    "FederatedIdentity",
     "FollowUp",
     "FollowUpStatus",
+    "IdentityProvider",
     "InvitationStatus",
     "Invoice",
     "InvoiceStatus",
