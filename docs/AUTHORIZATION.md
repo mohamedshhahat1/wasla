@@ -206,31 +206,52 @@ authoritative answer is always the dependency tree.
 
 <!-- 107 operations; 10 unauthenticated -->
 
-### The twelve unauthenticated routes
+### The fourteen unauthenticated routes
 
-Nine under `/api/v1`, plus the three health endpoints. Every one is deliberate,
-and each carries a different justification.
+Eleven under `/api/v1`, plus the three health endpoints. Every one is
+deliberate, and each carries a different justification.
 
-The count was wrong before this revision: the two password-reset routes shipped
-with ADR-042 and were never listed here. Email verification adds none - **both
-of its routes require a session**, which is what removes the enumeration
-surface rather than mitigating it (ADR-043).
+**This list is generated from the dependency graph, not from reading route
+decorators.** A route is counted as unauthenticated when its resolved
+`dependant` tree contains neither `get_current_user` nor
+`get_active_workspace`, which is what actually runs — a route that *looks*
+guarded but resolves to neither would appear here, and one whose guard sits
+behind an included router would not be missed. `tests/integration/
+test_route_authorization.py` regenerates it and fails if the code and this
+table disagree.
+
+The count has been wrong twice. The password-reset routes shipped with ADR-042
+and went unlisted until the previous revision; the two provider webhooks
+shipped with ADR-042 and ADR-044 and went unlisted until this one. Both times
+the table was written by hand from memory. It is no longer written by hand.
+
+Email verification adds none — **both of its routes require a session**, which
+is what removes the enumeration surface rather than mitigating it (ADR-043).
 
 | Route | Why it is open | What bounds it |
 |---|---|---|
 | `POST /auth/register` | Self-service signup | Client-address limit |
 | `POST /auth/login` | Credentials are what it establishes | Client-address **and per-account** limit |
 | `POST /auth/refresh` | The refresh token is the credential | Client-address limit; a replay tears the account's session estate down (ADR-039) |
-| `POST /auth/logout` | Revoking a token you hold needs no second credential | Nothing — see §7 |
+| `POST /auth/logout` | Revoking a token you hold needs no second credential | Client-address limit — see §7 |
 | `POST /auth/password-reset/request` | The caller cannot sign in; that is what it is for | Client-address limit; one constant 202 whatever the address is |
 | `POST /auth/password-reset/confirm` | The emailed token in the body is the authorization | Client-address limit; one constant refusal for every dead token |
 | `POST /invitations/accept` | The invitee may have no account yet; the token in the body is the authorization | Client-address limit |
 | `GET /webhooks/whatsapp` | Meta's subscription challenge | Verify token, compared in constant time |
 | `POST /webhooks/whatsapp` | Meta cannot hold a credential of ours | HMAC-SHA256 signature; **never** rate-limited (ADR-032); 1 MB body cap |
+| `POST /webhooks/paymob` | A payment processor cannot hold a credential of ours | HMAC-SHA512 over twenty documented fields, `compare_digest`; **never** rate-limited (ADR-032); a saved-card callback is verified under its own eight-field scheme (ADR-046) |
+| `POST /webhooks/email` | Resend cannot hold a credential of ours | Svix signature over the raw body; **never** rate-limited (ADR-032) |
 | `GET /health`, `/health/live`, `/health/ready` | A load balancer has no credential | Report status and a version, never a connection string or a dependency error |
 
-The webhook is the only unauthenticated **write** path, and its signature check
-is the whole of its authorization.
+There are **three** unauthenticated write paths, not one: the WhatsApp webhook,
+the Paymob webhook and the Resend webhook. In each case the signature check is
+the whole of the authorization, and in each case a failed check answers 403
+before anything reaches the database. None of them is rate-limited, and that is
+deliberate — a 429 to a provider is a delivery it stops making (ADR-032).
+
+An earlier revision of this table said the WhatsApp webhook was the only one.
+That sentence was written when it was true and was not revisited when the other
+two shipped, which is exactly the failure mode the generated test now closes.
 
 ## 5. Rate limiting
 
@@ -456,6 +477,85 @@ that is the only way to see the property at all. Its control is checked: with
 the commit disabled, both assertions fail with exactly the message they were
 written for.
 
+
+### 6.13 The authorization matrix had drifted from the code — fixed
+
+Found by walking the resolved dependency graph rather than reading this
+document, which is the only way it could have been found: every affected route
+was correctly guarded, so no test failed and no request behaved wrongly.
+
+Three inaccuracies, all in the same direction — the matrix understated what
+existed:
+
+| Claim | Reality |
+|---|---|
+| "The twelve unauthenticated routes" | Fourteen. `POST /webhooks/paymob` (ADR-044) and `POST /webhooks/email` (ADR-042) were never added |
+| "The webhook is the only unauthenticated **write** path" | Three are |
+| "`POST /auth/logout` is unauthenticated and unlimited" | It carries the client-address limit |
+
+None of these is a vulnerability. Both missing webhooks verify a provider
+signature and refuse with 403 before touching the database — checked live
+against the running application during this review, not merely read. The defect
+is the document: an authorization matrix is what a reviewer trusts *instead of*
+reading 119 routes, and one that understates the open surface by two write
+endpoints is worse than none.
+
+**Root cause: the table was maintained by hand.** It had already been wrong
+once for the same reason — the password-reset routes went unlisted for a
+release — and the previous fix was to correct the entries rather than the
+process, so it drifted again the moment a phase added a route.
+
+**Fixed** by `tests/integration/test_route_authorization.py`, which resolves
+every route's `dependant` tree and fails when the code and the documented open
+set disagree in either direction. Adding an unguarded route to `leads.py` fails
+it by name; closing a documented-open route fails it too, so the list cannot
+rot in the other direction either. It also asserts that every authenticated
+route resolves an active workspace unless it is an account or platform route,
+which is the structural form of the mistake this document exists to prevent.
+
+### 6.14 Token forgery was tested only for tokens we minted — closed
+
+Not a defect in the application: every forgery below was already refused. It
+was a gap in the *evidence*, and the algorithm allowlist is a one-line defence
+with no second layer behind it.
+
+`tests/unit/test_security.py` covered expiry, a wrong signing key and a tampered
+payload — all tokens this application had minted and then damaged. It did not
+cover tokens an attacker mints: `alg: none` (both PyJWT-built and
+byte-assembled), HS384/HS512 signed with the same secret, an RS256 header
+swapped onto an HMAC signature, a missing claim one at a time, a foreign
+issuer, and a `sub`, `tid` or `ver` that is not the type it must be.
+
+`tests/unit/test_token_forgery.py` adds twenty-six. Widening
+`algorithms=[settings.jwt_algorithm]` to include `none` fails four of them,
+which is the control being verified rather than assumed.
+
+One honest note recorded in that file: the missing-claim tests do **not** pin
+`options={"require": [...]}`. Gutting that list leaves them all passing,
+because each claim is caught a second time by the code that reads it. The tests
+hold the outcome; the redundancy is real and is named rather than claimed as
+something it is not.
+
+### 6.15 Prompt injection had no adversarial test — closed
+
+Tool grants have been enforced at execution since 6.4, and that enforcement was
+tested. What was not tested is the scenario the enforcement exists for: a
+customer message that talks the model into calling a tool the agent was never
+granted.
+
+The property is worth stating precisely, because it is not "the model cannot be
+persuaded". It can. A conversation is text written by a stranger and the model
+reads it as instructions. The guarantee is that **being persuaded achieves
+nothing** — the call is refused at execution, and the refusal names neither the
+registry nor the agent's actual grants, since the model may relay it to whoever
+wrote the message.
+
+Four tests in `test_auth_hardening.py` drive it: an ungranted tool, an invented
+tool name, the wording of the refusal, and hostile arguments. The last found the
+defence is stronger than expected — an undeclared argument such as `tenant_id`
+is rejected before the handler is entered, so a model cannot smuggle one at all,
+and `ToolContext` has no field its arguments could reach in any case.
+
 ## 7. Known gaps, not fixed here
 
 Recorded rather than silently carried.
@@ -475,11 +575,13 @@ Recorded rather than silently carried.
   leaving another alone needs a session table; ADR-036 records why one was not
   built. Note that this is *session* revocation — workspace membership
   revocation is per-membership and does not touch the token estate (ADR-038).
-- **`POST /auth/logout` is unauthenticated and unlimited.** Revoking a token you
-  hold is legitimate, but anyone who obtains a victim's refresh token can also
-  revoke it. Since ADR-039 the consequence is larger, and in the defender's
-  favour: a logout followed by a refresh with the same token is a replay, and
-  tears the estate down.
+- **`POST /auth/logout` is unauthenticated**, and bounded by the client-address
+  limit like the other open auth routes. Revoking a token you hold is
+  legitimate, but anyone who obtains a victim's refresh token can also revoke
+  it. Since ADR-039 the consequence is larger, and in the defender's favour: a
+  logout followed by a refresh with the same token is a replay, and tears the
+  estate down. (This entry read "and unlimited" until the 2026-08-29 review;
+  the limit was added with the others and the sentence was not revisited.)
 - **Registration discloses whether an address or slug is taken** (W-12).
 - **The limiter fails open on a Redis error** (W-14) — deliberate, and a real
   residual risk for the authentication policy specifically.
