@@ -70,6 +70,12 @@ MAX_ERROR_LENGTH: Final = 300
 # enough that nobody stores a payload in it.
 MAX_FAILURE_REASON_LENGTH: Final = 200
 
+# Stands in for a billing field Paymob requires and this product does not
+# collect. Spelled to be unmistakable in the provider's dashboard: somebody
+# reading a transaction must not take it for a customer's real telephone
+# number. See `PaymobProvider._billing_data`.
+UNKNOWN_BILLING_FIELD: Final = "NOT_COLLECTED"
+
 # The regions Paymob publishes, each with its API base and its checkout host.
 # Both are needed and they are not the same host - see the module docstring.
 REGIONS: Final[dict[str, tuple[str, str]]] = {
@@ -287,9 +293,10 @@ class PaymobProvider:
         if self._redirection_url:
             body["redirection_url"] = self._redirection_url
 
-        billing = self._billing_data(request)
-        if billing:
-            body["billing_data"] = billing
+        # Always sent, never conditionally: Paymob refuses an intention whose
+        # billing block is missing a required key, so an empty one is not a
+        # smaller request, it is a rejected one.
+        body["billing_data"] = self._billing_data(request)
 
         payload = await self._post(INTENTION_PATH, body)
 
@@ -329,22 +336,38 @@ class PaymobProvider:
 
     @staticmethod
     def _billing_data(request: CheckoutRequest) -> dict[str, str]:
-        """The little Paymob shows on the checkout page.
+        """The billing block Paymob requires, filled from what we actually hold.
 
-        Only what the account already holds. This product does not collect a
-        customer's address or telephone number, and inventing placeholder
-        values to fill a provider's optional fields would be putting fiction
-        onto somebody else's systems.
+        Paymob validates this object rather than treating it as decoration: an
+        intention carrying a partial one is refused with
+        `{"billing_data":{"phone_number":["This field is required."]}}` - which
+        is how this was found, against the live test API, after a version that
+        sent only the fields we had was accepted by every mocked test.
+
+        So the required keys are always present. Where the account holds a real
+        value it is sent; where it does not, `NOT_COLLECTED` stands in.
+
+        That placeholder is a deliberate reversal of what this method used to
+        do, and the reasoning has changed with the facts. Declining to invent
+        values is right for *optional* fields - it keeps fiction off somebody
+        else's systems. It is not available for required ones: the choice there
+        is a placeholder or no card payments at all. The string is spelled to
+        be unmistakable in Paymob's dashboard, so nobody reading a transaction
+        mistakes it for a customer's real telephone number. Paymob's own
+        documented example fills these with `"dumy"`, and their callback sample
+        ships `"NA"`, so a placeholder is the convention rather than an abuse.
+
+        Wasla collects no address and no telephone number for a billing
+        contact, and this is not the place to start: an address field here
+        would be a data-protection question, not a payments one.
         """
-        data: dict[str, str] = {}
-        if request.customer_email:
-            data["email"] = request.customer_email
-        if request.customer_name:
-            first, _, last = request.customer_name.partition(" ")
-            data["first_name"] = first
-            if last:
-                data["last_name"] = last
-        return data
+        first, _, last = (request.customer_name or "").partition(" ")
+        return {
+            "email": request.customer_email or UNKNOWN_BILLING_FIELD,
+            "first_name": first or UNKNOWN_BILLING_FIELD,
+            "last_name": last or UNKNOWN_BILLING_FIELD,
+            "phone_number": UNKNOWN_BILLING_FIELD,
+        }
 
     def _redacted(self, text: str) -> str:
         """This deployment's own secrets taken back out of a provider's text.

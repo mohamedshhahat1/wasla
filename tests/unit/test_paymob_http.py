@@ -36,6 +36,7 @@ from app.integrations.billing.paymob import (
     INTENTION_PATH,
     REFUND_PATH,
     REGIONS,
+    UNKNOWN_BILLING_FIELD,
     PaymobProvider,
 )
 
@@ -433,3 +434,105 @@ async def test_a_refund_timeout_is_retryable() -> None:
         )
 
     assert caught.value.retryable
+
+
+# ------------------------------------------------------------- billing data
+
+
+async def test_the_required_billing_keys_are_always_present() -> None:
+    """Found against the live API, not here, which is the point of the test.
+
+    Paymob validates `billing_data` rather than treating it as decoration. An
+    intention carrying a partial one is refused with
+    `{"billing_data":{"phone_number":["This field is required."]}}` - and every
+    mocked test passed against the version that sent only the fields we had,
+    because a mock transport accepts whatever it is given.
+
+    So this pins the *shape of the request* rather than the provider's
+    reaction, which is the only part a test without credentials can hold.
+    """
+    seen: list[httpx.Request] = []
+
+    await _provider(_intention_ok(seen)).create_checkout(
+        CheckoutRequest(
+            reference="r",
+            amount=Decimal("25.00"),
+            currency="EGP",
+            description="Pro plan",
+            customer_email="owner@example.com",
+            customer_name="Ada Lovelace",
+        )
+    )
+
+    billing = json.loads(seen[0].read())["billing_data"]
+    assert set(billing) >= {"email", "first_name", "last_name", "phone_number"}
+    assert billing["email"] == "owner@example.com"
+    assert billing["first_name"] == "Ada"
+    assert billing["last_name"] == "Lovelace"
+
+
+async def test_a_field_we_do_not_collect_is_sent_as_an_obvious_placeholder() -> None:
+    """Wasla holds no telephone number, and Paymob requires one.
+
+    A placeholder is the only option other than not taking card payments, and
+    it is spelled to be unmistakable in Paymob's dashboard so nobody reading a
+    transaction takes it for a customer's real number.
+    """
+    seen: list[httpx.Request] = []
+
+    await _provider(_intention_ok(seen)).create_checkout(
+        CheckoutRequest(
+            reference="r",
+            amount=Decimal("25.00"),
+            currency="EGP",
+            description="Pro plan",
+        )
+    )
+
+    billing = json.loads(seen[0].read())["billing_data"]
+    assert billing["phone_number"] == UNKNOWN_BILLING_FIELD
+    # No account details at all, so every field falls back rather than the
+    # block being omitted - an omitted block is a refused intention.
+    assert billing["email"] == UNKNOWN_BILLING_FIELD
+    assert billing["first_name"] == UNKNOWN_BILLING_FIELD
+
+
+async def test_a_single_word_name_still_fills_both_name_fields() -> None:
+    """`"Ada".partition(" ")` leaves the surname empty, and Paymob wants one."""
+    seen: list[httpx.Request] = []
+
+    await _provider(_intention_ok(seen)).create_checkout(
+        CheckoutRequest(
+            reference="r",
+            amount=Decimal("25.00"),
+            currency="EGP",
+            description="Pro plan",
+            customer_name="Ada",
+        )
+    )
+
+    billing = json.loads(seen[0].read())["billing_data"]
+    assert billing["first_name"] == "Ada"
+    assert billing["last_name"] == UNKNOWN_BILLING_FIELD
+
+
+async def test_no_address_is_ever_sent() -> None:
+    """Wasla collects none, and a payments integration is not where that starts.
+
+    An address field here would be a data-protection question rather than a
+    payments one, so the absence is deliberate and worth pinning.
+    """
+    seen: list[httpx.Request] = []
+
+    await _provider(_intention_ok(seen)).create_checkout(
+        CheckoutRequest(
+            reference="r",
+            amount=Decimal("25.00"),
+            currency="EGP",
+            description="Pro plan",
+            customer_email="owner@example.com",
+        )
+    )
+
+    billing = json.loads(seen[0].read())["billing_data"]
+    assert not (set(billing) & {"street", "building", "apartment", "floor", "city", "state"})
