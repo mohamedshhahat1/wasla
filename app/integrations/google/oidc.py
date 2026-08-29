@@ -40,6 +40,7 @@ import json
 import time
 from dataclasses import dataclass
 from typing import Any, Final
+from urllib.parse import urlsplit
 
 import httpx
 import jwt
@@ -93,6 +94,20 @@ JWKS_MIN_REFRESH_SECONDS: Final = 60
 # scenario `build_guarded_client` exists for.
 MAX_JWKS_BYTES: Final = 64 * 1024
 
+# A profile picture URL is the one claim whose value this application hands
+# straight to a browser, so it is the one claim that needs a shape rule rather
+# than only a type check. `https` alone, and no longer than the column that
+# stores it.
+#
+# The scheme allowlist is the whole point: `javascript:` and `data:` are what a
+# stored-XSS payload arrives as, and a token carrying one is still perfectly
+# signed - Google signs what the account says, and an ID token is not a promise
+# that every claim in it is safe to render. Refusing here rather than escaping
+# at the template means the value cannot be rendered dangerously by a caller
+# that forgets, including one written later.
+_PICTURE_SCHEMES: Final = frozenset({"https"})
+MAX_PICTURE_URL_LENGTH: Final = 512
+
 
 class GoogleTokenInvalidError(Exception):
     """The token was not acceptable.
@@ -120,6 +135,34 @@ class GoogleKeysUnavailableError(Exception):
     """
 
 
+def _safe_picture(value: Any) -> str | None:
+    """The `picture` claim, if it is a URL worth storing - otherwise None.
+
+    Degrading to None rather than raising is deliberate, and is the difference
+    between an avatar and a credential. Nothing is authorized by this claim, so
+    a malformed or hostile one is a person with no picture, not a refused
+    login: rejecting the token would let a Google account with an odd profile
+    photo lock somebody out of a product they have paid for.
+
+    `urlsplit` rather than a regular expression, because the question is what a
+    browser will do with the string, and the parser is the thing that answers
+    it. A value with no host is refused too - `https:///x` parses and is not
+    fetchable.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or len(candidate) > MAX_PICTURE_URL_LENGTH:
+        return None
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in _PICTURE_SCHEMES or not parsed.hostname:
+        return None
+    return candidate
+
+
 @dataclass(frozen=True, slots=True)
 class GoogleIdentityClaims:
     """What a validated Google ID token says about a person.
@@ -133,6 +176,9 @@ class GoogleIdentityClaims:
     email: str
     email_verified: bool
     full_name: str | None
+    # Google's hosted avatar, or None. Optional in every sense: absent from
+    # some tokens, and never required for a login to succeed.
+    picture: str | None
 
 
 class GoogleKeyRing:
@@ -411,7 +457,7 @@ class GoogleIdTokenVerifier:
 
     @staticmethod
     def _extract(payload: dict[str, Any]) -> GoogleIdentityClaims:
-        """Pull out the four things this application needs, strictly.
+        """Pull out the five things this application needs, strictly.
 
         Types are checked rather than coerced. `email_verified` in particular is
         compared against `True` and not evaluated for truthiness: the string
@@ -438,4 +484,5 @@ class GoogleIdTokenVerifier:
             email=email.strip(),
             email_verified=payload.get("email_verified") is True,
             full_name=full_name.strip() if full_name else None,
+            picture=_safe_picture(payload.get("picture")),
         )

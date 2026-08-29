@@ -1,7 +1,7 @@
 """Add the federated identity actions to the audit vocabulary.
 
-Revision ID: 0031
-Revises: 0030
+Revision ID: 0034
+Revises: 0033
 
 Same shape as 0029, for the same reasons. `ALTER TYPE ... ADD VALUE` cannot run
 inside a transaction block, so each statement goes in an autocommit block, and

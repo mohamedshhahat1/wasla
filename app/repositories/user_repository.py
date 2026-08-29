@@ -66,6 +66,7 @@ class UserRepository(BaseRepository[User]):
         email: str,
         full_name: str | None = None,
         hashed_password: str | None = None,
+        avatar_url: str | None = None,
     ) -> User:
         """Create an identity.
 
@@ -81,6 +82,7 @@ class UserRepository(BaseRepository[User]):
                 email=normalised,
                 full_name=full_name.strip() if full_name else None,
                 hashed_password=hashed_password,
+                avatar_url=avatar_url,
                 is_active=True,
             )
         )

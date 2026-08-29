@@ -25,6 +25,7 @@ from app.integrations.google.oidc import (
     JWKS_MIN_REFRESH_SECONDS,
     JWKS_STALE_SECONDS,
     MAX_JWKS_BYTES,
+    MAX_PICTURE_URL_LENGTH,
     GoogleIdTokenVerifier,
     GoogleKeyRing,
     GoogleKeysUnavailableError,
@@ -37,6 +38,7 @@ ROTATED_KID = "test-key-2"
 SUBJECT = "109876543210987654321"
 EMAIL = "person@example.com"
 NONCE = "flow-nonce-value"
+PICTURE = "https://lh3.googleusercontent.com/a/abc123=s96-c"
 ISSUER = "https://accounts.google.com"
 
 # Generated once per module. Two of them, because "signed by a key that is not
@@ -71,6 +73,7 @@ def _claims(**overrides):
         "email": EMAIL,
         "email_verified": True,
         "name": "A Person",
+        "picture": PICTURE,
         "nonce": NONCE,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=5)).timestamp()),
@@ -514,3 +517,83 @@ async def test_a_key_document_that_is_not_an_object_is_handled(monkeypatch):
     _install(monkeypatch, _FakeStream(chunks=[b'["not", "an", "object"]']))
     with pytest.raises(GoogleKeysUnavailableError):
         await GoogleKeyRing().key_for(KID)
+
+
+# --- The `picture` claim -------------------------------------------------
+#
+# The only claim whose value is handed to a browser, and therefore the only one
+# with a shape rule rather than just a type check. Every case below is about
+# what may reach `users.avatar_url`, because nothing downstream re-checks it.
+
+
+async def test_a_picture_is_carried_through():
+    verifier, _ = _verifier()
+    claims = await verifier.verify(id_token=_sign(_claims()), nonce=NONCE)
+    assert claims.picture == PICTURE
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        _ABSENT,
+        None,
+        "",
+        "   ",
+        42,
+        ["https://example.com/a.png"],
+        {"url": "https://example.com/a.png"},
+    ],
+)
+async def test_a_missing_or_untyped_picture_becomes_none(value):
+    """Absent and unusable are the same answer: a person with no picture."""
+    verifier, _ = _verifier()
+    claims = await verifier.verify(id_token=_sign(_claims(picture=value)), nonce=NONCE)
+    assert claims.picture is None
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "javascript:alert(1)",
+        "JavaScript:alert(1)",
+        "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+        "vbscript:msgbox(1)",
+        "file:///etc/passwd",
+        "http://lh3.googleusercontent.com/a/abc",
+        "//evil.example.com/a.png",
+        "https:///nohost",
+        "not a url at all",
+    ],
+)
+async def test_a_hostile_picture_url_is_refused_rather_than_stored(hostile):
+    """The case this validation exists for.
+
+    Google signs what the account says; an ID token is not a promise that every
+    claim inside it is safe to render. A `javascript:` or `data:` value is a
+    stored-XSS payload arriving under a perfectly valid signature, and plain
+    `http` is a mixed-content warning at best. None of them may reach the
+    column, and none of them may fail the login either - the person simply has
+    no picture.
+    """
+    verifier, _ = _verifier()
+    claims = await verifier.verify(id_token=_sign(_claims(picture=hostile)), nonce=NONCE)
+    assert claims.picture is None
+    assert claims.subject == SUBJECT
+
+
+async def test_an_overlong_picture_url_is_refused():
+    """Longer than the column, so refusing here is what stops a write error."""
+    long_url = "https://lh3.googleusercontent.com/" + ("a" * MAX_PICTURE_URL_LENGTH)
+    verifier, _ = _verifier()
+    claims = await verifier.verify(id_token=_sign(_claims(picture=long_url)), nonce=NONCE)
+    assert claims.picture is None
+
+
+async def test_a_picture_at_the_length_limit_is_kept():
+    """The boundary, so the cap cannot quietly become off-by-one."""
+    prefix = "https://lh3.googleusercontent.com/"
+    exact = prefix + "a" * (MAX_PICTURE_URL_LENGTH - len(prefix))
+    assert len(exact) == MAX_PICTURE_URL_LENGTH
+    verifier, _ = _verifier()
+    claims = await verifier.verify(id_token=_sign(_claims(picture=exact)), nonce=NONCE)
+    assert claims.picture == exact

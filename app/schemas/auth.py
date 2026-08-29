@@ -128,6 +128,12 @@ class ProfileResponse(BaseModel):
     id: uuid.UUID
     email: str
     full_name: str | None = None
+    # The account's avatar, or None. Populated today only by Google sign-in,
+    # which refreshes it on every login; a password-only account has none until
+    # it connects an identity. Always an https URL - the Google verifier
+    # refuses anything else before it can be stored - so a client may render it
+    # directly.
+    avatar_url: str | None = None
     # When this address was last proven reachable, or None if it never was
     # (docs/EMAIL_VERIFICATION.md). Reported so a client can decide whether to
     # offer the "verify your email" prompt at all - without it there is no way

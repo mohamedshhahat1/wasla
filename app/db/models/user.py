@@ -31,6 +31,17 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     # accepted. Hashing arrives with authentication in Phase 2.
     hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     full_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # An avatar the product can render, wherever it came from. Deliberately a
+    # column on the account rather than on `user_identities`: what the interface
+    # needs is "this person's picture", and a field that had to be resolved by
+    # asking which issuer vouched most recently would be answering a different
+    # question. Today only Google sign-in populates it.
+    #
+    # Sized to `MAX_PICTURE_URL_LENGTH` in the Google verifier, which refuses
+    # anything longer before it reaches here. Nothing renders this without the
+    # verifier having already established it is an https URL - the column holds
+    # no other kind of value, and nothing else writes it.
+    avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # When somebody last proved they could read mail at `email` above.
     #

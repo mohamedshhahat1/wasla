@@ -1,7 +1,7 @@
 """Federated authentication identities.
 
-Revision ID: 0030
-Revises: 0029
+Revision ID: 0033
+Revises: 0032
 
 One table and one enum type.
 

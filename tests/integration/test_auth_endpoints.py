@@ -44,6 +44,7 @@ def user() -> User:
         id=uuid.uuid4(),
         email="owner@example.com",
         full_name="Owner",
+        avatar_url="https://lh3.googleusercontent.com/a/abc123=s96-c",
         is_active=True,
     )
 
@@ -268,6 +269,10 @@ async def test_the_profile_lists_the_callers_workspaces(client, service, authent
     assert body["email"] == "owner@example.com"
     assert [entry["slug"] for entry in body["workspaces"]] == ["acme"]
     assert body["platform_role"] is None
+    # Reported so a client can render the person without a second request. An
+    # account that has never signed in with Google simply has null here.
+    assert body["full_name"] == "Owner"
+    assert body["avatar_url"] == "https://lh3.googleusercontent.com/a/abc123=s96-c"
 
 
 async def test_the_profile_requires_authentication(client, service):

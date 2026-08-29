@@ -159,7 +159,11 @@ class GoogleAuthService:
             subject=claims.subject,
         )
         if identity is not None:
-            return await self._resume(identity=identity, workspace_slug=workspace_slug)
+            return await self._resume(
+                identity=identity,
+                claims=claims,
+                workspace_slug=workspace_slug,
+            )
 
         # Before any lookup. See the module docstring: this ordering is what
         # keeps the collision answer below from being an enumeration oracle.
@@ -181,6 +185,7 @@ class GoogleAuthService:
         self,
         *,
         identity: FederatedIdentity,
+        claims: GoogleIdentityClaims,
         workspace_slug: str | None,
     ) -> AuthenticatedSession:
         """Open a session for an account this Google subject already owns.
@@ -188,6 +193,10 @@ class GoogleAuthService:
         Once an identity row exists the email claim is never consulted again. A
         Google account whose address changes keeps working; a Google account
         that acquires somebody else's address gains nothing.
+
+        The *display* claims are consulted every time, through
+        :meth:`_refresh_profile`. Name and picture are decoration and follow
+        Google; the address is identity and does not.
         """
         user = await self._users.get_by_id(identity.user_id)
         if user is None:
@@ -201,6 +210,8 @@ class GoogleAuthService:
                 },
             )
             raise AuthenticationError(GOOGLE_FAILED)
+
+        self._refresh_profile(user=user, claims=claims)
 
         try:
             session = await self._auth.authenticate_federated(
@@ -225,6 +236,36 @@ class GoogleAuthService:
         )
         self._record(AuditAction.GOOGLE_LOGIN_SUCCEEDED, user=user, reason="existing_identity")
         return session
+
+    @staticmethod
+    def _refresh_profile(*, user: User, claims: GoogleIdentityClaims) -> None:
+        """Follow Google's copy of the name and picture, and only those.
+
+        Called on every login and on every link, so a renamed or
+        re-photographed Google account is reflected here rather than frozen at
+        whatever it said the first time. Both fields are decoration: nothing is
+        authorized by either, so following the issuer costs nothing and keeps
+        the interface from showing a five-year-old photograph.
+
+        **The email address is deliberately not refreshed, and this is a
+        security property rather than an omission.** `_resume` never consults
+        the email claim once an identity row exists, precisely so that a Google
+        account which later acquires somebody else's address gains nothing by
+        it. Writing `claims.email` to `user.email` here would hand back exactly
+        that: control of a Google account would become the power to move a
+        Wasla account onto any address Google would attest to, and every
+        password reset thereafter would go to the new one. The address is
+        captured once, at enrolment, where it *is* the account.
+
+        A `None` claim leaves the stored value alone. Google omitting a field
+        is not the same statement as somebody clearing it, and treating the two
+        alike would blank a perfectly good avatar every time a token arrived
+        without one.
+        """
+        if claims.full_name is not None:
+            user.full_name = claims.full_name
+        if claims.picture is not None:
+            user.avatar_url = claims.picture
 
     async def _refuse_collision(self, *, user: User) -> AuthenticatedSession:
         """Refuse a first login onto an address that already has an account.
@@ -280,6 +321,7 @@ class GoogleAuthService:
                 email=email,
                 full_name=claims.full_name,
                 hashed_password=None,
+                avatar_url=claims.picture,
             )
             await self._session.flush()
             self._identities.create(
@@ -374,6 +416,9 @@ class GoogleAuthService:
             raise ConflictError("Please try connecting Google again.") from exc
 
         self._adopt_verification(user=user, claims=claims)
+        # A password account that has never had a picture gets one here, which
+        # is usually the first time it can have had one at all.
+        self._refresh_profile(user=user, claims=claims)
         self._record(AuditAction.GOOGLE_IDENTITY_LINKED, user=user, reason="linked")
         return identity
 

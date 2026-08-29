@@ -181,6 +181,7 @@ async def me(current_user: CurrentUserDep, service: AuthServiceDep) -> ProfileRe
         id=user.id,
         email=user.email,
         full_name=user.full_name,
+        avatar_url=user.avatar_url,
         email_verified_at=user.email_verified_at,
         platform_role=user.platform_role,
         workspaces=[_summarise(workspace) for workspace in workspaces],
