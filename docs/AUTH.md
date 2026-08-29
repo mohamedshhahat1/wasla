@@ -12,6 +12,14 @@ A login against an unknown address still spends the time a real verification wou
 
 An account that exists but is disabled is only told so **after** its password is proven, which reveals nothing the caller did not already know.
 
+## Signing in with Google
+
+A second way to open a session, and the *only* other one: `AuthService.authenticate_federated` is the sole public entry to token issuance besides `login`. It takes a `User` rather than an address, so there is no argument a caller could supply that is a claim from a stranger, and everything that makes a session a session happens inside it — the account-status check, the workspace resolution, the current `token_version`, the same claims and the same rotation. A federated session is indistinguishable from a password session downstream, which is exactly what keeps every authorization dependency, tenant isolation check and membership rule below applicable without any of them being taught that Google exists. Anything that had to be taught would be a place this could bypass it.
+
+An account created by Google login has **no password hash**, and needs no new code to be safe: `login` already refuses an account whose hash is `None`, in the same branch and after the same delay as an address that does not exist. Such an account also has no workspace until it is invited to one — `register` needs a name and a slug that Google does not supply.
+
+The account's `full_name` and `avatar_url` follow Google on every login; its `email` is written once, at enrolment, and never refreshed. The design, the threat it closes, and the five ADRs behind it are in [GOOGLE_OAUTH.md](GOOGLE_OAUTH.md).
+
 ## Tokens
 
 | Token | Lifetime | Carries | Revocable |
@@ -70,4 +78,6 @@ Unknown, spent, revoked, and expired invitations all answer identically, so the 
 
 ## Testing
 
-RBAC per role, cross-tenant access attempts, platform-versus-tenant boundaries, refresh rotation and replay, and invitation expiry and reuse are tested against a real PostgreSQL database in `tests/integration/test_authorization.py`. The HTTP surface and the role guards are tested separately with a stubbed service in `tests/integration/test_auth_endpoints.py`. Membership revocation is covered in `tests/integration/test_membership_revocation.py`, which walks the dependency graph and calls every workspace-scoped route with a revoked member's genuine token; refresh reuse in `tests/integration/test_refresh_reuse.py`. See [SECURITY.md](SECURITY.md).
+RBAC per role, cross-tenant access attempts, platform-versus-tenant boundaries, refresh rotation and replay, and invitation expiry and reuse are tested against a real PostgreSQL database in `tests/integration/test_authorization.py`. The HTTP surface and the role guards are tested separately with a stubbed service in `tests/integration/test_auth_endpoints.py`. Membership revocation is covered in `tests/integration/test_membership_revocation.py`, which walks the dependency graph and calls every workspace-scoped route with a revoked member's genuine token; refresh reuse in `tests/integration/test_refresh_reuse.py`.
+
+Google sign-in is tested in four places: `tests/unit/test_google_oidc.py` mints real RS256 tokens against real key sets and attacks the verifier; `tests/unit/test_oauth_flow.py` attacks the single-use state store; `tests/unit/test_google_profile.py` pins which fields a login may change; and `tests/integration/test_google_profile.py` drives the login and link paths against a real database. `tests/integration/test_route_authorization.py` resolves every route's dependency tree and fails if the two open Google routes are not the ones documented. See [SECURITY.md](SECURITY.md).

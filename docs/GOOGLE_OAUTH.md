@@ -99,14 +99,22 @@ oversight.
 
 **Decision.** A `user_identities` table. Columns: `id`, `user_id`, `provider`,
 `provider_subject`, `created_at`, `updated_at`, `last_login_at`. Unique on
-`(provider, provider_subject)` and on `(user_id, provider)`. No Google columns
-on `users`.
+`(provider, provider_subject)` and on `(user_id, provider)`. No provider
+columns on `users`, and no attributes at all on this table.
+
+The account's display fields - `users.full_name`, `users.avatar_url` - are not
+an exception to that. They are the *account's* name and picture, which Google
+happens to be the only current source of; nothing about them is Google-shaped,
+and a second issuer would write the same two columns. See **Profile data**
+below.
 
 **Why the subject and nothing else.** Google's `sub` is stable for the lifetime
 of the account and is the only claim documented as such. An email address is
 not: people change them, corporate domains change hands, and a Workspace
 administrator can reassign one to a different human being. A display name, a
-picture and a username are not identifiers at all. Keying on anything but the
+picture and a username are not identifiers at all - which is exactly why they
+are stored as decoration on the account and never consulted to decide who
+somebody is. Keying on anything but the
 subject means an address change silently orphans an account, or - far worse - an
 address reassignment silently hands one over.
 
@@ -124,8 +132,10 @@ meaning without the account it opens, so a stranded row would be a row that
 grants access to nothing while occupying a unique constraint that would block
 the rightful owner from reconnecting.
 
-**Nothing from Google is stored.** No ID token, no access token, no refresh
-token, no authorization code. Wasla calls no Google API on a user's behalf, so a
+**No Google credential is stored.** No ID token, no access token, no refresh
+token, no authorization code. (The display claims are a different matter and
+are covered under **Profile data**; none of them is a credential, and none is
+on this table.) Wasla calls no Google API on a user's behalf, so a
 stored token would be a credential held for no purpose - and the authorization
 request asks for `access_type=online`, which means Google does not issue a
 refresh token at all. That is deliberately structural: "do not store it" is a
@@ -336,7 +346,7 @@ two URLs that have not changed in a decade, and it would put the key document's
 location under the control of whatever the discovery response said.
 
 **Userinfo is not called.** The ID token already carries `sub`, `email`,
-`email_verified` and `name`, inside a signature. Userinfo carries the same
+`email_verified`, `name` and `picture`, inside a signature. Userinfo carries the same
 things without one, requires an extra round trip on the critical path of every
 login, and would add a failure mode. There is no question it could answer that
 the ID token has not already answered better.
@@ -344,6 +354,78 @@ the ID token has not already answered better.
 **Google's error bodies are never returned to a caller and never logged.** They
 are provider internals, they sometimes echo the request that produced them, and
 a caller who can read them learns about this deployment's configuration.
+
+---
+
+## Profile data
+
+Five claims are read from a verified token. Two of them decide things; three
+are decoration, and the difference is the whole subject of this section.
+
+| Claim | Where it goes | On a later login |
+|---|---|---|
+| `sub` | `user_identities.provider_subject` | Never changes; it is the key |
+| `email_verified` | Gate on enrolment only | Re-checked, never stored |
+| `email` | `users.email`, at enrolment only | **Ignored** |
+| `name` | `users.full_name` | Followed |
+| `picture` | `users.avatar_url` | Followed |
+
+`profile` has always been in the requested scope, so `name` and `picture` cost
+nothing extra to read - `picture` was simply being discarded.
+
+### The display claims follow Google
+
+`name` and `picture` are refreshed on every login and on every link, so a
+renamed or re-photographed Google account is reflected here rather than frozen
+at whatever it said the first time. Nothing is authorized by either, so
+following the issuer costs nothing.
+
+A claim that is absent leaves the stored value alone. Google omitting a field
+is not the same statement as somebody clearing it, and treating the two alike
+would blank a perfectly good avatar every time a token arrived without one.
+
+The consequence, stated plainly: a name edited inside Wasla is overwritten at
+the next Google login. That is the trade this direction makes, and it is the
+right one while Google is the only source - the alternative is an account whose
+displayed name disagrees with every other Google surface the person uses. It
+would have to be revisited the day Wasla offers profile editing of its own.
+
+### The address does not
+
+**`users.email` is written once, at enrolment, and never again.** This is a
+security property, not an omission.
+
+Once an identity row exists the email claim is not consulted at all: a Google
+account whose address changes keeps working, and a Google account that acquires
+somebody else's address gains nothing (ADR-049). Refreshing the address would
+hand over exactly what that is designed to prevent - control of a Google
+account would become the power to move a Wasla account onto any address Google
+would attest to, and every password reset thereafter would follow it.
+
+`tests/unit/test_google_profile.py` and
+`tests/integration/test_google_profile.py` both assert the address standing
+still *while the display claims move*, so the omission cannot be misread as the
+refresh failing to run.
+
+### The picture URL is validated before storage
+
+`picture` is the only claim whose value is handed straight to a browser, and it
+is validated where it enters rather than escaped where it is rendered. Only
+`https`, with a host, within the column length survives; anything else becomes
+no picture.
+
+The reason it needs a rule at all is that **a signature is not a safety
+guarantee**. Google signs what the account says, so a `javascript:` or
+`data:` value arrives perfectly signed, and an ID token is not a promise that
+every claim inside it is safe to render. Refusing at the boundary means the
+column cannot hold a dangerous value for *any* consumer to render - including
+one written later that forgets to escape.
+
+A rejected URL is never a rejected login. Nothing is authorized by an avatar,
+and refusing a person entry to a product they pay for because of their profile
+photograph would be absurd. `tests/unit/test_google_oidc.py` covers the hostile
+shapes: `javascript:`, `data:`, `vbscript:`, `file:`, plain `http`,
+scheme-relative, host-less, over-length, and the exact boundary.
 
 ---
 
@@ -454,40 +536,52 @@ then unlinks. Support needs no special tooling for either.
 
 ## Build state
 
-What is in the tree:
+Written, and now executed. The branch that produced this feature was merged onto
+the billing line, where the suite, the linters and the migrations were run for
+the first time.
 
 | Piece | Written | Executed |
 | --- | --- | --- |
-| `user_identities` model and migration 0030 | yes | **no** |
-| Audit actions and migration 0031 | yes | **no** |
-| Configuration and fail-closed validation | yes | **no** |
-| ID token verifier and JWKS key ring | yes | **no** |
-| Flow store, PKCE, Google client | yes | **no** |
-| Identity repository | yes | **no** |
-| `AuthService.authenticate_federated` | yes | **no** |
-| `GoogleAuthService` | yes | **no** |
-| Five endpoints, registered and rate limited | yes | **no** |
-| Adversarial tests, ~60 functions | yes | **no** |
+| `user_identities` model and migration `0033` | yes | yes |
+| Audit actions and migration `0034` | yes | yes |
+| `users.avatar_url` and migration `0035` | yes | yes |
+| Configuration and fail-closed validation | yes | yes |
+| ID token verifier and JWKS key ring | yes | yes |
+| Flow store, PKCE, Google client | yes | yes |
+| Identity repository | yes | yes |
+| `AuthService.authenticate_federated` | yes | yes |
+| `GoogleAuthService`, including profile refresh | yes | yes |
+| Five endpoints, registered and rate limited | yes | yes |
+| Unit and integration tests | yes | yes |
 
-What has **not** been done, and must be before this is deployed:
+What has run: Ruff, Black and MyPy clean; the whole suite green; `alembic
+upgrade head`, `downgrade base`, re-`upgrade` and `check` against a real
+PostgreSQL, with a single head and no model drift. The five routes are resolved
+from the live dependency graph by `tests/integration/test_route_authorization.py`,
+which is what proves the two open ones are the two that were meant.
 
-- No test has run. Ruff, Black, MyPy and pytest have never been invoked.
-- No migration has been applied. `alembic upgrade`, `check`, `downgrade` and
-  re-`upgrade` are unrun, so drift is unproven either way.
-- No container has been built or booted. No endpoint has served a request.
+The merge also corrected two things this branch had shipped red: thirteen lint
+failures under the target line's ruff configuration, and a rotation test that
+asserted the opposite of the documented `JWKS_MIN_REFRESH_SECONDS` bound.
+
+What is still **not** done, and must be before this is deployed:
+
 - **No real Google authentication has been performed.** The cryptography is
   exercised with controlled fixtures - real RSA keys, real signatures - and that
-  is a genuine test of the verifier. It is not a test of Google.
-- No integration or HTTP-level tests exist for the identity paths: first login,
-  existing identity, collision refusal, disabled account, linking, unlinking,
-  audit rows. Those need database fixtures, and writing them against fixtures
-  that could not be read would have produced tests that fail for reasons
-  unrelated to this feature.
-- `DECISIONS.md`, `docs/SECURITY.md`, `docs/AUTHORIZATION.md`, `docs/API.md`,
-  `docs/DEPLOYMENT.md`, `docs/RUNBOOK.md` and `docs/ARCHITECTURE.md` are **not**
-  updated. ADR-047 to ADR-051 live in this file only.
-- A Google-first account is created with **no workspace**, because `register`
-  needs a name and slug Google does not supply and `SLUG_PATTERN` is strict
-  ASCII. Such an account holds a valid session and cannot open any
-  workspace-scoped endpoint until it is invited somewhere. This is a real
-  product gap, not a rounding error.
+  is a genuine test of the verifier. It is not a test of Google. Nobody has yet
+  clicked "Sign in with Google" against a real client id.
+- No HTTP-level tests exist for the identity endpoints. The service paths are
+  covered against a real database in `tests/integration/test_google_profile.py`
+  - first login, repeat login, linking, and the address that must not move - but
+  the routes themselves are proved only for their guards and their shape, not by
+  driving the five of them over a socket.
+- Some service paths remain untested at any level: the collision refusal, the
+  disabled account, unlinking the last sign-in method, and the audit rows each
+  of those writes.
+- No container carrying this code has been built or booted.
+- `docs/RUNBOOK.md` has no Google entry. There is no operational procedure yet
+  for "Google sign-in is failing" beyond what **Failure modes** above says.
+
+ADR-047 to ADR-051 are recorded in `DECISIONS.md`, and `docs/API.md`,
+`docs/AUTH.md`, `docs/AUTHORIZATION.md`, `docs/DEPLOYMENT.md`,
+`docs/SECURITY.md` and `README.md` are updated.

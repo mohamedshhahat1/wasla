@@ -202,6 +202,44 @@ The controls, and why each differs from the reset flow where it does:
 worth protecting here: a verified-email check added casually would lock out
 every account created before the column existed.
 
+## Google sign-in — a second issuer, and two rules about what it may change
+
+The design, the five ADRs and the flow are in [GOOGLE_OAUTH.md](GOOGLE_OAUTH.md).
+Two properties belong here because they are the ones a later change is most
+likely to undo by accident.
+
+**A verified Google address never claims an existing account.** A first login
+onto an address that already has a Wasla account is refused with `409`, never
+signed in and never linked (ADR-049). The caller has proven control of a
+*mailbox*; that is not proof of anything about an account registered under it,
+which may have been opened by whoever held the address before them. Linking is
+authenticated and deliberate, and binds to the account recorded server-side when
+the flow began — not to the address in the token.
+
+**A later Google login never moves an account to a new address.** `users.email`
+is written once, at enrolment, and never refreshed; once an identity row exists
+the email claim is not consulted at all. If it were, control of a Google account
+would become the power to move a Wasla account onto any address Google would
+attest to, and every password reset thereafter would follow. The display claims
+— name and picture — *are* refreshed every login, which is what makes the
+address standing still a decision rather than the refresh failing to run;
+`tests/unit/test_google_profile.py` and
+`tests/integration/test_google_profile.py` assert exactly that pairing.
+
+**The `picture` claim is validated at the boundary, not escaped at the edge.**
+It is the one claim whose value is handed straight to a browser, and a signature
+is not a safety guarantee: Google signs what the account says, so a
+`javascript:` or `data:` URL arrives perfectly signed. Only `https`, with a
+host, within the column length is stored; everything else becomes no picture,
+never a refused login. Validating on the way in means the column cannot hold a
+value that is dangerous for *any* consumer to render, including one written
+later that forgets. The hostile shapes are enumerated in
+`tests/unit/test_google_oidc.py`.
+
+**No Google credential is stored** — no ID token, access token, authorization
+code, and no refresh token, because `access_type=online` means Google never
+issues one. "It is never issued" is a stronger guarantee than "do not store it".
+
 ## Account lifecycle — what is still missing
 
 Stated rather than carried silently.

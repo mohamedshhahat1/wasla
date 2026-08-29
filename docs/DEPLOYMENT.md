@@ -198,6 +198,37 @@ Values outside the bounds are **refused, not clamped**: a deployment that
 silently corrected them is a deployment whose operator believes something false
 about how long a code lives.
 
+## Google sign-in
+
+Off by default, and off means the five Google routes answer `404` — a feature
+nobody configured does not exist in this deployment. Turning it on makes the
+other three mandatory at startup, because half-configured Google sign-in is a
+button that always fails with the only error message on Google's domain.
+
+| Variable | Secret | Purpose |
+| --- | --- | --- |
+| `GOOGLE_ENABLED` | no | `false` by default. `true` makes the three below mandatory |
+| `GOOGLE_CLIENT_ID` | no | From Google Cloud Console → Credentials → OAuth 2.0 Client ID, type *Web application*. Startup refuses a value not ending in `.apps.googleusercontent.com`, which catches the secret being pasted into this field |
+| `GOOGLE_CLIENT_SECRET` | **yes** | Used in exactly one place: the server-to-server code exchange |
+| `GOOGLE_REDIRECT_URI` | no | A **frontend** route, not an API one. Google exact-matches it against the console — scheme, host, port and path, trailing slash included. Must be `https` in production, because a single-use authorization code arrives in its query string |
+
+`GOOGLE_CLIENT_SECRET` belongs to the API process only: never a Docker build
+argument, never in an image layer, never in a frontend bundle, returned by no
+endpoint including `/health`, and never logged. Google permits two secrets
+briefly, so rotate by adding the new one, deploying, then deleting the old one
+in the console.
+
+**Google sign-in requires Redis.** The state, nonce and PKCE verifier for an
+in-flight authorization live there and nowhere else, so a Redis outage makes
+Google sign-in *unavailable* rather than unverified (ADR-051). Password login is
+unaffected. This is deliberately the opposite of the rate limiter's fail-open
+posture: a degraded limiter still slows an attacker, whereas a process-local
+approximation of a single-use replay control is not weaker but absent.
+
+Verify a deployment by requesting `POST /api/v1/auth/google/authorize`. A `404`
+means the feature is off or half-configured; a `200` carrying an
+`authorization_url` on `accounts.google.com` means the configuration loaded.
+
 Verification needs no DNS or provider configuration of its own — it sends
 through the same outbox, worker and Resend adapter as everything else. With
 `EMAIL_ENABLED=false` no code is ever delivered, and the endpoints still answer

@@ -52,6 +52,11 @@ Liveness deliberately does not touch PostgreSQL: a database outage must not make
 | POST | `/api/v1/auth/password-reset/confirm` | Redeem the emailed token for a new password | Public |
 | POST | `/api/v1/auth/email/verification/send` | Mail a six-digit code to **your own** address (`202`, always the same body) | Authenticated |
 | POST | `/api/v1/auth/email/verification/verify` | Prove control of your own address | Authenticated |
+| POST | `/api/v1/auth/google/authorize` | Begin signing in with Google | Public |
+| POST | `/api/v1/auth/google/callback` | Finish signing in with Google | Public |
+| POST | `/api/v1/auth/identities/google/authorize` | Begin connecting Google to this account | Authenticated |
+| POST | `/api/v1/auth/identities/google/link` | Attach a verified Google account | Authenticated |
+| DELETE | `/api/v1/auth/identities/google` | Disconnect Google (`204`) | Authenticated |
 
 `logout` revokes one refresh token; `logout-all` revokes the whole estate by raising
 `users.token_version`, which every token is checked against (ADR-036). The calling
@@ -82,6 +87,53 @@ in a response, never in a URL and never in the subject line.
 Neither route grants anything. `verify` returns a timestamp, not a credential, and
 `GET /auth/me` reports `email_verified_at` so a client can decide whether to prompt.
 No route in this document requires a verified address.
+
+### Signing in with Google
+
+Five routes, all answering `404` when `GOOGLE_ENABLED` is off - a feature nobody
+configured does not exist in this deployment, which is a different statement from
+`503`'s "it is temporarily unwell". See [GOOGLE_OAUTH.md](GOOGLE_OAUTH.md).
+
+`authorize` is a `POST` rather than a `GET` because it writes server state - a
+single-use flow record - and a `GET` that writes state is one a link preview will
+happily fetch on its own. The callback is a `POST` **from the frontend**, not a
+redirect target for Google: this API returns tokens in response bodies, so a `GET`
+callback reached by top-level navigation would render a document containing a refresh
+token. Google redirects the browser to `GOOGLE_REDIRECT_URI`, a frontend route, which
+reads `code` and `state` from its own URL and posts them here.
+
+```
+POST /api/v1/auth/google/authorize  -> 200 {"authorization_url": "https://accounts.google.com/o/oauth2/v2/auth?...", "expires_in": 600}
+POST /api/v1/auth/google/callback   -> 200 {"access_token": "...", "refresh_token": "...", ...}
+```
+
+`callback` answers exactly what `/auth/login` answers, built by the same helper: a
+caller cannot tell from the response which method opened the session, and nothing
+downstream can either. Errors are `401` for any failed authorization (bad, replayed or
+expired state; refused code; forged token; wrong nonce), `403` for a disabled account,
+`409` when the verified Google address already has a Wasla account - which must be
+linked deliberately rather than claimed (ADR-049) - and `503` when Google or Redis
+cannot be reached.
+
+`identities/google/link` returns the connection, never a session:
+
+```
+POST /api/v1/auth/identities/google/link -> 200 {"provider": "google", "connected_at": "...", "last_login_at": null}
+DELETE /api/v1/auth/identities/google    -> 204
+```
+
+Unlinking is `404` when nothing is connected and `403` when it would leave the account
+with no way to sign in at all - no password and no other identity.
+
+### The profile a Google login carries
+
+`GET /auth/me` reports `full_name` and `avatar_url`. Both are refreshed from Google on
+every Google login, so a renamed or re-photographed account is followed; `avatar_url`
+is always an `https` URL or `null`, validated before storage, so a client may render it
+directly. An account that has never signed in with Google simply has `null`.
+
+The account's `email` is **not** refreshed - it is written once, at enrolment. See
+[GOOGLE_OAUTH.md](GOOGLE_OAUTH.md#profile-data) for why that asymmetry is deliberate.
 
 ## Invitations
 

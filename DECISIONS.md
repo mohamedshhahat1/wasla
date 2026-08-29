@@ -1348,3 +1348,139 @@ The webhook endpoint now dispatches on the callback's declared `type`. That decl
 The first card a workspace saves becomes its default; later ones do not. Silently moving renewals onto a card somebody used for a single payment is a surprise, and the API has an explicit call for changing it.
 
 **Automatic charging has not been exercised against Paymob.** The account this was built against has no Moto integration, so `charge_saved_method` has never run against the live API - only against a mock transport shaped from the documented request and response. Everything up to the charge, including the card-token signature, is pinned to Paymob's published worked examples. The remaining dependency is a merchant capability, not code.
+
+---
+
+## ADR-047 — Wasla Is a Confidential Client and Uses PKCE Anyway, and the Callback Is a POST From the Frontend
+
+Date:
+2026-08-30
+
+Status:
+Accepted.
+
+Decision:
+Add Google as a second issuer that may open a session. Use the authorization code flow with a client secret held server-side, and add PKCE on top of it. Initiate with a `POST` that writes a single-use flow record, and have Google redirect the browser to a **frontend** route which posts `code` and `state` to the API, rather than redirecting to the API itself.
+
+Context:
+This API is cookieless: it returns access and refresh tokens in response bodies. That single fact decides the shape of the callback. A conventional `GET` callback reached by top-level navigation would have to render a document containing a refresh token — unreadable by the single-page application that needs it, and visible to anything that can see the page, including the browser history and any referrer.
+
+Reason:
+**PKCE despite the secret.** A confidential client is not required to use PKCE, and the client secret already stops a stolen code being exchanged by somebody else. PKCE costs one hash and closes the case where the code leaks *and* the secret has leaked separately — a defence in depth that is nearly free.
+
+**Initiation is a `POST`.** It writes server state, and a `GET` that writes state is one a browser prefetch or a link preview will fetch on its own, filling the store with flows nobody started.
+
+**The frontend owns the redirect URI.** `GOOGLE_REDIRECT_URI` is still fixed configuration that Google exact-matches, the code is still exchanged server-side with the client secret and the PKCE verifier, and the frontend never sees a Google token. Only the two opaque values `code` and `state` pass through it.
+
+Consequences:
+The residual gap is disclosed rather than papered over: without a cookie, the state is unpredictable, single-use, short-lived and server-side, but it cannot prove that the browser finishing a flow is the one that started it. For linking, the binding is strong regardless, because the flow record holds the initiating account and a caller cannot influence it.
+
+Deployments must register the frontend route in the Google console, not the API. A mismatch is refused by Google before Wasla is reached.
+
+---
+
+## ADR-048 — Identity Lives in Its Own Table Keyed on the Subject, and the Profile Lives on the Account
+
+Date:
+2026-08-30
+
+Status:
+Accepted.
+
+Decision:
+Store federated identities in `user_identities`, keyed on `(provider, provider_subject)` and unique also on `(user_id, provider)`. Store no attributes on that table and no provider-shaped columns on `users`. Keep the account's display fields — `full_name`, `avatar_url` — on `users`, and refresh them from Google on every login.
+
+Context:
+An account is not "a Google account". It is an account that Google is willing to vouch for, and over its life it may be vouched for by more than one issuer, or by none.
+
+Reason:
+**Keyed on the subject and nothing else.** Google's `sub` is stable for the life of the account and is the only claim documented as such. An email address is not: people change them, corporate domains change hands, and a Workspace administrator can reassign one to a different human being. Keying on anything else means an address change silently orphans an account, or — far worse — an address reassignment silently hands one over.
+
+**A table rather than `users.google_sub`.** A column models "a user has at most one Google account, forever". A table models "a user has some identities", which is what becomes true the moment a second provider exists, and costs one join today. `(provider, provider_subject)` is the security-relevant constraint: it makes "one Google account cannot open two Wasla accounts" true of the data rather than of the code paths somebody remembered, and it is the race backstop for two simultaneous first logins.
+
+**The profile is on the account, not the identity.** What an interface needs is "this person's name and picture". A field resolved by asking which issuer vouched most recently would be answering a different question, and would have to be re-answered every time a provider was added. `avatar_url` is provider-agnostic; a second issuer writes the same column.
+
+**No credential is stored.** No ID token, access token, authorization code — and no refresh token, because the authorization request asks for `access_type=online` and Google therefore never issues one. "It is never issued" is a stronger guarantee than "do not store it", which is a rule somebody has to keep remembering.
+
+Consequences:
+`ON DELETE CASCADE` from `users`: a stranded identity row would grant access to nothing while occupying the unique slot its rightful owner needs to reconnect.
+
+A name edited inside Wasla is overwritten at the next Google login. That is the accepted cost of following the issuer while Google is the only source, and it must be revisited the day Wasla offers profile editing of its own.
+
+---
+
+## ADR-049 — A Matching Email Address Never Links Anything
+
+Date:
+2026-08-30
+
+Status:
+Accepted.
+
+Decision:
+A first Google login onto an address that already has a Wasla account is refused with `409`. It is never signed in, never linked, and the existing account's password is never touched. Linking requires an authenticated request, and binds to the account recorded server-side when the flow began — never to the address in the token.
+
+Context:
+The convenient behaviour is obvious and wrong: see a verified Google address matching an existing account, attach the identity, sign them in.
+
+Reason:
+Proving control of a *mailbox* is not proof of anything about an account registered under it. The account may have been opened by whoever held that address before them — corporate addresses are reassigned, personal ones are recycled by providers. Automatic linking would mean that acquiring an address is enough to acquire every account ever registered with it.
+
+The refusal is ordered before the account lookup for the unverified case, so that the answer cannot be turned into an oracle for which addresses have accounts.
+
+Consequences:
+A person whose Wasla account predates their Google sign-in must sign in with their password once and link deliberately. That is a real friction, accepted knowingly, and it is the only step in the flow where the product asks something a competitor might not.
+
+`GOOGLE_LOGIN_FAILED` is recorded for this refusal because it names a real account — one of only two refusals that do. A bad signature or a stale nonce gets a log line and no audit row, so that an unauthenticated stranger cannot flood a trail colleagues have to read.
+
+---
+
+## ADR-050 — Google's `email_verified` Is Trusted, Because It Buys Nothing
+
+Date:
+2026-08-30
+
+Status:
+Accepted.
+
+Decision:
+Require `email_verified` to be `true` before enrolling a new account, and stamp `users.email_verified_at` from it. Compare the claim against `True` rather than evaluating truthiness.
+
+Context:
+ADR-043 built email verification as a six-digit code and gave it deliberately no authority. That decision is what makes trusting Google here cheap.
+
+Reason:
+The address arrived inside a signature this system checked against Google's published keys, which is a stronger proof than a code mailed to the address and typed back. And because verification grants nothing — no route reads the column, no permission depends on it — trusting the claim writes down a fact rather than handing out access. The blast radius of Google being wrong is a timestamp that should not be there.
+
+The type check is not pedantry. The string `"false"` is truthy in Python, so a provider that sent one would otherwise be read as having verified the address.
+
+Consequences:
+An unverified Google address is refused enrolment rather than enrolled-and-unverified, because the address is the only identifier the new account would have.
+
+If a future rule ever makes `email_verified_at` grant something, this ADR is one of the two places that must be revisited — the other being ADR-043 itself.
+
+---
+
+## ADR-051 — State and Nonce Live in Redis, and Refuse When It Is Gone
+
+Date:
+2026-08-30
+
+Status:
+Accepted.
+
+Decision:
+Keep the state, nonce and PKCE verifier for an in-flight authorization in Redis, single-use and short-lived. When Redis is unavailable, Google sign-in fails closed and becomes unavailable. Password login is unaffected.
+
+Context:
+ADR-040 established the opposite posture for the rate limiter: a degraded dependency degrades the limit rather than removing it, and a Redis outage must not lock everybody out.
+
+Reason:
+The two are not inconsistent, and the difference is what the control actually is. A degraded limiter still slows an attacker — a process-local approximation of "how many attempts per minute" is weaker but real. There is no weaker-but-real version of a *single-use* replay control: a per-process store would let the same state be spent once on every worker, which is not a degraded defence but an absent one. A replay window that opens exactly when infrastructure is unhealthy is the worst possible time for it to open.
+
+Failing closed also keeps the failure honest. An unavailable Google sign-in is visible, alarming and quickly fixed; a silently unverified one is none of those things.
+
+Consequences:
+Google sign-in is unavailable during a Redis outage, and this is documented as a deployment dependency rather than discovered during one. Because password login does not touch this store, an outage degrades one route rather than locking every customer out — which is what makes failing closed here affordable.
+
+The `404`-when-unconfigured behaviour is separate and deliberate: a feature nobody enabled does not exist in this deployment, which is a different statement from `503`'s "it is temporarily unwell", and it declines to tell an unauthenticated caller that the feature exists and is broken.

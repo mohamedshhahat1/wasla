@@ -14,7 +14,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Documentation protocol (`Documentation_Protocol.md`) | Implemented |
 | Project memory (`README` / `ARCHITECTURE` / `TASKS` / `DECISIONS`, `docs/`) | Implemented |
 | Application foundation (FastAPI, config, logging, errors, DB, Redis, health, Docker, CI) | Implemented |
-| Domain models and migrations (`0001`–`0027`) | Implemented |
+| Domain models and migrations (`0001`–`0035`) | Implemented |
 | Multi-tenancy, authentication, workspace RBAC, invitations | Implemented |
 | WhatsApp Cloud API (webhook, signatures, idempotency, outbound client) | Implemented |
 | Conversations, inbox, human handoff, templates, cursor paging | Implemented |
@@ -30,6 +30,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Plans, subscriptions, entitlements enforced against usage, invoices and payment records | Implemented |
 | Transactional email (outbox, Resend provider, delivery webhooks, bounce suppression) | Implemented |
 | Password reset, invitation delivery and account security notices | Implemented |
+| Google sign-in (OIDC, PKCE, identity linking, profile name and picture) | Implemented |
 | A message actually delivered by Resend (DNS, webhook and reputation are the operator's) | Planned |
 | A live payment provider (the boundary and a manual implementation exist) | Planned |
 | Production hardening: rate limits, audit trail, request limits, encrypted workspace credentials, worker liveness | Implemented |
@@ -71,6 +72,7 @@ Planned for later phases:
 | [docs/PRODUCT.md](docs/PRODUCT.md) | Product scope, personas, customer journey |
 | [docs/SAAS.md](docs/SAAS.md) | Multi-tenancy, workspaces, platform owner, plans |
 | [docs/AUTH.md](docs/AUTH.md) | Authentication, memberships, RBAC |
+| [docs/GOOGLE_OAUTH.md](docs/GOOGLE_OAUTH.md) | Google sign-in: OIDC verification, identity linking, profile data |
 | [docs/WHATSAPP.md](docs/WHATSAPP.md) | WhatsApp Cloud API integration and webhooks |
 | [docs/AI_AGENTS.md](docs/AI_AGENTS.md) | AI agent configuration, orchestration, tools |
 | [docs/RAG.md](docs/RAG.md) | Knowledge base, ingestion, tenant-scoped retrieval |
