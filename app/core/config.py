@@ -30,6 +30,26 @@ _EMAIL_SHAPE: Final = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+$")
 # are the reason this is an allowlist: APP_PUBLIC_URL is prefixed onto every
 # reset and invitation link, so whatever it holds is what a recipient clicks.
 _PUBLIC_URL_SCHEMES: Final = frozenset({"http", "https"})
+# Anything that is a number at all, sign included, so a negative integration id
+# is refused as an out-of-range number rather than accepted as a method name.
+_SIGNED_INTEGER: Final = re.compile(r"[+-]?\d+")
+
+
+def _integration_token(raw: str) -> int | str:
+    """One `PAYMOB_INTEGRATION_IDS` entry, as the provider will send it.
+
+    A number is an integration id and becomes an integer; anything else is one
+    of the method names Paymob documents (`"card"`) and stays a string.
+    Deciding here rather than in the provider keeps the parsing in the one
+    place that already owns turning environment text into settings.
+
+    A *signed* number is deliberately still parsed as a number, so `-1` becomes
+    the integer -1 and is refused by the range check. Treating it as a name
+    would let a typo through as a payment method Paymob has never heard of,
+    which is a checkout that fails at the customer rather than at boot.
+    """
+    token = raw.strip()
+    return int(token) if _SIGNED_INTEGER.fullmatch(token) else token
 
 
 def _key_mode(key: str | None, prefix: str) -> str | None:
@@ -241,10 +261,21 @@ class Settings(BaseSettings):
     paymob_secret_key: str | None = None
     paymob_public_key: str | None = None
     paymob_hmac_secret: str | None = None
-    # The integration id(s) Paymob issues per payment method. Test and live ids
-    # are different values, and the docs are explicit that they must match the
-    # mode of the secret key used with them.
-    paymob_integration_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
+    # Which payment integrations a checkout may use. Passed to Paymob's Create
+    # Intention API as `payment_methods`, documented as "the Integration ID(s)
+    # used to process the payment. Values can be provided as integers (e.g.,
+    # 1256) or as names enclosed in quotes (e.g., "card")" - so both forms are
+    # accepted here and neither is interpreted.
+    #
+    # **Nothing in this application knows what an entry means.** There is no
+    # table mapping a number to card or wallet, because there is nothing this
+    # code could do with one: the list is quoted to Paymob and Paymob decides
+    # which methods to offer the customer. Switching from card to wallet, or
+    # offering both, is this variable changing and no code changing.
+    #
+    # Test and live ids are different values and must match the mode of the
+    # secret key used with them.
+    paymob_integration_ids: Annotated[list[int | str], NoDecode] = Field(default_factory=list)
     # Chooses the API host *and* the checkout host, which are different hosts.
     # There is deliberately no sandbox setting: Paymob's documentation states
     # that test and live share a regional base URL and the keys decide the
@@ -304,12 +335,23 @@ class Settings(BaseSettings):
     @field_validator("paymob_integration_ids", mode="before")
     @classmethod
     def _parse_integration_ids(cls, value: Any) -> Any:
-        """Accept a JSON array, a comma-separated string, or a list of ints.
+        """Accept a JSON array, a comma-separated string, or a list.
 
         Comma-separated because that is what a container environment can
-        express, following `credential_encryption_keys`. A value that is not a
-        number is refused rather than skipped: an integration id with a typo in
-        it is a payment method that silently stops being offered.
+        express, following `credential_encryption_keys`.
+
+        Numeric entries become integers and everything else stays a string,
+        because Paymob's Create Intention API documents `payment_methods` as
+        taking "the Integration ID(s) used to process the payment. Values can
+        be provided as integers (e.g., 1256) or as names enclosed in quotes
+        (e.g., "card")". Both forms are passed through untouched, so which
+        payment methods a deployment offers stays a configuration question -
+        which is the whole point of this setting.
+
+        Nothing here decides what a method *is*. An id is an opaque token to
+        this application: it is quoted to Paymob and Paymob decides what it
+        means, so there is no table here mapping numbers to card or wallet and
+        no way for one to fall out of date.
         """
         if value is None:
             return []
@@ -319,16 +361,18 @@ class Settings(BaseSettings):
                 return []
             if raw.startswith("["):
                 return json.loads(raw)
-            return [int(item.strip()) for item in raw.split(",") if item.strip()]
+            return [_integration_token(item) for item in raw.split(",") if item.strip()]
+        if isinstance(value, list):
+            return [_integration_token(item) if isinstance(item, str) else item for item in value]
         return value
 
     @field_validator("paymob_integration_ids", mode="after")
     @classmethod
-    def _check_integration_ids(cls, value: list[int]) -> list[int]:
-        """Refuse ids that cannot be real, and refuse the same one twice.
+    def _check_integration_ids(cls, value: list[int | str]) -> list[int | str]:
+        """Refuse entries that cannot be real, and refuse the same one twice.
 
         A duplicate is not harmless: the list is sent to the provider as the
-        payment methods to offer, and a repeated id offers the same method
+        payment methods to offer, and a repeated entry offers the same method
         twice on the checkout page. A non-positive id is a parsing accident -
         `0` is what an empty field becomes if the split above is ever loosened
         - and it would silently disable a payment method rather than fail.
@@ -337,10 +381,13 @@ class Settings(BaseSettings):
         follows for a lifetime out of range: silently correcting configuration
         is how an operator comes to believe something is set that is not.
         """
-        if any(item <= 0 for item in value):
-            raise ValueError("PAYMOB_INTEGRATION_IDS must all be positive integers")
-        if len(set(value)) != len(value):
-            raise ValueError("PAYMOB_INTEGRATION_IDS must not repeat an id")
+        for item in value:
+            if isinstance(item, bool) or (isinstance(item, int) and item <= 0):
+                raise ValueError("PAYMOB_INTEGRATION_IDS must all be positive integers or names")
+            if isinstance(item, str) and not item.strip():
+                raise ValueError("PAYMOB_INTEGRATION_IDS must not contain an empty entry")
+        if len({str(item) for item in value}) != len(value):
+            raise ValueError("PAYMOB_INTEGRATION_IDS must not repeat an entry")
         return value
 
     @field_validator("credential_encryption_keys", mode="before")

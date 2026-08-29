@@ -223,7 +223,7 @@ class PaymobProvider:
         secret_key: str,
         public_key: str,
         hmac_secret: str,
-        integration_ids: list[int],
+        integration_ids: list[int | str],
         region: str = "egypt",
         notification_url: str | None = None,
         redirection_url: str | None = None,
@@ -263,7 +263,12 @@ class PaymobProvider:
         body: dict[str, Any] = {
             "amount": _to_cents(request.amount),
             "currency": request.currency,
-            "payment_methods": self._integration_ids,
+            # Exactly what was configured, in order, uninterpreted. Which
+            # methods the customer is then offered is Paymob's decision from
+            # this list - there is deliberately no branching here on card
+            # versus wallet, because this integration does not know which an
+            # entry is and does not need to.
+            "payment_methods": list(self._integration_ids),
             # Ours, and quoted back to us as `merchant_order_id`. This is the
             # entire mapping from a callback to a payment row.
             "special_reference": request.reference,

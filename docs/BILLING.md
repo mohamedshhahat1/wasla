@@ -181,13 +181,38 @@ an invoice; starting a subscription is `POST /billing/subscription`.
 | `PAYMOB_SECRET_KEY` | Authenticates **us to Paymob** when creating an intention |
 | `PAYMOB_PUBLIC_KEY` | Not secret; goes in the checkout URL a browser follows |
 | `PAYMOB_HMAC_SECRET` | Authenticates **Paymob to us** on the callback |
-| `PAYMOB_INTEGRATION_IDS` | Comma-separated integration ids, one per payment method |
+| `PAYMOB_INTEGRATION_IDS` | Which integrations a checkout may use — see below |
 | `PAYMOB_REGION` | `egypt`, `uae`, `oman` or `saudi` — picks the API host *and* the checkout host, which differ |
 
 Setting `BILLING_PROVIDER=paymob` without all of them refuses to boot, in every
 environment. Test and live share a base URL: Paymob's documentation states the
 mode is decided by which keys and integration ids are used, so there is no
 sandbox setting.
+
+### Which payment methods a customer sees
+
+**Configuration, not code.** The list in `PAYMOB_INTEGRATION_IDS` is passed to
+the Intention API as `payment_methods` and Paymob renders the hosted checkout
+from it. Adding a wallet alongside cards is that variable changing; no service,
+schema, migration or business rule is involved.
+
+Paymob documents the field as taking the Integration ID(s) "as integers (e.g.,
+1256) or as names enclosed in quotes (e.g., `"card"`)", and both forms are
+accepted here. Numeric entries become integers, everything else stays a string,
+and neither is interpreted.
+
+**Nothing in this application knows what an entry means.** There is no table
+mapping a number to card or wallet, and there must not be one: the meaning is
+Paymob's, it is visible in their dashboard under Settings → Payment
+Integrations, and a copy here could only ever go stale or be wrong. An id is an
+opaque token that is quoted to the provider.
+
+`tests/unit/test_payment_methods_are_configuration.py` holds that boundary
+open. It asserts the configured list reaches the intention request untouched,
+that two providers differing only in configuration produce requests differing
+only in `payment_methods`, that no module between `CheckoutService` and the
+adapter names a payment method in code, and that no integration id is hardcoded
+anywhere in `app/`.
 
 ### Paying a renewal
 
