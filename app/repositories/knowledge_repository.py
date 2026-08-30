@@ -263,7 +263,13 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
         Three filters, and none of them is optional:
 
         - `tenant_id`, which is what stops one company's question reaching
-          another company's documents.
+          another company's documents. It is applied on *both* the chunk and
+          the joined document, and that duplication is deliberate: either
+          predicate alone is sufficient, so removing one is safe and removing
+          both is a cross-tenant leak. The suite is written against the
+          property rather than the implementation, so it fails only when both
+          are gone - which is correct, and is why this note exists for whoever
+          is tempted to delete "the redundant filter".
         - a join to the document restricted to `READY`, so a half-ingested or
           failed document contributes nothing. Without it, chunks written before
           a failure would still be retrievable.

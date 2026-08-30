@@ -8,6 +8,7 @@ screen and a customer reply shared a code path.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from enum import Enum, auto
 from typing import Any, Final
 
@@ -48,6 +49,18 @@ class _Unset(Enum):
 UNSET: Final = _Unset.TOKEN
 
 
+def _model_refusal(model: str, allowed: Sequence[str]) -> str:
+    """What a caller is told when they name a model this deployment will not run.
+
+    The permitted list is named in the message. It is configuration a workspace
+    administrator is entitled to know, it contains no secret, and the
+    alternative - "that model is not allowed" with no list - produces a support
+    ticket for every attempt.
+    """
+    offered = ", ".join(sorted(allowed))
+    return f"The model {model} is not available on this deployment. Choose one of: {offered}."
+
+
 class AgentService:
     """Configures the agents of one workspace."""
 
@@ -71,6 +84,57 @@ class AgentService:
     async def get(self, agent_id: uuid.UUID) -> Agent:
         return await self._agents.require_by_id(agent_id)
 
+    def _permitted_models(self) -> tuple[str, ...]:
+        """Every model this deployment will run, including the fallback.
+
+        The configured default is always in the set. It is what an agent naming
+        no model is given, so a list that omitted it would make the ordinary
+        agent unbuildable - a misconfiguration that would surface as "cannot
+        create any agent" long after the list was written.
+        """
+        configured = tuple(self._settings.openai_allowed_models)
+        if not configured:
+            return ()
+        return tuple({*configured, self._settings.openai_model})
+
+    def _checked_model(self, model: str | None) -> str:
+        """Resolve the model to use, refusing one this deployment will not run (ADR-053).
+
+        Enforced in the service rather than in the schema because the schema
+        cannot see configuration, and enforced on the way *in* rather than at
+        the provider because a rejected model must be a 422 the administrator
+        can act on, not a failed inference a customer waits for.
+
+        An empty allowlist means no restriction, which is the right default for
+        a development deployment and is why `.env.example` sets an explicit list
+        for anything that pays a provider bill.
+        """
+        resolved = (model or self._settings.openai_model).strip()
+        permitted = self._permitted_models()
+        if permitted and resolved not in permitted:
+            logger.warning(
+                "agent.model_refused",
+                extra={"event": "agent.model_refused", "model": resolved},
+            )
+            raise ValidationError(_model_refusal(resolved, permitted))
+        return resolved
+
+    def _checked_output_tokens(self, requested: int | None) -> int:
+        """The per-call output ceiling, defaulted and bounded by configuration.
+
+        `None` used to mean "whatever the provider decides", which is an
+        unbounded per-call spend nobody chose. It now means "this deployment's
+        configured ceiling", and a value above that ceiling is refused rather
+        than silently clamped: an administrator who asked for 8,000 tokens and
+        got 2,048 would believe something false about what they configured.
+        """
+        ceiling = self._settings.openai_max_output_tokens
+        if requested is None:
+            return ceiling
+        if requested > ceiling:
+            raise ValidationError(f"max_output_tokens may not exceed {ceiling} on this deployment.")
+        return requested
+
     async def create(
         self,
         *,
@@ -91,12 +155,12 @@ class AgentService:
         """
         agent = await self._agents.create(
             name=name.strip(),
-            model=model or self._settings.openai_model,
+            model=self._checked_model(model),
             system_prompt=system_prompt,
             description=description,
             status=AgentStatus.DRAFT,
             temperature=temperature,
-            max_output_tokens=max_output_tokens,
+            max_output_tokens=self._checked_output_tokens(max_output_tokens),
             memory_message_limit=memory_message_limit,
             memory_token_budget=memory_token_budget,
             escalation_sentiment=escalation_sentiment,
@@ -135,13 +199,13 @@ class AgentService:
         if description is not None:
             agent.description = description
         if model is not None:
-            agent.model = model
+            agent.model = self._checked_model(model)
         if status is not None:
             agent.status = status
         if temperature is not None:
             agent.temperature = temperature
         if max_output_tokens is not None:
-            agent.max_output_tokens = max_output_tokens
+            agent.max_output_tokens = self._checked_output_tokens(max_output_tokens)
         if memory_message_limit is not None:
             agent.memory_message_limit = memory_message_limit
         if memory_token_budget is not None:

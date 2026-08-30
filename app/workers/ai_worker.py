@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 
-from app.agents.orchestrator import AgentOrchestrator
+from app.agents.orchestrator import MAX_ROUNDS, AgentOrchestrator
 from app.agents.registry import ToolRegistry
 from app.core.config import Settings
 from app.core.logging import get_logger
@@ -126,7 +126,14 @@ class AgentWorker:
                 tenant_id=job.tenant_id,
                 default_plan_code=self._settings.default_plan_code,
             )
-            if not await entitlements.allows(LimitKey.PERIOD_AI_REQUESTS):
+            # Asked for the balance rather than a yes/no (ADR-054), because the answer
+            # decides how many provider calls this turn may make. One agent
+            # turn is up to `MAX_ROUNDS` calls and each is metered as a
+            # request, so a turn that only checked "may I make one?" could
+            # knowingly spend three - which is a workspace being billed past a
+            # limit the system had already read.
+            allowance = await entitlements.check(LimitKey.PERIOD_AI_REQUESTS, additional=1)
+            if not allowance.allowed:
                 # Checked, and *not* raised. A workspace out of AI requests has
                 # a billing problem; its customer has a question. The message is
                 # already stored and the conversation is waiting for a person,
@@ -141,6 +148,20 @@ class AgentWorker:
                     },
                 )
                 return
+
+            # `remaining` is None for an unlimited plan, which is the only case
+            # that gets the full round budget without arithmetic.
+            #
+            # This closes the deterministic overshoot, not the concurrent one:
+            # two workers answering the same workspace at the same instant both
+            # read this balance before either records against it, so N workers
+            # can still spend N rounds beyond the limit. Closing that needs an
+            # atomic reservation, which the entitlement system does not have for
+            # any limit - it is a platform-wide property rather than an AI one,
+            # and is recorded in docs/AI_AGENTS.md rather than half-fixed here.
+            permitted_rounds = (
+                MAX_ROUNDS if allowance.remaining is None else min(MAX_ROUNDS, allowance.remaining)
+            )
 
             agent: Agent | None = None
             if job.agent_id is not None:
@@ -182,6 +203,7 @@ class AgentWorker:
                     tenant_id=job.tenant_id,
                     client=client,
                     registry=self._registry,
+                    max_rounds=permitted_rounds,
                     embeddings=embeddings,
                     sentiment=sentiment,
                 )

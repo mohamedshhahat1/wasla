@@ -1484,3 +1484,113 @@ Consequences:
 Google sign-in is unavailable during a Redis outage, and this is documented as a deployment dependency rather than discovered during one. Because password login does not touch this store, an outage degrades one route rather than locking every customer out — which is what makes failing closed here affordable.
 
 The `404`-when-unconfigured behaviour is separate and deliberate: a feature nobody enabled does not exist in this deployment, which is a different statement from `503`'s "it is temporarily unwell", and it declines to tell an unauthenticated caller that the feature exists and is broken.
+
+---
+
+## ADR-052 — An Agent's Mutations Are Audited As the Agent, and Only After They Happen
+
+Date:
+2026-08-30
+
+Status:
+Accepted.
+
+Decision:
+Add `AuditActorKind.AGENT` and three actions — `AGENT_HANDOFF_REQUESTED`, `AGENT_LEAD_RECORDED`, `AGENT_FOLLOW_UP_SCHEDULED`. Write them from the tool handlers, after the mutation has succeeded, with the actor kind passed literally and the scope taken from `ToolContext`. Record shapes in `meta`, never customer content. Do not audit ordinary inference.
+
+Context:
+Leads already carried `ActorKind.AGENT` attribution and handoffs already emitted analytics, so an agent's work was partly reconstructable. What did not exist was a row in `audit_logs` — the artefact an incident review actually reads. After a prompt-injection report the first question is "which conversations did the agent act in, and when", and the trail could not answer it.
+
+Reason:
+**A distinct actor kind rather than `SYSTEM`.** `SYSTEM` means the scheduler acting on its own clock — a subscription the sweep expired. "An agent decided this" and "time decided this" are different answers to "who did this", and only the first is worth filtering on after an injection report. Collapsing them would have made the new rows unfindable among the billing sweep's.
+
+**Written after the mutation, never before.** Recording at the top of a handler produces a trail full of actions that did not happen, which is worse than no trail because it is believed. Every call sits below its service call, past the branches that return early on refusal, so a refused tool, a rejected argument or a conversation a colleague had already taken over leaves nothing.
+
+**Shapes, not content.** `meta` carries which lead fields were filled and how long a follow-up delay was. It does not carry the customer's name, their number, the follow-up body or the handoff reason. An audit log is append-only and outlives the rows it describes; copying personal data into it would create a second store with a different retention story and would survive every deletion request made against the first.
+
+**Inference is not audited.** A row per reply would bury three real mutations in traffic and turn the log into a worse copy of the message table. Only acts that change state are recorded.
+
+Consequences:
+The model cannot influence the actor. Identity is passed as a literal by the handler and the scope comes from a context the orchestrator built from the worker's job, so there is no argument through which a compromised model could claim to be a user or write into another workspace's trail. `tests/integration/test_ai_security.py` asserts this, and mutating the actor kind to `SYSTEM` fails three of its tests.
+
+Migration 0036 extends two enums. It has no downgrade, for the reason 0025, 0029 and 0034 record.
+
+---
+
+## ADR-053 — A Workspace May Only Name a Model the Deployment Will Pay For
+
+Date:
+2026-08-30
+
+Status:
+Accepted.
+
+Decision:
+Add `OPENAI_ALLOWED_MODELS` and `OPENAI_MAX_OUTPUT_TOKENS`. Validate both in `AgentService` on create and on update. An empty allowlist means no restriction; the configured `OPENAI_MODEL` is always permitted. `max_output_tokens` defaults to the configured ceiling and a request above it is refused rather than clamped.
+
+Context:
+`model` was free text bounded only by length, and `max_output_tokens` was nullable. A workspace administrator could therefore point an agent at the most expensive model a provider offers and buy unbounded output per call. The plan caps the *number* of AI requests through `PERIOD_AI_REQUESTS`; nothing capped what one request cost, so plan economics could be inverted by an authenticated customer acting entirely inside their own workspace.
+
+Reason:
+**In the service, not the schema.** A Pydantic schema cannot see configuration, and the check has to be against what *this deployment* funds rather than a constant compiled into the application. Putting it in `AgentService` also covers every caller rather than only the HTTP route.
+
+**On the way in, not at the provider.** A refused model must be a `422` an administrator can act on. Deferring the check to the provider turns a configuration mistake into a failed inference that a customer waits for and that surfaces as "the agent stopped answering".
+
+**Refused, not clamped.** An administrator who asked for 8,192 output tokens and silently got 2,048 would believe something false about what they configured. The same reasoning as the email-verification bounds in ADR-043.
+
+**Empty means unrestricted.** A developer's container should not need a curated list to run, and a deployment paying a provider bill should not be able to forget one — so `.env.example` ships an explicit list and the documentation states the consequence of leaving it empty.
+
+Consequences:
+Neither setting is reachable from a prompt or a tool. Model choice, token ceiling, temperature and system prompt are configuration, and no tool declares an argument by any of those names; the test suite asserts that structurally over the whole registry so a tool added later cannot quietly expose one.
+
+Per-plan model tiers were considered and not built. The entitlement system keys on countable usage rather than on configuration values, so expressing "this plan may use these models" would mean a new kind of limit rather than a new limit — a billing change rather than a security fix, and out of scope for the review that produced this. The global allowlist is the operator's control; per-plan tiers remain open.
+
+---
+
+## ADR-054 — An Agent Turn May Not Spend More Rounds Than the Allowance Permits
+
+Date:
+2026-08-30
+
+Status:
+Accepted. Narrows ADR-030's "check, then act" for this one path.
+
+Decision:
+The AI worker reads the remaining `PERIOD_AI_REQUESTS` balance rather than a yes/no, and caps the turn's tool rounds at what remains. The concurrent-worker race is left open and documented rather than half-closed.
+
+Context:
+The worker asked "may I make one request?", then ran a turn of up to `MAX_ROUNDS` provider calls and metered all of them. A workspace on its last permitted request could therefore be billed for three, deterministically, every time.
+
+Reason:
+**Bounding the rounds rather than reserving the worst case.** Reserving three up front would refuse a turn that only needed one, leaving customers unanswered while allowance remained — a product regression in exchange for the same guarantee. Capping the budget refuses nothing that fits.
+
+**The concurrent race is not closed, and saying so is the point.** Two workers answering one workspace both read the balance before either records against it, so *N* workers can spend *N* rounds past the limit. Closing it needs an atomic reservation, which the entitlement system has for *no* limit — messages and campaign sends share the property. Fixing it here alone would leave the same race everywhere else while implying it had been solved, which is a worse outcome than a documented bound.
+
+Consequences:
+The deterministic 3× overshoot is gone; a bounded concurrent overshoot remains, proportional to worker count rather than to traffic. It is recorded in `docs/AI_AGENTS.md` under the allowance bound, and closing it platform-wide is a separate piece of work against the entitlement system rather than against the AI subsystem.
+
+---
+
+## ADR-055 — What Leaves Wasla Is Documented, and Provider Retention Is Not Asserted
+
+Date:
+2026-08-30
+
+Status:
+Accepted.
+
+Decision:
+Document the complete inventory of data sent to OpenAI in `docs/AI_AGENTS.md`, including what is deliberately *not* sent. State what this application controls — `store: false`, no `previous_response_id`, no internal identifiers in any payload — and explicitly decline to assert what the provider retains beyond that.
+
+Context:
+Customer conversation text, voice transcripts, image content and retrieved knowledge-base passages all reach OpenAI, and no document said so. For a product whose tenants' end users are consumers messaging over WhatsApp, "what leaves, to whom, for how long" is the first question a tenant's legal review asks, and the repository had no answer to point at.
+
+Reason:
+**Written from the request builders, not from intent.** The inventory was produced by reading every payload construction in `app/integrations/openai/`, which is also how the negative claim was established: no `tenant_id`, `conversation_id`, `user_id` or agent id appears in any provider request.
+
+**Retention is not asserted, deliberately.** `store: false` is a property of this code and can be stated. Whether a given OpenAI account has zero-retention eligibility, what its abuse-monitoring window is, and whether a data-processing agreement is in force are facts about an account and a contract that this repository cannot inspect. Documenting an assumption as a guarantee would be worse than documenting nothing, because a tenant would rely on it.
+
+Consequences:
+An operator running Wasla for third-party businesses must confirm the retention posture on their own provider account and record it. The documentation says so rather than implying the question is settled.
+
+Prompts are not persisted anywhere: the memory window is rebuilt from message rows each turn and discarded. That is a deletion story worth having — there is no prompt archive to leak, and deleting a conversation removes the material a prompt would have been built from.

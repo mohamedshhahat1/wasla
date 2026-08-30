@@ -52,6 +52,15 @@ class AuditActorKind(StrEnum):
     USER = "user"
     PLATFORM_STAFF = "platform_staff"
     SYSTEM = "system"
+    # An AI agent acting inside a conversation. Kept apart from `SYSTEM`, which
+    # is the scheduler acting on its own clock: "an agent decided this" and "a
+    # sweep decided this" are different answers to "who did this", and the first
+    # is the one an incident review filters on after a prompt-injection report.
+    #
+    # The model never chooses this value. It is written by the tool handler from
+    # the server-built `ToolContext`, so a compromised model cannot present
+    # itself as a user or as platform staff.
+    AGENT = "agent"
 
 
 class AuditAction(StrEnum):
@@ -151,6 +160,26 @@ class AuditAction(StrEnum):
     # opened, and because it is the step before an account becomes
     # password-only - or unreachable, which the service refuses.
     GOOGLE_IDENTITY_UNLINKED = "google_identity_unlinked"
+
+    # What an AI agent did on its own initiative (ADR-052, docs/AI_AGENTS.md).
+    #
+    # Recorded because these are mutations nobody typed. A colleague can be
+    # asked why they moved a conversation; an agent cannot, so the trail is the
+    # only account of what it did - and after a prompt-injection report, "which
+    # conversations did the agent act in, and when" is the first question.
+    #
+    # Ordinary inference is deliberately absent from this vocabulary. A row per
+    # reply would bury the mutations in traffic and turn the audit log into a
+    # second, worse copy of the message table. Only acts that change state are
+    # here.
+    #
+    # Every one is written *after* the mutation has succeeded. A refused tool
+    # call, a rejected argument or a conversation a colleague had already taken
+    # over leaves no row, so the trail cannot report an action that did not
+    # happen.
+    AGENT_HANDOFF_REQUESTED = "agent_handoff_requested"
+    AGENT_LEAD_RECORDED = "agent_lead_recorded"
+    AGENT_FOLLOW_UP_SCHEDULED = "agent_follow_up_scheduled"
 
     # The channel a business talks to its customers through
     WHATSAPP_ACCOUNT_CONNECTED = "whatsapp_account_connected"

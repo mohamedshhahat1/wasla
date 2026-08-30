@@ -38,7 +38,7 @@ Ingestion runs on its own queue and worker, separate from the agent queue (ADR-0
 
 PostgreSQL with pgvector. `knowledge_bases` groups documents; `documents` holds source metadata, the extracted text and the ingestion status; `document_chunks` holds chunk text, ordinal, token estimate and the embedding vector.
 
-`tenant_id` is on all three tables, including chunks, even though it could be reached by joining through the document. Similarity search reads the chunk table alone, and the tenant predicate has to be expressible on the row being scanned — a filter that depends on a join is a filter someone will eventually write without the join.
+`tenant_id` is on all three tables, including chunks, even though it could be reached by joining through the document. Similarity search *does* join the document — it needs the title to cite and the status to filter on — so both predicates are applied and either one alone would be sufficient. The duplication is kept deliberately: a filter that depends on a join is a filter someone eventually writes without the join, and the column costs four bytes against a leak that would be silent. Removing either is safe; removing both is a cross-tenant leak, and that is the case the tests fail on.
 
 The embedding column is `vector(1536)`, the width of `text-embedding-3-small`, fixed in the schema rather than configurable (ADR-018). The width is also requested explicitly on every embedding call, so the provider cannot return something the column will not accept.
 

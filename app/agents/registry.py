@@ -23,10 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ConflictError, ValidationError
 from app.core.logging import get_logger
 from app.db.models.analytics import AnalyticsSource
+from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.conversation import ConversationMode
 from app.db.models.lead import ActorKind
 from app.integrations.openai.embeddings import EmbeddingsClient
 from app.integrations.openai.types import ToolSpec
+from app.services.audit_service import AuditTrail
 from app.services.follow_up_service import MAX_DELAY, MIN_DELAY, FollowUpService
 from app.services.inbox_service import InboxService
 from app.services.lead_service import ExtractedLead, LeadService
@@ -184,6 +186,52 @@ def _checked_value(parameter: ToolParameter, value: Any) -> Any:
     return value
 
 
+def _record(
+    context: ToolContext,
+    action: AuditAction,
+    *,
+    target_type: str,
+    target_id: uuid.UUID,
+    meta: dict[str, Any] | None = None,
+) -> None:
+    """Write one audit row for something an agent actually did (ADR-052).
+
+    Three rules, and each closes a way the trail could lie.
+
+    **The actor is fixed.** `AuditActorKind.AGENT` is passed literally and no
+    `actor` user is supplied, so nothing a model emits can influence who the
+    row says acted. There is no argument through which to claim otherwise: the
+    model's output reaches this function only as `meta`, never as identity.
+
+    **The scope comes from the context.** `tenant_id` and the conversation are
+    read from the server-built `ToolContext`, which the orchestrator assembled
+    from the worker's job - not from tool arguments. A compromised model cannot
+    write a row into another workspace's trail because it cannot name one.
+
+    **Only facts, never content.** `meta` carries shapes and identifiers - which
+    fields were filled, how long a delay was - and never the customer's words,
+    the agent's prompt or a handoff reason. An audit log is read by people
+    investigating an incident; it must not become a second copy of the
+    conversation, and a trail that quietly accumulated message text would be a
+    privacy problem of its own.
+
+    Called only after the mutation has succeeded. Every caller sits below its
+    service call, past the branches that return early on refusal, so a refused
+    tool cannot leave a row claiming it ran.
+    """
+    entry: dict[str, Any] = {"conversation_id": str(context.conversation_id)}
+    if meta:
+        entry.update(meta)
+    AuditTrail(context.session, tenant_id=context.tenant_id).record(
+        action,
+        actor_kind=AuditActorKind.AGENT,
+        target_type=target_type,
+        target_id=target_id,
+        tenant_id=context.tenant_id,
+        meta=entry,
+    )
+
+
 async def _request_human_handoff(context: ToolContext, arguments: dict[str, Any]) -> str:
     """Switch the conversation to human mode and stop answering it."""
     reason = str(arguments["reason"])[:MAX_HANDOFF_REASON_LENGTH]
@@ -196,6 +244,17 @@ async def _request_human_handoff(context: ToolContext, arguments: dict[str, Any]
         # and an agent giving up on it are the same row on `conversations` and
         # very different facts about the product.
         source=AnalyticsSource.AGENT,
+    )
+    # After the mode change, never before: a handoff that raised must not leave
+    # a row saying the conversation was handed over. The reason itself is not
+    # recorded here - it is a sentence about a customer, it is already on the
+    # conversation row, and the trail answers "who and when", not "what was
+    # said".
+    _record(
+        context,
+        AuditAction.AGENT_HANDOFF_REQUESTED,
+        target_type="conversation",
+        target_id=context.conversation_id,
     )
     logger.info(
         "agent.handoff_requested",
@@ -328,6 +387,17 @@ async def _record_lead_details(context: ToolContext, arguments: dict[str, Any]) 
         # than retry.
         return "A colleague has taken over this conversation. Do not reply further."
 
+    # Which fields the agent filled, never what it wrote into them. "The agent
+    # set a phone number on this lead at 14:02" is the auditable fact; the
+    # number itself is the customer's personal data and belongs on the lead
+    # row alone, where deleting the lead deletes it.
+    _record(
+        context,
+        AuditAction.AGENT_LEAD_RECORDED,
+        target_type="lead",
+        target_id=lead.id,
+        meta={"fields": sorted(extracted.as_fields())},
+    )
     logger.info(
         "agent.lead_recorded",
         extra={
@@ -442,6 +512,15 @@ async def _schedule_follow_up(context: ToolContext, arguments: dict[str, Any]) -
         # outside the bounds, or a conversation that has since been closed.
         return f"The follow-up was not scheduled: {error}"
 
+    # The delay is a scheduling fact and is recorded; the message body is text
+    # that will be sent to a customer and is not.
+    _record(
+        context,
+        AuditAction.AGENT_FOLLOW_UP_SCHEDULED,
+        target_type="follow_up",
+        target_id=follow_up.id,
+        meta={"delay_minutes": minutes},
+    )
     logger.info(
         "agent.follow_up_scheduled",
         extra={

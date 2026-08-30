@@ -13,6 +13,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.config import MAX_AGENT_OUTPUT_TOKENS
 from app.db.models.agent import (
     DEFAULT_ESCALATION_SENTIMENT,
     DEFAULT_MEMORY_MESSAGE_LIMIT,
@@ -32,7 +33,9 @@ MAX_PROMPT_LENGTH = 20_000
 MAX_MESSAGE_LIMIT = 200
 MIN_TOKEN_BUDGET = 200
 MAX_TOKEN_BUDGET = 100_000
-MAX_OUTPUT_TOKENS = 8_192
+# One home, in configuration, because `Settings` validates its own ceiling
+# against it and two copies of a bound drift.
+MAX_OUTPUT_TOKENS = MAX_AGENT_OUTPUT_TOKENS
 MIN_TEMPERATURE = 0.0
 MAX_TEMPERATURE = 2.0
 

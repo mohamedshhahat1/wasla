@@ -39,6 +39,13 @@ _PUBLIC_URL_SCHEMES: Final = frozenset({"http", "https"})
 # domain, which is far harder to diagnose than a container that says why.
 _GOOGLE_CLIENT_ID_SUFFIX: Final = ".apps.googleusercontent.com"
 
+# The absolute ceiling on an agent's `max_output_tokens`, independent of what a
+# deployment configures below. Defined here rather than in the schema because
+# `Settings` has to validate against it and configuration cannot import schemas
+# without a cycle; the schema imports it from here instead, so the number has
+# one home.
+MAX_AGENT_OUTPUT_TOKENS: Final = 8_192
+
 # Anything that is a number at all, sign included, so a negative integration id
 # is refused as an out-of-range number rather than accepted as a method name.
 _SIGNED_INTEGER: Final = re.compile(r"[+-]?\d+")
@@ -240,6 +247,22 @@ class Settings(BaseSettings):
     # model so a workspace can classify cheaply and answer well.
     openai_sentiment_model: str = "gpt-4.1-mini"
     openai_timeout_seconds: float = Field(default=60.0, gt=0)
+    # Which models a workspace may point an agent at, and how much output it may
+    # buy per call. Both are cost controls, and both belong here rather than in
+    # the schema: the schema cannot see configuration, and a deployment paying
+    # the provider bill is the only party that can say what it is willing to
+    # fund. Empty means "no restriction", which is the right default for a
+    # single-tenant or development deployment and the wrong one for a SaaS -
+    # `.env.example` sets an explicit list for that reason.
+    #
+    # `openai_model` above is always permitted whatever this says: it is the
+    # fallback every agent gets when it names none, so a list that excluded it
+    # would make the default agent unbuildable.
+    openai_allowed_models: list[str] = Field(default_factory=list)
+    # The ceiling on `agents.max_output_tokens`, and the default when an agent
+    # names none. A null there previously meant "whatever the provider's own
+    # default is", which is an unbounded per-call spend nobody chose.
+    openai_max_output_tokens: int = Field(default=2_048, ge=1, le=MAX_AGENT_OUTPUT_TOKENS)
 
     # Media
     # Where downloaded attachments are written. A path on the local filesystem,
