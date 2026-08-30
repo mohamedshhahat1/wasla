@@ -1553,7 +1553,10 @@ Date:
 2026-08-30
 
 Status:
-Accepted. Narrows ADR-030's "check, then act" for this one path.
+Accepted, and its residual race **closed by ADR-056**. The paragraph below
+recording the concurrent overshoot as unfixed was true when written and is no
+longer; it is left in place because the reasoning about *why* it was not
+half-fixed is what led to the general primitive.
 
 Decision:
 The AI worker reads the remaining `PERIOD_AI_REQUESTS` balance rather than a yes/no, and caps the turn's tool rounds at what remains. The concurrent-worker race is left open and documented rather than half-closed.
@@ -1594,3 +1597,40 @@ Consequences:
 An operator running Wasla for third-party businesses must confirm the retention posture on their own provider account and record it. The documentation says so rather than implying the question is settled.
 
 Prompts are not persisted anywhere: the memory window is rebuilt from message rows each turn and discarded. That is a deletion story worth having — there is no prompt archive to leak, and deleting a conversation removes the material a prompt would have been built from.
+
+
+---
+
+## ADR-056 — A Metered Allowance Is Reserved Atomically, For Every Limit
+
+Date:
+2026-08-30
+
+Status:
+Accepted. Closes the residual race recorded in ADR-054.
+
+Decision:
+Add `EntitlementService.consume(key, event_type, amount)`: take a PostgreSQL advisory transaction lock keyed on (workspace, limit), re-check the allowance under it, record the usage meter, and flush before the lock is released. Make it a general primitive available to every period limit rather than an AI-specific mechanism. Use it in the agent worker to reserve one AI request before each provider round, in a short transaction of its own.
+
+Context:
+ADR-054 bounded a turn's rounds by the remaining allowance, which removed a deterministic three-times overshoot. It explicitly left the concurrent case open on the grounds that it was small and platform-wide.
+
+Measuring it showed the estimate was wrong. Ten connections reserving simultaneously against an allowance of three **all ten succeeded** — every concurrent attempt reads a total none of the others has yet written to, so the overshoot is bounded by concurrency rather than by anything small. On the path taken by every provider call this product makes, that is a real hole in plan enforcement.
+
+Reason:
+**An advisory lock rather than a counter table.** `usage_events` is append-only and is the single source of truth for what a workspace has spent (ADR-030). A counter column beside it would be a second source that can disagree with the first, and disagreeing about billing is a worse failure than serialising briefly.
+
+**Rather than SERIALIZABLE.** That would push retry handling into every caller for a conflict that is rare, and would make correctness depend on every future caller remembering to retry.
+
+**Keyed on (workspace, limit).** Only the workspaces actually contending serialise. Two different workspaces never wait for each other, and neither do two different limits within one workspace.
+
+**Held briefly, and never across an inference.** The lock lives until its transaction ends, so the worker reserves on a session of its own and commits before calling the provider. Holding a workspace's lock for the length of an inference would serialise every conversation that workspace is having — trading a billing leak for a throughput collapse.
+
+**The caller names the meter.** A key can be fed by more than one meter: `PERIOD_MESSAGES` counts sent *and* received. Incrementing every meter for a key would bill a workspace twice for one message, so `consume` takes the event type and refuses one that does not count toward the key. Resource limits — agents, numbers, seats — count rows that already exist and cannot be consumed at all; asking to is an error rather than a silent no-op.
+
+Consequences:
+The request meter moved. It is now written by the reservation before each provider call rather than by the worker after the turn, so the worker records tokens only and passes `requests=0`. A turn that is reserved and then abandoned has still spent the request: usage is append-only and there is no refund, which is the safe direction for a cost control.
+
+A crash between reserving and calling bills a request that did not happen. That is accepted, and it is the direction to fail in.
+
+The primitive is general and unused by the other limits so far. Adopting it for messages and campaigns is follow-on work against those call sites, not a change to this one.

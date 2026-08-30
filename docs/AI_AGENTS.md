@@ -89,6 +89,8 @@ A rolling conversation summary is still planned. Long conversations currently lo
 
 All inference goes through `app/integrations/openai/`, over HTTP with no vendor SDK, using the Responses API (ADR-007, ADR-014). Requests set `store: false` and never thread turns provider-side: the conversation lives in the workspace's own tables.
 
+**Verified against the real Responses API**, not only against a fake transport: authentication and endpoint, the request shape this application builds, the four tool schemas, a returned tool call and its parsing, two-round tool results, the `input_tokens`/`output_tokens`/`total_tokens` fields the meter reads, and the handling of an unknown model, invalid credentials and a timeout. `tests/real_provider/` holds those and is skipped without `OPENAI_API_KEY`, so CI stays green without credentials. What remains unverified against the real provider is listed in the same file's docstring.
+
 Retries are the inverse of the WhatsApp client's — 429, transport errors and 5xx are all retried, three attempts with linear backoff — because a duplicated inference costs tokens and reaches no customer, while a duplicated send reaches one. Provider error prose is never logged, only its `code` and `type`, because that prose can quote the request and the request contains a customer's conversation.
 
 ## Model and cost policy (ADR-053)
@@ -106,11 +108,15 @@ Empty-means-unrestricted is the right default for a developer's container and th
 
 **Neither is reachable from a prompt or a tool.** Model choice, token ceiling, temperature and system prompt are configuration, and no tool declares an argument by any of those names — `tests/integration/test_ai_security.py` asserts that structurally over the whole registry, so a tool added later cannot quietly expose one.
 
-### The allowance bound (ADR-054)
+### The allowance is reserved, not counted afterwards (ADR-054, ADR-056)
 
-One turn is up to three provider calls and each is metered as a request. The worker therefore reads the *balance* rather than a yes/no, and caps the turn's rounds at what remains, so a workspace cannot be billed past a limit the system had already read.
+One turn is up to three provider calls and each one costs a request. The request meter is therefore taken **before** each call rather than counted after the turn: `EntitlementService.consume` reserves one AI request atomically, and the orchestrator makes the call only if the reservation succeeded. A turn that runs out mid-way stops and sends whatever it has, rather than making a call nobody paid for.
 
-**Known limitation, not fixed here.** Two workers answering the same workspace at the same instant both read the balance before either records against it, so *N* concurrent workers can still spend *N* rounds beyond the limit. Closing that needs an atomic reservation, which the entitlement system has for no limit — it is a platform-wide property rather than an AI one, and half-fixing it here would leave the same race everywhere else while implying it was solved.
+**The concurrent race is closed, and the fix is platform-wide rather than AI-only.** `consume` takes a PostgreSQL advisory lock keyed on (workspace, limit), re-checks under it, records the meter, and flushes before releasing — so two workers cannot both spend the last permitted request. It is a general primitive on `EntitlementService`: any limit fed by a usage meter can use it, and messages and campaigns are free to adopt it without a second mechanism being invented.
+
+The race was real and larger than an estimate suggested. With the lock removed, ten concurrent reservations against an allowance of three **all ten succeeded**; with it, exactly three do. `tests/integration/test_ai_security.py::test_concurrent_reservations_cannot_oversell_the_allowance` runs that on ten real connections, and it is mutation-tested: deleting the lock fails it.
+
+**What the lock does not do.** It is held only for the reservation's own short transaction — never across an inference, which would serialise every conversation a busy workspace is having. The worker therefore reserves on a separate session and commits before calling the provider. The consequence is deliberate and is the safe direction: a crash between reserving and calling bills a request that did not happen, where the alternative would give away requests that did.
 
 ## What leaves Wasla (ADR-055)
 
@@ -143,6 +149,8 @@ Implemented:
 - `record_lead_details` — saves what the customer said about themselves onto their lead. Every argument is optional, because extraction is partial by nature: a name arrives in one message and a budget three messages later, and a required field would push the model into inventing one. The tool offers no way to name a lead, set a status or set a score — it reports what it heard, and the service resolves which lead that is from the conversation's contact. Fields a person entered are never overwritten. Details in [CRM.md](CRM.md).
 
 Planned, in the phase that gives each one something to act on: `create_lead`, `update_lead`, `get_lead`, `assign_lead` (Phase 7), `schedule_follow_up` (Phase 8), `send_media` (Phase 9), and later `get_product`, `get_price`, `create_ticket`, `get_order`, `check_availability`, `create_appointment`, `cancel_appointment`, `reschedule_appointment`.
+
+`additionalProperties: false` is declared on every tool schema, and the real provider was observed to honour it — a developer-channel instruction demanding two extra identifier fields produced a call carrying only declared ones. That is recorded as an observation rather than relied upon: `strict` is not set, so adherence is provider behaviour rather than a contract, and the boundary that actually holds is `validate_arguments` on the way in. `strict` is not adopted because it requires every property to be required, which would force the deliberately optional lead fields to be sent as nulls and lose the distinction between "not mentioned" and "empty".
 
 Every tool that mutates writes an audit row after — never before — the mutation succeeds, with `AuditActorKind.AGENT` as the actor and the tenant and conversation taken from `ToolContext`. The model cannot influence who the row says acted, and a refused or failed tool leaves no row. `meta` carries shapes only — which lead fields were filled, how long a follow-up delay was — never the customer's words, so the trail does not become a second copy of the conversation with a different retention story.
 

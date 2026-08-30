@@ -137,4 +137,7 @@ addopts = "-q --strict-markers --strict-config"
 markers = [
     "integration: exercises the ASGI application or infrastructure adapters",
     "e2e: exercises a full end-to-end flow",
+    # Opt-in, and skipped without OPENAI_API_KEY so CI stays green without
+    # credentials. These call the real provider and cost real money.
+    "real_provider: calls a real external provider; needs credentials",
 ]

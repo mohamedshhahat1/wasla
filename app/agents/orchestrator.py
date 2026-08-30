@@ -12,7 +12,7 @@ project and lets a worker decide whether a turn is kept or rolled back.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Set
+from collections.abc import Awaitable, Callable, Set
 from dataclasses import dataclass
 from typing import Final
 
@@ -103,6 +103,7 @@ class AgentOrchestrator:
         max_rounds: int = MAX_ROUNDS,
         embeddings: EmbeddingsClient | None = None,
         sentiment: SentimentService | None = None,
+        reserve_round: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
@@ -114,6 +115,11 @@ class AgentOrchestrator:
         # no assessment, and a deployment without a provider still answers. The
         # worker always supplies one, which is the path customers arrive on.
         self._sentiment = sentiment
+        # Called before each provider round to take one AI request from the
+        # workspace's allowance. Optional so a unit test can drive the loop
+        # without a database; the worker always supplies one, which is the path
+        # customers arrive on.
+        self._reserve_round = reserve_round
         self._registry = registry if registry is not None else build_default_registry()
         self._max_rounds = max(1, max_rounds)
         self._agents = AgentRepository(session, tenant_id=tenant_id)
@@ -207,6 +213,23 @@ class AgentOrchestrator:
         rounds = 0
 
         for round_number in range(1, self._max_rounds + 1):
+            if self._reserve_round is not None and not await self._reserve_round():
+                # The allowance ran out mid-turn, which a first-round check
+                # cannot rule out: another worker may have spent the last
+                # request while this turn was thinking. Whatever has been said
+                # so far is still worth sending, so this breaks rather than
+                # raising - the customer gets a shorter answer instead of
+                # silence, and the workspace is not billed for a call that was
+                # never made.
+                logger.warning(
+                    "agent.allowance_exhausted_mid_turn",
+                    extra={
+                        "event": "agent.allowance_exhausted_mid_turn",
+                        "conversation_id": str(conversation_id),
+                        "round": round_number,
+                    },
+                )
+                break
             rounds = round_number
             reply = await self._client.respond(
                 model=resolved.model,

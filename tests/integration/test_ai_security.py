@@ -23,15 +23,16 @@ assumes it and tests what happens on the far side of a *granted* tool.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import httpx
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.agents.registry import (
     HANDOFF_DEFINITION,
@@ -45,7 +46,13 @@ from app.agents.registry import (
 from app.core.config import Settings
 from app.core.exceptions import ValidationError
 from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
-from app.db.models.billing import BillingInterval, LimitKey, Plan, SubscriptionStatus
+from app.db.models.billing import (
+    BillingInterval,
+    LimitKey,
+    Plan,
+    Subscription,
+    SubscriptionStatus,
+)
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -61,12 +68,12 @@ from app.db.models.knowledge import (
 )
 from app.db.models.lead import Lead
 from app.db.models.tenant import Tenant
-from app.db.models.usage import UsageEventType
+from app.db.models.usage import UsageEvent, UsageEventType
 from app.db.models.whatsapp import WhatsAppAccount
 from app.repositories.billing_repository import SubscriptionRepository
 from app.services.agent_service import AgentService
+from app.services.entitlement_service import EntitlementService
 from app.services.retrieval_service import DEFAULT_TOP_K, MAX_TOP_K, RetrievalService
-from app.services.usage_service import UsageRecorder
 from tests.fake_embeddings import FakeEmbeddings, embed_text
 
 pytestmark = pytest.mark.integration
@@ -686,114 +693,153 @@ async def _plan_with_ai_limit(session: AsyncSession, *, tenant: Tenant, limit: i
     await session.flush()
 
 
-async def test_a_turn_cannot_spend_more_rounds_than_the_allowance_permits(
+async def test_a_round_is_reserved_before_each_provider_call(
     db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The overspend this fix exists to close.
+    """The request meter is taken *before* the call, not counted after it.
 
-    One agent turn is up to `MAX_ROUNDS` provider calls and each is metered as
-    a request. A worker that only asked "may I make one?" would then knowingly
-    make three, billing a workspace past a limit the system had already read.
-
-    The allowance here permits three requests and two are already spent, so the
-    turn may make exactly one call. The assertion is on the budget the worker
-    hands the orchestrator, because that is where the decision is taken.
+    Counting afterwards is what let two workers both spend the last permitted
+    request: each read a total the other had not yet written to. Reserving
+    first makes the meter the reservation.
     """
-    from app.workers import ai_worker as worker_module
-    from app.workers.queue import AgentJob
+    tenant = await _tenant(db_session, slug="reserve")
+    await _plan_with_ai_limit(db_session, tenant=tenant, limit=5)
+    service = EntitlementService(db_session, tenant_id=tenant.id)
 
-    tenant = await _tenant(db_session, slug="allowance")
-    conversation = await _conversation(db_session, tenant=tenant)
-    await _plan_with_ai_limit(db_session, tenant=tenant, limit=3)
+    first = await service.consume(LimitKey.PERIOD_AI_REQUESTS, event_type=UsageEventType.AI_REQUEST)
 
-    recorder = UsageRecorder(db_session, tenant_id=tenant.id)
-    recorder.record(UsageEventType.AI_REQUEST, quantity=2)
-    await db_session.flush()
-
-    seen: dict[str, int] = {}
-
-    class _Capturing:
-        def __init__(self, **kwargs: object) -> None:
-            seen["max_rounds"] = int(kwargs["max_rounds"])  # type: ignore[arg-type]
-
-        async def answer(self, **_: object):
-            from app.agents.orchestrator import AgentOutcome
-            from app.integrations.openai.types import TokenUsage
-
-            return AgentOutcome(
-                reply=None,
-                handed_off=False,
-                tools_run=(),
-                usage=TokenUsage(input_tokens=0, output_tokens=0, total_tokens=0),
-                rounds=1,
-            )
-
-    monkeypatch.setattr(worker_module, "AgentOrchestrator", _Capturing)
-    monkeypatch.setattr(
-        worker_module,
-        "build_http_client",
-        lambda: httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda request: httpx.Response(200))
-        ),
-    )
-
-    worker = worker_module.AgentWorker(
-        database=_SessionHandle(db_session),
-        redis=_NullRedis(),
-        settings=_settings(openai_api_key="test-key-not-a-real-credential"),
-    )
-    await worker._handle(AgentJob(tenant_id=tenant.id, conversation_id=conversation.id))
-
-    assert seen["max_rounds"] == 1
+    assert first.allowed
+    assert await _ai_requests_used(db_session, tenant) == 1
 
 
-async def test_an_unlimited_plan_gets_the_full_round_budget(
+async def test_a_reservation_past_the_limit_records_nothing(
     db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The control: the bound must not throttle a workspace that has no limit."""
-    from app.agents.orchestrator import MAX_ROUNDS
-    from app.workers import ai_worker as worker_module
-    from app.workers.queue import AgentJob
+    """A refusal must not consume. Usage is append-only, so there is no refund."""
+    tenant = await _tenant(db_session, slug="exhausted")
+    await _plan_with_ai_limit(db_session, tenant=tenant, limit=1)
+    service = EntitlementService(db_session, tenant_id=tenant.id)
 
-    tenant = await _tenant(db_session, slug="unlimited")
-    conversation = await _conversation(db_session, tenant=tenant)
+    assert (
+        await service.consume(LimitKey.PERIOD_AI_REQUESTS, event_type=UsageEventType.AI_REQUEST)
+    ).allowed
+    refused = await service.consume(
+        LimitKey.PERIOD_AI_REQUESTS, event_type=UsageEventType.AI_REQUEST
+    )
 
-    seen: dict[str, int] = {}
+    assert not refused.allowed
+    assert await _ai_requests_used(db_session, tenant) == 1
 
-    class _Capturing:
-        def __init__(self, **kwargs: object) -> None:
-            seen["max_rounds"] = int(kwargs["max_rounds"])  # type: ignore[arg-type]
 
-        async def answer(self, **_: object):
-            from app.agents.orchestrator import AgentOutcome
-            from app.integrations.openai.types import TokenUsage
+async def test_a_resource_limit_cannot_be_consumed(db_session: AsyncSession) -> None:
+    """Agents and numbers count rows that exist; there is no meter to take."""
+    tenant = await _tenant(db_session, slug="resource")
+    service = EntitlementService(db_session, tenant_id=tenant.id)
 
-            return AgentOutcome(
-                reply=None,
-                handed_off=False,
-                tools_run=(),
-                usage=TokenUsage(input_tokens=0, output_tokens=0, total_tokens=0),
-                rounds=1,
+    with pytest.raises(ValueError):
+        await service.consume(LimitKey.AGENTS, event_type=UsageEventType.AI_REQUEST)
+
+
+async def test_the_meter_must_belong_to_the_limit(db_session: AsyncSession) -> None:
+    """`PERIOD_MESSAGES` counts two meters; consuming the wrong one would misbill."""
+    tenant = await _tenant(db_session, slug="wrongmeter")
+    service = EntitlementService(db_session, tenant_id=tenant.id)
+
+    with pytest.raises(ValueError):
+        await service.consume(
+            LimitKey.PERIOD_AI_REQUESTS, event_type=UsageEventType.WHATSAPP_MESSAGE_SENT
+        )
+
+
+async def test_concurrent_reservations_cannot_oversell_the_allowance(
+    prepared_database: str,
+) -> None:
+    """The race, reproduced on real connections and then closed.
+
+    Every other test in this file shares one session, where nothing can
+    interleave. This one opens ten independent connections and has them all
+    reserve at the same moment against an allowance of three, which is the
+    situation ten workers answering one busy workspace are actually in.
+
+    Without the advisory lock each connection reads a count the others have not
+    yet written to and more than three succeed. With it, exactly three do - and
+    the assertion is on the recorded total as well as on the verdicts, because
+    a lock that serialised the checks but not the writes would still oversell.
+    """
+    engine = create_async_engine(prepared_database, poolclass=NullPool)
+    limit = 3
+    attempts = 10
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_id: uuid.UUID
+    plan_id: uuid.UUID
+    try:
+        # Seeded through the ORM and committed, so every connection below sees
+        # it. Raw SQL here would have to restate the schema and would rot.
+        async with factory() as setup:
+            tenant = Tenant(name="Race", slug=f"race-{uuid.uuid4().hex[:8]}")
+            plan = Plan(
+                code=f"race-{uuid.uuid4().hex[:8]}",
+                name="Race",
+                price=Decimal("10.00"),
+                currency="USD",
+                interval=BillingInterval.MONTHLY,
+                limits={LimitKey.PERIOD_AI_REQUESTS.value: limit},
+            )
+            setup.add_all([tenant, plan])
+            await setup.flush()
+            now = datetime.now(UTC)
+            setup.add(
+                Subscription(
+                    tenant_id=tenant.id,
+                    plan_id=plan.id,
+                    status=SubscriptionStatus.ACTIVE,
+                    current_period_start=now - timedelta(days=1),
+                    current_period_end=now + timedelta(days=27),
+                )
+            )
+            await setup.commit()
+            tenant_id, plan_id = tenant.id, plan.id
+
+        async def reserve() -> bool:
+            async with factory() as session:
+                service = EntitlementService(session, tenant_id=tenant_id)
+                outcome = await service.consume(
+                    LimitKey.PERIOD_AI_REQUESTS, event_type=UsageEventType.AI_REQUEST
+                )
+                await session.commit()
+                return outcome.allowed
+
+        verdicts = await asyncio.gather(*(reserve() for _ in range(attempts)))
+
+        async with engine.begin() as connection:
+            recorded = await connection.scalar(
+                text(
+                    "SELECT COALESCE(SUM(quantity), 0) FROM usage_events "
+                    "WHERE tenant_id = :tenant_id AND event_type = 'ai_request'"
+                ),
+                {"tenant_id": tenant_id},
             )
 
-    monkeypatch.setattr(worker_module, "AgentOrchestrator", _Capturing)
-    monkeypatch.setattr(
-        worker_module,
-        "build_http_client",
-        lambda: httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda request: httpx.Response(200))
-        ),
-    )
+        assert sum(verdicts) == limit, f"{sum(verdicts)} of {attempts} succeeded, wanted {limit}"
+        assert int(recorded) == limit, f"recorded {recorded}, wanted {limit}"
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM usage_events WHERE tenant_id = :t"), {"t": tenant_id}
+            )
+            await connection.execute(
+                text("DELETE FROM subscriptions WHERE tenant_id = :t"), {"t": tenant_id}
+            )
+            await connection.execute(text("DELETE FROM plans WHERE id = :p"), {"p": plan_id})
+            await connection.execute(text("DELETE FROM tenants WHERE id = :t"), {"t": tenant_id})
+        await engine.dispose()
 
-    worker = worker_module.AgentWorker(
-        database=_SessionHandle(db_session),
-        redis=_NullRedis(),
-        settings=_settings(openai_api_key="test-key-not-a-real-credential"),
-    )
-    await worker._handle(AgentJob(tenant_id=tenant.id, conversation_id=conversation.id))
 
-    # No subscription at all means no limit for this key, which is the
-    # deployment default and must not be read as "zero allowed".
-    assert seen["max_rounds"] == MAX_ROUNDS
+async def _ai_requests_used(session: AsyncSession, tenant: Tenant) -> int:
+    total = await session.scalar(
+        select(func.coalesce(func.sum(UsageEvent.quantity), 0)).where(
+            UsageEvent.tenant_id == tenant.id,
+            UsageEvent.event_type == UsageEventType.AI_REQUEST,
+        )
+    )
+    return int(total or 0)

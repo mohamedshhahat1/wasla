@@ -603,11 +603,16 @@ async def test_an_agent_turn_meters_its_provider_calls_and_tokens(
     await db_session.flush()
 
     totals = await _totals(db_session, tenant)
-    assert totals[UsageEventType.AI_REQUEST] == 2
     assert totals[UsageEventType.AI_INPUT_TOKEN] == 420
     assert totals[UsageEventType.AI_OUTPUT_TOKEN] == 60
     # The reply went out, so it is counted too.
     assert totals[UsageEventType.WHATSAPP_MESSAGE_SENT] == 1
+    # The *request* meter is no longer written here. It is taken per round by
+    # the reservation the orchestrator calls before each provider call, so that
+    # two workers cannot both spend the last permitted request. This stub
+    # orchestrator makes no provider calls and so reserves nothing; the real
+    # accounting is proved in `test_ai_security.py`.
+    assert UsageEventType.AI_REQUEST not in totals
 
 
 async def test_a_turn_that_says_nothing_is_still_metered(
@@ -629,7 +634,10 @@ async def test_a_turn_that_says_nothing_is_still_metered(
     await db_session.flush()
 
     totals = await _totals(db_session, tenant)
-    assert totals[UsageEventType.AI_REQUEST] == 1
+    # Tokens are metered whether or not the turn produced words - a handoff
+    # cost the same inference as an answer. The request meter belongs to the
+    # reservation now; see the note above.
+    assert totals[UsageEventType.AI_INPUT_TOKEN] > 0
     assert UsageEventType.WHATSAPP_MESSAGE_SENT not in totals
 
 

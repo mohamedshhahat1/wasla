@@ -26,6 +26,7 @@ failure mode a limit check should have.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -51,6 +52,7 @@ from app.db.models.usage import UsageEventType
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
 from app.repositories.usage_repository import UsageEventRepository
+from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
@@ -102,6 +104,29 @@ def _refusal(entitlement: Entitlement) -> str:
         + (" per billing period" if entitlement.key not in RESOURCE_LIMITS else "")
         + f", and {entitlement.used} have been used. Upgrade the plan to continue."
     )
+
+
+# PostgreSQL advisory locks take two 32-bit integers. The first is a namespace
+# constant so this application's locks cannot collide with anything else using
+# the same mechanism on the same database; the second identifies the workspace
+# and the limit being consumed.
+_ADVISORY_NAMESPACE: Final = 0x5741_534C  # "WASL"
+
+
+def _lock_id(tenant_id: uuid.UUID, key: LimitKey) -> int:
+    """A stable 32-bit identifier for one workspace's hold on one limit.
+
+    Signed, because PostgreSQL's advisory lock functions take `int4`. The
+    derivation only has to be stable and well spread - a collision between two
+    unrelated (workspace, limit) pairs costs a little needless serialisation
+    and never a wrong answer, because the check under the lock is still the
+    real one.
+    """
+    digest = hashlib.blake2b(
+        f"{tenant_id}:{key.value}".encode(),
+        digest_size=4,
+    ).digest()
+    return int.from_bytes(digest, "big", signed=True)
 
 
 class EntitlementService:
@@ -205,6 +230,86 @@ class EntitlementService:
                 },
             )
             raise PlanLimitExceededError(_refusal(entitlement))
+        return entitlement
+
+    async def consume(
+        self,
+        key: LimitKey,
+        *,
+        event_type: UsageEventType,
+        amount: int = 1,
+    ) -> Entitlement:
+        """Reserve `amount` against a limit and record it, atomically.
+
+        The primitive every limit should use before doing something the plan
+        pays for. :meth:`check` and :meth:`require` answer a question; this one
+        takes the allowance, and the difference matters exactly when two
+        workers ask at once.
+
+        **Why a lock at all.** `check` reads a total and the caller then writes
+        to it, which is a read-then-act sequence over a value another
+        transaction may be changing. Two workers holding the last remaining
+        request both read "one left", both are told yes, and both spend it. The
+        window is small and entirely real: it is open for the length of a
+        database round trip, on the path taken by every provider call this
+        product makes.
+
+        **Why an advisory lock rather than SERIALIZABLE or a counter table.**
+        `usage_events` is append-only and is the single source of truth for
+        what a workspace has spent (ADR-030). A counter column beside it would
+        be a second source that can disagree, and disagreeing about billing is
+        worse than serialising. SERIALIZABLE would push retry handling into
+        every caller for a conflict that is rare. An advisory lock keyed on
+        (workspace, limit) serialises only the workspaces actually contending,
+        leaves the data model alone, and is released by the transaction ending
+        whether it commits or aborts - there is no lock to leak.
+
+        **Hold it briefly.** The lock lives until this transaction ends, so a
+        caller must not keep the transaction open across slow work. The agent
+        worker reserves in a short transaction of its own for exactly this
+        reason: holding a workspace's lock across an inference would serialise
+        every conversation that workspace is having.
+
+        Returns the entitlement. When `allowed` is false nothing was recorded
+        and the caller must not proceed; usage is append-only, so there is no
+        refund for work that is reserved and then abandoned.
+        """
+        if key not in PERIOD_METERS:
+            # Resource limits count rows that already exist - agents, numbers,
+            # seats - so there is no meter to increment and nothing to reserve.
+            # Those callers want `require`, and saying so is better than
+            # silently locking and recording nothing.
+            raise ValueError(f"{key.value} is a resource limit and cannot be consumed")
+        if event_type not in PERIOD_METERS[key]:
+            raise ValueError(f"{event_type.value} does not count toward {key.value}")
+        if amount <= 0:
+            return await self.check(key, additional=0)
+
+        await self._session.execute(
+            select(func.pg_advisory_xact_lock(_lock_id(self._tenant_id, key)))
+        )
+
+        entitlement = await self.check(key, additional=amount)
+        if not entitlement.allowed:
+            logger.info(
+                "billing.reservation_refused",
+                extra={
+                    "event": "billing.reservation_refused",
+                    "tenant_id": str(self._tenant_id),
+                    "key": key.value,
+                },
+            )
+            return entitlement
+
+        # The caller names the meter rather than the key implying it: a key can
+        # be fed by more than one meter - `PERIOD_MESSAGES` counts sent *and*
+        # received - and incrementing all of them for one event would bill a
+        # workspace twice for a message it only sent once.
+        UsageRecorder(self._session, tenant_id=self._tenant_id).record(event_type, quantity=amount)
+        # Flushed inside the lock so the next holder's count sees it. Without
+        # this the row would still be pending in this session and the whole
+        # exercise would serialise nothing.
+        await self._session.flush()
         return entitlement
 
     async def allows(self, key: LimitKey, *, additional: int = 1) -> bool:
