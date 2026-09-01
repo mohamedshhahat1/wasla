@@ -22,6 +22,7 @@ from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestContextMiddleware, SecurityHeadersMiddleware
 from app.core.redis import RedisClient
 from app.db.session import Database
+from app.integrations.email import require_delivery_verification
 
 logger = get_logger(__name__)
 
@@ -52,6 +53,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Build a configured application instance."""
     resolved = settings or get_settings()
     configure_logging(resolved)
+    # The API half of the email configuration, checked in the process that
+    # needs it rather than in `Settings` - which every process builds, and
+    # which would therefore force the webhook secret into the worker container
+    # too (ADR-063). `build_email_provider` does the same for the credential
+    # only the worker needs.
+    require_delivery_verification(resolved)
 
     app = FastAPI(
         title=resolved.app_name,

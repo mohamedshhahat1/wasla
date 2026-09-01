@@ -788,16 +788,14 @@ class Settings(BaseSettings):
                         "APP_PUBLIC_URL must be https in production: reset and "
                         "invitation tokens travel in these links"
                     )
-                if not self.resend_webhook_secret:
-                    # Without it the delivery-event endpoint answers 503 to
-                    # every call, so bounces and complaints are never recorded
-                    # and the platform keeps writing to dead mailboxes until
-                    # the sending domain is the thing that fails. The same
-                    # reasoning META_APP_SECRET is required on.
-                    problems.append(
-                        "RESEND_WEBHOOK_SECRET must be set so delivery events can be "
-                        "verified; without it bounces and complaints are never recorded"
-                    )
+                # RESEND_WEBHOOK_SECRET is deliberately *not* required here.
+                # It is still required in production - by
+                # `integrations.email.require_delivery_verification`, called
+                # from `create_app` - and the move is the point: this validator
+                # runs in every process, so demanding the secret here forced it
+                # into the worker container, which never verifies a webhook.
+                # RESEND_API_KEY is kept out of the API by exactly this
+                # reasoning; the two are now symmetric (ADR-063).
 
         if self.billing_provider == "paymob" and not self.is_testing:
             # Fail closed where money is involved, and in every environment

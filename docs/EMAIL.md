@@ -300,10 +300,16 @@ suite, startup requires:
   whatever this holds is prefixed onto every link a recipient clicks, and
   `javascript:` is a link too.
 
-In production it additionally refuses the fake provider, requires
-`APP_PUBLIC_URL` to be HTTPS, and requires `RESEND_WEBHOOK_SECRET` — without
-it the delivery endpoint answers 503 to every bounce, so no suppression is
-ever recorded and the platform keeps writing to dead mailboxes until the
+In production it additionally refuses the fake provider and requires
+`APP_PUBLIC_URL` to be HTTPS.
+
+`RESEND_WEBHOOK_SECRET` is required in production too, but by the **API
+process** rather than by `Settings` — `require_delivery_verification`, called
+from `create_app`. The requirement is the same strength and the reason is
+least privilege: this validator runs in every process, so demanding the secret
+here obliged the worker to carry one it never reads ([ADR-063](../DECISIONS.md)).
+Without it the delivery endpoint answers 503 to every bounce, so no suppression
+is ever recorded and the platform keeps writing to dead mailboxes until the
 sending domain is the thing that fails.
 
 A misconfigured deployment does not boot, rather than booting and silently

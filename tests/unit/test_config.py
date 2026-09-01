@@ -336,11 +336,19 @@ def test_production_refuses_the_fake_provider():
         _email_production(email_provider="fake")
 
 
-def test_production_requires_a_webhook_secret():
-    """Without it no bounce or complaint is ever recorded, and the platform
-    keeps writing to dead mailboxes until the sending domain is what fails."""
-    with pytest.raises(ValidationError, match="RESEND_WEBHOOK_SECRET"):
-        _email_production(resend_webhook_secret=None)
+def test_settings_alone_do_not_demand_the_webhook_secret():
+    """It is required of the API, not of every process that reads Settings.
+
+    The requirement is real and is asserted next to the check that now owns it
+    (`tests/unit/test_email_configuration_is_per_process.py`). What must *not*
+    happen here is the settings model demanding it, because this validator runs
+    in the worker too - and that is what put a secret the worker never reads
+    into the worker's container (ADR-063).
+    """
+    settings = _email_production(resend_webhook_secret=None)
+
+    assert settings.resend_webhook_secret is None
+    assert settings.email_enabled is True
 
 
 def test_a_non_production_environment_may_use_the_fake_over_plain_http():

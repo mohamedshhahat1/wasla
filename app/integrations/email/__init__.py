@@ -38,6 +38,33 @@ def build_email_provider(settings: Settings) -> EmailProvider:
     return ResendEmailProvider(api_key=settings.resend_api_key)
 
 
+def require_delivery_verification(settings: Settings) -> None:
+    """Refuse an API process that could not verify a delivery event.
+
+    The mirror of `build_email_provider`, and here for the same reason. Only
+    the process that *serves the webhook* needs RESEND_WEBHOOK_SECRET, so the
+    requirement belongs to that process rather than to `Settings` - a check in
+    the shared settings model runs in every container and therefore obliges the
+    worker to carry a secret it never reads (ADR-063).
+
+    The guarantee is unchanged: a production API with email on still refuses to
+    start without it. Without the secret the delivery-event endpoint answers
+    503 to every call, so bounces and complaints are never recorded and the
+    platform keeps writing to dead mailboxes until the sending domain is the
+    thing that fails.
+
+    Production only, matching the setting it replaces. A local deployment
+    exercises sending through the fake provider and has nothing to verify.
+    """
+    if not settings.email_enabled or not settings.is_production:
+        return
+    if not settings.resend_webhook_secret:
+        raise ValueError(
+            "RESEND_WEBHOOK_SECRET must be set so delivery events can be "
+            "verified; without it bounces and complaints are never recorded"
+        )
+
+
 __all__ = [
     "EmailMessage",
     "EmailProvider",
@@ -46,4 +73,5 @@ __all__ = [
     "FakeEmailProvider",
     "ResendEmailProvider",
     "build_email_provider",
+    "require_delivery_verification",
 ]

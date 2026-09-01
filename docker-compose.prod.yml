@@ -179,7 +179,9 @@ services:
       EMAIL_REPLY_TO: ${EMAIL_REPLY_TO:-}
       # Verifies the Svix signature on delivery events. The API owns that
       # endpoint, and without this it refuses every delivery rather than
-      # trusting any.
+      # trusting any - so this container is the only one that carries it, and
+      # `require_delivery_verification` is what makes a production API with
+      # email on refuse to start without it (ADR-063).
       RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
       EMAIL_VERIFICATION_TTL_SECONDS: ${EMAIL_VERIFICATION_TTL_SECONDS:-600}
       EMAIL_VERIFICATION_MAX_ATTEMPTS: ${EMAIL_VERIFICATION_MAX_ATTEMPTS:-5}
@@ -299,16 +301,17 @@ services:
       # startup in the process that uses it, rather than the settings model
       # demanding a credential from containers that never send.
       #
-      # RESEND_WEBHOOK_SECRET is here too, and only because the production
-      # validator requires it whenever email is on: the worker never verifies a
-      # webhook. It is the one value in this block that is present to satisfy a
-      # check rather than to be used.
+      # No RESEND_WEBHOOK_SECRET, and that is the same rule applied the other
+      # way round: only the API serves the delivery webhook, so only the API
+      # can verify one. It used to be here because the shared settings
+      # validator demanded it; that requirement now lives in the API process
+      # (`integrations.email.require_delivery_verification`), so each half of
+      # the Resend configuration reaches exactly one container (ADR-063).
       EMAIL_ENABLED: ${EMAIL_ENABLED:-false}
       EMAIL_PROVIDER: ${EMAIL_PROVIDER:-resend}
       EMAIL_FROM: ${EMAIL_FROM:-}
       EMAIL_REPLY_TO: ${EMAIL_REPLY_TO:-}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
-      RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
       EMAIL_MAX_ATTEMPTS: ${EMAIL_MAX_ATTEMPTS:-8}
       EMAIL_WORKER_POLL_SECONDS: ${EMAIL_WORKER_POLL_SECONDS:-10}
 

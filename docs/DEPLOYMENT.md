@@ -111,14 +111,20 @@ would make an optional integration compulsory. What refuses a *half* configured
 feature is the application's own validator, which knows which combinations are
 coherent.
 
-**Each process gets only what it reads.**
+**Each process gets only what it reads.** The table below groups the settings
+the four optional integrations need; it is a summary, and the authoritative
+list is `FEATURE_SETTINGS` in the drift guard, which expands each prefix
+against `Settings.model_fields` rather than restating a count that would rot.
+The guard enforces the dashes as well as the ticks - a secret injected into a
+process that does not read it fails CI the same way a missing one does
+([ADR-063](../DECISIONS.md)).
 
 | Setting group | API | Worker | Why |
 | --- | :-: | :-: | --- |
 | `APP_PUBLIC_URL` | ✓ | ✓ | The API builds the Paymob callback URL from it; the worker builds emailed links |
 | `EMAIL_ENABLED`, `EMAIL_PROVIDER`, `EMAIL_FROM`, `EMAIL_REPLY_TO` | ✓ | ✓ | The API writes outbox rows, the worker renders and sends |
 | `RESEND_API_KEY` | — | ✓ | The API never sends. The credential lives in one container |
-| `RESEND_WEBHOOK_SECRET` | ✓ | ✓ | The API verifies delivery events; the worker carries it only because the production validator requires it wherever email is on |
+| `RESEND_WEBHOOK_SECRET` | ✓ | — | Only the API serves the delivery webhook, so only the API can verify one ([ADR-063](../DECISIONS.md)) |
 | `EMAIL_VERIFICATION_*` | ✓ | — | Challenges are issued on the request path |
 | `EMAIL_MAX_ATTEMPTS`, `EMAIL_WORKER_POLL_SECONDS` | — | ✓ | Delivery retries and the poll interval belong to the email worker |
 | `GOOGLE_*` | ✓ | — | Nothing in the worker touches OIDC, so the client secret reaches exactly one container |

@@ -1909,3 +1909,73 @@ and reviewed rather than clever.
 values needs to be able to discover they exist — the failure `TRUSTED_PROXY_IPS`
 demonstrated in ADR-060, where an undocumented variable was also misconfigured and
 the two compounded.
+
+
+## ADR-063 — A Credential Is Required By The Process That Uses It
+
+Date:
+2026-09-01
+
+Status:
+Accepted
+
+Decision:
+`RESEND_WEBHOOK_SECRET` is no longer required by `Settings`. The requirement
+moved to `integrations.email.require_delivery_verification`, called from
+`create_app`, so a production API with email enabled still refuses to start
+without it — and the worker container no longer carries it. The drift guard was
+extended to enforce deliberate *absence* as well as presence, so a secret added
+to a process that does not read it fails CI.
+
+Context:
+ADR-062 split the production environment by what each process reads, and got
+`RESEND_API_KEY` right: only the worker sends, `build_email_provider` validates
+the key in the sending process, and the API never sees it. `Settings` documents
+that choice in as many words — "requiring it globally would force a credential
+into a container that never uses it".
+
+The webhook secret is the mirror image and was handled the opposite way. Only
+the API serves `POST /webhooks/email`, and `settings.resend_webhook_secret` is
+read in exactly one module (`api/v1/email_webhooks.py`). But the requirement sat
+in the shared production validator, keyed on `EMAIL_ENABLED` — a flag the worker
+must also have, because it is what tells the worker to send. Every process
+builds `Settings`, so the worker had to be handed a secret it never reads simply
+to boot. `docker-compose.prod.yml` said so in a comment: "the one value in this
+block that is present to satisfy a check rather than to be used."
+
+Nothing was exploitable and nothing was broken. It was an extra copy of a
+credential in an extra container, which is the kind of thing that is only ever
+found by going looking.
+
+Reason:
+**A validator in a shared model is a requirement on every process.** That is the
+whole mechanism. `GOOGLE_*` avoids it by accident of shape — `GOOGLE_ENABLED` is
+API-only, so the Google validator never fires in the worker — while email could
+not, because its enabling flag is genuinely shared. So the check has to move to
+the process rather than the flag being contorted to suit the check.
+
+**The two halves are separately damaging.** `RESEND_API_KEY` can send mail as the
+platform's domain; `RESEND_WEBHOOK_SECRET` decides which delivery reports are
+believed. Keeping them in different containers means taking one does not hand
+over the other, and there is now a test asserting no container holds both.
+
+**The guard only checked one direction.** `EXPECTED_ABSENT` recorded decisions
+and nothing verified them, so adding `RESEND_API_KEY` back to the API — or
+copying a block "to keep the two the same" — would have passed every assertion
+in the file. Absence is now enforced, which is what makes the least-privilege
+split a property of the repository rather than of the commit that introduced it.
+
+Consequences:
+The fail-fast guarantee is unchanged in production and now belongs to the API
+process; `tests/unit/test_email_configuration_is_per_process.py` asserts both
+halves, including which process fails, because a test that only asked whether
+*something* refuses would have passed before and after.
+
+Paymob is deliberately left alone. Every Paymob setting genuinely reaches both
+processes: the API creates intentions and verifies callbacks, the worker charges
+saved cards for renewals, and both build the same provider through
+`build_checkout_provider`. `PAYMOB_HMAC_SECRET` is the one value the worker
+constructs but never uses, and splitting the factory to withhold it would put a
+second, partial construction path into the money code to remove a secret from a
+container that already holds `PAYMOB_SECRET_KEY` — a worse trade than the one it
+buys.

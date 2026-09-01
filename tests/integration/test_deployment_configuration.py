@@ -45,8 +45,10 @@ ENV_EXAMPLE = ROOT / ".env.example"
 # "api" and "worker" are the service names in `docker-compose.prod.yml`.
 FEATURE_SETTINGS: dict[str, tuple[str, ...]] = {
     # The API verifies Resend's delivery webhook and writes outbox rows; the
-    # worker is what actually sends. Both, therefore - and the one field that
-    # is genuinely worker-only is called out in EXPECTED_ABSENT below.
+    # worker is what actually sends. Both, therefore - and the fields only one
+    # of them may hold are called out in EXPECTED_ABSENT below, which is
+    # enforced in both directions: missing where needed *and* present where it
+    # is not.
     "email_": ("api", "worker"),
     "resend_": ("api", "worker"),
     # Emailed links and the Paymob callback URL are both built from it.
@@ -71,6 +73,11 @@ EXPECTED_ABSENT: dict[tuple[str, str], str] = {
     ("api", "RESEND_API_KEY"): (
         "the API never sends - `build_email_provider` validates this in the "
         "process that uses it, so the credential lives on the worker alone"
+    ),
+    ("worker", "RESEND_WEBHOOK_SECRET"): (
+        "the worker never verifies a delivery event - "
+        "`require_delivery_verification` validates this in the API, which is "
+        "the only process that serves the webhook (ADR-063)"
     ),
     ("worker", "EMAIL_VERIFICATION_TTL_SECONDS"): (
         "verification challenges are issued on the request path"
@@ -156,6 +163,48 @@ def test_production_compose_carries_every_setting_its_process_reads(service: str
         f"{', '.join(missing)}. Add them as ${{VAR:-}} so the feature stays "
         "optional, or record a deliberate omission in EXPECTED_ABSENT."
     )
+
+
+@pytest.mark.parametrize("key", sorted(EXPECTED_ABSENT))
+def test_a_setting_a_process_does_not_need_is_not_injected_into_it(
+    key: tuple[str, str],
+) -> None:
+    """The other half of the drift guard, and the half that was missing.
+
+    Everything above asks whether a process is given what it reads. Nothing
+    asked the reverse, so adding `RESEND_API_KEY` to the API - or putting
+    `GOOGLE_CLIENT_SECRET` on the worker "to keep the two blocks the same" -
+    would have passed every check in this file while widening the blast radius
+    of whichever container was taken over first.
+
+    `EXPECTED_ABSENT` is therefore read as a decision rather than an excuse:
+    each entry says a process must *not* carry that value, and this is what
+    holds the file to it.
+    """
+    service, name = key
+    declared = _service_environment(PROD_COMPOSE.read_text(encoding="utf-8"), service)
+
+    assert name not in declared, (
+        f"docker-compose.prod.yml passes {name} to {service!r}, which does not "
+        f"need it: {EXPECTED_ABSENT[key]}. Remove it, or delete the "
+        "EXPECTED_ABSENT entry if the process genuinely started reading it."
+    )
+
+
+def test_the_two_halves_of_the_resend_configuration_never_meet() -> None:
+    """Neither container can both send mail and authenticate a delivery event.
+
+    Stated as its own property because it is the concrete thing the split buys.
+    A credential that can send as the platform's domain and a secret that
+    decides which delivery reports are believed are separately damaging, and
+    the point of putting them in different containers is that taking one does
+    not hand over the other.
+    """
+    text = PROD_COMPOSE.read_text(encoding="utf-8")
+    for service in ("api", "worker"):
+        declared = _service_environment(text, service)
+        held = declared & {"RESEND_API_KEY", "RESEND_WEBHOOK_SECRET"}
+        assert len(held) <= 1, f"{service} holds both halves of the Resend configuration: {held}"
 
 
 @pytest.mark.parametrize("service", ["api", "worker"])
