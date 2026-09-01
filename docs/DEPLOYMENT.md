@@ -91,6 +91,70 @@ Set a calendar reminder for the first expiry regardless. Renewal automation fail
 
 A load balancer or ingress terminating TLS should leave the redirect in `nginx.conf` commented out and **must** set `X-Forwarded-Proto`. Without it the application believes every request arrived in plaintext. It must also set `X-Forwarded-For`: the authentication rate limiter counts by client address, and without it every user shares one identity and one budget ([ADR-032](../DECISIONS.md)).
 
+## What the shipped Compose file passes to which process
+
+`docker-compose.prod.yml` enumerates its environment explicitly rather than
+forwarding a `.env`, so nothing reaches a container by accident. That
+enumeration is now held against `Settings` by
+`tests/integration/test_deployment_configuration.py`, which fails CI when a
+setting a feature needs is not wired in ([ADR-062](../DECISIONS.md)) - the file
+had gone five phases without Google, email or Paymob, and the stack came up
+perfectly while none of them could be switched on.
+
+Two rules shape it:
+
+**Every feature setting is `${VAR:-}`, never `${VAR:?}`.** The infrastructure a
+deployment cannot run without - the image, the database URL, `JWT_SECRET`,
+`META_APP_SECRET` - stays mandatory at interpolation. A feature nobody enabled
+is different: refusing to bring the stack up over an absent Google client secret
+would make an optional integration compulsory. What refuses a *half* configured
+feature is the application's own validator, which knows which combinations are
+coherent.
+
+**Each process gets only what it reads.**
+
+| Setting group | API | Worker | Why |
+| --- | :-: | :-: | --- |
+| `APP_PUBLIC_URL` | ✓ | ✓ | The API builds the Paymob callback URL from it; the worker builds emailed links |
+| `EMAIL_ENABLED`, `EMAIL_PROVIDER`, `EMAIL_FROM`, `EMAIL_REPLY_TO` | ✓ | ✓ | The API writes outbox rows, the worker renders and sends |
+| `RESEND_API_KEY` | — | ✓ | The API never sends. The credential lives in one container |
+| `RESEND_WEBHOOK_SECRET` | ✓ | ✓ | The API verifies delivery events; the worker carries it only because the production validator requires it wherever email is on |
+| `EMAIL_VERIFICATION_*` | ✓ | — | Challenges are issued on the request path |
+| `EMAIL_MAX_ATTEMPTS`, `EMAIL_WORKER_POLL_SECONDS` | — | ✓ | Delivery retries and the poll interval belong to the email worker |
+| `GOOGLE_*` | ✓ | — | Nothing in the worker touches OIDC, so the client secret reaches exactly one container |
+| `BILLING_PROVIDER`, `PAYMOB_*` | ✓ | ✓ | The API creates intentions and verifies callbacks; the worker collects renewals |
+| `BILLING_PAST_DUE_DAYS`, `BILLING_SUSPEND_AFTER_DAYS` | ✓ | ✓ | The worker acts on them; the API carries them so the ordering rule is validated by whichever process starts first |
+
+`docker-compose.yml` is not held to this: it forwards a developer's whole `.env`
+through `env_file` and therefore cannot drift.
+
+## Dunning
+
+A renewal invoice that goes unpaid moves the workspace through two states, both
+measured in days from the moment the invoice was **issued**
+([ADR-061](../DECISIONS.md)):
+
+```
+ACTIVE ──BILLING_PAST_DUE_DAYS──▶ PAST_DUE ──BILLING_SUSPEND_AFTER_DAYS──▶ SUSPENDED
+   ▲                                  │                                        │
+   └────────────── a settled payment lifts either ───────────────────────────┘
+```
+
+`PAST_DUE` still serves: a failed card is a conversation to have, not a
+disconnection. `SUSPENDED` does not - the paid plan stops resolving and the
+workspace falls back to `DEFAULT_PLAN_CODE`, so it keeps a usable free tier
+rather than being locked out. Nothing is deleted, no further invoice is raised
+and no saved card is charged.
+
+Paying the outstanding invoice restores service. A **cancelled** or **expired**
+subscription is not revived by a payment, deliberately: those are decisions
+somebody made.
+
+Defaults are 7 days and 30. The second must be strictly greater than the first
+or the application refuses to start, in every environment - suspending a
+workspace in the same sweep that first tells it anything is the opposite of a
+grace period.
+
 ## Payments
 
 Off unless `BILLING_PROVIDER=paymob`. With it set, all of

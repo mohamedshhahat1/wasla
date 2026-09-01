@@ -148,6 +148,67 @@ services:
       MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-33554432}
       REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-60}
       RUN_MIGRATIONS: "false"
+
+      # --- Feature integrations (ADR-062) ---
+      #
+      # Every one of these is `${VAR:-}`, never `${VAR:?}`. A feature this
+      # deployment has not switched on must not stop the stack coming up, and
+      # each feature's own settings validator is what refuses a *half*
+      # configured one - `EMAIL_ENABLED=true` with no sender, `GOOGLE_ENABLED=
+      # true` with no client id, `BILLING_PROVIDER=paymob` with no HMAC secret.
+      # Making them mandatory here would move that decision from the
+      # application, which knows which combinations are coherent, to Compose,
+      # which does not.
+      #
+      # Split by what each process actually reads. The API and the worker do
+      # not need the same secrets, and handing each only what it uses is the
+      # difference between one compromised container and two.
+
+      # The canonical origin. Read by the API to build the Paymob callback URL
+      # and by the worker to build emailed links - never derived from a request
+      # header, because a reset link built from a Host header is one an
+      # attacker can aim.
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-}
+
+      # Email. The API *writes* outbox rows and verifies Resend's delivery
+      # webhook; it never sends, so RESEND_API_KEY is deliberately absent here
+      # and appears only on the worker.
+      EMAIL_ENABLED: ${EMAIL_ENABLED:-false}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-resend}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      EMAIL_REPLY_TO: ${EMAIL_REPLY_TO:-}
+      # Verifies the Svix signature on delivery events. The API owns that
+      # endpoint, and without this it refuses every delivery rather than
+      # trusting any.
+      RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
+      EMAIL_VERIFICATION_TTL_SECONDS: ${EMAIL_VERIFICATION_TTL_SECONDS:-600}
+      EMAIL_VERIFICATION_MAX_ATTEMPTS: ${EMAIL_VERIFICATION_MAX_ATTEMPTS:-5}
+
+      # Google sign-in. API only: no worker path touches OIDC, so the client
+      # secret never reaches that container. With GOOGLE_ENABLED unset the
+      # worker's settings do not even ask for the rest.
+      GOOGLE_ENABLED: ${GOOGLE_ENABLED:-false}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-}
+
+      # Payments. The API creates the intention a customer is sent to and
+      # verifies the callback that settles it; the worker collects renewals, so
+      # both hold these.
+      BILLING_PROVIDER: ${BILLING_PROVIDER:-manual}
+      PAYMOB_SECRET_KEY: ${PAYMOB_SECRET_KEY:-}
+      PAYMOB_PUBLIC_KEY: ${PAYMOB_PUBLIC_KEY:-}
+      PAYMOB_HMAC_SECRET: ${PAYMOB_HMAC_SECRET:-}
+      PAYMOB_INTEGRATION_IDS: ${PAYMOB_INTEGRATION_IDS:-}
+      PAYMOB_MOTO_INTEGRATION_ID: ${PAYMOB_MOTO_INTEGRATION_ID:-}
+      PAYMOB_REGION: ${PAYMOB_REGION:-egypt}
+
+      # Dunning (ADR-061). Only the billing worker acts on these, and they are
+      # here as well so the API validates the pair too: the ordering rule is
+      # refused at startup, and a deployment that got it wrong should hear
+      # about it from whichever process starts first.
+      BILLING_PAST_DUE_DAYS: ${BILLING_PAST_DUE_DAYS:-7}
+      BILLING_SUSPEND_AFTER_DAYS: ${BILLING_SUSPEND_AFTER_DAYS:-30}
     volumes:
       # Shared with the worker: one writes the file, the other serves it back.
       # This is a single-host arrangement, and it is the constraint ADR-023
@@ -222,6 +283,51 @@ services:
       # apart from ingestion and follow-ups, since moving bytes and running
       # inference want differently sized pools.
       WORKER_KINDS: ${WORKER_KINDS:-}
+
+      # --- Feature integrations (ADR-062) ---
+      #
+      # The worker's half. Optional in the same way and for the same reason as
+      # the API's block above: `${VAR:-}` throughout, with each feature's own
+      # validator refusing a half-configured one.
+
+      # Read to build emailed links, and required by the settings validator
+      # wherever email is enabled.
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-}
+
+      # Email. This is the process that *sends*, which is why RESEND_API_KEY is
+      # here and on no other container - `build_email_provider` validates it at
+      # startup in the process that uses it, rather than the settings model
+      # demanding a credential from containers that never send.
+      #
+      # RESEND_WEBHOOK_SECRET is here too, and only because the production
+      # validator requires it whenever email is on: the worker never verifies a
+      # webhook. It is the one value in this block that is present to satisfy a
+      # check rather than to be used.
+      EMAIL_ENABLED: ${EMAIL_ENABLED:-false}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-resend}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      EMAIL_REPLY_TO: ${EMAIL_REPLY_TO:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
+      EMAIL_MAX_ATTEMPTS: ${EMAIL_MAX_ATTEMPTS:-8}
+      EMAIL_WORKER_POLL_SECONDS: ${EMAIL_WORKER_POLL_SECONDS:-10}
+
+      # No GOOGLE_* here, deliberately. Nothing this process runs touches OIDC,
+      # and with GOOGLE_ENABLED absent its settings do not ask for a client
+      # secret - so the credential exists in exactly one container.
+
+      # Payments, for the renewal collection half of the billing sweep.
+      BILLING_PROVIDER: ${BILLING_PROVIDER:-manual}
+      PAYMOB_SECRET_KEY: ${PAYMOB_SECRET_KEY:-}
+      PAYMOB_PUBLIC_KEY: ${PAYMOB_PUBLIC_KEY:-}
+      PAYMOB_HMAC_SECRET: ${PAYMOB_HMAC_SECRET:-}
+      PAYMOB_INTEGRATION_IDS: ${PAYMOB_INTEGRATION_IDS:-}
+      PAYMOB_MOTO_INTEGRATION_ID: ${PAYMOB_MOTO_INTEGRATION_ID:-}
+      PAYMOB_REGION: ${PAYMOB_REGION:-egypt}
+
+      # Dunning (ADR-061). This is the process that acts on them.
+      BILLING_PAST_DUE_DAYS: ${BILLING_PAST_DUE_DAYS:-7}
+      BILLING_SUSPEND_AFTER_DAYS: ${BILLING_SUSPEND_AFTER_DAYS:-30}
     volumes:
       - media-data:${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
     depends_on:

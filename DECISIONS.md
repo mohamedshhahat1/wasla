@@ -1844,3 +1844,68 @@ minutes.
 Dunning is now complete as a lifecycle. What remains open is commercial rather
 than technical: how long a suspended workspace's data is retained, and whether a
 suspension should ever become a cancellation on its own.
+
+## ADR-062 — Deployment Configuration Is Derived From Settings, Not Maintained Beside It
+
+Date:
+2026-09-01
+
+Status:
+Accepted
+
+Decision:
+`docker-compose.prod.yml` passes every setting each process actually reads, each
+as `${VAR:-}` so a feature nobody enabled cannot stop the stack starting. A test
+derives the expected set from `Settings.model_fields` through a single mapping of
+feature prefix to service, and fails when the two diverge.
+
+Context:
+Google sign-in, transactional email and Paymob payments were implemented, tested
+and documented, and none of them could be switched on by a deployment brought up
+from the shipped production Compose file: it carried no `GOOGLE_*`, no `EMAIL_*`,
+no `RESEND_*`, no `PAYMOB_*`, no `BILLING_PROVIDER` and no `APP_PUBLIC_URL`.
+
+The file was not wrong when written. It enumerates its environment explicitly,
+which is the right posture for production — nothing reaches a container by
+accident — and that enumeration went stale across five phases while `Settings`
+grew. Nothing anywhere compared the two, so the failure was invisible: the stack
+came up, served traffic, and quietly had no email, no Google and no card
+payments. `docker-compose.yml` was never affected, because it forwards a
+developer's whole `.env` through `env_file` and therefore cannot drift.
+
+Reason:
+**Optional at interpolation, fail-closed at validation.** The infrastructure a
+deployment cannot run without — the image, the database, the signing key — stays
+`${VAR:?}`. A feature is different: refusing to boot over an absent Google client
+secret would make an optional integration compulsory. So every feature setting is
+`${VAR:-}`, and each feature's own validator refuses a *half* configured one.
+`Settings` already knew which combinations are coherent; Compose does not, and
+this keeps that decision where the knowledge is.
+
+**Split by what each process reads.** The API verifies Resend's delivery webhook
+and never sends, so `RESEND_API_KEY` exists only on the worker — which is what
+`Settings` already documented when it declined to require that key globally.
+Nothing in the worker touches OIDC, so no `GOOGLE_*` reaches it and the client
+secret lives in exactly one container. Handing each process only what it uses is
+the difference between one compromised container and two.
+
+**The guard derives rather than restates.** Three hand-maintained copies of the
+same list is the original bug with extra steps. `FEATURE_SETTINGS` maps a prefix
+to the services that read it and the test expands it against `Settings.model_fields`,
+so a field added under a mapped prefix and not wired in fails CI. The mapping is
+checked in both directions: an entry naming a field that no longer exists fails
+too, which is what stops the guard rotting into a test of itself. Deliberate
+omissions live in `EXPECTED_ABSENT` with their reason, so an absence is either a
+recorded decision or a failure.
+
+Consequences:
+Adding a setting to an existing feature now requires wiring it into the production
+file or recording why not. Adding a *new* feature requires one line in
+`FEATURE_SETTINGS`; until it is there the guard says nothing about it, which is
+the honest limit of a mapping-based approach and the reason the mapping is small
+and reviewed rather than clever.
+
+`.env.example` is held to the same set, because the operator who has to set these
+values needs to be able to discover they exist — the failure `TRUSTED_PROXY_IPS`
+demonstrated in ADR-060, where an undocumented variable was also misconfigured and
+the two compounded.
