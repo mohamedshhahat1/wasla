@@ -562,6 +562,121 @@ def test_the_manual_provider_needs_no_credentials():
     assert settings.paymob_secret_key is None
 
 
+# --------------------------------------------------------------- Google sign-in
+
+GOOGLE = {
+    "google_enabled": True,
+    "google_client_id": "1234567890-testclient.apps.googleusercontent.com",
+    "google_client_secret": "a-test-client-secret",
+    "google_redirect_uri": "https://app.example.com/auth/google/callback",
+}
+
+
+def _google(**overrides):
+    """A staging deployment with Google sign-in switched on.
+
+    Staging rather than test for `_paymob`'s reason: the test environment is
+    exempt from the fail-closed rules on purpose, and those rules are what
+    these exercise.
+    """
+    values = {
+        "_env_file": None,
+        "environment": "staging",
+        "jwt_secret": secrets.token_urlsafe(32),
+        **GOOGLE,
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+def test_google_off_needs_no_credentials():
+    """A feature nobody enabled must not stop a deployment starting.
+
+    This is the property the production Compose file relies on: every
+    integration setting is optional at interpolation time, and the validator is
+    what refuses a half-configured one (ADR-062).
+    """
+    settings = Settings(
+        _env_file=None,
+        environment="staging",
+        jwt_secret=secrets.token_urlsafe(32),
+    )
+
+    assert settings.google_enabled is False
+    assert settings.google_client_id is None
+    assert settings.google_client_secret is None
+
+
+def test_google_on_accepts_a_complete_configuration():
+    settings = _google()
+
+    assert settings.google_enabled is True
+    assert settings.google_redirect_uri.endswith("/auth/google/callback")
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["google_client_id", "google_client_secret", "google_redirect_uri"],
+)
+def test_google_on_requires_every_credential(missing):
+    """Half-configured Google sign-in is a button that always fails.
+
+    And the only error message a user ever sees lives on Google's domain, which
+    is why this refuses at startup rather than at the first login.
+    """
+    with pytest.raises(ValidationError) as caught:
+        _google(**{missing: None})
+
+    assert missing.upper() in str(caught.value)
+
+
+def test_google_refuses_a_client_id_that_is_not_one():
+    """Catches the two paste errors that actually happen.
+
+    The secret in the id field, or the bare project number. Both produce a
+    refusal from Google that looks like Google's fault.
+    """
+    with pytest.raises(ValidationError) as caught:
+        _google(google_client_id="1234567890")
+
+    assert "GOOGLE_CLIENT_ID" in str(caught.value)
+
+
+def test_google_refuses_the_client_id_pasted_as_the_secret():
+    with pytest.raises(ValidationError) as caught:
+        _google(google_client_secret=GOOGLE["google_client_id"])
+
+    assert "GOOGLE_CLIENT_SECRET" in str(caught.value)
+
+
+def test_google_requires_https_in_production():
+    """A single-use authorization code travels back to this address."""
+    with pytest.raises(ValidationError) as caught:
+        _google(
+            environment="production",
+            debug=False,
+            docs_enabled=False,
+            meta_app_secret="an-app-secret",
+            google_redirect_uri="http://app.example.com/auth/google/callback",
+        )
+
+    assert "https" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "redirect",
+    [
+        "javascript:alert(1)",
+        "//app.example.com/auth/google/callback",
+        "https://app.example.com/callback#fragment",
+    ],
+)
+def test_google_refuses_a_redirect_that_is_not_a_plain_url(redirect):
+    """Scheme allowlist and no fragment, checked before Google ever sees it."""
+    with pytest.raises(ValidationError):
+        _google(google_redirect_uri=redirect)
+
+
 # ------------------------------------------------------------------- dunning
 
 

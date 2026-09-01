@@ -322,7 +322,7 @@ Deferred by decision, not unfinished:
 - [ ] Per-unit overage pricing. Usage lines on an invoice carry a quantity and a zero amount for exactly this reason; when a price exists the lines gain amounts and nothing else changes
 - [ ] A real payment provider. `PaymentProvider` is one method and `ManualProvider` implements it honestly — it records that an invoice is awaiting payment and never claims to have collected (ADR-031)
 - [ ] MRR and ARR on the platform overview. Collected revenue is a fact and is available; those are projections needing decisions nobody has made — whether a trial counts, what a past-due subscription is worth, how an annual plan is spread
-- [ ] Dunning: chasing a `past_due` subscription, and deciding when grace runs out. The status exists and keeps serving the customer; what happens next is a commercial policy rather than a missing loop
+- [x] Dunning: chasing a `past_due` subscription, and deciding when grace runs out. Completed in Phase 23 (ADR-061) - `SUSPENDED` ends the grace and stops the paid plan resolving. What remains is retention policy for a suspended workspace, which is commercial rather than code
 - [ ] Plan administration over the API. Plans are edited in the database today, which is acceptable while only platform staff can reach them and becomes a real requirement the moment they are editable by anyone else (ADR-029)
 ## Phase 14 — Production hardening
 
@@ -795,10 +795,8 @@ the fixes:
 
 Still open, and deliberately not addressed here:
 
-- [ ] **Dunning.** `PAST_DUE` still serves the customer and nothing ends that
-      grace, so non-payment restricts nothing. Recorded in Phase 13 and
-      unchanged by ADR-059, which fixes how a plan is *obtained* rather than
-      what happens when one stops being paid for
+- [x] **Dunning.** Closed in Phase 23 by ADR-061: `SUSPENDED` is where the
+      grace ends, and it is outside `SERVING_STATUSES`
 - [ ] **A browser-bound OAuth state.** The login-CSRF residual disclosed in
       ADR-047 is unchanged
 - [ ] **Recovering a Google-first account that has already lost Google access.**
@@ -810,6 +808,65 @@ Still open, and deliberately not addressed here:
 - [ ] **The Paymob client** does not use `build_guarded_client`, which every
       other integration does
 - [ ] **Media MIME types** are the caller's claim, with no magic-byte check
-- [ ] **Compose files carry no `GOOGLE_*`, `PAYMOB_*`, `EMAIL_*` or
-      `APP_PUBLIC_URL`**, so a deployment brought up from them cannot enable
-      Google sign-in, email or card payments
+- [x] **Compose files carry no `GOOGLE_*`, `PAYMOB_*`, `EMAIL_*` or
+      `APP_PUBLIC_URL`**. Closed in Phase 23 by ADR-062, with a drift guard so
+      it cannot recur silently
+
+## Phase 23 — Commercial enforcement and deployment readiness
+
+The two items Phase 22 recorded as open and most load-bearing: a billing
+lifecycle that ended nowhere, and a shipped deployment that could not switch on
+the features the code already had.
+
+- [x] **A workspace that stops paying stops being served** (ADR-061).
+      `PAST_DUE` was a serving status and nothing moved a subscription past it,
+      so retention was unenforced even after ADR-059 made the purchase safe.
+      `SubscriptionStatus.SUSPENDED` is where the grace ends: outside
+      `SERVING_STATUSES`, so `EntitlementService` falls the workspace back to
+      the default plan rather than locking it out
+- [x] **A settled payment lifts a suspension** — and only a suspension. The
+      recoverable set is two closed members, so a cancellation and an expiry
+      stay where the customer left them
+- [x] **Both dunning thresholds are configuration**, anchored on `issued_at`,
+      with the hard one validated to be strictly later than the soft one in
+      every environment
+- [x] **Migration `0037`** adds the `suspended` status and the
+      `subscription_suspended` audit action. Two enum labels, no column, no
+      data change
+- [x] **Production Compose passes what each process reads** (ADR-062). Google,
+      email, Resend, Paymob, `APP_PUBLIC_URL`, `BILLING_PROVIDER` and the
+      dunning thresholds, split so the Resend key reaches only the worker and
+      no Google credential reaches it at all
+- [x] **A drift guard derived from `Settings`** rather than a fourth copy of
+      the same list, checked in both directions and proven to fail when a
+      required setting is removed from the Compose representation
+
+Tests added:
+
+- [x] `tests/integration/test_dunning_lifecycle.py` — the lifecycle asserted at
+      the *entitlement* level rather than on a status column, because a test
+      that only read the label would pass against the bug. Soft threshold still
+      serving, hard threshold degrading to the default plan, recovery from both
+      `PAST_DUE` and `SUSPENDED`, no revival of a cancelled or expired
+      subscription, idempotency by status and by outbox key, tenant isolation,
+      and the boundary just before, exactly at and just after the threshold —
+      all against a fixed clock
+- [x] `tests/integration/test_deployment_configuration.py` — the drift guard,
+      plus assertions that no feature setting is mandatory at interpolation
+      time and that no credential is written literally into the shipped file
+- [x] `tests/unit/test_config.py` — Google sign-in disabled, incomplete and
+      complete, which had no coverage at all, and the dunning ordering rule
+
+Still open, and deliberately untouched here:
+
+- [ ] **SEC-07** — a browser-bound OAuth state
+- [ ] **SEC-08** — the Paymob client does not use `build_guarded_client`
+- [ ] **SEC-10** — Redis failure on `/auth/refresh` answers 500 rather than 503
+- [ ] **SEC-11** — Google `name` and `sub` claims are unbounded against their
+      columns
+- [ ] **Retention policy for a suspended workspace.** How long its data is kept,
+      and whether a suspension should ever become a cancellation on its own, are
+      commercial decisions rather than missing code (ADR-061)
+- [ ] Observability: metrics, tracing, error tracking, alerting
+- [ ] Queue retry with backoff, attempt counts and dead-letter monitoring
+- [ ] Object storage and a media retention sweep; an ANN vector index
