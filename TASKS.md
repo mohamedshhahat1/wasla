@@ -731,3 +731,85 @@ created, no callback has arrived from Paymob's infrastructure, no card has been
 charged and no refund has been issued. The HTTP boundary is exercised against
 `httpx.MockTransport` and the signature against the vendor's published worked
 example.
+
+## Phase 22 — Audit remediation, batch 0
+
+The seven defects a repository-wide audit found at the **seams between
+subsystems**, each of which was individually well built and individually well
+tested. Every one of them lived in a gap that no subsystem owned, which is why
+the suite was green over all of them.
+
+- [x] **An invitation can no longer claim an existing account** (ADR-057).
+      `accept` set a password whenever the account had none, on the reasoning
+      that passwordlessness meant "created by an earlier invitation". Google
+      sign-in creates passwordless accounts on purpose, so anybody who could
+      register could invite a Google user's address, redeem the invitation with
+      a chosen password, and sign in as them. A password is now written only on
+      the branch that creates the account
+- [x] **The raw invitation token no longer crosses the API boundary**
+      (ADR-057). It was returned by `POST /invitations` because there was no
+      mail delivery; there is now, and the schema's own docstring said the field
+      would go when there was
+- [x] **`POST /auth/password/set`** (ADR-057) — the legitimate route the hole
+      above was standing in for. Authenticated, self-only, refused for an
+      account that already has a password, and reusing `change_password`'s
+      revocation, audit and notification policy exactly. A Google-first account
+      can now set a password and afterwards disconnect Google, which is what
+      `unlink`'s refusal has always instructed
+- [x] **Workspace switching returns a usable token** (ADR-058).
+      `select_workspace` omitted `token_version`, so `POST /auth/workspace`
+      answered 200 with a token every later request refused as revoked.
+      Multi-workspace switching did not work at all. Every access token is now
+      minted by one function
+- [x] **A priced plan is granted only by settlement** (ADR-059). `change_plan`
+      moved a workspace onto any public plan for free, so the whole checkout
+      pipeline was optional decoration. Self-service is now refused with 402 for
+      a priced plan, and `CheckoutService._settle` applies the invoice's plan
+      when a signed callback says it is paid
+- [x] **A trusted proxy is an address, not a name** (ADR-060). The shipped
+      compose file set `TRUSTED_PROXY_IPS=nginx`, which can never equal a peer
+      address, so every client on the internet shared one authentication
+      rate-limit bucket and HSTS was never emitted. Entries are now parsed as
+      addresses or CIDR networks, a hostname is refused at startup, and the
+      compose file gives nginx a fixed address on an explicit subnet
+- [x] **`.claude/` is ignored, and secrets are scanned in the working tree.**
+      The directory was untracked rather than ignored, so `git add -A` would
+      have staged a full checkout including its own `.env`. Nothing was ever
+      committed. `gitleaks` now runs as a pre-commit hook over the staged diff,
+      not only over history in CI
+
+Cross-subsystem regression tests, which is the half that was missing rather than
+the fixes:
+
+- [x] `tests/integration/test_identity_seam.py` — invitations against Google
+      accounts, over HTTP against real rows, including the exploit reproduced
+      with the token taken from the outbox so the test holds even if the
+      response leak returns
+- [x] `tests/integration/test_workspace_switching.py` — switches, then *spends*
+      the token on `/auth/me` and on a workspace-scoped route
+- [x] `tests/integration/test_paid_plan_settlement.py` — the free upgrade
+      refused, a verified callback granting the plan, and declined, forged,
+      mismatched, replayed and cross-tenant callbacks granting nothing
+- [x] `tests/unit/test_trusted_proxies.py` — addresses, networks, IPv6, and a
+      hostname refused at startup
+
+Still open, and deliberately not addressed here:
+
+- [ ] **Dunning.** `PAST_DUE` still serves the customer and nothing ends that
+      grace, so non-payment restricts nothing. Recorded in Phase 13 and
+      unchanged by ADR-059, which fixes how a plan is *obtained* rather than
+      what happens when one stops being paid for
+- [ ] **A browser-bound OAuth state.** The login-CSRF residual disclosed in
+      ADR-047 is unchanged
+- [ ] **Recovering a Google-first account that has already lost Google access.**
+      `POST /auth/password/set` needs a live session, and a password reset is
+      declined for an account with no password hash, so somebody who never set
+      a password and can no longer sign in with Google needs support to
+      re-establish the identity (ADR-057)
+- [ ] **Redis failure on `/auth/refresh`** answers 500 rather than 503
+- [ ] **The Paymob client** does not use `build_guarded_client`, which every
+      other integration does
+- [ ] **Media MIME types** are the caller's claim, with no magic-byte check
+- [ ] **Compose files carry no `GOOGLE_*`, `PAYMOB_*`, `EMAIL_*` or
+      `APP_PUBLIC_URL`**, so a deployment brought up from them cannot enable
+      Google sign-in, email or card payments

@@ -14,6 +14,17 @@ repos:
       - id: check-added-large-files
       - id: detect-private-key
 
+  # The working tree, not the history. `security.yml` runs gitleaks over every
+  # commit, which catches a secret after it has already leaked; this catches it
+  # in the staged diff, which is the only moment it can still be stopped.
+  # Same pinned image and same configuration, so a value allowlisted for one is
+  # allowlisted for both.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+        args: [--config=.gitleaks.toml, --redact]
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.8.6
     hooks:

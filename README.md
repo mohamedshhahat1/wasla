@@ -6,7 +6,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 
 ## Project status
 
-**Phases 0 through 15 are complete.** The table below reflects the actual state of the code, not the roadmap. One caveat is worth stating up front: the delivery pipeline builds, scans and publishes images and can deploy one, but it has never run against a real host â€” no production deployment exists yet, and nothing here pretends otherwise.
+**Phases 0 through 15 are complete.** The table below reflects the actual state of the code, not the roadmap. One caveat is worth stating up front: the delivery pipeline builds, scans and publishes images and can deploy one, but it has never run against a real host — no production deployment exists yet, and nothing here pretends otherwise.
 
 | Area | Status |
 | --- | --- |
@@ -14,7 +14,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Documentation protocol (`Documentation_Protocol.md`) | Implemented |
 | Project memory (`README` / `ARCHITECTURE` / `TASKS` / `DECISIONS`, `docs/`) | Implemented |
 | Application foundation (FastAPI, config, logging, errors, DB, Redis, health, Docker, CI) | Implemented |
-| Domain models and migrations (`0001`â€“`0035`) | Implemented |
+| Domain models and migrations (`0001`–`0036`) | Implemented |
 | Multi-tenancy, authentication, workspace RBAC, invitations | Implemented |
 | WhatsApp Cloud API (webhook, signatures, idempotency, outbound client) | Implemented |
 | Conversations, inbox, human handoff, templates, cursor paging | Implemented |
@@ -144,11 +144,11 @@ mypy app
 pre-commit install     # run the same gates on every commit
 ```
 
-The suite injects fake infrastructure, so no Redis, OpenAI or Meta credentials are required to run it. Tests that need a database skip unless `TEST_DATABASE_URL` (or `DATABASE_URL`) points at PostgreSQL with `pgvector`; `docker compose up -d postgres` is enough to make them run â€” and they are worth running, since the isolation and retrieval guarantees are only meaningful against a real database.
+The suite injects fake infrastructure, so no Redis, OpenAI or Meta credentials are required to run it. Tests that need a database skip unless `TEST_DATABASE_URL` (or `DATABASE_URL`) points at PostgreSQL with `pgvector`; `docker compose up -d postgres` is enough to make them run — and they are worth running, since the isolation and retrieval guarantees are only meaningful against a real database.
 
 Those tests build the schema **once per session** and roll each test back afterwards, so the whole suite takes about a minute and a half rather than the forty it took when every test dropped and recreated the schema. `tests/integration/test_fixture_isolation.py` covers the isolation itself, including that a test which calls `commit()` still cannot leak into the next one.
 
-Install with `pip install -e ".[dev]"` rather than installing the tools yourself: Ruff, Black and MyPy are pinned to exact versions (ADR-016), and a different version will report findings CI does not, or miss ones it does. Those pins are kept honest by a weekly `pip-audit` run in the security workflow â€” run `pip-audit` locally before changing any dependency bound.
+Install with `pip install -e ".[dev]"` rather than installing the tools yourself: Ruff, Black and MyPy are pinned to exact versions (ADR-016), and a different version will report findings CI does not, or miss ones it does. Those pins are kept honest by a weekly `pip-audit` run in the security workflow — run `pip-audit` locally before changing any dependency bound.
 
 ### Migrations
 

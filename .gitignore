@@ -3,6 +3,13 @@
 .env.*
 !.env.example
 
+# Agent working directory, including any git worktrees created under it.
+# Ignored at the repository root because it was untracked rather than ignored,
+# so `git add -A` would stage everything inside it - and what is inside it is a
+# full checkout with its own, correctly ignored, `.env`. The nested
+# `.env` rule protects the file; this protects the directory holding it.
+.claude/
+
 # Python
 __pycache__/
 *.py[cod]
