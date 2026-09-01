@@ -1671,3 +1671,25 @@ Consequences:
 Accepting an invitation for an existing address no longer sets a password, and a client that relied on that was relying on the vulnerability. `POST /api/v1/invitations` no longer returns `token`; a deployment with `EMAIL_ENABLED=false` therefore has no way to deliver an invitation, which is correct — it also has no way to deliver a password reset.
 
 A Google-first account can now set a password and afterwards disconnect Google, which is what `unlink`'s refusal message has always instructed and what ADR-049 claimed the recovery path was.
+
+## ADR-058 — One Access Token Issuance Policy, In One Function
+
+Date:
+2026-09-01
+
+Status:
+Accepted
+
+Decision:
+Every access token this application mints is built by `AuthService._access_token`. `select_workspace` and `_issue` differ in what they pass it, not in how they build a token.
+
+Context:
+`select_workspace` called `create_access_token` directly and omitted `token_version`. A token without a `ver` claim decodes to `None`; `get_current_user` compares that claim against `users.token_version`, which defaults to 1. `None != 1`, so `POST /auth/workspace` answered 200 with a token that every subsequent request refused as revoked. Multi-workspace switching — a headline requirement of this product — did not work at all.
+
+The endpoint's tests replaced `AuthService` with a stub returning the literal `"switched-value"`, and the one test that ran against the real service asserted only the 404 refusal. No test ever used the token that came back.
+
+Reason:
+A second issuance site is a second policy. This one differed by an omission nobody could see, and the next claim added to `_create_token` would have had to be remembered in two places. Extracting the common function makes the two callers differ only in their arguments — whether a workspace is selected, and whether a refresh token accompanies it.
+
+Consequences:
+A test that asserts on a token must spend it. A stub returning a token shape proves the route is wired, not that the token works, and the regression tests for this switch workspace and then call `/auth/me` and a workspace-scoped route with what came back.

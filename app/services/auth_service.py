@@ -486,13 +486,8 @@ class AuthService:
         workspace = await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
         if workspace is None:
             raise TenantIsolationError()
-        access_token, _ = create_access_token(
-            settings=self._settings,
-            subject=user.id,
-            tenant_id=workspace.tenant.id,
-        )
         return WorkspaceAccess(
-            access_token=access_token,
+            access_token=self._access_token(user=user, workspace=workspace),
             expires_in=self._settings.access_token_ttl_seconds,
             workspace=workspace,
         )
@@ -548,13 +543,33 @@ class AuthService:
             raise PermissionDeniedError("This workspace is suspended.")
         return WorkspaceContext(membership=requested, tenant=tenant)
 
-    def _issue(self, *, user: User, workspace: WorkspaceContext | None) -> AuthenticatedSession:
-        access_token, _ = create_access_token(
+    def _access_token(self, *, user: User, workspace: WorkspaceContext | None) -> str:
+        """The one place an access token is minted, for every path that mints one.
+
+        Extracted because there used to be two, and they disagreed. `_issue`
+        below passed `token_version`; `select_workspace` did not, so switching
+        workspace handed back a token with no `ver` claim - and
+        `get_current_user` compares that claim against `users.token_version`,
+        whose default is 1. `None != 1`, so every request made with a switched
+        token was refused as revoked and multi-workspace switching did not work
+        at all (ADR-058).
+
+        A second issuance site is a second policy, and a policy that exists
+        twice is one that will differ again the next time a claim is added. So
+        there is one function, and the ways in which the two callers differ -
+        whether a workspace is selected, and whether a refresh token comes with
+        it - are arguments to it rather than copies of it.
+        """
+        token, _ = create_access_token(
             settings=self._settings,
             subject=user.id,
             tenant_id=workspace.tenant.id if workspace else None,
             token_version=user.token_version,
         )
+        return token
+
+    def _issue(self, *, user: User, workspace: WorkspaceContext | None) -> AuthenticatedSession:
+        access_token = self._access_token(user=user, workspace=workspace)
         refresh_token, _ = create_refresh_token(
             settings=self._settings,
             subject=user.id,
