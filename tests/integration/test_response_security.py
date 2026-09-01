@@ -273,6 +273,55 @@ async def test_hsts_is_sent_when_a_trusted_proxy_reports_https() -> None:
     assert "max-age=" in trusted.headers.get("Strict-Transport-Security", "")
 
 
+async def test_hsts_is_sent_when_the_proxy_is_named_by_a_network() -> None:
+    """The shipped topology names an address; a CIDR block has to work too.
+
+    Both go through the same parser, and this is the half a deployment behind a
+    subnet-addressed proxy relies on (ADR-060).
+    """
+    settings = Settings(
+        _env_file=None,
+        environment="production",
+        jwt_secret="x" * 40,
+        meta_app_secret="s",
+        docs_enabled=False,
+        cors_origins=[],
+        log_level="CRITICAL",
+        rate_limit_enabled=False,
+        trusted_proxy_ips=["127.0.0.0/8"],
+    )
+    app = create_app(settings)
+    app.state.database = FakeDependency(name="postgresql")
+    app.state.redis = FakeDependency(name="redis")
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app, client=("127.0.0.1", 1234)),
+        base_url="http://wasla.test",
+    ) as client:
+        trusted = await client.get(f"{API}/auth/me", headers={"X-Forwarded-Proto": "https"})
+
+    assert "max-age=" in trusted.headers.get("Strict-Transport-Security", "")
+
+
+async def test_a_proxy_named_by_hostname_is_refused_at_startup() -> None:
+    """The regression that mattered: `TRUSTED_PROXY_IPS=nginx` used to boot.
+
+    It came up, served traffic, trusted nothing, and neither rate-limited by
+    address nor sent HSTS - with no error anywhere. Now the container refuses
+    to start and says which value to fix.
+    """
+    with pytest.raises(ValueError, match="TRUSTED_PROXY_IPS"):
+        Settings(
+            _env_file=None,
+            environment="production",
+            jwt_secret="x" * 40,
+            meta_app_secret="s",
+            docs_enabled=False,
+            cors_origins=[],
+            trusted_proxy_ips=["nginx"],
+        )
+
+
 async def test_an_untrusted_peer_cannot_induce_an_hsts_pin(http: AsyncClient) -> None:
     """`trusted_proxy_ips` is empty on this fixture, so the header is ignored."""
     response = await http.get(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from time import perf_counter
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp
 
 from app.core.logging import bind_log_context, clear_log_context, get_logger
+from app.core.proxy import is_trusted_peer, parse_trusted_proxies
 
 logger = get_logger(__name__)
 
@@ -108,17 +110,20 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         app: ASGIApp,
         *,
         hsts_seconds: int = 31_536_000,
-        trusted_proxies: frozenset[str] = frozenset(),
+        trusted_proxies: Collection[str] = (),
     ) -> None:
         super().__init__(app)
         self._hsts_seconds = hsts_seconds
-        self._trusted_proxies = trusted_proxies
+        # Parsed once, at application construction. Entries are addresses or
+        # CIDR networks; a malformed one has already been refused by `Settings`
+        # (ADR-060).
+        self._trusted_proxies = parse_trusted_proxies(trusted_proxies)
 
     def _is_https(self, request: Request) -> bool:
         if request.url.scheme == "https":
             return True
         peer = request.client.host if request.client else None
-        if peer is not None and peer in self._trusted_proxies:
+        if is_trusted_peer(peer, self._trusted_proxies):
             # Only believed from a proxy we listed. Otherwise any caller could
             # assert HTTPS and collect an HSTS pin for this host.
             return request.headers.get("X-Forwarded-Proto", "").strip().lower() == "https"

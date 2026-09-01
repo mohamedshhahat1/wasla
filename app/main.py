@@ -74,7 +74,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # stack trace would otherwise be served without them.
     app.add_middleware(
         SecurityHeadersMiddleware,
-        trusted_proxies=frozenset(resolved.trusted_proxy_ips),
+        trusted_proxies=resolved.trusted_proxy_ips,
     )
     app.add_middleware(RequestContextMiddleware, header_name=resolved.request_id_header)
     app.add_middleware(

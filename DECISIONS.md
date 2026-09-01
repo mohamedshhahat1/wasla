@@ -1727,3 +1727,36 @@ Consequences:
 A workspace with no subscription that pays for a plan gets a settled invoice and no plan. That state requires `DEFAULT_PLAN_CODE` to name no plan — where limits are already unenforced — and it is logged rather than guessed at.
 
 Dunning is untouched and remains open: `PAST_DUE` still serves, and deciding when that grace runs out is a separate change.
+
+## ADR-060 — A Trusted Proxy Is an Address or a Network, Never a Name
+
+Date:
+2026-09-01
+
+Status:
+Accepted
+
+Decision:
+`TRUSTED_PROXY_IPS` entries are parsed as IP addresses or CIDR networks, IPv4 or IPv6, and compared against the parsed peer address. A malformed entry — a hostname included — is refused at startup in every environment. `docker-compose.prod.yml` gives the internal network an explicit subnet and nginx a fixed address on it, and trusts that address.
+
+Context:
+The comparison was `peer not in trusted_proxies`, a string membership test against `request.client.host`, which is an IP address. The shipped `docker-compose.prod.yml` set `TRUSTED_PROXY_IPS=nginx` — a Docker service name, which can never equal an address. Nothing ever matched, and two controls failed together with no error anywhere:
+
+- **Authentication rate limiting collapsed to one bucket.** Every request from the internet was counted under the nginx container's own address, so the whole world shared a ten-per-minute budget in front of `/auth/login`. That is not a weakened limit; it is an outage anybody can trigger.
+- **HSTS was never emitted.** `SecurityHeadersMiddleware` decides whether to believe `X-Forwarded-Proto` from the same trust test.
+
+`TRUSTED_PROXY_IPS` was also the one security-relevant setting absent from `.env.example`, so an operator had no prompt to set it correctly.
+
+Reason:
+**Addresses, because that is what is being compared.** `ipaddress.ip_network` with `strict=False` accepts a bare address as a single-host network, so naming one proxy is still writing one address.
+
+**Fail-fast, because the failure was silent.** The settings module already refuses rather than clamps a lifetime out of range, on the argument that silently correcting configuration is how an operator comes to believe something is set that is not. A trust list matching nothing is the same failure with a security consequence.
+
+**No name resolution.** Resolving a hostname would put the trust anchor for forwarding headers under whatever answers DNS, and this list exists precisely because that decision must not be influenceable from outside. A name is refused with a message saying so.
+
+**A fixed address rather than the whole subnet.** Docker allocates bridge subnets per host, so there was no stable range to name; the compose file now declares `10.89.0.0/24` — outside Docker's default pools — and pins nginx to `10.89.0.10`. Trusting one address keeps forwarding headers believable from the proxy alone rather than from every container on the network.
+
+Consequences:
+A deployment carrying a hostname in `TRUSTED_PROXY_IPS` will not start, and says which value to fix. That is the intended migration: it was not working before, it was failing quietly.
+
+Addresses read from forwarding headers are normalised, so one client written two ways is one rate-limit bucket rather than two.

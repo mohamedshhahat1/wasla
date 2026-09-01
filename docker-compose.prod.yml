@@ -116,7 +116,13 @@ services:
       # network is the only one; without this the application ignores every
       # forwarding header and rate-limits by the socket address, which behind a
       # proxy would be one bucket for the whole internet.
-      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-nginx}
+      # The nginx container's fixed address on the internal network below.
+      # This is compared against the *peer* address of the connection, so it
+      # has to be an address or a CIDR network - a service name never matches
+      # one, which is what made the previous default silently disable both
+      # forwarded-client identity and HSTS (ADR-060). The application refuses
+      # to start on anything that is not one.
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-10.89.0.10}
       LOG_FORMAT: json
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
@@ -264,7 +270,11 @@ services:
     depends_on:
       - api
     networks:
-      - internal
+      internal:
+        # Fixed, so TRUSTED_PROXY_IPS above can name it. Trusting one address
+        # rather than the whole subnet keeps the forwarding headers believable
+        # from the proxy alone, not from every container on the network.
+        ipv4_address: 10.89.0.10
     restart: always
 
 volumes:
@@ -275,3 +285,11 @@ volumes:
 networks:
   internal:
     driver: bridge
+    # An explicit subnet, because the proxy needs a fixed address the
+    # application can be told to trust and Docker's automatic allocation
+    # differs per host. 10.89.0.0/24 sits outside Docker's default address
+    # pools (172.17-172.31 and 192.168.0.0/16), so it does not collide with a
+    # network somebody else's stack already created.
+    ipam:
+      config:
+        - subnet: 10.89.0.0/24

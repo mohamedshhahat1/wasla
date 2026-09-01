@@ -16,6 +16,8 @@ from urllib.parse import urlparse
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.core.proxy import parse_trusted_proxies
+
 Environment = Literal["local", "test", "staging", "production"]
 LogFormat = Literal["json", "console"]
 
@@ -575,6 +577,28 @@ class Settings(BaseSettings):
             if raw.startswith("["):
                 return json.loads(raw)
             return [item.strip() for item in raw.split(",") if item.strip()]
+        return value
+
+    @field_validator("trusted_proxy_ips", mode="after")
+    @classmethod
+    def _check_trusted_proxy_ips(cls, value: list[str]) -> list[str]:
+        """Refuse an entry that is not an address or a network.
+
+        Fail-fast, in every environment, and the failure it prevents is one
+        that produced no error at all. `docker-compose.prod.yml` shipped
+        `TRUSTED_PROXY_IPS=nginx` - a Docker service name - and the comparison
+        was against `request.client.host`, which is an IP. Nothing ever
+        matched, so forwarding headers were ignored, every client on the
+        internet shared one authentication rate-limit bucket, and HSTS was
+        never emitted. All of that looked exactly like a correctly configured
+        deployment (ADR-060).
+
+        A hostname is refused rather than resolved. Resolving one would put the
+        trust anchor for forwarding headers under whatever answers DNS, and
+        this list exists precisely because that decision must not be
+        influenceable from outside.
+        """
+        parse_trusted_proxies(value)
         return value
 
     @field_validator("jwt_algorithm", mode="before")

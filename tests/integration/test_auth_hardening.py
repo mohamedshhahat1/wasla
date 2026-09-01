@@ -151,6 +151,78 @@ def test_a_transport_reporting_no_address_shares_one_bucket():
     assert client_identity(_Request(peer=None), trusted_proxies=()) == UNKNOWN_CLIENT
 
 
+def test_a_proxy_may_be_named_by_network():
+    """The shipped topology puts nginx on a known subnet (ADR-060)."""
+    identity = client_identity(
+        _Request(peer="10.89.0.10", headers={"X-Real-IP": "198.51.100.4"}),
+        trusted_proxies=("10.89.0.0/24",),
+    )
+
+    assert identity == "198.51.100.4"
+
+
+def test_two_clients_behind_one_trusted_proxy_land_in_different_buckets():
+    """The property the whole fix exists for.
+
+    With the peer never recognised as trusted, every client on the internet
+    collapsed onto the proxy's own address and shared a single ten-per-minute
+    authentication budget - which is an outage anybody could trigger, not
+    merely a weakened limit.
+    """
+    first = client_identity(
+        _Request(peer="10.89.0.10", headers={"X-Forwarded-For": "198.51.100.4"}),
+        trusted_proxies=("10.89.0.10",),
+    )
+    second = client_identity(
+        _Request(peer="10.89.0.10", headers={"X-Forwarded-For": "203.0.113.7"}),
+        trusted_proxies=("10.89.0.10",),
+    )
+
+    assert first == "198.51.100.4"
+    assert second == "203.0.113.7"
+    assert first != second
+
+
+def test_a_service_name_never_trusts_the_peer_it_names():
+    """`TRUSTED_PROXY_IPS=nginx` is refused by `Settings` before it reaches here.
+
+    Asserted at this layer too, because `client_identity` is called with
+    whatever a caller passes and must not start believing headers if one ever
+    arrives another way.
+    """
+    with pytest.raises(ValueError):
+        client_identity(
+            _Request(peer="10.89.0.10", headers={"X-Real-IP": "198.51.100.4"}),
+            trusted_proxies=("nginx",),
+        )
+
+
+def test_an_unparseable_forwarded_entry_is_skipped_not_returned():
+    """`unknown` is a documented `X-Forwarded-For` value, and is not a client."""
+    identity = client_identity(
+        _Request(
+            peer="10.89.0.10",
+            headers={"X-Forwarded-For": "198.51.100.4, unknown"},
+        ),
+        trusted_proxies=("10.89.0.10",),
+    )
+
+    assert identity == "198.51.100.4"
+
+
+def test_a_forged_real_ip_from_an_untrusted_peer_is_ignored_even_now():
+    """The rule that must survive the fix: the header is only as good as the peer."""
+    identity = client_identity(
+        _Request(
+            peer="203.0.113.9",
+            headers={"X-Real-IP": "10.0.0.7", "X-Forwarded-For": "10.0.0.8"},
+        ),
+        trusted_proxies=("10.89.0.0/24",),
+    )
+
+    assert identity == "203.0.113.9"
+
+
 def test_the_account_bucket_does_not_leak_the_address_it_counts():
     """The key lives in Redis, which shows up in slow logs and screenshots."""
     identity = account_identity("Ahmed@Example.COM")

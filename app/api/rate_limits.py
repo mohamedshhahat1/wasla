@@ -43,6 +43,7 @@ from fastapi import Depends, Request
 
 from app.api.dependencies import ActiveWorkspace, ActiveWorkspaceDep
 from app.core.dependencies import RedisDep, SettingsDep
+from app.core.proxy import is_trusted_peer, normalised_address, trusted_networks
 from app.core.rate_limit import RateLimitDecision, RateLimiter, RateLimitPolicy
 
 # When a request arrives with no usable client address at all - an ASGI
@@ -74,24 +75,39 @@ def client_identity(request: Request, *, trusted_proxies: Collection[str] = ()) 
     a trusted proxy - the address the outermost proxy we control actually saw.
     A caller can prepend as many forged entries as they like and never reach
     that position.
+
+    **The comparison is on parsed addresses, not on strings** (ADR-060). It was
+    a string comparison, and the shipped compose file set `TRUSTED_PROXY_IPS`
+    to the Docker service name `nginx`, which cannot equal an address - so no
+    peer was ever trusted, every client on the internet was counted under the
+    proxy's own address, and one shared budget stood in front of `/auth/login`.
+    Entries may now be addresses or CIDR networks; see `app/core/proxy.py`.
     """
+    networks = trusted_networks(trusted_proxies)
     peer = request.client.host if request.client and request.client.host else None
-    if peer is None or peer not in trusted_proxies:
+    if not is_trusted_peer(peer, networks):
         # No proxy in front of us, or one we were not told about. The socket is
         # the only thing here that cannot be forged.
         return peer or UNKNOWN_CLIENT
 
-    real_ip = (request.headers.get("X-Real-IP") or "").strip()
+    real_ip = normalised_address(request.headers.get("X-Real-IP"))
     if real_ip:
         return real_ip
 
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
-        for entry in reversed([part.strip() for part in forwarded.split(",")]):
-            if entry and entry not in trusted_proxies:
+        for part in reversed(forwarded.split(",")):
+            entry = normalised_address(part)
+            # Anything unparseable is skipped rather than returned: `unknown`
+            # is a documented XFF value, and a value that is not an address
+            # cannot be the client this counts by.
+            if entry is not None and not is_trusted_peer(entry, networks):
                 return entry
 
-    return peer
+    # Every hop was a proxy we listed, so the peer is the closest thing to a
+    # client there is. `peer` is not None here: `is_trusted_peer` refused it
+    # above otherwise.
+    return peer or UNKNOWN_CLIENT
 
 
 def get_rate_limiter(redis: RedisDep) -> RateLimiter:
