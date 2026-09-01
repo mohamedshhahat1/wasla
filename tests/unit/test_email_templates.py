@@ -43,6 +43,12 @@ CONTEXTS: dict[EmailTemplate, dict[str, str]] = {
     },
     EmailTemplate.TRIAL_EXPIRED: {"workspace_name": "Acme"},
     EmailTemplate.SUBSCRIPTION_CANCELLED: {"workspace_name": "Acme"},
+    # Says what is owed, because the reader's next question is "how much".
+    EmailTemplate.SUBSCRIPTION_SUSPENDED: {
+        "workspace_name": "Acme",
+        "amount_due": "99.00",
+        "currency": "USD",
+    },
 }
 
 

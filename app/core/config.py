@@ -351,6 +351,25 @@ class Settings(BaseSettings):
     # over a missing catalogue row.
     default_plan_code: str = "starter"
 
+    # Dunning, in days from the moment an invoice was *issued* (ADR-061). That
+    # anchor is the one the customer experienced - the day they were asked for
+    # money - rather than a period boundary they never saw, and it is stable:
+    # `issued_at` is written once and never rewritten, so neither threshold can
+    # move under a workspace while it is being chased.
+    #
+    # The first is how long a renewal may go unpaid before the workspace is
+    # marked behind. A week rather than a day: cards expire, finance
+    # departments pay on Fridays, and a customer one working day late has not
+    # stopped paying. `PAST_DUE` still serves.
+    billing_past_due_days: int = Field(default=7, ge=1)
+    # The second is when that grace ends and the workspace stops being served.
+    # A month, which is long enough that somebody on holiday does not come back
+    # to a dead product and short enough that the platform is not funding an
+    # account nobody intends to pay for. Validated below to be strictly later
+    # than the first: a hard threshold at or before the soft one would suspend
+    # workspaces that were never given a chance to notice.
+    billing_suspend_after_days: int = Field(default=30, ge=2)
+
     # Which processor collects money, if any (ADR-044). `manual` is the
     # existing behaviour and stays the default: it records what is owed and
     # waits for a human to confirm a bank transfer, which is how this product
@@ -685,6 +704,20 @@ class Settings(BaseSettings):
         the one environment that never listens on a network.
         """
         problems: list[str] = []
+
+        if self.billing_suspend_after_days <= self.billing_past_due_days:
+            # Checked in every environment, including `test`, because this pair
+            # is not a credential to be waved through locally - it is an
+            # ordering, and an ordering that is wrong is wrong everywhere. With
+            # the hard threshold at or before the soft one a workspace would be
+            # suspended in the same sweep that first told it anything was
+            # amiss, which is the opposite of what a grace period is for
+            # (ADR-061).
+            problems.append(
+                "BILLING_SUSPEND_AFTER_DAYS must be greater than "
+                f"BILLING_PAST_DUE_DAYS ({self.billing_past_due_days}); a workspace "
+                "has to be told it is behind before service stops"
+            )
 
         if not self.is_testing and (
             self.jwt_secret == PLACEHOLDER_SECRET or len(self.jwt_secret) < MINIMUM_SECRET_LENGTH

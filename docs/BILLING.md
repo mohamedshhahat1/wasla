@@ -1,6 +1,6 @@
 # Billing
 
-**Status: Implemented** — plans, the seeded catalogue, subscriptions, entitlements and their enforcement, the lifecycle and its sweep, invoices, payment records, the invoice API and the provider boundary all exist and are exercised against real PostgreSQL (migrations `0016` and `0017`; ADR-029, ADR-030, ADR-031). Paymob checkout, refunds and saved-card renewals are Implemented (ADR-044, ADR-045); a priced plan is granted only by verified settlement (ADR-059). Overage pricing and dunning are Planned, each for a reason recorded in [../TASKS.md](../TASKS.md). See [../TASKS.md](../TASKS.md) phase 13.
+**Status: Implemented** — plans, the seeded catalogue, subscriptions, entitlements and their enforcement, the lifecycle and its sweep, invoices, payment records, the invoice API and the provider boundary all exist and are exercised against real PostgreSQL (migrations `0016` and `0017`; ADR-029, ADR-030, ADR-031). Paymob checkout, refunds and saved-card renewals are Implemented (ADR-044, ADR-045); a priced plan is granted only by verified settlement (ADR-059). Dunning is Implemented (ADR-061): an unpaid renewal moves a workspace to `past_due` and then to `suspended`, where the paid plan stops resolving. Overage pricing is Planned, for a reason recorded in [../TASKS.md](../TASKS.md). See [../TASKS.md](../TASKS.md) phase 13.
 
 Scope: plans, subscriptions, entitlements, invoicing, and payment provider boundaries. Plan limits are listed in [SAAS.md](SAAS.md); metering is in [ANALYTICS.md](ANALYTICS.md).
 
@@ -190,10 +190,40 @@ Paying settles an invoice; it does not resubscribe, revive or extend anything.
 | --- | --- |
 | on another plan, invoice names a priced plan | moved onto that plan, `active`, period restarts (ADR-059) |
 | on the plan the invoice names | unchanged — a renewal, and the sweep owns periods |
-| `past_due` | `active` — the one *status* a payment changes on its own |
+| `past_due` | `active` — grace was running and the money arrived |
+| `suspended` | `active` — service was withheld pending exactly this payment (ADR-061) |
 | `trialing` | unchanged; a trial is not ended by paying |
 | `active` | unchanged |
 | `cancelled` / `expired` | unchanged — paying is not a request to resubscribe, and reviving would undo a deliberate decision |
+
+The recoverable set is closed at those two, in `CheckoutService`, rather than
+expressed as "any status that is not active" - so a sixth status added later
+cannot silently become revivable by a payment.
+
+### When a workspace stops being served (ADR-061)
+
+    ACTIVE ──BILLING_PAST_DUE_DAYS──▶ PAST_DUE ──BILLING_SUSPEND_AFTER_DAYS──▶ SUSPENDED
+
+Both thresholds count days from the invoice's `issued_at` - the day the customer
+was actually asked for money, rather than a period boundary they never saw - and
+that column is written once, so neither threshold moves under a workspace while
+it is being chased.
+
+`PAST_DUE` is inside `SERVING_STATUSES` and `SUSPENDED` is not. So the paid plan
+keeps resolving through the grace and stops afterwards, and the workspace falls
+back to `DEFAULT_PLAN_CODE` rather than losing access outright. The billing
+worker changes the status; `EntitlementService` decides what a status means.
+Neither knows the other's job.
+
+A suspended subscription is excluded from the roll-over sweep, so no new period
+opens, no further invoice is raised, and `RecurringService` will not charge a
+saved card against it.
+
+`SUSPENDED` is a distinct status rather than a reuse of `cancelled` because this
+vocabulary records *who decided*: a cancellation is the customer's decision and a
+suspension is the platform's. Collapsing them would misattribute it in the audit
+trail, count it as churn beside genuine cancellations, and make recovery
+impossible to express.
 
 A workspace with no subscription at all is not given one, and a paid invoice
 for it settles while granting nothing. That state needs `DEFAULT_PLAN_CODE` to

@@ -55,10 +55,12 @@ POLL_SECONDS: Final = 600.0
 # rather than one enormous transaction.
 CLAIM_LIMIT: Final = 200
 
-# How long a renewal invoice may go unpaid before the workspace is marked
-# behind. A week rather than a day: cards expire, finance departments pay on
-# Fridays, and a customer who is one working day late has not stopped paying.
+# Both dunning thresholds are configuration (ADR-061). These names survive as
+# the defaults a caller gets when it constructs the worker without settings,
+# which is what the older tests do; `runner.py` builds it from `Settings`, so a
+# deployment changes the numbers rather than the code.
 GRACE_DAYS: Final = 7
+SUSPEND_AFTER_DAYS: Final = 30
 
 
 class BillingWorker:
@@ -71,13 +73,23 @@ class BillingWorker:
         settings: Settings,
         poll_seconds: float = POLL_SECONDS,
         claim_limit: int = CLAIM_LIMIT,
-        grace_days: int = GRACE_DAYS,
+        grace_days: int | None = None,
+        suspend_after_days: int | None = None,
     ) -> None:
         self._database = database
         self._settings = settings
         self._poll_seconds = poll_seconds
         self._claim_limit = claim_limit
-        self._grace_days = grace_days
+        # Settings decide unless a caller is explicit. A test driving a
+        # boundary wants to name its own thresholds; a deployment wants the
+        # ones an operator configured, and `Settings` has already refused a
+        # pair where the hard threshold is not strictly later than the soft.
+        self._grace_days = grace_days if grace_days is not None else settings.billing_past_due_days
+        self._suspend_after_days = (
+            suspend_after_days
+            if suspend_after_days is not None
+            else settings.billing_suspend_after_days
+        )
         self._running = False
         # Set by stop(), so shutdown does not wait out a ten-minute interval.
         self._stopping = asyncio.Event()
@@ -166,6 +178,13 @@ class BillingWorker:
             # and the chase sees an invoice that is already being dealt with.
             handled += await self._collect_renewals(session, now=moment)
             handled += await self._chase_unpaid(session, now=moment)
+            # Chase before suspending, and in that order for a reason: a
+            # workspace whose invoice is already past the hard threshold when
+            # this worker first sees it - because the loop was down, or because
+            # it was only just issued the bill - is marked behind and suspended
+            # in the same sweep, with both notices and both audit rows, rather
+            # than being cut off having never been told.
+            handled += await self._suspend_unpaid(session, now=moment)
 
         logger.info("billing.sweep_completed", extra={"handled": handled})
         return handled
@@ -304,6 +323,100 @@ class BillingWorker:
                 },
             )
         return marked
+
+    async def _suspend_unpaid(self, session: AsyncSession, *, now: datetime) -> int:
+        """Stop serving a workspace whose bill has gone unpaid past the grace.
+
+        The half of dunning that was missing (ADR-061). `_chase_unpaid` above
+        moved a workspace to `PAST_DUE` and nothing moved it anywhere after
+        that - and `PAST_DUE` is a *serving* status, so a workspace that simply
+        stopped paying kept its paid plan for ever. The purchase was protected
+        by ADR-059 and the retention was not, which is the same product given
+        away by a slower route.
+
+        `SUSPENDED` rather than `CANCELLED`, and that distinction is the whole
+        reason a new status exists. A cancellation is the customer's decision;
+        this is the platform's. Recording it as the former would misattribute
+        it in the trail, count it as churn on a dashboard that separates
+        cancellations from failed payments, and - because paying an invoice
+        deliberately does not revive a subscription somebody chose to end -
+        make recovery impossible to express.
+
+        Only a `PAST_DUE` subscription is suspended. That is not merely an
+        ordering convenience: it means a workspace is never cut off without the
+        state and the notice that precede it, even when both happen in one
+        sweep because this loop had been down.
+
+        The threshold is read from `issued_at`, exactly as the soft one is, so
+        both are anchored to the day the customer was asked for money and
+        neither can move under a workspace being chased.
+
+        Everything here is staged on the sweep's session - the status, the
+        audit row and the outbox row - so a suspension and the message telling
+        somebody about it commit together or not at all (ADR-042).
+        """
+        grace = timedelta(days=self._suspend_after_days)
+        invoices = await PlatformInvoiceRepository(session).overdue(
+            before=now - grace,
+            limit=self._claim_limit,
+        )
+        if not invoices:
+            return 0
+
+        subscriptions = PlatformSubscriptionRepository(session)
+        suspended = 0
+        for invoice in invoices:
+            subscription = await subscriptions.get_by_id(invoice.subscription_id)
+            if subscription is None or subscription.status is not SubscriptionStatus.PAST_DUE:
+                # Already suspended by an earlier sweep, already cancelled, or
+                # never chased. Re-running this method is therefore a no-op,
+                # which is what makes the sweep safe to repeat: the status is
+                # the claim, and only one pass can find it in `PAST_DUE`.
+                continue
+
+            subscription.status = SubscriptionStatus.SUSPENDED
+            # `ended_at` is deliberately left alone. It records a subscription
+            # that finished, and this one has not: it is waiting for a payment
+            # that lifts it (`CheckoutService._settle`).
+            AuditTrail(session, tenant_id=subscription.tenant_id).record(
+                AuditAction.SUBSCRIPTION_SUSPENDED,
+                actor=None,
+                actor_kind=AuditActorKind.SYSTEM,
+                target_type="subscription",
+                target_id=subscription.id,
+                meta={
+                    "invoice_id": str(invoice.id),
+                    "outstanding": str(invoice.outstanding),
+                    "currency": invoice.currency,
+                    "unpaid_days": self._suspend_after_days,
+                },
+            )
+            tenant = await TenantRepository(session).get_by_id(subscription.tenant_id)
+            # Keyed to the invoice, like the past-due notice, so a workspace
+            # that stays suspended is told once about this bill rather than
+            # once every ten minutes for ever.
+            await EmailOutbox(session, self._settings).enqueue_for_tenant_owners(
+                tenant_id=subscription.tenant_id,
+                template=EmailTemplate.SUBSCRIPTION_SUSPENDED,
+                idempotency_prefix=f"subscription-suspended:{invoice.id}",
+                context={
+                    "workspace_name": tenant.name if tenant is not None else "your workspace",
+                    "amount_due": f"{invoice.outstanding:.2f}",
+                    "currency": invoice.currency,
+                },
+            )
+            suspended += 1
+            logger.warning(
+                "billing.subscription_suspended",
+                extra={
+                    "event": "billing.subscription_suspended",
+                    "tenant_id": str(subscription.tenant_id),
+                    "invoice_id": str(invoice.id),
+                    "outstanding": str(invoice.outstanding),
+                    "unpaid_days": self._suspend_after_days,
+                },
+            )
+        return suspended
 
     async def _invoice(
         self,

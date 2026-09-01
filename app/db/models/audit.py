@@ -211,6 +211,11 @@ class AuditAction(StrEnum):
     INVOICE_VOIDED = "invoice_voided"
     # A renewal went unpaid long enough that the workspace was marked behind.
     SUBSCRIPTION_PAST_DUE = "subscription_past_due"
+    # And unpaid long enough after that to stop being served (ADR-061). Kept
+    # apart from `SUBSCRIPTION_CANCELLED` because this is the platform's
+    # decision rather than the customer's, and an investigation asking "did
+    # they leave or did we cut them off" must be able to tell the two apart.
+    SUBSCRIPTION_SUSPENDED = "subscription_suspended"
 
     # Writing to many customers at once
     CAMPAIGN_SCHEDULED = "campaign_scheduled"

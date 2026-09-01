@@ -83,6 +83,23 @@ def _same_day(moment: datetime, *, year: int, month: int) -> datetime:
     raise ValueError("No valid day in the target month.")  # pragma: no cover
 
 
+def _unusable_reason(subscription: Subscription) -> str:
+    """Why a terminal subscription cannot be changed, in the customer's terms.
+
+    Three call sites refuse `is_terminal` and all three used to say "this
+    subscription has ended", which stopped being true when `SUSPENDED` joined
+    the set (ADR-061). A suspended workspace has not ended anything - it owes
+    money - and telling it to start a new subscription would send somebody down
+    a path that does not fix their problem.
+
+    The refusal itself is unchanged and correct in both cases: you cannot
+    cancel, resume or downgrade your way out of an unpaid invoice.
+    """
+    if subscription.is_suspended_for_non_payment:
+        return "This workspace is suspended for an unpaid invoice. " "Settle it to restore service."
+    return "This subscription has ended. Start a new one instead."
+
+
 class SubscriptionService:
     """Subscription operations for one workspace."""
 
@@ -205,7 +222,7 @@ class SubscriptionService:
         if subscription.plan_id == plan.id:
             raise ConflictError("This workspace is already on that plan.")
         if subscription.is_terminal:
-            raise ConflictError("This subscription has ended. Start a new one instead.")
+            raise ConflictError(_unusable_reason(subscription))
 
         previous = subscription.plan_id
         subscription.plan_id = plan.id
@@ -253,7 +270,7 @@ class SubscriptionService:
         moment = now if now is not None else datetime.now(UTC)
         subscription = await self._require_subscription()
         if subscription.is_terminal:
-            raise ConflictError("This subscription has already ended.")
+            raise ConflictError(_unusable_reason(subscription))
 
         subscription.cancelled_at = moment
         if immediately:
@@ -296,7 +313,7 @@ class SubscriptionService:
         """Undo a cancellation that has not taken effect yet."""
         subscription = await self._require_subscription()
         if subscription.is_terminal:
-            raise ConflictError("This subscription has ended. Start a new one instead.")
+            raise ConflictError(_unusable_reason(subscription))
         if not subscription.cancel_at_period_end:
             raise ConflictError("This subscription is not scheduled to end.")
 

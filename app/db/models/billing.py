@@ -116,18 +116,29 @@ class SubscriptionStatus(StrEnum):
 
     `EXPIRED` is what a trial becomes when nobody acts. It is separate from
     `CANCELLED` because nobody chose it, and the two want different emails.
+
+    `SUSPENDED` is where `PAST_DUE` ends up when nobody ever pays (ADR-061).
+    It is deliberately its own value rather than a reuse of `CANCELLED`,
+    because this enum's whole job is to record *who decided and why*: a
+    cancellation is the customer's decision, an expiry is nobody's, and a
+    suspension is the platform's. Collapsing the third into the first would
+    misattribute it in the audit trail and count it as churn on a dashboard
+    that separates cancellations from failed payments - and it would make
+    recovery impossible to express, because paying an invoice deliberately
+    does not revive a subscription somebody chose to end.
     """
 
     TRIALING = "trialing"
     ACTIVE = "active"
     PAST_DUE = "past_due"
+    SUSPENDED = "suspended"
     CANCELLED = "cancelled"
     EXPIRED = "expired"
 
 
 # Statuses in which a workspace may still use the product. `PAST_DUE` is in the
 # list on purpose: service continues while a payment problem is sorted out, and
-# the platform decides separately when that grace has run out.
+# `SUSPENDED` is where the platform decides that grace has run out.
 SERVING_STATUSES: Final[frozenset[SubscriptionStatus]] = frozenset(
     {
         SubscriptionStatus.TRIALING,
@@ -136,9 +147,15 @@ SERVING_STATUSES: Final[frozenset[SubscriptionStatus]] = frozenset(
     }
 )
 
-# Statuses from which nothing further happens on its own.
+# Statuses from which nothing further happens **on its own**. That is what this
+# set means, and it is why `SUSPENDED` belongs in it: the sweep opens no new
+# period, raises no further invoice and attempts no further collection against
+# one. It is not a claim that the row can never move again - a settled payment
+# lifts a suspension, which is the one recovery `CheckoutService._settle`
+# permits and the one the other two members deliberately refuse.
 TERMINAL_SUBSCRIPTION_STATUSES: Final[frozenset[SubscriptionStatus]] = frozenset(
     {
+        SubscriptionStatus.SUSPENDED,
         SubscriptionStatus.CANCELLED,
         SubscriptionStatus.EXPIRED,
     }
@@ -272,7 +289,23 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     @property
     def is_terminal(self) -> bool:
+        """Whether the sweep will advance this row no further.
+
+        Not the same question as "can this ever change again". A suspension is
+        terminal in this sense - no period opens, no invoice is raised - and is
+        still the one non-serving state a payment can lift (ADR-061).
+        """
         return self.status in TERMINAL_SUBSCRIPTION_STATUSES
+
+    @property
+    def is_suspended_for_non_payment(self) -> bool:
+        """Whether service stopped because a bill went unpaid.
+
+        The single place that distinction is expressed, so the settlement path
+        can restore this and only this - a cancellation and an expiry are
+        decisions, and paying an old invoice is not a request to undo one.
+        """
+        return self.status is SubscriptionStatus.SUSPENDED
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
         return f"Subscription(tenant_id={self.tenant_id!r}, status={self.status!r})"

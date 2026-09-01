@@ -517,6 +517,13 @@ Conversation routes are open to every workspace member rather than to admins onl
 
 **A priced plan is granted by settlement, never by asking** (ADR-059). `SubscriptionService` refuses a plan with a price to a self-service caller, answering 402; `CheckoutService._settle` applies `invoice.plan_code` when a signed provider callback says the invoice is paid. The plan comes from a row this system wrote before the provider was called, so the callback contributes one fact — that the money arrived — and a declined, unsigned, mismatched or replayed one grants nothing.
 
+**And an unpaid one stops being served** (ADR-061). The billing worker moves a `PAST_DUE` subscription to `SUSPENDED` once its invoice has gone unpaid for `BILLING_SUSPEND_AFTER_DAYS` from `issued_at`; `SUSPENDED` is outside `SERVING_STATUSES`, so `EntitlementService` stops resolving the paid plan and the workspace falls back to `DEFAULT_PLAN_CODE` rather than being locked out. The worker changes state and the entitlement service interprets it - there is no plan resolution in the worker and no dunning arithmetic in the entitlement service. A settled payment lifts a suspension, and only a suspension: a cancellation and an expiry are decisions somebody made, and paying an old invoice does not undo one.
+
+    ACTIVE ──(invoice unpaid, BILLING_PAST_DUE_DAYS)──▶ PAST_DUE ──(BILLING_SUSPEND_AFTER_DAYS)──▶ SUSPENDED
+       ▲                                                   │                                          │
+       └──────────── settled payment ──────────────────────┴──────────────────────────────────────────┘
+
+
 Metering came first because entitlements read it: a period limit is a sum over `usage_events` between the subscription's period bounds, which is what makes "1,000 messages a month" reset rather than accumulate forever. Resource limits — numbers, agents, colleagues, documents — are counted from the rows themselves.
 
 Where a limit is enforced is a decision recorded in ADR-030, and the short version is: refuse the person who chose, never the customer who wrote. Creating something answers 402 from a dependency in the route signature; scheduling a campaign is checked for its whole audience at once; an agent turn with no allowance left stops without failing its job; and the inbound webhook path carries no check at all, because those words belong to a customer who owes us nothing and a non-2xx to Meta eventually disables the integration.

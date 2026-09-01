@@ -1760,3 +1760,87 @@ Consequences:
 A deployment carrying a hostname in `TRUSTED_PROXY_IPS` will not start, and says which value to fix. That is the intended migration: it was not working before, it was failing quietly.
 
 Addresses read from forwarding headers are normalised, so one client written two ways is one rate-limit bucket rather than two.
+
+## ADR-061 — An Unpaid Subscription Is Suspended, Not Cancelled and Not Served For Ever
+
+Date:
+2026-09-01
+
+Status:
+Accepted
+
+Decision:
+`SubscriptionStatus` gains `SUSPENDED`. The billing worker moves a `PAST_DUE`
+subscription there once its invoice has been unpaid for `BILLING_SUSPEND_AFTER_DAYS`
+from `issued_at`. `SUSPENDED` is outside `SERVING_STATUSES`, so `EntitlementService`
+stops resolving the paid plan and the workspace falls back to `DEFAULT_PLAN_CODE`.
+A settled payment lifts it back to `ACTIVE`; a cancellation and an expiry are
+untouched by settlement, as before.
+
+Context:
+ADR-059 closed the *purchase*: a priced plan became unobtainable without an
+authoritative payment. It said nothing about *retention*. `_chase_unpaid` marked
+a workspace `PAST_DUE` after seven days and nothing moved it afterwards, and
+`PAST_DUE` is a serving status — the model's own comment said the platform would
+"decide separately when that grace has run out", and no such decision existed.
+
+So a workspace that simply stopped paying kept its full paid plan indefinitely,
+receiving one email per invoice. That is the same product given away by a slower
+route than the one ADR-059 shut, and it made the entire billing lifecycle
+advisory: buying was enforced and keeping was not.
+
+Reason:
+**A new status rather than reusing `CANCELLED`.** This enum's job is to record
+*who decided and why* — its docstring already separates an expiry from a
+cancellation on exactly that ground, because "nobody chose it" and "the customer
+chose it" want different emails. A suspension is the platform's decision, and
+writing it as a cancellation would misattribute it in the audit trail, count it
+as churn on a dashboard that deliberately separates cancellations from failed
+payments, and — because settlement must not revive a subscription somebody chose
+to end — make recovery impossible to express. A customer who paid their overdue
+bill would have settled the invoice and stayed cut off.
+
+**`SUSPENDED` is in `TERMINAL_SUBSCRIPTION_STATUSES`.** That set means "the sweep
+advances this no further", which is exactly true: no period opens, no invoice is
+raised, no saved card is charged. It is not a claim that the row can never move
+again, and the model now says so. `Subscription.is_suspended_for_non_payment` is
+the single place the recoverable case is named, and `CheckoutService` reads a
+closed two-member set rather than "any status that is not active" — so adding a
+sixth status later cannot silently make it recoverable.
+
+**Anchored on `issued_at`, like the soft threshold already was.** It is the day
+the customer was asked for money rather than a period boundary they never saw,
+and it is written once and never rewritten — so neither threshold can move under
+a workspace while it is being chased. No new column and no new query: the same
+`PlatformInvoiceRepository.overdue` serves both sweeps with different windows.
+
+**Both thresholds are configuration, and the ordering is validated.** A hard
+threshold at or before the soft one would suspend a workspace in the same sweep
+that first told it anything, which is the opposite of a grace period. That is
+refused in every environment including `test`, because it is an ordering rather
+than a credential.
+
+**The worker changes state; the entitlement service interprets it.** There is no
+plan resolution in the worker and no dunning arithmetic in `EntitlementService`.
+The degradation to the default plan is the fallback that already existed for a
+workspace whose subscription is not serving.
+
+**Chase before suspend, in one sweep.** A workspace whose invoice is already past
+the hard threshold the first time the loop sees it — because the worker was down —
+gets both transitions, both audit rows and both notices, rather than being cut off
+having never been told.
+
+Consequences:
+Migration 0037 adds two enum labels and nothing else. Its downgrade is empty for
+the reason 0025, 0029, 0034 and 0036 give, plus one of its own: a row that reached
+`suspended` describes a workspace the platform stopped serving, and a downgrade
+would have to invent a status for it.
+
+Idempotency has two independent guards. The status is the claim — only one pass
+can find a row in `PAST_DUE` — and the outbox key is the invoice, so a workspace
+that stays suspended is told once about that bill rather than once every ten
+minutes.
+
+Dunning is now complete as a lifecycle. What remains open is commercial rather
+than technical: how long a suspended workspace's data is retained, and whether a
+suspension should ever become a cancellation on its own.

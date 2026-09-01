@@ -113,6 +113,31 @@ def test_a_finished_subscription_serves_nobody():
     assert _subscription(SubscriptionStatus.EXPIRED).is_serving is False
 
 
+def test_a_suspended_subscription_serves_nobody():
+    """The whole point of the status (ADR-061).
+
+    `PAST_DUE` serves so a late payment does not cut anybody off; `SUSPENDED`
+    is where that grace ends, and if it served too then dunning would be a
+    label change with no consequence - which is the defect it was added for.
+    """
+    assert _subscription(SubscriptionStatus.SUSPENDED).is_serving is False
+    assert _subscription(SubscriptionStatus.SUSPENDED).is_terminal is True
+
+
+def test_only_a_suspension_is_recoverable_by_paying():
+    """Which non-serving state a payment may lift, and which it may not.
+
+    `is_terminal` means the sweep advances the row no further - not that it can
+    never move again. A suspension is waiting for exactly the money a
+    settlement brings; a cancellation and an expiry are decisions somebody
+    made, and paying an old invoice must not undo one.
+    """
+    assert _subscription(SubscriptionStatus.SUSPENDED).is_suspended_for_non_payment is True
+    assert _subscription(SubscriptionStatus.CANCELLED).is_suspended_for_non_payment is False
+    assert _subscription(SubscriptionStatus.EXPIRED).is_suspended_for_non_payment is False
+    assert _subscription(SubscriptionStatus.PAST_DUE).is_suspended_for_non_payment is False
+
+
 def test_serving_and_terminal_do_not_overlap():
     assert not SERVING_STATUSES & TERMINAL_SUBSCRIPTION_STATUSES
     assert set(SubscriptionStatus) == SERVING_STATUSES | TERMINAL_SUBSCRIPTION_STATUSES

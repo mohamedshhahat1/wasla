@@ -82,6 +82,19 @@ MISMATCHED: Final = "mismatched"
 NO_CHANGE: Final = "no_change"
 REFUSED: Final = "refused"
 
+# The two subscription statuses a settled payment lifts, and nothing else
+# (ADR-059, ADR-061). Both mean the platform is waiting for exactly this money:
+# `PAST_DUE` is a workspace being chased, `SUSPENDED` is one whose grace ran
+# out. A cancellation and an expiry are decisions somebody made, and a payment
+# against an old invoice must not undo one - which is why this is a closed set
+# rather than "any status that is not active".
+_RECOVERABLE_STATUSES: Final[frozenset[SubscriptionStatus]] = frozenset(
+    {
+        SubscriptionStatus.PAST_DUE,
+        SubscriptionStatus.SUSPENDED,
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class StartedCheckout:
@@ -771,13 +784,35 @@ class CheckoutService:
         if (
             subscription is not None
             and subscription.id == invoice.subscription_id
-            and subscription.status is SubscriptionStatus.PAST_DUE
+            and subscription.status in _RECOVERABLE_STATUSES
         ):
-            # The one *status* a payment changes on its own. A trial stays a
-            # trial and a cancellation stays cancelled: paying an invoice is
-            # not a request to resubscribe, and treating it as one would revive
-            # a subscription somebody deliberately ended.
+            # The only two statuses a payment changes on its own, and the list
+            # is closed on purpose. Both mean "the platform is waiting for this
+            # money": `PAST_DUE` is a workspace being chased, `SUSPENDED` is
+            # one whose grace ran out (ADR-061). Settling the bill is precisely
+            # the condition each was waiting on, so lifting them is the whole
+            # point of the payment rather than a side effect of it.
+            #
+            # A trial stays a trial, a cancellation stays cancelled and an
+            # expiry stays expired: paying an invoice is not a request to
+            # resubscribe, and treating it as one would revive a subscription
+            # somebody deliberately ended (ADR-059). That is why this reads a
+            # closed set rather than "not active".
+            #
+            # Ordered before `_apply_purchased_plan` so a suspended workspace
+            # that pays for a *different* plan gets it: the row is no longer
+            # terminal by the time the plan transition is considered.
+            previous = subscription.status
             subscription.status = SubscriptionStatus.ACTIVE
+            logger.info(
+                "billing.subscription_restored",
+                extra={
+                    "event": "billing.subscription_restored",
+                    "tenant_id": str(self._tenant_id),
+                    "invoice_id": str(invoice.id),
+                    "from_status": previous.value,
+                },
+            )
 
         await self._apply_purchased_plan(invoice, subscription=subscription, now=now)
 

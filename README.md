@@ -14,7 +14,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Documentation protocol (`Documentation_Protocol.md`) | Implemented |
 | Project memory (`README` / `ARCHITECTURE` / `TASKS` / `DECISIONS`, `docs/`) | Implemented |
 | Application foundation (FastAPI, config, logging, errors, DB, Redis, health, Docker, CI) | Implemented |
-| Domain models and migrations (`0001`–`0036`) | Implemented |
+| Domain models and migrations (`0001`–`0037`) | Implemented |
 | Multi-tenancy, authentication, workspace RBAC, invitations | Implemented |
 | WhatsApp Cloud API (webhook, signatures, idempotency, outbound client) | Implemented |
 | Conversations, inbox, human handoff, templates, cursor paging | Implemented |
@@ -28,6 +28,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Usage metering, and tenant analytics derived from the domain tables | Implemented |
 | Platform owner view across every workspace (read-only) | Implemented |
 | Plans, subscriptions, entitlements enforced against usage, invoices and payment records | Implemented |
+| Dunning: an unpaid renewal becomes `past_due`, then `suspended`, and the paid plan stops applying | Implemented |
 | Transactional email (outbox, Resend provider, delivery webhooks, bounce suppression) | Implemented |
 | Password reset, invitation delivery and account security notices | Implemented |
 | Google sign-in (OIDC, PKCE, identity linking, profile name and picture) | Implemented |

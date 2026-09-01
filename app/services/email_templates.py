@@ -44,6 +44,11 @@ class EmailTemplate(StrEnum):
     INVOICE_ISSUED = "invoice_issued"
     TRIAL_EXPIRED = "trial_expired"
     SUBSCRIPTION_CANCELLED = "subscription_cancelled"
+    # Service stopped because a bill went unpaid past the grace period
+    # (ADR-061). Its own template rather than a reuse of the cancellation
+    # notice, because the two say opposite things about who decided and about
+    # what the reader should do next.
+    SUBSCRIPTION_SUSPENDED = "subscription_suspended"
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +74,7 @@ _SUBJECTS: Final[dict[EmailTemplate, str]] = {
     EmailTemplate.INVOICE_ISSUED: "Your Wasla invoice is ready",
     EmailTemplate.TRIAL_EXPIRED: "Your Wasla trial has ended",
     EmailTemplate.SUBSCRIPTION_CANCELLED: "Your Wasla subscription has been cancelled",
+    EmailTemplate.SUBSCRIPTION_SUSPENDED: "Your Wasla workspace has been suspended",
 }
 
 _REQUIRED_KEYS: Final[dict[EmailTemplate, frozenset[str]]] = {
@@ -87,6 +93,7 @@ _REQUIRED_KEYS: Final[dict[EmailTemplate, frozenset[str]]] = {
     ),
     EmailTemplate.TRIAL_EXPIRED: frozenset({"workspace_name"}),
     EmailTemplate.SUBSCRIPTION_CANCELLED: frozenset({"workspace_name"}),
+    EmailTemplate.SUBSCRIPTION_SUSPENDED: frozenset({"workspace_name", "amount_due", "currency"}),
 }
 
 
@@ -324,6 +331,30 @@ def render(
                 "The trial for your workspace "
                 f"<strong>{html.escape(workspace)}</strong> on Wasla has ended.",
                 "Sign in and choose a plan to continue where you left off.",
+            ],
+            None,
+        )
+    elif template is EmailTemplate.SUBSCRIPTION_SUSPENDED:
+        workspace = context["workspace_name"]
+        amount = f"{context['amount_due']} {context['currency']}"
+        text = (
+            f'Your workspace "{workspace}" on Wasla has been suspended because '
+            f"an invoice of {amount} is still unpaid.\n\n"
+            "Your data is retained and nothing has been deleted. Sign in and "
+            "settle the outstanding invoice to restore service. This message "
+            "contains no payment link - Wasla never asks you to pay through a "
+            "link in an email."
+        )
+        html_body = _layout(
+            subject,
+            [
+                f"Your workspace <strong>{html.escape(workspace)}</strong> on "
+                "Wasla has been suspended because an invoice of "
+                f"<strong>{html.escape(amount)}</strong> is still unpaid.",
+                "Your data is retained and nothing has been deleted. Sign in "
+                "and settle the outstanding invoice to restore service.",
+                "This message contains no payment link - Wasla never asks you "
+                "to pay through a link in an email.",
             ],
             None,
         )

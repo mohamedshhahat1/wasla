@@ -560,3 +560,44 @@ def test_the_manual_provider_needs_no_credentials():
 
     assert settings.billing_provider == "manual"
     assert settings.paymob_secret_key is None
+
+
+# ------------------------------------------------------------------- dunning
+
+
+def test_the_suspension_threshold_must_be_later_than_the_past_due_one():
+    """Otherwise a workspace is cut off in the sweep that first chases it.
+
+    Checked in every environment, `test` included, because this is an ordering
+    rather than a credential - and an ordering that is wrong is wrong
+    everywhere (ADR-061).
+    """
+    for past_due, suspend in ((7, 7), (10, 3), (2, 2)):
+        with pytest.raises(ValidationError) as caught:
+            Settings(
+                _env_file=None,
+                environment="test",
+                billing_past_due_days=past_due,
+                billing_suspend_after_days=suspend,
+            )
+        assert "BILLING_SUSPEND_AFTER_DAYS" in str(caught.value)
+
+
+def test_the_dunning_defaults_are_a_week_then_a_month():
+    """The numbers a deployment inherits without configuring anything."""
+    settings = Settings(_env_file=None, environment="test")
+
+    assert settings.billing_past_due_days == 7
+    assert settings.billing_suspend_after_days == 30
+
+
+def test_the_dunning_thresholds_are_configurable():
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        billing_past_due_days=3,
+        billing_suspend_after_days=14,
+    )
+
+    assert settings.billing_past_due_days == 3
+    assert settings.billing_suspend_after_days == 14
