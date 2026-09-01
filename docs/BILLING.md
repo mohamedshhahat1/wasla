@@ -225,6 +225,24 @@ suspension is the platform's. Collapsing them would misattribute it in the audit
 trail, count it as churn beside genuine cancellations, and make recovery
 impossible to express.
 
+**Recovery is something the customer can reach.** A suspended owner keeps every
+billing route: they can read the subscription, and `POST /billing/checkout`
+accepts both doors - naming the overdue `invoice_id`, or naming the plan, which
+issues one for the current period. Neither is gated on the subscription status,
+and that is deliberate rather than accidental. `SUSPENDED` is a member of
+`TERMINAL_SUBSCRIPTION_STATUSES`, so a generic `is_terminal` refusal anywhere on
+the way to a payment page would close the loop - a workspace that must pay to
+recover and cannot start a payment because it has not paid. The reachable path
+is asserted end to end over HTTP in `tests/integration/test_dunning_lifecycle.py`
+rather than inferred from settlement supporting the transition.
+
+What recovery does **not** open is a free door. `POST /billing/subscription/plan`
+still answers 402 for a priced plan and 409 for the free one, so a suspended
+workspace can neither re-select what it owes for nor downgrade out of the bill;
+only a verified settlement moves it (ADR-059). And `cancelled` and `expired`
+remain unrecoverable by the same route: they may open a checkout and pay it, the
+invoice settles honestly, and the subscription still does not come back.
+
 A workspace with no subscription at all is not given one, and a paid invoice
 for it settles while granting nothing. That state needs `DEFAULT_PLAN_CODE` to
 name no plan — where limits are already unenforced — and is logged as

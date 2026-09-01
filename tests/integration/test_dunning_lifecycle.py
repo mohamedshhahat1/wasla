@@ -23,12 +23,15 @@ reintroduce that.
 
 from __future__ import annotations
 
+import json
 import secrets
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI, Request
@@ -36,7 +39,11 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_entitlement_service
+from app.api.dependencies import (
+    ActiveWorkspace,
+    get_active_workspace,
+    get_entitlement_service,
+)
 from app.core.config import Settings
 from app.core.dependencies import SESSION_STATE_ATTRIBUTE, get_session
 from app.db.models.audit import AuditAction, AuditLog
@@ -53,6 +60,7 @@ from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.membership import Membership
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
+from app.integrations.billing import paymob
 from app.integrations.billing.paymob import hmac_signature
 from app.main import create_app
 from app.repositories.billing_repository import SubscriptionRepository
@@ -147,8 +155,41 @@ def dunning_settings() -> Settings:
     return _settings()
 
 
+CLIENT_SECRET = "csk_test_onepagebearer"
+
+
 @pytest.fixture
-def app(dunning_settings: Settings, db_session: AsyncSession) -> Iterator[FastAPI]:
+def provider_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer Paymob without a socket, leaving the rest of the graph real.
+
+    Patched onto the provider class rather than injected through a dependency
+    override, following the sibling billing suites: the recovery tests below
+    are about the *real* dependency graph reaching a payment page, and that
+    graph builds its own provider from settings.
+    """
+    original = paymob.PaymobProvider.__init__
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "intention" in str(request.url):
+            return httpx.Response(
+                201,
+                json={"id": "pi_test_recovery", "client_secret": CLIENT_SECRET},
+            )
+        return httpx.Response(200, json={"id": 579305, "success": True, "pending": False})
+
+    def patched(self, **kwargs):  # type: ignore[no-untyped-def]
+        kwargs.setdefault("transport", httpx.MockTransport(handler))
+        original(self, **kwargs)
+
+    monkeypatch.setattr(paymob.PaymobProvider, "__init__", patched)
+
+
+@pytest.fixture
+def app(
+    dunning_settings: Settings,
+    db_session: AsyncSession,
+    provider_transport: None,
+) -> Iterator[FastAPI]:
     """The real application, for the callback half of the lifecycle."""
     application = create_app(dunning_settings)
     application.state.database = _Infra()
@@ -328,14 +369,48 @@ def _transaction(*, reference: str, amount_cents: int = 9900, **overrides: objec
     return transaction
 
 
-async def _pay(http: AsyncClient, payment: Payment):
+async def _pay_reference(http: AsyncClient, reference: str, *, amount_cents: int = 9900):
     """A callback exactly as Paymob sends one, signed with the real scheme."""
-    transaction = _transaction(reference=str(payment.id))
+    transaction = _transaction(reference=reference, amount_cents=amount_cents)
     signature = hmac_signature(transaction, secret=HMAC_SECRET)
     return await http.post(
         WEBHOOK,
         params={"hmac": signature},
         json={"type": "TRANSACTION", "obj": transaction},
+    )
+
+
+async def _pay(http: AsyncClient, payment: Payment):
+    return await _pay_reference(http, str(payment.id))
+
+
+async def _act_as_owner(
+    app: FastAPI,
+    session: AsyncSession,
+    tenant: Tenant,
+    user: User,
+) -> None:
+    """Resolve the workspace to this owner, using the membership row that exists.
+
+    The membership is read from the database rather than fabricated, because
+    the question these tests ask is whether a *suspended* workspace still
+    resolves - and a hand-built `ACTIVE` membership would answer that by
+    construction. Dunning writes to `subscriptions.status` and touches neither
+    the tenant nor the membership, and this is what holds it to that.
+    """
+    membership = (
+        await session.execute(
+            select(Membership).where(
+                Membership.tenant_id == tenant.id,
+                Membership.user_id == user.id,
+            )
+        )
+    ).scalar_one()
+
+    app.dependency_overrides[get_active_workspace] = lambda: ActiveWorkspace(
+        user=user,
+        membership=membership,
+        tenant=tenant,
     )
 
 
@@ -775,3 +850,247 @@ async def test_a_suspended_workspace_cannot_change_its_way_out_of_the_bill(
             await call()
         assert "suspended" in str(caught.value).lower()
         assert "unpaid invoice" in str(caught.value)
+
+
+# ------------------------------------------- 9. recovery is actually reachable
+#
+# Everything in section 3 proves that a verified settlement lifts a suspension.
+# None of it proves a suspended customer can *get* to a settlement: those tests
+# insert the pending payment row directly, which is a state only this system can
+# create. So the recovery they demonstrate would have been unreachable in the
+# product if any guard on the way to a payment page refused a non-serving
+# workspace - SUSPENDED is in TERMINAL_SUBSCRIPTION_STATUSES, and one
+# `if subscription.is_terminal` on the checkout path would have closed the loop:
+# needs to pay to recover, cannot start a payment because it has not paid.
+#
+# These tests walk the whole reachable path over HTTP instead - suspension by
+# the real sweep, then the customer's own requests - so the loop is proved open
+# end to end rather than inferred from `_settle` supporting the transition.
+
+
+async def _suspended_workspace(
+    session: AsyncSession,
+    app: FastAPI,
+) -> tuple[Tenant, User, Subscription, Invoice]:
+    """A workspace the *worker* suspended, with its owner at the keyboard."""
+    tenant = await _tenant(session)
+    user = await _owner(session, tenant)
+    await _free_plan(session)
+    paid = await _paid_plan(session)
+    subscription = await _subscription(session, tenant, paid, status=SubscriptionStatus.ACTIVE)
+    invoice = await _unpaid_invoice(session, tenant, subscription, issued_days_ago=SUSPEND_DAYS + 1)
+
+    # The real dunning path rather than a status assignment, and walked one
+    # stage at a time. The first sweep runs inside the grace - eleven days after
+    # the invoice was issued, past the soft threshold and well short of the hard
+    # one - so it can only chase. The second runs after the hard threshold, and
+    # `_suspend_unpaid` acts on nothing but a `PAST_DUE` row, so this is the
+    # transition a customer actually experiences rather than a shortcut to the
+    # end state.
+    await _worker(session).run_once(now=NOW - timedelta(days=20))
+    assert subscription.status is SubscriptionStatus.PAST_DUE
+
+    await _worker(session).run_once(now=NOW)
+    assert subscription.status is SubscriptionStatus.SUSPENDED
+
+    await _act_as_owner(app, session, tenant, user)
+    return tenant, user, subscription, invoice
+
+
+async def test_a_suspended_owner_can_pay_the_bill_that_suspended_them(
+    http: AsyncClient,
+    app: FastAPI,
+    db_session: AsyncSession,
+) -> None:
+    """The whole loop, over the routes a customer actually has.
+
+    Read the state, open a checkout against the overdue invoice, receive the
+    signed callback, and be served again - with no operator, no console and no
+    UPDATE anywhere in it.
+    """
+    tenant, _, subscription, invoice = await _suspended_workspace(db_session, app)
+    assert await _agent_limit(db_session, tenant) == FREE_AGENTS
+
+    # 1. The customer can see what is wrong.
+    state = await http.get("/api/v1/billing/subscription")
+    assert state.status_code == 200
+    assert state.json()["subscription"]["status"] == "suspended"
+
+    # 2. And can start paying for it. This is the assertion the section exists
+    #    for: a terminal-status guard here would make the suspension permanent.
+    started = await http.post(
+        "/api/v1/billing/checkout",
+        json={"invoice_id": str(invoice.id)},
+    )
+    assert started.status_code == 201, started.text
+    checkout = started.json()
+    assert checkout["amount"] == "99.00"
+    assert checkout["invoice_id"] == str(invoice.id)
+    # The page is real, and the bearer value stays in the URL and nowhere else.
+    assert CLIENT_SECRET in checkout["redirect_url"]
+    assert CLIENT_SECRET not in json.dumps(
+        {key: value for key, value in checkout.items() if key != "redirect_url"}
+    )
+
+    # 3. A pending attempt exists, against that invoice and no other.
+    payment = (
+        await db_session.execute(
+            select(Payment).where(Payment.id == uuid.UUID(checkout["payment_id"]))
+        )
+    ).scalar_one()
+    assert payment.invoice_id == invoice.id
+    assert payment.status is PaymentStatus.PENDING
+
+    # 4. Paymob says the money arrived, signed the way Paymob signs it.
+    delivered = await _pay_reference(http, checkout["payment_id"])
+    assert delivered.status_code == 200
+
+    # 5. Service is back, measured as an entitlement rather than as a label.
+    await db_session.refresh(subscription)
+    await db_session.refresh(invoice)
+    assert invoice.status is InvoiceStatus.PAID
+    assert subscription.status is SubscriptionStatus.ACTIVE
+    assert subscription.is_serving is True
+    assert await _agent_limit(db_session, tenant) == PAID_AGENTS
+
+
+async def test_a_suspended_owner_can_also_recover_by_naming_the_plan(
+    http: AsyncClient,
+    app: FastAPI,
+    db_session: AsyncSession,
+) -> None:
+    """The other door onto checkout works from SUSPENDED too.
+
+    Naming a plan issues an invoice for the current period rather than
+    collecting the overdue one, and a customer who has lost access is at least
+    as likely to press "subscribe" as to hunt for an invoice id. Both have to
+    reach settlement, or recovery depends on which button the UI happens to
+    show.
+    """
+    tenant, _, subscription, overdue = await _suspended_workspace(db_session, app)
+
+    started = await http.post("/api/v1/billing/checkout", json={"plan_code": "pro"})
+
+    assert started.status_code == 201, started.text
+    checkout = started.json()
+    # A fresh invoice for the current period, not the overdue one.
+    assert checkout["invoice_id"] != str(overdue.id)
+
+    assert (await _pay_reference(http, checkout["payment_id"])).status_code == 200
+
+    await db_session.refresh(subscription)
+    assert subscription.status is SubscriptionStatus.ACTIVE
+    assert await _agent_limit(db_session, tenant) == PAID_AGENTS
+
+
+async def test_a_suspended_owner_who_starts_a_checkout_and_never_pays_stays_cut_off(
+    http: AsyncClient,
+    app: FastAPI,
+    db_session: AsyncSession,
+) -> None:
+    """Reaching the payment page is not the same as having paid.
+
+    The counterweight to the two tests above: if opening a checkout restored
+    service, recovery would be free and the suspension pointless.
+    """
+    tenant, _, subscription, invoice = await _suspended_workspace(db_session, app)
+
+    started = await http.post(
+        "/api/v1/billing/checkout",
+        json={"invoice_id": str(invoice.id)},
+    )
+
+    assert started.status_code == 201
+    await db_session.refresh(subscription)
+    assert subscription.status is SubscriptionStatus.SUSPENDED
+    assert subscription.is_serving is False
+    assert await _agent_limit(db_session, tenant) == FREE_AGENTS
+
+
+async def test_a_suspended_owner_cannot_select_the_paid_plan_instead_of_paying(
+    http: AsyncClient,
+    app: FastAPI,
+    db_session: AsyncSession,
+) -> None:
+    """The recovery door does not open a second, free one.
+
+    `POST /billing/subscription/plan` is the self-service route, and the Phase 0
+    commercial invariant is that a priced plan is granted only by settlement
+    (ADR-059). Making checkout reachable from SUSPENDED must not weaken it: a
+    workspace that could simply re-select `pro` would have recovered without
+    paying anybody.
+    """
+    tenant, _, subscription, _ = await _suspended_workspace(db_session, app)
+
+    refused = await http.post("/api/v1/billing/subscription/plan", json={"plan_code": "pro"})
+
+    assert refused.status_code == 402
+    await db_session.refresh(subscription)
+    assert subscription.status is SubscriptionStatus.SUSPENDED
+    assert await _agent_limit(db_session, tenant) == FREE_AGENTS
+
+
+async def test_a_suspended_owner_cannot_downgrade_out_of_the_bill_over_http(
+    http: AsyncClient,
+    app: FastAPI,
+    db_session: AsyncSession,
+) -> None:
+    """The free tier is not an exit from an unpaid invoice, over HTTP either.
+
+    The service-level refusal is asserted in section 8; this is the same rule
+    reaching the customer, with the message that tells them what would help.
+    """
+    tenant, _, subscription, _ = await _suspended_workspace(db_session, app)
+
+    refused = await http.post("/api/v1/billing/subscription/plan", json={"plan_code": "starter"})
+
+    assert refused.status_code == 409
+    assert "suspended" in refused.text.lower()
+    await db_session.refresh(subscription)
+    assert subscription.status is SubscriptionStatus.SUSPENDED
+
+
+@pytest.mark.parametrize(
+    "status",
+    [SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED],
+)
+async def test_an_ended_subscription_is_not_revived_by_a_fresh_checkout(
+    http: AsyncClient,
+    app: FastAPI,
+    db_session: AsyncSession,
+    status: SubscriptionStatus,
+) -> None:
+    """The distinction SUSPENDED exists to express, proved the reachable way.
+
+    Section 4 already shows an *old* callback failing to revive an ended
+    subscription. This is the stronger form: the customer opens a brand-new
+    checkout through the real route and pays it, and the subscription still
+    does not come back - because ending was a decision, not a debt. The money
+    is recorded truthfully either way; the ledger and the entitlements are
+    different questions.
+    """
+    tenant = await _tenant(db_session)
+    user = await _owner(db_session, tenant)
+    await _free_plan(db_session)
+    paid = await _paid_plan(db_session)
+    subscription = await _subscription(db_session, tenant, paid, status=status)
+    await _act_as_owner(app, db_session, tenant, user)
+
+    started = await http.post("/api/v1/billing/checkout", json={"plan_code": "pro"})
+    assert started.status_code == 201, started.text
+    checkout = started.json()
+
+    assert (await _pay_reference(http, checkout["payment_id"])).status_code == 200
+
+    invoice = (
+        await db_session.execute(
+            select(Invoice).where(Invoice.id == uuid.UUID(checkout["invoice_id"]))
+        )
+    ).scalar_one()
+    # The ledger is honest...
+    assert invoice.status is InvoiceStatus.PAID
+    # ...and the subscription stays where the customer left it.
+    await db_session.refresh(subscription)
+    assert subscription.status is status
+    assert subscription.is_serving is False
+    assert await _agent_limit(db_session, tenant) == FREE_AGENTS
