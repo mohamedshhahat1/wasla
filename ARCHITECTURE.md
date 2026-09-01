@@ -505,11 +505,13 @@ It is also read-only. Suspending or deleting a workspace is precisely the action
 
 Argon2id password hashing with rehash-on-login, typed access and refresh tokens, rotating refresh tokens with a Redis denylist, a current-user dependency, workspace resolution and switching from the token, and role dependencies for both scopes. Access tokens are intentionally not revocable and membership is re-verified per request; the reasoning for both, and the invitation flow, is in [docs/AUTH.md](docs/AUTH.md).
 
+**An invitation grants a membership, never an identity** (ADR-057). Acceptance may set a password only on an account it created in that same call; for an address that already has one it adds or reinstates the membership and changes nothing else. A passwordless account — which today means one created by Google sign-in — acquires a password through `POST /auth/password/set`, where the proof is the session rather than an invitation.
+
 Conversation routes are open to every workspace member rather than to admins only, because restricting them would exclude the people who staff an inbox. Reading agent configuration is open for the same reason. Role gates stay on administrative actions: connecting a number, inviting a colleague, revoking an invitation, and changing what an agent says to customers.
 
 ## 19. Usage metering and billing
 
-**Status: In Progress** — usage metering (migration `0014`, ADR-027), plans, subscriptions and enforced entitlements (migration `0016`, ADR-029, ADR-030), and invoices with payment records behind a one-method provider boundary (migration `0017`, ADR-031) are Implemented. A live payment provider is Planned.
+**Status: In Progress** — usage metering (migration `0014`, ADR-027), plans, subscriptions and enforced entitlements (migration `0016`, ADR-029, ADR-030), invoices with payment records behind a provider boundary (migration `0017`, ADR-031), and Paymob checkout, refunds and saved-card renewals (ADR-044, ADR-045) are Implemented. A payment taken from a live merchant account, overage pricing and dunning are Planned.
 
 Metering came first because entitlements read it: a period limit is a sum over `usage_events` between the subscription's period bounds, which is what makes "1,000 messages a month" reset rather than accumulate forever. Resource limits — numbers, agents, colleagues, documents — are counted from the rows themselves.
 

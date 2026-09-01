@@ -48,13 +48,17 @@ def _invitation(tenant_id: uuid.UUID) -> TenantInvitation:
 
 
 class StubInvitationService:
+    # Named so a test can assert it is absent from a response body rather than
+    # matching a literal in two places.
+    token = "raw-invitation-token"
+
     def __init__(self, *, tenant_id):
         self.invitation = _invitation(tenant_id)
         self.calls = []
 
     async def issue(self, **kwargs):
         self.calls.append(("issue", kwargs))
-        return self.invitation, "raw-invitation-token"
+        return self.invitation, self.token
 
     async def list_pending(self, **kwargs):
         self.calls.append(("list_pending", kwargs))
@@ -96,7 +100,15 @@ def service(app: FastAPI, owner: ActiveWorkspace) -> StubInvitationService:
     return stub
 
 
-async def test_issuing_returns_the_token_once(client, service, owner):
+async def test_issuing_never_returns_the_token(client, service, owner):
+    """The raw invitation token does not cross the API boundary (ADR-057).
+
+    It used to, because there was no way to deliver it. There is now: `issue`
+    queues it to the invited address through the outbox. A 201 body reaches
+    proxy logs and browser captures, so a credential returned here is a
+    credential published - and this one both joins a workspace and, until the
+    accompanying fix, could claim a Google-only account.
+    """
     response = await client.post(
         "/api/v1/invitations",
         json={"email": "invited@example.com", "role": "member"},
@@ -104,7 +116,8 @@ async def test_issuing_returns_the_token_once(client, service, owner):
 
     assert response.status_code == 201
     body = response.json()
-    assert body["token"] == "raw-invitation-token"
+    assert "token" not in body
+    assert service.token not in response.text
     assert body["email"] == "invited@example.com"
     assert body["status"] == "pending"
     # The tenant comes from the resolved workspace, not from the request.

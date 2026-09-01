@@ -118,6 +118,7 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/auth/logout-all` | **USER** | no | none | - |
 | `GET` | `/api/v1/auth/me` | **USER** | no | none | - |
 | `POST` | `/api/v1/auth/password` | **USER** | no | client | - |
+| `POST` | `/api/v1/auth/password/set` | **USER** | no | client | - |
 | `POST` | `/api/v1/auth/refresh` | **ANON** | no | client | - |
 | `POST` | `/api/v1/auth/register` | **ANON** | no | client | - |
 | `POST` | `/api/v1/auth/workspace` | **USER** | no | none | - |

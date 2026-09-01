@@ -1634,3 +1634,40 @@ The request meter moved. It is now written by the reservation before each provid
 A crash between reserving and calling bills a request that did not happen. That is accepted, and it is the direction to fail in.
 
 The primitive is general and unused by the other limits so far. Adopting it for messages and campaigns is follow-on work against those call sites, not a change to this one.
+
+## ADR-057 — An Invitation Grants a Membership, Never an Identity
+
+Date:
+2026-09-01
+
+Status:
+Accepted
+
+Decision:
+`InvitationService.accept` may set a password **only on an account it created in that same call**. For an address that already has an account it adds or reinstates the membership and touches nothing else; a supplied password is ignored. The legitimate way for a passwordless account to acquire a password is `POST /auth/password/set`, which is authenticated and self-only. The raw invitation token is no longer returned by `POST /api/v1/invitations`; it travels only in the outbox row addressed to the invited mailbox.
+
+Context:
+Acceptance contained a branch that set a password whenever the account had none:
+
+    elif user.hashed_password is None and password is not None:
+        user.hashed_password = hash_password(password)
+
+Its comment named the case it was written for — "an account created by an earlier invitation that was never completed" — and at the time the inference held, because acceptance was the only thing that created an account without a password. Google sign-in ended that. `GoogleAuthService._enrol` creates accounts with `hashed_password=None` deliberately, which is what makes them unreachable by password. Passwordlessness stopped meaning "this invitation owns this account" and started meaning "somebody signs in with Google".
+
+The result was a full account takeover, available to anybody who could register: registration makes its holder the owner of a workspace, an owner may invite any address, the 201 response carried the raw token, and `POST /invitations/accept` is unauthenticated. Invite a Google user, redeem the invitation with a password of your choosing, sign in as them — and with them every workspace they belong to.
+
+Neither subsystem's tests could see it. The invitation tests never meet a Google account and the Google tests never meet an invitation.
+
+Reason:
+**The branch cannot be repaired by narrowing its condition.** Any test on the *state* of the account is a proxy for the question actually being asked, and the last proxy was true until a feature three phases away made it false. The question is "did this call create this account", which is not a property of a row; it is a fact the call knows. So it is expressed as control flow — the create branch sets a password because it is the branch that created the account, and no other branch writes one.
+
+**A supplied password is ignored rather than refused.** Every other answer this endpoint gives is uniform, because unknown, spent, revoked and expired invitations must be indistinguishable. A distinct error for "that address already has an account" would tell whoever holds the token exactly that.
+
+**The token stops at the outbox.** `InvitationCreatedResponse` existed because there was no mail delivery, and its docstring said the field would go once there was. There is: `issue` queues the token to the invited address (ADR-042). A 201 body reaches reverse-proxy logs, APM payloads and browser captures, so returning a credential there publishes it — and this token both joins a workspace and, until this change, could claim an identity.
+
+**Setting a first password needs its own route, not a relaxed one.** `/auth/password` proves control with the current password, which these accounts do not have; a reset declines passwordless accounts rather than becoming an oracle. So the proof is the session, and the route refuses any account that already has a hash — it is not a second way to replace a password without knowing it. It reuses `change_password`'s policy exactly: the same strength rule, the same `token_version` bump, the same audit action, the same notice to the address on the account.
+
+Consequences:
+Accepting an invitation for an existing address no longer sets a password, and a client that relied on that was relying on the vulnerability. `POST /api/v1/invitations` no longer returns `token`; a deployment with `EMAIL_ENABLED=false` therefore has no way to deliver an invitation, which is correct — it also has no way to deliver a password reset.
+
+A Google-first account can now set a password and afterwards disconnect Google, which is what `unlink`'s refusal message has always instructed and what ADR-049 claimed the recovery path was.

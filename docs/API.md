@@ -47,7 +47,8 @@ Liveness deliberately does not touch PostgreSQL: a database outage must not make
 | POST | `/api/v1/auth/workspace` | Switch the active workspace | Authenticated |
 | GET | `/api/v1/auth/me` | The caller and their memberships | Authenticated |
 | POST | `/api/v1/auth/logout-all` | End **every** session this account holds | Authenticated |
-| POST | `/api/v1/auth/password` | Change the password, ending every session | Authenticated |
+| POST | `/api/v1/auth/password` | Change the password, proving the current one, ending every session | Authenticated |
+| POST | `/api/v1/auth/password/set` | Choose a **first** password for an account that has none, ending every session | Authenticated |
 | POST | `/api/v1/auth/password-reset/request` | Ask for a reset link by email (`202`, always the same body) | Public |
 | POST | `/api/v1/auth/password-reset/confirm` | Redeem the emailed token for a new password | Public |
 | POST | `/api/v1/auth/email/verification/send` | Mail a six-digit code to **your own** address (`202`, always the same body) | Authenticated |
@@ -147,7 +148,9 @@ The account's `email` is **not** refreshed - it is written once, at enrolment. S
 | DELETE | `/api/v1/workspace/members/{user_id}` | Withdraw access, or leave by naming yourself | Workspace member (see below) |
 | POST | `/api/v1/workspace/members/{user_id}/reinstate` | Readmit somebody who was removed | Tenant admin |
 
-Only the hash of an invitation token is stored, so a database disclosure does not yield usable invitations.
+Only the hash of an invitation token is stored, so a database disclosure does not yield usable invitations. **The raw token is not returned by `POST /api/v1/invitations`** and never has been readable from any other route (ADR-057): it travels only in the email queued to the invited address, so an invitation cannot be delivered by a deployment with `EMAIL_ENABLED=false`.
+
+Accepting an invitation for an address that already has an account adds or reinstates the membership and changes nothing about the account — a `password` in the body is ignored. Only the branch that *creates* an account sets one. Somebody who signed up with Google and wants a password uses `POST /api/v1/auth/password/set`.
 
 ## WhatsApp accounts
 

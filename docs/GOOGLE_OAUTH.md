@@ -206,10 +206,18 @@ message does not say whose account holds it.
 **Unlinking.** Refused when it would leave the account with no way in: no
 password hash and no other identity. A person who signed up with Google and
 never set a password would otherwise be able to lock themselves out with one
-button. If it happens anyway - through direct database access, say - the
-recovery path is an ordinary password reset, which works because a
-Google-first account still owns its mailbox. An account **with** a password can
-always unlink.
+button. The route out is `POST /auth/password/set` (ADR-057), which is what
+that refusal tells the person to use: a session is the proof, because an account
+that has never had a password has nothing else to prove with.
+
+This corrects what ADR-049 originally claimed. The stated recovery was "an
+ordinary password reset", and that does not work: `PasswordResetService.request`
+returns without issuing a token for an account whose `hashed_password` is
+`None`, deliberately, so that a reset cannot bypass the invitation flow's own
+proof. Until `/auth/password/set` existed, a Google-first account had no
+supported way to acquire a password at all - and the one unsupported way, an
+invitation redeemed with a chosen password, was the account-takeover path
+ADR-057 closes. An account **with** a password can always unlink.
 
 ---
 
@@ -528,9 +536,15 @@ login is unaffected throughout.
 ### Recovery if Google access is lost
 
 A user who loses their Google account and has a password signs in normally and
-can unlink. A user with no password requests a password reset - which reaches
-their mailbox, and a Google-first account owns its mailbox - sets a password,
-then unlinks. Support needs no special tooling for either.
+can unlink.
+
+A user with **no** password needs a live session to set one, because
+`POST /auth/password/set` proves control by the session and a password reset is
+declined for an account with no password hash. So the order matters: set a
+password *before* losing access to Google, which is what the unlink refusal
+prompts. Somebody who has already lost Google access and never set a password
+cannot self-serve, and support has to re-establish the identity - that gap is
+real and is recorded in TASKS.md rather than papered over.
 
 ---
 

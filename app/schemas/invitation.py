@@ -38,10 +38,21 @@ class InvitationAcceptRequest(_Payload):
 
 
 class InvitationResponse(BaseModel):
-    """An invitation as an administrator sees it.
+    """An invitation as an administrator sees it, at every point in its life.
 
-    The token is absent by design: it is stored only as a hash, so it cannot be
-    read back out of the API even by the person who issued it.
+    The token is absent by design, and this is now the *only* representation -
+    there used to be a second one that carried the raw token back to whoever
+    issued the invitation, because at the time there was no way to deliver it.
+    Its own docstring said the field would go once mail delivery existed
+    (ADR-057). It does: `InvitationService.issue` queues the token to the
+    invited address through the outbox, which is the one destination that
+    proves the recipient owns the mailbox.
+
+    Returning it here proved nothing and travelled everywhere - a 201 body
+    reaches reverse-proxy logs, APM payloads and browser captures - so the
+    credential that joins a workspace was readable by anything that could read
+    a response. It is stored only as a hash, so this class cannot reconstruct
+    it even if a later field wanted to.
     """
 
     id: uuid.UUID
@@ -50,17 +61,6 @@ class InvitationResponse(BaseModel):
     status: InvitationStatus
     expires_at: datetime
     accepted_at: datetime | None = None
-
-
-class InvitationCreatedResponse(InvitationResponse):
-    """The single moment the raw token is visible.
-
-    It is returned to the administrator who issued the invitation because there
-    is no mail delivery yet. Once there is, the token stops crossing this
-    boundary and goes only to the invited address.
-    """
-
-    token: str
 
 
 class InvitationAcceptedResponse(BaseModel):

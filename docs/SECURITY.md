@@ -95,6 +95,7 @@ immediate rather than waiting out the fifteen-minute access lifetime.
 |---|---|---|
 | `POST /auth/logout-all` | The account holder | Ends every session, including the calling one. The account stays usable; sign in again. |
 | `POST /auth/password` | The account holder, proving the current password | Replaces the password and ends every session. |
+| `POST /auth/password/set` | The account holder, proving nothing but the session | Sets a **first** password on an account that has none; refused when one exists. Ends every session. |
 | `POST /platform/users/{id}/disable` | Platform staff | Suspends the account and ends every session. |
 | `POST /platform/users/{id}/enable` | Platform staff | Restores the account **and bumps again**, so tokens from before the suspension stay dead. |
 | `POST /auth/logout` | Anyone holding the token | Revokes that one refresh token via the Redis denylist. |
@@ -150,14 +151,26 @@ implementation, item for item:
   covers reuse, expiry, supersession, enumeration, the constant refusal, and
   that no token reaches the audit trail.
 
-The shortcut deliberately *not* taken is the one the invitation flow takes —
-returning the token in the API response. That is sound for an invitation, whose
-caller is an authenticated administrator already trusted to hold it, and
-catastrophic for a reset, whose request is unauthenticated by necessity.
+The invitation flow used to take the shortcut this one refuses — returning the
+token in the API response — and no longer does (ADR-057). The argument for it
+was that an invitation's caller is an authenticated administrator already
+trusted to hold the token. That was true and beside the point: a 201 body
+travels to reverse-proxy logs, APM payloads and browser captures, and the token
+both joins a workspace and, in combination with a second defect, could claim a
+Google-only account. Both credentials now travel only in the email addressed to
+the mailbox being proven.
 
 **`POST /auth/password`** remains the authenticated password *change*: the
-current password is the proof, so nothing has to be delivered anywhere. Both now
-notify the account holder afterwards.
+current password is the proof, so nothing has to be delivered anywhere.
+
+**`POST /auth/password/set`** is the first-password route for an account that
+has never had one — which today means an account created by Google sign-in
+(ADR-057). The session is the proof, because there is no current password to
+give; an account that already has a hash is refused, so this is not a second way
+to replace one without knowing it. It reuses the change flow's policy exactly:
+same strength rule, same `token_version` bump, same audit action, same notice.
+
+All three notify the account holder afterwards.
 
 **Email verification is deliberately absent**, and that is a decision rather
 than a gap — nothing in the authorization model reads a verified flag. See

@@ -15,6 +15,7 @@ from app.schemas.auth import (
     LoginRequest,
     LogoutRequest,
     PasswordChangeRequest,
+    PasswordSetRequest,
     ProfileResponse,
     RefreshRequest,
     RegistrationRequest,
@@ -236,9 +237,9 @@ async def change_password(
     """Replace the password, proving the current one first.
 
     Not a reset. A reset serves somebody who *cannot* sign in and needs a token
-    sent to an address they control, which this deployment has no way to send -
-    see docs/SECURITY.md. This serves somebody already signed in, so the proof
-    is the password itself.
+    sent to an address they control, which `/auth/password-reset/request` does.
+    This serves somebody already signed in, so the proof is the password itself
+    - and `/auth/password/set` serves an account that has never had one.
 
     Every session ends on success, this one included, because the usual reason
     to change a password is that something may have been taken.
@@ -246,6 +247,46 @@ async def change_password(
     user = await accounts.change_password(
         user=current_user.user,
         current_password=payload.current_password,
+        new_password=payload.new_password,
+    )
+    return _account_state(user)
+
+
+@router.post(
+    "/password/set",
+    response_model=AccountStateResponse,
+    summary="Choose a first password for an account that has none",
+)
+async def set_password(
+    payload: PasswordSetRequest,
+    current_user: CurrentUserDep,
+    accounts: AccountServiceDep,
+    # Limited by client address like the rest of the credential surface. This
+    # one writes a credential rather than verifying one, so the budget is about
+    # bounding automation rather than guessing.
+    limit: AuthRateLimit,
+) -> AccountStateResponse:
+    """Set the first password on this account. Authenticated, and self only.
+
+    Who this is for: somebody who signed up with Google. That account is
+    created without a password hash on purpose, and every other route refuses
+    to give it one - `/auth/password` needs a current password to prove, and a
+    reset declines passwordless accounts rather than becoming an oracle for
+    which addresses have Google accounts. Disconnecting Google is refused while
+    no password exists, with a message telling the person to set one; this is
+    that route (ADR-057).
+
+    The session is the proof, so no current password is asked for and none
+    exists to ask for. An account that already has one is refused: this is not
+    a second way to replace a password without knowing it.
+
+    Every session ends on success, this one included, exactly as
+    `/auth/password` behaves - acquiring a credential is a credential change,
+    and the response carries the new token version so a client knows to sign in
+    again.
+    """
+    user = await accounts.set_password(
+        user=current_user.user,
         new_password=payload.new_password,
     )
     return _account_state(user)

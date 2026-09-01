@@ -14,7 +14,6 @@ from app.schemas.auth import WorkspaceSummary
 from app.schemas.invitation import (
     InvitationAcceptedResponse,
     InvitationAcceptRequest,
-    InvitationCreatedResponse,
     InvitationCreateRequest,
     InvitationResponse,
 )
@@ -41,7 +40,7 @@ def _response(invitation: TenantInvitation) -> InvitationResponse:
 
 @router.post(
     "",
-    response_model=InvitationCreatedResponse,
+    response_model=InvitationResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Invite somebody to this workspace",
     dependencies=[_WORKSPACE_LIMIT],
@@ -54,18 +53,22 @@ async def issue_invitation(
     # refusing somebody who was invited in good faith, at the moment they click,
     # is a worse experience than telling the inviter now.
     seat: SeatDep,
-) -> InvitationCreatedResponse:
-    invitation, token = await service.issue(
+) -> InvitationResponse:
+    """Create an invitation and mail it. The token is not returned (ADR-057).
+
+    `issue` still hands the raw token back to this layer, because the service
+    is what queues the email and the caller is what commits it. It stops here:
+    the only place it travels is the outbox row addressed to the invited
+    mailbox, which is the proof of ownership the whole flow rests on.
+    """
+    invitation, _token = await service.issue(
         tenant_id=workspace.tenant.id,
         inviter=workspace.user,
         inviter_role=workspace.role,
         email=payload.email,
         role=payload.role,
     )
-    return InvitationCreatedResponse(
-        **_response(invitation).model_dump(),
-        token=token,
-    )
+    return _response(invitation)
 
 
 @router.get(

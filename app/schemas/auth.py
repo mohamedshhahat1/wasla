@@ -84,6 +84,21 @@ class PasswordChangeRequest(_Payload):
     )
 
 
+class PasswordSetRequest(_Payload):
+    """Choosing a first password for an account that has none.
+
+    Deliberately carries no `current_password`: the accounts this serves have
+    never had one. What proves control is the session the request is made in,
+    which is why the route is authenticated and self-only, and why the service
+    refuses any account that already has a hash.
+    """
+
+    new_password: str = Field(
+        min_length=MINIMUM_PASSWORD_LENGTH,
+        max_length=MAXIMUM_PASSWORD_LENGTH,
+    )
+
+
 class AccountStateResponse(BaseModel):
     """What an account lifecycle action left behind.
 

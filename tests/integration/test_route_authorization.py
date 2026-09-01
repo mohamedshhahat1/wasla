@@ -69,6 +69,10 @@ ACCOUNT_OR_PLATFORM: frozenset[str] = frozenset(
         "/auth/workspace",
         "/auth/logout-all",
         "/auth/password",
+        # Choosing a first password is about the account, not about work inside
+        # a workspace - and the accounts that need it are Google-first ones,
+        # which may hold no membership at all.
+        "/auth/password/set",
         "/auth/email/verification/send",
         "/auth/email/verification/verify",
         # Connecting and disconnecting Google is about the account, not about

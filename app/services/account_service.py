@@ -268,3 +268,65 @@ class AccountService:
             extra={"event": "account.password_changed", "user_id": str(user.id)},
         )
         return user
+
+    async def set_password(self, *, user: User, new_password: str) -> User:
+        """Give a first password to an account that has none.
+
+        The counterpart to :meth:`change_password`, and deliberately a separate
+        method rather than a branch inside it. `change_password` proves control
+        with the current password; an account that has never had one cannot
+        prove anything that way, so the proof here is the authenticated session
+        itself. Keeping them apart is what stops this from becoming a way to
+        replace a password without knowing it: the guard below refuses any
+        account that already has a hash, and there is no argument that relaxes
+        it.
+
+        Who needs it: somebody who signed up with Google. `_enrol` creates that
+        account with `hashed_password=None` on purpose, and until now every
+        route that could give it one refused - `change_password` for want of a
+        current password, and the reset flow because it declines passwordless
+        accounts rather than becoming an oracle. `unlink` meanwhile refuses to
+        disconnect Google while there is no password, telling the person to set
+        one. This is the route that sentence refers to (ADR-057).
+
+        It is emphatically **not** the path an invitation used to take. An
+        invitation is a workspace's statement about somebody; a session is that
+        person. See `InvitationService.accept`.
+
+        Everything after the guard is `change_password`'s policy, reused rather
+        than restated: the same strength rule, the same version bump, the same
+        audit action, the same notice to the address on the account. Ending
+        every session includes the one making this call, which is the existing
+        semantics and the right ones - a first password is a credential change,
+        and `AccountStateResponse` carries the new version so a client knows to
+        sign in again.
+        """
+        if user.hashed_password is not None:
+            # Not a not-found and not a conflict about state the caller cannot
+            # see: they know perfectly well whether they have a password, and
+            # the route that replaces one is `/auth/password`.
+            raise ValidationError(
+                "This account already has a password. Use the password change endpoint."
+            )
+
+        validate_password_strength(new_password)
+        user.hashed_password = hash_password(new_password)
+        version = self._bump(user)
+        self._audit.record(
+            AuditAction.PASSWORD_CHANGED,
+            actor=user,
+            actor_kind=AuditActorKind.USER,
+            target_type="user",
+            target_id=user.id,
+            target_label=user.email,
+            # Distinguishes a first password from a replacement without needing
+            # a second audit action, and therefore without a migration to add
+            # one to the enum.
+            meta={"token_version": version, "initial": True},
+        )
+        await self._notify(user, EmailTemplate.PASSWORD_CHANGED, version=version)
+        logger.info(
+            "account.password_set",
+            extra={"event": "account.password_set", "user_id": str(user.id)},
+        )
+        return user

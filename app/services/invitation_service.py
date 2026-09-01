@@ -226,6 +226,8 @@ class InvitationService:
 
         user = await self._users.get_by_email(invitation.email)
         if user is None:
+            # The only branch that may set a password, because it is the only
+            # branch that creates the account it sets one on.
             if password is None:
                 raise ValidationError("A password is required to create the account.")
             validate_password_strength(password)
@@ -235,11 +237,38 @@ class InvitationService:
                 hashed_password=hash_password(password),
             )
             await self._session.flush()
-        elif user.hashed_password is None and password is not None:
-            # An account created by an earlier invitation that was never
-            # completed: this is where it gets a password.
-            validate_password_strength(password)
-            user.hashed_password = hash_password(password)
+        else:
+            # The account already existed, so this invitation does not own it.
+            #
+            # A supplied password is ignored rather than refused, and neither
+            # the password nor any other global-account state is touched. What
+            # an invitation grants is a membership; it is a workspace's
+            # statement about somebody, not a claim on their identity.
+            #
+            # This replaces a branch that set a password whenever the account
+            # had none, on the reasoning that passwordlessness meant "created
+            # by an earlier invitation that was never completed". Google
+            # sign-in made that inference false: `GoogleAuthService._enrol`
+            # creates accounts with `hashed_password=None` on purpose, so the
+            # branch had become a way for anyone who could issue an invitation
+            # to write a password onto a stranger's Google-only account and
+            # then sign in as them (ADR-057). The argument is ignored rather
+            # than rejected for the reason every other answer on this endpoint
+            # is uniform: a distinct error would tell whoever holds the token
+            # whether that address already has an account.
+            #
+            # Somebody who signed up with Google and wants a password now has a
+            # route of their own - `POST /auth/password/set`, which proves
+            # control with a session rather than with an invitation.
+            if password is not None:
+                logger.info(
+                    "invitation.password_ignored_for_existing_account",
+                    extra={
+                        "event": "invitation.password_ignored_for_existing_account",
+                        "tenant_id": str(invitation.tenant_id),
+                        "user_id": str(user.id),
+                    },
+                )
 
         memberships = MembershipRepository(self._session, tenant_id=invitation.tenant_id)
         # Deliberately the read that sees revoked rows. Somebody removed from a
