@@ -870,3 +870,85 @@ Still open, and deliberately untouched here:
 - [ ] Observability: metrics, tracing, error tracking, alerting
 - [ ] Queue retry with backoff, attempt counts and dead-letter monitoring
 - [ ] Object storage and a media retention sweep; an ANN vector index
+
+## Phase 24 — Verifying Phase 23 rather than trusting it
+
+Phase 23 claimed two things it had not actually demonstrated. Both turned out to
+be nearly right, and the gap between "nearly" and "proved" is what this phase
+closed.
+
+- [x] **A suspended customer can reach a payment page.** `_settle` supporting
+      `SUSPENDED -> ACTIVE` shows the transition is *possible*; it does not show
+      it is *reachable*, and every existing recovery test inserted the pending
+      payment row directly — a state only this system can create. Since
+      `SUSPENDED` is a member of `TERMINAL_SUBSCRIPTION_STATUSES`, one generic
+      `if subscription.is_terminal` on the way to checkout would have made the
+      suspension permanent while every test still passed. Traced: no such guard
+      exists on `CheckoutService.start`, `_priced_plan`, `_collectible_invoice`,
+      `_open_invoice`, the billing routes or workspace resolution, and dunning
+      writes only `subscriptions.status` — never the tenant or the membership —
+      so authentication is unaffected. **No production code change was needed**;
+      the reachability is now asserted rather than inferred
+- [x] **The webhook secret reached a process that never reads it.**
+      `RESEND_WEBHOOK_SECRET` is read in exactly one module,
+      `api/v1/email_webhooks.py`, but was required by the shared `Settings`
+      validator — which every process builds — so the worker had to be handed it
+      to boot at all. `docker-compose.prod.yml` said so in a comment, and
+      `docs/DEPLOYMENT.md` already documented the opposite as the intent. Closed
+      by ADR-063: the requirement moved to
+      `integrations.email.require_delivery_verification`, called from
+      `create_app`, mirroring what `build_email_provider` already did for
+      `RESEND_API_KEY`. Each half of the Resend configuration now reaches
+      exactly one container
+- [x] **The drift guard only checked one direction.** `EXPECTED_ABSENT` recorded
+      decisions and nothing verified them, so adding a credential to a process
+      that does not need it passed every assertion in the file. Absence is now
+      enforced too
+- [x] **Settings accounting reconciled.** Twenty-four settings across the four
+      optional integrations, not twenty-one — the earlier figure was the count
+      the API carries, and Paymob has six settings rather than five. Derived
+      mechanically from `Settings.model_fields` against both Compose files and
+      `.env.example`; no setting was missing from either process or from the
+      example file, so the discrepancy was arithmetic in the write-up and not a
+      configuration defect
+
+Tests added:
+
+- [x] `tests/integration/test_dunning_lifecycle.py` — a ninth section walking
+      the reachable recovery path over HTTP: suspension by the real sweep, then
+      the owner's own requests through `GET /billing/subscription`,
+      `POST /billing/checkout` by invoice id *and* by plan code, the verified
+      Paymob callback, and paid entitlements returning. With the counterweights:
+      starting a checkout and not paying leaves the workspace cut off, and
+      `POST /billing/subscription/plan` still answers 402 for the paid plan and
+      409 for the free one, so recovery opens no free door. Cancelled and
+      expired subscriptions pay a *fresh* checkout and still do not revive —
+      the stronger form of the old-callback test. Verified by injecting the
+      hypothetical `is_terminal` guard into `CheckoutService.start`: five of the
+      new tests fail and no pre-existing test does, which is what says the gap
+      was real
+- [x] `tests/unit/test_email_configuration_is_per_process.py` — which process
+      fails, not merely that something does, since a test asking only the latter
+      passed before the split and after it. Includes a subprocess check that
+      `app.workers.runner` never imports `app.main`, because that import is what
+      would silently drag the API's startup checks back into the worker
+- [x] `tests/integration/test_deployment_configuration.py` — every
+      `EXPECTED_ABSENT` entry asserted genuinely absent, and neither container
+      holding both halves of the Resend configuration
+
+Reviewed and deliberately left alone:
+
+- [ ] **`TERMINAL_SUBSCRIPTION_STATUSES` keeps its name.** It means "the sweep
+      advances this no further", which is documented on the constant, on
+      `is_terminal`, and pinned by `tests/unit/test_billing_models.py`. Every
+      one of its four readers wants that meaning; the one place the other
+      question is asked has its own helper, `is_suspended_for_non_payment`, and
+      settlement uses a closed `_RECOVERABLE_STATUSES` rather than "not
+      terminal". Renaming would be churn across correct code
+- [ ] **All six `PAYMOB_*` settings stay on both processes.** The API creates
+      intentions and verifies callbacks, the worker charges saved cards for
+      renewals, and both build the same provider through
+      `build_checkout_provider`. `PAYMOB_HMAC_SECRET` is the one value the
+      worker constructs but never uses; withholding it would need a second,
+      partial construction path in the money code to remove a secret from a
+      container that already holds `PAYMOB_SECRET_KEY` (ADR-063)
