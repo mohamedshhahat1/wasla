@@ -19,39 +19,29 @@ from app.main import create_app
 
 pytestmark = pytest.mark.integration
 
-
-@pytest.fixture
-def limited_settings() -> Settings:
-    """Small limits, so a test is a request rather than a wait.
-
-    One second rather than a fraction of one, and the margin is the point: an
-    ordinary in-process request here takes single-digit milliseconds, but the
-    whole suite running on a loaded machine can stretch that past a tight
-    budget - which is a flake caused by the test's stopwatch rather than by the
-    middleware. The slow handler below sleeps five seconds, so the timeout still
-    fires promptly with a wide margin either side.
-    """
-    return Settings(
-        _env_file=None,
-        environment="test",
-        log_format="console",
-        log_level="CRITICAL",
-        cors_origins=[],
-        rate_limit_enabled=False,
-        max_request_bytes=2048,
-        request_timeout_seconds=1.0,
-    )
+# How long the timeout tests give a handler, and how long the deliberately slow
+# handler takes. A five-fold ratio, so neither assertion is close to its edge.
+TIMEOUT_SECONDS = 2.0
+SLOW_SECONDS = 10.0
 
 
-@pytest.fixture
-def app(limited_settings: Settings, fake_database, fake_redis) -> FastAPI:
-    application = create_app(limited_settings)
-    application.state.database = fake_database
-    application.state.redis = fake_redis
+def _settings(**overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "environment": "test",
+        "log_format": "console",
+        "log_level": "CRITICAL",
+        "cors_origins": [],
+        "rate_limit_enabled": False,
+        "max_request_bytes": 2048,
+    }
+    values.update(overrides)
+    return Settings(_env_file=None, **values)  # type: ignore[arg-type]
 
+
+def _with_test_routes(application: FastAPI) -> FastAPI:
     @application.get("/test/slow")
     async def slow() -> dict[str, str]:
-        await asyncio.sleep(5)
+        await asyncio.sleep(SLOW_SECONDS)
         return {"status": "eventually"}
 
     @application.post("/test/echo")
@@ -62,9 +52,56 @@ def app(limited_settings: Settings, fake_database, fake_redis) -> FastAPI:
 
 
 @pytest.fixture
+def limited_settings() -> Settings:
+    """A small body cap and an ordinary timeout.
+
+    The body cap is what these tests are about, and it is a size comparison
+    rather than a stopwatch - so the timeout stays at its default. It used to be
+    one second here, which quietly put every body test on a clock: on a loaded
+    runner an in-process request that normally takes single-digit milliseconds
+    can exceed a one-second budget, and `test_a_body_under_the_limit_is_accepted`
+    then fails with 504 for a reason that has nothing to do with body size. That
+    is a test failing about its own harness.
+    """
+    return _settings()
+
+
+@pytest.fixture
+def app(limited_settings: Settings, fake_database, fake_redis) -> FastAPI:
+    application = create_app(limited_settings)
+    application.state.database = fake_database
+    application.state.redis = fake_redis
+    return _with_test_routes(application)
+
+
+@pytest.fixture
 async def client(app: FastAPI):
     async with AsyncClient(
         transport=ASGITransport(app=app),
+        base_url="http://wasla.test",
+    ) as http_client:
+        yield http_client
+
+
+@pytest.fixture
+def timed_app(fake_database, fake_redis) -> FastAPI:
+    """The one application configured to time requests out.
+
+    Only the two tests below need it, and the ratio is what keeps them honest:
+    the slow handler sleeps five times the budget, so the refusal is decisive,
+    and a request that should *not* be cut off has the whole budget to finish
+    in rather than the fraction of a second a tighter one would leave it.
+    """
+    application = create_app(_settings(request_timeout_seconds=TIMEOUT_SECONDS))
+    application.state.database = fake_database
+    application.state.redis = fake_redis
+    return _with_test_routes(application)
+
+
+@pytest.fixture
+async def timed_client(timed_app: FastAPI):
+    async with AsyncClient(
+        transport=ASGITransport(app=timed_app),
         base_url="http://wasla.test",
     ) as http_client:
         yield http_client
@@ -131,17 +168,18 @@ async def test_a_body_sent_without_a_declared_length_is_still_capped(client):
 # ---------------------------------------------------------------- timeout
 
 
-async def test_a_handler_that_takes_too_long_is_cut_off(client):
+async def test_a_handler_that_takes_too_long_is_cut_off(timed_client):
     """A handler waiting on something is holding a pooled database connection
     while it waits, which is the resource being protected."""
-    response = await client.get("/test/slow")
+    response = await timed_client.get("/test/slow")
 
     assert response.status_code == 504
     assert response.json()["error"]["code"] == "request_timeout"
 
 
-async def test_a_normal_request_is_not_affected(client):
-    response = await client.get("/health/live")
+async def test_a_normal_request_is_not_affected(timed_client):
+    """The control: the timeout refuses a slow handler, not every handler."""
+    response = await timed_client.get("/health/live")
 
     assert response.status_code == 200
     assert response.json()["status"] == "alive"
@@ -156,7 +194,7 @@ async def test_the_whatsapp_webhook_is_exempt_from_the_timeout(app):
     """
     from app.core.limits import RequestTimeoutMiddleware
 
-    middleware = RequestTimeoutMiddleware(app, timeout_seconds=1.0)
+    middleware = RequestTimeoutMiddleware(app, timeout_seconds=TIMEOUT_SECONDS)
 
     assert middleware._exempt("/api/v1/webhooks/whatsapp") is True
     assert middleware._exempt("/api/v1/conversations") is False

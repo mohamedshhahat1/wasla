@@ -48,6 +48,13 @@ SINCE = datetime(2026, 8, 1, tzinfo=UTC)
 UNTIL = datetime(2026, 9, 1, tzinfo=UTC)
 NOON = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
 
+# Every seeded row states its own moment, and `NOON` is the one to use. A row
+# left to `created_at`'s server default lands on the wall clock instead, which
+# is inside the window above only while the wall clock happens to be in August
+# 2026 - so the lead seeds below passed for a fortnight and then failed on the
+# 1st of September, permanently, on a test that has nothing to do with dates.
+# The window is fixed on purpose; the rows have to be fixed with it.
+
 
 async def _tenant(session, slug: str = "acme") -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
@@ -272,10 +279,27 @@ async def test_pipeline_counts_come_from_the_leads_themselves(db_session):
     tenant = await _tenant(db_session)
     db_session.add_all(
         [
-            Lead(tenant_id=tenant.id, source=LeadSource.AGENT, status=LeadStatus.NEW),
-            Lead(tenant_id=tenant.id, source=LeadSource.AGENT, status=LeadStatus.QUALIFIED),
-            Lead(tenant_id=tenant.id, source=LeadSource.MANUAL, status=LeadStatus.WON),
-            Lead(tenant_id=tenant.id, source=LeadSource.MANUAL, status=LeadStatus.LOST),
+            Lead(
+                tenant_id=tenant.id, source=LeadSource.AGENT, status=LeadStatus.NEW, created_at=NOON
+            ),
+            Lead(
+                tenant_id=tenant.id,
+                source=LeadSource.AGENT,
+                status=LeadStatus.QUALIFIED,
+                created_at=NOON,
+            ),
+            Lead(
+                tenant_id=tenant.id,
+                source=LeadSource.MANUAL,
+                status=LeadStatus.WON,
+                created_at=NOON,
+            ),
+            Lead(
+                tenant_id=tenant.id,
+                source=LeadSource.MANUAL,
+                status=LeadStatus.LOST,
+                created_at=NOON,
+            ),
         ]
     )
     await db_session.flush()
@@ -409,7 +433,9 @@ async def test_a_report_never_reaches_another_workspace(db_session):
         [
             _message(acme, conversation, inbound=True, at=NOON),
             _message(acme, conversation, inbound=False, at=NOON + timedelta(seconds=30)),
-            Lead(tenant_id=acme.id, source=LeadSource.AGENT, status=LeadStatus.WON),
+            Lead(
+                tenant_id=acme.id, source=LeadSource.AGENT, status=LeadStatus.WON, created_at=NOON
+            ),
         ]
     )
     await db_session.flush()
