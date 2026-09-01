@@ -34,7 +34,12 @@ from typing import Final
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.exceptions import (
+    ConflictError,
+    NotFoundError,
+    ValidationError,
+    WaslaError,
+)
 from app.core.logging import get_logger
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import Plan, Subscription, SubscriptionStatus
@@ -57,7 +62,7 @@ from app.integrations.billing.checkout import (
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
 from app.repositories.invoice_repository import InvoiceRepository, PaymentRepository
 from app.services.audit_service import AuditTrail
-from app.services.subscription_service import add_interval
+from app.services.subscription_service import SubscriptionService, add_interval
 
 logger = get_logger(__name__)
 
@@ -726,13 +731,17 @@ class CheckoutService:
         payment: Payment,
         now: datetime,
     ) -> tuple[str, str | None]:
-        """Money arrived: mark the invoice paid and put the subscription right.
+        """Money arrived: mark the invoice paid, and grant what it was for.
 
-        Deliberately does not *create* a subscription. Paying an invoice
-        settles an invoice; which plan a workspace is on is
-        `SubscriptionService`'s decision and has its own rules about trials and
-        periods. What this does is the narrow thing a payment means: a
-        workspace that was behind is no longer behind.
+        **This is the authoritative point at which a paid plan is granted**
+        (ADR-059). Nothing a client sends can reach it: the only caller is
+        `apply`, which runs behind an HMAC over the provider's own payload, and
+        the plan it grants is read from the invoice this system wrote before
+        the customer was ever sent to a payment page.
+
+        Still deliberately narrow. Paying settles an invoice; it does not
+        resubscribe, revive or extend anything. See `_apply_purchased_plan` for
+        exactly which subscriptions move and which are left alone.
         """
         if invoice.is_terminal:
             # A second payment against an invoice that is already finished.
@@ -764,11 +773,13 @@ class CheckoutService:
             and subscription.id == invoice.subscription_id
             and subscription.status is SubscriptionStatus.PAST_DUE
         ):
-            # The one state a payment changes on its own. A trial stays a trial
-            # and a cancellation stays cancelled: paying an invoice is not a
-            # request to resubscribe, and treating it as one would revive a
-            # subscription somebody deliberately ended.
+            # The one *status* a payment changes on its own. A trial stays a
+            # trial and a cancellation stays cancelled: paying an invoice is
+            # not a request to resubscribe, and treating it as one would revive
+            # a subscription somebody deliberately ended.
             subscription.status = SubscriptionStatus.ACTIVE
+
+        await self._apply_purchased_plan(invoice, subscription=subscription, now=now)
 
         self._audit.record(
             AuditAction.PAYMENT_RECORDED,
@@ -795,6 +806,105 @@ class CheckoutService:
             },
         )
         return APPLIED, f"Invoice {invoice.status.value}."
+
+    async def _apply_purchased_plan(
+        self,
+        invoice: Invoice,
+        *,
+        subscription: Subscription | None,
+        now: datetime,
+    ) -> None:
+        """Move the workspace onto the plan this invoice was raised for.
+
+        The counterpart to the self-service refusal in `SubscriptionService`:
+        a priced plan cannot be asked for, so this is where one is granted. The
+        plan is named by `invoice.plan_code`, which `_open_invoice` copied from
+        the plan the customer chose *before* the provider was called - so the
+        grant is decided by a row this system wrote, never by anything in the
+        callback. The callback says only that the money arrived.
+
+        The transition itself is `SubscriptionService.change_plan`, called with
+        `self_service=False`. Reused rather than reimplemented, and that is the
+        point: period arithmetic, trial clearing, the cancellation reset and the
+        audit entry are one state machine with one owner, and a second copy here
+        would be the parallel billing machine this fix exists to avoid.
+
+        Four cases are deliberately left alone:
+
+        - **No subscription.** There is nothing to move and creating one here
+          would mean inventing trial and period rules in a settlement path.
+          Every workspace gets one at registration, so this is the misconfigured
+          deployment where `DEFAULT_PLAN_CODE` names no plan - and where limits
+          are already unenforced. Logged loudly rather than guessed at.
+        - **A renewal.** The invoice names the plan the workspace is already on,
+          so there is no transition; the period rolls over in the billing sweep,
+          which is the thing that understands periods.
+        - **A terminal subscription.** Cancelled and expired stay that way.
+          Paying an old invoice is not a request to resubscribe, which is the
+          rule `_settle` already follows for status.
+        - **A retired plan code.** The catalogue row is gone, so there is
+          nothing to grant. The invoice is still paid and the money is still
+          recorded.
+
+        Failure is contained. A plan that cannot be applied must not undo a
+        settlement that has already happened: the customer's money arrived, the
+        invoice says so, and a grant that did not land is something an operator
+        can put right - whereas an exception here would roll back the record of
+        the payment itself.
+        """
+        if subscription is None:
+            logger.warning(
+                "billing.paid_plan_without_subscription",
+                extra={
+                    "event": "billing.paid_plan_without_subscription",
+                    "tenant_id": str(self._tenant_id),
+                    "invoice_id": str(invoice.id),
+                    "plan_code": invoice.plan_code,
+                },
+            )
+            return
+        if subscription.is_terminal:
+            return
+
+        plan = await self._plans.get_by_code(invoice.plan_code)
+        if plan is None or plan.id == subscription.plan_id:
+            return
+
+        try:
+            await SubscriptionService(self._session, tenant_id=self._tenant_id).change_plan(
+                plan_code=invoice.plan_code,
+                now=now,
+                # The platform granting what was paid for, not a customer
+                # choosing. This is the only caller besides registration that
+                # passes it, and it is what lets a priced plan through the gate
+                # in `_require_plan`.
+                self_service=False,
+                # No actor: nobody pressed anything. A callback is the provider
+                # telling us money moved, so the audit entry `change_plan`
+                # writes is a system observation.
+                actor=None,
+            )
+        except WaslaError:
+            logger.exception(
+                "billing.paid_plan_not_applied",
+                extra={
+                    "event": "billing.paid_plan_not_applied",
+                    "tenant_id": str(self._tenant_id),
+                    "invoice_id": str(invoice.id),
+                    "plan_code": invoice.plan_code,
+                },
+            )
+            return
+
+        logger.info(
+            "billing.paid_plan_applied",
+            extra={
+                "event": "billing.paid_plan_applied",
+                "tenant_id": str(self._tenant_id),
+                "invoice_id": str(invoice.id),
+                "plan_code": invoice.plan_code,
+            },
+        )
 
     async def require_payment(self, payment_id: uuid.UUID) -> Payment:
         """One payment of this workspace's, or a 404.

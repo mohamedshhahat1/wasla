@@ -157,6 +157,30 @@ async def _seed_plan(engine: AsyncEngine, code: str) -> None:
         )
 
 
+async def _seed_default_plan(engine: AsyncEngine) -> None:
+    """The free tier `DEFAULT_PLAN_CODE` names, as migration 0016 seeds it.
+
+    Registration puts a new workspace on this plan, so without it these tests
+    run against a workspace with no subscription at all - which is a real state
+    (a deployment whose catalogue is missing) but not the one being tested. The
+    scratch database is built from model metadata rather than by running
+    migrations, so the seeded catalogue is not there.
+
+    `ON CONFLICT DO NOTHING` because it is shared catalogue data: several tests
+    register against the same database, and the first one to arrive seeds it.
+    """
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO plans (id, code, name, price, currency, interval, trial_days,"
+                " limits, is_public, is_active, sort_order, created_at, updated_at)"
+                " VALUES (gen_random_uuid(), 'starter', 'Starter', 0.00, 'EGP', 'monthly', 0,"
+                " '{\"agents\": 1}'::jsonb, true, true, 0, now(), now())"
+                " ON CONFLICT (code) DO NOTHING"
+            )
+        )
+
+
 async def _forget(engine: AsyncEngine, *, slug: str, email: str, plan_code: str) -> None:
     """Remove what the server committed.
 
@@ -246,6 +270,7 @@ async def test_paying_a_plan_settles_the_invoice_and_moves_the_entitlements(
     suffix = uuid.uuid4().hex[:8]
     slug, email = f"e2e-{suffix}", f"e2e-{suffix}@wasla-example.com"
     plan_code = f"e2e-pro-{suffix}"
+    await _seed_default_plan(scratch_engine)
     await _seed_plan(scratch_engine, plan_code)
 
     try:
@@ -265,15 +290,21 @@ async def test_paying_a_plan_settles_the_invoice_and_moves_the_entitlements(
             assert registered.status_code == 201
             auth = {"Authorization": f"Bearer {registered.json()['access_token']}"}
 
-            # A real authorization decision: this token is a workspace
-            # owner because registration made its holder one.
-            chosen = await client.post(
-                "/api/v1/billing/subscription",
+            # The plan cannot simply be asked for (ADR-059). A real
+            # authorization decision happens first - this token is a workspace
+            # owner because registration made its holder one - and the refusal
+            # that follows is commercial rather than a permission problem.
+            asked = await client.post(
+                "/api/v1/billing/subscription/plan",
                 json={"plan_code": plan_code},
                 headers=auth,
             )
-            assert chosen.status_code == 201, chosen.text
-            assert chosen.json()["status"] == "active"
+            assert asked.status_code == 402, asked.text
+            assert asked.json()["error"]["code"] == "payment_required"
+
+            before = await client.get("/api/v1/billing/subscription", headers=auth)
+            was = {row["key"]: row["limit"] for row in before.json()["entitlements"]}
+            assert was["agents"] != 7, "the paid plan's allowance must not apply yet"
 
             started = await client.post(
                 "/api/v1/billing/checkout",
@@ -316,7 +347,13 @@ async def test_paying_a_plan_settles_the_invoice_and_moves_the_entitlements(
             assert invoice.json()["amount_paid"] == "25.00"
             assert invoice.json()["outstanding"] == "0.00"
 
+            # The commercial invariant, at the far end of the money path: the
+            # plan a customer could not ask for is theirs now, and the only
+            # thing that granted it was a signed callback saying the invoice
+            # was paid.
             state = await client.get("/api/v1/billing/subscription", headers=auth)
+            assert state.json()["subscription"]["plan"]["code"] == plan_code
+            assert state.json()["subscription"]["status"] == "active"
             limits = {row["key"]: row["limit"] for row in state.json()["entitlements"]}
             assert limits["agents"] == 7, "the paid plan's allowance is what applies"
     finally:
@@ -340,6 +377,7 @@ async def test_a_declined_payment_leaves_the_workspace_exactly_as_it_was(
     suffix = uuid.uuid4().hex[:8]
     slug, email = f"e2e-{suffix}", f"e2e-{suffix}@wasla-example.com"
     plan_code = f"e2e-pro-{suffix}"
+    await _seed_default_plan(scratch_engine)
     await _seed_plan(scratch_engine, plan_code)
 
     try:
@@ -357,11 +395,8 @@ async def test_a_declined_payment_leaves_the_workspace_exactly_as_it_was(
                 },
             )
             auth = {"Authorization": f"Bearer {registered.json()['access_token']}"}
-            await client.post(
-                "/api/v1/billing/subscription",
-                json={"plan_code": plan_code},
-                headers=auth,
-            )
+            # No plan selection: a priced plan is only ever granted by
+            # settlement, so the checkout below is the whole of the request.
             checkout = (
                 await client.post(
                     "/api/v1/billing/checkout",
@@ -419,6 +454,7 @@ async def test_a_forged_callback_cannot_settle_anything_over_a_real_socket(
     suffix = uuid.uuid4().hex[:8]
     slug, email = f"e2e-{suffix}", f"e2e-{suffix}@wasla-example.com"
     plan_code = f"e2e-pro-{suffix}"
+    await _seed_default_plan(scratch_engine)
     await _seed_plan(scratch_engine, plan_code)
 
     try:
@@ -436,11 +472,8 @@ async def test_a_forged_callback_cannot_settle_anything_over_a_real_socket(
                 },
             )
             auth = {"Authorization": f"Bearer {registered.json()['access_token']}"}
-            await client.post(
-                "/api/v1/billing/subscription",
-                json={"plan_code": plan_code},
-                headers=auth,
-            )
+            # No plan selection: a priced plan is only ever granted by
+            # settlement, so the checkout below is the whole of the request.
             checkout = (
                 await client.post(
                     "/api/v1/billing/checkout",
@@ -530,6 +563,7 @@ async def test_a_retried_callback_settles_the_invoice_once(
     suffix = uuid.uuid4().hex[:8]
     slug, email = f"e2e-{suffix}", f"e2e-{suffix}@wasla-example.com"
     plan_code = f"e2e-pro-{suffix}"
+    await _seed_default_plan(scratch_engine)
     await _seed_plan(scratch_engine, plan_code)
 
     try:
@@ -547,11 +581,8 @@ async def test_a_retried_callback_settles_the_invoice_once(
                 },
             )
             auth = {"Authorization": f"Bearer {registered.json()['access_token']}"}
-            await client.post(
-                "/api/v1/billing/subscription",
-                json={"plan_code": plan_code},
-                headers=auth,
-            )
+            # No plan selection: a priced plan is only ever granted by
+            # settlement, so the checkout below is the whole of the request.
             checkout = (
                 await client.post(
                     "/api/v1/billing/checkout",

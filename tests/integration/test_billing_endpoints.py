@@ -55,12 +55,13 @@ async def _plan(
     code: str,
     trial_days: int = 0,
     is_public: bool = True,
+    price: str = "99.00",
     **limits,
 ) -> Plan:
     plan = Plan(
         code=code,
         name=code.title(),
-        price=Decimal("99.00"),
+        price=Decimal(price),
         currency="USD",
         interval=BillingInterval.MONTHLY,
         trial_days=trial_days,
@@ -82,6 +83,7 @@ async def test_a_plan_with_a_trial_starts_the_workspace_on_it(db_session):
     subscription = await SubscriptionService(db_session, tenant_id=tenant.id).start(
         plan_code="pro",
         now=NOW,
+        self_service=False,
     )
 
     assert subscription.status is SubscriptionStatus.TRIALING
@@ -96,6 +98,7 @@ async def test_a_plan_without_a_trial_starts_active_for_a_full_period(db_session
     subscription = await SubscriptionService(db_session, tenant_id=tenant.id).start(
         plan_code="pro",
         now=NOW,
+        self_service=False,
     )
 
     assert subscription.status is SubscriptionStatus.ACTIVE
@@ -106,10 +109,10 @@ async def test_a_workspace_cannot_hold_two_subscriptions(db_session):
     tenant = await _tenant(db_session)
     await _plan(db_session, code="pro")
     service = SubscriptionService(db_session, tenant_id=tenant.id)
-    await service.start(plan_code="pro", now=NOW)
+    await service.start(plan_code="pro", now=NOW, self_service=False)
 
     with pytest.raises(ConflictError):
-        await service.start(plan_code="pro", now=NOW)
+        await service.start(plan_code="pro", now=NOW, self_service=False)
 
 
 async def test_a_plan_nobody_offers_is_refused(db_session):
@@ -148,7 +151,7 @@ async def test_a_private_plan_cannot_be_switched_to_either(db_session):
     await _plan(db_session, code="enterprise", is_public=False)
 
     service = SubscriptionService(db_session, tenant_id=tenant.id)
-    await service.start(plan_code="pro", now=NOW)
+    await service.start(plan_code="pro", now=NOW, self_service=False)
     with pytest.raises(ValidationError):
         await service.change_plan(plan_code="enterprise", now=NOW)
 
@@ -193,13 +196,13 @@ async def test_the_platform_can_still_assign_a_private_plan(db_session):
 
 async def test_changing_plan_restarts_the_period_and_ends_the_trial(db_session):
     tenant = await _tenant(db_session)
-    await _plan(db_session, code="starter", trial_days=14)
+    await _plan(db_session, code="starter", trial_days=14, price="0.00")
     await _plan(db_session, code="pro")
     service = SubscriptionService(db_session, tenant_id=tenant.id)
     await service.start(plan_code="starter", now=NOW)
 
     later = NOW + timedelta(days=3)
-    subscription = await service.change_plan(plan_code="pro", now=later)
+    subscription = await service.change_plan(plan_code="pro", now=later, self_service=False)
 
     assert subscription.status is SubscriptionStatus.ACTIVE
     assert subscription.trial_ends_at is None
@@ -211,10 +214,10 @@ async def test_changing_to_the_plan_already_held_is_refused(db_session):
     tenant = await _tenant(db_session)
     await _plan(db_session, code="pro")
     service = SubscriptionService(db_session, tenant_id=tenant.id)
-    await service.start(plan_code="pro", now=NOW)
+    await service.start(plan_code="pro", now=NOW, self_service=False)
 
     with pytest.raises(ConflictError):
-        await service.change_plan(plan_code="pro", now=NOW)
+        await service.change_plan(plan_code="pro", now=NOW, self_service=False)
 
 
 async def test_cancelling_leaves_the_customer_the_period_they_paid_for(db_session):
@@ -223,7 +226,7 @@ async def test_cancelling_leaves_the_customer_the_period_they_paid_for(db_sessio
     tenant = await _tenant(db_session)
     await _plan(db_session, code="pro")
     service = SubscriptionService(db_session, tenant_id=tenant.id)
-    await service.start(plan_code="pro", now=NOW)
+    await service.start(plan_code="pro", now=NOW, self_service=False)
 
     subscription = await service.cancel(now=NOW)
 
@@ -238,7 +241,7 @@ async def test_cancelling_immediately_ends_the_period_too(db_session):
     tenant = await _tenant(db_session)
     await _plan(db_session, code="pro")
     service = SubscriptionService(db_session, tenant_id=tenant.id)
-    await service.start(plan_code="pro", now=NOW)
+    await service.start(plan_code="pro", now=NOW, self_service=False)
 
     subscription = await service.cancel(immediately=True, now=NOW)
 
@@ -252,7 +255,7 @@ async def test_a_cancellation_can_be_taken_back_before_it_happens(db_session):
     tenant = await _tenant(db_session)
     await _plan(db_session, code="pro")
     service = SubscriptionService(db_session, tenant_id=tenant.id)
-    await service.start(plan_code="pro", now=NOW)
+    await service.start(plan_code="pro", now=NOW, self_service=False)
     await service.cancel(now=NOW)
 
     subscription = await service.resume()
@@ -264,20 +267,20 @@ async def test_a_cancellation_can_be_taken_back_before_it_happens(db_session):
 async def test_choosing_a_new_plan_takes_back_a_pending_cancellation(db_session):
     """Somebody choosing a plan has plainly changed their mind about leaving."""
     tenant = await _tenant(db_session)
-    await _plan(db_session, code="starter")
+    await _plan(db_session, code="starter", price="0.00")
     await _plan(db_session, code="pro")
     service = SubscriptionService(db_session, tenant_id=tenant.id)
     await service.start(plan_code="starter", now=NOW)
     await service.cancel(now=NOW)
 
-    subscription = await service.change_plan(plan_code="pro", now=NOW)
+    subscription = await service.change_plan(plan_code="pro", now=NOW, self_service=False)
 
     assert subscription.cancel_at_period_end is False
 
 
 async def test_an_ended_subscription_cannot_be_resumed_or_changed(db_session):
     tenant = await _tenant(db_session)
-    await _plan(db_session, code="starter")
+    await _plan(db_session, code="starter", price="0.00")
     await _plan(db_session, code="pro")
     service = SubscriptionService(db_session, tenant_id=tenant.id)
     await service.start(plan_code="starter", now=NOW)
@@ -286,7 +289,7 @@ async def test_an_ended_subscription_cannot_be_resumed_or_changed(db_session):
     with pytest.raises(ConflictError):
         await service.resume()
     with pytest.raises(ConflictError):
-        await service.change_plan(plan_code="pro", now=NOW)
+        await service.change_plan(plan_code="pro", now=NOW, self_service=False)
 
 
 async def test_a_workspace_with_no_subscription_has_nothing_to_cancel(db_session):
@@ -300,13 +303,13 @@ async def test_a_new_plans_limits_apply_at_once(db_session):
     from app.services.entitlement_service import EntitlementService
 
     tenant = await _tenant(db_session)
-    await _plan(db_session, code="starter", **{LimitKey.AGENTS: 1})
+    await _plan(db_session, code="starter", price="0.00", **{LimitKey.AGENTS: 1})
     await _plan(db_session, code="pro", **{LimitKey.AGENTS: 5})
     service = SubscriptionService(db_session, tenant_id=tenant.id)
     await service.start(plan_code="starter", now=NOW)
 
     before = await EntitlementService(db_session, tenant_id=tenant.id).check(LimitKey.AGENTS)
-    await service.change_plan(plan_code="pro", now=NOW)
+    await service.change_plan(plan_code="pro", now=NOW, self_service=False)
     after = await EntitlementService(db_session, tenant_id=tenant.id).check(LimitKey.AGENTS)
 
     assert before.limit == 1
@@ -317,7 +320,9 @@ async def test_one_workspace_cannot_reach_anothers_subscription(db_session):
     acme = await _tenant(db_session, "acme")
     rival = await _tenant(db_session, "rival")
     await _plan(db_session, code="pro")
-    await SubscriptionService(db_session, tenant_id=acme.id).start(plan_code="pro", now=NOW)
+    await SubscriptionService(db_session, tenant_id=acme.id).start(
+        plan_code="pro", now=NOW, self_service=False
+    )
 
     assert await SubscriptionService(db_session, tenant_id=rival.id).get() is None
     with pytest.raises(NotFoundError):

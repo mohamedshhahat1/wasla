@@ -221,6 +221,8 @@ async def test_starting_a_subscription_is_recorded_with_its_plan(db_session):
         plan_code="pro",
         now=NOW,
         actor=user,
+        # A priced plan is granted by settlement rather than chosen (ADR-059).
+        self_service=False,
     )
     await db_session.flush()
 

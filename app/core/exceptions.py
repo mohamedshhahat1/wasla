@@ -104,6 +104,22 @@ class PlanLimitExceededError(WaslaError):
     message = "This workspace's plan does not allow that."
 
 
+class PaymentRequiredError(WaslaError):
+    """The action needs money that has not been collected yet.
+
+    402, like `PlanLimitExceededError`, and deliberately a different `code`.
+    Both tell a caller to reach for a card rather than for an administrator,
+    but they are different sentences: one says the current plan does not
+    stretch that far, and this one says the plan being asked for has not been
+    paid for. A client that rendered them alike would tell somebody to upgrade
+    when they are already trying to.
+    """
+
+    status_code = 402
+    error_code = "payment_required"
+    message = "That plan has not been paid for."
+
+
 class RateLimitedError(WaslaError):
     status_code = 429
     error_code = "rate_limited"

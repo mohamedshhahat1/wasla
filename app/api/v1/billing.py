@@ -105,8 +105,11 @@ async def start_subscription(
 ) -> SubscriptionRead:
     """Choose a plan for a workspace that has none. Owners only.
 
-    The trial, if there is one, comes from the plan. A caller that could ask for
-    a trial length is a caller that can ask for a thousand days.
+    **Free plans only.** A plan with a price is reached through
+    `POST /billing/checkout` and applied when the payment is confirmed
+    (ADR-059); asking for one here answers 402. The trial, if there is one,
+    comes from the plan - a caller that could ask for a trial length is a
+    caller that can ask for a thousand days.
     """
     subscription = await subscriptions.start(
         plan_code=payload.plan_code,
@@ -122,12 +125,18 @@ async def change_plan(
     workspace: TenantOwnerDep,
     subscriptions: SubscriptionServiceDep,
 ) -> SubscriptionRead:
-    """Upgrade or downgrade, effective now. Owners only.
+    """Move to another **free** plan, effective now. Owners only.
+
+    A priced plan is not obtainable here and answers 402 (ADR-059): buying one
+    means `POST /billing/checkout`, and the plan applies when the provider's
+    signed callback says the invoice is paid. What is left here is the move
+    that costs nothing - a downgrade to the free tier, and any deployment whose
+    catalogue is free.
 
     The billing period restarts, which cuts both ways: the new plan's allowances
-    start now, and so does its period. No proration — money is not moved by this
-    system yet, and inventing a credit no invoice reflects would be worse than
-    not having one.
+    start now, and so does its period. No proration — a downgrade does not
+    refund the remainder, and inventing a credit no invoice reflects would be
+    worse than not having one.
     """
     subscription = await subscriptions.change_plan(
         plan_code=payload.plan_code,

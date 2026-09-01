@@ -1,6 +1,6 @@
 # Billing
 
-**Status: Implemented** — plans, the seeded catalogue, subscriptions, entitlements and their enforcement, the lifecycle and its sweep, invoices, payment records, the invoice API and the provider boundary all exist and are exercised against real PostgreSQL (migrations `0016` and `0017`; ADR-029, ADR-030, ADR-031). A live payment provider, overage pricing, refunds and dunning are Planned, each for a reason recorded in [../TASKS.md](../TASKS.md). See [../TASKS.md](../TASKS.md) phase 13.
+**Status: Implemented** — plans, the seeded catalogue, subscriptions, entitlements and their enforcement, the lifecycle and its sweep, invoices, payment records, the invoice API and the provider boundary all exist and are exercised against real PostgreSQL (migrations `0016` and `0017`; ADR-029, ADR-030, ADR-031). Paymob checkout, refunds and saved-card renewals are Implemented (ADR-044, ADR-045); a priced plan is granted only by verified settlement (ADR-059). Overage pricing and dunning are Planned, each for a reason recorded in [../TASKS.md](../TASKS.md). See [../TASKS.md](../TASKS.md) phase 13.
 
 Scope: plans, subscriptions, entitlements, invoicing, and payment provider boundaries. Plan limits are listed in [SAAS.md](SAAS.md); metering is in [ANALYTICS.md](ANALYTICS.md).
 
@@ -158,20 +158,49 @@ Four refusals stand between a verified callback and a paid invoice:
 | That payment is this workspace's | The repository's tenant filter, so a leaked reference still reaches nothing |
 | The amount and currency match | A provider reporting a different figure is not settling this invoice, whatever it says |
 
+### How a workspace gets onto a paid plan (ADR-059)
+
+**A plan with a price is granted only by settlement.** `POST
+/billing/subscription` and `POST /billing/subscription/plan` refuse one with
+`402 payment_required`; they remain the route to a *free* plan, so downgrading
+to the default tier is still self-service. Buying is:
+
+    POST /billing/checkout  {"plan_code": "pro"}
+        -> invoice raised for pro, pending payment written, hosted page returned
+        -> customer pays
+        -> POST /webhooks/paymob   (signed, and the only authoritative signal)
+        -> invoice paid  ->  subscription moved onto invoice.plan_code
+
+The plan is read from the **invoice**, which recorded it before the provider was
+ever called, so the grant is decided by a row this system wrote. The callback
+contributes one fact: the money arrived. A declined, unsigned, mismatched or
+replayed callback grants nothing.
+
+This closes a hole in which the whole pipeline above was optional: `change_plan`
+moved a workspace onto any public plan the moment an owner asked, so every paid
+tier was free for the asking. The money path was already strict; nothing joined
+it to the plan.
+
 ### What a payment does to a subscription
 
-Deliberately very little. Paying an invoice settles an invoice; which plan a
-workspace is on is `SubscriptionService`'s decision.
+Beyond applying the plan the invoice was raised for, deliberately very little.
+Paying settles an invoice; it does not resubscribe, revive or extend anything.
 
 | Before | After a successful payment |
 | --- | --- |
-| `past_due` | `active` — the one state a payment changes on its own |
+| on another plan, invoice names a priced plan | moved onto that plan, `active`, period restarts (ADR-059) |
+| on the plan the invoice names | unchanged — a renewal, and the sweep owns periods |
+| `past_due` | `active` — the one *status* a payment changes on its own |
 | `trialing` | unchanged; a trial is not ended by paying |
 | `active` | unchanged |
 | `cancelled` / `expired` | unchanged — paying is not a request to resubscribe, and reviving would undo a deliberate decision |
 
-A workspace with no subscription at all is not given one. Checkout collects for
-an invoice; starting a subscription is `POST /billing/subscription`.
+A workspace with no subscription at all is not given one, and a paid invoice
+for it settles while granting nothing. That state needs `DEFAULT_PLAN_CODE` to
+name no plan — where limits are already unenforced — and is logged as
+`billing.paid_plan_without_subscription` rather than guessed at: inventing trial
+and period rules inside a settlement path is the parallel state machine ADR-059
+exists to avoid.
 
 ### Configuration
 

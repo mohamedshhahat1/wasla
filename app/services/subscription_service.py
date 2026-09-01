@@ -30,7 +30,12 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.exceptions import (
+    ConflictError,
+    NotFoundError,
+    PaymentRequiredError,
+    ValidationError,
+)
 from app.core.logging import get_logger
 from app.db.models.audit import AuditAction
 from app.db.models.billing import (
@@ -346,6 +351,32 @@ class SubscriptionService:
             # distinct message would confirm that a private plan code is real,
             # which is exactly what somebody guessing codes wants to learn.
             raise ValidationError("No such plan.")
+        if self_service and plan.price > 0:
+            # The commercial invariant, enforced in the one place both doors
+            # pass through (ADR-059).
+            #
+            # `start` and `change_plan` used to grant any public plan outright,
+            # so a workspace owner could post `{"plan_code": "business"}` and
+            # hold every Business limit without a payment existing anywhere.
+            # The money pipeline beside it was already strict - invoice,
+            # payment, signed callback, amount and currency checked, legal
+            # transition - and simply had nothing to do with which plan a
+            # workspace was on. This is the join between them.
+            #
+            # A **priced** plan is now reached only through `POST
+            # /billing/checkout`, and applied only by `CheckoutService._settle`
+            # when a verified callback says the invoice is paid. A **free**
+            # plan is unaffected: downgrading to the default plan, and every
+            # deployment whose catalogue is free, works exactly as before.
+            #
+            # `self_service=False` is what settlement and registration pass, so
+            # the platform can still assign what a customer may not ask for.
+            # It has to be passed explicitly, which is what keeps the
+            # permissive path from being the one a caller gets by forgetting.
+            raise PaymentRequiredError(
+                f"The {plan.name} plan is not free. Start a checkout for it and "
+                "the plan applies once the payment is confirmed."
+            )
         return plan
 
 

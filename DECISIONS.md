@@ -1693,3 +1693,37 @@ A second issuance site is a second policy. This one differed by an omission nobo
 
 Consequences:
 A test that asserts on a token must spend it. A stub returning a token shape proves the route is wired, not that the token works, and the regression tests for this switch workspace and then call `/auth/me` and a workspace-scoped route with what came back.
+
+## ADR-059 — A Priced Plan Is Granted by Settlement, Never by Asking
+
+Date:
+2026-09-01
+
+Status:
+Accepted
+
+Decision:
+`SubscriptionService.start` and `change_plan` refuse a plan with `price > 0` when `self_service=True`, answering 402 `payment_required`. A priced plan is reached through `POST /billing/checkout` and applied by `CheckoutService._settle`, from `invoice.plan_code`, when a signed provider callback says the invoice is paid. Free plans are unaffected.
+
+Context:
+Two correct-in-isolation halves with nothing between them. The money path was already strict — an HMAC over the provider's payload, a reference this system generated, amount and currency compared against the invoice, a transition table deciding legality, idempotency by unique constraint. And `change_plan` moved a workspace onto any public plan the moment an owner asked, with no reference to an invoice at all. `_settle` deliberately did not touch the plan, on the sound reasoning that paying an invoice settles an invoice.
+
+So the entire checkout pipeline was optional decoration around a self-service upgrade that cost nothing: `POST /billing/subscription/plan {"plan_code": "business"}` and every Business limit applied. Every test passed — the billing tests exercised the money, the entitlement tests exercised the limits, and nothing exercised the sentence joining them.
+
+Reason:
+**The gate belongs on `_require_plan`**, which both doors already pass through and which already carries the `is_public` rule for the same reason: a catalogue filter was standing in for an authorization rule and had to become one. `self_service=False` already existed for the platform assigning what a customer may not choose — registration putting a new workspace on the default plan — and settlement is exactly that kind of caller.
+
+**The grant reuses `change_plan` rather than reimplementing it.** Period arithmetic, trial clearing, the cancellation reset and the audit entry are one state machine with one owner. A second copy inside settlement would be the parallel billing machine this change exists to avoid.
+
+**The plan comes from the invoice, not from the callback.** `invoice.plan_code` was copied from the plan the customer chose before the provider was ever called, so the grant is decided by a row this system wrote. The callback contributes one fact: the money arrived.
+
+**402 with its own code.** `PlanLimitExceededError` is also 402, but it says the current plan does not stretch that far. This one says the plan being asked for has not been paid for, and a client rendering them alike would tell somebody to upgrade while they are trying to.
+
+Four cases are deliberately left alone: no subscription (nothing to move, and inventing trial rules inside settlement is the parallel machine again — logged loudly instead), a renewal (the invoice names the plan already held, and the sweep owns periods), a terminal subscription (paying is not a request to resubscribe), and a retired plan code.
+
+Consequences:
+`POST /billing/subscription` and `/subscription/plan` answer 402 for a priced plan. The seeded catalogue makes starter free and pro and business priced, so downgrading remains self-service and upgrading is not.
+
+A workspace with no subscription that pays for a plan gets a settled invoice and no plan. That state requires `DEFAULT_PLAN_CODE` to name no plan — where limits are already unenforced — and it is logged rather than guessed at.
+
+Dunning is untouched and remains open: `PAST_DUE` still serves, and deciding when that grace runs out is a separate change.

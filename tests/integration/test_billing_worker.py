@@ -346,6 +346,9 @@ async def test_a_workspace_created_before_billing_can_still_subscribe(db_session
     subscription = await SubscriptionService(db_session, tenant_id=tenant.id).start(
         plan_code="pro",
         now=NOW,
+        # The platform putting a workspace on a paid plan, which is what
+        # settlement does: a customer cannot ask for one (ADR-059).
+        self_service=False,
     )
 
     assert subscription.status is SubscriptionStatus.ACTIVE
