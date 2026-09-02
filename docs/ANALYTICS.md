@@ -83,3 +83,20 @@ Rates are always returned beside the counts they were computed from. A rate on i
 **Not implemented, and each for a reason rather than for want of time.** Revenue, MRR, ARR, subscription revenue and churn are questions about subscriptions, and there are none until phase 13. Estimated AI cost needs per-model prices that are stored nowhere: token counts are real, a cost derived from invented prices is not, and a plausible figure on a dashboard is worse than an absent one because somebody eventually believes it. Trial companies and plan distribution wait on plans for the same reason.
 
 All analytics and usage endpoints take an optional UTC window and report the one they applied. Aggregation runs on the request path today: each query is an indexed range scan over one workspace's rows, and moving it to a worker before that is the bottleneck would add a component that has to be running for a figure to be right. When it does become the bottleneck, a rollup is added *beside* the rows rather than instead of them — a sum over rows can be recomputed for any window, and a drifted counter cannot.
+
+### What was measured, and what it says about when that day comes
+
+3.9 million events across 50 workspaces over nine months (ADR-081):
+
+| query | 1.3M rows | 3.9M rows |
+| --- | --- | --- |
+| entitlement period check | 8.8ms | 9.4ms |
+| workspace dashboard totals | 20ms | 33ms |
+| workspace daily series | 63ms | 66ms |
+| platform `by_tenant` | 64ms | 172ms |
+
+**The entitlement check does not grow with the table.** It sums one meter over one workspace's billing period, and the rows in that sum are bounded by the plan limit rather than by how much history exists — a workspace that has spent its 25,000 AI requests stops making them. It scanned the same 26,035 rows at both sizes.
+
+What it did do was visit the table once per row to read two narrow columns, so `quantity` and `unit` are now INCLUDE columns on `ix_usage_events_tenant_id_event_type_occurred_at` and the sum is an `Index Only Scan`. 9.4ms to 7.1ms, and — more to the point — indifferent to the table growing around it: the same check on a 1.3GB table whose heap pages had been evicted measured 50ms before the change.
+
+**The platform roll-up is the one that grows without bound**: 64ms to 172ms for a 3× table, linear in total rows. It is a SaaS-owner dashboard and 172ms is nobody's problem, so no rollup exists yet. The trigger is written down rather than guessed at: at roughly 50 million rows in the window, or a dashboard past a second, add a daily rollup keyed `(tenant_id, day, event_type)` with `INSERT ... ON CONFLICT DO UPDATE`, serve dashboards from it, and leave entitlements reading raw rows. Money should not come to depend on an aggregation that can drift.

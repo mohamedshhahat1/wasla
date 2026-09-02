@@ -119,11 +119,19 @@ class UsageEvent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):
         # dashboard query a range scan; adding the type in front of the
         # timestamp in the second index makes the per-meter one the same.
         Index("ix_usage_events_tenant_id_occurred_at", "tenant_id", "occurred_at"),
+        # `quantity` and `unit` are carried in the index rather than fetched
+        # from the table, which turns the entitlement check into an index-only
+        # scan (ADR-081). It is the hottest read in the system - every agent
+        # turn asks it, twice, and the reservation asks it while holding the
+        # workspace's advisory lock - and it is a `SUM`, so before this it
+        # visited the heap once per row to read two columns it could have been
+        # handed. Measured on 3.9M rows: 9.4ms to 7.1ms, `Heap Fetches: 0`.
         Index(
             "ix_usage_events_tenant_id_event_type_occurred_at",
             "tenant_id",
             "event_type",
             "occurred_at",
+            postgresql_include=["quantity", "unit"],
         ),
         # The platform dashboard sums across every workspace for a window, which
         # no tenant-leading index can serve.

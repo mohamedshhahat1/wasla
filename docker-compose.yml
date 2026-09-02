@@ -7,6 +7,13 @@ name: wasla
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    # Docker gives a container 64MB of /dev/shm, and PostgreSQL puts a
+    # parallel query's shared tuple store there. An aggregate big enough to be
+    # worth parallelising then dies with "could not resize shared memory
+    # segment ... No space left on device", and the server restarts into
+    # recovery - which is how this was found, by running a platform usage
+    # roll-up over four million rows (ADR-081).
+    shm_size: 1gb
     environment:
       POSTGRES_USER: wasla
       POSTGRES_PASSWORD: wasla

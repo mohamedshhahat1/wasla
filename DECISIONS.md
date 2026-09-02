@@ -3230,3 +3230,94 @@ commit/respond ordering — which is the cheap version of the same guard.
 The WhatsApp send is left inside the transaction on purpose. It is not the same
 boundary: the message row is flushed before the call so an attempt exists as a
 row whatever happens next, and that is the quarantine design ADR-074 depends on.
+
+## ADR-081 — usage_events Got an Index, Not a Rollup, and the Reason Is a Number
+
+**Context.** The P2 audit ranked `usage_events` fourth: append-only,
+unpartitioned, and the aggregate behind every entitlement check. The obvious
+answers are a rollup table or time partitioning, and both are substantial.
+
+**Decision.** Carry `quantity` and `unit` as INCLUDE columns on
+`ix_usage_events_tenant_id_event_type_occurred_at`, and build neither a rollup
+nor partitions. Raw events stay the only source of truth for money.
+
+**What was measured.** 3.9 million events across 50 workspaces over nine
+months, shaped from the plans the product sells — one workspace at the Business
+tier's volume, a middle cohort, a long tail. Four query shapes, taken from the
+repositories rather than invented:
+
+| query | 1.3M rows | 3.9M rows |
+| --- | --- | --- |
+| entitlement period check | 8.8ms | 9.4ms |
+| workspace dashboard totals | 20ms | 33ms |
+| workspace daily series | 63ms | 66ms |
+| platform `by_tenant` | 64ms | **172ms** |
+
+**The hottest query does not have a growth problem, and that was the surprise.**
+`_period_usage` sums one meter over one workspace's current billing period, and
+the number of rows in that sum is bounded by *the plan limit*, not by the size
+of the table: a workspace that has spent its 25,000 AI requests stops making
+them. So it scanned 26,035 rows at 1.3M and 26,035 rows at 3.9M, and the
+timing barely moved. The audit's framing — "at platform scale this table
+dominates" — is right about the table and wrong about this query.
+
+What it did have was a heap visit per row, to read two narrow columns it could
+have been handed: 219 index buffers and 916 heap buffers to add up numbers.
+INCLUDE turns it into an `Index Only Scan` with `Heap Fetches: 0` on a
+committed, vacuumed table — 9.4ms to 7.1ms, with the other three shapes flat.
+That matters more than 2ms sounds like, because `consume` runs this query while
+holding the workspace's advisory lock, so it is time every other conversation in
+that workspace spends waiting.
+
+There is a second reason, visible only in a cold cache. On a 1.3GB table that no
+longer fits in `shared_buffers`, the same 26,035-row check measured **50ms**,
+because the heap pages it needed had been evicted. Row count is bounded by the
+plan; page residency is bounded by nothing. An index-only scan reads a few
+hundred pages of a small hot index and is indifferent to how large the table
+has grown around it.
+
+**Why not a rollup.** The one query that grows without bound is the platform
+`by_tenant` aggregate: 64ms to 172ms for a 3× table, a parallel sequential scan
+because a month of a nine-month table is not selective enough for the
+`occurred_at` index. That is linear in total rows and arithmetic guarantees
+where it ends up. But it is a SaaS-owner dashboard measured at 172ms, and a
+rollup is a table, a worker, bucket boundaries, late-arrival handling, rerun
+idempotency and — the part that actually costs — a second set of numbers that
+can disagree with the invoice. Building that for a query nobody is waiting on
+is how money ends up depending on eventually-consistent aggregation. The
+trigger is recorded instead: **when the platform usage window crosses roughly
+50 million rows, or the dashboard passes a second, the answer is a daily rollup
+keyed `(tenant_id, day, event_type)` with `INSERT ... ON CONFLICT DO UPDATE`,
+serving dashboards only, with entitlements still reading raw.**
+
+**Why not partitioning.** Monthly partitions would prune that platform query to
+one partition and would make retention a `DROP TABLE`. They would also mean
+converting the highest-write table in the system in place, plus insert routing,
+future-partition creation and a maintenance job that must never fall behind —
+and the query benefit is the same benefit a rollup gives more cheaply. The
+prompt for this phase put it well: do not partition because a table is
+append-only. Nothing measured here argues for it yet.
+
+**A defect found by doing the measuring.** PostgreSQL puts a parallel query's
+shared tuple store in `/dev/shm`, Docker gives a container 64MB of it by
+default, and neither Compose file set `shm_size`. Running the platform roll-up
+over four million rows produced `could not resize shared memory segment ... No
+space left on device` and restarted the server into crash recovery. It is now
+`shm_size: 1gb` in both files. This was not a benchmark artefact — it is what
+the shipped Compose file does to a production database the first time an
+aggregate is big enough to be worth parallelising.
+
+**Consequences.** One index changed, no new tables, no new worker, and usage
+accounting untouched: the same rows, the same half-open windows, the same
+`occurred_at` bucket. `tests/integration/test_usage_index_only.py` asserts the
+index-only total equals a total read from the table with every index refused —
+across three workspaces with deliberately different quantities, on both window
+boundaries, and after a late event written for a day already over. Removing the
+INCLUDE columns fails the schema and plan tests and leaves the correctness tests
+passing, which is the right split: it is a performance regression, not a
+wrong number.
+
+The migration drops and recreates, because PostgreSQL cannot add an INCLUDE
+column to an existing index, and does both `CONCURRENTLY` — usage is written on
+the path that answers customers, so an index rebuild that blocks inserts there
+blocks replies.
