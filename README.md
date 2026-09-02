@@ -155,6 +155,8 @@ pre-commit install     # run the same gates on every commit
 
 The suite injects fake infrastructure, so no Redis, OpenAI or Meta credentials are required to run it. Tests that need a database skip unless `TEST_DATABASE_URL` (or `DATABASE_URL`) points at PostgreSQL with `pgvector`; `docker compose up -d postgres` is enough to make them run — and they are worth running, since the isolation and retrieval guarantees are only meaningful against a real database.
 
+The media suites want an object store the same way: they skip unless `TEST_S3_ENDPOINT_URL`, `TEST_S3_BUCKET`, `TEST_S3_ACCESS_KEY_ID` and `TEST_S3_SECRET_ACCESS_KEY` point at one, and `docker compose --profile objectstore up -d minio` is enough. Run them: what they prove is that the SigV4 signing in `app/core/object_store.py` satisfies a real store, and mocking an SDK call cannot establish that — a signature is either accepted or it is a 403. CI runs them against MinIO and fails if it finds them skipped.
+
 Those tests build the schema **once per session** and roll each test back afterwards, so the whole suite takes about a minute and a half rather than the forty it took when every test dropped and recreated the schema. `tests/integration/test_fixture_isolation.py` covers the isolation itself, including that a test which calls `commit()` still cannot leak into the next one.
 
 Install with `pip install -e ".[dev]"` rather than installing the tools yourself: Ruff, Black and MyPy are pinned to exact versions (ADR-016), and a different version will report findings CI does not, or miss ones it does. Those pins are kept honest by a weekly `pip-audit` run in the security workflow — run `pip-audit` locally before changing any dependency bound.
