@@ -56,5 +56,7 @@ async def metrics(redis: RedisDep, settings: SettingsDep) -> Response:
     if not settings.metrics_enabled:
         return Response(status_code=status.HTTP_404_NOT_FOUND)
 
-    body = await MetricsService(redis.client).render()
+    body = await MetricsService(
+        redis.client, backup_status_path=settings.backup_status_path
+    ).render()
     return Response(content=body, media_type=CONTENT_TYPE)

@@ -220,6 +220,12 @@ class Settings(BaseSettings):
     # slow Redis (ADR-074). Two minutes means a crashed worker's job is back in
     # play inside a few minutes rather than never.
     queue_visibility_timeout_seconds: float = Field(default=120.0, ge=30.0, le=3600.0)
+    # Where the backup process leaves its machine-readable outcome, so the
+    # API can publish how long it has been since a backup last reached its
+    # off-host destination. Unset means this deployment does not mount one and
+    # the backup series are simply absent - which is itself alertable, and
+    # honest, rather than a zero that looks like a fresh backup (ADR-075).
+    backup_status_path: str | None = None
 
     # HTTP
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)

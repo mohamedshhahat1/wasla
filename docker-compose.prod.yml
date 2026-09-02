@@ -129,6 +129,10 @@ services:
       # exposition is reachable from a scraper on `internal` and from nowhere
       # else (ADR-070).
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      # Read-only, and only so `/metrics` can say how long it has been since a
+      # backup last reached its destination. The API takes no backups and
+      # holds no object-store credential (ADR-075).
+      BACKUP_STATUS_PATH: /backups/status.json
       QUEUE_VISIBILITY_TIMEOUT_SECONDS: ${QUEUE_VISIBILITY_TIMEOUT_SECONDS:-120}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
@@ -223,6 +227,10 @@ services:
       # records - with the API and the worker on different hosts, this volume
       # is not shared and the object-store implementation is required.
       - media-data:${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
+      # Read-only: the API publishes what the backup wrote and must never be
+      # able to alter it. A process that could edit its own backup status
+      # could report a recovery point it does not have (ADR-075).
+      - ${BACKUP_DIR:-./backups}:/backups:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -378,7 +386,13 @@ services:
   #
   #   docker compose -f docker-compose.prod.yml --profile backup run --rm backup
   backup:
-    image: pgvector/pgvector:pg16
+    # Its own image: `pg_dump` must match the server's major version, and the
+    # off-host upload needs a client the database image does not carry. See
+    # Dockerfile.backup for why neither belongs in the application image.
+    image: ${WASLA_BACKUP_IMAGE:-wasla-backup:local}
+    build:
+      context: .
+      dockerfile: Dockerfile.backup
     profiles: ["backup"]
     entrypoint: ["/bin/sh", "/opt/wasla/scripts/backup_postgres.sh"]
     security_opt:
@@ -390,12 +404,29 @@ services:
       # database once and cannot describe it two different ways.
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       BACKUP_DIR: /backups
+      BACKUP_STATUS_PATH: /backups/status.json
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      # Where the dump goes so that losing this host does not lose it.
+      # Required in production: `upload_backup.sh` refuses to report success
+      # with no destination unless BACKUP_ALLOW_LOCAL_ONLY says so, and this
+      # file deliberately never sets that (ADR-075).
+      BACKUP_DESTINATION: ${BACKUP_DESTINATION:-none}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-wasla}
+      # Set for any S3-compatible store that is not AWS - MinIO, R2, Wasabi,
+      # Backblaze. Left empty for AWS itself.
+      BACKUP_S3_ENDPOINT_URL: ${BACKUP_S3_ENDPOINT_URL:-}
+      BACKUP_S3_SSE: ${BACKUP_S3_SSE:-}
+      # Read by `aws` from the environment, never from a command line. Neither
+      # the API nor the worker is given these: a compromised application
+      # container must not be able to read or delete the backups.
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${BACKUP_S3_REGION:-us-east-1}
     volumes:
-      - ./scripts:/opt/wasla/scripts:ro
-      # A host path rather than a named volume, deliberately: a backup that
-      # only Docker can see is one an operator cannot copy off the host, and
-      # copying it off the host is the entire point (docs/BACKUP.md).
+      # A host path rather than a named volume, deliberately: this is staging,
+      # and an operator has to be able to reach it from outside Docker when
+      # they are recovering (docs/BACKUP.md).
       - ${BACKUP_DIR:-./backups}:/backups
     depends_on:
       postgres:

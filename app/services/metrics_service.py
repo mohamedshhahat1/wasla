@@ -32,6 +32,7 @@ from redis.asyncio import Redis
 from app.core.logging import get_logger
 from app.core.metrics import REGISTRY, MetricsRegistry, render_gauge_lines
 from app.core.telemetry import REDIS_COUNTERS, read_redis_counters
+from app.services.backup_status import read_backup_status
 from app.workers.heartbeat import heartbeat_key
 from app.workers.queue import QUEUES, ReliableQueue
 from app.workers.runner import ALL_KINDS
@@ -78,12 +79,65 @@ class QueueSnapshot:
 class MetricsService:
     """Collects and renders the operational exposition."""
 
-    def __init__(self, redis: Redis | None, *, registry: MetricsRegistry = REGISTRY) -> None:
+    def __init__(
+        self,
+        redis: Redis | None,
+        *,
+        registry: MetricsRegistry = REGISTRY,
+        backup_status_path: str | None = None,
+    ) -> None:
         self._redis = redis
         self._registry = registry
+        self._backup_status_path = backup_status_path
 
     async def render(self, *, now: datetime | None = None) -> str:
-        return self._registry.render(extra=await self._external(now=now))
+        lines = await self._external(now=now)
+        lines.extend(self._backup_lines(now=now))
+        return self._registry.render(extra=lines)
+
+    def _backup_lines(self, *, now: datetime | None) -> list[str]:
+        """What the backup process last wrote down, if this deployment mounts it.
+
+        Synchronous and file-backed rather than a counter, because the process
+        that knows the answer has already exited by the time anybody scrapes -
+        see `app/services/backup_status.py`. Absent when no path is configured
+        or no status has been written: a missing series says "this deployment
+        cannot tell you", which is a truer alert than a zero.
+        """
+        if not self._backup_status_path:
+            return []
+        status = read_backup_status(self._backup_status_path)
+        if status is None:
+            return []
+
+        lines: list[str] = []
+        age = status.age_seconds(now=now)
+        if status.last_success_at is not None:
+            lines.extend(
+                render_gauge_lines(
+                    "wasla_backup_last_success_timestamp_seconds",
+                    "When a backup last reached its off-host destination.",
+                    [({}, status.last_success_at.timestamp())],
+                )
+            )
+        if age is not None:
+            lines.extend(
+                render_gauge_lines(
+                    "wasla_backup_age_seconds",
+                    "How long since a backup last reached its off-host destination.",
+                    [({}, age)],
+                )
+            )
+        lines.extend(
+            _counter(
+                "wasla_backup_failures_total",
+                "Backup runs that did not produce a durable off-host copy.",
+                # `stage` is a bounded set the script chooses: dump, validate,
+                # upload, retention. Never a message, never a bucket name.
+                [({"stage": status.failed_stage or "none"}, float(status.failures_total))],
+            )
+        )
+        return lines
 
     async def snapshot(self, *, now: datetime | None = None) -> list[QueueSnapshot]:
         """Every queue's depths, for the exposition and for an operator command."""

@@ -1,0 +1,25 @@
+[Unit]
+Description=Take a Wasla PostgreSQL backup daily
+Documentation=file:///srv/wasla/docs/BACKUP.md
+
+[Timer]
+# Daily, at an hour nobody chose for anything else. `OnCalendar` rather than
+# `OnUnitActiveSec` so the schedule is a wall-clock time an operator can reason
+# about against the recovery point it implies: up to 24 hours of writes.
+OnCalendar=*-*-* 02:17:00
+
+# Spread across ten minutes. One machine does not need it; a fleet pointing at
+# the same object store at 02:17:00 exactly does.
+RandomizedDelaySec=600
+
+# **The line that matters after an outage.** Without it, a host that was down
+# at 02:17 simply skips that day and nobody finds out until the restore. With
+# it, the run happens as soon as the host is back and the backup age never
+# silently doubles.
+Persistent=true
+
+# Keeps the state that `Persistent` reads across reboots.
+Unit=wasla-backup.service
+
+[Install]
+WantedBy=timers.target

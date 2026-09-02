@@ -1,0 +1,56 @@
+[Unit]
+# One backup run: dump, validate, upload off-host, verify, record.
+#
+# A `oneshot` rather than a daemon, and a timer rather than a sleep loop in a
+# container. The host already has a scheduler that survives reboots and logs
+# what it did; adding a second one inside the stack would be a process to watch
+# whose only job is watching the clock.
+#
+# Install:
+#   sudo cp deploy/systemd/wasla-backup.* /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wasla-backup.timer
+#
+# Verify without waiting a day:
+#   sudo systemctl start wasla-backup.service
+#   journalctl -u wasla-backup.service -n 50
+#
+# See docs/BACKUP.md.
+Description=Wasla PostgreSQL backup to off-host storage
+Documentation=file:///srv/wasla/docs/BACKUP.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/wasla
+
+# Credentials and destination live here, not in this unit. Root-owned and mode
+# 0600: it holds the object-store keys, and a unit file is world-readable.
+EnvironmentFile=/etc/wasla/backup.env
+
+# `run --rm` rather than `up`: this is a one-shot service behind a Compose
+# profile, so an ordinary `docker compose up` does not start it and this does
+# not leave a stopped container behind each night.
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml --profile backup run --rm backup
+
+# A backup that hangs is a backup that is not happening, and one that is still
+# running when the next one starts is two clients writing the same prefix.
+TimeoutStartSec=3600
+
+# The unit fails when the script does, which is what makes
+# `systemctl is-failed wasla-backup.service` and the OnFailure hook below
+# meaningful. No Restart=: a failed backup should be noticed, not retried into
+# a loop against an object store that is refusing us.
+Restart=no
+
+# Least privilege for the wrapper. The real work happens inside a container
+# with its own hardening; this process only talks to the Docker socket.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/wasla
+
+[Install]
+WantedBy=multi-user.target

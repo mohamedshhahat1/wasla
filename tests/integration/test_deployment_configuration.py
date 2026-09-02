@@ -74,6 +74,10 @@ FEATURE_SETTINGS: dict[str, tuple[str, ...]] = {
     # process reporting a queue stuck while the other believed it fine
     # (ADR-074).
     "queue_visibility_timeout_seconds": ("api", "worker"),
+    # Only the API reads it, and only to publish how stale the backup is. The
+    # worker takes no backups and is deliberately not told where the status
+    # file is - see EXPECTED_ABSENT below (ADR-075).
+    "backup_status_path": ("api",),
 }
 
 # Fields a mapped prefix picks up that a given service deliberately does not
@@ -98,6 +102,18 @@ EXPECTED_ABSENT: dict[tuple[str, str], str] = {
     ("api", "EMAIL_MAX_ATTEMPTS"): "delivery retries belong to the email worker",
     ("api", "EMAIL_WORKER_POLL_SECONDS"): "the poll interval belongs to the email worker",
 }
+
+# Values the *backup* process holds and no application process may. Asserted
+# rather than assumed, because the whole point of giving backups their own
+# container is that taking over an application container does not hand somebody
+# the ability to read or delete the backups (ADR-075).
+BACKUP_ONLY: tuple[str, ...] = (
+    "BACKUP_DESTINATION",
+    "BACKUP_S3_BUCKET",
+    "BACKUP_S3_ENDPOINT_URL",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+)
 
 
 def _service_environment(text: str, service: str) -> set[str]:
@@ -296,3 +312,56 @@ def test_no_secret_value_is_written_into_the_shipped_configuration() -> None:
         for line in re.findall(rf"^\s*{name}:.*$", text, re.M):
             value = line.split(":", 1)[1].strip()
             assert value.startswith("${"), f"{name} is not interpolated: {line.strip()}"
+
+
+@pytest.mark.parametrize("service", ["api", "worker"])
+def test_no_application_process_holds_an_object_store_credential(service: str) -> None:
+    """The reason backups run in their own container at all.
+
+    An API or worker that could reach the backup bucket would mean a single
+    compromised application container could delete the database *and* every
+    copy of it, which is the one failure the off-host copy exists to survive.
+    """
+    declared = _service_environment(PROD_COMPOSE.read_text(encoding="utf-8"), service)
+    held = declared & set(BACKUP_ONLY)
+
+    assert not held, (
+        f"docker-compose.prod.yml gives {service!r} backup-store settings it must "
+        f"not have: {sorted(held)}. Only the `backup` service holds these."
+    )
+
+
+def test_the_backup_service_holds_what_it_needs() -> None:
+    """The other direction: a backup that cannot reach its destination is none."""
+    declared = _service_environment(PROD_COMPOSE.read_text(encoding="utf-8"), "backup")
+
+    assert set(BACKUP_ONLY) <= declared
+    assert "BACKUP_STATUS_PATH" in declared
+
+
+def test_the_api_reads_the_backup_status_but_cannot_write_it() -> None:
+    """A process that could edit its own backup status could invent one."""
+    text = PROD_COMPOSE.read_text(encoding="utf-8")
+    block = re.search(r"^  api:\n(.*?)(?=^  \w|\Z)", text, re.M | re.S)
+    assert block is not None
+
+    mounts = re.findall(r"^      - (\$\{BACKUP_DIR[^\n]*)$", block.group(1), re.M)
+    assert mounts, "the API does not mount the backup status directory"
+    assert all(
+        mount.endswith(":ro") for mount in mounts
+    ), f"the backup directory must be read-only in the API: {mounts}"
+
+
+def test_production_never_allows_a_backup_that_stays_on_this_host() -> None:
+    """`BACKUP_ALLOW_LOCAL_ONLY` is for a laptop, and this file is not one.
+
+    Setting it here would make `upload_backup.sh` report success for a dump
+    sitting beside the database it came from, which is the exact thing the
+    off-host step exists to prevent.
+    """
+    for service in ("api", "worker", "backup"):
+        declared = _service_environment(PROD_COMPOSE.read_text(encoding="utf-8"), service)
+        assert "BACKUP_ALLOW_LOCAL_ONLY" not in declared, (
+            f"{service} is told it may keep backups on this host. Naming it in a "
+            "comment is fine; setting it here is not."
+        )

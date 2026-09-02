@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+
+# The image the scheduled backup runs in.
+#
+# Separate from the application image, and built on the *database* one, because
+# of a version rule rather than a preference: `pg_dump` must be at least the
+# major version of the server it dumps, and the version that certainly is, is
+# the one running the server. Adding `postgresql-client` to the runtime image
+# instead would put it on every API and worker container that serves traffic,
+# for the benefit of a process that runs once a day.
+#
+# What it adds to that base is the one thing the base cannot do: get the dump
+# off this host. `awscli` speaks S3 to AWS, MinIO, Cloudflare R2, Wasabi,
+# Backblaze B2 and Ceph alike, so one client covers every object store a
+# deployment is likely to choose without this repository choosing one for it.
+# It signs, it uses TLS, and it reads its credentials from the environment -
+# all three of which a hand-rolled `curl` uploader would have to reimplement.
+FROM pgvector/pgvector:pg16
+
+ARG WASLA_VERSION="0.0.0-local"
+ARG WASLA_REVISION="unknown"
+LABEL org.opencontainers.image.title="wasla-backup" \
+      org.opencontainers.image.description="Scheduled PostgreSQL backup and off-host upload for Wasla" \
+      org.opencontainers.image.version="${WASLA_VERSION}" \
+      org.opencontainers.image.revision="${WASLA_REVISION}"
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends awscli ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# The restore script travels with the backup one, deliberately. The image that
+# can take a backup is the image that can put it back: on the day somebody
+# needs it, the application image may not build, the repository may not be
+# reachable, and the one thing that certainly exists is whatever was pulled to
+# run last night's backup.
+COPY scripts/backup_postgres.sh scripts/upload_backup.sh scripts/fetch_backup.sh      scripts/restore_postgres.sh /opt/wasla/scripts/
+RUN chmod +x /opt/wasla/scripts/*.sh
+
+# No default command. The Compose service names one, and a backup image whose
+# default behaviour is "take a backup" is one that takes a backup whenever
+# somebody runs it to look around.
+ENTRYPOINT ["/bin/sh"]
+CMD ["-c", "echo 'run /opt/wasla/scripts/backup_postgres.sh' >&2; exit 64"]
