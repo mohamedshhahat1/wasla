@@ -141,7 +141,41 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       META_APP_SECRET: ${META_APP_SECRET:?META_APP_SECRET is required to verify webhook signatures}
       META_VERIFY_TOKEN: ${META_VERIFY_TOKEN:-}
+      # --- Media storage (ADR-077) ---
+      #
+      # Both processes get the same values, and they must: the worker writes an
+      # attachment and the API serves it back. A deployment where the two
+      # disagreed would accept files into one store and read from another.
+      #
+      # `local` keeps the shared volume below and is a single-host arrangement.
+      # `s3` is what removes that, and selecting it with an incomplete
+      # configuration refuses to start rather than silently writing to disk.
+      MEDIA_STORAGE_BACKEND: ${MEDIA_STORAGE_BACKEND:-local}
       MEDIA_STORAGE_PATH: ${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
+      MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-26214400}
+      # `${VAR:-}`, never `${VAR:?}`: a deployment that has not switched the
+      # object store on must still come up, and the application's own validator
+      # is what refuses a *half* configured one (ADR-062).
+      #
+      # Deliberately NOT the AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY pair the
+      # backup service holds. Media and backups are different buckets under
+      # different credentials, so an application container that is taken over
+      # cannot reach the copies of the database (ADR-075). The deployment drift
+      # guard asserts both directions of that.
+      MEDIA_S3_BUCKET: ${MEDIA_S3_BUCKET:-}
+      MEDIA_S3_ENDPOINT_URL: ${MEDIA_S3_ENDPOINT_URL:-}
+      MEDIA_S3_REGION: ${MEDIA_S3_REGION:-us-east-1}
+      MEDIA_S3_ACCESS_KEY_ID: ${MEDIA_S3_ACCESS_KEY_ID:-}
+      MEDIA_S3_SECRET_ACCESS_KEY: ${MEDIA_S3_SECRET_ACCESS_KEY:-}
+      MEDIA_S3_PATH_STYLE: ${MEDIA_S3_PATH_STYLE:-true}
+      MEDIA_S3_SERVER_SIDE_ENCRYPTION: ${MEDIA_S3_SERVER_SIDE_ENCRYPTION:-}
+      MEDIA_S3_TIMEOUT_SECONDS: ${MEDIA_S3_TIMEOUT_SECONDS:-30}
+      # Zero disables the retention sweep, which is the default: how long a
+      # customer's attachments are kept is a decision this file cannot make
+      # (ADR-078).
+      MEDIA_RETENTION_DAYS: ${MEDIA_RETENTION_DAYS:-0}
+      MEDIA_RETENTION_BATCH_SIZE: ${MEDIA_RETENTION_BATCH_SIZE:-200}
+      MEDIA_RETENTION_POLL_SECONDS: ${MEDIA_RETENTION_POLL_SECONDS:-86400}
       # A key ring for workspace credentials at rest (ADR-034). Optional, and
       # the consequence of leaving it empty is specific rather than vague: every
       # workspace sends through META_ACCESS_TOKEN, and a workspace trying to
@@ -297,7 +331,41 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:-}
+      # --- Media storage (ADR-077) ---
+      #
+      # Both processes get the same values, and they must: the worker writes an
+      # attachment and the API serves it back. A deployment where the two
+      # disagreed would accept files into one store and read from another.
+      #
+      # `local` keeps the shared volume below and is a single-host arrangement.
+      # `s3` is what removes that, and selecting it with an incomplete
+      # configuration refuses to start rather than silently writing to disk.
+      MEDIA_STORAGE_BACKEND: ${MEDIA_STORAGE_BACKEND:-local}
       MEDIA_STORAGE_PATH: ${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
+      MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-26214400}
+      # `${VAR:-}`, never `${VAR:?}`: a deployment that has not switched the
+      # object store on must still come up, and the application's own validator
+      # is what refuses a *half* configured one (ADR-062).
+      #
+      # Deliberately NOT the AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY pair the
+      # backup service holds. Media and backups are different buckets under
+      # different credentials, so an application container that is taken over
+      # cannot reach the copies of the database (ADR-075). The deployment drift
+      # guard asserts both directions of that.
+      MEDIA_S3_BUCKET: ${MEDIA_S3_BUCKET:-}
+      MEDIA_S3_ENDPOINT_URL: ${MEDIA_S3_ENDPOINT_URL:-}
+      MEDIA_S3_REGION: ${MEDIA_S3_REGION:-us-east-1}
+      MEDIA_S3_ACCESS_KEY_ID: ${MEDIA_S3_ACCESS_KEY_ID:-}
+      MEDIA_S3_SECRET_ACCESS_KEY: ${MEDIA_S3_SECRET_ACCESS_KEY:-}
+      MEDIA_S3_PATH_STYLE: ${MEDIA_S3_PATH_STYLE:-true}
+      MEDIA_S3_SERVER_SIDE_ENCRYPTION: ${MEDIA_S3_SERVER_SIDE_ENCRYPTION:-}
+      MEDIA_S3_TIMEOUT_SECONDS: ${MEDIA_S3_TIMEOUT_SECONDS:-30}
+      # Zero disables the retention sweep, which is the default: how long a
+      # customer's attachments are kept is a decision this file cannot make
+      # (ADR-078).
+      MEDIA_RETENTION_DAYS: ${MEDIA_RETENTION_DAYS:-0}
+      MEDIA_RETENTION_BATCH_SIZE: ${MEDIA_RETENTION_BATCH_SIZE:-200}
+      MEDIA_RETENTION_POLL_SECONDS: ${MEDIA_RETENTION_POLL_SECONDS:-86400}
       # The same key ring the API has, and it must be the same value: the worker
       # decrypts a workspace's credential to send with it, so a worker missing a
       # key the API used cannot send for that workspace at all.

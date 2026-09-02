@@ -18,7 +18,7 @@ from app.core.dependencies import RedisDep, SessionDep, SettingsDep
 from app.core.exceptions import AuthenticationError, PermissionDeniedError
 from app.core.rate_limit import RateLimiter
 from app.core.security import TokenClaims, TokenType, decode_token
-from app.core.storage import LocalMediaStorage, MediaStorage
+from app.core.storage import MediaStorage, build_media_storage
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.db.models.billing import LimitKey
@@ -370,11 +370,17 @@ MessagingServiceDep = Annotated[MessagingService, Depends(get_messaging_service)
 def get_media_storage(settings: SettingsDep) -> MediaStorage:
     """The file store this deployment is configured with.
 
-    Returned as the protocol rather than the concrete class, so replacing the
-    local implementation with an object store is a change here and nowhere else
-    (ADR-023).
+    Returned as the protocol rather than the concrete class, which is what makes
+    the choice between local disk and an object store a line here rather than a
+    change in every service that touches a file (ADR-023, ADR-077).
+
+    A deployment that selected `s3` and configured it incompletely never reaches
+    this function: `Settings` refuses to construct. That matters more than it
+    looks - falling back to local disk on a missing credential would give the
+    API and the worker each their own copy on their own container, and every
+    download would be a coin toss with nothing anywhere to say why.
     """
-    return LocalMediaStorage(settings.media_storage_path)
+    return build_media_storage(settings)
 
 
 MediaStorageDep = Annotated[MediaStorage, Depends(get_media_storage)]

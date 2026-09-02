@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
-from app.core.storage import LocalMediaStorage, MediaStorage
+from app.core.storage import MediaStorage, build_media_storage
 from app.db.models.media import MediaStatus, MessageMedia
 from app.db.session import Database
 from app.integrations.openai.client import ResponsesClient
@@ -82,9 +82,9 @@ class MediaWorker:
         self._whatsapp_factory = whatsapp_factory
         self._reader_factory = reader_factory
         # Injected so a test can hand in a store backed by a temporary
-        # directory, and so the object-store implementation can replace this
-        # one without touching the worker (ADR-023).
-        self._storage = storage or LocalMediaStorage(settings.media_storage_path)
+        # directory; otherwise built from the same factory the API uses, so the
+        # two processes cannot end up writing to different places (ADR-077).
+        self._storage = storage or build_media_storage(settings)
         self._queue = MediaQueue(redis.client)
         self._agents = AgentQueue(redis.client)
         self._running = False

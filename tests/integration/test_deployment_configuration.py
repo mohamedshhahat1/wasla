@@ -78,6 +78,19 @@ FEATURE_SETTINGS: dict[str, tuple[str, ...]] = {
     # worker takes no backups and is deliberately not told where the status
     # file is - see EXPECTED_ABSENT below (ADR-075).
     "backup_status_path": ("api",),
+    # Both, and this pair is the one where disagreement is silent rather than
+    # loud: the worker writes an attachment and the API serves it back, so a
+    # deployment where one is on `s3` and the other on `local` accepts files
+    # into one store and reads from another, and nothing anywhere says so
+    # (ADR-077).
+    "media_storage_backend": ("api", "worker"),
+    "media_storage_path": ("api", "worker"),
+    "media_max_bytes": ("api", "worker"),
+    "media_s3_": ("api", "worker"),
+    # The retention sweep runs in the worker; the API is given the same values
+    # so a mismatch is a configuration error rather than a behaviour nobody
+    # notices (ADR-078).
+    "media_retention_": ("api", "worker"),
 }
 
 # Fields a mapped prefix picks up that a given service deliberately does not
@@ -350,6 +363,74 @@ def test_the_api_reads_the_backup_status_but_cannot_write_it() -> None:
     assert all(
         mount.endswith(":ro") for mount in mounts
     ), f"the backup directory must be read-only in the API: {mounts}"
+
+
+# Values the *media* store uses. Named separately from BACKUP_ONLY on purpose:
+# these are the credentials the application processes legitimately hold, and the
+# whole point is that they are a different bucket under a different key from the
+# backups (ADR-077).
+MEDIA_STORE_SETTINGS: tuple[str, ...] = (
+    "MEDIA_S3_BUCKET",
+    "MEDIA_S3_ENDPOINT_URL",
+    "MEDIA_S3_ACCESS_KEY_ID",
+    "MEDIA_S3_SECRET_ACCESS_KEY",
+)
+
+
+@pytest.mark.parametrize("service", ["api", "worker"])
+def test_media_credentials_are_never_the_backup_credentials(service: str) -> None:
+    """The two stores must not be reachable with one key.
+
+    An application container that could reach the backup bucket could delete the
+    database and every copy of it, which is the one failure the off-host copy
+    exists to survive (ADR-075). Media storage gives the API and the worker an
+    object-store credential for the first time, so this asserts the thing that
+    makes that safe: it is a *different* credential, and the generic AWS pair
+    stays out of both processes.
+    """
+    declared = _service_environment(PROD_COMPOSE.read_text(encoding="utf-8"), service)
+
+    assert set(MEDIA_STORE_SETTINGS) <= declared, (
+        f"{service} cannot reach the media store: missing "
+        f"{sorted(set(MEDIA_STORE_SETTINGS) - declared)}"
+    )
+    assert not (declared & set(BACKUP_ONLY)), (
+        f"{service} holds backup-store settings: {sorted(declared & set(BACKUP_ONLY))}. "
+        "Media and backups are different buckets under different credentials."
+    )
+
+
+def test_the_backup_service_holds_no_media_credential() -> None:
+    """The other direction, and it matters as much.
+
+    The backup container is the one that may delete objects. Giving it the media
+    credential would put every customer attachment inside the blast radius of
+    the process whose whole job is deleting old files.
+    """
+    declared = _service_environment(PROD_COMPOSE.read_text(encoding="utf-8"), "backup")
+    held = declared & set(MEDIA_STORE_SETTINGS)
+
+    assert not held, f"the backup service holds media-store settings: {sorted(held)}"
+
+
+def test_the_media_store_is_never_mandatory_at_interpolation() -> None:
+    """A deployment on local disk must still come up.
+
+    `${VAR:?}` here would make the object store required by Compose rather than
+    by the application, which is the wrong place for the decision: `Settings`
+    knows that `s3` needs a bucket and `local` does not, and Compose does not
+    (ADR-062).
+    """
+    text = PROD_COMPOSE.read_text(encoding="utf-8")
+    for name in MEDIA_STORE_SETTINGS:
+        for line in re.findall(rf"^\s*{name}:.*$", text, re.M):
+            assert ":?" not in line, f"{name} is mandatory at interpolation: {line.strip()}"
+
+
+def test_the_media_secret_is_interpolated_rather_than_written_down() -> None:
+    text = PROD_COMPOSE.read_text(encoding="utf-8")
+    for line in re.findall(r"^\s*MEDIA_S3_SECRET_ACCESS_KEY:.*$", text, re.M):
+        assert line.split(":", 1)[1].strip().startswith("${")
 
 
 def test_production_never_allows_a_backup_that_stays_on_this_host() -> None:

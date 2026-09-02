@@ -2870,3 +2870,92 @@ would keep the defect alive for every file already in the store.
 Meta's own format support is narrower than this table in places. A file Meta
 will not carry comes back as a recorded rejection on the message rather than as
 a guess made locally, which is the same posture every other send already takes.
+
+## ADR-077 — Media Belongs in an Object Store, Signed Here
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Context:
+ADR-023 named the storage boundary and shipped one implementation behind it:
+local disk. That was always a stated limitation rather than a design. It
+requires the API and the worker to share a volume, which means one host — and
+one host is a single point at which every attachment every workspace ever
+received disappears, with the PostgreSQL backup carrying none of it. The audit
+called local-disk media a hard single-host ceiling and, separately, a disk-full
+incident waiting to happen.
+
+Decision:
+**An S3-compatible backend behind the existing `MediaStorage` protocol**, chosen
+by `MEDIA_STORAGE_BACKEND`. Local disk stays for development and is still the
+default; nothing about the interface, the key format or any caller changes.
+
+**One protocol, not one provider**, following ADR-075. AWS S3, MinIO, Cloudflare
+R2, Wasabi, Backblaze B2 and Ceph all speak the S3 object API, so one
+implementation reaches any of them and this repository chooses none.
+
+**The requests are signed here rather than by `boto3`.** The SDK is synchronous,
+so every `put` and `get` would cross a thread boundary in an application that is
+asynchronous end to end; it is a large addition to a deliberately small runtime
+image; and it brings its own retry, timeout and endpoint-resolution behaviour
+that would have to be pinned to match what every other client here does. The
+four operations this needs — PUT, GET, DELETE and HEAD on one object — are the
+simplest possible use of SigV4: no multipart, no pagination, no session tokens.
+The drill against a real MinIO is what proves it, and a signing bug is not
+subtle: the store answers 403 and nothing works.
+
+**This client is deliberately not `build_guarded_client`.** That guard exists
+because integration clients fetch URLs arriving in somebody else's response, and
+the worker sits inside the deployment network. An object store is not in that
+class: its endpoint comes from configuration and from nowhere else, and
+`http://minio:9000` is the correct value for a self-hosted stack — exactly as
+`DATABASE_URL` and `REDIS_URL` point at private addresses by design. Guarding it
+would break the ordinary deployment while protecting against nothing.
+`tests/unit/test_outbound_pinning.py` asserts the exemption and its reason
+rather than leaving it in a comment.
+
+**Fail closed, in every environment including `test`.** Selecting `s3` with an
+incomplete configuration refuses to start. A silent fall back to local disk
+would give the API and the worker each their own copy on their own container,
+every download would be a coin toss, and nothing anywhere would say why.
+
+**A different credential from the backups.** `MEDIA_S3_*` rather than the
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` pair the backup container holds.
+Media storage hands the API and the worker an object-store credential for the
+first time, and the property that keeps ADR-075 true is that it is a *different*
+bucket under a *different* key: a compromised application container still cannot
+reach the copies of the database. The deployment guard asserts both directions,
+including that the backup service holds no media credential — the container
+whose job is deleting old files must not have every customer attachment in its
+blast radius.
+
+**Private, with no way to ask otherwise.** No ACL header is ever sent, no
+presigned URL is ever produced, and a test asserts that over the module's code
+with its comments and strings stripped, because the property is "never, on any
+path" and the way it stops being true is a branch nothing exercises. Bytes reach
+a colleague by being streamed through the authenticated API.
+
+Consequences:
+Keys are unchanged — `{tenant}/{year}/{month}/{uuid}{ext}` from the same
+`build_key` — so a key written by one backend is a key the other can read, and
+migrating is copying objects rather than rewriting rows. The key is validated
+against the same pattern on the way out of both, because a key read back from a
+database row is input whatever wrote it.
+
+**A key prefix is a layout, not a boundary.** Tenant isolation is the scoped
+repository, and nothing about object storage changes that; the isolation tests
+run against both backends for exactly that reason.
+
+Storage errors are translated at the adapter. A caller gets `StorageError`,
+whose message names no infrastructure at all; an operator gets a log line with
+the operation and the status code, and never the bucket, the endpoint, the key,
+the credential or the store's own error body — which a misconfigured gateway
+will happily echo request headers into.
+
+The object-store tests skip without `TEST_S3_ENDPOINT_URL`, following the
+convention the PostgreSQL suite already uses. `docker compose --profile
+objectstore up -d minio` is enough to make them run, and they are worth running:
+mocking a `boto` call proves nothing about a signature.

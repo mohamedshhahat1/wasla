@@ -11,7 +11,7 @@ import json
 import re
 from functools import lru_cache
 from typing import Annotated, Any, Final, Literal
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -84,6 +84,35 @@ def _key_mode(key: str | None, prefix: str) -> str | None:
         if f"{prefix}_{mode}_" in key:
             return mode
     return None
+
+
+def _object_store_endpoint_problems(value: str) -> list[str]:
+    """Refuse an object-store endpoint that cannot mean what it says.
+
+    Deliberately looser than `_public_url_problems`. That one guards an origin
+    emailed to a person, so it must be reachable from the internet; this one
+    names infrastructure on the deployment network, and `http://minio:9000` is
+    the correct value in development and in a self-hosted stack.
+
+    What is refused is a value that is not a URL at all, or that carries a path,
+    query or fragment - `https://store.example.com/wasla` looks like it scopes
+    the bucket and does not; the bucket is `MEDIA_S3_BUCKET`, and a path here is
+    silently ignored by the signer, which is the sort of misconfiguration that
+    is discovered by a support ticket.
+    """
+    problems: list[str] = []
+    parsed = urlsplit(value.strip())
+
+    if parsed.scheme not in {"http", "https"}:
+        problems.append("MEDIA_S3_ENDPOINT_URL must start with http:// or https://")
+    if not parsed.netloc:
+        problems.append("MEDIA_S3_ENDPOINT_URL must name a host")
+    if parsed.path.strip("/") or parsed.query or parsed.fragment:
+        problems.append(
+            "MEDIA_S3_ENDPOINT_URL must be a bare origin such as https://s3.example.com: "
+            "the bucket is MEDIA_S3_BUCKET, and a path here is ignored"
+        )
+    return problems
 
 
 def _public_url_problems(value: str) -> list[str]:
@@ -287,11 +316,60 @@ class Settings(BaseSettings):
     openai_max_output_tokens: int = Field(default=2_048, ge=1, le=MAX_AGENT_OUTPUT_TOKENS)
 
     # Media
-    # Where downloaded attachments are written. A path on the local filesystem,
-    # which requires the API and worker containers to share a volume; object
-    # storage replaces this implementation without changing the setting
-    # (ADR-023).
+    # Which implementation of `MediaStorage` this deployment uses (ADR-077).
+    #
+    # `local` writes to `media_storage_path` and requires the API and worker to
+    # share a volume, which is a single-host arrangement and the right one for
+    # development. `s3` writes to an S3-compatible bucket and is the only
+    # option that survives a second host or the loss of the first.
+    #
+    # Selecting `s3` without complete credentials is refused at start-up rather
+    # than discovered when the first attachment arrives: a deployment that
+    # silently fell back to local disk would be one whose media is not where
+    # anybody thinks it is.
+    media_storage_backend: Literal["local", "s3"] = "local"
+    # Where downloaded attachments are written when the backend is `local`.
     media_storage_path: str = "/var/lib/wasla/media"
+    # The bucket, and the credentials that reach it. Deliberately *not* the
+    # `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` pair the backup container
+    # holds: those two must stay out of every application process, because a
+    # compromised API that could reach the backup bucket could delete the
+    # database and every copy of it (ADR-075). Media and backups are different
+    # buckets under different credentials, and the deployment drift guard
+    # asserts both directions.
+    media_s3_bucket: str | None = None
+    # Empty means AWS itself. Set it for MinIO, Cloudflare R2, Wasabi,
+    # Backblaze B2 or Ceph - one implementation covers all of them because
+    # they speak the same protocol.
+    media_s3_endpoint_url: str | None = None
+    media_s3_region: str = "us-east-1"
+    media_s3_access_key_id: str | None = None
+    media_s3_secret_access_key: str | None = None
+    # Path-style addressing (`endpoint/bucket/key`) rather than virtual-host
+    # (`bucket.endpoint/key`). Required by MinIO and by most self-hosted
+    # gateways, because there is no wildcard DNS in front of them.
+    media_s3_path_style: bool = True
+    # Asks the store to encrypt at rest, when the store supports being asked.
+    # `AES256` is server-side encryption with provider-managed keys; empty
+    # sends no header, which is right for a bucket that already has a default
+    # encryption rule and for stores that reject the header.
+    media_s3_server_side_encryption: str | None = None
+    # How long one object request may take. Separate from the provider timeout
+    # because this is infrastructure on the deployment network rather than
+    # somebody else's API across the internet.
+    media_s3_timeout_seconds: float = Field(default=30.0, gt=0)
+    # How long a stored file is kept before the retention sweep removes it
+    # (ADR-078). Zero disables the sweep, which is the default: deleting a
+    # customer's conversation history is a decision a deployment makes, not one
+    # a library makes for it.
+    media_retention_days: int = Field(default=0, ge=0)
+    # How many rows one retention pass claims. Bounded like every other sweep
+    # here, so a deployment with a large backlog takes several passes rather
+    # than one enormous transaction.
+    media_retention_batch_size: int = Field(default=200, gt=0, le=5_000)
+    # How often the retention sweep runs. Daily by default: retention is a date,
+    # and sweeping harder would be querying constantly to learn nothing.
+    media_retention_poll_seconds: float = Field(default=86_400.0, gt=0)
     # Larger than most of what WhatsApp permits, so the cap bites on video and
     # on nothing else. A file over it is recorded as skipped rather than
     # downloaded: the point is not to pay to move ninety megabytes in order to
@@ -867,6 +945,31 @@ class Settings(BaseSettings):
                     require_https=self.is_production,
                 )
             )
+
+        if self.media_storage_backend == "s3":
+            # Fail closed, and in *every* environment including `test`. The
+            # other integrations here are optional features whose absence is a
+            # button that does not appear; this one is a store that half the
+            # system writes to and the other half reads from, and a deployment
+            # that selected it and could not reach it would accept attachments
+            # and then serve nothing back.
+            #
+            # Falling back to local disk instead would be worse than failing:
+            # the API and the worker would each keep their own copy on their own
+            # container, every download would be a coin toss, and nothing
+            # anywhere would say so.
+            if not self.media_s3_bucket:
+                problems.append("MEDIA_S3_BUCKET must be set when MEDIA_STORAGE_BACKEND is s3")
+            if not self.media_s3_access_key_id:
+                problems.append(
+                    "MEDIA_S3_ACCESS_KEY_ID must be set when MEDIA_STORAGE_BACKEND is s3"
+                )
+            if not self.media_s3_secret_access_key:
+                problems.append(
+                    "MEDIA_S3_SECRET_ACCESS_KEY must be set when MEDIA_STORAGE_BACKEND is s3"
+                )
+            if self.media_s3_endpoint_url:
+                problems.extend(_object_store_endpoint_problems(self.media_s3_endpoint_url))
 
         if problems:
             raise ValueError(f"invalid {self.environment} configuration: " + "; ".join(problems))

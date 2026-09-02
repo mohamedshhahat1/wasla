@@ -423,3 +423,40 @@ async def test_no_integration_client_follows_redirects_by_itself():
     finally:
         for client in clients.values():
             await client.aclose()
+
+
+# ------------------------------------------- the one client that is not guarded
+
+
+def test_the_object_store_is_deliberately_not_an_integration_client():
+    """The media store is infrastructure, and the guard would break it.
+
+    `build_guarded_client` refuses private addresses because the clients it
+    builds fetch URLs that arrive in somebody else's response - a WhatsApp media
+    location, a redirect - and the worker sits inside the deployment network.
+
+    An object store is not in that class. Its endpoint comes from configuration
+    and from nowhere else, and `http://minio:9000` is the correct value for a
+    self-hosted stack, exactly as `DATABASE_URL` and `REDIS_URL` point at
+    private addresses by design. Guarding it would make the ordinary deployment
+    unreachable while protecting against nothing.
+
+    This is an assertion rather than a comment because the *reason* it is safe
+    is "no request, provider response or database row can influence the
+    endpoint", and the way that stops being true is somebody passing one in.
+    """
+    import inspect
+
+    from app.core.object_store import S3MediaStorage
+
+    signature = inspect.signature(S3MediaStorage.__init__)
+    assert "endpoint_url" in signature.parameters
+
+    # Built from `Settings` and from nothing else, so the endpoint is a
+    # deployment decision by construction.
+    source = inspect.getsource(S3MediaStorage.from_settings)
+    assert "settings.media_s3_endpoint_url" in source
+
+    # And nothing anywhere hands it a URL from another source.
+    callers = inspect.getsource(__import__("app.core.storage", fromlist=["x"]))
+    assert "endpoint_url" not in callers

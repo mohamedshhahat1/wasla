@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Protocol
 
+from app.core.config import Settings
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
 
@@ -179,3 +180,23 @@ class LocalMediaStorage:
         if not resolved.is_relative_to(root):
             raise StorageError()
         return resolved
+
+
+def build_media_storage(settings: Settings) -> MediaStorage:
+    """The store this deployment is configured for.
+
+    One function, so "which backend is running?" has a single answer that the
+    API dependency and the worker both reach for rather than each deciding.
+    They used to construct `LocalMediaStorage` separately, which was harmless
+    while there was one implementation and is exactly how two processes end up
+    writing to different places once there are two.
+
+    The import is deferred because `object_store` imports `Settings` and this
+    module is imported by nearly everything; a module-level import here would
+    make every consumer of a storage key pull in an HTTP client it does not use.
+    """
+    if settings.media_storage_backend == "s3":
+        from app.core.object_store import S3MediaStorage
+
+        return S3MediaStorage.from_settings(settings)
+    return LocalMediaStorage(settings.media_storage_path)
