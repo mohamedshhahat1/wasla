@@ -127,23 +127,37 @@ async def test_a_deployment_with_no_retention_still_runs_the_loop(tmp_path, reco
 
 
 async def test_a_failing_sweep_does_not_kill_the_loop(tmp_path, monkeypatch) -> None:
-    """A store unavailable for a day is not a reason to stop trying."""
+    """A store unavailable for a day is not a reason to stop trying.
+
+    The third failure is **waited for**, not slept past. How many iterations fit
+    inside a fixed window depends on the machine and on what else it is doing -
+    each one formats a traceback - so a count asserted against wall-clock is a
+    test that passes here and fails on a loaded CI runner, which is the worst
+    kind to own.
+    """
     attempts = 0
+    kept_going = asyncio.Event()
 
     async def explode(self, **kwargs):
         nonlocal attempts
         attempts += 1
+        if attempts >= 3:
+            kept_going.set()
         raise RuntimeError("the store is on fire")
 
     monkeypatch.setattr(RecordingService, "reconcile", explode)
     worker = _worker(tmp_path, media_retention_days=30)
 
     task = asyncio.create_task(worker.run_forever())
-    await asyncio.sleep(0.05)
-    worker.stop()
-    await asyncio.wait_for(task, timeout=2)
+    try:
+        # Generous, because the assertion is "it kept going" and not "it kept
+        # going quickly". A loop that died fails by timing out here.
+        await asyncio.wait_for(kept_going.wait(), timeout=10)
+    finally:
+        worker.stop()
+        await asyncio.wait_for(task, timeout=5)
 
-    assert attempts > 1, "the loop stopped after the first failure"
+    assert attempts >= 3, "the loop stopped after the first failure"
 
 
 async def test_stopping_does_not_wait_out_the_interval(tmp_path) -> None:

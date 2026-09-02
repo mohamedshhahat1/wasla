@@ -19,6 +19,7 @@ from app.workers.follow_up_worker import FollowUpWorker
 from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_worker import MediaWorker
 from app.workers.recovery import RecoveryWorker
+from app.workers.retention_worker import RetentionWorker
 from app.workers.runner import (
     AGENT,
     ALL_KINDS,
@@ -138,6 +139,11 @@ def test_each_kind_builds_its_own_worker(settings):
         # processes were holding when they died, so a deployment that runs it
         # nowhere has no crash recovery at all (ADR-074).
         RecoveryWorker,
+        # Retention is present by the same rule: a deployment that had to name
+        # it is one where forgetting to is a media store that grows for ever
+        # with nothing to say so. It removes nothing until MEDIA_RETENTION_DAYS
+        # is set, but its reconciliation pass still has to run (ADR-078).
+        RetentionWorker,
     ]
 
 
