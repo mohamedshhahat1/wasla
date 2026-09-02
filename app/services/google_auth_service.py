@@ -7,6 +7,14 @@ implementation detail. Two orderings in particular.
 state is refused without a single outbound request, so a stranger cannot make
 this process talk to Google on their schedule.
 
+**The browser is proven before the code is exchanged too.** A state proves this
+server issued it; it cannot prove who asked, because the API is cookieless. So
+each flow additionally records the digest of a secret held by the initiating
+browser, and a callback must present a cookie that hashes to it (ADR-066).
+Without that, an attacker could run an authorization on their own account and
+have a victim's browser complete it - signing the victim into the attacker's
+account (SEC-07).
+
 **`email_verified` is checked before any account is looked up.** This is what
 lets the collision response name the collision without becoming an enumeration
 oracle. Anybody who gets as far as the lookup has proven, cryptographically,
@@ -39,6 +47,7 @@ from app.core.exceptions import (
     PermissionDeniedError,
 )
 from app.core.logging import get_logger
+from app.core.oauth_binding import hash_binding, matches
 from app.core.oauth_flow import (
     FLOW_TTL_SECONDS,
     FlowKind,
@@ -109,22 +118,35 @@ class GoogleAuthService:
         self._identities = FederatedIdentityRepository(session)
         self._audit = AuditTrail(session)
 
-    async def start_login(self) -> tuple[str, int]:
-        """Begin an unauthenticated sign-in attempt."""
-        return await self._start(kind=FlowKind.LOGIN, user=None)
+    async def start_login(self, *, binding: str) -> tuple[str, int]:
+        """Begin an unauthenticated sign-in attempt.
 
-    async def start_link(self, *, user: User) -> tuple[str, int]:
+        `binding` is the secret held by the initiating browser. Only its digest
+        is stored, and the callback has to present a cookie that hashes to it.
+        """
+        return await self._start(kind=FlowKind.LOGIN, user=None, binding=binding)
+
+    async def start_link(self, *, user: User, binding: str) -> tuple[str, int]:
         """Begin a linking attempt on behalf of somebody already signed in.
 
         The account is recorded in the flow, not carried through the browser.
         That is what binds the eventual callback to this person: the identity is
         attached to whoever started the flow, and there is no request field the
         caller could set to change that.
-        """
-        return await self._start(kind=FlowKind.LINK, user=user)
 
-    async def _start(self, *, kind: FlowKind, user: User | None) -> tuple[str, int]:
-        started = await self._flows.start(kind=kind, user_id=user.id if user else None)
+        The browser binding is the second half and is not redundant with it. The
+        account answers *whose* identity would be attached; the binding answers
+        *who asked*, and linking is the more sensitive of the two flows because
+        a successful one adds a permanent way into an existing account.
+        """
+        return await self._start(kind=FlowKind.LINK, user=user, binding=binding)
+
+    async def _start(self, *, kind: FlowKind, user: User | None, binding: str) -> tuple[str, int]:
+        started = await self._flows.start(
+            kind=kind,
+            binding=hash_binding(binding),
+            user_id=user.id if user else None,
+        )
         url = self._client.authorization_url(
             state=started.state,
             nonce=started.flow.nonce,
@@ -149,10 +171,21 @@ class GoogleAuthService:
         *,
         code: str,
         state: str,
+        binding: str | None,
         workspace_slug: str | None = None,
     ) -> AuthenticatedSession:
-        """Finish a sign-in, creating the account if this is a first login."""
-        _, claims = await self._redeem(code=code, state=state, expected=FlowKind.LOGIN)
+        """Finish a sign-in, creating the account if this is a first login.
+
+        `binding` is the secret the calling browser presented, or `None` if it
+        presented none. A callback from a browser that did not start the flow
+        is refused before anything is looked up.
+        """
+        _, claims = await self._redeem(
+            code=code,
+            state=state,
+            binding=binding,
+            expected=FlowKind.LOGIN,
+        )
 
         identity = await self._identities.get_by_subject(
             provider=_PROVIDER,
@@ -360,14 +393,30 @@ class GoogleAuthService:
         )
         return session
 
-    async def complete_link(self, *, user: User, code: str, state: str) -> FederatedIdentity:
+    async def complete_link(
+        self,
+        *,
+        user: User,
+        code: str,
+        state: str,
+        binding: str | None,
+    ) -> FederatedIdentity:
         """Attach a Google account to the person who started the flow.
 
-        The binding is `flow.user_id`, recorded server-side when the flow began.
-        Not a request field, not the token's email address - there is nothing
-        here a caller can set to make the identity land on a different account.
+        Two independent bindings, and both are required. `flow.user_id` is
+        recorded server-side when the flow began, so there is nothing here a
+        caller can set to make the identity land on a different account; the
+        browser binding, checked inside `_redeem`, additionally requires the
+        callback to come from the browser that asked. A stolen state completed
+        from anywhere else fails the second even when the session passes the
+        first.
         """
-        flow, claims = await self._redeem(code=code, state=state, expected=FlowKind.LINK)
+        flow, claims = await self._redeem(
+            code=code,
+            state=state,
+            binding=binding,
+            expected=FlowKind.LINK,
+        )
         if flow.user_id != user.id:
             # A link flow finished by somebody other than the account that
             # started it. Either a mix-up or an attempt to graft an identity
@@ -502,14 +551,22 @@ class GoogleAuthService:
         *,
         code: str,
         state: str,
+        binding: str | None,
         expected: FlowKind,
     ) -> tuple[OAuthFlow, GoogleIdentityClaims]:
-        """Spend the state, exchange the code, and validate what comes back.
+        """Spend the state, prove the browser, exchange the code, validate it.
 
         The state is spent *first*. Everything after that line runs only for a
         caller who presented a state this process issued, has not been used, and
         was issued for this kind of flow - so a replay cannot reach the network,
         and a login flow cannot be finished at the linking endpoint.
+
+        The browser check comes **second, and still before the exchange**. Two
+        consequences, both wanted. A callback from the wrong browser never
+        causes an outbound request to Google, so it costs nothing and reveals
+        nothing. And it does consume the state, which is the right way round:
+        the flow whose state is burnt belongs to whoever is presenting it, and
+        in the attack this exists to stop that is the attacker.
         """
         flow = await self._flows.spend(state=state)
         if flow is None or flow.kind is not expected:
@@ -519,6 +576,21 @@ class GoogleAuthService:
                     "event": "google.state_refused",
                     "expected": expected.value,
                     "found": flow.kind.value if flow else None,
+                },
+            )
+            raise AuthenticationError(GOOGLE_FAILED)
+
+        if not matches(secret=binding, expected=flow.binding):
+            # The state was real and this is not the browser that asked for it:
+            # login CSRF, or a genuinely mixed-up client. Logged as a category,
+            # never with either value - and answered with the same message every
+            # other failure gets, so it cannot be told apart from a bad state.
+            logger.warning(
+                "google.browser_binding_refused",
+                extra={
+                    "event": "google.browser_binding_refused",
+                    "kind": expected.value,
+                    "presented": binding is not None,
                 },
             )
             raise AuthenticationError(GOOGLE_FAILED)

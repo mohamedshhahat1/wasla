@@ -1,9 +1,10 @@
 """In-flight OAuth authorization attempts.
 
 One record per attempt, in Redis, under a key nobody can guess. It holds the
-three values that have to survive a round trip through somebody else's website:
-the nonce that will appear in the ID token, the PKCE verifier that will redeem
-the authorization code, and - for a linking attempt - which account started it.
+values that have to survive a round trip through somebody else's website: the
+nonce that will appear in the ID token, the PKCE verifier that will redeem the
+authorization code, the digest of the secret held by the browser that started
+it, and - for a linking attempt - which account started it.
 
 Keeping them together is deliberate. Three separate stores would be three
 chances to validate one and forget another; here there is no way to check the
@@ -99,6 +100,11 @@ class OAuthFlow:
     kind: FlowKind
     nonce: str
     code_verifier: str
+    # SHA-256 of the secret handed to the initiating browser in a cookie. This
+    # is what binds the attempt to a browser rather than only to this server
+    # (ADR-066): the state proves we issued it, and this proves who asked. Only
+    # the digest is here, so a reader of this keyspace cannot complete a flow.
+    binding: str
     # Set only for a link. This is what binds a linking attempt to one account:
     # the identity is attached to whoever started the flow, never to whoever
     # matches the email address in the token.
@@ -134,6 +140,7 @@ def _encode(flow: OAuthFlow) -> str:
             "kind": flow.kind.value,
             "nonce": flow.nonce,
             "code_verifier": flow.code_verifier,
+            "binding": flow.binding,
             "user_id": str(flow.user_id) if flow.user_id else None,
         }
     )
@@ -156,11 +163,19 @@ def _decode(payload: str) -> OAuthFlow | None:
     kind = raw.get("kind")
     nonce = raw.get("nonce")
     verifier = raw.get("code_verifier")
+    binding = raw.get("binding")
     if kind not in tuple(item.value for item in FlowKind):
         return None
     if not isinstance(nonce, str) or not nonce:
         return None
     if not isinstance(verifier, str) or not verifier:
+        return None
+    if not isinstance(binding, str) or not binding:
+        # Required, not defaulted. A record without one is either corrupt or
+        # was written by a build that predates browser binding, and treating
+        # either as "no binding needed" would be a check that switches itself
+        # off. The cost is that flows in flight across a deploy are refused;
+        # they live ten minutes and the person retries.
         return None
 
     user_id: uuid.UUID | None = None
@@ -177,6 +192,7 @@ def _decode(payload: str) -> OAuthFlow | None:
         kind=FlowKind(kind),
         nonce=nonce,
         code_verifier=verifier,
+        binding=binding,
         user_id=user_id,
     )
 
@@ -187,13 +203,25 @@ class OAuthFlowStore:
     def __init__(self, redis: RedisClient) -> None:
         self._redis = redis
 
-    async def start(self, *, kind: FlowKind, user_id: uuid.UUID | None = None) -> StartedFlow:
-        """Mint an attempt and remember it for :data:`FLOW_TTL_SECONDS`."""
+    async def start(
+        self,
+        *,
+        kind: FlowKind,
+        binding: str,
+        user_id: uuid.UUID | None = None,
+    ) -> StartedFlow:
+        """Mint an attempt and remember it for :data:`FLOW_TTL_SECONDS`.
+
+        `binding` is the digest of the initiating browser's secret, computed by
+        the caller. This store never sees the secret itself, which is what keeps
+        the value in Redis from being enough to finish the flow.
+        """
         state = secrets.token_urlsafe(STATE_BYTES)
         flow = OAuthFlow(
             kind=kind,
             nonce=secrets.token_urlsafe(NONCE_BYTES),
             code_verifier=secrets.token_urlsafe(VERIFIER_BYTES),
+            binding=binding,
             user_id=user_id,
         )
 

@@ -2101,3 +2101,92 @@ unbounded claim reached a column — and the one where the damage would land on
 somebody who already had a working account.
 
 No migration: every bound is the width the schema already has.
+
+## ADR-066 — An OAuth State Proves the Server Issued It; a Cookie Proves Who Asked
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Decision:
+Both Google `authorize` routes hand the browser a 256-bit secret in a
+short-lived cookie and store its SHA-256 in the flow record beside the state,
+nonce and PKCE verifier. Both callback routes require a cookie that hashes to
+the stored digest, checked with `compare_digest` after the state is spent and
+before the code is exchanged. It is the only cookie this API sets.
+
+Context:
+ADR-047 recorded a known gap and did not close it. The state is 256-bit,
+single-use, ten-minute and server-side, which establishes that *this server
+issued it*; because the API is cookieless there was nothing in a callback that
+established *this browser asked for it*. So an attacker could complete a Google
+authorization on their own account, capture the `code` and `state`, and induce a
+victim's browser to post them — signing the victim into the attacker's account
+(SEC-07, CWE-352). Linking was partly protected already, because the flow record
+holds the initiating account, but only partly: it bounded *whose* account an
+identity could land on, not *who* could cause the landing.
+
+Reason:
+**A cookie is the only thing that answers the question.** The missing property
+is "this request comes from the user agent that started the flow", and a user
+agent has exactly one place to keep something across a redirect it does not
+control. PKCE binds the code to this *server*, not to a browser; a header cannot
+survive Google's redirect; a value in the URL is not a secret because it travels
+through the attacker's hands.
+
+**What is on the browser is a secret, not a session.** No Google token, no PKCE
+verifier, no nonce, no user or tenant id. Presented without a live state it is
+worth nothing, and every other route ignores it — which is what leaves SEC-18's
+reasoning intact: this API has no CSRF tokens because it authenticates by bearer
+token, and it stays true because this cookie authorizes nothing. It is also why
+introducing a cookie does not change the CORS argument in `Settings`.
+
+**Only the digest is stored.** A reader of the OAuth keyspace in Redis should
+not come away able to finish somebody's flow. SHA-256 rather than a slow hash
+for `hash_invitation_token`'s reason: 256 bits of randomness leave nothing to
+brute-force.
+
+**One secret per browser, not per flow.** A fresh value on every initiation
+would mean opening Google sign-in in a second tab silently broke the first, and
+the refusal the person then saw would be indistinguishable from an attack.
+Reusing a well-formed cookie makes concurrent flows work; the cost is that the
+secret outlives one flow, which is acceptable for an `HttpOnly`, host-only value
+that expires with the flow window and that anybody able to read could only read
+by already owning the browser.
+
+**The check runs after the state is spent and before the exchange.** After,
+because the flow being consumed belongs to whoever presents it — in the attack
+that is the attacker, so the burn costs them and not the victim, and the
+victim's own flow is untouched. Before, because a callback from the wrong
+browser must not cause an outbound request to Google or spend an authorization
+code.
+
+**Cleared on success, never on failure.** Success means the secret has done its
+job. Clearing on failure would hand anybody who can induce one forged callback
+the ability to destroy a legitimate flow running in the victim's browser — the
+defence would become a denial of service against the person it defends.
+
+Consequences:
+The concurrency behaviour is stated rather than discovered: two flows started in
+one browser share its secret and both are completable until one succeeds, at
+which point the other must be restarted. `authorize` mints a new secret
+immediately, so this is a restart and not a lockout, and it is pinned by a test.
+
+`SameSite=Lax` is depth, not the mechanism — the binding holds whatever a
+browser does with the cookie. It does require the frontend and the API to be
+same-site, which is the topology `GOOGLE_REDIRECT_URI` already assumes.
+
+The name is `__Host-wasla_oauth` where TLS terminates and `wasla_oauth`
+elsewhere, because a `__Host-` cookie without `Secure` is rejected by browsers
+outright: keeping the prefix over plain HTTP would mean no cookie and no local
+Google sign-in, rather than a weaker one.
+
+A flow record with no stored binding is refused rather than treated as
+unbound — a check that switches itself off when its input is missing is not a
+check. The cost is that flows in flight across the deploy that introduces this
+are refused; they live ten minutes and the person retries.
+
+No migration and no new configuration: the digest goes in the existing Redis
+flow record, and whether the cookie is secure is derived from `ENVIRONMENT`.

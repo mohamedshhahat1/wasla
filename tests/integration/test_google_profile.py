@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.config import Settings
+from app.core.oauth_binding import hash_binding
 from app.core.oauth_flow import FlowKind, OAuthFlow
 from app.core.token_store import RefreshTokenStore
 from app.db.models.identity import FederatedIdentity, IdentityProvider
@@ -115,17 +116,36 @@ def _service(db_session, settings: Settings, claims: GoogleIdentityClaims, *, fl
     )
 
 
+# The secret a browser would have been given at `authorize`, and the digest the
+# flow record would hold. Real values rather than placeholders, because
+# `_redeem` compares them and a flow built with a stand-in digest would refuse
+# every login in this file.
+BROWSER_SECRET = "browser-binding-secret-for-these-tests"
+BROWSER_BINDING = hash_binding(BROWSER_SECRET)
+
+
 def _login_flow() -> OAuthFlow:
-    return OAuthFlow(kind=FlowKind.LOGIN, nonce="n", code_verifier="v")
+    return OAuthFlow(
+        kind=FlowKind.LOGIN,
+        nonce="n",
+        code_verifier="v",
+        binding=BROWSER_BINDING,
+    )
 
 
 def _link_flow(user_id: uuid.UUID) -> OAuthFlow:
-    return OAuthFlow(kind=FlowKind.LINK, nonce="n", code_verifier="v", user_id=user_id)
+    return OAuthFlow(
+        kind=FlowKind.LINK,
+        nonce="n",
+        code_verifier="v",
+        binding=BROWSER_BINDING,
+        user_id=user_id,
+    )
 
 
 async def _login(db_session, settings, claims: GoogleIdentityClaims, *, state: str) -> None:
     await _service(db_session, settings, claims, flow=_login_flow()).complete_login(
-        code="a-code", state=state
+        code="a-code", state=state, binding=BROWSER_SECRET
     )
     await db_session.flush()
 
@@ -221,7 +241,7 @@ async def test_linking_gives_a_password_account_its_first_picture(db_session, se
 
     linked = _claims(email="existing@example.com")
     await _service(db_session, settings, linked, flow=_link_flow(user.id)).complete_link(
-        user=user, code="a-code", state="s"
+        user=user, code="a-code", state="s", binding=BROWSER_SECRET
     )
     await db_session.flush()
 

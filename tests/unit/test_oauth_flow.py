@@ -19,6 +19,7 @@ import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.core.exceptions import DependencyUnavailableError
+from app.core.oauth_binding import hash_binding
 from app.core.oauth_flow import (
     FLOW_TTL_SECONDS,
     KEY_PREFIX,
@@ -98,6 +99,12 @@ class _FakeRedis:
         return self.commands
 
 
+# A digest, because that is what the store is given: the secret itself never
+# reaches it, which is what keeps the value in Redis from being enough to finish
+# a flow.
+BINDING = hash_binding("a-browser-binding-secret")
+
+
 def _store():
     fake = _FakeRedis()
     return OAuthFlowStore(cast("RedisClient", fake)), fake
@@ -108,7 +115,7 @@ def _store():
 
 async def test_a_flow_can_be_started_and_spent_once():
     store, _ = _store()
-    started = await store.start(kind=FlowKind.LOGIN)
+    started = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
 
     spent = await store.spend(state=started.state)
     assert spent is not None
@@ -125,7 +132,7 @@ async def test_state_and_nonce_are_unpredictable():
     states = set()
     nonces = set()
     for _ in range(20):
-        started = await store.start(kind=FlowKind.LOGIN)
+        started = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
         states.add(started.state)
         nonces.add(started.flow.nonce)
     assert len(states) == 20
@@ -136,7 +143,7 @@ async def test_state_and_nonce_are_unpredictable():
 
 async def test_a_flow_is_stored_with_a_bounded_lifetime():
     store, fake = _store()
-    started = await store.start(kind=FlowKind.LOGIN)
+    started = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
     assert fake.commands.expiries[f"{KEY_PREFIX}{started.state}"] == FLOW_TTL_SECONDS
 
 
@@ -161,8 +168,8 @@ async def test_a_misshapen_state_never_becomes_a_lookup(state):
 
 async def test_a_flow_records_which_kind_it_is():
     store, _ = _store()
-    login = await store.start(kind=FlowKind.LOGIN)
-    link = await store.start(kind=FlowKind.LINK, user_id=uuid.uuid4())
+    login = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
+    link = await store.start(kind=FlowKind.LINK, binding=BINDING, user_id=uuid.uuid4())
 
     assert (await store.spend(state=login.state)).kind is FlowKind.LOGIN
     assert (await store.spend(state=link.state)).kind is FlowKind.LINK
@@ -171,7 +178,7 @@ async def test_a_flow_records_which_kind_it_is():
 async def test_a_link_flow_remembers_the_account_that_started_it():
     store, _ = _store()
     user_id = uuid.uuid4()
-    started = await store.start(kind=FlowKind.LINK, user_id=user_id)
+    started = await store.start(kind=FlowKind.LINK, binding=BINDING, user_id=user_id)
     spent = await store.spend(state=started.state)
     assert spent is not None
     assert spent.user_id == user_id
@@ -179,13 +186,13 @@ async def test_a_link_flow_remembers_the_account_that_started_it():
 
 async def test_a_login_flow_carries_no_account():
     store, _ = _store()
-    started = await store.start(kind=FlowKind.LOGIN)
+    started = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
     assert (await store.spend(state=started.state)).user_id is None
 
 
 async def test_a_corrupt_record_is_treated_as_absent():
     store, fake = _store()
-    started = await store.start(kind=FlowKind.LOGIN)
+    started = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
     fake.commands.values[f"{KEY_PREFIX}{started.state}"] = "{not json"
     assert await store.spend(state=started.state) is None
 
@@ -197,14 +204,14 @@ async def test_starting_a_flow_fails_closed_when_redis_is_down():
     store, fake = _store()
     fake.commands.broken = True
     with pytest.raises(DependencyUnavailableError):
-        await store.start(kind=FlowKind.LOGIN)
+        await store.start(kind=FlowKind.LOGIN, binding=BINDING)
 
 
 async def test_spending_a_flow_fails_closed_when_redis_is_down():
     """ADR-051. A replay control that answers "not found" during an outage is a
     replay control that has been switched off, so this raises instead."""
     store, fake = _store()
-    started = await store.start(kind=FlowKind.LOGIN)
+    started = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
     fake.commands.broken = True
     with pytest.raises(DependencyUnavailableError):
         await store.spend(state=started.state)
@@ -229,7 +236,7 @@ def test_the_challenge_never_contains_the_verifier():
 
 async def test_the_verifier_meets_the_rfc_length_floor():
     store, _ = _store()
-    started = await store.start(kind=FlowKind.LOGIN)
+    started = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
     assert 43 <= len(started.flow.code_verifier) <= 128
 
 
