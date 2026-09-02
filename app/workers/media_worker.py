@@ -41,13 +41,19 @@ from app.integrations.whatsapp.client import build_http_client as build_whatsapp
 from app.repositories.media_repository import ConversationMediaGate, MediaRepository
 from app.services.media_reader import MediaReader
 from app.services.media_service import MediaService
+from app.workers.dispatch import JobIdentity, handle_failure, record_success
 from app.workers.media_queue import BLOCK_SECONDS, MediaJob, MediaQueue
-from app.workers.queue import AgentJob, AgentQueue, MalformedJobError
+from app.workers.queue import AgentJob, AgentQueue, JobEnvelope, MalformedJobError
+from app.workers.retry import IDEMPOTENT_RETRY, NO_RETRY, FailureCategory
 
 logger = get_logger(__name__)
 
 # How long to wait after a failed reserve before trying again.
 RETRY_DELAY_SECONDS = 5.0
+
+# The name this queue reports itself under, in metrics and in dead-letter
+# records. Short and fixed, because it is a metric label.
+JOB_TYPE = "media"
 
 # The two halves that talk to somebody else's service, injectable so a test can
 # drive the loop without a network. The same shape `FollowUpWorker` uses for its
@@ -123,22 +129,40 @@ class MediaWorker:
         if raw is None:
             return False
 
+        envelope = JobEnvelope.decode(raw)
         try:
-            job = MediaJob.decode(raw)
+            job = MediaJob.decode(envelope.body)
         except MalformedJobError:
             # Retrying would fail identically forever.
             logger.warning("media.job_malformed")
-            await self._queue.fail(raw)
+            await handle_failure(
+                self._queue,
+                raw,
+                envelope,
+                job_type=JOB_TYPE,
+                identity=JobIdentity(),
+                category=FailureCategory.MALFORMED,
+                policy=NO_RETRY,
+            )
             return True
 
         try:
             await self._handle(job)
-        except Exception:
+        except Exception as error:
             logger.exception("media.job_failed", extra={"media_id": str(job.media_id)})
-            await self._queue.fail(raw)
+            await handle_failure(
+                self._queue,
+                raw,
+                envelope,
+                job_type=JOB_TYPE,
+                identity=JobIdentity(tenant_id=job.tenant_id, job_id=job.media_id),
+                error=error,
+                policy=IDEMPOTENT_RETRY,
+            )
             return True
 
         await self._queue.release(raw)
+        await record_success(job_type=JOB_TYPE)
         return True
 
     async def _handle(self, job: MediaJob) -> None:

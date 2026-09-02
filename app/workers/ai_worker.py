@@ -11,6 +11,16 @@ consistency boundary for the whole turn, and the alternative of writing in a
 second session would let a handoff commit while the reply that explained it did
 not. The cost is a pooled connection held for the length of an inference, which
 bounds how many workers one pool supports.
+
+**Why this queue retries less than the others.** An agent turn is not
+idempotent. It reserves an allowance, it may call tools that write rows, and
+it ends by sending a customer a WhatsApp message that carries no idempotency
+key - so running it twice is a second answer to one question, which is worse
+for the customer than no answer at all. What *is* safe to repeat is everything
+before the provider is engaged: loading the workspace, reading the allowance,
+looking up the agent. Those touch nothing outside a transaction that rolls
+back. `_TurnProgress` marks the moment that stops being true, and the moment
+it is marked this worker's retry policy becomes `NO_RETRY` (ADR-068).
 """
 
 from __future__ import annotations
@@ -37,12 +47,44 @@ from app.services.messaging_service import MessagingService
 from app.services.sentiment_reader import SentimentAnalyzer
 from app.services.sentiment_service import SentimentService
 from app.services.usage_service import UsageRecorder
-from app.workers.queue import BLOCK_SECONDS, AgentJob, AgentQueue, MalformedJobError
+from app.workers.dispatch import JobIdentity, handle_failure, record_success
+from app.workers.queue import (
+    BLOCK_SECONDS,
+    AgentJob,
+    AgentQueue,
+    JobEnvelope,
+    MalformedJobError,
+)
+from app.workers.retry import NO_RETRY, FailureCategory, RetryPolicy
 
 logger = get_logger(__name__)
 
 # How long to wait after a failed reserve before trying again.
 RETRY_DELAY_SECONDS = 5.0
+
+# The name this queue reports itself under, in metrics and in dead-letter
+# records. Short and fixed, because it is a metric label.
+JOB_TYPE = "agent"
+
+# Deliberately shorter than the idempotent queues': the only failures this
+# policy can ever see are the ones raised before a turn engaged the provider,
+# and those are infrastructure blips that either clear in seconds or are not
+# clearing today.
+AGENT_RETRY = RetryPolicy(max_attempts=3, base_seconds=2.0, max_seconds=30.0)
+
+
+class _TurnProgress:
+    """Whether this turn has done anything the outside world can see.
+
+    Set immediately before the HTTP client is built, which is the last moment
+    at which nothing has left this process. After it, a retry could bill a
+    second inference or send a second reply, so `run_once` stops offering one.
+    """
+
+    __slots__ = ("engaged",)
+
+    def __init__(self) -> None:
+        self.engaged = False
 
 
 class AgentWorker:
@@ -95,31 +137,55 @@ class AgentWorker:
 
         Nothing raised by a single job escapes this method. A worker that dies
         on one bad job stops answering every other customer too, so the failure
-        is contained to the job and recorded in the dead-letter list.
+        is contained to the job and either retried or recorded in the
+        dead-letter list.
         """
         raw = await self._queue.reserve(wait_seconds=wait_seconds)
         if raw is None:
             return False
 
+        envelope = JobEnvelope.decode(raw)
         try:
-            job = AgentJob.decode(raw)
+            job = AgentJob.decode(envelope.body)
         except MalformedJobError:
             # Retrying would fail identically forever.
             logger.warning("agent.job_malformed")
-            await self._queue.fail(raw)
+            await handle_failure(
+                self._queue,
+                raw,
+                envelope,
+                job_type=JOB_TYPE,
+                identity=JobIdentity(),
+                category=FailureCategory.MALFORMED,
+                policy=NO_RETRY,
+            )
             return True
 
+        progress = _TurnProgress()
         try:
-            await self._handle(job)
-        except Exception:
+            await self._handle(job, progress)
+        except Exception as error:
             logger.exception(
                 "agent.job_failed",
                 extra={"conversation_id": str(job.conversation_id)},
             )
-            await self._queue.fail(raw)
+            await handle_failure(
+                self._queue,
+                raw,
+                envelope,
+                job_type=JOB_TYPE,
+                identity=JobIdentity(tenant_id=job.tenant_id, job_id=job.conversation_id),
+                error=error,
+                # The whole of this queue's retry safety, in one expression.
+                # Once the turn has engaged the provider there is no failure
+                # this worker can distinguish from one that already sent a
+                # reply, so it stops offering another attempt.
+                policy=NO_RETRY if progress.engaged else AGENT_RETRY,
+            )
             return True
 
         await self._queue.release(raw)
+        await record_success(job_type=JOB_TYPE)
         return True
 
     def _reservation(self, tenant_id: uuid.UUID) -> Callable[[], Awaitable[bool]]:
@@ -152,7 +218,7 @@ class AgentWorker:
 
         return reserve
 
-    async def _handle(self, job: AgentJob) -> None:
+    async def _handle(self, job: AgentJob, progress: _TurnProgress) -> None:
         async with self._database.session() as session:
             entitlements = EntitlementService(
                 session,
@@ -198,6 +264,10 @@ class AgentWorker:
                         extra={"agent_id": str(job.agent_id)},
                     )
 
+            # Past this line the turn can reserve an allowance, call the
+            # provider and send a customer a message, none of which a second
+            # attempt could tell had already happened.
+            progress.engaged = True
             async with build_http_client() as http:
                 api_key = self._settings.openai_api_key or ""
                 client = ResponsesClient(http=http, api_key=api_key)

@@ -50,6 +50,7 @@ from app.services.media_reader import TRANSCRIPTION_METHOD, VISION_METHOD, ReadR
 from app.services.media_service import MediaService
 from app.services.messaging_service import MessagingService
 from app.services.whatsapp_service import WhatsAppIngestionService
+from app.workers.ai_worker import _TurnProgress
 from app.workers.queue import AgentJob
 
 pytestmark = pytest.mark.integration
@@ -599,8 +600,15 @@ async def test_an_agent_turn_meters_its_provider_calls_and_tokens(
 
     # Two tool rounds are two provider calls, and the tokens are their sum.
     worker = _worker(monkeypatch, db_session, settings, _outcome(reply="Certainly.", rounds=2))
-    await worker._handle(AgentJob(tenant_id=tenant.id, conversation_id=conversation.id))
+    progress = _TurnProgress()
+    await worker._handle(AgentJob(tenant_id=tenant.id, conversation_id=conversation.id), progress)
     await db_session.flush()
+
+    # The turn reached the provider, so it is no longer safe to retry: a second
+    # run would bill another inference and send the customer a second reply
+    # (ADR-068). Asserted here rather than only in the unit suite, because this
+    # is the one test that drives the real `_handle` end to end.
+    assert progress.engaged is True
 
     totals = await _totals(db_session, tenant)
     assert totals[UsageEventType.AI_INPUT_TOKEN] == 420
@@ -630,8 +638,12 @@ async def test_a_turn_that_says_nothing_is_still_metered(
     conversation = await _conversation(db_session, tenant, account)
 
     worker = _worker(monkeypatch, db_session, settings, _outcome(handed_off=True))
-    await worker._handle(AgentJob(tenant_id=tenant.id, conversation_id=conversation.id))
+    progress = _TurnProgress()
+    await worker._handle(AgentJob(tenant_id=tenant.id, conversation_id=conversation.id), progress)
     await db_session.flush()
+
+    # A handoff still engaged the provider, so it is still not retryable.
+    assert progress.engaged is True
 
     totals = await _totals(db_session, tenant)
     # Tokens are metered whether or not the turn produced words - a handoff

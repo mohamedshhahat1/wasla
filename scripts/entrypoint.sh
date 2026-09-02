@@ -37,6 +37,14 @@ case "${command}" in
   migrate)
     exec alembic upgrade head
     ;;
+  queues)
+    # The operator's view of the queues: depths, dead-letter records, and the
+    # replay path back out of one. Deliberately a command rather than an HTTP
+    # endpoint, because replaying an agent job sends somebody's customer a
+    # message (ADR-071).
+    shift || true
+    exec python -m app.workers.queues "$@"
+    ;;
   *)
     exec "$@"
     ;;

@@ -216,6 +216,7 @@ async def test_an_exhausted_ai_allowance_stops_the_turn_without_failing_the_job(
     from app.core.config import Settings
     from app.db.models.tenant import Tenant as TenantModel
     from app.workers import ai_worker as worker_module
+    from app.workers.ai_worker import _TurnProgress
     from app.workers.queue import AgentJob
 
     tenant = TenantModel(name="Acme", slug="acme")
@@ -245,5 +246,11 @@ async def test_an_exhausted_ai_allowance_stops_the_turn_without_failing_the_job(
     )
 
     # Returns rather than raises: the job is released, not dead-lettered.
-    await worker._handle(AgentJob(tenant_id=tenant.id, conversation_id=uuid.uuid4()))
+    progress = _TurnProgress()
+    await worker._handle(AgentJob(tenant_id=tenant.id, conversation_id=uuid.uuid4()), progress)
+
+    # And it never reached the provider, so had it failed instead of returning
+    # it would still have been retryable (ADR-068). A workspace out of allowance
+    # is a billing problem, not a reason to burn a retry budget.
+    assert progress.engaged is False
     assert refused.asked == [LimitKey.PERIOD_AI_REQUESTS]

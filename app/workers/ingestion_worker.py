@@ -10,6 +10,11 @@ failed agent turn leaves nothing behind but a log line; a failed ingestion
 leaves the document in `FAILED` with the reason on the row, so the person who
 uploaded it can see what went wrong and fix it. The job is dead-lettered as well,
 because the document says what broke and the job says that anything tried.
+
+Ingestion is idempotent - re-running replaces a document's chunks rather than
+appending to them - so a transient failure here is genuinely worth another
+attempt, and this worker carries `IDEMPOTENT_RETRY` rather than the agent
+worker's narrower policy (ADR-068).
 """
 
 from __future__ import annotations
@@ -23,17 +28,23 @@ from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.db.session import Database
 from app.integrations.openai.embeddings import EmbeddingsClient, build_http_client
 from app.services.knowledge_service import KnowledgeService
+from app.workers.dispatch import JobIdentity, handle_failure, record_success
 from app.workers.ingestion_queue import (
     BLOCK_SECONDS,
     IngestionJob,
     IngestionQueue,
 )
-from app.workers.queue import MalformedJobError
+from app.workers.queue import JobEnvelope, MalformedJobError
+from app.workers.retry import IDEMPOTENT_RETRY, NO_RETRY, FailureCategory
 
 logger = get_logger(__name__)
 
 # How long to wait after a failed reserve before trying again.
 RETRY_DELAY_SECONDS = 5.0
+
+# The name this queue reports itself under, in metrics and in dead-letter
+# records. Short and fixed, because it is a metric label.
+JOB_TYPE = "ingestion"
 
 
 class IngestionWorker:
@@ -90,25 +101,43 @@ class IngestionWorker:
         if raw is None:
             return False
 
+        envelope = JobEnvelope.decode(raw)
         try:
-            job = IngestionJob.decode(raw)
+            job = IngestionJob.decode(envelope.body)
         except MalformedJobError:
             # Retrying would fail identically forever.
             logger.warning("knowledge.job_malformed")
-            await self._queue.fail(raw)
+            await handle_failure(
+                self._queue,
+                raw,
+                envelope,
+                job_type=JOB_TYPE,
+                identity=JobIdentity(),
+                category=FailureCategory.MALFORMED,
+                policy=NO_RETRY,
+            )
             return True
 
         try:
             await self._handle(job)
-        except Exception:
+        except Exception as error:
             logger.exception(
                 "knowledge.job_failed",
                 extra={"document_id": str(job.document_id)},
             )
-            await self._queue.fail(raw)
+            await handle_failure(
+                self._queue,
+                raw,
+                envelope,
+                job_type=JOB_TYPE,
+                identity=JobIdentity(tenant_id=job.tenant_id, job_id=job.document_id),
+                error=error,
+                policy=IDEMPOTENT_RETRY,
+            )
             return True
 
         await self._queue.release(raw)
+        await record_success(job_type=JOB_TYPE)
         return True
 
     async def _handle(self, job: IngestionJob) -> None:

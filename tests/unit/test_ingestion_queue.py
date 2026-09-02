@@ -15,7 +15,9 @@ from app.workers.ingestion_queue import (
     IngestionJob,
     IngestionQueue,
 )
-from app.workers.queue import QUEUE_NAMESPACE, MalformedJobError
+from app.workers.queue import QUEUE_NAMESPACE, DeadLetterRecord, JobEnvelope, MalformedJobError
+from app.workers.retry import FailureCategory
+from tests.fake_queue_redis import FakeQueueRedis
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 DOCUMENT = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -23,32 +25,6 @@ DOCUMENT = uuid.UUID("22222222-2222-2222-2222-222222222222")
 PENDING = "knowledge:ingestion:pending"
 INFLIGHT = "knowledge:ingestion:inflight"
 FAILED = "knowledge:ingestion:failed"
-
-
-class FakeRedis:
-    def __init__(self, reserved=None):
-        self.pushed = []
-        self.removed = []
-        self.moves = []
-        self.lengths = {}
-        self._reserved = reserved
-
-    async def rpush(self, key, value):
-        self.pushed.append((key, value))
-        return 1
-
-    # ASYNC109 wants asyncio.timeout, but this mirrors redis-py's own
-    # signature: the fake has to accept what the queue actually passes.
-    async def blmove(self, source, destination, timeout):  # noqa: ASYNC109
-        self.moves.append((source, destination, timeout))
-        return self._reserved
-
-    async def lrem(self, key, count, value):
-        self.removed.append((key, count, value))
-        return 1
-
-    async def llen(self, key):
-        return self.lengths.get(key, 0)
 
 
 def test_a_job_survives_a_round_trip():
@@ -86,56 +62,94 @@ async def test_ingestion_does_not_share_the_agent_queue():
     assert not PENDING.startswith(QUEUE_NAMESPACE)
 
 
-async def test_enqueue_pushes_onto_the_pending_list():
-    redis = FakeRedis()
+async def test_enqueue_pushes_an_envelope_onto_the_pending_list():
+    redis = FakeQueueRedis()
 
     await IngestionQueue(redis).enqueue(IngestionJob(tenant_id=TENANT, document_id=DOCUMENT))
 
-    key, value = redis.pushed[0]
-    assert key == PENDING
-    assert IngestionJob.decode(value).document_id == DOCUMENT
+    (value,) = redis.lists[PENDING]
+    assert IngestionJob.decode(JobEnvelope.decode(value).body).document_id == DOCUMENT
 
 
 async def test_reserving_moves_the_job_to_the_in_flight_list():
     """A worker killed mid-job must leave the job recoverable."""
-    payload = IngestionJob(tenant_id=TENANT, document_id=DOCUMENT).encode()
-    redis = FakeRedis(reserved=payload)
+    redis = FakeQueueRedis()
+    queue = IngestionQueue(redis)
+    await queue.enqueue(IngestionJob(tenant_id=TENANT, document_id=DOCUMENT))
 
-    reserved = await IngestionQueue(redis).reserve(wait_seconds=3)
+    reserved = await queue.reserve(wait_seconds=3)
 
-    assert reserved == payload
-    assert redis.moves == [(PENDING, INFLIGHT, 3)]
+    assert reserved is not None
+    assert redis.lists[INFLIGHT] == [reserved]
+    assert redis.lists[PENDING] == []
 
 
 async def test_reserving_an_empty_queue_returns_nothing():
-    redis = FakeRedis(reserved=None)
-
-    assert await IngestionQueue(redis).reserve() is None
+    assert await IngestionQueue(FakeQueueRedis()).reserve() is None
 
 
 async def test_releasing_removes_the_exact_payload():
-    payload = IngestionJob(tenant_id=TENANT, document_id=DOCUMENT).encode()
-    redis = FakeRedis()
+    redis = FakeQueueRedis()
+    queue = IngestionQueue(redis)
+    await queue.enqueue(IngestionJob(tenant_id=TENANT, document_id=DOCUMENT))
+    reserved = await queue.reserve()
 
-    await IngestionQueue(redis).release(payload)
+    await queue.release(reserved)
 
-    assert redis.removed == [(INFLIGHT, 1, payload)]
+    assert redis.lists[INFLIGHT] == []
 
 
-async def test_failing_dead_letters_rather_than_discarding():
+async def test_a_transient_failure_is_retried_rather_than_dead_lettered():
+    """Re-ingesting replaces a document's chunks, so another attempt is free."""
+    redis = FakeQueueRedis()
+    queue = IngestionQueue(redis)
+    await queue.enqueue(IngestionJob(tenant_id=TENANT, document_id=DOCUMENT))
+    reserved = await queue.reserve()
+
+    await queue.schedule_retry(
+        reserved,
+        JobEnvelope.decode(reserved),
+        category=FailureCategory.PROVIDER_ERROR,
+        delay_seconds=2.0,
+    )
+
+    assert await queue.delayed_depth() == 1
+    assert await queue.failed_depth() == 0
+
+
+async def test_dead_lettering_records_rather_than_discarding():
     """The job records that an attempt was made; the document records why it broke."""
-    payload = IngestionJob(tenant_id=TENANT, document_id=DOCUMENT).encode()
-    redis = FakeRedis()
+    redis = FakeQueueRedis()
+    queue = IngestionQueue(redis)
+    await queue.enqueue(IngestionJob(tenant_id=TENANT, document_id=DOCUMENT))
+    reserved = await queue.reserve()
+    envelope = JobEnvelope.decode(reserved)
 
-    await IngestionQueue(redis).fail(payload)
+    written = await queue.dead_letter(
+        reserved,
+        DeadLetterRecord(
+            queue=INGESTION_NAMESPACE,
+            job_type="ingestion",
+            tenant_id=str(TENANT),
+            job_id=str(DOCUMENT),
+            attempts=envelope.attempt,
+            category=FailureCategory.INVALID_REQUEST,
+            enqueued_at=envelope.enqueued_at,
+            first_attempted_at=None,
+            last_attempted_at=envelope.enqueued_at,
+            dead_lettered_at=envelope.enqueued_at,
+            body=envelope.body,
+        ),
+    )
 
-    assert redis.removed == [(INFLIGHT, 1, payload)]
-    assert redis.pushed == [(FAILED, payload)]
+    assert written is True
+    assert redis.lists[INFLIGHT] == []
+    assert await queue.failed_depth() == 1
 
 
-async def test_depths_report_the_two_lists():
-    redis = FakeRedis()
-    redis.lengths = {PENDING: 4, FAILED: 2}
+async def test_depths_report_every_list():
+    redis = FakeQueueRedis()
+    redis.lists = {PENDING: ["a"] * 4, FAILED: ["b"] * 2}
     queue = IngestionQueue(redis)
 
     assert await queue.depth() == 4
