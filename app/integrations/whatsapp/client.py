@@ -33,11 +33,18 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.net import MAX_REDIRECTS, UnsafeUrlError, build_guarded_client, validate_outbound_url
+from app.core.telemetry import CallOutcome, Provider, record_provider_call
 
 logger = get_logger(__name__)
 
 # Followed by hand so each hop can be validated; see `_get`.
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+# The two operations this client is counted under. Short constants, never
+# anything derived from a request - a metric label domain has to be fixed at
+# the point it is written, not at the point somebody sends a message.
+SEND: Final = "send_message"
+FETCH_MEDIA: Final = "fetch_media"
 
 GRAPH_BASE_URL: Final = "https://graph.facebook.com"
 MESSAGING_PRODUCT: Final = "whatsapp"
@@ -467,6 +474,7 @@ class WhatsAppClient:
             except httpx.HTTPError as error:
                 if attempt >= self._max_attempts:
                     logger.warning("whatsapp.media_unreachable", extra={"attempts": attempt})
+                    await self._count(FETCH_MEDIA, CallOutcome.UNAVAILABLE)
                     raise ExternalServiceError("WhatsApp could not be reached.") from error
                 await self._backoff(attempt)
                 attempt += 1
@@ -482,10 +490,13 @@ class WhatsAppClient:
                 continue
 
             if response.status_code == TOO_MANY_REQUESTS:
+                await self._count(FETCH_MEDIA, CallOutcome.RATE_LIMITED)
                 raise RateLimitedError("WhatsApp is rate limiting this account.")
             if response.status_code >= CLIENT_ERROR_FLOOR:
                 self._log_failure(response)
+                await self._count(FETCH_MEDIA, CallOutcome.FAILURE)
                 raise ExternalServiceError("WhatsApp could not return this file.")
+            await self._count(FETCH_MEDIA, CallOutcome.SUCCESS)
             return response
 
     async def mark_read(self, *, phone_number_id: str, message_id: str) -> None:
@@ -520,6 +531,14 @@ class WhatsAppClient:
         )
 
     async def _post(self, *, phone_number_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Send one message, counting how it went.
+
+        The outcome is recorded on every exit, including the ones that raise,
+        because the ratio an operator alerts on is failures over attempts and a
+        failure that left no trace makes that ratio a lie. Counting is
+        best-effort - `record_provider_call` swallows - so it can never turn a
+        successful send into a failed one.
+        """
         url = f"{GRAPH_BASE_URL}/{self._api_version}/{phone_number_id}/messages"
         headers = {
             "Authorization": f"Bearer {self._access_token}",
@@ -534,6 +553,7 @@ class WhatsAppClient:
                 # Nothing reached Meta, so a retry cannot duplicate anything.
                 if attempt >= self._max_attempts:
                     logger.warning("whatsapp.send_unreachable", extra={"attempts": attempt})
+                    await self._count(SEND, CallOutcome.UNAVAILABLE)
                     raise ExternalServiceError("WhatsApp could not be reached.") from error
                 await self._backoff(attempt)
                 attempt += 1
@@ -541,11 +561,13 @@ class WhatsAppClient:
             except httpx.TimeoutException as error:
                 # The request may have landed. Retrying risks a second message.
                 logger.warning("whatsapp.send_timed_out", extra={"attempts": attempt})
+                await self._count(SEND, CallOutcome.UNAVAILABLE)
                 raise ExternalServiceError("WhatsApp did not respond in time.") from error
 
             if response.status_code == TOO_MANY_REQUESTS:
                 if attempt >= self._max_attempts:
                     logger.warning("whatsapp.send_rate_limited", extra={"attempts": attempt})
+                    await self._count(SEND, CallOutcome.RATE_LIMITED)
                     raise RateLimitedError("WhatsApp is rate limiting this account.")
                 await self._backoff(attempt)
                 attempt += 1
@@ -555,9 +577,16 @@ class WhatsAppClient:
                 # 5xx is deliberately not retried either: the message may have
                 # been accepted, and a duplicate reply is worse than a failure.
                 self._log_failure(response)
+                await self._count(SEND, CallOutcome.FAILURE)
                 raise ExternalServiceError("WhatsApp rejected the message.")
 
+            await self._count(SEND, CallOutcome.SUCCESS)
             return self._decode(response)
+
+    @staticmethod
+    async def _count(operation: str, outcome: CallOutcome) -> None:
+        """Record one outbound call. Best-effort by construction."""
+        await record_provider_call(provider=Provider.WHATSAPP, operation=operation, outcome=outcome)
 
     async def _backoff(self, attempt: int) -> None:
         await self._sleep(self._backoff_seconds * attempt)

@@ -29,6 +29,7 @@ from typing import Final, Protocol
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.redis import RedisClient
+from app.core.telemetry import set_counter_sink
 from app.db.session import Database
 from app.workers.ai_worker import AgentWorker
 from app.workers.billing_worker import BillingWorker
@@ -213,6 +214,10 @@ async def main() -> None:
 
     database = Database(settings)
     redis = RedisClient(settings)
+    # Job outcomes and provider calls are counted into Redis, because this
+    # process serves no HTTP for a scraper to read (ADR-069). The API renders
+    # them.
+    set_counter_sink(redis.client if settings.metrics_enabled else None)
     kinds = selected_kinds()
     workers = build_workers(
         kinds=kinds,
@@ -243,6 +248,7 @@ async def main() -> None:
     finally:
         # Stopped before Redis closes, so the beat does not fail on a client
         # that is already going away and log a warning nobody should act on.
+        set_counter_sink(None)
         stopping.set()
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):

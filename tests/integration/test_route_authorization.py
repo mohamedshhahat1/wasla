@@ -56,6 +56,14 @@ OPEN_ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/health"): "a load balancer has no credential",
     ("GET", "/health/live"): "a load balancer has no credential",
     ("GET", "/health/ready"): "a load balancer has no credential",
+    # A scraper has no credential either, and giving it one would mean every
+    # scraper in a deployment holding the same shared token to read a document
+    # that carries no customer data by construction. What keeps it off the
+    # internet is topology rather than authentication: the API container
+    # publishes no port, and `nginx.conf` answers 404 for this path on the
+    # public listener rather than proxying it (ADR-070). `METRICS_ENABLED=false`
+    # removes it entirely.
+    ("GET", "/metrics"): "a metrics scraper has no credential; nginx refuses the path",
 }
 
 # Authenticated routes that deliberately stop at `get_current_user` rather than
@@ -155,7 +163,7 @@ def test_no_documented_open_route_has_quietly_been_closed(graph) -> None:
 
 def test_the_documented_count_matches_the_graph(graph) -> None:
     """`docs/AUTHORIZATION.md` states a number. This is that number."""
-    assert len(_open(graph)) == 16
+    assert len(_open(graph)) == 17
 
 
 def test_every_other_route_resolves_a_workspace_or_is_an_account_route(graph) -> None:

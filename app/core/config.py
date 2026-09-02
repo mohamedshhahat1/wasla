@@ -206,6 +206,13 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: LogFormat = "json"
     health_check_timeout_seconds: float = Field(default=2.0, gt=0)
+    # Whether this process serves `/metrics`. On by default: an operator who
+    # has to switch telemetry on is an operator who will not have it during
+    # the first incident. The endpoint carries no customer data by
+    # construction - `app.core.metrics` refuses an identifier as a label - and
+    # `nginx.conf` refuses the path on the public listener, so what it exposes
+    # is reachable from the internal network and from nowhere else (ADR-070).
+    metrics_enabled: bool = True
 
     # HTTP
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)

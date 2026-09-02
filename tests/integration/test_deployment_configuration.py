@@ -64,6 +64,11 @@ FEATURE_SETTINGS: dict[str, tuple[str, ...]] = {
     # API so the ordering rule is validated by whichever process starts first.
     "billing_past_due_days": ("api", "worker"),
     "billing_suspend_after_days": ("api", "worker"),
+    # Both, and for different reasons: the API serves the exposition, the
+    # worker writes the cross-process counters into Redis for the API to render
+    # (ADR-069). A deployment that set it on one would silently publish half
+    # the signals - which is the failure this whole guard exists to stop.
+    "metrics_enabled": ("api", "worker"),
 }
 
 # Fields a mapped prefix picks up that a given service deliberately does not

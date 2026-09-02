@@ -27,6 +27,7 @@ from app.core.config import Settings
 from app.core.dependencies import RedisDep, SessionDep, SettingsDep
 from app.core.exceptions import DependencyUnavailableError, PermissionDeniedError
 from app.core.logging import get_logger
+from app.core.telemetry import CallOutcome, Provider, record_provider_call
 from app.integrations.whatsapp.signature import SIGNATURE_HEADER, verify_signature
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.media_queue import MediaQueue
@@ -35,6 +36,9 @@ from app.workers.queue import AgentQueue
 logger = get_logger(__name__)
 
 SUBSCRIBE_MODE = "subscribe"
+
+# What an accepted delivery from Meta is counted under.
+INBOUND = "inbound_webhook"
 
 router = APIRouter(route_class=CommittingRoute, prefix="/webhooks/whatsapp", tags=["WhatsApp"])
 
@@ -123,6 +127,13 @@ async def receive_events(
         return {"status": "ignored"}
 
     outcome = await service.ingest(payload)
+    # Counted as one inbound delivery, not one per message inside it: what an
+    # operator alerts on is Meta having stopped calling, and a delivery
+    # carrying three messages is still one call. The messages themselves are
+    # already metered per message into `usage_events`.
+    await record_provider_call(
+        provider=Provider.WHATSAPP, operation=INBOUND, outcome=CallOutcome.SUCCESS
+    )
     logger.info(
         "whatsapp.webhook_received",
         extra={

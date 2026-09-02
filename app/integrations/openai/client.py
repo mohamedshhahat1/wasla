@@ -38,6 +38,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.net import build_guarded_client
+from app.core.telemetry import CallOutcome, Provider, record_provider_call
 from app.integrations.openai.types import (
     AgentReply,
     StructuredFormat,
@@ -52,6 +53,11 @@ logger = get_logger(__name__)
 
 OPENAI_BASE_URL: Final = "https://api.openai.com/v1"
 RESPONSES_PATH: Final = "/responses"
+
+# What this client is counted under. A fixed constant, never anything
+# derived from the prompt or the model's answer: a metric label domain is
+# chosen where it is written, not where a customer types.
+RESPOND: Final = "respond"
 REQUEST_TIMEOUT_SECONDS: Final = 60.0
 MAX_ATTEMPTS: Final = 3
 BACKOFF_SECONDS: Final = 1.0
@@ -166,6 +172,7 @@ class ResponsesClient:
                 # worst duplicate an inference, which no customer ever sees.
                 if attempt >= self._max_attempts:
                     logger.warning("openai.unreachable", extra={"attempts": attempt})
+                    await _count(CallOutcome.UNAVAILABLE)
                     raise ExternalServiceError("The AI provider could not be reached.") from error
                 await self._backoff(attempt)
                 attempt += 1
@@ -179,7 +186,9 @@ class ResponsesClient:
                 if attempt >= self._max_attempts:
                     self._log_failure(response, attempts=attempt)
                     if response.status_code == TOO_MANY_REQUESTS:
+                        await _count(CallOutcome.RATE_LIMITED)
                         raise RateLimitedError("The AI provider is rate limiting this account.")
+                    await _count(CallOutcome.UNAVAILABLE)
                     raise ExternalServiceError("The AI provider is unavailable.")
                 await self._backoff(attempt)
                 attempt += 1
@@ -187,8 +196,10 @@ class ResponsesClient:
 
             if response.status_code >= CLIENT_ERROR_FLOOR:
                 self._log_failure(response, attempts=attempt)
+                await _count(CallOutcome.FAILURE)
                 raise ExternalServiceError("The AI provider rejected the request.")
 
+            await _count(CallOutcome.SUCCESS)
             return self._decode(response)
 
     async def _backoff(self, attempt: int) -> None:
@@ -305,3 +316,15 @@ class ResponsesClient:
             arguments=arguments,
             arguments_json=arguments_json,
         )
+
+
+async def _count(outcome: CallOutcome) -> None:
+    """Record one inference attempt's outcome. Best-effort by construction.
+
+    Counted here rather than in the worker because this is where the outcome
+    is already distinguished: a 429, a 5xx and a refused request are three
+    different operational problems and only this loop can tell them apart.
+    Token *spend* is not counted here - it is already metered into
+    `usage_events`, and a second tally would be a second number to reconcile.
+    """
+    await record_provider_call(provider=Provider.OPENAI, operation=RESPOND, outcome=outcome)

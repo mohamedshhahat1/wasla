@@ -19,6 +19,7 @@ from starlette.responses import JSONResponse, Response
 
 from app.core.config import Settings
 from app.core.logging import current_log_context, get_logger
+from app.core.telemetry import observe_unhandled_error
 
 logger = get_logger(__name__)
 
@@ -269,6 +270,12 @@ def register_exception_handlers(app: FastAPI) -> None:
                 "path": request.url.path,
             },
         )
+        # The one counter that says "something is wrong here that nobody
+        # anticipated". Unlabelled deliberately: the interesting breakdown is
+        # `wasla_http_requests_total{status="5xx"}` by route, and repeating it
+        # here with an exception type would put a class name from any library
+        # in the tree into a label domain.
+        observe_unhandled_error()
         details = (
             None
             if settings.is_production

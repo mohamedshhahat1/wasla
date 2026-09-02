@@ -124,6 +124,11 @@ services:
       # to start on anything that is not one.
       TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-10.89.0.10}
       LOG_FORMAT: json
+      # Serves /metrics on the internal network. nginx refuses the path on the
+      # public listener and this container publishes no port of its own, so the
+      # exposition is reachable from a scraper on `internal` and from nowhere
+      # else (ADR-070).
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
@@ -269,6 +274,10 @@ services:
       ENVIRONMENT: production
       DEBUG: "false"
       LOG_FORMAT: json
+      # The worker serves no HTTP, so it publishes nothing itself: it writes
+      # job outcomes and provider calls into Redis and the API renders them
+      # (ADR-069). Off here means those counters are simply not written.
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
@@ -354,6 +363,40 @@ services:
     # what it holds.
     stop_grace_period: 60s
     restart: always
+
+  # A one-shot backup, run by the host's scheduler rather than by a loop in
+  # this stack. Behind a profile so an ordinary `up` does not start it, and
+  # built on the *database* image rather than the application one because
+  # `pg_dump` has to match the server's major version and the image that
+  # certainly does is the one running the server (docs/BACKUP.md).
+  #
+  #   docker compose -f docker-compose.prod.yml --profile backup run --rm backup
+  backup:
+    image: pgvector/pgvector:pg16
+    profiles: ["backup"]
+    entrypoint: ["/bin/sh", "/opt/wasla/scripts/backup_postgres.sh"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      # The same URL the application uses, so the deployment describes its
+      # database once and cannot describe it two different ways.
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - ./scripts:/opt/wasla/scripts:ro
+      # A host path rather than a named volume, deliberately: a backup that
+      # only Docker can see is one an operator cannot copy off the host, and
+      # copying it off the host is the entire point (docs/BACKUP.md).
+      - ${BACKUP_DIR:-./backups}:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+    restart: "no"
 
   nginx:
     image: nginx:1.27-alpine

@@ -30,6 +30,7 @@ from typing import Final
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.core.telemetry import CallOutcome, Provider, record_provider_call
 from app.db.models.email import OutboundEmail
 from app.db.session import Database
 from app.integrations.email import build_email_provider
@@ -52,6 +53,13 @@ logger = get_logger(__name__)
 # retries do not arrive as the same thundering herd that just failed.
 BASE_BACKOFF_SECONDS: Final = 30.0
 MAX_BACKOFF_SECONDS: Final = 3600.0
+
+# What a delivery attempt is counted under. `deliver` covers every attempt at
+# sending; `suppress` is the separate story of a message not attempted at all,
+# and keeping the two apart is what stops a suppression list looking like an
+# outage on a dashboard.
+DELIVER: Final = "deliver"
+SUPPRESS: Final = "suppress"
 
 
 class EmailWorker:
@@ -189,6 +197,9 @@ class EmailWorker:
                 error_code="suppressed",
                 error_message="recipient is suppressed after a bounce or complaint",
             )
+            await record_provider_call(
+                provider=Provider.EMAIL, operation=SUPPRESS, outcome=CallOutcome.SUCCESS
+            )
             logger.info(
                 "email.suppressed_skipped",
                 extra={
@@ -221,6 +232,9 @@ class EmailWorker:
                 now=now,
                 error_code="render_error",
                 error_message=str(error),
+            )
+            await record_provider_call(
+                provider=Provider.EMAIL, operation=DELIVER, outcome=CallOutcome.FAILURE
             )
             logger.error(
                 "email.render_failed",
@@ -255,6 +269,9 @@ class EmailWorker:
                 provider=result.provider,
                 provider_message_id=result.provider_message_id,
             )
+            await record_provider_call(
+                provider=Provider.EMAIL, operation=DELIVER, outcome=CallOutcome.SUCCESS
+            )
             logger.info(
                 "email.sent",
                 extra={
@@ -275,6 +292,9 @@ class EmailWorker:
                 now=now,
                 error_code=result.error_code,
                 error_message=result.error_message,
+            )
+            await record_provider_call(
+                provider=Provider.EMAIL, operation=DELIVER, outcome=CallOutcome.FAILURE
             )
             logger.error(
                 "email.failed_permanently",
@@ -299,6 +319,9 @@ class EmailWorker:
             available_at=now + timedelta(seconds=delay),
             error_code=result.error_code,
             error_message=result.error_message,
+        )
+        await record_provider_call(
+            provider=Provider.EMAIL, operation=DELIVER, outcome=CallOutcome.UNAVAILABLE
         )
         logger.warning(
             "email.retry_scheduled",

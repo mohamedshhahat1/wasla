@@ -250,6 +250,13 @@ is what removes the enumeration surface rather than mitigating it (ADR-043).
 | `POST /webhooks/paymob` | A payment processor cannot hold a credential of ours | HMAC-SHA512 over twenty documented fields, `compare_digest`; **never** rate-limited (ADR-032); a saved-card callback is verified under its own eight-field scheme (ADR-046) |
 | `POST /webhooks/email` | Resend cannot hold a credential of ours | Svix signature over the raw body; **never** rate-limited (ADR-032) |
 | `GET /health`, `/health/live`, `/health/ready` | A load balancer has no credential | Report status and a version, never a connection string or a dependency error |
+| `GET /metrics` | A metrics scraper has no credential, and a shared token every scraper holds would protect a document that carries no customer data (ADR-070) | Not routable from outside: the API publishes no port and `nginx.conf` answers 404 for this path on the public listener. Every label value is refused unless it is a bounded category — no identifier, address or phone number can become a series. `METRICS_ENABLED=false` removes it |
+
+`/metrics` is the only open route that is not reachable from the internet at
+all, and that is the whole of its access control. It is a read, it changes
+nothing, and what it exposes is operational shape rather than customer data —
+but operational shape is still worth keeping off a public listener, which is
+why the nginx refusal is shipped in the same change as the endpoint.
 
 There are **three** unauthenticated write paths, not one: the WhatsApp webhook,
 the Paymob webhook and the Resend webhook. In each case the signature check is

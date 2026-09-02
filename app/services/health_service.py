@@ -3,6 +3,13 @@
 Probes run concurrently and every failure is contained: a readiness check
 reports a degraded dependency, it never raises. That keeps the endpoint useful
 precisely when infrastructure is misbehaving.
+
+Each probe's verdict is also recorded as a metric, so a dependency outage is
+alertable rather than only visible to whoever asked. The gauge says what the
+last probe found and the counter says how many probes have failed - the pair
+distinguishes "PostgreSQL is down now" from "PostgreSQL has been flapping all
+morning", and only the second one explains the latency somebody is asking
+about.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ from typing import Literal
 
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
+from app.core.telemetry import observe_dependency
 
 logger = get_logger(__name__)
 
@@ -64,6 +72,7 @@ class HealthService:
         try:
             await probe()
         except WaslaError as exc:
+            observe_dependency(name, healthy=False)
             return ComponentHealth(
                 name=name,
                 status="down",
@@ -80,12 +89,14 @@ class HealthService:
                     "reason": type(exc).__name__,
                 },
             )
+            observe_dependency(name, healthy=False)
             return ComponentHealth(
                 name=name,
                 status="down",
                 duration_ms=self._elapsed_ms(started),
                 detail="Dependency probe failed.",
             )
+        observe_dependency(name, healthy=True)
         return ComponentHealth(name=name, status="up", duration_ms=self._elapsed_ms(started))
 
     @staticmethod
