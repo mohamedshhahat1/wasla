@@ -10,6 +10,12 @@
 # `.env` rule protects the file; this protects the directory holding it.
 .claude/
 
+# Database dumps. A dump carries every customer record there is, so the
+# pattern is here rather than left to whoever remembers where they put one.
+*.dump
+*.sql.gz
+backups/
+
 # Python
 __pycache__/
 *.py[cod]
