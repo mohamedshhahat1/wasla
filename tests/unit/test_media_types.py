@@ -207,6 +207,42 @@ def test_every_canonical_type_is_reachable_from_some_byte_sequence() -> None:
     assert set(CANONICAL_TYPES) == reachable
 
 
+# ---------------------------------------------- the table agrees with itself
+
+
+def test_everything_the_reader_can_read_is_a_type_the_detector_accepts() -> None:
+    """Two tables, one subject, and they must not drift apart.
+
+    `READABLE_TYPES` decides what is worth downloading at all; `CANONICAL_TYPES`
+    decides what may be stored. A type in the first and not the second means the
+    download path says "worth fetching" and the detector then refuses it - a
+    file skipped for a reason nobody wrote down.
+
+    It fails safe, which is why it needs a test rather than an incident: the
+    symptom is an attachment that is quietly never read.
+    """
+    from app.services.media_reader import READABLE_TYPES
+
+    unsupported = sorted(READABLE_TYPES - set(CANONICAL_TYPES))
+
+    assert (
+        not unsupported
+    ), f"the media reader accepts types the detector will refuse: {unsupported}"
+
+
+def test_every_extension_the_store_knows_belongs_to_a_supported_type() -> None:
+    """The other direction, on the table that names a file in the store.
+
+    An extension for a type nothing can store is dead, and worse, it is a
+    suggestion that the type is supported to whoever reads the table next.
+    """
+    from app.core.storage import EXTENSIONS
+
+    unknown = sorted(set(EXTENSIONS) - set(CANONICAL_TYPES))
+
+    assert not unknown, f"the store maps extensions for unsupported types: {unknown}"
+
+
 # ------------------------------------------------------------- RIFF ambiguity
 
 
