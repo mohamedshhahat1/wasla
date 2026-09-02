@@ -182,6 +182,26 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
             "tenant_id",
             "knowledge_base_id",
         ),
+        # The approximate-nearest-neighbour index, declared here as well as in
+        # the migration so autogenerate compares against it and `alembic check`
+        # does not offer to drop it.
+        #
+        # `vector_cosine_ops` because `KnowledgeRepository.search` orders by
+        # `<=>`. An opclass that did not match the operator would be built,
+        # catalogued, and never used - the failure mode this line exists to
+        # rule out (ADR-079).
+        #
+        # Defaults for `m` and `ef_construction`: measured, not assumed. At
+        # 45,000 chunks in one workspace the default build answers a top-5 in
+        # ~2ms against ~42ms for the exact scan, and raising either parameter
+        # bought nothing a retrieval can feel while costing build time on the
+        # table this system writes to most.
+        Index(
+            "ix_document_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
     )
 
     document_id: Mapped[uuid.UUID] = mapped_column(

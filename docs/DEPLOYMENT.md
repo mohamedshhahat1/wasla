@@ -392,6 +392,21 @@ Deploy the previous digest. The procedure, and why a rollback must not run migra
 
 Migrations run as an explicit step before the new application version serves traffic; schema is never mutated manually. Readiness gates traffic on dependency availability while liveness stays independent of PostgreSQL. Health, logging, and observability details are in [../ARCHITECTURE.md](../ARCHITECTURE.md).
 
+### Migration 0039 builds a vector index, and it is not instant
+
+`ix_document_chunks_embedding_hnsw` is built `CONCURRENTLY`, so document ingestion keeps working while it runs, but the migration step itself will sit there: measured at ~14 minutes for 77,000 chunks, producing a 597MB index (roughly 8KB per chunk, which is the vectors themselves). Budget for it in the deployment window and do not kill it — a cancelled concurrent build leaves an index marked `INVALID`, which the planner ignores while it keeps occupying the disk.
+
+To check afterwards:
+
+```sql
+SELECT indexrelid::regclass, indisvalid
+FROM pg_index WHERE indexrelid = 'ix_document_chunks_embedding_hnsw'::regclass;
+```
+
+`indisvalid = false` means the build did not finish. Drop it (`DROP INDEX CONCURRENTLY ix_document_chunks_embedding_hnsw`) and re-run the migration; the migration drops by name before creating for exactly this case, so a retry rebuilds rather than adopting the remains. Retrieval is correct either way — it falls back to the exact scan — so this is a performance incident, not an outage.
+
+Build speed depends on `maintenance_work_mem`. If the graph does not fit, PostgreSQL logs `hnsw graph no longer fits into maintenance_work_mem` and finishes on disk far more slowly. Raising it for the migration session is worthwhile on a large corpus.
+
 **[RUNBOOK.md](RUNBOOK.md) is the operational document**: what to check first, what each symptom means, how to roll back, how to rotate each secret, and — stated explicitly — what it cannot tell you.
 
 ### Metrics

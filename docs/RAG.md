@@ -1,6 +1,6 @@
 # Knowledge Base and RAG
 
-**Status: Implemented** — ingestion, tenant-scoped retrieval and the `search_knowledge` tool exist and are exercised against real PostgreSQL with pgvector. PDF extraction arrived with phase 9, and each search is metered as a `rag_query` (phase 12). An approximate vector index is Planned. See [../TASKS.md](../TASKS.md) phase 6. Storage decision: ADR-008. Embedding width: ADR-018. Queue separation: ADR-019.
+**Status: Implemented** — ingestion, tenant-scoped retrieval and the `search_knowledge` tool exist and are exercised against real PostgreSQL with pgvector. PDF extraction arrived with phase 9, and each search is metered as a `rag_query` (phase 12). An approximate vector index (HNSW, migration 0039) exists and is measured. See [../TASKS.md](../TASKS.md) phase 6. Storage decision: ADR-008. Embedding width: ADR-018. Queue separation: ADR-019.
 
 Scope: knowledge sources, ingestion, embeddings, and tenant-scoped retrieval.
 
@@ -42,7 +42,35 @@ PostgreSQL with pgvector. `knowledge_bases` groups documents; `documents` holds 
 
 The embedding column is `vector(1536)`, the width of `text-embedding-3-small`, fixed in the schema rather than configurable (ADR-018). The width is also requested explicitly on every embedding call, so the provider cannot return something the column will not accept.
 
-**No approximate index exists yet.** ivfflat and hnsw need to be built against representative data to be worth anything — ivfflat in particular wants its list count chosen from the row count, and one built on an empty table produces a bad plan that survives until someone reindexes. Exact search is correct at every size and fast at the sizes a new workspace has; choosing an index belongs with the Phase 14 performance pass.
+### The approximate index
+
+`ix_document_chunks_embedding_hnsw` is an HNSW index with `vector_cosine_ops`, built by migration 0039 (ADR-079).
+
+**HNSW rather than IVFFlat.** IVFFlat trains its lists against the rows present when it is built, and a knowledge base is empty when a workspace is created and fills up over months. An index whose recall depends on when it was built would be wrong for most of this table's life, and rebuilding it on a schedule is an operational commitment nobody asked for. HNSW has no training step. Defaults for `m` (16) and `ef_construction` (64) were kept because raising either bought nothing measurable and both cost build time on the table this system writes to most.
+
+**`search` sets two GUCs per query, and the index is worse than useless without them.**
+
+`hnsw.iterative_scan = strict_order`. pgvector indexes one column, so the tenant, knowledge-base and READY filters are applied *after* the index has picked its candidates. By default the scan visits `ef_search` candidates in global distance order and answers with whichever survive - which for a workspace holding a small share of the corpus is close to none. Measured: a 200-chunk workspace in a 32,000-chunk table got **zero passages out of five**, and the agent was then told the knowledge base had no answer.
+
+`plan_cache_mode = force_custom_plan`. The retrieval statement is prepared once per pooled connection, and after five executions PostgreSQL weighs a generic plan against the custom ones. A generic plan cannot know which workspace is asking, so it estimates the tenant filter from the average workspace and picks a nested loop over every document. Measured through `DocumentChunkRepository.search` on a 45,000-chunk workspace: searches one to five took 7ms and every search afterwards took 250ms - the same query, on the same connection, having simply been run often enough.
+
+### Measured behaviour
+
+Local drill, not CI: PostgreSQL 16.14, pgvector 0.8.6, 77,000 chunks across 36 workspaces (one of 45,000, one of 12,000, a tail down to 200), `shared_buffers` 128MB. Twelve searches per arm through the repository, one process per arm so no pooled connection carries a plan decision between them.
+
+| workspace | chunks | before | after | plan after |
+| --- | --- | --- | --- | --- |
+| enterprise | 45,000 | 236ms (steady 240ms) | **7.9ms** | `Index Scan using ix_document_chunks_embedding_hnsw` |
+| mid | 12,000 | 53ms | 54ms | bitmap on `(tenant_id, knowledge_base_id)` + top-N sort |
+| small | 200 | 6.8ms | 7.5ms | nested loop from `documents` |
+
+**The planner chooses per query, and that is the design rather than a limitation.** Its cost crossover sits at roughly 26,000 retrievable chunks in one workspace: below it the exact scan is chosen and is correct and cheap; above it the approximate index is chosen and the exact scan would have kept growing linearly for ever. Forcing the approximate path everywhere was measured and rejected - on the 200-chunk workspace it costs 54ms against 1.5ms, because the scan spends its whole budget discarding other workspaces' vectors.
+
+The band between roughly 3,000 and 26,000 chunks is where PostgreSQL keeps the exact scan and the approximate one would have been faster (2.4ms against 42ms, forced, at 12,000). That is left alone deliberately: the alternative is a size threshold in the repository choosing between two query shapes, and a wrong threshold is a silent retrieval-quality regression rather than a slow query. The 0.7ms the two GUCs cost the small workspace is the price of the correctness they buy.
+
+Recall at 45,000 chunks is 1.000 over 20 queries - the approximate answer is the exact answer. On the deliberately tight 1,000-chunk corpus the suite uses, id overlap is 0.80 while the furthest passage returned is within 0.36% of the exact answer's furthest, which is near-tie shuffling rather than lost recall; the test asserts the distance property for that reason.
+
+The index is 597MB for 77,000 chunks, roughly 8KB per chunk, and takes ~14 minutes to build at that size. Both matter operationally and are in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Retrieval flow
 

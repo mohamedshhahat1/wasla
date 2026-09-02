@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import ColumnElement, delete, func, select
+from sqlalchemy import ColumnElement, delete, func, select, text
 
 from app.core.exceptions import ConflictError
 from app.db.models.knowledge import (
@@ -277,8 +277,10 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
           the space and pgvector would have to be asked what to do with it.
 
         Ordering is by cosine distance, which suits normalised embeddings such
-        as OpenAI's and is what the eventual index will be built for.
+        as OpenAI's and is what `ix_document_chunks_embedding_hnsw` is built
+        for.
         """
+        await self._prepare_the_planner()
         distance = DocumentChunk.embedding.cosine_distance(embedding)
         query = (
             select(DocumentChunk, distance.label("distance"), Document.title)
@@ -300,3 +302,48 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
             ScoredChunk(chunk=chunk, distance=float(value), document_title=title)
             for chunk, value, title in result.all()
         ]
+
+    async def _prepare_the_planner(self) -> None:
+        """Two settings without which the index below is worse than useless.
+
+        Both are `SET LOCAL`, so they last for this unit of work rather than
+        for whatever the pooled connection is asked to do next, and both cost
+        one round trip against a retrieval they turn from hundreds of
+        milliseconds into single digits (ADR-079).
+
+        **`hnsw.iterative_scan` stops the index answering with fewer passages
+        than were asked for.** None of the three filters above is in the vector
+        index - pgvector indexes one column - so on the approximate path they
+        are applied *after* it. By default the scan visits `ef_search`
+        candidates in global distance order, discards the ones belonging to
+        other workspaces, and answers with whatever survived. For a workspace
+        holding a small share of the corpus that is reliably nothing: the
+        measured case returned **zero passages out of five** for a workspace
+        with 200 chunks, and the agent was then told, as far as it could tell
+        truthfully, that the knowledge base had no answer. `strict_order`
+        makes the scan resume instead of stopping, and - unlike
+        `relaxed_order` - hands the rows back in distance order, which is what
+        the `ORDER BY` above promises its caller.
+
+        **`plan_cache_mode` stops PostgreSQL settling on a plan built without
+        knowing which workspace is asking.** This statement is prepared once
+        per pooled connection and PostgreSQL compares a generic plan against
+        the custom ones after five executions. The generic plan cannot know the
+        tenant, so it estimates the filter from the average workspace, decides
+        a nested loop over every document is cheap, and is kept for the life of
+        the connection. Measured through this repository on a 45,000-chunk
+        workspace: searches one to five took 7ms, and every search after that
+        took 250ms - the *same* query, on the same connection, having simply
+        been run often enough. Forcing a custom plan puts the workspace's real
+        size back in front of the planner, which is the whole basis on which it
+        chooses the approximate index at all.
+        """
+        # `set_config(..., is_local => true)` rather than two `SET LOCAL`
+        # statements: it means the same thing and fits in one round trip, and a
+        # prepared statement may carry only one command.
+        await self.session.execute(
+            text(
+                "SELECT set_config('hnsw.iterative_scan', 'strict_order', true),"
+                " set_config('plan_cache_mode', 'force_custom_plan', true)"
+            )
+        )

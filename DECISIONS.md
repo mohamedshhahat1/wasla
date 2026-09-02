@@ -3061,3 +3061,87 @@ expires them. What retention guarantees is that the object is no longer
 retrievable through Wasla; making it unrecoverable is a rule on the bucket, and
 `docs/MEDIA.md` says so rather than letting the word "deleted" imply more than
 it should.
+
+## ADR-079 — An Approximate Index Is Three Decisions, and Two of Them Are Not the Index
+
+**Context.** `document_chunks.embedding` had no index. Every knowledge search
+computed a cosine distance for each retrievable chunk in the workspace and
+sorted the lot, which the P2 audit named as the single largest scaling blocker
+on the hottest path. The obvious fix is one line of DDL.
+
+Measured on 77,000 chunks across 36 workspaces (PostgreSQL 16.14, pgvector
+0.8.6), that one line makes retrieval **worse**.
+
+**Decision.** Build an HNSW index with `vector_cosine_ops`, and set two
+PostgreSQL parameters per retrieval query without which it is not usable.
+
+**Why HNSW and not IVFFlat.** IVFFlat trains its lists against the rows present
+at build time. A knowledge base is empty when a workspace signs up and fills up
+over months, so an IVFFlat index built by a migration is trained on nothing and
+stays that way until somebody reindexes — and "somebody reindexes" is an
+operational commitment, not a design. HNSW has no training step: it is correct
+on an empty table and stays correct as one fills. Defaults for `m` and
+`ef_construction` were kept because nothing measured argued for changing them,
+and both cost build time on the table this system writes to most.
+
+**Why the opclass is not a detail.** `KnowledgeRepository.search` orders by
+`<=>`. An index built with `vector_l2_ops` is created, occupies the same 597MB,
+appears in `pg_indexes`, and is never once considered by the planner. Retrieval
+stays exactly as slow as it was and nothing anywhere says so. The suite asserts
+the opclass against `pg_opclass`, and the plan test fails too when it is wrong —
+which is the actual proof, because the catalogue looks the same either way.
+
+**`hnsw.iterative_scan = strict_order`, or the index answers with silence.**
+pgvector indexes one column, so the tenant, knowledge-base and READY filters
+are post-filters on the approximate path. By default the scan visits
+`ef_search` candidates in global distance order, discards those belonging to
+other workspaces, and answers with whatever survived. For a workspace holding a
+small share of the corpus that is reliably nothing: a 200-chunk workspace in a
+32,000-chunk table returned **zero passages out of five**. The agent was then
+told, as far as it could tell truthfully, that the knowledge base had no answer
+— a query that succeeded, documents that were present, and a customer told "I
+do not have that information". `strict_order` makes the scan resume until it has
+the rows it was asked for, and hands them back in distance order, which is what
+the query's `ORDER BY` promises. `relaxed_order` is faster and does not promise
+that.
+
+**`plan_cache_mode = force_custom_plan`, or the index is abandoned after five
+queries.** The retrieval statement is prepared once per pooled connection.
+PostgreSQL builds custom plans for five executions, then compares a generic plan
+and keeps it if it estimates cheaper. A generic plan cannot know which workspace
+is asking, so it estimates the tenant filter from the average workspace, decides
+a nested loop over every document is cheap, and holds that opinion for the life
+of the connection. Measured through the repository on a 45,000-chunk workspace:
+searches one to five took 7ms, and every search after that took 250ms. Same
+query, same connection, same data — run often enough. This trap pre-dates the
+index and was costing 250ms against a 190ms exact scan; with the index available
+the generic plan is worse still, because the ANN scan it declines is the one
+that would have taken 8ms.
+
+Scoped to this query rather than set on the engine. Every query in this system
+filters by `tenant_id` and workspace sizes vary by two orders of magnitude, so
+the same trap plausibly waits elsewhere — but "plausibly" is not a measurement,
+and turning off generic plans platform-wide on a hunch is how a performance fix
+becomes a performance regression somewhere nobody was looking.
+
+**What is deliberately not built: a size threshold in the repository.** The
+planner's cost crossover sits at roughly 26,000 retrievable chunks in one
+workspace. Below it the exact scan is chosen, and for the 200-chunk workspace
+that is right by a factor of 36 — forcing the approximate path there costs 54ms
+against 1.5ms, because the scan spends its whole budget discarding other
+workspaces' vectors. Above it the approximate index is chosen, and the exact
+scan it replaces was growing linearly with no ceiling. Between roughly 3,000 and
+26,000 chunks the planner keeps the exact scan where the approximate one would
+have been faster, and that is accepted: the alternative is application code
+choosing between two query shapes from a row count, where a wrong threshold is a
+silent retrieval-quality regression rather than a query somebody notices is slow.
+
+**Consequences.** Retrieval on the largest measured workspace goes from 236ms to
+7.9ms. Small workspaces pay 0.7ms for the one round trip that carries both
+settings, and get complete results in exchange. Recall at that scale is 1.000
+against the exact answer. The index is 597MB per 77,000 chunks and takes ~14
+minutes to build, so migration 0039 builds it `CONCURRENTLY` in an Alembic
+autocommit block — a plain `CREATE INDEX` would block document ingestion
+platform-wide for the duration. A failed concurrent build leaves an invalid
+index behind, so the migration drops by name before creating: a retry must build
+rather than adopt something half-finished.
