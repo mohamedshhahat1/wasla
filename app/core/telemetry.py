@@ -69,11 +69,19 @@ class CallOutcome(StrEnum):
 
 
 class JobOutcome(StrEnum):
-    """How one attempt at a queued job ended."""
+    """How one attempt at a queued job ended.
+
+    The last two are the crash-recovery pair, and they are separate because an
+    operator reads them differently: `recovered` is the system healing itself
+    after a worker died, and `quarantined` is a job it refused to heal because
+    doing so might send somebody a second message.
+    """
 
     SUCCEEDED = "succeeded"
     RETRIED = "retried"
     DEAD_LETTERED = "dead_lettered"
+    RECOVERED = "recovered"
+    QUARANTINED = "quarantined"
 
 
 # ------------------------------------------------------ in-process (API only)

@@ -69,6 +69,11 @@ FEATURE_SETTINGS: dict[str, tuple[str, ...]] = {
     # (ADR-069). A deployment that set it on one would silently publish half
     # the signals - which is the failure this whole guard exists to stop.
     "metrics_enabled": ("api", "worker"),
+    # The worker holds reservations and renews them; the API publishes how
+    # many have expired. A deployment where the two disagree would have one
+    # process reporting a queue stuck while the other believed it fine
+    # (ADR-074).
+    "queue_visibility_timeout_seconds": ("api", "worker"),
 }
 
 # Fields a mapped prefix picks up that a given service deliberately does not

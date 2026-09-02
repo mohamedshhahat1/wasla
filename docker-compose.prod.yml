@@ -129,6 +129,7 @@ services:
       # exposition is reachable from a scraper on `internal` and from nowhere
       # else (ADR-070).
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      QUEUE_VISIBILITY_TIMEOUT_SECONDS: ${QUEUE_VISIBILITY_TIMEOUT_SECONDS:-120}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
@@ -278,6 +279,11 @@ services:
       # job outcomes and provider calls into Redis and the API renders them
       # (ADR-069). Off here means those counters are simply not written.
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      # How long this process's claim on a job is good for. It renews every
+      # third of this while it lives, so a crash is noticed in about that time
+      # and a long job is never stolen from a worker still running it
+      # (ADR-074). Must match the API's, which publishes the same queues.
+      QUEUE_VISIBILITY_TIMEOUT_SECONDS: ${QUEUE_VISIBILITY_TIMEOUT_SECONDS:-120}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}

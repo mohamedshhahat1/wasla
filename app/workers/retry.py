@@ -59,6 +59,16 @@ class FailureCategory(StrEnum):
     """
 
     MALFORMED = "malformed"
+    # The worker holding this job stopped without acknowledging it. Not an
+    # error the job raised - nothing raised - which is why it is its own
+    # category rather than `unknown`: an operator reading a dead-letter list
+    # needs to tell "this job is broken" from "the machine running it went
+    # away", because only the second one is worth trying again.
+    WORKER_CRASHED = "worker_crashed"
+    # A worker died after a turn had engaged the provider, so the outbound
+    # message may or may not have been sent. Terminal by construction: the one
+    # thing that must not follow is another send (ADR-074).
+    UNCERTAIN_DELIVERY = "uncertain_delivery"
     DEPENDENCY_UNAVAILABLE = "dependency_unavailable"
     PROVIDER_ERROR = "provider_error"
     RATE_LIMITED = "rate_limited"
@@ -86,8 +96,19 @@ RETRYABLE: Final[frozenset[FailureCategory]] = frozenset(
         FailureCategory.PROVIDER_ERROR,
         FailureCategory.RATE_LIMITED,
         FailureCategory.TIMEOUT,
+        # A crash is a machine problem rather than a job problem, so the job
+        # deserves another attempt - but it *spends* one, because a crash is
+        # still an execution attempt and hiding that would let a job loop
+        # through crashes for ever without ever exhausting its budget.
+        FailureCategory.WORKER_CRASHED,
     }
 )
+
+# Categories that mean "somebody has to look at this", as opposed to "this
+# failed". Both are terminal; the difference is what an operator does next,
+# and `uncertain_delivery` is the one where the *safe* action may be to do
+# nothing at all.
+NEEDS_OPERATOR: Final[frozenset[FailureCategory]] = frozenset({FailureCategory.UNCERTAIN_DELIVERY})
 
 
 def classify(error: BaseException) -> FailureCategory:
@@ -192,6 +213,7 @@ NO_RETRY: Final = RetryPolicy(max_attempts=1, base_seconds=1.0, max_seconds=1.0)
 
 __all__ = [
     "IDEMPOTENT_RETRY",
+    "NEEDS_OPERATOR",
     "NO_RETRY",
     "RETRYABLE",
     "FailureCategory",

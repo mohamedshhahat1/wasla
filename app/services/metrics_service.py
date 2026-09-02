@@ -54,6 +54,11 @@ DEPTH_GAUGES: tuple[tuple[str, str, str], ...] = (
         "Jobs that stopped being retried and are waiting for an operator.",
         "dead_lettered",
     ),
+    (
+        "wasla_queue_expired_reservations",
+        "In-flight jobs whose worker has stopped renewing their lease.",
+        "expired",
+    ),
 )
 
 
@@ -66,6 +71,7 @@ class QueueSnapshot:
     inflight: int
     delayed: int
     dead_lettered: int
+    expired: int
     oldest_pending_age_seconds: float | None
 
 
@@ -95,6 +101,7 @@ class MetricsService:
                     inflight=await queue.inflight_depth(),
                     delayed=await queue.delayed_depth(),
                     dead_lettered=await queue.failed_depth(),
+                    expired=await queue.expired_depth(now=moment),
                     oldest_pending_age_seconds=await queue.oldest_pending_age_seconds(now=moment),
                 )
             )

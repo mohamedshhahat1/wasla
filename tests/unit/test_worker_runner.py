@@ -18,6 +18,7 @@ from app.workers.campaign_worker import CampaignWorker
 from app.workers.follow_up_worker import FollowUpWorker
 from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_worker import MediaWorker
+from app.workers.recovery import RecoveryWorker
 from app.workers.runner import (
     AGENT,
     ALL_KINDS,
@@ -132,6 +133,11 @@ def test_each_kind_builds_its_own_worker(settings):
         FollowUpWorker,
         CampaignWorker,
         BillingWorker,
+        # Email is absent because this fixture leaves it disabled; recovery is
+        # present because it is not optional. It reclaims what *other*
+        # processes were holding when they died, so a deployment that runs it
+        # nowhere has no crash recovery at all (ADR-074).
+        RecoveryWorker,
     ]
 
 

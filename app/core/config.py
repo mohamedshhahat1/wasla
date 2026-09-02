@@ -213,6 +213,13 @@ class Settings(BaseSettings):
     # `nginx.conf` refuses the path on the public listener, so what it exposes
     # is reachable from the internal network and from nowhere else (ADR-070).
     metrics_enabled: bool = True
+    # How long a worker's claim on a queued job is good for before a recovery
+    # pass may reclaim it. Workers renew the leases they hold every third of
+    # this, so it does not have to cover the longest job anybody might run -
+    # it only has to be comfortably longer than one renewal interval plus a
+    # slow Redis (ADR-074). Two minutes means a crashed worker's job is back in
+    # play inside a few minutes rather than never.
+    queue_visibility_timeout_seconds: float = Field(default=120.0, ge=30.0, le=3600.0)
 
     # HTTP
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)

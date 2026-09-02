@@ -230,40 +230,31 @@ def _line_of(node: ast.AST) -> int:
 def test_the_turn_is_marked_engaged_before_anything_leaves_the_process():
     """Read out of `_handle` itself, because the tests above cannot see it.
 
-    Every other test in this file stubs `_handle` and sets `progress.engaged`
-    by hand, which proves the *decision* - engaged means no retry - and proves
-    nothing about where the real code sets it. A mutation probe that replaced
-    `progress.engaged = True` with `False` passed this whole file, which is
-    exactly the gap a stub leaves behind.
+    Every other test in this file stubs `_handle` and drives `progress` by
+    hand, which proves the *decision* - engaged means no retry - and proves
+    nothing about where the real code marks it. A mutation probe that replaced
+    the marker with its opposite passed this whole file, which is exactly the
+    gap a stub leaves behind.
 
     So the placement is asserted structurally. The invariant is narrow and
-    positional: the marker is set, and it is set before the HTTP client that
-    carries the turn to OpenAI and to Meta is built. Everything before that
-    point is a transaction that rolls back; everything after it may have
+    positional: the turn is marked engaged, and it is marked before the HTTP
+    client that carries it to OpenAI and to Meta is built. Everything before
+    that point is a transaction that rolls back; everything after it may have
     reserved an allowance, called a provider or sent a customer a message.
     """
     body = _handle_body()
 
-    assignments = [
+    marks = [
         node
         for node in ast.walk(body)
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Attribute)
-            and target.attr == "engaged"
-            and isinstance(target.value, ast.Name)
-            and target.value.id == "progress"
-            for target in node.targets
-        )
+        if isinstance(node, ast.Await)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "engage"
+        and isinstance(node.value.func.value, ast.Name)
+        and node.value.func.value.id == "progress"
     ]
-    assert assignments, "`_handle` never marks the turn engaged"
-
-    truthy = [
-        node
-        for node in assignments
-        if isinstance(node.value, ast.Constant) and node.value.value is True
-    ]
-    assert truthy, "`_handle` sets `progress.engaged` to something other than True"
+    assert marks, "`_handle` never marks the turn engaged"
 
     clients = [
         node
@@ -274,7 +265,43 @@ def test_the_turn_is_marked_engaged_before_anything_leaves_the_process():
     ]
     assert clients, "`_handle` no longer builds the turn's HTTP client here"
 
-    assert min(_line_of(node) for node in truthy) < min(_line_of(node) for node in clients), (
+    assert min(_line_of(node) for node in marks) < min(_line_of(node) for node in clients), (
         "the turn must be marked engaged *before* the HTTP client is built; "
         "after that line a retry can bill a second inference or send a second reply"
     )
+
+
+async def test_marking_the_turn_engaged_persists_it_outside_the_process():
+    """The in-memory flag is not enough, and this is why.
+
+    A worker that dies takes `_TurnProgress` with it. If the fact never
+    reached Redis, a recovery pass would find a reservation it could not
+    classify and would have to guess about a WhatsApp message that may already
+    have been sent (ADR-074).
+    """
+    redis = FakeQueueRedis()
+    worker = build_worker(redis)
+    await enqueue(worker)
+    raw = await worker.queue.reserve(wait_seconds=1, now=NOW)
+
+    engaged: list[bool] = []
+
+    async def engage_then_fail(job, progress):
+        await progress.engage()
+        engaged.append(progress.engaged)
+        raise ExternalServiceError("Meta rejected the message")
+
+    # The reservation the worker is about to hand `_handle` is the one just
+    # reserved, so put it back where `run_once` will find it.
+    redis.lists["agent:jobs:inflight"].remove(raw)
+    redis.lists["agent:jobs:pending"].append(raw)
+    await redis.hdel("agent:jobs:reservations", raw)
+
+    worker._handle = engage_then_fail  # type: ignore[method-assign]
+    await worker.run_once(wait_seconds=1)
+
+    assert engaged == [True]
+    # The turn failed after engaging, so it was dead-lettered rather than
+    # retried - and the reservation is gone because the worker acknowledged it.
+    assert await worker.queue.failed_depth() == 1
+    assert await worker.queue.delayed_depth() == 0

@@ -23,7 +23,11 @@ class FakeQueueRedis:
     def __init__(self) -> None:
         self.lists: dict[str, list[str]] = {}
         self.zsets: dict[str, dict[str, float]] = {}
+        # Counter hashes (HINCRBY) and string hashes (HSET) are kept apart,
+        # because real Redis would refuse to mix them on one key and a fake
+        # that allowed it could hide that.
         self.hashes: dict[str, dict[str, int]] = {}
+        self.strings: dict[str, dict[str, str]] = {}
         # Every command issued, for the few assertions that care about the
         # shape of the conversation rather than its result.
         self.calls: list[tuple[str, ...]] = []
@@ -131,6 +135,22 @@ class FakeQueueRedis:
 
     # ------------------------------------------------------------ hashes
 
+    async def hset(self, key: str, field: str, value: str) -> int:
+        fields = self.strings.setdefault(key, {})
+        added = 0 if field in fields else 1
+        fields[field] = value
+        return added
+
+    async def hget(self, key: str, field: str) -> str | None:
+        return (self.strings.get(key) or {}).get(field)
+
+    async def hdel(self, key: str, field: str) -> int:
+        fields = self.strings.get(key)
+        if not fields or field not in fields:
+            return 0
+        del fields[field]
+        return 1
+
     async def hincrby(self, key: str, field: str, amount: int = 1) -> int:
         fields = self.hashes.setdefault(key, {})
         fields[field] = fields.get(field, 0) + amount
@@ -144,6 +164,14 @@ class FakeQueueRedis:
     async def exists(self, key: str) -> int:
         return 1 if key in self.lists or key in self.zsets or key in self.hashes else 0
 
+    async def flushdb(self) -> bool:
+        """Everything Redis held is gone - a restore, or somebody's mistake."""
+        self.lists.clear()
+        self.zsets.clear()
+        self.hashes.clear()
+        self.strings.clear()
+        return True
+
 
 class FailingRedis(FakeQueueRedis):
     """Refuses whichever commands a test names, to prove nothing depends on them.
@@ -155,6 +183,22 @@ class FailingRedis(FakeQueueRedis):
     def __init__(self, *, failing: frozenset[str] = frozenset()) -> None:
         super().__init__()
         self.failing = failing
+
+    async def hset(self, key: str, field: str, value: str) -> int:
+        fields = self.strings.setdefault(key, {})
+        added = 0 if field in fields else 1
+        fields[field] = value
+        return added
+
+    async def hget(self, key: str, field: str) -> str | None:
+        return (self.strings.get(key) or {}).get(field)
+
+    async def hdel(self, key: str, field: str) -> int:
+        fields = self.strings.get(key)
+        if not fields or field not in fields:
+            return 0
+        del fields[field]
+        return 1
 
     async def hincrby(self, key: str, field: str, amount: int = 1) -> int:
         if "hincrby" in self.failing:

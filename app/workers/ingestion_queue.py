@@ -30,7 +30,9 @@ from redis.asyncio import Redis
 
 from app.core.redis import MAX_BLOCKING_SECONDS
 from app.workers.queue import (
+    DEFAULT_VISIBILITY_TIMEOUT_SECONDS,
     INGESTION_NAMESPACE,
+    MalformedJobError,
     ReliableQueue,
     _decode_object,
     _identifier,
@@ -80,11 +82,36 @@ class IngestionQueue(ReliableQueue):
     the queue stays independent of application startup.
     """
 
-    def __init__(self, redis: Redis, *, namespace: str = INGESTION_NAMESPACE) -> None:
-        super().__init__(redis, namespace=namespace)
+    label = "ingestion"
+
+    #: Re-ingesting replaces a document's chunks rather than appending, so a
+    #: repeat costs embedding calls and changes nothing anybody can see.
+    idempotent = True
+
+    def __init__(
+        self,
+        redis: Redis,
+        *,
+        namespace: str = INGESTION_NAMESPACE,
+        worker_id: str | None = None,
+        visibility_timeout_seconds: float = DEFAULT_VISIBILITY_TIMEOUT_SECONDS,
+    ) -> None:
+        super().__init__(
+            redis,
+            namespace=namespace,
+            worker_id=worker_id,
+            visibility_timeout_seconds=visibility_timeout_seconds,
+        )
 
     async def enqueue(self, job: IngestionJob, *, now: datetime | None = None) -> None:
         await self.enqueue_body(job.encode(), now=now)
+
+    def identify(self, body: str) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+        try:
+            job = IngestionJob.decode(body)
+        except MalformedJobError:
+            return None, None
+        return job.tenant_id, job.document_id
 
 
 __all__ = ["BLOCK_SECONDS", "INGESTION_NAMESPACE", "IngestionJob", "IngestionQueue"]

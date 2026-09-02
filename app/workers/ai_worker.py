@@ -76,15 +76,30 @@ AGENT_RETRY = RetryPolicy(max_attempts=3, base_seconds=2.0, max_seconds=30.0)
 class _TurnProgress:
     """Whether this turn has done anything the outside world can see.
 
-    Set immediately before the HTTP client is built, which is the last moment
-    at which nothing has left this process. After it, a retry could bill a
-    second inference or send a second reply, so `run_once` stops offering one.
+    Marked immediately before the HTTP client is built, which is the last
+    moment at which nothing has left this process. After it, a retry could
+    bill a second inference or send a second reply, so `run_once` stops
+    offering one.
+
+    **The mark is also written to Redis**, and that is what makes it survive
+    the process. An in-memory flag answers "may this worker retry", which is
+    only ever asked by a worker that is still alive to ask it; a crash takes
+    the flag with it and leaves a reaper guessing whether a customer already
+    has a reply. `on_engage` is the reservation's stage transition, so the
+    answer outlives the process that knew it (ADR-074).
     """
 
-    __slots__ = ("engaged",)
+    __slots__ = ("_on_engage", "engaged")
 
-    def __init__(self) -> None:
+    def __init__(self, on_engage: Callable[[], Awaitable[object]] | None = None) -> None:
         self.engaged = False
+        self._on_engage = on_engage
+
+    async def engage(self) -> None:
+        """Record that the turn is about to talk to somebody else's API."""
+        self.engaged = True
+        if self._on_engage is not None:
+            await self._on_engage()
 
 
 class AgentWorker:
@@ -161,7 +176,7 @@ class AgentWorker:
             )
             return True
 
-        progress = _TurnProgress()
+        progress = _TurnProgress(lambda: self._queue.mark_engaged(raw))
         try:
             await self._handle(job, progress)
         except Exception as error:
@@ -266,8 +281,10 @@ class AgentWorker:
 
             # Past this line the turn can reserve an allowance, call the
             # provider and send a customer a message, none of which a second
-            # attempt could tell had already happened.
-            progress.engaged = True
+            # attempt could tell had already happened. Awaited rather than
+            # assigned because it also persists the fact, so a worker that dies
+            # after this point is not mistaken for one that died before it.
+            await progress.engage()
             async with build_http_client() as http:
                 api_key = self._settings.openai_api_key or ""
                 client = ResponsesClient(http=http, api_key=api_key)

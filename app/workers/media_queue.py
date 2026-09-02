@@ -30,7 +30,9 @@ from redis.asyncio import Redis
 
 from app.core.redis import MAX_BLOCKING_SECONDS
 from app.workers.queue import (
+    DEFAULT_VISIBILITY_TIMEOUT_SECONDS,
     MEDIA_NAMESPACE,
+    MalformedJobError,
     ReliableQueue,
     _decode_object,
     _identifier,
@@ -79,11 +81,36 @@ class MediaQueue(ReliableQueue):
     the queue stays independent of application startup.
     """
 
-    def __init__(self, redis: Redis, *, namespace: str = MEDIA_NAMESPACE) -> None:
-        super().__init__(redis, namespace=namespace)
+    label = "media"
+
+    #: A file already stored is not downloaded again and one already read is
+    #: not read again, so a repeat costs a database round trip and no more.
+    idempotent = True
+
+    def __init__(
+        self,
+        redis: Redis,
+        *,
+        namespace: str = MEDIA_NAMESPACE,
+        worker_id: str | None = None,
+        visibility_timeout_seconds: float = DEFAULT_VISIBILITY_TIMEOUT_SECONDS,
+    ) -> None:
+        super().__init__(
+            redis,
+            namespace=namespace,
+            worker_id=worker_id,
+            visibility_timeout_seconds=visibility_timeout_seconds,
+        )
 
     async def enqueue(self, job: MediaJob, *, now: datetime | None = None) -> None:
         await self.enqueue_body(job.encode(), now=now)
+
+    def identify(self, body: str) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+        try:
+            job = MediaJob.decode(body)
+        except MalformedJobError:
+            return None, None
+        return job.tenant_id, job.media_id
 
 
 __all__ = ["BLOCK_SECONDS", "MEDIA_NAMESPACE", "MediaJob", "MediaQueue"]

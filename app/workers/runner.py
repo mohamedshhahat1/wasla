@@ -23,7 +23,7 @@ import asyncio
 import contextlib
 import os
 import signal
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Final, Protocol
 
 from app.core.config import Settings, get_settings
@@ -43,6 +43,8 @@ from app.workers.heartbeat import (
 )
 from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_worker import MediaWorker
+from app.workers.queue import LEASE_RENEWAL_FRACTION, ReliableQueue
+from app.workers.recovery import RecoveryWorker
 
 logger = get_logger(__name__)
 
@@ -53,12 +55,19 @@ MEDIA: Final = "media"
 CAMPAIGN: Final = "campaign"
 BILLING: Final = "billing"
 EMAIL: Final = "email"
+RECOVERY: Final = "recovery"
 # Media comes before agent deliberately. It is the order the work flows in -
 # a file is read, then answered - and the order the log lines appear in at
 # startup, which is worth having match. Billing and email come last: billing
 # is the only loop whose period is measured in days, and email consumes what
 # the others (and the API) produce, so nothing upstream waits on either.
-ALL_KINDS: Final = (MEDIA, AGENT, INGESTION, FOLLOW_UP, CAMPAIGN, BILLING, EMAIL)
+#
+# Recovery is last of all, and it is the only loop that does nothing for its
+# own queue: it reclaims what *other* processes were holding when they died,
+# so a deployment that runs it nowhere has no crash recovery at all. Leaving
+# it out of `WORKER_KINDS` is therefore a decision worth having to make
+# explicitly, which is what including it here by default achieves.
+ALL_KINDS: Final = (MEDIA, AGENT, INGESTION, FOLLOW_UP, CAMPAIGN, BILLING, EMAIL, RECOVERY)
 
 KINDS_VARIABLE: Final = "WORKER_KINDS"
 
@@ -134,7 +143,26 @@ def build_workers(
             # missing RESEND_API_KEY refuses to boot here rather than
             # claiming rows it can never send (ADR-042).
             workers.append(EmailWorker(database=database, settings=settings))
+        elif kind == RECOVERY:
+            workers.append(RecoveryWorker(redis=redis, settings=settings))
     return workers
+
+
+def reservation_queues(workers: Iterable[Worker]) -> list[ReliableQueue]:
+    """The queues whose leases this process is responsible for renewing.
+
+    Collected from the workers themselves rather than rebuilt, because a lease
+    is renewed for the *instance* that holds the reservation - a second
+    `AgentQueue` over the same Redis knows nothing about what the first one is
+    holding, and renewing from it would extend nothing while looking like it
+    had.
+    """
+    queues: list[ReliableQueue] = []
+    for worker in workers:
+        queue = getattr(worker, "queue", None)
+        if isinstance(queue, ReliableQueue):
+            queues.append(queue)
+    return queues
 
 
 async def run(workers: list[Worker]) -> None:
@@ -193,6 +221,42 @@ async def beat_while_running(
             await asyncio.wait_for(stopping.wait(), timeout=interval_seconds)
 
 
+async def renew_while_running(
+    queues: Sequence[ReliableQueue],
+    *,
+    stopping: asyncio.Event,
+    interval_seconds: float,
+) -> None:
+    """Keep this process's claims on the jobs it is working on.
+
+    The other half of crash recovery, and the half that stops it doing harm. A
+    lease long enough to cover the longest job anybody might run would take an
+    hour to notice a dead worker; a lease short enough to notice quickly would
+    be stolen out from under a worker still using it. Renewal removes the
+    choice: the timeout can be short because a living process keeps saying so.
+
+    A renewal that fails is logged and not retried here - the next tick tries
+    again, and if the process is in a state where renewals keep failing then a
+    reaper reclaiming its work is the correct outcome rather than a bug.
+    """
+    if not queues:
+        return
+    while not stopping.is_set():
+        for queue in queues:
+            try:
+                await queue.renew_leases()
+            except Exception:
+                logger.warning(
+                    "worker.lease_renewal_failed",
+                    extra={
+                        "event": "worker.lease_renewal_failed",
+                        "queue": queue.namespace,
+                    },
+                )
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stopping.wait(), timeout=interval_seconds)
+
+
 async def check_health() -> bool:
     """Whether this container's configured loops are all beating.
 
@@ -238,6 +302,13 @@ async def main() -> None:
 
     stopping = asyncio.Event()
     heartbeat = asyncio.create_task(beat_while_running(redis, kinds, stopping=stopping))
+    renewal = asyncio.create_task(
+        renew_while_running(
+            reservation_queues(workers),
+            stopping=stopping,
+            interval_seconds=settings.queue_visibility_timeout_seconds * LEASE_RENEWAL_FRACTION,
+        )
+    )
 
     try:
         await run(workers)
@@ -251,8 +322,10 @@ async def main() -> None:
         set_counter_sink(None)
         stopping.set()
         heartbeat.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat
+        renewal.cancel()
+        for task in (heartbeat, renewal):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await redis.close()
         await database.dispose()
         logger.info("worker.shutdown", extra={"event": "worker.shutdown"})
