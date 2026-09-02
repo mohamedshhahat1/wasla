@@ -283,8 +283,31 @@ def test_the_claim_picks_within_an_ambiguous_container() -> None:
 
 
 def test_an_ambiguous_container_with_no_claim_is_refused_rather_than_guessed() -> None:
+    """Matroska and an OLE2 document both have a wrong answer to pick."""
     with pytest.raises(MediaTypeError):
         resolve(claimed=None, prefix=webm())
+    with pytest.raises(MediaTypeError):
+        resolve(claimed=None, prefix=ole2())
+
+
+def test_undeclared_text_takes_the_conservative_half_of_its_pair() -> None:
+    """The one ambiguity with no consequence, and so the one with a default.
+
+    `text/plain` and `text/csv` take the same route through extraction, are the
+    same class, and are both served as an attachment that is never rendered -
+    so refusing a plain-text file for want of a header somebody's client did
+    not send would cost a customer their file to settle a distinction that
+    changes nothing.
+    """
+    assert resolve(claimed=None, prefix=b"a note from a customer").mime_type == "text/plain"
+    assert resolve(claimed="", prefix=b"name,price\nsofa,4500\n").mime_type == "text/plain"
+
+
+def test_the_default_never_widens_what_was_detected() -> None:
+    """It picks within the detected pair and can never reach outside it."""
+    detected = detect(b"a note from a customer")
+    assert detected is not None
+    assert resolve(claimed=None, prefix=b"a note from a customer").mime_type in detected
 
 
 def test_an_ambiguous_container_cannot_be_claimed_as_something_outside_the_pair() -> None:

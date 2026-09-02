@@ -169,6 +169,20 @@ WEBM_TYPES: Final = frozenset({"audio/webm", "video/webm"})
 # Reached only when nothing above matched and the bytes decode as text.
 TEXT_TYPES: Final = frozenset({"text/plain", "text/csv"})
 
+# What an ambiguous container resolves to when the caller declared nothing.
+#
+# Only text is here, and the omission of the other two is the decision. For
+# Matroska and for an OLE2 document, choosing wrongly has a consequence - audio
+# sent to a video reader, a spreadsheet announced as a document - so there is no
+# honest default and the file is refused instead.
+#
+# Text has no such consequence. `text/plain` and `text/csv` take the same route
+# through extraction, belong to the same class, and are both served as an
+# attachment that is never rendered; picking the more conservative of the two
+# costs nothing and refusing a plain-text attachment for want of a header
+# somebody's client did not send costs a customer their file.
+UNDECLARED_DEFAULTS: Final[dict[frozenset[str], str]] = {TEXT_TYPES: "text/plain"}
+
 # Bytes that never appear in a plain text file this system should accept. NUL
 # rules out every binary format that got this far, and the C0 controls rule out
 # the escape sequences that make a "text" file a terminal payload. Tab, newline
@@ -359,12 +373,16 @@ def resolve(*, claimed: str | None, prefix: bytes) -> DetectedMedia:
 
     normalised = (claimed or "").split(";", 1)[0].strip().lower()
     if normalised in UNDECLARED_TYPES:
-        if len(candidates) != 1:
+        canonical = (
+            next(iter(candidates))
+            if len(candidates) == 1
+            else UNDECLARED_DEFAULTS.get(candidates, "")
+        )
+        if not canonical:
             raise MediaTypeError(
                 "This file does not say what type it is, and its contents could "
                 "be more than one. Send it with a content type."
             )
-        canonical = next(iter(candidates))
         return DetectedMedia(mime_type=canonical, kind=CANONICAL_TYPES[canonical])
 
     if normalised not in candidates:

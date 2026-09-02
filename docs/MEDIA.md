@@ -87,7 +87,7 @@ The upload route reads in chunks for the same reason, so an oversized attachment
 | --- | --- |
 | Claim agrees with the bytes | Accepted, stored under the canonical spelling |
 | Claim contradicts the bytes | Refused — 400 on upload, `SKIPPED` on download |
-| Claim absent or `application/octet-stream` | The bytes decide alone |
+| Claim absent or `application/octet-stream` | The bytes decide alone; an ambiguous pair is refused, except text, which takes `text/plain` |
 | Bytes of no supported format | Refused, whatever was claimed |
 | Container that genuinely carries two types | The claim picks within the pair, and can never widen it |
 

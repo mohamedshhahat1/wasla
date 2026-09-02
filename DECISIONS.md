@@ -2843,8 +2843,14 @@ upload route it is a 400; on the download path it is `SKIPPED`, because no
 retry turns those bytes into the announced type.
 
 **Absent is not conflicting.** A missing header and `application/octet-stream`
-say the same thing, and the bytes decide alone — except for the two ambiguous
-containers, where there is no honest way to choose and the file is refused.
+say the same thing, and the bytes decide alone. Where detection narrows to a
+pair there is usually no honest way to choose, and the file is refused — but
+text is the exception, and the exception is the point: `text/plain` and
+`text/csv` take the same route through extraction, are the same class, and are
+both served as an attachment that is never rendered, so the distinction has no
+consequence and picking the conservative half of it costs nothing. Refusing a
+plain-text attachment for want of a header somebody's client did not send would
+cost a customer their file to settle a question that changes nothing.
 
 **The cap is enforced during the read.** `fetch_media` now takes a required
 `max_bytes` and streams, abandoning the body mid-chunk when it passes. A
