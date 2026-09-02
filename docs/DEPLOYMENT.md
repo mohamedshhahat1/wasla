@@ -43,6 +43,8 @@ Every secret in the production file is required and interpolated from the deploy
 | `DEFAULT_PLAN_CODE` | New workspaces start on `starter` |
 | `RATE_LIMIT_*` | Limiting is on, at the application defaults |
 | `MAX_REQUEST_BYTES`, `REQUEST_TIMEOUT_SECONDS` | 32 MB and 60 seconds |
+| `METRICS_ENABLED` | Metrics are **on**. `/metrics` is served on the internal network, and the worker writes the cross-process counters the API renders. Set it to `false` on both processes to remove the endpoint and stop the counters; setting it on one publishes half the signals, which the deployment drift guard refuses |
+| `BACKUP_DIR`, `BACKUP_RETENTION_DAYS` | `./backups` on the host and fourteen days. Read by `scripts/backup_postgres.sh` and never by the application, which is why neither is a `Settings` field |
 
 `REDIS_PASSWORD` is consumed twice on purpose: as the server's `--requirepass` and as the credential inside `REDIS_URL`. The healthcheck authenticates too, so a mismatch fails the check rather than reporting a healthy server that refuses every real client.
 
@@ -386,4 +388,35 @@ Deploy the previous digest. The procedure, and why a rollback must not run migra
 
 Migrations run as an explicit step before the new application version serves traffic; schema is never mutated manually. Readiness gates traffic on dependency availability while liveness stays independent of PostgreSQL. Health, logging, and observability details are in [../ARCHITECTURE.md](../ARCHITECTURE.md).
 
-**[RUNBOOK.md](RUNBOOK.md) is the operational document**: what to check first, what each symptom means, how to roll back, how to rotate each secret, and — stated explicitly — what it cannot tell you, including that there is no backup system yet.
+**[RUNBOOK.md](RUNBOOK.md) is the operational document**: what to check first, what each symptom means, how to roll back, how to rotate each secret, and — stated explicitly — what it cannot tell you.
+
+### Metrics
+
+`GET /metrics` serves the Prometheus exposition described in
+[OBSERVABILITY.md](OBSERVABILITY.md). **Point a scraper at the API container on
+the internal network**, not at the public listener: `nginx.conf` answers 404 for
+the path there, deliberately, and the API publishes no port of its own, so that
+refusal plus the network is the whole of the access control (ADR-070).
+
+There is no Alertmanager in this stack. [OBSERVABILITY.md](OBSERVABILITY.md)
+gives concrete expressions for every signal that exists; wiring them into
+whatever is watching this deployment is the operator's step, and until it
+happens nobody is paged for anything.
+
+### Backups
+
+`docker compose -f docker-compose.prod.yml --profile backup run --rm backup`,
+fired by the host's cron or a systemd timer — a one-shot service like `migrate`,
+not a scheduler running inside the stack. It writes to `BACKUP_DIR` on the host.
+
+Two things are the operator's and are not automated here, and both matter more
+than the script does:
+
+- **Copy the dumps off the host, encrypted.** A backup that only exists on the
+  machine running the database survives a dropped table and not a dead host.
+- **Rehearse the restore against your own data.** The procedure and a drill run
+  against synthetic data are in [BACKUP.md](BACKUP.md); a restore nobody on this
+  deployment has performed is a procedure, not a recovery capability.
+
+Redis is deliberately not backed up, and media is not backed up at all.
+[BACKUP.md](BACKUP.md) says what each of those costs.
