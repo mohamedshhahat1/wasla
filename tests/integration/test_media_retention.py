@@ -432,6 +432,111 @@ async def test_pending_counts_only_unfinished_claims(db_session, storage) -> Non
     assert await service.pending_count() == 0
 
 
+# ================================================ retention meets the worker
+
+
+async def test_a_replayed_media_job_does_not_undo_a_purge(db_session, storage) -> None:
+    """A null `storage_key` used to mean one thing and now means two.
+
+    Before retention it meant "not downloaded yet". It now also means "the file
+    was removed", and a media job replayed after a purge would otherwise ask
+    Meta for a handle that expired months ago, fail, and flip a READY row with
+    a good transcript to FAILED - destroying the record of what the file said
+    to re-fetch a file the workspace asked to have deleted.
+    """
+    from app.core.config import Settings
+    from app.services.media_service import MediaService
+
+    tenant = await _tenant(db_session)
+    media = await _stored_file(
+        db_session, tenant, storage, age_days=RETENTION_DAYS + 1, transcript="A price list."
+    )
+    media.wa_media_id = "meta-handle-long-expired"
+    await db_session.flush()
+
+    await _service(db_session, storage).sweep(now=NOW, retention_days=RETENTION_DAYS, limit=100)
+    assert media.is_purged
+
+    class ExplodingWhatsApp:
+        async def probe_media(self, media_id: str):
+            raise AssertionError("a purged file was re-fetched from Meta")
+
+        async def fetch_media(self, media_id: str, *, max_bytes: int):
+            raise AssertionError("a purged file was re-fetched from Meta")
+
+    service = MediaService(
+        session=db_session,
+        tenant_id=tenant.id,
+        settings=Settings(
+            _env_file=None,
+            environment="test",
+            log_format="console",
+            log_level="WARNING",
+            cors_origins=[],
+        ),
+        storage=storage,
+        whatsapp=ExplodingWhatsApp(),  # type: ignore[arg-type]
+    )
+
+    outcome = await service.download(media)
+
+    assert outcome.status is MediaStatus.READY
+    assert media.status is MediaStatus.READY
+    assert media.transcript == "A price list."
+    assert media.storage_key is None
+
+
+async def test_reading_a_purged_file_is_not_attempted(db_session, storage) -> None:
+    """The transcript is the answer, and the bytes are gone anyway."""
+    from app.core.config import Settings
+    from app.services.media_service import MediaService
+
+    tenant = await _tenant(db_session)
+    media = await _stored_file(
+        db_session, tenant, storage, age_days=RETENTION_DAYS + 1, transcript="A price list."
+    )
+    await _service(db_session, storage).sweep(now=NOW, retention_days=RETENTION_DAYS, limit=100)
+
+    class ExplodingReader:
+        async def read(self, *, content: bytes, mime_type: str | None):
+            raise AssertionError("a purged file was handed to the reader")
+
+    service = MediaService(
+        session=db_session,
+        tenant_id=tenant.id,
+        settings=Settings(
+            _env_file=None,
+            environment="test",
+            log_format="console",
+            log_level="WARNING",
+            cors_origins=[],
+        ),
+        storage=storage,
+    )
+
+    outcome = await service.understand(media, reader=ExplodingReader())  # type: ignore[arg-type]
+
+    assert outcome.status is MediaStatus.READY
+    assert media.transcript == "A price list."
+
+
+async def test_a_sweep_with_no_clock_of_its_own_counts_honestly(db_session, storage) -> None:
+    """`sweep()` without a `now` must stamp and compare the same instant.
+
+    Reading the clock twice - once to claim and once to count - makes every row
+    look like one an earlier pass had left behind, which is precisely the number
+    an operator is told to alert on.
+    """
+    tenant = await _tenant(db_session)
+    await _stored_file(db_session, tenant, storage, age_days=RETENTION_DAYS + 1)
+
+    outcome = await _service(db_session, storage).sweep(retention_days=RETENTION_DAYS, limit=100)
+
+    assert outcome.claimed == 1
+    assert outcome.purged == 1
+    assert outcome.already_claimed == 0, "a freshly claimed row was counted as resumed"
+
+
 # ============================================================ still isolated
 
 

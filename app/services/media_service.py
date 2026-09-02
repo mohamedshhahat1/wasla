@@ -103,6 +103,17 @@ class MediaService:
         """
         if media.storage_key is not None:
             return MediaOutcome(media_id=media.id, status=media.status)
+        if media.is_purged:
+            # Retention removed this file (ADR-078). A null `storage_key` used
+            # to mean one thing - not downloaded yet - and now means two, so
+            # this is checked before anything treats the row as fresh work.
+            #
+            # Without it a media job replayed after a purge would ask Meta for
+            # a handle that expired months ago, fail, and flip a READY row with
+            # a good transcript to FAILED - undoing the deletion the workspace
+            # asked for if it happened to succeed, and destroying the record of
+            # what the file said if it did not.
+            return MediaOutcome(media_id=media.id, status=media.status)
         if media.wa_media_id is None:
             return await self._skip(media, "This message carries no file to download.")
         if self._whatsapp is None:
@@ -230,6 +241,10 @@ class MediaService:
           at which point it becomes a give-up that still lets the customer be
           answered.
         """
+        if media.is_purged:
+            # Read already, and the file since removed. The transcript on the
+            # row is the answer, and re-deriving it is not possible anyway.
+            return MediaOutcome(media_id=media.id, status=media.status)
         if media.storage_key is None:
             return await self._skip(media, "There is nothing stored to read.")
         if media.status is MediaStatus.READY:

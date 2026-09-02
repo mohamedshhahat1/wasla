@@ -177,11 +177,16 @@ class MediaRetentionService:
         through leaves the rows it did not reach claimed but intact, which is
         the state the next pass is built to continue from.
         """
-        rows = await self.claim(now=now, retention_days=retention_days, limit=limit)
+        # Read once and passed down. Computing it again below would compare the
+        # rows against a *different* instant from the one `claim` stamped them
+        # with, and every row would look like one an earlier pass had left -
+        # which is the number an operator alerts on.
+        moment = now or datetime.now(UTC)
+
+        rows = await self.claim(now=moment, retention_days=retention_days, limit=limit)
         if not rows:
             return RetentionOutcome()
 
-        moment = now or datetime.now(UTC)
         resumed = sum(1 for media in rows if media.purge_started_at != moment)
 
         purged = 0
