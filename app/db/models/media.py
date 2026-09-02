@@ -34,6 +34,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -98,6 +99,16 @@ class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         Index("ix_message_media_tenant_id", "tenant_id"),
         Index("ix_message_media_tenant_id_status", "tenant_id", "status"),
         Index("ix_message_media_conversation_id", "conversation_id"),
+        # The retention sweep's only query: files that still have an object,
+        # oldest first. Partial, because the rows it must never look at - every
+        # file already purged, and every message that carried none - are the
+        # overwhelming majority once a deployment has been running a while
+        # (ADR-078).
+        Index(
+            "ix_message_media_retention",
+            "created_at",
+            postgresql_where=text("storage_key IS NOT NULL"),
+        ),
     )
 
     message_id: Mapped[uuid.UUID] = mapped_column(
@@ -140,6 +151,26 @@ class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the retention sweep decided this file should go (ADR-078).
+    #
+    # One column rather than two, and it carries the whole state machine because
+    # it is read alongside `storage_key`:
+    #
+    #   purge_started_at IS NULL                   the ordinary state
+    #   set,   storage_key set                     claimed; the object may or
+    #                                              may not still be there
+    #   set,   storage_key NULL                     done
+    #
+    # The middle state is the point. Deleting an object and clearing the column
+    # that points at it are two writes to two systems and cannot be one
+    # transaction, so the claim is committed *first*: a sweep that dies after
+    # removing the object leaves a row that says so, the next pass deletes again
+    # (which is a no-op) and finishes the job. The alternative order - delete
+    # then record - leaves a row pointing confidently at a file that is gone,
+    # and nothing anywhere to distinguish that from a broken store.
+    purge_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     @property
     def is_resolved(self) -> bool:
@@ -154,3 +185,13 @@ class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
     @property
     def is_exhausted(self) -> bool:
         return self.attempts >= MAX_ATTEMPTS
+
+    @property
+    def is_purged(self) -> bool:
+        """Whether the file is gone, as opposed to merely unreadable.
+
+        A colleague opening an attachment that retention removed should be told
+        that it was removed, which is a different sentence from the store being
+        unavailable - and only this row can tell them apart.
+        """
+        return self.purge_started_at is not None and self.storage_key is None

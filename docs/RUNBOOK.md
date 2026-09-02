@@ -529,6 +529,46 @@ and re-driving them means enqueueing agent jobs for the affected
 conversations — which nothing does automatically, and should not: answering a
 day-old question may be worse than silence.
 
+### Recovering media
+
+**The database restore does not bring the files back, and is not supposed to**
+([BACKUP.md](BACKUP.md)). It restores the `message_media` rows — the transcript,
+the type, the size, the storage key — and the bytes those keys name are the
+object store's to keep.
+
+On `MEDIA_STORAGE_BACKEND=s3` there is nothing to do: point the replacement at
+the same bucket and the keys resolve. Check first that the bucket's lifecycle
+rule has not already expired objects older than the backup you restored, because
+that combination gives a product that works and files that are missing, and
+nothing here compares the two windows for you.
+
+On `local` there is no second copy. Whatever backs up the host is the recovery
+point for attachments; if nothing does, they are gone.
+
+**A restore with missing objects still serves.** Rows whose keys resolve to
+nothing report a storage error for that file rather than failing the
+application, so the inbox works while the store is being brought back.
+
+To check the store from a replacement container before switching traffic to it,
+store and read back one object under a scratch tenant id:
+
+```bash
+docker compose -f docker-compose.prod.yml exec api python - <<'PY'
+import asyncio, uuid
+from app.core.config import get_settings
+from app.core.storage import build_media_storage
+
+async def main() -> None:
+    store = build_media_storage(get_settings())
+    key = await store.put(tenant_id=uuid.uuid4(), data=b"%PDF-1.7 probe", mime_type="application/pdf")
+    assert await store.get(key) == b"%PDF-1.7 probe"
+    await store.delete(key)
+    print("media store reachable, readable and writable")
+
+asyncio.run(main())
+PY
+```
+
 ## What to watch
 
 **Start with the metrics.** `/metrics` publishes request rates and latency,
@@ -580,11 +620,13 @@ Stated plainly, because a runbook that pretends to cover everything is one that 
   production send is also the first test of the DNS, the webhook endpoint and
   the sending reputation.
 - **A wedged event loop is invisible.** Lease renewal and the worker heartbeat both assert the same thing — the process is up and scheduling — so a loop blocked by a genuinely synchronous call keeps renewing its leases and is never reclaimed. Every loop here is I/O-bound async, so that is a bug rather than a state, but it is one this design cannot detect.
-- **Backups cover PostgreSQL and nothing else.** [BACKUP.md](BACKUP.md) has the scripts, the schedule, the retention policy and a restore drill that was actually executed — against synthetic data on local containers, never against production, because there is no production. **Redis is deliberately not backed up** (queued work is late rather than lost; the messages themselves are in PostgreSQL), and **media is not backed up at all**: attachments live on one host's volume and losing it loses them.
-- **No off-host copy is configured.** The backup script writes to a directory. Getting that directory somewhere else, encrypted, is the deployment's job and this repository does not automate it.
+- **Backups cover PostgreSQL and nothing else.** [BACKUP.md](BACKUP.md) has the scripts, the schedule, the retention policy and a restore drill that was actually executed — against synthetic data on local containers, never against production, because there is no production. **Redis is deliberately not backed up** (queued work is late rather than lost; the messages themselves are in PostgreSQL), and **media is not in the dump and is not meant to be**: the rows and the storage keys are, the bytes are the object store's to keep ([ADR-077](../DECISIONS.md), [ADR-078](../DECISIONS.md)). On `MEDIA_STORAGE_BACKEND=local` that means nothing keeps them, and losing the host loses every attachment.
+- **The media recovery check ran against MinIO, not a provider.** A synthetic object was stored, its metadata recorded, the runtime and the local volume destroyed, and the same bytes and canonical type read back by a fresh process against the same off-host store. That proves the application half — the client, the signing, the key, the metadata — and not any provider's IAM, TLS chain, replication lag or lifecycle rules.
+- **Nothing verifies that a bucket's lifecycle rule outlives this backup's retention.** Restoring a database from one date against a bucket that has already expired the objects it references gives a working product with missing files, and no check anywhere compares the two windows.
 - **There is no configured alerting.** [OBSERVABILITY.md](OBSERVABILITY.md) gives concrete expressions against metrics that now exist, and the table above lists the log events worth watching. Neither is a running alert: no Alertmanager, no monitoring vendor, nobody paged.
-- **Media files are not replicated.** They live on one host's volume ([ADR-023](../DECISIONS.md)). Losing it loses every attachment customers sent.
+- **Media durability depends on `MEDIA_STORAGE_BACKEND`** ([ADR-077](../DECISIONS.md)). On `local` the volume is the only copy and losing the host loses every attachment. On `s3` the bytes outlive the host, and their durability, versioning and lifecycle are the bucket's - the PostgreSQL backup carries the rows and the keys, never the files, and is not meant to ([BACKUP.md](BACKUP.md)).
 - **`usage_events` and `audit_logs` grow without bound.** Neither is swept, deliberately — retention for billing records and audit trails is a legal question, not a disk-space one.
+- **The media store grows until a retention period is set.** `MEDIA_RETENTION_DAYS` defaults to zero, which keeps everything ([ADR-078](../DECISIONS.md)). Watch `wasla_media_retention_total{outcome="pending"}`: a number that stays above zero across sweeps is a store refusing deletions, which is otherwise invisible — the rows are claimed, the sweep reports itself as having run, and the volume does not shrink.
 
 ### A refund was issued and the customer says it never arrived
 

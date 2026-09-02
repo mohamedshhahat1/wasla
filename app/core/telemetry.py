@@ -171,6 +171,18 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Calls to an external provider, by provider, operation and outcome.",
         ("provider", "operation", "outcome"),
     ),
+    # Retention (ADR-078). One label with three fixed values, and no tenant,
+    # media id, filename or storage key anywhere near it - the cardinality of
+    # this metric is three, for ever.
+    #
+    # `pending` is the one worth alerting on. `purged` and `failed` are rates
+    # and a bad day in either is visible; a store that has been refusing
+    # deletions is invisible in both, because the rows are claimed, the sweep
+    # reports itself as having run, and the volume simply does not shrink.
+    "wasla_media_retention_total": (
+        "Stored files the retention sweep removed, failed to remove, or is still holding.",
+        ("outcome",),
+    ),
 }
 
 
@@ -219,11 +231,15 @@ def counter_sink() -> Redis | None:
 
 
 async def _increment(metric: str, labels: Mapping[str, str]) -> None:
+    await _increment_by(metric, labels, 1)
+
+
+async def _increment_by(metric: str, labels: Mapping[str, str], amount: int) -> None:
     redis = _sink
     if redis is None:
         return
     try:
-        await cast("Any", redis.hincrby(f"{COUNTER_PREFIX}:{metric}", _field(labels), 1))
+        await cast("Any", redis.hincrby(f"{COUNTER_PREFIX}:{metric}", _field(labels), amount))
     except Exception:
         # A counter that cannot be written is a sample lost, and losing a
         # sample is not a reason to fail the work being sampled.
@@ -267,6 +283,24 @@ async def record_provider_call(
         "wasla_provider_requests_total",
         {"provider": str(provider), "operation": operation, "outcome": str(outcome)},
     )
+
+
+async def record_retention_pass(*, purged: int, failed: int, pending: int) -> None:
+    """One retention sweep's result.
+
+    `pending` is a level rather than a count of events, and it is written to a
+    counter anyway - deliberately. The alternative was a fourth mechanism for
+    cross-process gauges, and what an operator actually asks of this number is
+    "is it going up?", which a monotonically-increasing sum answers as well as a
+    gauge does while costing nothing new. Documented here because a counter
+    named like a level is exactly the sort of thing somebody reads wrongly.
+    """
+    if purged:
+        await _increment_by("wasla_media_retention_total", {"outcome": "purged"}, purged)
+    if failed:
+        await _increment_by("wasla_media_retention_total", {"outcome": "failed"}, failed)
+    if pending:
+        await _increment_by("wasla_media_retention_total", {"outcome": "pending"}, pending)
 
 
 async def read_redis_counters(redis: Redis) -> dict[str, list[tuple[dict[str, str], float]]]:
@@ -319,5 +353,6 @@ __all__ = [
     "read_redis_counters",
     "record_job_outcome",
     "record_provider_call",
+    "record_retention_pass",
     "set_counter_sink",
 ]

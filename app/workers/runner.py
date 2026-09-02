@@ -45,6 +45,7 @@ from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_worker import MediaWorker
 from app.workers.queue import LEASE_RENEWAL_FRACTION, ReliableQueue
 from app.workers.recovery import RecoveryWorker
+from app.workers.retention_worker import RetentionWorker
 
 logger = get_logger(__name__)
 
@@ -56,6 +57,7 @@ CAMPAIGN: Final = "campaign"
 BILLING: Final = "billing"
 EMAIL: Final = "email"
 RECOVERY: Final = "recovery"
+RETENTION: Final = "retention"
 # Media comes before agent deliberately. It is the order the work flows in -
 # a file is read, then answered - and the order the log lines appear in at
 # startup, which is worth having match. Billing and email come last: billing
@@ -67,7 +69,23 @@ RECOVERY: Final = "recovery"
 # so a deployment that runs it nowhere has no crash recovery at all. Leaving
 # it out of `WORKER_KINDS` is therefore a decision worth having to make
 # explicitly, which is what including it here by default achieves.
-ALL_KINDS: Final = (MEDIA, AGENT, INGESTION, FOLLOW_UP, CAMPAIGN, BILLING, EMAIL, RECOVERY)
+# Retention sits beside recovery at the end, and for a related reason: it is
+# housekeeping rather than customer-facing work, and it is the only loop that
+# deletes anything. A deployment that has not set MEDIA_RETENTION_DAYS runs it
+# and it removes nothing, which is the intended default - but the loop still
+# has to run, because its reconciliation pass is what finishes rows an earlier
+# sweep claimed and could not complete (ADR-078).
+ALL_KINDS: Final = (
+    MEDIA,
+    AGENT,
+    INGESTION,
+    FOLLOW_UP,
+    CAMPAIGN,
+    BILLING,
+    EMAIL,
+    RECOVERY,
+    RETENTION,
+)
 
 KINDS_VARIABLE: Final = "WORKER_KINDS"
 
@@ -145,6 +163,8 @@ def build_workers(
             workers.append(EmailWorker(database=database, settings=settings))
         elif kind == RECOVERY:
             workers.append(RecoveryWorker(redis=redis, settings=settings))
+        elif kind == RETENTION:
+            workers.append(RetentionWorker(database=database, settings=settings))
     return workers
 
 

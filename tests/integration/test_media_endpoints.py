@@ -208,6 +208,22 @@ async def test_media_from_another_workspace_is_not_found(client, media_service):
     assert response.status_code == 404
 
 
+async def test_a_file_removed_by_retention_says_so(client, media_service):
+    """ "Deleted on purpose" and "the store is broken" are different sentences.
+
+    A colleague acts on them differently - one is a policy they can ask about,
+    the other is an incident - and only the row can tell them apart. Left to
+    fail as a storage error it would be a 500, which says neither (ADR-078).
+    """
+    media_service._media.purge_started_at = NOW
+    media_service._media.storage_key = None
+
+    response = await client.get(f"/api/v1/conversations/{CONVERSATION_ID}/media/{MEDIA_ID}")
+
+    assert response.status_code == 404
+    assert "retention" in response.text.lower()
+
+
 async def test_a_file_missing_from_the_store_is_not_a_crash(client, media_service):
     media_service._content = None
 

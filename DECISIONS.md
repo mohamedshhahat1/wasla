@@ -2959,3 +2959,99 @@ The object-store tests skip without `TEST_S3_ENDPOINT_URL`, following the
 convention the PostgreSQL suite already uses. `docker compose --profile
 objectstore up -d minio` is enough to make them run, and they are worth running:
 mocking a `boto` call proves nothing about a signature.
+
+## ADR-078 — Retention Deletes the File and Keeps the Record
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Context:
+`MediaStorage.delete` existed from the day the interface was written and no
+caller ever invoked it. Nothing swept the store, so it grew monotonically — on
+a single host that is a disk-full incident with no warning, and it takes the API
+and the worker down together because they share the volume (BUG-006). Object
+storage removes the disk-full failure and does nothing about the growth; a
+bucket that only ever accumulates is a bill that only ever rises, and a set of
+customer photographs that is kept for ever by accident rather than by policy.
+
+Decision:
+**The file goes, the row stays.** `message_media.transcript` holds what Wasla
+concluded a photograph or a voice note said. That is conversation history: it is
+what the agent was shown and what a colleague reading the thread sees, and
+deleting it would silently rewrite the record of a conversation. Retention
+removes the copy of the original bytes and leaves a row that says plainly there
+was a file and that it was removed.
+
+**Zero is the default, and it means "keep everything".** How long a business
+keeps what its customers sent it is not a decision this code can make. Any
+number here would be invented, and an invented number that deletes customer data
+is worse than no sweep at all. `MEDIA_RETENTION_DAYS` is what a deployment sets
+when it has decided.
+
+**The claim is committed before the object is touched.** Removing an object and
+clearing the column that points at it are writes to two systems, and no
+transaction spans both. Both orders fail, and they fail differently:
+
+- delete then commit → the commit fails and the row points confidently at a file
+  that is gone, indistinguishable from a broken store;
+- commit then delete → the delete fails and nothing anywhere remembers the
+  object exists. A permanent orphan no query can find.
+
+So `purge_started_at` is set and committed first. Set with `storage_key` still
+present means "being removed, and may or may not still be there"; a pass that
+dies anywhere leaves that state, and the next pass deletes again — a no-op on an
+object already gone, in both backends — and finishes. The cost is a window in
+which a row says a file is going and the file is still readable, which is the
+right way round: briefly serving an attachment that was due for deletion is a
+smaller failure than telling somebody a file is there when it is not.
+
+**A reconciliation pass, separate from the age query.** A claimed row can
+outlive its own eligibility: raise `MEDIA_RETENTION_DAYS` after a failed sweep
+and the age query stops selecting the rows it left half-done, which would strand
+them for ever with their objects still in the store. Reconciliation runs first
+each pass, so work already decided is finished before more is taken on.
+
+**A poll, not a queue.** Enqueueing one job per file would put the deletion of
+customer data behind the replay command, where an operator could re-run a
+dead-lettered purge weeks later against a row since re-populated. The claim in
+the database is a better record of intent than a job payload, it survives Redis
+entirely, and resuming after a crash is a query rather than a recovery
+mechanism — the same reasoning as the billing sweep (ADR-022).
+
+Consequences:
+One nullable column and one partial index (migration 0038), reversible, and a
+no-op for a deployment that never sets a retention period.
+
+A purged file answers 404 with the reason rather than failing as a storage
+error. "Deleted on purpose" and "the store is unavailable" are different
+sentences, a colleague acts on them differently, and only the row can tell them
+apart.
+
+**What is deliberately not built: a bucket-listing orphan sweep.** The
+reverse direction — an object with no row referencing it — cannot be found
+without listing the store and deciding from age, and a sweep on that rule
+eventually deletes a live file whose row it failed to read. One narrow orphan
+remains open and is stated rather than papered over: `MediaService.download`
+writes the object and then commits the row, so a transaction that fails after
+the write leaves an object nothing references. It is invisible to every query
+here, it is bounded by how often a commit fails after a successful store, and
+closing it properly needs a durable intent record written *before* the object —
+which is a table and a second state machine for a failure nobody has yet
+observed. The metered `STORAGE_USED` event is written in the same transaction,
+so a leaked object is not billed for.
+
+`wasla_media_retention_total` carries one label with three fixed values —
+`purged`, `failed`, `pending` — and no tenant, media id, filename or key
+anywhere near it. `pending` is the one to alert on: a store refusing deletions
+is otherwise invisible, because the rows are claimed, the sweep reports itself
+as having run, and the volume simply does not shrink.
+
+**On a versioned bucket, deleted does not mean gone.** A delete leaves a delete
+marker and the previous versions remain until the bucket's own lifecycle rule
+expires them. What retention guarantees is that the object is no longer
+retrievable through Wasla; making it unrecoverable is a rule on the bucket, and
+`docs/MEDIA.md` says so rather than letting the word "deleted" imply more than
+it should.

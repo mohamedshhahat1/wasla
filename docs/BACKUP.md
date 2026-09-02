@@ -25,7 +25,7 @@ what it proves is the remote copy.
 | --- | --- | --- |
 | Everything the product is — workspaces, users, conversations, messages, leads, documents, embeddings, invoices, payments, audit log | PostgreSQL | **Yes** |
 | Queued and in-flight jobs, rate-limit counters, the refresh-token denylist, OAuth flow state, worker heartbeats | Redis | **No, deliberately** |
-| Customer attachments | `media-data`, a local volume ([ADR-023](../DECISIONS.md)) | **No — see below** |
+| Customer attachments | The media store: a local volume, or an object bucket ([ADR-077](../DECISIONS.md)) | **No, and it is not meant to — see below** |
 
 **Redis is deliberately not backed up.** Everything in it is either
 reconstructible or worth losing. A queued job is a message that will be
@@ -37,13 +37,46 @@ PostgreSQL and a platform-wide bump revokes every session immediately. Backing
 Redis up would create a second copy of a denylist whose whole value is being
 current.
 
-**Media is not backed up, and this is a known gap.** Attachments live on one
-host's volume. Losing it loses every file customers sent, and no amount of
-`pg_dump` changes that — the database holds the metadata and the storage key,
-not the bytes. The fix is object storage behind the existing `MediaStorage`
-protocol, which is P2 work. Until then, back up the volume with whatever backs
-up the host, and know that the recovery point for attachments is whatever that
-gives you.
+**Media durability has a separate owner, and this backup is not it.** A
+`pg_dump` carries the `message_media` rows — the transcript, the type, the size,
+the storage key — and none of the bytes those keys point at. That is not an
+oversight to be corrected by widening the dump. Putting a workspace's video
+attachments inside a database backup would make every restore carry them, would
+grow the one artifact whose restore time is the recovery time, and would give
+two systems the same job.
+
+So the two halves are owned separately, and a disaster recovery needs both:
+
+| | Owner | What it restores |
+| --- | --- | --- |
+| Metadata and references | This backup, verified off-host ([ADR-075](../DECISIONS.md)) | Which files existed, what they said, who they belong to |
+| The bytes | The object store's own durability, versioning and replication | The files themselves |
+
+**With `MEDIA_STORAGE_BACKEND=local` there is no second owner.** The volume is
+the only copy, losing the host loses every attachment, and the database restore
+comes back with rows whose keys resolve to nothing. Back the volume up with
+whatever backs up the host and know that the recovery point for attachments is
+whatever that gives you — or set `s3`, which is the sentence this exists to stop
+being true ([MEDIA.md](MEDIA.md)).
+
+**With `s3`, durability is the store's** — versioning, replication and a
+lifecycle rule configured on the bucket, which outlive this host and do not
+depend on a script here running. Wasla does not copy objects into its own
+backup, because that would be a second, worse copy of something the provider
+already replicates.
+
+**A restore that finds missing objects still works.** Rows whose keys resolve to
+nothing report a storage error per file rather than failing the application, so
+the product serves while the store is being restored, and a colleague opening
+one attachment sees an error about that attachment. What must not happen is
+restoring a database from one date against a bucket whose lifecycle rule has
+already expired the objects it references — check the bucket's retention against
+this backup's retention before assuming both halves cover the same window.
+
+Verified by drill: `docs/RUNBOOK.md` describes the media recovery check, which
+stores an object, records its metadata, discards the runtime, and reads the same
+bytes and the same canonical type back from a fresh process against the same
+off-host store.
 
 ---
 

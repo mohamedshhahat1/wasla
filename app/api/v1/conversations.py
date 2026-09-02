@@ -38,6 +38,7 @@ from app.schemas.conversation import (
     SendTemplateRequest,
     SendTextRequest,
 )
+from app.services.media_retention_service import purge_reason
 
 router = APIRouter(route_class=CommittingRoute, prefix="/conversations", tags=["conversations"])
 
@@ -253,6 +254,14 @@ async def download_media(
         # Answered as not-found rather than as a mismatch, which would confirm
         # the id names something real.
         raise NotFoundError()
+
+    reason = purge_reason(media)
+    if reason is not None:
+        # Retention removed the file. Said plainly rather than left to fail as a
+        # storage error, because "this was deleted on purpose" and "the store is
+        # unavailable" are different sentences, a colleague acts on them
+        # differently, and only this row can tell them apart (ADR-078).
+        raise NotFoundError(reason)
 
     content = await media_service.read(media)
     return Response(

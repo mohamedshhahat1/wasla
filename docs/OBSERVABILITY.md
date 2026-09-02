@@ -136,6 +136,18 @@ and age gauges are for, and needing both is why both exist.
 | --- | --- | --- |
 | `wasla_jobs_total` | counter | `queue`, `outcome` (`succeeded`, `retried`, `dead_lettered`, `recovered`, `quarantined`) |
 | `wasla_job_failures_total` | counter | `queue`, `category` |
+| `wasla_media_retention_total` | counter | `outcome` (`purged`, `failed`, `pending`) |
+
+`wasla_media_retention_total` carries one label with three fixed values, so its
+cardinality is three for ever - no tenant, media id, filename, MIME type or
+storage key goes anywhere near it (ADR-078). `pending` is a *level* written to a
+counter deliberately: what an operator asks of it is "is it going up?", which a
+rising sum answers as well as a gauge would while needing no fourth mechanism
+for cross-process gauges.
+
+**`pending` is the one worth an alert.** A store that has stopped accepting
+deletions is otherwise invisible - the rows are claimed, the sweep reports
+itself as having run, and the media store simply does not shrink.
 
 The last two outcomes are the crash-recovery pair, and they are separate
 because an operator reads them differently. `recovered` is the system healing
@@ -326,6 +338,7 @@ against the metrics that actually exist, for whatever an operator points at
 | **Dead letters appearing** | `increase(wasla_queue_dead_letter_jobs[1h]) > 0` | warn | Work stopped being retried. **This is the signal that did not exist before.** |
 | Dead letters accumulating | `wasla_queue_dead_letter_jobs > 20` | **page** | A systemic failure, not a bad job. |
 | Retry storm | `sum(rate(wasla_jobs_total{outcome="retried"}[10m])) > sum(rate(wasla_jobs_total{outcome="succeeded"}[10m]))` for 15m | warn | More work is being retried than finished. |
+| Media retention stuck | `increase(wasla_media_retention_total{outcome="pending"}[3d]) > 0 and increase(wasla_media_retention_total{outcome="purged"}[3d]) == 0` | warn | The sweep is claiming files and removing none. The store is refusing deletions and the volume is not shrinking. |
 | **Reservations expiring** | `sum(wasla_queue_expired_reservations) > 0` for 10m | warn | Workers are dying while holding jobs, faster than recovery reclaims them. |
 | Jobs being recovered | `increase(wasla_jobs_total{outcome="recovered"}[1h]) > 0` | warn | Something is killing workers. The work is not lost; find out why. |
 | **Uncertain deliveries** | `increase(wasla_jobs_total{outcome="quarantined"}[1h]) > 0` | **page** | A worker died mid-send. A customer may or may not have been answered, and only a person can decide. |

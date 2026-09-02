@@ -110,7 +110,63 @@ Files go through a `MediaStorage` interface, implemented on local disk ([ADR-023
 
 The workspace prefix makes deleting or relocating one workspace's files a single operation. The generated identifier is what guarantees a customer-supplied filename can never influence where a file lands — `../../etc/passwd` arrives as a filename occasionally, and it is a request rather than an accident. The filename is recorded for display and never consulted when building a path; keys are checked against both a pattern and a containment test on every read.
 
-**Deployment constraint.** Local disk means the API and worker containers share a volume: one writes the file, the other serves it back. Both compose files configure this. It is a single-host arrangement, and the point at which it stops working is the point at which the object-store implementation behind the interface gets written.
+`MEDIA_STORAGE_BACKEND` chooses the implementation ([ADR-077](../DECISIONS.md)).
+
+| Backend | What it is | When |
+| --- | --- | --- |
+| `local` | A path on this host | Development, and a deliberate single-host deployment |
+| `s3` | An S3-compatible bucket | Anything with a second host, or that must survive losing the first |
+
+**Local disk means the API and worker containers share a volume**: one writes the file, the other serves it back. That is a single-host arrangement, and it is also the arrangement in which one lost disk is every attachment every workspace ever received.
+
+**`s3` is one protocol, not one provider.** AWS S3, MinIO, Cloudflare R2, Wasabi, Backblaze B2 and Ceph all speak the S3 object API. The requests are signed here rather than by `boto3` — the SDK is synchronous in an application that is not, and the four operations needed (PUT, GET, DELETE, HEAD on one object) are the simplest possible use of SigV4. A real MinIO drill is what proves that; mocking a `boto` call proves nothing about a signature.
+
+Keys are identical across both backends, so a key written by one is a key the other reads — migrating is copying objects, not rewriting rows.
+
+**The bucket is private and there is no way to ask otherwise.** No ACL header is sent, no presigned URL is issued, and bytes reach a colleague only by being streamed through the authenticated API. Selecting `s3` with an incomplete configuration **refuses to start**: falling back to local disk would give the API and the worker each their own copy on their own container, and every download would be a coin toss.
+
+**These are not the backup credentials.** `MEDIA_S3_*`, never the `AWS_*` pair the backup container holds ([ADR-075](../DECISIONS.md)). Media and backups are different buckets under different credentials, so an application container that is taken over still cannot delete the copies of the database — and the backup container, whose job is deleting old files, holds no media credential. The deployment guard asserts both directions.
+
+Object storage is **not** an authorization boundary. A key prefix is a layout; tenant isolation is the scoped repository, and the isolation tests run against both backends for exactly that reason.
+
+## Retention
+
+Nothing ever deleted a stored file, so the store grew monotonically ([ADR-078](../DECISIONS.md)). `MEDIA_RETENTION_DAYS` is what stops that, and **zero — keep everything — is the default**: how long a business keeps what its customers sent it is not a decision this code can make, and an invented number that deletes customer data is worse than no sweep.
+
+**The file goes, the row stays.** `transcript` is what the agent was shown and what a colleague reading the thread sees; deleting it would rewrite the record of a conversation. Afterwards the row says plainly that there was a file and that it was removed, and a download answers 404 with that reason rather than failing as a storage error — "deleted on purpose" and "the store is unavailable" are different sentences.
+
+The sweep is two writes, because removing an object and clearing the column pointing at it are two systems and no transaction spans both:
+
+```
+older than MEDIA_RETENTION_DAYS
+      ↓
+purge_started_at set, committed      ← survives this process dying
+      ↓
+object deleted
+      ↓
+storage_key cleared, committed
+```
+
+A pass that dies anywhere leaves a claimed row; the next pass deletes again — a no-op on an object already gone — and finishes. The other order would leave a row pointing confidently at a file that is gone, which is indistinguishable from a broken store. A **reconciliation** pass runs first each sweep and finishes claimed rows whatever their age now, because raising the retention period after a failed pass would otherwise strand them.
+
+A poll rather than a queue: enqueueing one job per file would put the deletion of customer data behind the replay command, where an operator could re-run a dead-lettered purge weeks later against a row since re-populated.
+
+**On a versioned bucket, deleted does not mean gone.** A delete leaves a delete marker and previous versions stay until the bucket's own lifecycle rule expires them. What retention guarantees is that the object is no longer retrievable through Wasla; making it unrecoverable is a rule configured on the bucket.
+
+**No bucket-listing orphan sweep exists**, deliberately. Finding an object with no row means listing the store and deciding from age, and a sweep on that rule eventually deletes a live file whose row it failed to read. One narrow orphan is left open and stated rather than papered over: the download path writes the object and then commits the row, so a transaction failing in between leaves an object nothing references.
+
+## Durability
+
+**The PostgreSQL backup does not cover media, and never did** ([BACKUP.md](BACKUP.md)). It carries the `message_media` rows — the transcript, the type, the size, the key — and none of the bytes those keys point at. The two halves have separate owners:
+
+| | Owner | Restores |
+| --- | --- | --- |
+| Metadata and references | The PostgreSQL backup, off-host ([ADR-075](../DECISIONS.md)) | Which files existed, what they said, who they belong to |
+| The bytes | The object store's own durability, versioning and replication | The files themselves |
+
+On `local` there is no second owner: the volume is the only copy, and losing the host loses every attachment. That is the sentence `MEDIA_STORAGE_BACKEND=s3` exists to stop being true.
+
+A disaster recovery that restores the database and points it at a surviving bucket gets both halves back. One that restores the database alone gets rows whose keys resolve to nothing — which the API reports as a storage error per file rather than as a failure to start, so the rest of the product works while the store is being restored.
 
 ## One reply per conversation
 
@@ -141,8 +197,20 @@ The PDF parser added here also settles a note `KnowledgeService` had carried sin
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `MEDIA_STORAGE_PATH` | `/var/lib/wasla/media` | Shared volume between API and worker |
+| `MEDIA_STORAGE_BACKEND` | `local` | `local` or `s3` |
+| `MEDIA_STORAGE_PATH` | `/var/lib/wasla/media` | `local` only; shared volume between API and worker |
 | `MEDIA_MAX_BYTES` | `26214400` | 25 MB; bites on video and little else |
+| `MEDIA_S3_BUCKET` | — | Required for `s3`; must be private |
+| `MEDIA_S3_ENDPOINT_URL` | — | Empty means AWS. A bare origin, no path |
+| `MEDIA_S3_REGION` | `us-east-1` | |
+| `MEDIA_S3_ACCESS_KEY_ID` | — | Required for `s3`. Not the backup credential |
+| `MEDIA_S3_SECRET_ACCESS_KEY` | — | Required for `s3`. Not the backup credential |
+| `MEDIA_S3_PATH_STYLE` | `true` | Required by MinIO and most self-hosted gateways |
+| `MEDIA_S3_SERVER_SIDE_ENCRYPTION` | — | `AES256` asks the store to encrypt at rest |
+| `MEDIA_S3_TIMEOUT_SECONDS` | `30` | |
+| `MEDIA_RETENTION_DAYS` | `0` | Zero keeps everything, and is the default |
+| `MEDIA_RETENTION_BATCH_SIZE` | `200` | Rows per sweep |
+| `MEDIA_RETENTION_POLL_SECONDS` | `86400` | Daily |
 | `OPENAI_VISION_MODEL` | `gpt-4.1-mini` | Separate budget from the answering model |
 | `OPENAI_TRANSCRIPTION_MODEL` | `gpt-4o-mini-transcribe` | |
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -142,3 +143,84 @@ class ConversationMediaGate(BaseRepository[Conversation]):
         await self._session.execute(
             select(Conversation.id).where(Conversation.id == conversation_id).with_for_update()
         )
+
+
+class PlatformMediaRepository(BaseRepository[MessageMedia]):
+    """Attached files across every workspace, for the retention sweep.
+
+    Unscoped, like `PlatformSubscriptionRepository` and for the same reason: a
+    sweep that had to be told which workspace to look at would need a list of
+    workspaces to iterate, which is a query per tenant to do the work of one.
+
+    Kept as a separate class rather than a flag on `MediaRepository`, so that
+    "this repository is not tenant-scoped" is a fact about the type and visible
+    at every call site, instead of an argument somebody can pass by accident.
+    Nothing reachable from a request constructs it.
+    """
+
+    model = MessageMedia
+
+    def __init__(self, session: AsyncSession) -> None:
+        super().__init__(session)
+
+    async def due_for_purge(self, *, cutoff: datetime, limit: int) -> list[MessageMedia]:
+        """Files older than `cutoff` that still have an object, oldest first.
+
+        Includes rows a previous pass already claimed, because a claim that was
+        not finished is exactly what the next pass has to pick up. `storage_key
+        IS NOT NULL` is the whole condition for "there is something to delete" -
+        a row whose key is cleared is done, and a message that never carried a
+        file never had one.
+
+        Ordered oldest first so a backlog drains in the order it accumulated,
+        and bounded so a deployment with a large one takes several passes rather
+        than one enormous transaction.
+        """
+        statement = (
+            select(MessageMedia)
+            .where(
+                MessageMedia.storage_key.is_not(None),
+                MessageMedia.created_at < cutoff,
+            )
+            .order_by(MessageMedia.created_at)
+            .limit(limit)
+        )
+        return list((await self._session.execute(statement)).scalars().all())
+
+    async def claimed_but_unfinished(self, *, limit: int) -> list[MessageMedia]:
+        """Rows a sweep claimed and never completed, whatever their age now.
+
+        Separate from `due_for_purge` because a claimed row can outlive its own
+        eligibility: raise the retention period after a failed pass and the age
+        query stops selecting the rows it left half-done. They would then stay
+        claimed for ever with their objects still in the store, and no query
+        anywhere would be looking for them.
+        """
+        statement = (
+            select(MessageMedia)
+            .where(
+                MessageMedia.storage_key.is_not(None),
+                MessageMedia.purge_started_at.is_not(None),
+            )
+            .order_by(MessageMedia.purge_started_at)
+            .limit(limit)
+        )
+        return list((await self._session.execute(statement)).scalars().all())
+
+    async def pending_purge_count(self) -> int:
+        """How many claimed files still have an object.
+
+        Published as a metric. A number that stays above zero across sweeps is a
+        store refusing deletions, which is otherwise invisible: the rows are
+        claimed, the sweep reports itself as having run, and the volume does not
+        shrink.
+        """
+        statement = (
+            select(func.count())
+            .select_from(MessageMedia)
+            .where(
+                MessageMedia.storage_key.is_not(None),
+                MessageMedia.purge_started_at.is_not(None),
+            )
+        )
+        return int((await self._session.execute(statement)).scalar_one())
