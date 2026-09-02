@@ -3145,3 +3145,88 @@ autocommit block — a plain `CREATE INDEX` would block document ingestion
 platform-wide for the duration. A failed concurrent build leaves an invalid
 index behind, so the migration drops by name before creating: a retry must build
 rather than adopt something half-finished.
+
+## ADR-080 — A Turn Gives the Connection Back Before It Waits
+
+**Context.** One session spanned an agent turn and the provider was called
+inside it, which `app/workers/ai_worker.py` disclosed in its own module
+docstring rather than hiding. A pooled connection was therefore held for the
+length of an inference, so the number of turns a worker process could run at
+once was `pool_size + max_overflow` — 15 by default — regardless of how deep the
+queue was. The P2 audit ranked it second behind the missing vector index.
+
+The reason it was written that way is real: tools mutate rows during the round
+loop, so the session was the consistency boundary for the turn, and the stated
+alternative — writing through a second session — would have let a handoff commit
+while the reply explaining it did not.
+
+**Decision.** `AgentOrchestrator` ends its transaction and hands the connection
+back before every provider call, and before every per-round reservation. The
+primitive is `app.db.session.released`, which is a commit and says so: SQLAlchemy
+returns a connection to the pool when a transaction ends, and nothing less than
+ending it releases anything.
+
+**Why committing at those points is not the failure the old comment feared.**
+The feared shape was a second session writing concurrently with the first. This
+is one session, committing at boundaries where what is staged is finished work:
+
+- Before the *first* inference nothing is staged. The phase above only reads,
+  and the sentiment assessment — the one thing before it that writes — releases
+  and commits its own reading, which is a unit of its own with its own paid
+  provider call and its own meter.
+- Before a *later* inference what is staged is the completed work of the
+  previous round's tools. A tool has run and either succeeded or reported its
+  failure to the model; there is no half-written state at that line.
+- A handoff can never be caught mid-commit, because `handoff_to_human` breaks
+  the loop. No reply is ever composed after a committed handoff, which is what
+  the original concern was actually about.
+
+**What it costs, and it is a real cost.** A turn is no longer one transaction.
+A turn that dies partway now leaves the work it finished instead of none of it.
+That is the better direction for this queue specifically: it is `NO_RETRY` once
+the provider is engaged (ADR-068), so a rolled-back lead is a lead nobody will
+ask the customer for again.
+
+**A commit ends a snapshot, so state has to be read again.** Between the
+reservation and the reply the world can move, and exactly one thing that moves
+changes the right answer: a colleague taking the conversation. `_taken_over`
+re-reads `conversations.mode` as a scalar column before the orchestrator offers
+a reply — a scalar and not a repository fetch, because the row is already in the
+identity map and a `select` returning the mapped object hands back the instance
+with the attributes it was loaded with, which is the stale value the re-read
+exists to avoid. The reply is discarded rather than sent, and the tokens are
+still metered, because the inference happened.
+
+The other candidates were checked and need nothing. The allowance is
+re-resolved every round already: `_reservation` builds a fresh
+`EntitlementService` on a fresh session per round, so a subscription suspended
+mid-turn is seen by the next round — falling back to the default plan's limits
+rather than to a lockout, which is the existing policy and is now tested.
+Agent configuration is deliberately *not* re-read: the turn was authorised under
+the configuration it loaded, and swapping a system prompt between rounds of one
+conversation would be worse than using a snapshot.
+
+**The reservation moved inside the released block, and that ordering is load-
+bearing.** `consume` holds an advisory lock until its transaction ends, so it
+gets a session of its own — which means two sessions want connections at the
+same moment. Asking for the second while the turn still holds the first needs
+two connections from a pool that may have one, and on a pool of one it
+deadlocks. Releasing first makes the peak one connection instead of two.
+
+**What is deliberately not built: a separate pool for agent turns.** It was the
+audit's alternative suggestion and it treats the symptom. A dedicated pool still
+holds a connection across an inference; it just holds it somewhere else, and it
+adds a second pool to size, monitor and get wrong.
+
+**Consequences.** Proved rather than argued, in
+`tests/integration/test_provider_session_lifetime.py`: two turns are inside the
+provider call simultaneously through a pool of exactly one connection with no
+overflow, and the pool's own checkout count is zero while they wait. A control
+test asserts the pool really is one connection, so the proof cannot pass
+vacuously. Moving the call back inside the transaction makes that test fail with
+`QueuePool limit of size 1 overflow 0 reached`, and makes a unit test fail on the
+commit/respond ordering — which is the cheap version of the same guard.
+
+The WhatsApp send is left inside the transaction on purpose. It is not the same
+boundary: the message row is flushed before the call so an attempt exists as a
+row whatever happens next, and that is the quarantine design ADR-074 depends on.

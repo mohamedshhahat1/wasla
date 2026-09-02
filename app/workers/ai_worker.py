@@ -5,12 +5,22 @@ not answer quickly, and an inference reliably takes long enough to trigger that.
 Doing the work there would duplicate it rather than deliver it. The webhook
 stores the message and enqueues; this reads the queue.
 
-Known trade-off, recorded rather than hidden: the provider call happens inside
-the database session. Tools mutate rows during the loop, so that session is the
-consistency boundary for the whole turn, and the alternative of writing in a
-second session would let a handoff commit while the reply that explained it did
-not. The cost is a pooled connection held for the length of an inference, which
-bounds how many workers one pool supports.
+**The provider is called with no database connection held** (ADR-080). One
+session spans the turn, but `AgentOrchestrator` commits it and hands the
+connection back before each inference and before each per-round reservation, so
+a turn waiting on OpenAI is not a turn occupying a slot in the pool. That is
+what stops the effective concurrency of an agent turn being
+`pool_size + max_overflow` instead of the queue depth.
+
+What that costs, stated rather than hidden: the turn is no longer one
+transaction. Each round commits what the previous round's tools finished, so a
+turn that dies partway leaves the work it completed rather than none of it -
+which is the better direction, because this queue does not retry after the
+provider is engaged and a rolled-back lead is a lead the customer will not give
+twice. And a commit ends a snapshot: state read before an inference may be
+stale after it, so the orchestrator re-reads the conversation mode before it
+offers a reply. A handoff cannot be caught half-committed, because a handoff
+ends the loop rather than taking another round.
 
 **Why this queue retries less than the others.** An agent turn is not
 idempotent. It reserves an allowance, it may call tools that write rows, and

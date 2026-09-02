@@ -40,15 +40,47 @@ SENT_AT = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
 class StubClient:
     """Hands out queued replies and records how it was asked."""
 
-    def __init__(self, replies):
+    def __init__(self, replies, *, timeline=None):
         self._replies = list(replies)
         self.calls = []
+        # Shared with FakeSession, so a test can assert that the connection was
+        # handed back *before* the call rather than merely at some point.
+        self._timeline = timeline if timeline is not None else []
 
     async def respond(self, **kwargs):
+        self._timeline.append("respond")
         self.calls.append(kwargs)
         if not self._replies:
             raise AssertionError("The orchestrator asked for more replies than were queued.")
         return self._replies.pop(0)
+
+
+class FakeSession:
+    """Enough of an AsyncSession for the two things the orchestrator asks it.
+
+    Everything else it needs goes through a repository, and those are
+    monkeypatched. The orchestrator reaches for the session itself exactly
+    twice: `released` commits it to hand the connection back before a provider
+    call, and `_taken_over` reads the conversation mode again afterwards.
+
+    Both are recorded. The commit count is how a test knows a release happened
+    per round, and the shared timeline is how it knows the release came first.
+    """
+
+    def __init__(self, *, mode=ConversationMode.AI, timeline=None):
+        self.mode = mode
+        self.commits = 0
+        self.mode_reads = 0
+        self.timeline = timeline if timeline is not None else []
+
+    async def commit(self):
+        self.commits += 1
+        self.timeline.append("commit")
+
+    async def scalar(self, statement):
+        self.mode_reads += 1
+        self.timeline.append("mode")
+        return self.mode
 
 
 class FakeConversations:
@@ -216,6 +248,7 @@ def _build(
     embeddings=None,
     attachments=None,
     sentiment=None,
+    session=None,
 ):
     fakes = {
         "ConversationRepository": FakeConversations(
@@ -232,7 +265,7 @@ def _build(
         monkeypatch.setattr(orchestrator_module, name, _returns(fake))
 
     return AgentOrchestrator(
-        session=None,
+        session=session if session is not None else FakeSession(),
         tenant_id=TENANT,
         client=client,
         registry=registry,
@@ -747,3 +780,124 @@ async def test_an_agent_that_cannot_answer_is_never_assessed(monkeypatch):
 
     assert outcome.escalated is False
     assert sentiment.thresholds == []
+
+
+# ------------------------------------------- the connection is not held (ADR-080)
+
+
+async def test_the_session_is_released_before_every_provider_call(monkeypatch):
+    """One release per round, and each one before its inference.
+
+    The ordering is the whole assertion. A commit that happened *after* the
+    call would satisfy a count and prove nothing: the connection would still
+    have been checked out for the length of the wait.
+    """
+    timeline = []
+    session = FakeSession(timeline=timeline)
+    client = StubClient(
+        [
+            _reply(None, tool_calls=[_call(HANDOFF_TOOL)]),
+            _reply("done"),
+        ],
+        timeline=timeline,
+    )
+    orchestrator = _build(
+        monkeypatch,
+        client=client,
+        agent=_agent(),
+        grants=(HANDOFF_TOOL,),
+        session=session,
+    )
+
+    await orchestrator.answer(conversation_id=CONVERSATION)
+
+    # The handoff ends the loop, so one round and one release.
+    assert timeline[:2] == ["commit", "respond"]
+    assert timeline.count("respond") == 1
+    assert session.commits == 1
+
+
+async def test_every_round_of_a_tool_using_turn_releases_the_connection(monkeypatch):
+    """Two inferences, two releases, and neither inference between them."""
+    timeline = []
+    session = FakeSession(timeline=timeline)
+
+    async def note(context, arguments):
+        return "noted"
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="note",
+            description="Write a note.",
+            parameters=(ToolParameter(name="body", type="string", description="What to note."),),
+            handler=note,
+        )
+    )
+    client = StubClient(
+        [
+            _reply(None, tool_calls=[_call("note", {"body": "hi"})]),
+            _reply("all done"),
+        ],
+        timeline=timeline,
+    )
+    orchestrator = _build(
+        monkeypatch,
+        client=client,
+        agent=_agent(),
+        grants=("note",),
+        registry=registry,
+        session=session,
+    )
+
+    outcome = await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert outcome.reply == "all done"
+    assert session.commits == 2
+    # Interleaved, not batched: a release, a call, a release, a call.
+    assert [step for step in timeline if step in {"commit", "respond"}] == [
+        "commit",
+        "respond",
+        "commit",
+        "respond",
+    ]
+
+
+async def test_a_conversation_taken_over_during_the_turn_is_not_answered(monkeypatch):
+    """A colleague opened it while the model was composing.
+
+    The mode was AI when the turn started - the repository fake says so - and
+    HUMAN when the session is asked again, which is exactly the window the
+    release opens. The reply is discarded rather than sent to a customer who is
+    now talking to a person.
+    """
+    session = FakeSession(mode=ConversationMode.HUMAN)
+    client = StubClient([_reply("here is your answer")])
+    orchestrator = _build(monkeypatch, client=client, agent=_agent(), session=session)
+
+    outcome = await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert client.calls, "the provider should have been called before anyone took over"
+    assert outcome.reply is None
+    assert outcome.handed_off is True
+    assert outcome.should_send is False
+    # Still metered: the inference happened and the workspace pays for it.
+    assert outcome.usage.total_tokens > 0
+    assert session.mode_reads == 1
+
+
+async def test_a_conversation_still_in_ai_mode_is_answered(monkeypatch):
+    """The companion to the above, so the re-read is not just always refusing."""
+    session = FakeSession(mode=ConversationMode.AI)
+    orchestrator = _build(
+        monkeypatch,
+        client=StubClient([_reply("here is your answer")]),
+        agent=_agent(),
+        session=session,
+    )
+
+    outcome = await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert outcome.reply == "here is your answer"
+    assert outcome.should_send is True
+    assert session.mode_reads == 1

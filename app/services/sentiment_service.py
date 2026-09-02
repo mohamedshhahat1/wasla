@@ -33,6 +33,7 @@ from app.db.models.sentiment import (
     is_at_least,
     raised_priority,
 )
+from app.db.session import released
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
 from app.repositories.media_repository import MediaRepository
 from app.repositories.sentiment_repository import SentimentRepository
@@ -141,7 +142,13 @@ class SentimentService:
             return SentimentOutcome()
 
         try:
-            reading = await self._analyzer.read(text)
+            # The connection goes back to the pool for the length of the call.
+            # Everything above this line only read, so the commit `released`
+            # performs writes nothing; what it buys is that a classification
+            # taking a second does not hold a connection for a second
+            # (ADR-080).
+            async with released(self._session):
+                reading = await self._analyzer.read(text)
         except (ExternalServiceError, RateLimitedError):
             # Contained deliberately. A reading is an enhancement; the reply is
             # the product, and losing the first must not cost the second.

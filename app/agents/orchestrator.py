@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable, Set
 from dataclasses import dataclass
 from typing import Final
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.memory import build_window
@@ -29,7 +30,8 @@ from app.agents.registry import (
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
 from app.db.models.agent import Agent
-from app.db.models.conversation import ConversationMode
+from app.db.models.conversation import Conversation, ConversationMode
+from app.db.session import released
 from app.integrations.openai.client import ResponsesClient
 from app.integrations.openai.embeddings import EmbeddingsClient
 from app.integrations.openai.types import TokenUsage, ToolCall, ToolResult, Turn
@@ -213,33 +215,50 @@ class AgentOrchestrator:
         rounds = 0
 
         for round_number in range(1, self._max_rounds + 1):
-            if self._reserve_round is not None and not await self._reserve_round():
-                # The allowance ran out mid-turn, which a first-round check
-                # cannot rule out: another worker may have spent the last
-                # request while this turn was thinking. Whatever has been said
-                # so far is still worth sending, so this breaks rather than
-                # raising - the customer gets a shorter answer instead of
-                # silence, and the workspace is not billed for a call that was
-                # never made.
-                logger.warning(
-                    "agent.allowance_exhausted_mid_turn",
-                    extra={
-                        "event": "agent.allowance_exhausted_mid_turn",
-                        "conversation_id": str(conversation_id),
-                        "round": round_number,
-                    },
+            # The turn's connection goes back to the pool here, and stays
+            # there for both the reservation and the inference (ADR-080).
+            #
+            # The reservation is inside the block, not before it, and that
+            # ordering is the difference between working and deadlocking on a
+            # small pool: `reserve_round` takes a *second* session, so asking
+            # for it while this one still holds a connection needs two at once
+            # from a pool that may only have one.
+            #
+            # `released` commits, and at this line that is what should happen.
+            # On the first round nothing is staged - the phase above only read,
+            # and the sentiment assessment, the one thing before this that
+            # writes, committed its own reading. On a later round what is
+            # staged is the finished work of the previous round's tools, not a
+            # half-written anything. A handoff is never caught mid-commit here,
+            # because a handoff breaks the loop rather than taking a round.
+            async with released(self._session):
+                if self._reserve_round is not None and not await self._reserve_round():
+                    # The allowance ran out mid-turn, which a first-round check
+                    # cannot rule out: another worker may have spent the last
+                    # request while this turn was thinking. Whatever has been
+                    # said so far is still worth sending, so this breaks rather
+                    # than raising - the customer gets a shorter answer instead
+                    # of silence, and the workspace is not billed for a call
+                    # that was never made.
+                    logger.warning(
+                        "agent.allowance_exhausted_mid_turn",
+                        extra={
+                            "event": "agent.allowance_exhausted_mid_turn",
+                            "conversation_id": str(conversation_id),
+                            "round": round_number,
+                        },
+                    )
+                    break
+                rounds = round_number
+                reply = await self._client.respond(
+                    model=resolved.model,
+                    instructions=resolved.system_prompt,
+                    turns=turns,
+                    tools=specs,
+                    tool_results=results,
+                    temperature=resolved.temperature,
+                    max_output_tokens=resolved.max_output_tokens,
                 )
-                break
-            rounds = round_number
-            reply = await self._client.respond(
-                model=resolved.model,
-                instructions=resolved.system_prompt,
-                turns=turns,
-                tools=specs,
-                tool_results=results,
-                temperature=resolved.temperature,
-                max_output_tokens=resolved.max_output_tokens,
-            )
             input_tokens += reply.usage.input_tokens
             output_tokens += reply.usage.output_tokens
             total_tokens += reply.usage.total_tokens
@@ -281,6 +300,39 @@ class AgentOrchestrator:
                 extra={"conversation_id": str(conversation_id), "rounds": rounds},
             )
 
+        if text and not handed_off and await self._taken_over(conversation_id):
+            # A colleague opened this conversation while the model was
+            # composing. The reply is discarded rather than sent: it was
+            # written for a conversation the AI owned, and the customer is now
+            # talking to a person who has not seen it (ADR-080).
+            #
+            # Read again rather than trusted from the snapshot above. The mode
+            # was checked at the top of this method, and between then and here
+            # the provider was called with no transaction open - so the row
+            # this decision depends on is precisely the one that could have
+            # moved underneath it.
+            logger.info(
+                "agent.taken_over_during_turn",
+                extra={
+                    "event": "agent.taken_over_during_turn",
+                    "conversation_id": str(conversation_id),
+                    "rounds": rounds,
+                },
+            )
+            return AgentOutcome(
+                reply=None,
+                handed_off=True,
+                tools_run=tuple(tools_run),
+                usage=TokenUsage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=total_tokens,
+                ),
+                rounds=rounds,
+                agent_id=resolved.id,
+                model=resolved.model,
+            )
+
         logger.info(
             "agent.turn_completed",
             extra={
@@ -308,6 +360,28 @@ class AgentOrchestrator:
             agent_id=resolved.id,
             model=resolved.model,
         )
+
+    async def _taken_over(self, conversation_id: uuid.UUID) -> bool:
+        """Whether a person has taken this conversation since the turn began.
+
+        A scalar column read, not a repository fetch, and deliberately: the
+        conversation is already in this session's identity map, and a `select`
+        that returns the mapped object hands back the instance that is there
+        with the attributes it was loaded with. Asking for the column value
+        gets the row as it is now, which is the entire point of asking again.
+
+        Still tenant-scoped. A conversation id from another workspace matches
+        nothing and reads as "not taken over", which is the safe direction -
+        the reply is refused a line later by the messaging service, which is
+        scoped too.
+        """
+        mode = await self._session.scalar(
+            select(Conversation.mode).where(
+                Conversation.id == conversation_id,
+                Conversation.tenant_id == self._tenant_id,
+            )
+        )
+        return mode is ConversationMode.HUMAN
 
     async def _run(
         self,

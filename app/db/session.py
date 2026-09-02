@@ -112,3 +112,38 @@ class Database:
     async def dispose(self) -> None:
         """Close all pooled connections."""
         await self._engine.dispose()
+
+
+@asynccontextmanager
+async def released(session: AsyncSession) -> AsyncIterator[None]:
+    """Hand this session's connection back while something slow happens.
+
+    For calls that take a network round trip to somebody else's API. A pooled
+    connection held across an inference is a connection no other worker can
+    use, and it makes the effective concurrency of an agent turn
+    `pool_size + max_overflow` rather than the queue depth - which is the
+    bottleneck this exists to remove (ADR-080).
+
+    **It commits.** That is not a side effect to work around, it is the
+    mechanism: SQLAlchemy returns a connection to the pool when the transaction
+    ends, so nothing short of ending it releases anything. Two consequences
+    the caller has to mean:
+
+    - Everything staged so far becomes durable. Callers therefore use this at a
+      point where what is staged is a finished unit of work - a sentiment
+      reading and the request that paid for it, a tool's rows and its audit
+      entry - and never mid-write.
+    - The transaction that resumes afterwards is a *new* one, so anything read
+      before the call is a snapshot from before it. `expire_on_commit=False`
+      keeps those objects readable, which is what makes the snapshot usable;
+      what it does not do is make it fresh. State that may have changed while
+      the provider was thinking has to be read again, deliberately, by the
+      caller that cares.
+
+    Nothing may touch the session inside the block. Doing so silently opens a
+    new transaction and checks a connection straight back out, which is the
+    regression `tests/integration/test_provider_session_lifetime.py` exists to
+    catch.
+    """
+    await session.commit()
+    yield

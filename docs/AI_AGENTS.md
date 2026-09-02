@@ -47,10 +47,25 @@ Webhook stores + projects the message -> enqueue one job per conversation
   -> worker reserves the job -> open one database session
   -> load conversation -> HUMAN mode? stop
   -> resolve the agent (requested, or the active default)
+  -> sentiment reading   [connection released for the call]
   -> build the memory window -> collect granted tools
-  -> Responses API -> tool calls? run them, feed results back (max 3 rounds)
+  -> per round, up to 3:
+       release the connection -> reserve one AI request -> Responses API
+       -> reacquire -> run any tool calls, feed results back
+  -> re-read the conversation mode -> still ours to answer?
   -> reply text -> worker sends it through the messaging service -> commit
 ```
+
+**No provider call happens while this turn holds a database connection**
+(ADR-080). The session is committed and the connection returned to the pool
+before each inference and before each reservation, so the number of turns a
+worker can run at once is the depth of the queue rather than
+`pool_size + max_overflow`. Two consequences are worth knowing: the turn is not
+one transaction, so a turn that dies partway leaves the work it finished; and a
+commit ends a snapshot, so the conversation mode is deliberately read again
+before a reply is offered — a colleague who took the conversation over while the
+model was composing gets silence rather than an AI answer arriving underneath
+them.
 
 The split in the last two lines is the important one. `AgentOrchestrator.answer()` returns an `AgentOutcome` — reply text, whether a handoff was requested, which tools ran, token usage, how many rounds it took — and sends nothing. The worker decides to send. That keeps the orchestrator testable with no WhatsApp account and no database, and it means a bug in sending cannot be reached by a bug in reasoning.
 
