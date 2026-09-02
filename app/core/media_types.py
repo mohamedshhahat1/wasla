@@ -213,21 +213,25 @@ def _matches_aac(prefix: bytes) -> bool:
 def _iso_bmff_type(prefix: bytes) -> frozenset[str] | None:
     """The canonical types of an ISO base media file, read from its brands.
 
-    The major brand sits at offset 8 and the compatible brands follow it, and a
-    file that is really a voice note frequently declares a video major brand
-    with an audio one alongside. Both are read, audio first, because calling a
-    voice note a video would send it down the wrong reader.
+    The box is `size | 'ftyp' | major_brand | minor_version | compatible[]`, and
+    the four bytes at offset 12 are a **version number, not a brand**. They are
+    skipped deliberately: reading them as one could only ever admit a file the
+    brand lists do not, and widening is the wrong direction for a check whose
+    whole job is narrowing.
+
+    A file that is really a voice note frequently declares a video major brand
+    with an audio one among its compatible brands, so both are read and audio
+    wins - calling a voice note a video would send it to the wrong reader.
     """
-    if len(prefix) < 12 or prefix[4:8] != b"ftyp":
+    if len(prefix) < 16 or prefix[4:8] != b"ftyp":
         return None
 
     # The box length, so the brand list is read from this box and not from
     # whatever follows it. Bounded by what was sniffed either way.
     size = int.from_bytes(prefix[0:4], "big")
-    end = min(len(prefix), size if 8 < size <= len(prefix) else len(prefix))
-    brands = [prefix[offset : offset + 4] for offset in range(8, max(8, end - 3), 4)]
-    if not brands:
-        return None
+    end = min(len(prefix), size if 16 <= size <= len(prefix) else len(prefix))
+    brands = [prefix[8:12]]
+    brands.extend(prefix[offset : offset + 4] for offset in range(16, max(16, end - 3), 4))
 
     if any(brand in AUDIO_BRANDS for brand in brands):
         return frozenset({"audio/mp4"})

@@ -232,6 +232,28 @@ def test_an_iso_container_with_no_recognised_brand_is_refused() -> None:
     assert detect(iso_bmff(b"qt  ")) is None
 
 
+def test_the_minor_version_field_is_not_read_as_a_brand() -> None:
+    """Offset 12 is a version number, and treating it as a brand only widens.
+
+    A file whose major brand is unsupported and whose minor version happens to
+    equal the four bytes of a supported one must still be refused: the check
+    exists to narrow, and anything that makes it accept more is a bug in the
+    direction that matters.
+    """
+    box = b"ftyp" + b"qt  " + b"isom"  # major `qt  `, minor version spelling `isom`
+    crafted = (len(box) + 4).to_bytes(4, "big") + box
+
+    assert detect(crafted) is None
+    with pytest.raises(MediaTypeError):
+        resolve(claimed="video/mp4", prefix=crafted)
+
+
+def test_a_truncated_ftyp_box_is_refused() -> None:
+    """Not enough bytes to hold a major brand is not enough to identify one."""
+    assert detect((16).to_bytes(4, "big") + b"ftyp") is None
+    assert detect((16).to_bytes(4, "big") + b"ftypM4A") is None
+
+
 def test_bytes_that_merely_contain_ftyp_are_not_a_video() -> None:
     """The box is at a fixed offset. Finding the word anywhere proves nothing.
 
