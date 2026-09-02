@@ -87,6 +87,16 @@ jobs:
       REDIS_URL: redis://localhost:6379/0
       # CI-only value. Never used by any deployed environment.
       JWT_SECRET: continuous-integration-secret-value-not-for-deployment
+      # The object store the media suites run against (ADR-077). Without these
+      # they skip, and a skipped test proves nothing about a signature: SigV4
+      # either satisfies a real store or it does not, and mocking a `boto` call
+      # cannot tell the difference. These are the MinIO container's own
+      # credentials, started in a step below, reachable from nowhere but this
+      # runner - so they are fixtures, not secrets.
+      TEST_S3_ENDPOINT_URL: http://localhost:9100
+      TEST_S3_BUCKET: wasla-media
+      TEST_S3_ACCESS_KEY_ID: wasla-media
+      TEST_S3_SECRET_ACCESS_KEY: wasla-media-secret
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -100,8 +110,35 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
+      - name: Start an object store for the media suites
+        run: |
+          docker run -d --name minio -p 9100:9000 \
+            -e MINIO_ROOT_USER=wasla-media \
+            -e MINIO_ROOT_PASSWORD=wasla-media-secret \
+            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:9100/minio/health/live && break
+            sleep 2
+          done
+          curl -sf http://localhost:9100/minio/health/live
+          docker run --rm --network host --entrypoint sh minio/mc:RELEASE.2025-04-16T18-13-26Z -c \
+            "mc alias set ci http://localhost:9100 wasla-media wasla-media-secret && \
+             mc mb --ignore-existing ci/wasla-media"
+
       - name: Tests
         run: pytest --cov=app --cov-report=term-missing
+
+      - name: No media suite was skipped for want of a store
+        run: |
+          # A skipped object-store test is indistinguishable from a passing one
+          # in the summary, so the store being reachable is asserted rather than
+          # assumed. Without this, a broken MinIO step would turn the whole
+          # media suite into silent skips and CI would still be green.
+          pytest tests/integration/test_object_store.py -q -rs 2>&1 | tee /tmp/store.txt
+          if grep -q "No object store configured" /tmp/store.txt; then
+            echo "::error::the object store was unreachable; media tests skipped"
+            exit 1
+          fi
 
       - name: Application starts
         run: python -c "from app.main import create_app; create_app(); print('application factory ok')"
