@@ -160,12 +160,20 @@ async def test_a_series_has_one_point_per_day_per_meter(db_session):
 
 
 async def test_a_summary_names_the_counters_a_dashboard_asks_for(db_session):
+    # A minute ago, not "now", and the minute is load-bearing. The default
+    # window ends at `datetime.now(UTC)` read inside `summary()`, the window is
+    # half-open, and `datetime.now` on some hosts has a granularity of a few
+    # milliseconds - so recording at `now` and summarising immediately can
+    # produce `occurred_at == until`, which the window excludes. That failed
+    # roughly one run in three on Windows and never on CI, which is the worst
+    # shape a flake comes in. The boundary itself has its own test below; this
+    # one is about the counters, so it stays away from the edge.
     tenant = await _tenant(db_session, "acme")
     recorder = UsageRecorder(db_session, tenant_id=tenant.id)
-    now = datetime.now(UTC)
-    recorder.record(UsageEventType.WHATSAPP_MESSAGE_RECEIVED, occurred_at=now)
-    recorder.record(UsageEventType.WHATSAPP_MESSAGE_SENT, occurred_at=now)
-    recorder.ai_request(input_tokens=300, output_tokens=45, occurred_at=now)
+    moment = datetime.now(UTC) - timedelta(minutes=1)
+    recorder.record(UsageEventType.WHATSAPP_MESSAGE_RECEIVED, occurred_at=moment)
+    recorder.record(UsageEventType.WHATSAPP_MESSAGE_SENT, occurred_at=moment)
+    recorder.ai_request(input_tokens=300, output_tokens=45, occurred_at=moment)
     await db_session.flush()
 
     summary = await UsageService(db_session, tenant_id=tenant.id).summary()
