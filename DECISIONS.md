@@ -2190,3 +2190,75 @@ are refused; they live ten minutes and the person retries.
 
 No migration and no new configuration: the digest goes in the existing Redis
 flow record, and whether the cookie is secure is derived from `ENVIRONMENT`.
+
+## ADR-067 — Every Outbound Client Is Guarded, and the List Is a Test
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Decision:
+`PaymobProvider` builds its HTTP client with `build_guarded_client`, the same
+constructor OpenAI, WhatsApp and Google use. `UnsafeUrlError` is caught in
+`_post` and leaves as a non-retryable `ProviderError`. The claim that every
+outbound client is guarded is now an assertion over every integration in
+`tests/unit/test_outbound_pinning.py` rather than a sentence in a docstring.
+
+Context:
+`app/integrations/openai/client.py` already stated the rule: the guard is used
+there although the URL is a constant, "so that the answer to which clients are
+guarded? is all of them rather than a list that goes stale". Paymob was the
+stale entry — a bare `httpx.AsyncClient` (SEC-08). Its URLs are constants from
+`REGIONS`, so nothing a caller supplies reaches the destination and the exposure
+needed a hijacked or poisoned resolver for `accept.paymob.com`. It was also the
+one outbound request carrying `PAYMOB_SECRET_KEY`.
+
+Reason:
+**A rule with an exception is a list, and lists go stale.** The value of the
+guard is not what it stops on any given day; it is that "which clients are
+guarded?" has one answer. Restoring that is most of the point, and it is why the
+fix is accompanied by a test that enumerates integrations rather than by a
+comment.
+
+**A guarded client and a retrying client are different concerns.** `_post`
+creates payment intentions and charges saved cards. Nothing was added that
+retries, and the test that says so is not decoration: an automatic second
+attempt after a timeout would turn one payment request into two financial
+operations. Retryability stays a *label* on `ProviderError` for a caller holding
+an idempotency key to act on.
+
+**Redirects stay off.** `GuardedTransport` judges the request it is handed, so a
+client that followed redirects itself would take the second hop inside httpx —
+below the guard, unresolved and unjudged. A public Paymob URL answering
+`302 Location: http://169.254.169.254/` would then reach the metadata endpoint.
+Paymob's API endpoints are JSON POSTs and do not redirect; if that ever changes,
+the answer is a hand-written loop of guarded requests, which is what the
+WhatsApp media download already does.
+
+**A refused destination is not retryable, and that is the difference from a
+timeout.** Nothing was sent, and pointing the same request at the same refused
+destination produces the same answer, because the refusal is a statement about
+where the request was aimed rather than about the network. Marking it retryable
+would have a caller loop on its own configuration.
+
+**`UnsafeUrlError` had to be caught.** It is deliberately not a `WaslaError`, so
+uncaught it reaches the unhandled-error handler and becomes a 500 raised from
+inside a route — the wrong report for "this deployment cannot safely reach its
+payment provider". `GoogleOAuthClient.exchange` makes the same catch for the
+same reason.
+
+Consequences:
+The regional hosts need no allow-list. `PAYMOB_REGION` selects between four
+documented API hosts and the guard judges the address each resolves to at the
+time of the request, which is the thing a list of names cannot do.
+
+Nothing about the inbound side changed. Callback HMAC verification, event
+deduplication, amount and currency checks and settlement are not HTTP clients
+and are untouched; their tests are part of this change's regression set for
+exactly that reason.
+
+The log line for a refused destination names neither the address nor the host.
+The refusal is the thing being probed for, so a log that described it would
+become the oracle it exists to prevent.

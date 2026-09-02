@@ -19,6 +19,12 @@ exactly_once_and_never_again` below.
 Pinning the route must not weaken the identity check, so the `Host` header and
 the TLS server name keep the original hostname. A transport that verified a
 certificate against the pinned IP would have traded one hole for a larger one.
+
+The last section asks a different question: **which clients are guarded?** The
+intended answer is "all of them", and the way that stops being true is one
+integration built by hand. Paymob was that integration (SEC-08), so the check is
+now an assertion over every outbound client rather than a sentence in a
+docstring.
 """
 
 from __future__ import annotations
@@ -38,6 +44,10 @@ from app.core.net import (
     resolve_public_host,
     validate_outbound_url,
 )
+from app.integrations.billing.paymob import PaymobProvider
+from app.integrations.openai import client as openai_client
+from app.integrations.openai import embeddings
+from app.integrations.whatsapp import client as whatsapp_client
 
 HOSTNAME = "rebind.example"
 PUBLIC_V4 = "93.184.216.34"
@@ -350,3 +360,66 @@ async def test_every_hop_of_a_redirect_chain_is_resolved_and_judged(monkeypatch)
 
     assert validated == hops
     assert refused == hops[2]
+
+
+# ------------------------------------------- every integration, not a list
+
+
+def _integration_clients() -> dict[str, httpx.AsyncClient]:
+    """One entry per outbound client this application builds.
+
+    A list is exactly the thing that goes stale, which is why the assertion
+    below is not "these four are guarded" but "every client any integration
+    hands out is guarded" - and why the Paymob entry constructs the provider
+    the way `build_checkout_provider` does, with no transport, rather than
+    reaching for an attribute.
+
+    Paymob was the stale entry (SEC-08). Every other integration went through
+    `build_guarded_client`; this one built a bare `httpx.AsyncClient`, and it is
+    the one request that carries a payment secret key.
+    """
+    return {
+        "openai.responses": openai_client.build_http_client(),
+        "openai.embeddings": embeddings.build_http_client(),
+        "whatsapp": whatsapp_client.build_http_client(),
+        "paymob": PaymobProvider(
+            secret_key="sk_test_notreal000000000000",
+            public_key="pk_test_notreal000000000000",
+            hmac_secret="a-test-hmac-secret",
+            integration_ids=[1],
+        )._client(),
+    }
+
+
+@pytest.mark.parametrize("name", sorted(_integration_clients()))
+async def test_every_integration_client_is_guarded(name):
+    """The invariant `openai/client.py` states in prose, asserted.
+
+    "The guard is used here although the URL is a constant, so that the answer
+    to which clients are guarded? is all of them rather than a list that goes
+    stale." This is the test that keeps that sentence true.
+    """
+    clients = _integration_clients()
+    try:
+        transport = clients[name]._transport
+        assert isinstance(transport, GuardedTransport), f"{name} is not guarded"
+    finally:
+        for client in clients.values():
+            await client.aclose()
+
+
+async def test_no_integration_client_follows_redirects_by_itself():
+    """`GuardedTransport` judges one hop, so a client must not follow the next.
+
+    A client with `follow_redirects=True` would take the second hop inside httpx,
+    below the transport - which is the one place the guard cannot see. The
+    clients that genuinely need redirects follow them by hand, one guarded
+    request per hop.
+    """
+    clients = _integration_clients()
+    try:
+        for name, client in clients.items():
+            assert client.follow_redirects is False, f"{name} follows redirects itself"
+    finally:
+        for client in clients.values():
+            await client.aclose()

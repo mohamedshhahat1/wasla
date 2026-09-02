@@ -47,6 +47,7 @@ from typing import Any, Final
 import httpx
 
 from app.core.logging import get_logger
+from app.core.net import UnsafeUrlError, build_guarded_client
 from app.db.models.invoice import PaymentStatus
 from app.integrations.billing.base import ProviderError
 from app.integrations.billing.checkout import (
@@ -65,6 +66,10 @@ from app.integrations.billing.checkout import (
 logger = get_logger(__name__)
 
 PAYMOB_PROVIDER: Final = "paymob"
+# Applied to connect, read, write and pool alike - `httpx.Timeout` of a single
+# value sets all four. A provider that accepts a connection and then stalls is
+# the failure mode that matters here, and it is a read timeout rather than a
+# connect one.
 DEFAULT_TIMEOUT_SECONDS: Final = 20.0
 # Enough of a provider error to act on, too little to carry a credential back
 # out through a log. Paymob error bodies quote the request.
@@ -368,6 +373,8 @@ class PaymobProvider:
         self._notification_url = notification_url
         self._redirection_url = redirection_url
         self._timeout = timeout_seconds
+        # Only a test supplies one. Production leaves it `None` and gets
+        # `build_guarded_client`; see `_client`.
         self._transport = transport
 
     @property
@@ -505,19 +512,63 @@ class PaymobProvider:
                 text = text.replace(secret, "[redacted]")
         return text
 
+    def _client(self) -> httpx.AsyncClient:
+        """The HTTP client every Paymob call uses.
+
+        `build_guarded_client`, the same constructor OpenAI, WhatsApp and Google
+        use, so the answer to "which outbound clients are guarded?" is "all of
+        them" rather than a list that goes stale (SEC-08). This integration was
+        the stale entry: it built a bare `httpx.AsyncClient`, and it is the one
+        request that carries the Paymob secret key.
+
+        The URLs are constants from `REGIONS`, so the exposure this closes is
+        narrow - a hijacked or poisoned resolver for `accept.paymob.com` and its
+        regional siblings. Narrow is not the same as absent, and the guard
+        costs nothing: it resolves once, refuses any answer that is not
+        publicly routable, and connects to the address it judged rather than to
+        a name that can change its mind between the check and the socket.
+
+        What the guard is **not** is a retry policy. It adds no attempts, and
+        deliberately: `_post` creates payment intentions and charges saved
+        cards, and a transparent retry after a timeout would turn one payment
+        request into two financial operations. Retryability stays a *label* on
+        `ProviderError` for a caller with idempotency to decide about.
+
+        Redirects stay off, which is the `httpx` default and also what
+        `GuardedTransport` assumes - it validates one hop, so a client that
+        followed redirects by itself would follow the second one unjudged.
+        Paymob's API endpoints are JSON POSTs and do not redirect.
+
+        A `transport` is supplied only by tests, which need a mock socket
+        rather than a real one. Production never passes it, so the guarded path
+        is the only path a deployment can take.
+        """
+        timeout = httpx.Timeout(self._timeout)
+        if self._transport is not None:
+            return httpx.AsyncClient(timeout=timeout, transport=self._transport)
+        return build_guarded_client(timeout=timeout)
+
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         """One JSON POST, with the credential in exactly one place.
 
         Every failure leaves as a `ProviderError` with the body truncated:
         Paymob quotes the request back in its errors, and this request carries
         the secret key.
+
+        A destination the guard refuses leaves as a `ProviderError` too, and
+        **not** as `UnsafeUrlError`. That exception is deliberately not a
+        `WaslaError`, so left uncaught it reaches the unhandled-error handler
+        and becomes a 500 - which is the wrong report for "this deployment
+        cannot safely reach its payment provider", and it would be raised from
+        inside a route. `GoogleOAuthClient.exchange` makes the same catch for
+        the same reason. What the caller learns is that Paymob could not be
+        reached; which address was refused stays out of the message, following
+        the argument `app/core/net.py` gives for keeping it out of its own log
+        line.
         """
         url = f"{self._api_base}{path}"
         try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout,
-                transport=self._transport,
-            ) as client:
+            async with self._client() as client:
                 response = await client.post(
                     url,
                     json=body,
@@ -532,6 +583,23 @@ class PaymobProvider:
             # unique reference, and a refund is guarded by the reference stored
             # before one is believed to have happened.
             raise ProviderError("Paymob did not respond in time.", retryable=True) from error
+        except UnsafeUrlError as error:
+            # The guarded transport refused the destination: a Paymob host that
+            # resolved to an address inside the deployment network, or a base
+            # URL that is not https. Not retryable, and that is the difference
+            # from the branch below - nothing was sent, and sending it again
+            # produces the same refusal, because this is a statement about
+            # where the request was pointed rather than about the network.
+            logger.error(
+                "billing.paymob_destination_refused",
+                extra={
+                    # No address and no host. The refusal is the thing being
+                    # probed for, so the log must not become the oracle.
+                    "event": "billing.paymob_destination_refused",
+                    "reason": type(error).__name__,
+                },
+            )
+            raise ProviderError("Paymob could not be reached.") from error
         except httpx.HTTPError as error:
             # Deliberately not interpolating the error: httpx puts the request
             # URL in it, and a future signed URL would end up in a log.
