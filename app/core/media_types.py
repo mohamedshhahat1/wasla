@@ -364,8 +364,9 @@ def resolve(*, claimed: str | None, prefix: bytes) -> DetectedMedia:
       broken client or an attempt, and neither is something to quietly relabel
       and carry on with.
     - A claim that is absent or generic is not a conflict. The detected type is
-      used, unless the bytes are one of the two ambiguous containers, where
-      there is no honest way to choose and the file is refused.
+      used - and where detection narrows to a pair rather than a single type,
+      `UNDECLARED_DEFAULTS` decides whether there is an honest default (text)
+      or whether the file is refused rather than guessed at (Matroska, OLE2).
     """
     candidates = detect(prefix)
     if candidates is None:
