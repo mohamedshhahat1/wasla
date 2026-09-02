@@ -952,3 +952,138 @@ Reviewed and deliberately left alone:
       worker constructs but never uses; withholding it would need a second,
       partial construction path in the money code to remove a secret from a
       container that already holds `PAYMOB_SECRET_KEY` (ADR-063)
+
+## Phase 25 — Operations: retries, dead letters, metrics and backups
+
+The audit's summary of this area was one sentence: "there is nothing that would
+tell anyone an outage had started — no metric, no alert, no error tracker, and
+no visibility into the queues where the symptom would first appear. Discovery
+would be a customer complaint." Alongside it, "there is no backup or restore
+procedure, because there is no backup system."
+
+Four things closed, in the order they depend on each other.
+
+### Queue reliability
+
+- [x] **A failure has a category, and the category is a bounded vocabulary.**
+      `FailureCategory` is eleven values; `RETRYABLE` is four of them. They are
+      used as dead-letter fields and metric labels, which is why they are an
+      enum rather than an exception message — provider prose can echo a
+      customer's phone number. `unknown` is deliberately not retryable: an
+      exception nobody has classified is one whose safety nobody has argued
+- [x] **Retryability is also a property of the operation, not only of the
+      failure** (ADR-068). Ingestion and media carry `IDEMPOTENT_RETRY` because
+      re-running one changes nothing anybody sees. The agent worker carries
+      `AGENT_RETRY` and narrows to `NO_RETRY` the instant `_TurnProgress`
+      records that the turn engaged the provider — after which no failure it can
+      catch is distinguishable from one that already sent a customer a reply
+- [x] **Bounded exponential backoff with additive jitter**, scheduled in a
+      Redis sorted set and promoted at the head of every reserve. The `zrem` is
+      the claim, so two workers promoting at once cannot queue the same retry
+      twice. `delay_for` is a pure function of the attempt and a jitter
+      fraction the caller supplies, so tests pin exact delays without patching
+      `random` or watching a clock
+- [x] **A queued entry became a `JobEnvelope`** carrying the attempt count, the
+      original enqueue time and the last failure category. `decode` accepts a
+      bare payload as attempt 1, so a deploy while jobs are in flight strands
+      nothing. The three near-identical queues became one `ReliableQueue`
+- [x] The queue tests were given a fake that keeps real lists and sorted sets.
+      The old one answered every `lrem` with 1, and dead-letter deduplication is
+      *defined* as the second `lrem` removing nothing — so it could not have
+      told the working implementation from the broken one
+
+### Dead letters
+
+- [x] **`fail()` became `dead_letter()` with a record**: job type, workspace,
+      attempt count, first and last attempt times, failure category and when it
+      was dead-lettered. Deliberately no exception text, no message content, no
+      credential — the list outlives the incident and is read by whoever is on
+      call
+- [x] **Deduplicated by the reservation.** Removing the entry from the in-flight
+      list is what proves the caller still holds the job, so calling the path
+      twice writes one record. Capped at 1,000 per queue, trimmed from the old
+      end
+- [x] **An operator command, not an endpoint** (ADR-071):
+      `python -m app.workers.queues status | dead-letters | replay`, reachable
+      through the image's `queues` entrypoint. Replay refuses the agent queue
+      without `--force`, re-queues as fresh first attempts, and leaves the
+      records in place so a second failure can be compared with the first
+
+### Metrics
+
+- [x] **A registry written here rather than pulled in** (ADR-072), because the
+      point is the guard: `_reject_unbounded` refuses a UUID, an email address,
+      a phone-shaped run of digits or anything longer than 96 characters *as a
+      label value*, at the moment a sample is recorded. Label names are fixed at
+      declaration. It raises; `app/core/telemetry.py` swallows, so the guard is
+      testable and can never fail a request
+- [x] **`GET /metrics`** in Prometheus text 0.0.4: HTTP rate, latency and
+      in-flight by route template; dependency readiness; queue pending,
+      in-flight, delayed, dead-lettered and oldest-job age; worker heartbeats;
+      job outcomes; provider calls for OpenAI, WhatsApp, Paymob and email
+- [x] **The worker's numbers travel through Redis** (ADR-069) rather than
+      through a second HTTP listener on the container that holds the Meta
+      token, the OpenAI key and the Paymob secret
+- [x] **Kept off the public listener** (ADR-070) rather than behind a shared
+      token: the API publishes no port, `nginx.conf` answers 404 for the path,
+      and `METRICS_ENABLED=false` removes it
+- [x] `docs/OBSERVABILITY.md` — the catalogue, the cardinality rules, the retry
+      safety matrix, and concrete alert expressions. Stated as recommendations,
+      because no Alertmanager exists in this stack and claiming otherwise would
+      be the drift this repository keeps catching itself in
+- [x] **No error-monitoring vendor was added**, and the reasoning is written
+      down rather than left as an omission: it would receive stack frames from
+      the process holding every credential and every conversation, and the
+      redaction that keeps those out of the logs is written against this
+      application's log records, not against an SDK's automatic context capture
+
+### Backups
+
+- [x] `scripts/backup_postgres.sh` and `scripts/restore_postgres.sh`, a one-shot
+      `backup` Compose service behind a profile, and host cron. The password
+      never reaches a command line or the output; each dump is read back with
+      `pg_restore --list` before it is believed; retention prunes only after a
+      success, so a failed run cannot delete the last good backup
+- [x] **The restore verifies** (ADR-073): schema, `vector` and `pgcrypto`,
+      `alembic_version` against `WASLA_EXPECTED_HEAD`, and representative rows.
+      The target is always named — restoring over the configured database needs
+      `WASLA_RESTORE_ALLOW_PRODUCTION=yes`
+- [x] **A drill was executed**, not written down and left: 149,666-byte dump of
+      a schema at head 0037 with a real 1536-dimension embedding, restored into
+      a database created by the script, verified by the script and then read
+      through the application's own ORM. Every failure case exercised too —
+      bad credentials, truncated dump, garbage file, production target,
+      existing target, wrong head. `docs/BACKUP.md` records all of it
+
+### Found while working
+
+- [x] **A pre-existing flake, diagnosed and fixed.**
+      `test_a_summary_names_the_counters_a_dashboard_asks_for` failed roughly
+      one run in three at `f31c34d`, and never on CI. It recorded usage at
+      `datetime.now(UTC)` and then summarised with a default window ending at
+      `datetime.now(UTC)`; the window is half-open, and this host's clock has a
+      granularity of a few milliseconds, so the two reads could land in the same
+      tick and `occurred_at == until` excluded every event. Reproduced (three
+      full-suite runs, then twelve runs of the file alone), the assertion
+      captured — `totals=()` — and closed by recording a minute in the past. The
+      boundary itself keeps its own test
+- [x] **A bug the mutation probes found in this phase's own work.** Every test
+      of the agent retry boundary stubbed `_handle` and set `progress.engaged`
+      by hand, so replacing `progress.engaged = True` with `False` in the real
+      code passed the entire file. Closed with a structural test that reads
+      `_handle`'s AST and asserts the marker is set, is set to `True`, and is
+      set *before* the HTTP client is built
+
+Deliberately not done here:
+
+- [ ] **OpenTelemetry tracing.** Metrics answer "is something wrong"; tracing
+      answers "where in the chain", and the second is only worth its weight once
+      the first exists. P2
+- [ ] **Provider latency histograms.** Provider calls are counted by outcome,
+      not timed. The time is in the log line, and for AI in `usage_events`
+- [ ] **Off-host backup copies and media backup.** The script writes to a
+      directory; getting it elsewhere and encrypted is a deployment decision,
+      and attachments need object storage before they can be backed up at all
+- [ ] **An in-flight reaper.** A job reserved by a worker that died still sits
+      in the in-flight list until an operator moves it. The runbook says so and
+      says why moving one is a judgement rather than a sweep

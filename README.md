@@ -42,7 +42,11 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | A production deployment it has actually run against | Planned |
 | Production TLS (documented and configured; certificates are the operator's) | Implemented |
 | Operational runbook | Implemented |
-| Backups, alerting and zero-downtime releases | Planned |
+| Queue reliability: bounded retries with backoff, attempt counts, dead-letter records and operator replay | Implemented |
+| Operational metrics (`/metrics`): HTTP, dependencies, queue depth and age, dead letters, worker heartbeats, provider outcomes | Implemented |
+| PostgreSQL backup, retention and a restore procedure verified by drill | Implemented |
+| Off-host backup storage, media backup, and a configured alerting stack | Planned |
+| Distributed tracing, an error-monitoring provider and zero-downtime releases | Planned |
 
 Status vocabulary used across all documentation: **Implemented**, **In Progress**, **Planned**, **Blocked**.
 
@@ -91,6 +95,8 @@ Also in use:
 | [docs/API.md](docs/API.md) | API conventions and endpoint catalogue |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker, Nginx, TLS, CI/CD, production deployment |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Operating it: triage, symptoms, procedures, what to watch |
+| [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Metrics catalogue, the scrape endpoint, alert expressions |
+| [docs/BACKUP.md](docs/BACKUP.md) | PostgreSQL backup, retention, restore procedure and drill |
 | [docs/SECURITY.md](docs/SECURITY.md) | Security model, secrets, isolation, auditing |
 
 ## Local development

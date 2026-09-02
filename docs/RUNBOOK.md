@@ -59,20 +59,73 @@ SELECT count(*) FROM whatsapp_events WHERE state = 'received';
 ```
 
 ```bash
-# Redis: pending vs in-flight for each queue
-docker compose -f docker-compose.prod.yml exec redis redis-cli LLEN agent:jobs:pending
-docker compose -f docker-compose.prod.yml exec redis redis-cli LLEN agent:jobs:inflight
-docker compose -f docker-compose.prod.yml exec redis redis-cli LLEN agent:jobs:failed
+# Every queue at once: pending, in-flight, waiting to retry, dead-lettered,
+# and how long the oldest waiting job has been waiting.
+docker compose -f docker-compose.prod.yml exec worker \
+  python -m app.workers.queues status
 ```
 
-- **pending growing, in-flight empty** — nothing is consuming. Check `WORKER_KINDS`: a typo fails at startup, but a *valid* subset silently runs only those loops.
+```
+queue         pending  inflight  delayed   dead    oldest
+------------------------------------------------------------
+agent               0         0        0      0         -
+ingestion           0         0        0      0         -
+media               0         0        0      0         -
+```
+
+The same numbers are on `/metrics` as `wasla_queue_pending_jobs`,
+`wasla_queue_inflight_jobs`, `wasla_queue_delayed_jobs`,
+`wasla_queue_dead_letter_jobs` and `wasla_queue_oldest_pending_age_seconds`
+([OBSERVABILITY.md](OBSERVABILITY.md)), which is what an alert should be
+watching so nobody has to run this to find out something is wrong.
+
+- **pending growing, in-flight empty** — nothing is consuming. Check `WORKER_KINDS`: a typo fails at startup, but a *valid* subset silently runs only those loops. `wasla_worker_heartbeat_alive{kind="agent"}` settles it in one look.
+- **delayed growing** — jobs are failing transiently and backing off. Not yet an incident; the failure category says why:
+  ```bash
+  docker compose -f docker-compose.prod.yml exec redis \
+    redis-cli ZRANGE agent:jobs:delayed 0 4 WITHSCORES
+  ```
+  Paired with `wasla_job_failures_total{category=...}` and the provider counters, this is usually somebody else's outage.
 - **in-flight non-empty and static** — jobs were reserved by a worker that died. **Nothing reaps them** ([TASKS.md](../TASKS.md), phase 8). Moving one back is an operator decision, because re-running an agent job sends the customer a second reply:
   ```bash
   docker compose -f docker-compose.prod.yml exec redis \
     redis-cli LMOVE agent:jobs:inflight agent:jobs:pending RIGHT LEFT
   ```
   Ingestion and media jobs are genuinely idempotent — a stored file is not fetched twice — so those can be requeued freely.
-- **failed growing** — the dead-letter list. Read one before requeueing anything: `redis-cli LINDEX agent:jobs:failed 0`.
+- **dead growing** — work that stopped being retried. Read the records before doing anything with them:
+  ```bash
+  docker compose -f docker-compose.prod.yml exec worker \
+    python -m app.workers.queues dead-letters agent --limit 5
+  ```
+  Each record carries the job type, the workspace, the attempt count, the first and last attempt times and a failure *category* — never an exception string, and never message content. Find the rest in the logs by `worker.job_dead_lettered` and the `tenant_id`.
+
+### Replaying dead-lettered work
+
+Only after reading a record and knowing why it failed.
+
+```bash
+# Idempotent queues: re-ingesting replaces a document's chunks, and a file
+# already read is not read again, so a replay costs a round trip.
+docker compose -f docker-compose.prod.yml exec worker \
+  python -m app.workers.queues replay ingestion --limit 20
+docker compose -f docker-compose.prod.yml exec worker \
+  python -m app.workers.queues replay media --limit 20
+```
+
+The agent queue is **refused** without `--force`, because an agent turn ends in
+a WhatsApp message that carries no idempotency key: replaying a job whose
+failure came after the provider was engaged sends a second answer to a question
+that already has one. Read the conversation first, decide whether answering it
+again is right, and then:
+
+```bash
+docker compose -f docker-compose.prod.yml exec worker \
+  python -m app.workers.queues replay agent --limit 1 --force
+```
+
+Replayed jobs go back as fresh first attempts, and the dead-letter records are
+kept — so if the replay fails too, comparing the new record with the old one is
+what tells you whether anything changed.
 
 ### Nobody can log in
 
@@ -397,7 +450,15 @@ loss.
 
 ## What to watch
 
-Nothing here ships a metrics stack ([ARCHITECTURE.md §20](../ARCHITECTURE.md) — OpenTelemetry and Prometheus are Planned). These are the log events worth alerting on with whatever aggregator is in front of them.
+**Start with the metrics.** `/metrics` publishes request rates and latency,
+dependency readiness, queue depth and age, dead-letter depth, worker heartbeats
+and provider outcomes; [OBSERVABILITY.md](OBSERVABILITY.md) has the catalogue
+and a set of alert expressions to point a scraper at. Nothing here ships a
+*configured* alert — there is no Alertmanager in this stack — so those
+expressions are recommendations until somebody wires them up.
+
+The events below are the log lines worth alerting on as well, for the failures
+that are more specific than a counter can be.
 
 | Event | Means | Urgency |
 | --- | --- | --- |
@@ -407,6 +468,10 @@ Nothing here ships a metrics stack ([ARCHITECTURE.md §20](../ARCHITECTURE.md) �
 | `ratelimit.unavailable` | Redis down; limiting is failing open | High |
 | `credential.decryption_failed` | A stored credential is unreadable — check key configuration | High |
 | `worker.heartbeat_failed` | A loop cannot reach Redis | High |
+| `worker.job_dead_lettered` | A job stopped being retried and is waiting for an operator | High if sustained |
+| `worker.job_retry_scheduled` | A job failed transiently and will be tried again | Low alone, High as a rate |
+| `worker.dead_letters_replayed` | Somebody re-queued dead-lettered work | Informational, and worth an audit read |
+| `metrics.collection_failed` | The scrape could not read Redis; queue signals are absent, not zero | Medium |
 | `campaign.sweep_failed` | A broadcast is stalled | Medium |
 | `email.sweep_failed` | The email worker's sweep threw; nothing is being delivered | High |
 | `email.failed_permanently` | A message will never be sent — check `error_code` | Medium, High if sustained |
@@ -431,8 +496,9 @@ Stated plainly, because a runbook that pretends to cover everything is one that 
   delivery event has arrived from Resend's own infrastructure, so the first
   production send is also the first test of the DNS, the webhook endpoint and
   the sending reputation.
-- **There is no backup or restore procedure**, because there is no backup system. `postgres-data` is a Docker volume. Before any real traffic: scheduled `pg_dump`, tested restores, and a documented recovery objective.
-- **There is no alerting.** The table above lists what to alert on, not a configured alert.
+- **Backups cover PostgreSQL and nothing else.** [BACKUP.md](BACKUP.md) has the scripts, the schedule, the retention policy and a restore drill that was actually executed — against synthetic data on local containers, never against production, because there is no production. **Redis is deliberately not backed up** (queued work is late rather than lost; the messages themselves are in PostgreSQL), and **media is not backed up at all**: attachments live on one host's volume and losing it loses them.
+- **No off-host copy is configured.** The backup script writes to a directory. Getting that directory somewhere else, encrypted, is the deployment's job and this repository does not automate it.
+- **There is no configured alerting.** [OBSERVABILITY.md](OBSERVABILITY.md) gives concrete expressions against metrics that now exist, and the table above lists the log events worth watching. Neither is a running alert: no Alertmanager, no monitoring vendor, nobody paged.
 - **Media files are not replicated.** They live on one host's volume ([ADR-023](../DECISIONS.md)). Losing it loses every attachment customers sent.
 - **`usage_events` and `audit_logs` grow without bound.** Neither is swept, deliberately — retention for billing records and audit trails is a legal question, not a disk-space one.
 

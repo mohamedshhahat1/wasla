@@ -669,7 +669,7 @@ one JSON POST does not justify a supply-chain entry.
 
 ## 20. Observability
 
-**Status: Implemented** — structured logging, request IDs, and health endpoints exist and are tested. OpenTelemetry, Prometheus, and Sentry remain Planned.
+**Status: Implemented** — structured logging, request IDs, health endpoints and a metrics endpoint exist and are tested. OpenTelemetry tracing and an error-monitoring provider remain Planned; the reasoning for not adding the latter is in [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 
 Structured JSON logs carry `request_id`, and where applicable `tenant_id`, `user_id`, and `conversation_id`, propagated through context variables so async work keeps its correlation. Fields whose names suggest secrets (password, token, secret, key, authorization, cookie, signature, credential) are redacted recursively before serialisation, so tokens and API keys cannot reach the logs. A console formatter is used locally and JSON in deployed environments.
 
@@ -686,6 +686,27 @@ Readiness probes run concurrently, are timeout-bounded, and contain their failur
 Events that are expected but worth counting are logged rather than raised: an unmapped delivery status, a status for a message Wasla never sent — normal for a template sent from Meta's own console — and a queue push that failed while the message itself was stored.
 
 An agent turn logs one summary event carrying the rounds taken, the tools run, whether it handed off, the estimated and actual token counts, and how many history turns were dropped, which is what makes a bad prompt or an over-tight budget diagnosable after the fact. Provider failures log the status, the attempt count and the provider's error `code` and `type` — never its prose, because that prose can quote the request and the request contains a customer's conversation.
+
+### Metrics
+
+`GET /metrics` serves Prometheus text exposition 0.0.4. The registry is written in `app/core/metrics.py` rather than pulled in, and the reason is the label guard (ADR-072): a metrics library will accept `tenant_id` as a label, and the resulting cardinality explosion is silent, delayed by weeks, and untraceable to the line that caused it. `_reject_unbounded` refuses an identifier-shaped value — a UUID in any spelling, anything containing `@`, a phone-shaped run of digits, anything longer than 96 characters — at the moment a sample is recorded, and label names are fixed at declaration. It raises; every call site reaches it through `app/core/telemetry.py`, which swallows, so the guard is testable and instrumentation can never fail a request.
+
+Signals come from two places, and which one follows from whether the producing process serves HTTP (ADR-069). The API records its own request path in process, so each replica is an ordinary scrape target. The worker serves no HTTP — its health probe is a command for that reason — so it writes job outcomes and provider call results into Redis and the API renders them; queue depths, retry depths, dead-letter depths and heartbeat freshness are read live from Redis at scrape time, because they are gauges of what is true now. Giving the worker a listener would hand an attack surface to the container holding the Meta token, the OpenAI key and the Paymob secret.
+
+| Group | Signals |
+| --- | --- |
+| HTTP | request count by method, route template and status class; latency histogram; in-flight; unhandled errors |
+| Dependencies | `wasla_dependency_up` and a failure counter per dependency, written by the readiness probe |
+| Queues | pending, in-flight, delayed, dead-lettered, and the age of the oldest waiting job, per queue |
+| Workers | `wasla_worker_heartbeat_alive` per loop, read from the keys the container's own probe reads |
+| Jobs | outcomes by queue (`succeeded`, `retried`, `dead_lettered`) and failures by bounded category |
+| Providers | OpenAI, WhatsApp, Paymob and email calls by operation and outcome |
+
+The `route` label is the matched route *template*, never the requested path, and a request matching no route becomes `__unmatched__` so a scanner cannot name a series. AI spend and message counts are deliberately absent: they are metered into `usage_events`, which is what a bill is computed from, and a second tally would be a second number to reconcile.
+
+The endpoint carries no authentication (ADR-070). The API container publishes no port, `nginx.conf` answers 404 for `/metrics` on the public listener rather than proxying it, and `METRICS_ENABLED=false` removes it. A shared bearer token would protect a document that by construction carries nothing worth stealing, while adding one more secret to rotate.
+
+[docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) has the full catalogue and a set of alert expressions. Nothing here ships a *configured* alert.
 
 ## 21. CI/CD and production deployment
 

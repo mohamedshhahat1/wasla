@@ -2262,3 +2262,357 @@ exactly that reason.
 The log line for a refused destination names neither the address nor the host.
 The refusal is the thing being probed for, so a log that described it would
 become the oracle it exists to prevent.
+
+---
+## ADR-068 — Retryability Belongs to the Operation, Not Only to the Failure
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Context:
+A job on one of the three Redis queues had two outcomes: it succeeded, or it was
+dead-lettered. There was no attempt count, no backoff and no classification, so
+a document whose embedding call met a 502 was thrown away as decisively as a
+document nobody could parse. The audit named this: "no exponential backoff and
+no per-job attempt counter on the Redis queues… nothing drains or alerts on the
+dead-letter list."
+
+The obvious fix — retry everything a few times — is wrong here, and wrong in a
+way that costs a customer rather than a developer. An agent turn ends by sending
+a WhatsApp message, and the Cloud API takes no idempotency key; `WhatsAppClient`
+already refuses to retry a timed-out send for exactly that reason. A generic
+queue-level retry would undo that decision one layer up, re-running the whole
+turn and sending a second answer to a question that already has one.
+
+Decision:
+Two independent judgements, and both have to say yes.
+
+**The failure has a category.** `FailureCategory` is eleven values covering
+everything the classifier recognises, and `RETRYABLE` is four of them:
+`dependency_unavailable`, `provider_error`, `rate_limited`, `timeout`. Anything
+else fails identically on the next attempt.
+
+`unknown` is deliberately *not* retryable. An exception the classifier does not
+recognise is one whose safety nobody has argued, and the honest response to an
+unargued failure is to stop and show an operator rather than run it four more
+times. Making a new failure retryable is a line in the map, not a default.
+
+**The operation has a policy.** `IDEMPOTENT_RETRY` — five attempts, doubling
+from two seconds to a ceiling of sixty, with jitter that only ever adds — is
+carried by the ingestion and media workers, because re-ingesting replaces a
+document's chunks and a file already read is not read again. The agent worker
+carries `AGENT_RETRY` (three attempts) and narrows it to `NO_RETRY` the instant
+`_TurnProgress.engaged` is set, which happens immediately before the HTTP client
+is built.
+
+That marker is the whole of this queue's retry safety in one expression. Before
+it, the turn has loaded a workspace, read an allowance and looked up an agent —
+all inside a transaction that rolls back, none of it visible outside the
+process, all of it safe to repeat. After it, the turn may have reserved an
+allowance, called the provider and sent a message, and no failure this worker
+can catch distinguishes those from one that did not.
+
+Consequences:
+A transient blip on the agent queue is now retried instead of dead-lettered, and
+a failure that might have sent a message still is not. The two cases are
+distinguished by *where* they happened rather than by what was raised, which is
+the only distinction that can be made honestly from an `except` block.
+
+The jitter fraction is an argument rather than a `random()` call inside the
+formula, so `delay_for` is a pure function and a test pins an exact delay
+without patching `random` or watching a clock. `handle_failure` draws it when
+the caller does not supply one.
+
+Delays are scheduled in a Redis sorted set and promoted at the head of every
+`reserve`. The `zrem` is the claim: two workers promoting the same entry at the
+same instant both see it and only the one whose removal returns 1 pushes it, so
+a retry cannot land on the pending list twice.
+
+A queued entry is now a `JobEnvelope` carrying the payload as an opaque string
+plus the attempt count, the original enqueue time and the last failure category.
+`decode` accepts a bare payload as attempt 1, so a deploy that happens while
+jobs are sitting in a queue does not strand them.
+
+The three queues became one `ReliableQueue` with three namespaces. Retry
+scheduling, attempt counting and dead-lettering are the kind of logic that goes
+subtly wrong when written out three times, and everything that actually differs
+between the queues is data.
+
+---
+
+## ADR-069 — The Worker's Metrics Travel Through Redis, Not a Second Listener
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Context:
+Metrics have to leave the process that produced them. For the API that is
+trivial: it already serves HTTP, so each replica is its own scrape target, which
+is the ordinary Prometheus model. The worker is the problem. It serves no HTTP
+at all — its health probe is a *command* (`app/workers/health.py`) precisely
+because of that — and yet it produces the numbers an operator most needs: job
+outcomes, provider call results, everything about whether customer work is
+getting done.
+
+Decision:
+The worker writes cross-process counters into Redis, one hash per metric with a
+field per label combination, and the API renders them at scrape time.
+
+Redis is already the cross-process channel for this pair: the worker writes
+heartbeats there and a separate probe process reads them. Queue depths, retry
+depths, dead-letter depths and heartbeat freshness are read live at scrape time
+rather than published on a timer, because they are gauges of what is true now
+and reading them is one command each.
+
+Consequences:
+The worker container gains no listening socket. That matters more than it
+sounds: it holds the Meta access token, the OpenAI key and the Paymob secret,
+and it currently accepts no inbound connection of any kind. Adding an HTTP
+server to it to publish counters would trade a real reduction in attack surface
+for a mechanism Redis already provides.
+
+Counters are totals across replicas rather than per-replica. For queue work that
+is the right shape — an operator asks how many agent jobs were dead-lettered,
+not how many by which container.
+
+A flushed or restored Redis resets them. A scraper handles that natively by
+noticing the value fell, so nothing here has to preserve totals.
+
+Two mechanisms exist rather than one, and the rule for which is which is
+written at the top of `app/core/telemetry.py`: in-process for the API's own
+request path, Redis for anything the worker produces. An HTTP request paying a
+Redis round trip to be counted would be instrumentation taking part in the work.
+
+The sink is module-level, set once per process at start-up, like the registry
+beside it. The alternative was threading a Redis handle through
+`WhatsAppClient`, `ResponsesClient` and every Paymob provider — none of which
+has one, all of which would then take an argument used for nothing but counting.
+
+---
+
+## ADR-070 — The Scrape Endpoint Is Kept Off the Public Listener, Not Behind a Token
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Context:
+`/metrics` publishes operational shape: route names, request rates, queue
+depths, provider error counts, which worker loops are alive. It carries no
+customer data — `app/core/metrics.py` refuses an identifier as a label and a
+test scans the whole rendered document for anything UUID-shaped — but it is
+still not something to serve to the internet.
+
+The reflex is a bearer token. Decision:
+
+Decision:
+No authentication on the endpoint. Three things stand between it and the
+internet instead:
+
+- The API container publishes no port; in `docker-compose.prod.yml` only nginx
+  is reachable from outside the `internal` network.
+- `nginx.conf` answers `404` for `/metrics` on the public listener rather than
+  proxying it. Without that block the catch-all `location /` would forward it.
+- `METRICS_ENABLED=false` removes it entirely, answering `404` — not `403`,
+  because "this deployment serves no metrics" is the true answer and a `403`
+  would confirm the endpoint exists.
+
+Consequences:
+A shared bearer token was rejected on its merits. Every scraper in a deployment
+would hold the same one; it would have to be distributed to whatever collects
+metrics; and it would protect a document that by construction carries nothing
+worth stealing. A credential whose loss costs nothing is a credential that gets
+treated as if losing it costs nothing, and it would then be one more secret in
+the deployment inventory to rotate and to leak.
+
+The access control is the deployment topology, which is the same access control
+everything else the API serves on port 8000 already relies on. Making that
+explicit — rather than leaving `/metrics` to be caught by nginx's `location /`
+— is what this decision actually buys.
+
+The endpoint is unversioned and excluded from the OpenAPI schema. A scrape path
+is part of the deployment's shape rather than of the product's API, and putting
+it under `/api/v1` would place it behind the public proxy's catch-all instead of
+beside the paths nginx already treats specially.
+
+`METRICS_ENABLED` is mapped in the deployment drift guard to both processes: the
+API serves the exposition and the worker writes the counters it renders, so a
+deployment that set it on one would silently publish half the signals.
+
+---
+
+## ADR-071 — Dead-Letter Replay Is a Command, and Refuses the Agent Queue
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Context:
+Once jobs stop being retried they have to go somewhere an operator can see, and
+there has to be a way back out. The question is what that way looks like.
+
+Decision:
+`python -m app.workers.queues`, reachable through the image's `queues`
+entrypoint command: `status`, `dead-letters <queue>`, `replay <queue>`. No HTTP
+endpoint, and replay is never automatic.
+
+`replay` refuses the agent queue unless `--force` is passed.
+
+Consequences:
+An HTTP endpoint for replay would need a platform role, a rate limit, an audit
+trail and an answer to "what may a tenant replay" — and none of that is worth
+building before anybody has needed it once. A command reachable only by whoever
+can already exec into the worker container has exactly the audience this should
+have.
+
+Automatic replay is refused for the same reason automatic retry is bounded: a
+loop that decided on its own to re-run dead-lettered work would turn a provider
+outage into the same jobs failing round and round for ever, which is the
+behaviour the attempt ceiling exists to prevent.
+
+The agent refusal is the same idempotency argument as ADR-068, one layer up.
+Ingestion and media are safe to replay; an agent turn ends in a message that
+carries no idempotency key. `--force` exists because an operator who has read
+the conversation may know better than the rule, and the refusal says so rather
+than pretending the operation is impossible.
+
+Replayed jobs go back as fresh first attempts. The old attempt count is what
+said the job had run out of budget, and an operator replaying it has decided
+that reason is gone; carrying the count forward would dead-letter it again on
+the first failure without giving it the retry that was being asked for.
+
+Dead-letter records survive the replay. A replayed job that fails again writes a
+*new* record, and comparing the two is how an operator learns whether the replay
+changed anything — which deleting the original would take away.
+
+A dead-letter record carries the job type, the workspace, the attempt count, the
+first and last attempt times, and a failure *category*. Never an exception
+`repr`: provider error text can echo a customer's phone number or a fragment of
+the request, and a dead-letter list outlives the incident and is read by whoever
+is on call rather than by whoever wrote the code.
+
+---
+
+## ADR-072 — The Metrics Registry Is Written Here, So the Label Guard Can Be
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Context:
+Wasla needed a metrics layer. The default answer is `prometheus_client`: small,
+ubiquitous, well tested.
+
+Decision:
+`app/core/metrics.py` implements counters, gauges, histograms and Prometheus
+text exposition 0.0.4 directly, for the same reason the OpenAI integration is
+written here rather than pulled in (ADR-013): the surface actually used is
+small, well specified and stable.
+
+The deciding factor was not the dependency. It was that a metrics library will
+happily accept `tenant_id` as a label.
+
+Consequences:
+`_reject_unbounded` refuses an identifier-shaped label value at the moment a
+sample is recorded — a UUID in any spelling, anything containing `@`, a
+phone-shaped run of digits, a value longer than 96 characters. Label *names* are
+fixed at declaration, so a sample carrying one the metric did not declare is
+refused too.
+
+That guard is the whole justification. A `tenant_id` label does not leak a
+workspace's data; it multiplies every series by the number of workspaces until
+the scraper falls over, weeks after the line was written, with nothing pointing
+back at the line. The failure is silent, delayed and expensive, which is exactly
+the shape that has to be made impossible in code rather than in review.
+
+It **raises**. Every call site in the application reaches metrics through
+`app.core.telemetry`, which swallows — so the guard is provable in a test and
+can never fail a request. `tests/integration/test_metrics_endpoint.py` breaks
+the recorder outright and asserts the request it was measuring is still served.
+
+The exposition format is the interoperable one: an OpenTelemetry collector,
+Grafana Agent, VictoriaMetrics or Prometheus itself all read it, so nothing here
+commits the deployment to a particular monitoring stack.
+
+A real bug this bought: the first `Histogram.render` summed the bucket counts a
+second time, because `observe` already increments every bucket a value falls
+under. It was caught by a test asserting the cumulative-and-total invariant
+rather than an example, which is the test that stays true when the buckets
+change.
+
+---
+
+## ADR-073 — A Backup Is Not a Script, It Is a Restore That Happened
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Context:
+The runbook said, in as many words, that there was no backup system and that
+`postgres-data` was a Docker volume. The audit listed "backups and a rehearsed
+restore" as blocking a real launch, with the note that a documented drill was
+required rather than a unit test.
+
+Decision:
+`scripts/backup_postgres.sh` and `scripts/restore_postgres.sh`, a one-shot
+`backup` Compose service behind a profile, host-scheduled by cron, and a restore
+drill executed against real PostgreSQL 16 with pgvector before any of it was
+committed. `docs/BACKUP.md` records the drill, including its output.
+
+The restore script **verifies**: the schema has tables, `vector` and `pgcrypto`
+came back, `alembic_version` is populated and matches `WASLA_EXPECTED_HEAD` if
+set, and representative rows can be counted. The drill goes one step further and
+reads the restored database through the application's own ORM.
+
+Consequences:
+The verification step is what makes this a procedure rather than a `pg_restore`
+invocation. A dump that restores into a database the application cannot query is
+not a backup, it is a file — and the pgvector check is the concrete version of
+that: `document_chunks.embedding` is a `vector(1536)`, and a restore that lost
+the extension would fail on that table and nowhere else.
+
+The target database is always named. There is deliberately no "restore into the
+configured database" path; overwriting the database `DATABASE_URL` names needs
+`WASLA_RESTORE_ALLOW_PRODUCTION=yes`, an opt-in that cannot be reached by
+leaving an argument off. The one thing a restore script must never do is the
+destructive thing by accident.
+
+Retention prunes only after a successful dump, and each dump is read back with
+`pg_restore --list` before it is believed. A failed run cannot delete the last
+good backup, and a truncated artefact that looks like a backup is worse than no
+backup.
+
+The password never reaches a command line or the output. It is exported into the
+process environment and nothing echoes it, so `ps` on a shared host shows the
+host, the user and the database name and no secret. This is asserted by a test
+that runs the script with a password in `DATABASE_URL` and greps both streams.
+
+**Redis is deliberately not backed up.** Queued work is a message answered late
+rather than never — the message itself is in PostgreSQL. The one entry worth
+thinking about is the refresh-token denylist, whose value is entirely in being
+current, and `users.token_version` in PostgreSQL is the revocation mechanism
+that actually survives.
+
+**Media is not backed up, and the gap is stated rather than papered over.**
+Attachments live on one host's volume; losing it loses them, and no amount of
+`pg_dump` changes that. Object storage behind the existing `MediaStorage`
+protocol is the fix and it is P2.
+
+The scripts run from the *database* image, not the application one. `pg_dump`
+has to match the server's major version and the image that certainly does is the
+one running the server.
