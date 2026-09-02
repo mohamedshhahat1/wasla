@@ -81,17 +81,17 @@ client secret. The authorization code is worthless without the verifier.
 **What this costs, stated plainly.** Without a cookie, the `state` cannot prove
 that the browser finishing the flow is the browser that started it. It is
 unpredictable, single-use, short-lived, server-side, and it carries the nonce
-and the PKCE verifier - which closes code injection and replay. It does not
-close "an attacker induces a victim's browser to complete an authorization the
-attacker began". Adding a browser-bound cookie would close it, and would mean
-introducing `SameSite`, domain and CSRF decisions across an API that currently
-has none of them. The residual exposure is narrower than it sounds, because the
-callback sets no browser state: a victim tricked into completing the attacker's
-flow receives tokens in a response body their own page reads, rather than
-acquiring a session silently. For the **link** flow there is no gap at all, as
-the flow record holds the initiating account and the identity can only ever
-attach to it. This is a known, deliberate, documented limitation rather than an
-oversight.
+and the PKCE verifier - which closes code injection and replay. It did not close
+"an attacker induces a victim's browser to complete an authorization the
+attacker began".
+
+**Superseded by ADR-066.** That gap is now closed, and the cookie this section
+declined to introduce is the thing that closed it. What made it worth doing was
+that the trade turned out to be smaller than described: the cookie carries a
+random secret and nothing else, so it introduced no CSRF surface to decide about
+- an API that authenticates by bearer token still has nothing a cookie alone can
+authorize. See ADR-066 for the design, and "What the frontend has to do" below
+for the one thing this changes for a client.
 
 ---
 
@@ -298,17 +298,26 @@ and finish it at the other.
    preview will fetch on its own.
 2. The browser goes to Google. Google redirects to `GOOGLE_REDIRECT_URI` - a
    frontend route - with `code` and `state`.
-3. `POST /auth/google/callback` with `{code, state}`.
+3. `POST /auth/google/callback` with `{code, state}`, **sent with the binding
+   cookie** the first request set.
    1. Spend the state. **Before the exchange**, so a replay never reaches the
       network.
-   2. Exchange the code for an ID token, server-side, with the client secret and
+   2. Check the browser binding: the cookie must hash to the digest stored with
+      the state. Also **before the exchange**, so a callback from the wrong
+      browser costs no outbound request and spends no authorization code
+      (ADR-066).
+   3. Exchange the code for an ID token, server-side, with the client secret and
       the verifier.
-   3. Validate the ID token: signature against Google's published JWKS,
+   4. Validate the ID token: signature against Google's published JWKS,
       algorithm `RS256` from a literal allowlist, issuer in the two spellings
       Google uses, audience equal to our client id, expiry with 30 seconds of
       leeway, required claims present, nonce compared with `compare_digest`,
-      non-empty subject, non-empty email.
-   4. Resolve: **identity exists** → load the user, enforce status, open a
+      non-empty subject, non-empty email. Claims are additionally bounded
+      against the columns that will hold them: an over-long `sub` or `email` is
+      refused because shortening an identifier merges identities, and an
+      over-long `name` is shortened because nothing is authorized by one
+      (ADR-065).
+   5. Resolve: **identity exists** → load the user, enforce status, open a
       session, stamp `last_login_at`. **No identity and `email_verified` false**
       → refuse. **No identity and the address is taken** → refuse with linking
       guidance. **No identity and the address is unknown** → create a user with
@@ -599,3 +608,43 @@ What is still **not** done, and must be before this is deployed:
 ADR-047 to ADR-051 are recorded in `DECISIONS.md`, and `docs/API.md`,
 `docs/AUTH.md`, `docs/AUTHORIZATION.md`, `docs/DEPLOYMENT.md`,
 `docs/SECURITY.md` and `README.md` are updated.
+
+---
+
+## What the frontend has to do
+
+Two requirements, both introduced by ADR-066 and neither visible in the request
+bodies.
+
+**Send credentials on all four routes.** `authorize` sets the binding cookie and
+the callback reads it, so a `fetch` that omits `credentials` will authorize
+successfully and then be refused at the callback - the failure looks like a bad
+state, because it deliberately cannot be told apart from one.
+
+```js
+await fetch(`${API}/auth/google/authorize`, { method: "POST", credentials: "include" });
+// ... Google redirects back to the frontend route with `code` and `state`
+await fetch(`${API}/auth/google/callback`, {
+  method: "POST",
+  credentials: "include",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ code, state }),
+});
+```
+
+The same applies to `POST /auth/identities/google/authorize` and
+`POST /auth/identities/google/link`, which additionally need the `Authorization`
+header they already needed.
+
+**Deploy the frontend and the API same-site.** The cookie is `SameSite=Lax`, so
+a browser withholds it from a genuinely cross-site request. `app.example.com`
+and `api.example.com` are same-site and work; `app.example.com` and
+`wasla-api.io` are not and will not. This is the topology `GOOGLE_REDIRECT_URI`
+already assumed, and `CORS_ORIGINS` must name the frontend origin explicitly -
+the middleware runs with `allow_credentials=True`, and a wildcard is refused in
+production.
+
+One consequence worth knowing before it is reported as a bug: a browser with two
+Google sign-ins pending at once can complete either one, but completing one
+clears the binding, so the other must be restarted. Starting sign-in again is
+enough; there is nothing to clear by hand.

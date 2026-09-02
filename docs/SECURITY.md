@@ -303,6 +303,14 @@ One URL is not constructed here: the WhatsApp media location, which arrives in a
 provider response. It passes through `app/core/net.py` before it is fetched, and
 so does every redirect hop.
 
+Every *other* outbound URL is a constant, and every other client is guarded
+anyway (ADR-067). The reason is not that a constant can be dangerous; it is that
+"which clients are guarded?" must have one answer rather than a list somebody
+has to keep current. It stopped having one answer once — the Paymob client was
+built by hand and carried the payment secret key (SEC-08) — so the claim is now
+an assertion over every integration in `tests/unit/test_outbound_pinning.py`
+rather than a sentence here.
+
 Correcting an earlier audit note: it claimed the fetch carries a bearer token
 across redirects. **It does not** — httpx strips `Authorization` when the origin
 changes, and `tests/unit/test_outbound_url_safety.py` pins that against the
@@ -315,10 +323,11 @@ Enforced: `https` only; every hop validated, not just the first; judged by
 resolved **address** rather than hostname, so a name pointing at metadata does
 not pass; IPv4-mapped IPv6 forms handled; at most three redirects.
 
-**Not defeated: DNS rebinding.** A name resolving public here and private when
-the socket opens would pass. Closing it needs the connection pinned to the
-checked address, which means a custom transport. Deferred deliberately — the
-caller is a provider URL rather than a user-supplied one.
+**DNS rebinding was defeated later**, and this paragraph used to say it had been
+deferred. `GuardedTransport` resolves once, judges every address and connects to
+a literal, so there is no second resolution to poison. The detail is in the
+findings list below; it is corrected here because a reader who stops at this
+section should not leave believing the hole is open.
 
 ## Request limits
 
@@ -477,7 +486,10 @@ Confirmed behaviourally during this audit rather than by reading:
   capacity *is* the outage — while the credential limits fall back to a bounded
   process-local counter. Failing closed was rejected: it makes signing in
   impossible whenever the cache is down, and anyone able to degrade Redis could
-  trigger it. Refresh-token spending was already fail-closed and stays that way.
+  trigger it. Refresh-token spending was already fail-closed and stays that way
+  — it now refuses with a 503 naming the dependency rather than letting the
+  driver exception escape as a 500 (ADR-064), which was the wrong report for an
+  outage and not something a client could retry on.
 - **`POST /auth/logout` is rate-limited** (ADR-040), and deliberately still
   unauthenticated: requiring an access token would break logout exactly when it
   is used, and adds nothing against somebody holding a victim's refresh token —
