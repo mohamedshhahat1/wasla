@@ -320,6 +320,7 @@ def test_no_secret_value_is_written_into_the_shipped_configuration() -> None:
         "RESEND_API_KEY",
         "RESEND_WEBHOOK_SECRET",
         "JWT_SECRET",
+        "MEDIA_S3_SECRET_ACCESS_KEY",
     )
     for name in secretish:
         for line in re.findall(rf"^\s*{name}:.*$", text, re.M):
@@ -425,12 +426,6 @@ def test_the_media_store_is_never_mandatory_at_interpolation() -> None:
     for name in MEDIA_STORE_SETTINGS:
         for line in re.findall(rf"^\s*{name}:.*$", text, re.M):
             assert ":?" not in line, f"{name} is mandatory at interpolation: {line.strip()}"
-
-
-def test_the_media_secret_is_interpolated_rather_than_written_down() -> None:
-    text = PROD_COMPOSE.read_text(encoding="utf-8")
-    for line in re.findall(r"^\s*MEDIA_S3_SECRET_ACCESS_KEY:.*$", text, re.M):
-        assert line.split(":", 1)[1].strip().startswith("${")
 
 
 def test_production_never_allows_a_backup_that_stays_on_this_host() -> None:
