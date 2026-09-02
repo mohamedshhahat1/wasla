@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+from redis.exceptions import ConnectionError
+
+from app.core.exceptions import DependencyUnavailableError
 from app.core.token_store import RefreshTokenStore
 
 
@@ -135,3 +139,107 @@ async def test_concurrent_spends_of_one_token_produce_exactly_one_winner():
 
     assert results.count(True) == 1
     assert results.count(False) == 7
+
+
+class FailingCommands(FakeCommands):
+    """Redis that is reachable for nothing, the way an outage presents.
+
+    `ConnectionError` rather than a bare `RedisError`, because that is what
+    redis-py actually raises when the server is gone and it is the subclass a
+    handler most plausibly gets wrong.
+    """
+
+    def __init__(self, *, message: str = "Error connecting to redis:6379"):
+        super().__init__()
+        self._message = message
+
+    async def set(self, key, value, ex=None, nx=False):
+        raise ConnectionError(self._message)
+
+    async def exists(self, key):
+        raise ConnectionError(self._message)
+
+
+class FailingRedis:
+    def __init__(self, *, message: str = "Error connecting to redis:6379"):
+        self.client = FailingCommands(message=message)
+
+
+async def test_spending_a_token_refuses_rather_than_guessing_when_redis_is_down():
+    store = RefreshTokenStore(FailingRedis())
+
+    # Not `True`. An unreachable denylist answering "you are the first" is a
+    # replay control failing open, and the caller would be handed a fresh
+    # session on the strength of a token nobody could check.
+    with pytest.raises(DependencyUnavailableError) as refusal:
+        await store.spend(uuid.uuid4(), ttl_seconds=60)
+
+    assert refusal.value.status_code == 503
+    assert refusal.value.error_code == "dependency_unavailable"
+    assert refusal.value.details == {"dependency": "redis"}
+
+
+async def test_revoking_refuses_rather_than_claiming_a_logout_that_did_not_happen():
+    store = RefreshTokenStore(FailingRedis())
+
+    # Returning quietly here would answer 204 to somebody signing out of a
+    # shared machine while their refresh token stayed usable for weeks.
+    with pytest.raises(DependencyUnavailableError):
+        await store.revoke(uuid.uuid4(), ttl_seconds=60)
+
+
+async def test_reading_the_denylist_refuses_rather_than_reporting_not_revoked():
+    store = RefreshTokenStore(FailingRedis())
+
+    # "Not found" and "could not look" are different answers, and only one of
+    # them means the token is still live.
+    with pytest.raises(DependencyUnavailableError):
+        await store.is_revoked(uuid.uuid4())
+
+
+async def test_an_expired_token_is_answered_without_reaching_redis_at_all():
+    store = RefreshTokenStore(FailingRedis())
+    token_id = uuid.uuid4()
+
+    # Both short-circuit on the TTL before any command is issued, so a token
+    # that is already dead is still answered during an outage rather than
+    # turning a no-op logout into a 503.
+    assert await store.spend(token_id, ttl_seconds=0) is False
+    await store.revoke(token_id, ttl_seconds=0)
+
+
+async def test_the_refusal_carries_no_connection_detail():
+    """The message a person sees names the service, never the server.
+
+    redis-py puts the host and port it failed to reach into `ConnectionError`,
+    and a URL configured with a password is one string away from that. The
+    dependency name is the whole of what a caller is told.
+    """
+    store = RefreshTokenStore(FailingRedis(message="Error connecting to redis://:hunter2@db:6379"))
+
+    with pytest.raises(DependencyUnavailableError) as refusal:
+        await store.spend(uuid.uuid4(), ttl_seconds=60)
+
+    rendered = f"{refusal.value.message} {refusal.value.details}"
+    assert "hunter2" not in rendered
+    assert "redis://" not in rendered
+    assert "6379" not in rendered
+    assert "ConnectionError" not in rendered
+
+
+async def test_the_store_works_again_once_redis_returns():
+    """No sticky failure state: the outage is per call, not per store."""
+    redis = FakeRedis()
+    store = RefreshTokenStore(redis)
+    token_id = uuid.uuid4()
+
+    broken = FailingCommands()
+    working = redis.client
+    redis.client = broken
+    with pytest.raises(DependencyUnavailableError):
+        await store.spend(token_id, ttl_seconds=60)
+
+    redis.client = working
+    # And the token that could not be spent during the outage was never
+    # recorded, so its holder is not locked out afterwards.
+    assert await store.spend(token_id, ttl_seconds=60) is True

@@ -19,6 +19,14 @@ impossible whenever the cache is down, which is worse for customers *and*
 attacker-triggerable by anyone who can degrade Redis: it would convert a
 denial-of-service against a cache into a denial-of-service against
 authentication.
+
+`RefreshTokenStore` is the counter-example, and it is here so the two policies
+are read side by side rather than discovered separately. A limiter meters
+capacity and can be approximated locally; the denylist meters credentials and
+cannot be approximated at all, because the only thing it knows is whether a
+particular token has already been presented. So it refuses (ADR-064), and the
+refusal is a 503 naming the dependency rather than the raw `RedisError` that
+used to escape as a 500.
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ from redis.exceptions import AuthenticationError as RedisAuthError
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeout
 
+from app.core.exceptions import DependencyUnavailableError
 from app.core.rate_limit import (
     LOGIN_ACCOUNT_POLICY,
     RateLimiter,
@@ -211,10 +220,40 @@ async def test_spending_a_refresh_token_fails_closed(error):
 
     Reuse detection *is* the atomic write. If Redis cannot answer, whether this
     token has been spent is unknowable - and issuing a fresh pair on an unknown
-    is exactly the case the mechanism exists to catch. It raises, the request
-    becomes a 5xx, and nothing is issued.
+    is exactly the case the mechanism exists to catch. It raises, and nothing is
+    issued.
+
+    What changed under ADR-064 is the *type*, not the direction. This used to
+    assert `pytest.raises(type(error))`, which was a faithful description of a
+    raw `RedisError` reaching the handler and becoming a 500 - the wrong status
+    for an outage, and one a client cannot act on. The refusal is now a domain
+    error that renders as a 503 naming the dependency. Both halves are asserted
+    here rather than only the new one, because the property that matters is
+    still "does not return", and a future refactor that restored a raw escape
+    would satisfy a test written only against the message.
     """
     store = RefreshTokenStore(BrokenRedis(error))
 
-    with pytest.raises(type(error)):
+    with pytest.raises(DependencyUnavailableError) as refusal:
         await store.spend(uuid.uuid4(), ttl_seconds=60)
+
+    assert refusal.value.status_code == 503
+    assert refusal.value.details == {"dependency": "redis"}
+    # The originating failure is kept as the cause for the log, and kept out of
+    # the message a caller sees.
+    assert isinstance(refusal.value.__cause__, type(error))
+    assert str(error) not in refusal.value.message
+
+
+@pytest.mark.parametrize("error", FAILURES)
+async def test_revoking_a_refresh_token_fails_closed_too(error):
+    """Logout is a security mutation, so it may not be answered optimistically.
+
+    `spend` and `revoke` differ in what they detect and not in what they may
+    assume: a revocation that was never written is a token that is still live,
+    and a 204 saying otherwise is worse than a 503 the caller can retry.
+    """
+    store = RefreshTokenStore(BrokenRedis(error))
+
+    with pytest.raises(DependencyUnavailableError):
+        await store.revoke(uuid.uuid4(), ttl_seconds=60)

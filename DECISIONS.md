@@ -1979,3 +1979,61 @@ constructs but never uses, and splitting the factory to withhold it would put a
 second, partial construction path into the money code to remove a secret from a
 container that already holds `PAYMOB_SECRET_KEY` — a worse trade than the one it
 buys.
+
+## ADR-064 — A Dependency Outage Is a 503 Naming the Dependency, Not a 500
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Decision:
+`RefreshTokenStore` catches `RedisError` on all three of its operations and
+raises `DependencyUnavailableError` with `details={"dependency": "redis"}`,
+which the existing handler renders as a 503. The behaviour it replaces was not
+insecure — it already refused — but it refused by letting the driver exception
+escape to `handle_unexpected_error`, so `/auth/refresh` and `/auth/logout`
+answered 500.
+
+Context:
+The security direction was never in question. Spending a refresh token *is* the
+replay check: a store that cannot answer does not know whether the token has
+already been presented, and issuing a fresh pair on that unknown is precisely
+the case the mechanism exists to catch. `OAuthFlowStore` already made this
+argument for the OAuth state (ADR-051) and already had the right shape. The
+denylist did not, and the gap was only in how the refusal was reported.
+
+Reason:
+**A 500 is a statement about us, and it is the wrong one.** It says the request
+was malformed by the application, so it pages the wrong people, is not
+retryable by any well-behaved client, and hides a Redis outage inside the
+application's error rate. A 503 with the dependency named is the same refusal
+made legible.
+
+**Silence would have been worse than either.** `revoke` had the additional
+option of returning quietly, since "already revoked" is not an error there. It
+would have meant answering 204 to somebody signing out of a shared machine
+while their refresh token stayed usable for a fortnight — a false statement
+about a security action. There is no second authoritative record for an
+individual refresh token, so an honest failure is the only available answer.
+
+**This is the opposite call to ADR-040, deliberately.** A rate limiter meters
+capacity and can be approximated in-process; the denylist meters credentials
+and cannot be approximated at all, because the only thing it knows is whether
+one particular token has been seen before. The two policies now sit in the same
+test file so the distinction is read rather than rediscovered.
+
+Consequences:
+While Redis is unreachable nobody can refresh, so every session ends within the
+access-token lifetime. That cost is stated in the module rather than left to be
+discovered during an incident. What is deliberately *not* coupled: signing in
+does not consult the denylist and keeps working, and `/auth/logout-all` keeps
+working because bulk revocation is `users.token_version` in PostgreSQL
+(ADR-036) — so the lever somebody reaches for when they believe a token has
+leaked is the one that does not depend on the cache.
+
+The exception type is recorded in the log and its message is not.
+`ConnectionError` from redis-py carries the address it failed to reach, and a
+configured URL may carry a password; this is also the log line most likely to
+be pasted into a ticket.
