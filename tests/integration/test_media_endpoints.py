@@ -156,6 +156,38 @@ async def test_an_attachment_is_never_served_inline(client, media_service):
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
+async def test_a_stored_type_outside_the_supported_set_is_not_served_back(client, media_service):
+    """A row is input to whoever reads it, whatever wrote it.
+
+    Every row written since SEC-09 was closed holds a type resolved from the
+    file's own bytes. A row written by an older release holds whatever the
+    caller claimed, and echoing that into a `Content-Type` would keep the
+    defect alive for every file already in the store - so the handler serves
+    the stored type only if it is one this system canonically supports.
+    """
+    media_service._media.mime_type = "image/svg+xml"
+
+    response = await client.get(f"/api/v1/conversations/{CONVERSATION_ID}/media/{MEDIA_ID}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/octet-stream")
+    assert "svg" not in response.headers["content-type"]
+
+
+async def test_customer_content_is_not_left_in_a_cache(client, media_service):
+    """An attachment is one workspace's data served to one authenticated person.
+
+    A shared cache holding it would serve it to the next person through the
+    same proxy; a browser cache would leave it on the machine after the session
+    that fetched it has gone.
+    """
+    response = await client.get(f"/api/v1/conversations/{CONVERSATION_ID}/media/{MEDIA_ID}")
+
+    cache_control = response.headers["cache-control"]
+    assert "no-store" in cache_control
+    assert "public" not in cache_control
+
+
 async def test_media_from_another_conversation_is_not_found(client, media_service):
     """It exists in this workspace, but not on the conversation named.
 

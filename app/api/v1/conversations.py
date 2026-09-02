@@ -25,6 +25,7 @@ from app.api.dependencies import (
 )
 from app.api.route import CommittingRoute
 from app.core.exceptions import NotFoundError, ValidationError
+from app.core.media_types import CANONICAL_TYPES
 from app.core.pagination import MAX_CURSOR_LENGTH
 from app.db.models.sentiment import ConversationPriority
 from app.schemas.conversation import (
@@ -52,6 +53,29 @@ MAX_CAPTION_LENGTH = 1024
 # API process rather than the store: the whole upload is held in memory to be
 # handed to Meta, and an unbounded one is a way to exhaust it.
 MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+
+# How much is read from an upload at a time. Small enough that the check below
+# stops an oversized file within a chunk of the limit rather than after it.
+UPLOAD_CHUNK_BYTES = 64 * 1024
+
+
+async def _read_capped(file: UploadFile) -> bytes:
+    """Read an upload, refusing it as soon as it passes the cap.
+
+    Chunked rather than `await file.read()`, which returns the whole body and
+    so learns the size only once the process is already holding it. The request
+    middleware caps the body too, but it is one deployment-wide number for every
+    route; this is the rule that understands attachments, and the two together
+    mean the oversized case is refused twice rather than trusted once.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(UPLOAD_CHUNK_BYTES):
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise ValidationError("This file is too large to send.")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @router.get("", response_model=CursorPage[ConversationRead])
@@ -185,19 +209,19 @@ async def send_media(
     exactly as it does to text. Answers 201 even when Meta rejects it - the
     attempt is recorded, and the returned status says whether it was sent.
     """
-    content = await file.read()
+    content = await _read_capped(file)
     if not content:
         raise ValidationError("The uploaded file is empty.")
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise ValidationError("This file is too large to send.")
 
     message = await messaging.send_media(
         conversation_id=conversation_id,
         content=content,
-        # `content_type` is what the browser claimed. It decides how Meta
-        # renders the file, not how anything here reads it, and an unsupported
-        # value is refused by the service rather than guessed at.
-        mime_type=file.content_type or "application/octet-stream",
+        # `content_type` is what the browser claimed, and it is treated as a
+        # hint from here. The service resolves the real type from the file's
+        # own bytes and refuses a claim that contradicts them (SEC-09); what
+        # Meta is told, what is stored and what is served back all come from
+        # that result rather than from this header.
+        mime_type=file.content_type,
         filename=file.filename,
         caption=caption,
         sent_by_id=workspace.user.id,
@@ -233,12 +257,25 @@ async def download_media(
     content = await media_service.read(media)
     return Response(
         content=content,
-        media_type=media.mime_type or "application/octet-stream",
+        # The stored type, and only if it is one this system canonically
+        # supports. Every row written since SEC-09 was closed holds a type
+        # resolved from the file's own bytes, but a row is still input to
+        # whatever reads it: one written by an older release holds whatever
+        # a caller claimed, and serving that back would keep the defect alive
+        # for every file already in the store.
+        media_type=(
+            media.mime_type if media.mime_type in CANONICAL_TYPES else "application/octet-stream"
+        ),
         headers={
             "Content-Disposition": "attachment",
             # Belt and braces with the disposition above: a file that is never
             # sniffed is never re-typed into something executable.
             "X-Content-Type-Options": "nosniff",
+            # Customer content, served to one authenticated colleague. A shared
+            # cache holding it would serve it to the next person through the
+            # same proxy, and a browser cache would leave it on a machine after
+            # the session that fetched it has gone.
+            "Cache-Control": "private, no-store",
         },
     )
 

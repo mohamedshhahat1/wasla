@@ -18,7 +18,7 @@ from app.core.exceptions import (
     RateLimitedError,
     ValidationError,
 )
-from app.integrations.whatsapp.client import WhatsAppClient
+from app.integrations.whatsapp.client import MediaTooLargeError, WhatsAppClient
 
 ACCESS_TOKEN = "meta-access-token"
 PHONE_NUMBER_ID = "109876543210"
@@ -366,6 +366,10 @@ MEDIA_ID = "media-handle-1"
 MEDIA_URL = "https://graph.facebook.com/v21.0/" + MEDIA_ID
 UPLOAD_URL = "https://graph.facebook.com/v21.0/" + PHONE_NUMBER_ID + "/media"
 CDN_URL = "https://lookaside.fbsbx.com/whatsapp/1234"
+# The byte cap every fetch is made under. Required rather than defaulted on
+# the client, so a caller cannot forget it; these tests pass a generous one
+# except where the cap itself is the subject.
+MEDIA_CAP = 25 * 1024 * 1024
 
 
 def _descriptor(**overrides) -> httpx.Response:
@@ -389,7 +393,7 @@ async def test_a_file_is_fetched_in_two_steps():
     """
     recorder = Recorder(_descriptor(), httpx.Response(200, content=b"jpeg-bytes"))
 
-    downloaded = await _client(recorder).fetch_media(MEDIA_ID)
+    downloaded = await _client(recorder).fetch_media(MEDIA_ID, max_bytes=MEDIA_CAP)
 
     assert downloaded.content == b"jpeg-bytes"
     assert downloaded.mime_type == "image/jpeg"
@@ -403,7 +407,7 @@ async def test_the_cdn_url_is_still_fetched_with_the_token():
     """It looks public and is not. Without the header Meta answers 401."""
     recorder = Recorder(_descriptor(), httpx.Response(200, content=b"bytes"))
 
-    await _client(recorder).fetch_media(MEDIA_ID)
+    await _client(recorder).fetch_media(MEDIA_ID, max_bytes=MEDIA_CAP)
 
     assert recorder.requests[1].headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
 
@@ -414,7 +418,7 @@ async def test_codec_parameters_are_stripped_from_a_fetched_type():
         httpx.Response(200, content=b"ogg"),
     )
 
-    downloaded = await _client(recorder).fetch_media(MEDIA_ID)
+    downloaded = await _client(recorder).fetch_media(MEDIA_ID, max_bytes=MEDIA_CAP)
 
     assert downloaded.mime_type == "audio/ogg"
 
@@ -423,7 +427,7 @@ async def test_a_descriptor_without_a_location_is_refused():
     recorder = Recorder(_descriptor(url=None))
 
     with pytest.raises(ExternalServiceError):
-        await _client(recorder).fetch_media(MEDIA_ID)
+        await _client(recorder).fetch_media(MEDIA_ID, max_bytes=MEDIA_CAP)
 
 
 async def test_a_read_is_retried_where_a_send_would_not_be():
@@ -438,10 +442,46 @@ async def test_a_read_is_retried_where_a_send_would_not_be():
         httpx.Response(200, content=b"bytes"),
     )
 
-    downloaded = await _client(recorder).fetch_media(MEDIA_ID)
+    downloaded = await _client(recorder).fetch_media(MEDIA_ID, max_bytes=MEDIA_CAP)
 
     assert downloaded.content == b"bytes"
     assert recorder.attempts == 3
+
+
+async def test_a_body_that_passes_the_cap_is_abandoned_mid_read():
+    """The cap has to bite during the read, not after it.
+
+    A buffered fetch learns a file was too big only once the process is holding
+    it, which makes the limit a description of what already happened rather than
+    a control. `MediaTooLargeError` is raised from inside the chunk loop.
+    """
+    oversized = b"x" * 4096
+    recorder = Recorder(_descriptor(file_size=8), httpx.Response(200, content=oversized))
+
+    with pytest.raises(MediaTooLargeError):
+        await _client(recorder).fetch_media(MEDIA_ID, max_bytes=1024)
+
+
+async def test_an_oversized_body_is_not_retried():
+    """It is a decision, not a transient failure. Retrying re-reads the same file."""
+    recorder = Recorder(_descriptor(), httpx.Response(200, content=b"y" * 4096))
+
+    with pytest.raises(MediaTooLargeError):
+        await _client(recorder).fetch_media(MEDIA_ID, max_bytes=16)
+
+    # Two requests: the descriptor and one attempt at the body.
+    assert recorder.attempts == 2
+    assert recorder.sleeps == []
+
+
+async def test_a_body_exactly_at_the_cap_is_accepted():
+    """A cap is a limit, not a limit minus one."""
+    body = b"z" * 1024
+    recorder = Recorder(_descriptor(), httpx.Response(200, content=body))
+
+    downloaded = await _client(recorder).fetch_media(MEDIA_ID, max_bytes=1024)
+
+    assert downloaded.content == body
 
 
 async def test_a_read_gives_up_after_the_attempt_budget():

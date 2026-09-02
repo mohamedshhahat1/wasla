@@ -24,10 +24,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.exceptions import ExternalServiceError, RateLimitedError
 from app.core.logging import get_logger
+from app.core.media_types import SNIFF_BYTES, MediaTypeError
+from app.core.media_types import resolve as resolve_media_type
 from app.core.storage import MediaStorage, StorageError
 from app.db.models.media import MAX_TRANSCRIPT_LENGTH, MediaStatus, MessageMedia
 from app.db.models.usage import UsageEventType
-from app.integrations.whatsapp.client import WhatsAppClient
+from app.integrations.whatsapp.client import MediaTooLargeError, WhatsAppClient
 from app.repositories.media_repository import MediaRepository
 from app.services.extraction import UnreadableDocumentError
 from app.services.media_reader import (
@@ -128,32 +130,67 @@ class MediaService:
         await self._session.flush()
 
         try:
-            downloaded = await self._whatsapp.fetch_media(media.wa_media_id)
+            downloaded = await self._whatsapp.fetch_media(media.wa_media_id, max_bytes=cap)
+        except MediaTooLargeError:
+            # Caught before the clause below, which would call this a failure
+            # and retry it. Meta's declared size is a claim, and this is the
+            # branch where the claim turned out to be wrong - the read was
+            # abandoned mid-body rather than completed and then measured, so
+            # the worker never held more than the cap.
+            return await self._skip(
+                media,
+                f"This file is larger than the {cap // (1024 * 1024)} MB limit.",
+            )
         except (ExternalServiceError, RateLimitedError) as error:
             # An attempt that broke, not a decision. Recorded rather than
             # raised, so the row explains itself and the worker can decide
             # whether another attempt is left.
             return await self._fail(media, str(error))
 
-        # Checked again on what arrived. Meta's declared size is a claim, and a
-        # cap enforced only against a claim is not a cap.
-        if downloaded.byte_size > cap:
+        # The second trust boundary SEC-09 named. Everything above this line
+        # decided what to do from `mime_type`, which is a string in Meta's
+        # media descriptor - and a descriptor is a claim about a file, not the
+        # file. From here the bytes decide: a file whose contents contradict
+        # what Meta said it was, or that is not a supported format at all, is
+        # skipped rather than stored and read as the thing it claimed to be.
+        #
+        # `SKIPPED` and not `FAILED`: no number of retries turns these bytes
+        # into the type they were announced as, and a retry loop against that
+        # is exactly what the two states exist to keep apart.
+        try:
+            detected = resolve_media_type(
+                claimed=downloaded.mime_type or mime_type,
+                prefix=downloaded.content[:SNIFF_BYTES],
+            )
+        except MediaTypeError:
+            logger.warning(
+                "media.type_mismatch",
+                extra={
+                    "event": "media.type_mismatch",
+                    "tenant_id": str(self._tenant_id),
+                    "media_id": str(media.id),
+                },
+            )
             return await self._skip(
                 media,
-                f"This file is larger than the {cap // (1024 * 1024)} MB limit.",
+                "This file's contents do not match the type it arrived as, "
+                "so it was not stored.",
             )
 
         try:
             key = await self._storage.put(
                 tenant_id=self._tenant_id,
                 data=downloaded.content,
-                mime_type=downloaded.mime_type or mime_type,
+                mime_type=detected.mime_type,
             )
         except StorageError as error:
             return await self._fail(media, str(error))
 
         media.storage_key = key
-        media.mime_type = downloaded.mime_type or mime_type
+        # The canonical type, so everything downstream - the reader that picks
+        # a route, the download handler that sets a Content-Type - works from
+        # what the file is rather than from what it was announced as.
+        media.mime_type = detected.mime_type
         media.byte_size = downloaded.byte_size
         media.content_hash = content_hash(downloaded.content)
         media.status = MediaStatus.STORED

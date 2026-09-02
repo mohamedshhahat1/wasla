@@ -63,11 +63,13 @@ WAMID = "wamid.sent"
 TEMPLATE_NAME = "appointment_reminder"
 TEMPLATE_LANGUAGE = "ar_EG"
 
-# Stand-ins for a real file. Nothing on this path inspects the bytes - the
-# mime type decides how a file is read - so a plausible-looking header would
-# only suggest a check that does not happen.
-PNG_BYTES = b"png-bytes" + b"0" * 63
-OGG_BYTES = b"ogg-bytes" + b"0" * 63
+# Stand-ins for a real file, and they now have to start with the real thing.
+# This path *does* inspect the bytes: a download is stored under the type its
+# contents prove it to be, and one whose contents contradict the declared type
+# is skipped rather than stored (SEC-09). Placeholder bytes with a plausible
+# mime type used to sail through here, which is precisely the defect.
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"0" * 64
+OGG_BYTES = b"OggS" + b"0" * 68
 
 
 @pytest.fixture
@@ -383,7 +385,7 @@ class StubWhatsApp:
     async def probe_media(self, media_id: str) -> MediaDescriptor:
         return MediaDescriptor(mime_type=self._mime_type, byte_size=len(self._content))
 
-    async def fetch_media(self, media_id: str) -> DownloadedMedia:
+    async def fetch_media(self, media_id: str, *, max_bytes: int) -> DownloadedMedia:
         return DownloadedMedia(
             content=self._content,
             mime_type=self._mime_type,

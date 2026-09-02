@@ -2782,3 +2782,91 @@ TLS chain or rate limits, which `docs/BACKUP.md` says plainly.
 No RPO or RTO is claimed. What the schedule *implies* is written down as an
 observed fact; adopting a target means measuring a restore at production scale,
 and there is no production.
+
+## ADR-076 — A File Is What Its Bytes Are, Not What Its Sender Called It
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Context:
+Every media type in this system arrived as a string somebody else wrote.
+`file.content_type` from a browser on the upload route, and `mime_type` from
+Meta's media descriptor on the download path. Both were believed, and both
+decided real behaviour: which of Meta's four attachment kinds a file was sent
+as, whether the media reader handed it to a vision model or a transcriber, what
+went into the `mime_type` column, and what `Content-Type` it was served back
+with.
+
+Worse, the outbound check was a family prefix. `_whatsapp_kind` read
+`mime_type.split("/")[0]` and mapped `image`, `audio` and `video` straight
+through, so `image/svg+xml` was an image, and so was any invented
+`image/x-whatever`. Nothing anywhere opened the file (SEC-09).
+
+The exploitable shape is narrow but real: a PDF, an HTML page or an archive
+uploaded as `image/jpeg` was accepted, uploaded to Meta as an image, stored as
+an image and served back to a colleague with `Content-Type: image/jpeg`. It was
+kept out of the High band only by `Content-Disposition: attachment` and
+`nosniff`, which are the controls that stop the *browser* acting on the lie —
+not controls that stop the lie.
+
+Decision:
+**The claim is a hint. The bytes are the answer.** `app/core/media_types.py`
+identifies a file from a bounded prefix of its own content and returns a
+canonical type, and everything downstream uses that: what Meta is told, what
+the reader routes on, what lands in the database, what is served back.
+
+**An exact allowlist, no families.** `CANONICAL_TYPES` enumerates every type
+this product supports, derived from what the reader can actually read and what
+a colleague can actually send. There is no wildcard left to widen, and
+`image/svg+xml` — a script that a browser will execute given half a chance — is
+not in it.
+
+**A signature table, not libmagic.** `python-magic` needs a system package in
+the runtime image and a second thing to patch. The supported set here is small
+and fixed, so a table for exactly those formats is smaller than the dependency,
+has no deployment story, and is tested exhaustively. The cost is stated rather
+than hidden: an unusual-but-valid file of a supported type whose signature the
+table does not recognise is refused. That is the direction to fail in.
+
+**Containers that genuinely carry two things narrow to two.** Matroska is audio
+or video with one signature, and an OLE2 compound document is Word or Excel; in
+both cases detection narrows to the pair and the *claim* picks within it. That
+is the only thing a claim is allowed to do, and it can never widen the set.
+
+**A conflict is a refusal, not a correction.** Silently relabelling a file whose
+declared type contradicts its content would carry on with something that is
+either a broken client or an attempt, and would throw away the evidence. On the
+upload route it is a 400; on the download path it is `SKIPPED`, because no
+retry turns those bytes into the announced type.
+
+**Absent is not conflicting.** A missing header and `application/octet-stream`
+say the same thing, and the bytes decide alone — except for the two ambiguous
+containers, where there is no honest way to choose and the file is refused.
+
+**The cap is enforced during the read.** `fetch_media` now takes a required
+`max_bytes` and streams, abandoning the body mid-chunk when it passes. A
+buffered fetch learns a file was too big only once the process is holding it,
+which makes the limit a description of what already happened. The upload route
+reads in chunks for the same reason.
+
+Consequences:
+Detection answers "are these bytes a supported container of a known format?".
+It does **not** prove the file is harmless: a valid JPEG can carry a decoder
+exploit, a valid PDF can carry JavaScript, and a polyglot can be a legitimate
+JPEG and a legitimate ZIP at once. Nothing here scans for malware and nothing
+here should be described as if it did. What it removes is the class where a
+file is processed and served as a type it is not.
+
+Two consequences a reader should expect. Bytes that decode as text are
+`text/plain`, which means an HTML file or an SVG **can** be stored — as text,
+served as text, with the disposition and `nosniff` that were always there. And
+the download handler serves the stored type only if it is canonical: rows
+written before this ADR hold whatever a caller claimed, and echoing one back
+would keep the defect alive for every file already in the store.
+
+Meta's own format support is narrower than this table in places. A file Meta
+will not carry comes back as a recorded rejection on the message rather than as
+a guess made locally, which is the same posture every other send already takes.

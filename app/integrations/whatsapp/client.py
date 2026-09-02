@@ -90,6 +90,30 @@ class DownloadedMedia:
 
 
 @dataclass(frozen=True, slots=True)
+class _Hop:
+    """One fetched hop: either a body, or somewhere else to look for one.
+
+    A pair rather than two methods, because the redirect loop has to tell the
+    two apart on every hop and a `None` body with a `None` destination is the
+    third case - a redirect with no `Location`, which is a dead end.
+    """
+
+    body: bytes | None
+    redirect_to: str | None
+
+
+class MediaTooLargeError(ExternalServiceError):
+    """A download passed the byte cap while it was being read.
+
+    Distinct from a fetch that broke. The caller records this as a decision not
+    to process the file, which no retry changes, rather than as an attempt worth
+    repeating - the same split `MediaStatus` draws between skipped and failed.
+    """
+
+    message = "This file is larger than the limit."
+
+
+@dataclass(frozen=True, slots=True)
 class SentMessage:
     """Meta's acknowledgement of one accepted message."""
 
@@ -321,7 +345,7 @@ class WhatsAppClient:
         logger.warning("whatsapp.template_pages_exhausted", extra={"pages": max_pages})
         return templates
 
-    async def fetch_media(self, media_id: str) -> DownloadedMedia:
+    async def fetch_media(self, media_id: str, *, max_bytes: int) -> DownloadedMedia:
         """Fetch an inbound file in the two steps Meta requires.
 
         The webhook carries a handle, not a file. Resolving the handle returns a
@@ -331,7 +355,14 @@ class WhatsAppClient:
 
         Retries are safe on this path, unlike a send: fetching a file twice
         costs a request and changes nothing a customer can see, which is why
-        this reuses `_get` rather than the send path's narrower policy.
+        this uses the wider read policy rather than the send path's narrower one.
+
+        **`max_bytes` is a required argument, not a default.** The body is read
+        in chunks and abandoned the moment it passes the cap, so a descriptor
+        that under-declares a file - or a CDN response that simply does not stop
+        - costs a bounded amount of memory in the worker rather than whatever
+        the far end felt like sending. A caller that had to remember to pass a
+        limit would be a caller that eventually forgot.
         """
         descriptor = await self._get_json(f"{GRAPH_BASE_URL}/{self._api_version}/{media_id}")
 
@@ -356,7 +387,7 @@ class WhatsAppClient:
         mime_type = descriptor.get("mime_type")
         declared = descriptor.get("file_size")
 
-        content = await self._get_bytes(url)
+        content = await self._stream_capped(url, max_bytes=max_bytes)
         return DownloadedMedia(
             content=content,
             mime_type=mime_type.split(";", 1)[0].strip() if isinstance(mime_type, str) else None,
@@ -418,12 +449,118 @@ class WhatsAppClient:
             raise ExternalServiceError("WhatsApp accepted the upload without an identifier.")
         return uploaded
 
+    async def _stream_capped(self, url: str, *, max_bytes: int) -> bytes:
+        """A media body, refused the moment it grows past `max_bytes`.
+
+        The same hop-by-hop validation as `_get`, and for the same reason - a
+        media URL arrives in a provider response, so every `Location` is a fresh
+        destination that has to be judged before it is fetched.
+
+        What is different is the read. `_get` returns a buffered response, which
+        means the process is already holding whatever arrived by the time anyone
+        can look at its length; a file that is bigger than the descriptor said
+        would be entirely in memory before the cap that exists to stop it got a
+        chance to run. This reads the body in chunks and gives up inside one
+        chunk of the limit, so the worker's exposure is the cap and not the
+        sender's intent.
+        """
+        for _ in range(MAX_REDIRECTS + 1):
+            hop = await self._stream_hop(url, max_bytes=max_bytes)
+            if hop.body is not None:
+                return hop.body
+            if hop.redirect_to is None:
+                raise ExternalServiceError("WhatsApp could not return this file.")
+            url = hop.redirect_to
+            try:
+                validate_outbound_url(url)
+            except UnsafeUrlError as error:
+                logger.warning(
+                    "whatsapp.media_redirect_refused",
+                    extra={"event": "whatsapp.media_redirect_refused"},
+                )
+                raise ExternalServiceError("WhatsApp could not return this file.") from error
+
+        raise ExternalServiceError("WhatsApp could not return this file.")
+
+    async def _stream_hop(self, url: str, *, max_bytes: int) -> _Hop:
+        """One streamed hop, under the retry policy `_get_once` uses.
+
+        The backoff happens after the response context has closed - `continue`
+        leaves the `async with` first - so a retry never holds the connection it
+        is retrying.
+        """
+        attempt = 1
+        while True:
+            try:
+                async with self._http.stream(
+                    "GET",
+                    url,
+                    headers={"Authorization": f"Bearer {self._access_token}"},
+                    follow_redirects=False,
+                ) as response:
+                    if response.status_code in _REDIRECT_STATUSES:
+                        location = response.headers.get("Location")
+                        return _Hop(
+                            body=None,
+                            redirect_to=(str(response.url.join(location)) if location else None),
+                        )
+
+                    retryable = (
+                        response.status_code == TOO_MANY_REQUESTS
+                        or response.status_code >= SERVER_ERROR_FLOOR
+                    )
+                    if not (retryable and attempt < self._max_attempts):
+                        if response.status_code == TOO_MANY_REQUESTS:
+                            await self._count(FETCH_MEDIA, CallOutcome.RATE_LIMITED)
+                            raise RateLimitedError("WhatsApp is rate limiting this account.")
+                        if response.status_code >= CLIENT_ERROR_FLOOR:
+                            # Read before logging: the failure log wants the
+                            # provider's error body, and a streamed response has
+                            # not fetched one yet. Bounded by the same cap, so a
+                            # hostile error body is no larger a problem than a
+                            # hostile file.
+                            await response.aread()
+                            self._log_failure(response)
+                            await self._count(FETCH_MEDIA, CallOutcome.FAILURE)
+                            raise ExternalServiceError("WhatsApp could not return this file.")
+
+                        body = await self._read_capped(response, max_bytes=max_bytes)
+                        await self._count(FETCH_MEDIA, CallOutcome.SUCCESS)
+                        return _Hop(body=body, redirect_to=None)
+            except httpx.HTTPError as error:
+                if attempt >= self._max_attempts:
+                    logger.warning("whatsapp.media_unreachable", extra={"attempts": attempt})
+                    await self._count(FETCH_MEDIA, CallOutcome.UNAVAILABLE)
+                    raise ExternalServiceError("WhatsApp could not be reached.") from error
+
+            await self._backoff(attempt)
+            attempt += 1
+
+    async def _read_capped(self, response: httpx.Response, *, max_bytes: int) -> bytes:
+        """Collect a streamed body, abandoning it if it passes the cap.
+
+        `MediaTooLargeError` rather than a generic failure, because the caller
+        draws a distinction that matters: a file that is too big is a decision
+        never to process it, and a file that could not be fetched is an attempt
+        worth repeating. Retrying an oversized download would spend the same
+        bandwidth to reach the same conclusion.
+        """
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes():
+            total += len(chunk)
+            if total > max_bytes:
+                logger.info(
+                    "whatsapp.media_over_cap",
+                    extra={"event": "whatsapp.media_over_cap", "limit_bytes": max_bytes},
+                )
+                raise MediaTooLargeError()
+            chunks.append(chunk)
+        return b"".join(chunks)
+
     async def _get_json(self, url: str) -> dict[str, Any]:
         response = await self._get(url)
         return self._decode(response)
-
-    async def _get_bytes(self, url: str) -> bytes:
-        return (await self._get(url)).content
 
     async def _get(self, url: str) -> httpx.Response:
         """A retrying GET carrying the access token.

@@ -76,7 +76,7 @@ class StubWhatsApp:
     async def probe_media(self, media_id: str) -> MediaDescriptor:
         return MediaDescriptor(mime_type=self._mime_type, byte_size=len(self._content))
 
-    async def fetch_media(self, media_id: str) -> DownloadedMedia:
+    async def fetch_media(self, media_id: str, *, max_bytes: int) -> DownloadedMedia:
         self.fetched += 1
         return DownloadedMedia(
             content=self._content,

@@ -527,6 +527,21 @@ Confirmed behaviourally during this audit rather than by reading:
 - **Session revocation is per-user, not per-session** (ADR-036). Membership
   revocation is per-membership and does not touch tokens; the two are different
   operations on different objects.
-- **Media download is bounded after the fact**, not while streaming: the size cap
-  is checked once the body is in memory. The declared size is checked first, but
-  a lying server is only caught afterwards.
+- **Media type detection is not malware scanning** (ADR-076). A file's canonical
+  type is decided from its own bytes, so it can no longer be processed or served
+  as something it is not. That is a different claim from "this file is safe": a
+  valid JPEG can carry a decoder exploit, a valid PDF can carry JavaScript, and a
+  polyglot can be a legitimate JPEG and a legitimate ZIP at once. Nothing scans
+  an attachment in either direction.
+- **Bytes that decode as text are `text/plain`.** An HTML file or an SVG can
+  therefore still be stored - as text, served as text, with the attachment
+  disposition and `nosniff` that were always there. What is closed is admitting
+  either of them as an *image*.
+- **Word and Excel are not told apart**, nor are audio and video inside a
+  Matroska container. Both share a container signature, detection narrows to the
+  pair, and the caller's claim chooses within it. The question that is answered
+  is "are these bytes a legacy Office document rather than a script?", which is
+  the one that bears on safety.
+- **pypdf parses attacker-supplied PDFs in-process.** Byte caps bound the input
+  and no image is decoded locally, but a document is still parsed by a library on
+  the worker.

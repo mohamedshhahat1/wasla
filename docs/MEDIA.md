@@ -73,7 +73,36 @@ Both count as resolved: the customer is still owed an answer, and an agent that 
 
 ## Size, and paying to find out
 
-The cap (`MEDIA_MAX_BYTES`, 25 MB by default) is checked twice: against the size Meta declares before the file is fetched, and against what actually arrives. A cap enforced only against a claim is not a cap. Asking first is worth the round trip — the alternative is moving ninety megabytes in order to discover it was too big to keep.
+The cap (`MEDIA_MAX_BYTES`, 25 MB by default) is checked against the size Meta declares before the file is fetched, and then **enforced while the body is read**. `fetch_media` takes a required `max_bytes` and streams, abandoning the download mid-chunk once it passes. A buffered fetch learns a file was too big only when the process is already holding it, which makes the limit a description of what happened rather than a control. Asking first is still worth the round trip — the alternative is moving ninety megabytes to discover it was too big to keep.
+
+The upload route reads in chunks for the same reason, so an oversized attachment is refused within a chunk of `MAX_UPLOAD_BYTES` (16 MB) rather than after the whole body is in memory.
+
+## What a file is
+
+**The declared type is a hint. The bytes are the answer** ([ADR-076](../DECISIONS.md)).
+
+`app/core/media_types.py` identifies a file from a bounded prefix of its own content and returns a *canonical* type. That canonical type is what Meta is told, what the reader routes on, what goes in the `mime_type` column, and what the download handler serves. Neither `file.content_type` from a browser nor `mime_type` from Meta's media descriptor decides anything on its own.
+
+| Situation | Result |
+| --- | --- |
+| Claim agrees with the bytes | Accepted, stored under the canonical spelling |
+| Claim contradicts the bytes | Refused — 400 on upload, `SKIPPED` on download |
+| Claim absent or `application/octet-stream` | The bytes decide alone |
+| Bytes of no supported format | Refused, whatever was claimed |
+| Container that genuinely carries two types | The claim picks within the pair, and can never widen it |
+
+The supported set is an **exact allowlist**. There is no `image/*` family rule left to widen, which is what used to admit `image/svg+xml` — a script a browser will run given the chance.
+
+| Class | Canonical types |
+| --- | --- |
+| Image | `image/jpeg`, `image/png`, `image/gif`, `image/webp` |
+| Audio | `audio/ogg`, `audio/mpeg`, `audio/mp4`, `audio/amr`, `audio/aac`, `audio/wav`, `audio/webm` |
+| Video | `video/mp4`, `video/3gpp`, `video/webm` |
+| Document | `application/pdf`, `text/plain`, `text/csv`, `application/msword`, `application/vnd.ms-excel`, and the three OOXML types |
+
+**What this does not claim.** Detection answers "are these bytes a supported container of a known format?". It does not prove the file is harmless — a valid JPEG can carry a decoder exploit and a valid PDF can carry JavaScript — and nothing here scans for malware. What it removes is the class where a file is processed and served as a type it is not. Note also that bytes which decode as text are `text/plain`: an HTML file can still be stored, as text, served as text, behind the disposition and `nosniff` that were always there.
+
+Two ambiguities are stated rather than guessed at. Matroska carries audio and video under one signature, and an OLE2 compound document is Word or Excel with the same first eight bytes; detection narrows each to its pair and the claim chooses within it.
 
 ## Storage
 

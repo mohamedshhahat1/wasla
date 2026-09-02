@@ -25,6 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.exceptions import ExternalServiceError, RateLimitedError, ValidationError
 from app.core.logging import get_logger
+from app.core.media_types import SNIFF_BYTES, MediaClass
+from app.core.media_types import resolve as resolve_media_type
 from app.core.storage import EXTENSIONS, MediaStorage, StorageError
 from app.db.models.conversation import Conversation, Message, MessageKind, MessageStatus
 from app.db.models.media import MediaStatus
@@ -58,13 +60,17 @@ SendCall = Callable[[WhatsAppClient, str, str], Awaitable[SentMessage]]
 # "image/png" is an image, but "application/pdf" is a *document* - so the
 # mapping translates rather than splitting on the slash, which is the mistake
 # this table exists to prevent.
-MEDIA_FAMILIES: Final[dict[str, str]] = {
-    "image": "image",
-    "audio": "audio",
-    "video": "video",
+#
+# Keyed on the class the *detector* assigned from the file's own bytes, never
+# on the family in a string somebody sent. That is the whole of SEC-09: the
+# previous version read `mime_type.split("/")[0]`, which made `image/svg+xml`
+# an image and made any invented `image/x-whatever` one too.
+MEDIA_FAMILIES: Final[dict[MediaClass, str]] = {
+    MediaClass.IMAGE: "image",
+    MediaClass.AUDIO: "audio",
+    MediaClass.VIDEO: "video",
+    MediaClass.DOCUMENT: "document",
 }
-# Everything Meta will carry that is not one of the three above.
-DOCUMENT_KIND: Final = "document"
 
 MEDIA_KINDS: Final[dict[str, MessageKind]] = {
     "image": MessageKind.IMAGE,
@@ -73,22 +79,6 @@ MEDIA_KINDS: Final[dict[str, MessageKind]] = {
     "video": MessageKind.VIDEO,
 }
 
-# Refused rather than sent as a document. Meta will carry almost anything under
-# "document", and a business forwarding an executable to a customer is not a
-# feature; the list is what a business plausibly sends on purpose.
-SENDABLE_DOCUMENTS: Final = frozenset(
-    {
-        "application/pdf",
-        "text/plain",
-        "text/csv",
-        "application/msword",
-        "application/vnd.ms-excel",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    }
-)
-
 # Meta requires a filename on a document, and one supplied by a caller is not
 # safe to pass through untouched. Replaced rather than sanitised: a name is a
 # convenience for the recipient, and a generated one that is definitely inert
@@ -96,21 +86,21 @@ SENDABLE_DOCUMENTS: Final = frozenset(
 SAFE_FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,99}$")
 
 
-def _whatsapp_kind(mime_type: str) -> str | None:
-    """Which of Meta's four attachment kinds this type is sent as.
+def _whatsapp_kind(kind: MediaClass) -> str:
+    """Which of Meta's four attachment kinds a detected class is sent as.
 
-    None means Wasla will not send it. That is a narrower rule than Meta's own -
-    it would carry almost any file as a document - and deliberately so: a
-    business forwarding an executable to a customer is not a feature anyone
-    asked for.
+    Total over `MediaClass`, because the refusal now happens earlier and in one
+    place: `media_types.resolve` has already refused anything that is not a
+    supported format, so by the time a class exists there is a kind for it.
+
+    Wasla's accepted set stays narrower than Meta's, and for the same reason as
+    before - a business forwarding an executable to a customer is not a feature
+    anyone asked for - but the narrowing is now done by what the bytes are
+    rather than by a list of strings a caller could sidestep. Meta's own support
+    is narrower again in places, and a file it will not carry comes back as a
+    recorded rejection on the message rather than as a guess made here.
     """
-    normalised = mime_type.strip().lower()
-    family = MEDIA_FAMILIES.get(normalised.split("/", 1)[0])
-    if family is not None:
-        return family
-    if normalised in SENDABLE_DOCUMENTS:
-        return DOCUMENT_KIND
-    return None
+    return MEDIA_FAMILIES[kind]
 
 
 def _safe_filename(filename: str | None, *, mime_type: str) -> str:
@@ -217,7 +207,11 @@ class MessagingService:
         *,
         conversation_id: uuid.UUID,
         content: bytes,
-        mime_type: str,
+        # Nullable, because "the caller said nothing" and "the caller said
+        # `application/octet-stream`" are the same statement and the type
+        # resolver treats them alike. A route inventing a placeholder to satisfy
+        # a signature would be manufacturing a claim nobody made.
+        mime_type: str | None,
         filename: str | None = None,
         caption: str | None = None,
         sent_by_id: uuid.UUID | None = None,
@@ -237,19 +231,29 @@ class MessagingService:
         `storage` is optional and only used to keep a copy of what was sent.
         Without it the message is still sent and recorded; the record simply
         does not point at a stored file.
+
+        `mime_type` is what the caller *said*. It is a hint from here on: the
+        file's own bytes decide what this is, and a claim that contradicts them
+        is refused rather than corrected (SEC-09). Everything downstream - what
+        Meta is told, what is stored, what is served back - uses the canonical
+        type that came out of that check and never the caller's string.
         """
-        family = _whatsapp_kind(mime_type)
-        if family is None:
-            raise ValidationError(f"Files of type {mime_type} cannot be sent.")
+        detected = resolve_media_type(claimed=mime_type, prefix=content[:SNIFF_BYTES])
+        canonical = detected.mime_type
+        family = _whatsapp_kind(detected.kind)
         kind = MEDIA_KINDS[family]
 
-        upload_name = _safe_filename(filename, mime_type=mime_type)
+        upload_name = _safe_filename(filename, mime_type=canonical)
 
         async def send(client: WhatsAppClient, phone_number_id: str, to: str) -> SentMessage:
             media_id = await client.upload_media(
                 phone_number_id=phone_number_id,
                 content=content,
-                mime_type=mime_type,
+                # The canonical type, not the caller's. Meta renders an
+                # attachment by what it is told it is, so sending the claim
+                # would let a mislabelled file be mislabelled to the customer
+                # as well.
+                mime_type=canonical,
                 filename=upload_name,
             )
             return await client.send_media(
@@ -275,7 +279,7 @@ class MessagingService:
         await self._record_attachment(
             message=message,
             content=content,
-            mime_type=mime_type,
+            mime_type=canonical,
             filename=filename,
             storage=storage,
         )
