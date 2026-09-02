@@ -14,6 +14,8 @@ Scope: containers, reverse proxy, CI/CD, and production operations. Runtime inst
 
 **A kind no running container covers is a queue that grows silently.** The health check below asserts only the loops *that container* was told to run, so splitting them apart means checking that every kind is still covered somewhere.
 
+**The billing loop is safe on more than one replica** (ADR-082). Every phase of its sweep claims rows with `FOR UPDATE ... SKIP LOCKED` and commits per claim, so two workers divide a cohort rather than issuing the same invoice or charging the same card twice — proved with two concurrent workers in `tests/integration/test_billing_sweep_concurrency.py`. It was not safe before: the sweep was one unlocked batch in one transaction, and a second replica meant one of them lost its whole pass to an integrity error.
+
 The worker never applies migrations, whatever `RUN_MIGRATIONS` says: it scales to several replicas, and a schema change racing across them is exactly what the opt-in flag on the API exists to avoid. Run `migrate` as its own step first; the production compose does this with `service_completed_successfully`.
 
 **The worker has a health check of its own** (`scripts/entrypoint.sh worker-health`), replacing the API liveness curl it used to inherit and could never answer. Each configured loop publishes a heartbeat to Redis with a 90-second expiry, refreshed every 30 seconds, and the probe exits non-zero unless *every* loop this container runs has beaten recently.

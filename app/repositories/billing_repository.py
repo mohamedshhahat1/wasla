@@ -131,13 +131,63 @@ class PlatformSubscriptionRepository(BaseRepository[Subscription]):
             return None
         return await self._first(self._select().where(Subscription.id == subscription_id))
 
-    async def due(self, *, now: datetime, limit: int = 100) -> Sequence[Subscription]:
-        """Subscriptions whose period has run out and needs attention.
+    async def claim_by_id(
+        self,
+        subscription_id: uuid.UUID,
+        *,
+        now: datetime,
+    ) -> Subscription | None:
+        """Claim one still-due subscription, or find that somebody else has.
+
+        The eligibility predicate is repeated here rather than trusted from the
+        batch that produced the id. Between the batch and this call another
+        worker may have rolled the row, and a roll moves `current_period_end`
+        past `now` - so re-asking is what makes acting on it safe rather than a
+        second roll of the same period (ADR-082).
+
+        `SKIP LOCKED` and not a plain `FOR UPDATE`: a row somebody is already
+        holding is somebody else's work, and waiting for it only to discover
+        that is the lock convoy this design exists to avoid.
+        """
+        return await self._first(
+            self._select()
+            .where(Subscription.id == subscription_id)
+            .where(Subscription.current_period_end <= now)
+            .where(
+                Subscription.status.in_(
+                    [
+                        SubscriptionStatus.TRIALING,
+                        SubscriptionStatus.ACTIVE,
+                        SubscriptionStatus.PAST_DUE,
+                    ]
+                )
+            )
+            .with_for_update(skip_locked=True)
+        )
+
+    async def claim_due(self, *, now: datetime, limit: int = 100) -> Sequence[Subscription]:
+        """Claim subscriptions whose period has run out, for this worker alone.
 
         Terminal ones are excluded: a cancelled subscription's period ending is
         not an event, it is the past. The caller decides what "attention" means
         - ending a trial, rolling a period over - because those are different
         decisions and both are reached by the same query.
+
+        **`FOR UPDATE ... SKIP LOCKED` is what makes a second billing worker
+        useful rather than dangerous** (ADR-082). The subscription row is the
+        consistency owner for everything a sweep does to a workspace - the
+        invoice is one per `(tenant_id, period_start)`, the dunning transitions
+        are columns on this row - so holding it is holding the right thing.
+        Locked rows are skipped rather than waited for, which is the difference
+        between two workers dividing a cohort and two workers taking turns.
+
+        The lock lives until the caller's transaction ends, so a caller commits
+        per claim. Holding a batch across a whole pass would put every claimed
+        row behind the slowest one in it.
+
+        Ordered by the oldest period end, so a backlog drains in the order
+        customers have been waiting rather than in whatever order the planner
+        finds convenient - and so a workspace cannot be perpetually last.
         """
         statement = (
             self._select()
@@ -153,5 +203,6 @@ class PlatformSubscriptionRepository(BaseRepository[Subscription]):
             )
             .order_by(Subscription.current_period_end)
             .limit(limit)
+            .with_for_update(skip_locked=True)
         )
         return await self._all(statement)

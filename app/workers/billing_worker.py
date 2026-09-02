@@ -18,8 +18,10 @@ This module is the query, the loop and the commit, and nothing else.
 from __future__ import annotations
 
 import asyncio
+import uuid
+from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
-from typing import Final
+from typing import Final, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,7 +42,7 @@ from app.services.audit_service import AuditTrail
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
 from app.services.invoice_service import InvoiceService
-from app.services.recurring_service import RecurringService
+from app.services.recurring_service import MAX_COLLECTION_ATTEMPTS, RecurringService
 from app.services.subscription_service import roll_over
 
 logger = get_logger(__name__)
@@ -49,11 +51,27 @@ logger = get_logger(__name__)
 # would be querying constantly to learn nothing.
 POLL_SECONDS: Final = 600.0
 
-# How many subscriptions one sweep advances. Bounded for the same reason the
-# follow-up sweep is: the rows are held until the commit, and a deployment with
-# ten thousand renewals on the first of the month should take several passes
-# rather than one enormous transaction.
+# How many rows one claim query takes. No longer a bound on what a sweep can
+# do - `_drain` keeps claiming until a phase runs out of work - just the size of
+# a bite. Each claimed row is processed in its own transaction, so a large batch
+# does not mean a large transaction (ADR-082).
 CLAIM_LIMIT: Final = 200
+
+# How many batches one phase may take in a single pass. A guard, not a limit
+# anybody should reach: every claim query excludes the state its own processing
+# produces, so a row cannot be claimed twice in a pass. The bound exists so a
+# future edit that breaks that property slows a sweep down instead of spinning
+# one for ever.
+MAX_BATCHES: Final = 200
+
+
+class _Batch(Protocol):
+    """One claim-and-process pass over a phase's eligible rows."""
+
+    __name__: str
+
+    def __call__(self, *, now: datetime) -> Awaitable[int]: ...
+
 
 # Both dunning thresholds are configuration (ADR-061). These names survive as
 # the defaults a caller gets when it constructs the worker without settings,
@@ -117,79 +135,144 @@ class BillingWorker:
         self._stopping.set()
 
     async def run_once(self, *, now: datetime | None = None) -> int:
-        """Advance every subscription whose period has ended.
+        """Work every subscription and invoice whose moment has come.
 
-        Returns how many were advanced. One session for the sweep, committed at
-        the end, so a subscription that fails to advance leaves the rest intact.
+        Returns how much was done. Four phases, in an order that matters, and
+        each phase drains rather than taking one batch: a first-of-the-month
+        cohort rolls over in this pass instead of over the next several hours
+        (ADR-082).
+
+        **Every claim is its own transaction.** A claim is a row lock held until
+        the transaction ends, so one transaction per sweep would put every
+        claimed row behind the slowest one in the pass - including behind a
+        Paymob request. One per claim also means a workspace that fails leaves
+        every other workspace's work committed, which the single transaction
+        could not promise.
         """
         moment = now or datetime.now(UTC)
-        handled = 0
 
-        async with self._database.session() as session:
-            subscriptions = PlatformSubscriptionRepository(session)
-            plans = PlanRepository(session)
-            due = await subscriptions.due(now=moment, limit=self._claim_limit)
-            for subscription in due:
-                plan = await plans.get_by_id(subscription.plan_id)
-                if plan is None:
-                    # RESTRICT on the foreign key makes this unreachable, and it
-                    # is logged rather than crashed on: one impossible row must
-                    # not strand every other workspace's renewal behind it.
-                    logger.warning(
-                        "billing.plan_missing_for_subscription",
-                        extra={"subscription_id": str(subscription.id)},
-                    )
-                    continue
-
-                previous = subscription.status
-                # Billed for the period that is ending, *before* it is rolled
-                # over: after the roll the row's bounds describe the next month,
-                # and the invoice would cover the wrong window.
-                await self._invoice(
-                    session,
-                    subscription=subscription,
-                    plan=plan,
-                    now=moment,
-                )
-                await roll_over(subscription, plan=plan, now=moment)
-                if (
-                    previous is SubscriptionStatus.TRIALING
-                    and subscription.status is SubscriptionStatus.EXPIRED
-                ):
-                    # The one transition nobody chose, so the owners are the
-                    # last to know unless they are told. Queued on the sweep's
-                    # own session, so the notice and the expiry commit
-                    # together (ADR-042).
-                    await self._notify_trial_expired(session, subscription=subscription)
-                handled += 1
-                logger.info(
-                    "billing.subscription_advanced",
-                    extra={
-                        "event": "billing.subscription_advanced",
-                        "tenant_id": str(subscription.tenant_id),
-                        "from_status": previous.value,
-                        "status": subscription.status.value,
-                    },
-                )
-
-            # Collect before chasing. An invoice a saved card settles this
-            # sweep should never also produce a past-due notice in the same
-            # pass; charging first means the callback has a chance to arrive
-            # and the chase sees an invoice that is already being dealt with.
-            handled += await self._collect_renewals(session, now=moment)
-            handled += await self._chase_unpaid(session, now=moment)
-            # Chase before suspending, and in that order for a reason: a
-            # workspace whose invoice is already past the hard threshold when
-            # this worker first sees it - because the loop was down, or because
-            # it was only just issued the bill - is marked behind and suspended
-            # in the same sweep, with both notices and both audit rows, rather
-            # than being cut off having never been told.
-            handled += await self._suspend_unpaid(session, now=moment)
+        handled = await self._advance_due(now=moment)
+        # Collect before chasing. An invoice a saved card settles this sweep
+        # should never also produce a past-due notice in the same pass;
+        # charging first means the callback has a chance to arrive and the
+        # chase sees an invoice that is already being dealt with.
+        handled += await self._drain(self._collect_batch, now=moment)
+        handled += await self._drain(self._chase_batch, now=moment)
+        # Chase before suspending, and in that order for a reason: a workspace
+        # whose invoice is already past the hard threshold when this worker
+        # first sees it - because the loop was down, or because it was only
+        # just issued the bill - is marked behind and suspended in the same
+        # sweep, with both notices and both audit rows, rather than being cut
+        # off having never been told.
+        handled += await self._drain(self._suspend_batch, now=moment)
 
         logger.info("billing.sweep_completed", extra={"handled": handled})
         return handled
 
-    async def _collect_renewals(self, session: AsyncSession, *, now: datetime) -> int:
+    async def _drain(self, batch: _Batch, *, now: datetime) -> int:
+        """Run one phase until it stops finding work, or the bound is reached.
+
+        A batch returning nothing ends the phase, and that is the correct
+        reading of both possible causes: there is no eligible work left, or
+        another worker holds what remains. Either way this worker is done.
+
+        `MAX_BATCHES` is a guard rather than a limit anybody should reach. Every
+        phase's claim query excludes what processing it produces, so a row
+        cannot come back a second time - but that property lives in a query,
+        and a future edit that breaks it should slow a sweep down rather than
+        spin one for ever.
+        """
+        done = 0
+        for pass_number in range(MAX_BATCHES):
+            claimed = await batch(now=now)
+            done += claimed
+            if claimed == 0:
+                return done
+            if pass_number == MAX_BATCHES - 1:
+                logger.warning(
+                    "billing.sweep_batch_limit_reached",
+                    extra={
+                        "event": "billing.sweep_batch_limit_reached",
+                        "phase": batch.__name__,
+                        "batches": MAX_BATCHES,
+                    },
+                )
+        return done
+
+    async def _advance_due(self, *, now: datetime) -> int:
+        """Roll over or expire every subscription whose period has ended."""
+        return await self._drain(self._advance_batch, now=now)
+
+    async def _advance_batch(self, *, now: datetime) -> int:
+        """Claim a batch of due subscriptions, one transaction each."""
+        async with self._database.session() as session:
+            claimed = await PlatformSubscriptionRepository(session).claim_due(
+                now=now,
+                limit=self._claim_limit,
+            )
+            identifiers = [subscription.id for subscription in claimed]
+        if not identifiers:
+            return 0
+
+        handled = 0
+        for subscription_id in identifiers:
+            handled += await self._advance_one(subscription_id, now=now)
+        return handled
+
+    async def _advance_one(self, subscription_id: uuid.UUID, *, now: datetime) -> int:
+        """One subscription, claimed again inside its own transaction.
+
+        Re-claimed rather than carried over from the batch: the batch's
+        transaction has ended, so its lock is gone, and acting on the row
+        without holding it is the duplicate this phase exists to prevent. The
+        re-claim is by id and `SKIP LOCKED`, so a row another worker took in
+        between is skipped rather than waited for or worked twice.
+        """
+        async with self._database.session() as session:
+            subscriptions = PlatformSubscriptionRepository(session)
+            subscription = await subscriptions.claim_by_id(subscription_id, now=now)
+            if subscription is None:
+                # Taken by another worker, or no longer due - a previous batch
+                # in this same pass may already have rolled it.
+                return 0
+
+            plan = await PlanRepository(session).get_by_id(subscription.plan_id)
+            if plan is None:
+                # RESTRICT on the foreign key makes this unreachable, and it is
+                # logged rather than crashed on: one impossible row must not
+                # strand every other workspace's renewal behind it.
+                logger.warning(
+                    "billing.plan_missing_for_subscription",
+                    extra={"subscription_id": str(subscription.id)},
+                )
+                return 0
+
+            previous = subscription.status
+            # Billed for the period that is ending, *before* it is rolled over:
+            # after the roll the row's bounds describe the next month, and the
+            # invoice would cover the wrong window.
+            await self._invoice(session, subscription=subscription, plan=plan, now=now)
+            await roll_over(subscription, plan=plan, now=now)
+            if (
+                previous is SubscriptionStatus.TRIALING
+                and subscription.status is SubscriptionStatus.EXPIRED
+            ):
+                # The one transition nobody chose, so the owners are the last to
+                # know unless they are told. Queued on this transaction, so the
+                # notice and the expiry commit together (ADR-042).
+                await self._notify_trial_expired(session, subscription=subscription)
+            logger.info(
+                "billing.subscription_advanced",
+                extra={
+                    "event": "billing.subscription_advanced",
+                    "tenant_id": str(subscription.tenant_id),
+                    "from_status": previous.value,
+                    "status": subscription.status.value,
+                },
+            )
+            return 1
+
+    async def _collect_batch(self, *, now: datetime) -> int:
         """Take due renewals from saved cards, where that is possible at all.
 
         Silent and free when the provider cannot charge saved cards, which is
@@ -200,6 +283,13 @@ class BillingWorker:
         Every refusal lives in `RecurringService`, not here. This is the query
         and the loop; what may be charged is a billing decision and belongs
         with the rules that make it.
+
+        **One transaction per invoice, and the reason is the HTTP call inside
+        it.** `collect` reaches Paymob, and a batch sharing a transaction would
+        hold every claimed invoice's lock for the sum of every request in it.
+        A worker sweeping alongside would find nothing to do and a customer's
+        card would be charged while another workspace's row sat locked behind
+        it (ADR-082).
         """
         provider = build_checkout_provider(self._settings)
         if provider is None or not isinstance(provider, RecurringProvider):
@@ -207,17 +297,48 @@ class BillingWorker:
         if not provider.can_charge_saved_methods:
             return 0
 
-        invoices = await PlatformInvoiceRepository(session).collectible(
-            before=now,
-            limit=self._claim_limit,
-        )
-        if not invoices:
+        async with self._database.session() as session:
+            claimed = await PlatformInvoiceRepository(session).claim_collectible(
+                before=now,
+                max_attempts=MAX_COLLECTION_ATTEMPTS,
+                limit=self._claim_limit,
+            )
+            identifiers = [invoice.id for invoice in claimed]
+        if not identifiers:
             return 0
 
-        subscriptions = PlatformSubscriptionRepository(session)
         charged = 0
-        for invoice in invoices:
-            subscription = await subscriptions.get_by_id(invoice.subscription_id)
+        for invoice_id in identifiers:
+            charged += await self._collect_one(invoice_id, provider=provider, now=now)
+        return charged
+
+    async def _collect_one(
+        self,
+        invoice_id: uuid.UUID,
+        *,
+        provider: RecurringProvider,
+        now: datetime,
+    ) -> int:
+        """One collection attempt, holding only its own invoice.
+
+        The invoice is claimed again by id, because the batch's lock ended with
+        the batch's transaction. Claiming it here is what makes "only one worker
+        reaches the provider for this attempt" true of the row rather than only
+        of the payment row's unique key - which would catch a duplicate after
+        the money had already moved.
+        """
+        async with self._database.session() as session:
+            invoices = PlatformInvoiceRepository(session)
+            invoice = await invoices.claim_by_id(
+                invoice_id,
+                max_attempts=MAX_COLLECTION_ATTEMPTS,
+            )
+            if invoice is None:
+                return 0
+
+            subscription = await PlatformSubscriptionRepository(session).get_by_id(
+                invoice.subscription_id
+            )
             service = RecurringService(
                 session,
                 tenant_id=invoice.tenant_id,
@@ -228,16 +349,17 @@ class BillingWorker:
             except Exception:
                 # One workspace's provider trouble must not strand every other
                 # renewal behind it. Logged loudly and left for the next sweep,
-                # which is the same contract `_invoice` follows.
+                # which is the same contract `_invoice` follows. The session
+                # rolls back, so the claim is released without a charge.
                 logger.exception(
                     "billing.recurring_collection_failed",
                     extra={"invoice_id": str(invoice.id)},
                 )
-                continue
+                return 0
 
             if outcome.charged:
-                charged += 1
-            elif outcome.reason is not None:
+                return 1
+            if outcome.reason is not None:
                 logger.info(
                     "billing.recurring_skipped",
                     extra={
@@ -246,9 +368,9 @@ class BillingWorker:
                         "reason": outcome.reason,
                     },
                 )
-        return charged
+            return 0
 
-    async def _chase_unpaid(self, session: AsyncSession, *, now: datetime) -> int:
+    async def _chase_batch(self, *, now: datetime) -> int:
         """Mark workspaces behind when a renewal has gone unpaid for too long.
 
         This is the half of recurring billing that is not about issuing a bill.
@@ -268,66 +390,17 @@ class BillingWorker:
         days from being *asked* rather than from a period boundary they never
         saw.
         """
-        grace = timedelta(days=self._grace_days)
-        invoices = await PlatformInvoiceRepository(session).overdue(
-            before=now - grace,
-            limit=self._claim_limit,
+        return await self._dun(
+            now=now,
+            grace=timedelta(days=self._grace_days),
+            require=SubscriptionStatus.ACTIVE,
+            become=SubscriptionStatus.PAST_DUE,
         )
-        if not invoices:
-            return 0
 
-        subscriptions = PlatformSubscriptionRepository(session)
-        marked = 0
-        for invoice in invoices:
-            subscription = await subscriptions.get_by_id(invoice.subscription_id)
-            if subscription is None or subscription.status is not SubscriptionStatus.ACTIVE:
-                # Trials owe nothing, and a cancelled or expired subscription
-                # is already not being served. Only an active workspace can
-                # fall behind.
-                continue
-
-            subscription.status = SubscriptionStatus.PAST_DUE
-            AuditTrail(session, tenant_id=subscription.tenant_id).record(
-                AuditAction.SUBSCRIPTION_PAST_DUE,
-                actor=None,
-                actor_kind=AuditActorKind.SYSTEM,
-                target_type="subscription",
-                target_id=subscription.id,
-                meta={
-                    "invoice_id": str(invoice.id),
-                    "outstanding": str(invoice.outstanding),
-                    "currency": invoice.currency,
-                },
-            )
-            # Keyed to the invoice, so a workspace that stays behind is told
-            # once about this bill rather than once every sweep.
-            await EmailOutbox(session, self._settings).enqueue_for_tenant_owners(
-                tenant_id=subscription.tenant_id,
-                template=EmailTemplate.INVOICE_ISSUED,
-                idempotency_prefix=f"invoice-overdue:{invoice.id}",
-                context={
-                    "amount_due": f"{invoice.outstanding:.2f}",
-                    "currency": invoice.currency,
-                    "period_start": invoice.period_start.date().isoformat(),
-                    "period_end": invoice.period_end.date().isoformat(),
-                },
-            )
-            marked += 1
-            logger.warning(
-                "billing.subscription_past_due",
-                extra={
-                    "event": "billing.subscription_past_due",
-                    "tenant_id": str(subscription.tenant_id),
-                    "invoice_id": str(invoice.id),
-                    "outstanding": str(invoice.outstanding),
-                },
-            )
-        return marked
-
-    async def _suspend_unpaid(self, session: AsyncSession, *, now: datetime) -> int:
+    async def _suspend_batch(self, *, now: datetime) -> int:
         """Stop serving a workspace whose bill has gone unpaid past the grace.
 
-        The half of dunning that was missing (ADR-061). `_chase_unpaid` above
+        The half of dunning that was missing (ADR-061). `_chase_batch` above
         moved a workspace to `PAST_DUE` and nothing moved it anywhere after
         that - and `PAST_DUE` is a *serving* status, so a workspace that simply
         stopped paying kept its paid plan for ever. The purchase was protected
@@ -342,7 +415,8 @@ class BillingWorker:
         deliberately does not revive a subscription somebody chose to end -
         make recovery impossible to express.
 
-        Only a `PAST_DUE` subscription is suspended. That is not merely an
+        Only a `PAST_DUE` subscription is suspended, and that is now the claim
+        query's predicate rather than a check afterwards. It is not merely an
         ordering convenience: it means a workspace is never cut off without the
         state and the notice that precede it, even when both happen in one
         sweep because this loop had been down.
@@ -350,73 +424,164 @@ class BillingWorker:
         The threshold is read from `issued_at`, exactly as the soft one is, so
         both are anchored to the day the customer was asked for money and
         neither can move under a workspace being chased.
-
-        Everything here is staged on the sweep's session - the status, the
-        audit row and the outbox row - so a suspension and the message telling
-        somebody about it commit together or not at all (ADR-042).
         """
-        grace = timedelta(days=self._suspend_after_days)
-        invoices = await PlatformInvoiceRepository(session).overdue(
-            before=now - grace,
-            limit=self._claim_limit,
+        return await self._dun(
+            now=now,
+            grace=timedelta(days=self._suspend_after_days),
+            require=SubscriptionStatus.PAST_DUE,
+            become=SubscriptionStatus.SUSPENDED,
         )
-        if not invoices:
+
+    async def _dun(
+        self,
+        *,
+        now: datetime,
+        grace: timedelta,
+        require: SubscriptionStatus,
+        become: SubscriptionStatus,
+    ) -> int:
+        """Claim one batch of overdue invoices and move each subscription on.
+
+        Both dunning phases are this function with different thresholds and
+        different endpoints, which is what they always were - the duplication
+        that used to sit between them was two copies of a claim loop.
+
+        `require` is the state a subscription must be in, and it is in the
+        *query* (ADR-082). Processing an invoice changes its subscription and
+        leaves the invoice as overdue as it was, so a status checked after the
+        claim left the row eligible for ever, holding its place at the front of
+        every later batch. More than `claim_limit` already-processed invoices
+        and the ones behind them were never reached.
+        """
+        async with self._database.session() as session:
+            claimed = await PlatformInvoiceRepository(session).claim_overdue(
+                before=now - grace,
+                subscription_status=require,
+                limit=self._claim_limit,
+            )
+            identifiers = [(invoice.id, subscription.id) for invoice, subscription in claimed]
+        if not identifiers:
             return 0
 
-        subscriptions = PlatformSubscriptionRepository(session)
-        suspended = 0
-        for invoice in invoices:
-            subscription = await subscriptions.get_by_id(invoice.subscription_id)
-            if subscription is None or subscription.status is not SubscriptionStatus.PAST_DUE:
-                # Already suspended by an earlier sweep, already cancelled, or
-                # never chased. Re-running this method is therefore a no-op,
-                # which is what makes the sweep safe to repeat: the status is
-                # the claim, and only one pass can find it in `PAST_DUE`.
-                continue
+        moved = 0
+        for invoice_id, subscription_id in identifiers:
+            moved += await self._dun_one(
+                invoice_id,
+                subscription_id,
+                now=now,
+                grace=grace,
+                require=require,
+                become=become,
+            )
+        return moved
 
-            subscription.status = SubscriptionStatus.SUSPENDED
-            # `ended_at` is deliberately left alone. It records a subscription
-            # that finished, and this one has not: it is waiting for a payment
-            # that lifts it (`CheckoutService._settle`).
+    async def _dun_one(
+        self,
+        invoice_id: uuid.UUID,
+        subscription_id: uuid.UUID,
+        *,
+        now: datetime,
+        grace: timedelta,
+        require: SubscriptionStatus,
+        become: SubscriptionStatus,
+    ) -> int:
+        """One transition, its audit row and its notice, in one transaction.
+
+        Everything is staged on this session - the status, the audit row and the
+        outbox row - so a suspension and the message telling somebody about it
+        commit together or not at all (ADR-042). What changed is only that the
+        transaction is per workspace rather than per sweep, so one workspace's
+        failure no longer takes the pass with it.
+
+        The pair is claimed again by id. The batch's locks ended with the
+        batch's transaction, and `require` is re-checked by the claim itself -
+        so a subscription some other worker moved in between is skipped rather
+        than transitioned twice.
+        """
+        async with self._database.session() as session:
+            claimed = await PlatformInvoiceRepository(session).claim_overdue_pair(
+                invoice_id=invoice_id,
+                subscription_id=subscription_id,
+                before=now - grace,
+                subscription_status=require,
+            )
+            if claimed is None:
+                return 0
+            invoice, subscription = claimed
+
+            subscription.status = become
+            if become is SubscriptionStatus.SUSPENDED:
+                # `ended_at` is deliberately left alone. It records a
+                # subscription that finished, and this one has not: it is
+                # waiting for a payment that lifts it
+                # (`CheckoutService._settle`).
+                action = AuditAction.SUBSCRIPTION_SUSPENDED
+                template = EmailTemplate.SUBSCRIPTION_SUSPENDED
+                prefix = f"subscription-suspended:{invoice.id}"
+                meta: dict[str, object] = {
+                    "invoice_id": str(invoice.id),
+                    "outstanding": str(invoice.outstanding),
+                    "currency": invoice.currency,
+                    "unpaid_days": self._suspend_after_days,
+                }
+                tenant = await TenantRepository(session).get_by_id(subscription.tenant_id)
+                context = {
+                    "workspace_name": tenant.name if tenant is not None else "your workspace",
+                    "amount_due": f"{invoice.outstanding:.2f}",
+                    "currency": invoice.currency,
+                }
+            else:
+                action = AuditAction.SUBSCRIPTION_PAST_DUE
+                # The same template as the bill itself: a past-due notice is
+                # that bill again, said louder.
+                template = EmailTemplate.INVOICE_ISSUED
+                prefix = f"invoice-overdue:{invoice.id}"
+                meta = {
+                    "invoice_id": str(invoice.id),
+                    "outstanding": str(invoice.outstanding),
+                    "currency": invoice.currency,
+                }
+                context = {
+                    "amount_due": f"{invoice.outstanding:.2f}",
+                    "currency": invoice.currency,
+                    "period_start": invoice.period_start.date().isoformat(),
+                    "period_end": invoice.period_end.date().isoformat(),
+                }
+
             AuditTrail(session, tenant_id=subscription.tenant_id).record(
-                AuditAction.SUBSCRIPTION_SUSPENDED,
+                action,
                 actor=None,
                 actor_kind=AuditActorKind.SYSTEM,
                 target_type="subscription",
                 target_id=subscription.id,
-                meta={
-                    "invoice_id": str(invoice.id),
-                    "outstanding": str(invoice.outstanding),
-                    "currency": invoice.currency,
-                    "unpaid_days": self._suspend_after_days,
-                },
+                meta=meta,
             )
-            tenant = await TenantRepository(session).get_by_id(subscription.tenant_id)
-            # Keyed to the invoice, like the past-due notice, so a workspace
-            # that stays suspended is told once about this bill rather than
-            # once every ten minutes for ever.
+            # Keyed to the invoice, so a workspace that stays behind is told
+            # once about this bill rather than once every sweep.
             await EmailOutbox(session, self._settings).enqueue_for_tenant_owners(
                 tenant_id=subscription.tenant_id,
-                template=EmailTemplate.SUBSCRIPTION_SUSPENDED,
-                idempotency_prefix=f"subscription-suspended:{invoice.id}",
-                context={
-                    "workspace_name": tenant.name if tenant is not None else "your workspace",
-                    "amount_due": f"{invoice.outstanding:.2f}",
-                    "currency": invoice.currency,
-                },
+                template=template,
+                idempotency_prefix=prefix,
+                context=context,
             )
-            suspended += 1
             logger.warning(
-                "billing.subscription_suspended",
+                (
+                    "billing.subscription_suspended"
+                    if become is SubscriptionStatus.SUSPENDED
+                    else "billing.subscription_past_due"
+                ),
                 extra={
-                    "event": "billing.subscription_suspended",
+                    "event": (
+                        "billing.subscription_suspended"
+                        if become is SubscriptionStatus.SUSPENDED
+                        else "billing.subscription_past_due"
+                    ),
                     "tenant_id": str(subscription.tenant_id),
                     "invoice_id": str(invoice.id),
                     "outstanding": str(invoice.outstanding),
-                    "unpaid_days": self._suspend_after_days,
                 },
             )
-        return suspended
+            return 1
 
     async def _invoice(
         self,

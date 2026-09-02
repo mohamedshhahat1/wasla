@@ -15,6 +15,7 @@ from decimal import Decimal
 from sqlalchemy import ColumnElement, func, select
 
 from app.core.pagination import Cursor
+from app.db.models.billing import Subscription, SubscriptionStatus
 from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
@@ -250,37 +251,113 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
             for row in result.all()
         ]
 
-    async def collectible(self, *, before: datetime, limit: int = 200) -> Sequence[Invoice]:
-        """Open invoices an automatic charge may be attempted against.
+    async def claim_by_id(
+        self,
+        invoice_id: uuid.UUID,
+        *,
+        max_attempts: int,
+    ) -> Invoice | None:
+        """Claim one invoice still worth a collection attempt.
 
-        Deliberately a *wide* net rather than a precise one. Everything about
-        whether a particular invoice should be charged - a live subscription, a
-        usable card, an attempt budget that is not spent - is decided by
+        The predicate is repeated from `claim_collectible` rather than trusted
+        from it: between the batch and this call the invoice may have been
+        settled by a callback or attempted by another worker, and either makes
+        a charge here wrong. Re-asking under the lock is what makes "one
+        attempt reaches the provider" a property of the row (ADR-082).
+        """
+        return await self._first(
+            self._select()
+            .where(Invoice.id == invoice_id)
+            .where(Invoice.status == InvoiceStatus.OPEN)
+            .where(Invoice.collection_attempts < max_attempts)
+            .with_for_update(skip_locked=True, of=Invoice)
+        )
+
+    async def claim_overdue_pair(
+        self,
+        *,
+        invoice_id: uuid.UUID,
+        subscription_id: uuid.UUID,
+        before: datetime,
+        subscription_status: SubscriptionStatus,
+    ) -> tuple[Invoice, Subscription] | None:
+        """Claim one overdue invoice and its subscription together.
+
+        The single-row form of `claim_overdue`, with the same predicates, for
+        the transaction that actually performs the transition. Both rows are
+        locked because the invoice is the evidence and the subscription is what
+        changes; claiming only one of them would let two workers holding two
+        invoices of the same workspace both move it (ADR-082).
+        """
+        statement = (
+            select(Invoice, Subscription)
+            .join(Subscription, Subscription.id == Invoice.subscription_id)
+            .where(Invoice.id == invoice_id)
+            .where(Subscription.id == subscription_id)
+            .where(Invoice.status == InvoiceStatus.OPEN)
+            .where(Invoice.issued_at.is_not(None))
+            .where(Invoice.issued_at < before)
+            .where(Subscription.status == subscription_status)
+            .with_for_update(skip_locked=True, of=(Invoice, Subscription))
+        )
+        row = (await self.session.execute(statement)).first()
+        if row is None:
+            return None
+        invoice, subscription = row
+        return invoice, subscription
+
+    async def claim_collectible(
+        self,
+        *,
+        before: datetime,
+        max_attempts: int,
+        limit: int = 200,
+    ) -> Sequence[Invoice]:
+        """Claim open invoices an automatic charge may be attempted against.
+
+        Still a wide net rather than a precise one. Whether a particular invoice
+        *should* be charged - a live subscription, a usable card - is decided by
         `RecurringService`, because those are billing rules and belong with the
-        rules. This query's only job is to avoid loading the whole table.
+        rules. This query's job is to avoid loading the whole table, and to hand
+        each invoice to exactly one worker.
 
         `next_collection_at IS NULL` is included on purpose: that is the state
         of an invoice nobody has tried yet, which is exactly the one a first
-        attempt is for. An invoice whose attempts have run out also has NULL
-        there, and is filtered by the attempt count in the service.
+        attempt is for.
 
-        Ordered oldest-first so the longest-outstanding money is chased first,
-        and so a backlog drains in a predictable order rather than by whichever
-        rows the planner happens to return.
+        **`max_attempts` is passed in, not decided here** (ADR-082). It is the
+        service's `MAX_COLLECTION_ATTEMPTS`, and the filter exists because
+        without it a spent invoice stays eligible for ever - `next_collection_at`
+        returns to NULL when the budget runs out - and takes a slot in every
+        future batch. With a fixed limit and enough spent invoices, the ones
+        behind them are never reached at all. The rule still lives in one place;
+        this is the query being told what it is.
+
+        `FOR UPDATE OF invoices SKIP LOCKED`, so two workers charge two
+        different cards rather than the same one twice. The invoice is what a
+        collection attempt belongs to, so the invoice is what is locked.
         """
         return await self._all(
             self._select()
             .where(Invoice.status == InvoiceStatus.OPEN)
             .where(Invoice.subscription_id.is_not(None))
+            .where(Invoice.collection_attempts < max_attempts)
             .where((Invoice.next_collection_at.is_(None)) | (Invoice.next_collection_at <= before))
             .order_by(Invoice.period_start)
             .limit(limit)
+            .with_for_update(skip_locked=True, of=Invoice)
         )
 
-    async def overdue(self, *, before: datetime, limit: int = 200) -> Sequence[Invoice]:
-        """Open invoices issued before a moment, oldest first.
+    async def claim_overdue(
+        self,
+        *,
+        before: datetime,
+        subscription_status: SubscriptionStatus,
+        limit: int = 200,
+    ) -> list[tuple[Invoice, Subscription]]:
+        """Claim overdue invoices whose subscription is in a given state.
 
-        What the dunning sweep reads. Keyed on `issued_at` rather than
+        What both dunning sweeps read. Keyed on `issued_at` rather than
         `period_start`, because the grace a customer gets should run from the
         day they were asked for money - an invoice for a period that ended
         weeks ago is not weeks overdue if it was only issued yesterday.
@@ -288,16 +365,37 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
         Invoices with no `issued_at` are excluded. Those are drafts and
         checkout-created rows that nobody has been billed for, and chasing
         somebody for a bill they were never sent is worse than not chasing.
+
+        **`subscription_status` is in the query rather than checked after, and
+        that is a starvation fix rather than a tidy-up** (ADR-082). Chasing an
+        invoice moves its *subscription* to `PAST_DUE` and leaves the invoice
+        exactly as overdue as it was. With the status checked in the worker the
+        invoice stayed eligible for ever and kept its place at the front of
+        every future batch, so a deployment with more than `limit` already-
+        chased invoices never reached the ones behind them. Expressed here, a
+        processed row leaves the eligible set and a pass can drain.
+
+        **Both rows are locked, which is why the pair is returned.** A workspace
+        can have several overdue invoices, so two workers claiming one each
+        would both transition the same subscription, write two audit rows and
+        race on the notice's idempotency key. The transition belongs to the
+        subscription, so the subscription is claimed too - and `SKIP LOCKED`
+        sends the second worker to the next workspace instead of queueing it
+        behind the first.
         """
-        return await self._all(
-            self._select()
+        statement = (
+            select(Invoice, Subscription)
+            .join(Subscription, Subscription.id == Invoice.subscription_id)
             .where(Invoice.status == InvoiceStatus.OPEN)
             .where(Invoice.issued_at.is_not(None))
             .where(Invoice.issued_at < before)
-            .where(Invoice.subscription_id.is_not(None))
+            .where(Subscription.status == subscription_status)
             .order_by(Invoice.issued_at)
             .limit(limit)
+            .with_for_update(skip_locked=True, of=(Invoice, Subscription))
         )
+        rows = await self.session.execute(statement)
+        return [(invoice, subscription) for invoice, subscription in rows]
 
     async def due_for_period(
         self,

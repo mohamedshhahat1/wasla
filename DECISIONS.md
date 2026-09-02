@@ -3321,3 +3321,107 @@ The migration drops and recreates, because PostgreSQL cannot add an INCLUDE
 column to an existing index, and does both `CONCURRENTLY` — usage is written on
 the path that answers customers, so an index rebuild that blocks inserts there
 blocks replies.
+
+## ADR-082 — The Billing Sweep Claims Its Work, and Two Workers Divide a Cohort
+
+**Context.** `BillingWorker.run_once` opened one session, read up to
+`CLAIM_LIMIT = 200` due subscriptions with no row locks at all, did everything
+to all of them, and committed at the end. The audit called it a throughput
+problem — 200 per ten-minute pass is 1,200 an hour, so a first-of-the-month
+cohort takes hours. It was also a correctness problem, and that is the half
+worth writing down.
+
+Two workers on that code both read the same due subscriptions and both called
+`issue_for_period`, which checks for an existing invoice and finds none because
+the other worker has not committed. Both insert. The second blocks on
+`uq_invoices_tenant_id_period_start` until the first commits, then raises — and
+an `IntegrityError` aborts the whole PostgreSQL transaction, so every later
+statement in the loser's sweep fails too. One worker's pass was lost to
+discovering that another worker existed. `_claim_attempt` was already better
+behaved, using a savepoint, but it still *blocked* until the winner committed,
+and the winner committed at the end of a pass that included Paymob requests.
+
+**Decision.** Every phase claims its rows with `FOR UPDATE ... SKIP LOCKED`,
+each claim is processed in its own transaction, and each phase drains rather
+than taking one batch.
+
+**What is claimed, per phase, and why that row.**
+
+The **subscription** for roll-over and invoicing. It is the consistency owner
+for everything a sweep does to a workspace: the invoice is unique per
+`(tenant_id, period_start)`, and the period bounds and status are columns on
+this row. There is one per tenant, so holding it holds the workspace.
+
+The **invoice** for collection. An attempt belongs to an invoice, and two
+workspaces' invoices are independent work that should proceed at once.
+
+**Both** for dunning, and that pair is the subtle one. A workspace can have
+several overdue invoices, so a claim on the invoice alone lets two workers take
+one each and both transition the same subscription — two audit rows, two
+notices, and a race on the outbox idempotency key. The transition belongs to the
+subscription, so the subscription is claimed with it.
+
+**Why `SKIP LOCKED` rather than `FOR UPDATE`.** A row another worker holds is
+another worker's work. Waiting for it means waiting to discover that, and with
+one lock held per claim that is a convoy: the second worker finishes the pass
+having done nothing but queue. The proof is a test — with `SKIP LOCKED` removed,
+the "a row another worker holds is skipped" test stops finishing and times out.
+
+**Why the transaction is per claim.** A lock lives until the transaction ends,
+so one transaction per sweep holds every claimed row for the duration of the
+whole pass, including for the length of a Paymob request made on behalf of some
+other workspace. It also meant one workspace's failure discarded every other
+workspace's committed work. Per claim, a failure is contained to its own
+workspace and the rest of the pass stands. What still commits together is what
+always had to: a status change, its audit row and its notice (ADR-042).
+
+**Why the claim is taken twice.** A batch query claims ids and commits, which
+releases its locks; the transaction that acts re-claims by id with the same
+eligibility predicate. Acting on a row whose lock has been released is the
+duplicate this design exists to prevent, and re-asking under the lock is what
+makes "one attempt reaches the provider" a property of the row rather than of a
+unique key that fires after the money has moved.
+
+**Two starvation bugs found while doing this, both pre-existing.** Neither was a
+concurrency problem; both were a fixed limit meeting a predicate that processing
+does not clear.
+
+Chasing an invoice moves its *subscription* to `PAST_DUE` and leaves the invoice
+exactly as overdue as it was. With the status checked in the worker, a chased
+invoice stayed eligible for ever and held its place at the front of every later
+batch — so a deployment with more than `CLAIM_LIMIT` already-chased invoices
+never reached the ones behind them. The subscription status is now a predicate
+in the claim query, so a processed row leaves the set.
+
+An invoice whose collection attempts are spent has `next_collection_at IS NULL`,
+which is indistinguishable from one nobody has tried, so it too kept a slot for
+ever. `MAX_COLLECTION_ATTEMPTS` is now passed into the claim query — passed in,
+not decided there, so the rule still lives in `RecurringService`.
+
+**`CLAIM_LIMIT` is now a batch size, not a ceiling.** `_drain` keeps claiming
+until a phase finds nothing, so a cohort of any size finishes in one pass. A
+batch returning nothing ends the phase, and that reads correctly for both
+causes: no work left, or another worker holds what remains. `MAX_BATCHES` is a
+guard rather than a limit anybody should reach — every claim query excludes the
+state its own processing produces, so a row cannot be claimed twice in a pass,
+but that property lives in a query and a future edit that breaks it should slow
+a sweep down instead of spinning one for ever.
+
+**Fairness.** Every claim is ordered — subscriptions by the oldest period end,
+invoices by `period_start` or `issued_at`. A workspace cannot be perpetually
+last, and the longest-outstanding money is chased first.
+
+**Consequences.** Proved with two workers against a committing database in
+`tests/integration/test_billing_sweep_concurrency.py`: a cohort of seven against
+a claim limit of two is advanced exactly once with exactly one invoice per
+workspace; seven collectible invoices produce seven charges at the provider and
+no duplicates; a workspace with two overdue invoices gets one transition, one
+audit row and one notice; a row held by somebody else is skipped and picked up
+by the next sweep; and one workspace's provider failure leaves the other six
+collected — with the failed attempt still on the record, because a request whose
+outcome is unknown has still been made.
+
+Removing `SKIP LOCKED` makes the skip test hang. Unlocking the per-invoice
+re-claim makes one worker do everything while the other does nothing, and
+unlocking it *and* bypassing the payment idempotency key produces the duplicate
+charge both layers exist to prevent.

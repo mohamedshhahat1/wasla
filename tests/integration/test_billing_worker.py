@@ -234,11 +234,15 @@ async def test_the_sweep_crosses_workspaces(db_session):
     assert await _worker(db_session).run_once(now=NOW) == 2
 
 
-async def test_a_sweep_is_bounded(db_session):
-    """Rows are held until the commit, so ten thousand renewals on the first of
-    the month take several passes rather than one enormous transaction."""
+async def test_a_cohort_larger_than_the_claim_limit_finishes_in_one_pass(db_session):
+    """The claim limit is a batch size, not a ceiling on a sweep (ADR-082).
+
+    It used to be both, which is what made a first-of-the-month cohort take
+    hours: 200 subscriptions per pass and a pass every ten minutes. Five
+    subscriptions against a limit of two now means three batches and one sweep.
+    """
     plan = await _plan(db_session)
-    for index in range(3):
+    for index in range(5):
         tenant = await _tenant(db_session, f"tenant-{index}")
         await _subscription(db_session, tenant, plan, status=SubscriptionStatus.ACTIVE)
 
@@ -247,7 +251,10 @@ async def test_a_sweep_is_bounded(db_session):
         settings=_settings(),
         claim_limit=2,
     )
-    assert await worker.run_once(now=NOW) == 2
+
+    assert await worker.run_once(now=NOW) == 5
+    # And nothing is left behind to find on the next pass.
+    assert await worker.run_once(now=NOW) == 0
 
 
 async def test_the_due_query_ignores_what_is_not_due(db_session):
@@ -261,7 +268,7 @@ async def test_the_due_query_ignores_what_is_not_due(db_session):
         end=NOW + timedelta(days=1),
     )
 
-    due = await PlatformSubscriptionRepository(db_session).due(now=NOW)
+    due = await PlatformSubscriptionRepository(db_session).claim_due(now=NOW)
     assert list(due) == []
 
 

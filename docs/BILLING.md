@@ -54,6 +54,26 @@ It polls every ten minutes rather than every thirty seconds, because a period bo
 
 The rules live in `roll_over`, a pure function over the row, so the worker is only the query, the loop and the commit.
 
+### Claiming, and why two workers are safe (ADR-082)
+
+Every phase claims its rows with `FOR UPDATE ... SKIP LOCKED` and processes each claim in **its own transaction**. Two billing workers therefore divide a cohort instead of colliding over it.
+
+They used to collide. The sweep was one transaction over one unlocked batch, so both workers read the same due subscriptions, both called `issue_for_period`, both found no invoice because neither had committed, and both inserted — the loser blocking on `uq_invoices_tenant_id_period_start` until the winner committed and then raising, which aborts a PostgreSQL transaction and took the rest of that worker's pass with it. Correctness rested on a constraint that fires *after* the work.
+
+| phase | what is claimed | why that row |
+| --- | --- | --- |
+| roll-over and invoicing | the subscription | one per tenant, and the period bounds, status and invoice uniqueness all hang off it |
+| saved-card collection | the invoice | an attempt belongs to an invoice, and two workspaces' invoices are independent work |
+| past-due and suspension | the invoice **and** its subscription | a workspace can have several overdue invoices, so claiming only the invoice lets two workers transition one subscription twice |
+
+`SKIP LOCKED` rather than a plain `FOR UPDATE`: a row somebody else holds is somebody else's work, and queueing behind it to find that out is how a second worker spends a pass achieving nothing.
+
+Each claim is taken twice — once by the batch query, which commits and releases, and again by the transaction that acts, with the same eligibility predicate. Acting on a row whose lock has been released is exactly the duplicate this is for, and re-asking under the lock is what makes "one attempt reaches the provider" true of the row rather than of a unique key that fires after money has moved.
+
+**`CLAIM_LIMIT` is a batch size, not a ceiling.** A phase drains until it finds nothing, so a first-of-the-month cohort finishes in one pass rather than at 200 per ten minutes.
+
+Two starvation bugs were fixed on the way, and neither was about concurrency. Chasing an invoice changes its *subscription* and leaves the invoice as overdue as it was, so with the status checked after the claim an already-chased invoice held the front of every future batch for ever; the subscription status is now a predicate in the query. And an invoice whose collection attempts are spent has `next_collection_at IS NULL`, indistinguishable from one nobody has tried, so `MAX_COLLECTION_ATTEMPTS` is passed into the claim query too — passed in, so the rule still lives in `RecurringService`.
+
 A refused action answers **402**, not 403. A permission error tells a caller to ask an administrator; this one tells them to upgrade, and a client that cannot tell them apart shows the wrong dialogue to a customer trying to give us money.
 
 ## Invoices
