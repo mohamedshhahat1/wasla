@@ -43,9 +43,11 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Production TLS (documented and configured; certificates are the operator's) | Implemented |
 | Operational runbook | Implemented |
 | Queue reliability: bounded retries with backoff, attempt counts, dead-letter records and operator replay | Implemented |
+| Crash recovery: leased reservations, renewal, an automatic reaper, and quarantine for deliveries a crash left uncertain | Implemented |
 | Operational metrics (`/metrics`): HTTP, dependencies, queue depth and age, dead letters, worker heartbeats, provider outcomes | Implemented |
-| PostgreSQL backup, retention and a restore procedure verified by drill | Implemented |
-| Off-host backup storage, media backup, and a configured alerting stack | Planned |
+| PostgreSQL backup on a systemd timer, uploaded to off-host object storage, with a durable last-success signal | Implemented |
+| Disaster restore from the off-host copy, verified by drill after the local copy was destroyed | Implemented |
+| Media backup and a configured alerting stack | Planned |
 | Distributed tracing, an error-monitoring provider and zero-downtime releases | Planned |
 
 Status vocabulary used across all documentation: **Implemented**, **In Progress**, **Planned**, **Blocked**.

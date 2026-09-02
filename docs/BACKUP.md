@@ -4,10 +4,18 @@ Until this phase the runbook said, in as many words, that there was no backup
 system and that `postgres-data` was a Docker volume. This is the answer to
 that.
 
-Two scripts, a scheduled one-shot container, and a restore procedure that has
-been executed rather than written down. The distinction matters: a `pg_dump`
-invocation nobody has run is not a backup solution, and the drill at the bottom
-of this page is what makes the difference.
+Four scripts, a systemd timer, an off-host destination, and a restore that has
+been executed from that destination *after the local copy was destroyed*. Two
+distinctions run through the whole page and everything else follows from them:
+
+**A dump is not a backup.** A validated dump next to the database it came from
+survives a dropped table and does not survive the host. So a run is not a
+success until the artifact has reached somewhere else and been read back there.
+
+**A script is not a procedure.** A `pg_dump` invocation nobody has run proves
+nothing, and neither does an upload adapter nobody has downloaded from. The
+drill at the bottom of this page removes the local copy before restoring, so
+what it proves is the remote copy.
 
 ---
 
@@ -74,54 +82,126 @@ Four properties worth knowing:
 
 ### Where it runs
 
-`pg_dump` has to match the server's major version, and the version that
-certainly does is the one inside `pgvector/pgvector:pg16`. So the backup runs
-as a one-shot container from that image, exactly like the `migrate` service:
+`pg_dump` has to match the server's major version, and getting the dump off the
+host needs a client the database image does not carry. `Dockerfile.backup` is
+the one image with both: the `pgvector/pgvector:pg16` base for `pg_dump`, plus
+`awscli` for the upload. Adding `postgresql-client` to the *application* image
+instead would put it on every container serving traffic for the benefit of a
+process that runs once a day.
 
 ```sh
 docker compose -f docker-compose.prod.yml --profile backup run --rm backup
 ```
 
-Scheduled from the host, because the host already has a scheduler and adding a
-long-running one to this stack would be a new process to watch:
+### The schedule
 
-```cron
-# /etc/cron.d/wasla-backup
-17 2 * * *  root  cd /srv/wasla && docker compose -f docker-compose.prod.yml --profile backup run --rm backup >> /var/log/wasla-backup.log 2>&1
+`deploy/systemd/wasla-backup.service` and `.timer`, shipped in the repository
+rather than described in prose:
+
+```sh
+sudo cp deploy/systemd/wasla-backup.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now wasla-backup.timer
 ```
 
-Or as a systemd timer, if that is the platform's habit. Either is fine; what
-matters is that something outside the stack fires it and that its output is
-somewhere an operator will look.
+Daily at 02:17 with a ten-minute jitter. Two properties are worth naming:
+
+- **`Persistent=true`.** A host that was down at 02:17 runs the backup as soon
+  as it is back rather than skipping the day. Without it a weekend of downtime
+  silently doubles the recovery window and nobody finds out until the restore.
+- **`Type=oneshot` with no `Restart=`.** A failed backup should be noticed, not
+  retried in a loop against an object store that is refusing us.
+  `systemctl is-failed wasla-backup.service` is then a real signal, and
+  `wasla_backup_age_seconds` is the other one.
+
+Verify it without waiting a day:
+
+```sh
+sudo systemctl start wasla-backup.service
+journalctl -u wasla-backup.service -n 50
+systemctl list-timers wasla-backup.timer
+```
+
+A cron entry works equally well if that is the platform's habit; what matters
+is that something outside the stack fires it and that its output is somewhere
+an operator will look.
 
 ### Storage and encryption
 
-`BACKUP_DIR` maps to a host path. **A backup that only exists on the machine
-running the database is not a backup** — it survives a dropped table and not a
-dead host, and the second is the failure that ends companies.
+`BACKUP_DIR` is **staging**, not the backup. The backup is what
+`scripts/upload_backup.sh` puts somewhere else, and the run fails if it cannot.
 
-Copy dumps somewhere else, and encrypt them there. This repository does not
-choose where, because that is a deployment decision and hardcoding a cloud
-provider into an operational script is how a script stops fitting the
-deployment. What it does state is the requirement:
+### The destination
 
-- Off-host, on a schedule at least as often as the backup itself.
-- Encrypted at rest — an encrypted bucket (S3 SSE-KMS, GCS CMEK, R2), an
-  encrypted volume, or platform-managed disk encryption.
-- Access separated from the application's own credentials, so a compromised API
-  container cannot read or delete the backups.
+One backend, `s3`, which is not one provider. `aws s3` with
+`BACKUP_S3_ENDPOINT_URL` speaks to AWS, MinIO, Cloudflare R2, Wasabi, Backblaze
+B2 and Ceph alike, so a single implementation covers every object store a
+deployment is likely to choose without this repository choosing one.
 
-Nothing here invents its own encryption. A dump is a file; the platform that
-stores files is what encrypts it.
+```sh
+BACKUP_DESTINATION=s3
+BACKUP_S3_BUCKET=wasla-backups
+BACKUP_S3_PREFIX=wasla
+BACKUP_S3_ENDPOINT_URL=      # empty for AWS; set it for anything else
+BACKUP_S3_SSE=AES256         # server-side encryption at rest
+BACKUP_S3_ACCESS_KEY_ID=…    # the backup container's, and nothing else's
+BACKUP_S3_SECRET_ACCESS_KEY=…
+```
+
+A deployment that needs something else entirely — a second datacentre over
+rsync, a tape robot — **replaces `scripts/upload_backup.sh`**. That is a file
+boundary rather than a `BACKUP_UPLOAD_COMMAND` string something would have to
+`eval`, and the difference is that nothing here ever hands attacker-influenced
+text to a shell.
+
+`BACKUP_DESTINATION=none` is **refused**, because a run that reports success
+having left the dump on the host is worse than one that fails.
+`BACKUP_ALLOW_LOCAL_ONLY=yes` overrides that for a development machine;
+`docker-compose.prod.yml` never sets it, and a test asserts as much.
+
+### What is required of the destination
+
+- **Off this host.** Not another directory, not another volume on the same
+  disk. The failure being survived is the machine.
+- **Encrypted in transit.** `aws s3` is HTTPS unless an endpoint URL says
+  otherwise; do not point it at an `http://` endpoint outside a private network.
+- **Encrypted at rest.** `BACKUP_S3_SSE`, or a bucket policy that enforces it,
+  or platform-managed disk encryption. Nothing here invents its own
+  cryptography — a dump is a file, and the platform storing files encrypts it.
+- **Credentials the application does not hold.** Only the `backup` service is
+  given `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. This is the whole reason
+  backups run in their own container: a compromised API must not be able to
+  delete the database *and* every copy of it. There is a test.
+- **Versioning or object-lock, if the store offers it.** Then a credential
+  compromise cannot destroy history either. Not enforced here because not every
+  store supports it.
+
+### Verification
+
+`cp` exiting zero says the client believed it finished. `upload_backup.sh` then
+asks the store what it actually holds and compares the size — the cheapest
+check that tells "uploaded" from "uploaded a zero-byte file because the pipe
+broke". Without it a truncated remote copy is indistinguishable from a good one
+until the day somebody needs it.
 
 ### Retention
 
-`BACKUP_RETENTION_DAYS`, default 14. Dumps older than that are removed after a
-successful run, matched by this database's own filename pattern so a shared
-directory is left alone. Fourteen days is a starting point, not a policy: it
-covers "somebody noticed on Monday what broke a week ago" and it is not an
-archival tier. If a retention obligation exists for billing or audit records,
-that is a legal question and it belongs in a decision, not in a default.
+Two retentions, with different owners, and conflating them is how a recovery
+fails.
+
+**Local staging** is `BACKUP_RETENTION_DAYS`, default 14, pruned by this script
+after the upload has succeeded — never before, so a failed run cannot delete
+the last good artifact it still has.
+
+**Off-host** is the object store's lifecycle policy, and it should stay there.
+A rule in the bucket outlives this host, survives a bug in a shell script, and
+cannot be undone by whoever gets the application credentials. If this script
+deleted remote objects it would need delete permission on the bucket, which is
+exactly the permission a backup uploader should not have.
+
+Fourteen days is a starting point, not a policy. If a retention obligation
+exists for billing or audit records, that is a legal question and belongs in a
+decision rather than in a default.
 
 ---
 
@@ -177,11 +257,13 @@ a day-old question is better than silence.
 
 ---
 
-## The drill
+## The disaster drill
 
-Run against PostgreSQL 16 with pgvector, on 2026-09-02, before any of this was
-committed. Synthetic data only — no production or customer records were
-touched at any point.
+**The one that matters.** The earlier drill proved a dump could be restored;
+this one proves the *remote* copy can, because the local copy was destroyed
+first. Run on 2026-09-02 against PostgreSQL 16 with pgvector and a MinIO
+container standing in for the object store. Synthetic data only — no production
+or customer records were touched at any point.
 
 ```
 source database          wasla_drill, migrated to head 0037
@@ -189,31 +271,69 @@ representative rows      2 tenants, 2 users, 2 memberships,
                          1 knowledge base, 1 document,
                          1 document_chunk with a real 1536-dimension embedding
 
-backup                   scripts/backup_postgres.sh
-                         -> wasla_drill-20260902T095931Z.dump (149,666 bytes)
-                         -> retention: kept 14 days, removed 0
+off-host destination     MinIO, bucket wasla-drill-backups, prefix wasla/
+                         reached over the S3 API by scripts/upload_backup.sh
 
-fresh target             wasla_restored (created by the script, did not exist)
-restore                  scripts/restore_postgres.sh <dump> wasla_restored --clean
+backup                   scripts/backup_postgres.sh, in the wasla-backup image
+  dump                   staged /backups/wasla_drill-20260902T123236Z.dump
+                                (149,668 bytes)
+  upload                 uploading to s3://wasla-drill-backups/wasla/
+  verify at destination  verified wasla/wasla_drill-20260902T123236Z.dump
+                                (149,668 bytes) at the destination
+  retention              kept 14 days of local staging, removed 0
+  status                 done: wasla_drill is backed up to s3
 
-verification (the script's own)
-  schema                 38 tables
-  extensions             pgcrypto, vector
-  migration head         0037   (matched WASLA_EXPECTED_HEAD=0037)
-  rows                   2 tenants, 2 users
+status file written
+  {"outcome": "success",
+   "last_success_at": "2026-09-02T12:32:40Z",
+   "last_success_artifact": "wasla_drill-20260902T123236Z.dump",
+   "last_success_bytes": 149668,
+   "destination": "s3",
+   "failures_total": 0,
+   "failed_stage": ""}
 
-verification (through the application)
-  SQLAlchemy read the restored database with the real models:
-  tenants  [('drill-alpha', TenantStatus.ACTIVE), ('drill-beta', TenantStatus.ACTIVE)]
-  users    2
-  chunk    99999999-...-999999999999, ordinal 0
+HOST LOSS SIMULATED     docker volume rm -f wasla-drill-staging
+                        -> staging volume destroyed
+                        -> confirmed: no local copy remains anywhere
+
+recovery host           a new, empty volume: `ls` shows . and .. and nothing else
+
+fetch                   scripts/fetch_backup.sh /recovered
+  discovery             newest artifact is wasla_drill-20260902T123236Z.dump
+  validation            verified wasla_drill-20260902T123236Z.dump is a readable dump
+  result                wrote /recovered/wasla_drill-20260902T123236Z.dump
+                              (149,668 bytes)
+
+fresh target            wasla_from_offhost (created by the script, did not exist)
+restore                 scripts/restore_postgres.sh /recovered/<artifact> \
+                                                    wasla_from_offhost --clean
+  schema                38 tables
+  extensions            pgcrypto, vector
+  migration head        0037   (matched WASLA_EXPECTED_HEAD=0037)
+  rows                  2 tenants, 2 users
+  result                wasla_from_offhost is restored and verified
+
+verification through the application
+  SQLAlchemy read the recovered database with the real models:
+  tenants   [('drill-alpha', TenantStatus.ACTIVE), ('drill-beta', TenantStatus.ACTIVE)]
+  users     2
+  chunk     99999999-9999-9999-9999-999999999999, ordinal 0
   embedding 1536 dimensions, [0.1429, 0.2857, 0.4286, 0.5714, ...]
 ```
 
-The last block is the one that matters. `psql` proving rows exist says the
-bytes came back; the ORM reading them through `Tenant`, `User` and
-`DocumentChunk` — enums mapped, `vector(1536)` mapped — says the *application*
-can use what came back.
+Three things this establishes that the earlier drill did not:
+
+1. **The bytes came from the object store**, not from a file that happened to
+   still be on disk. The staging volume was removed and the recovery volume
+   started empty — `ls` was run to prove it.
+2. **The restore script travels in the backup image.** On the day somebody
+   needs it, the application image may not build and the repository may not be
+   reachable; what certainly exists is whatever was pulled to run last night's
+   backup. The drill found this missing and it was fixed before this was
+   written down.
+3. **The ORM reads it.** `psql` proving rows exist says the bytes came back;
+   `Tenant`, `User` and `DocumentChunk` reading them — enums mapped,
+   `vector(1536)` mapped — says the *application* can use what came back.
 
 ### The failure cases, also executed
 
@@ -221,6 +341,10 @@ can use what came back.
 | --- | --- |
 | Backup with a user that does not exist | exit 1, `pg_dump exited non-zero; no artefact was kept`, no `.part` left behind |
 | Backup with a password in `DATABASE_URL` | the password appears in neither stdout nor stderr |
+| Dump succeeds, upload fails | exit 1, status `failure` at stage `upload`, `last_success_at` **unchanged**, local artifact kept |
+| No `BACKUP_DESTINATION` | refused: "a dump on the same host as its database is not a backup" |
+| Remote copy truncated | refused: sizes compared and reported |
+| Store does not hold the object | refused |
 | Restore from a truncated dump | exit 1 |
 | Restore from a file that is not a dump at all | exit 1 |
 | Restore over the configured database | refused |
@@ -230,19 +354,79 @@ can use what came back.
 
 ---
 
+## Repeating it
+
+Do **not** restore production backups automatically. A scheduled restore that
+writes to anything real is a scheduled outage waiting for a bad argument, and
+one that writes to a scratch database still costs a database's worth of disk
+and IO on whatever host runs it.
+
+Instead, run this by hand on a cadence somebody has agreed to — quarterly is a
+reasonable starting point, and after any change to the schema, the dump format
+or the destination:
+
+```sh
+# 1. Bring the newest off-host artifact to an isolated machine.
+sh scripts/fetch_backup.sh /tmp/drill
+
+# 2. Restore into a scratch database that is not production.
+WASLA_EXPECTED_HEAD=$(alembic heads | awk '{print $1}') \
+  sh scripts/restore_postgres.sh /tmp/drill/<artifact> wasla_drill_$(date +%Y%m%d) --clean
+
+# 3. Read it through the application, not only through psql.
+DATABASE_URL=postgresql+asyncpg://…/wasla_drill_$(date +%Y%m%d) \
+  python -c "…"   # the block in the drill above
+
+# 4. Destroy the scratch database and write down the date it passed.
+```
+
+Step 3 is the one people skip and the one that catches a schema the ORM can no
+longer map. Step 4 matters too: a drill whose result nobody recorded is a drill
+somebody will argue about.
+
+---
+
+## Recovery objectives
+
+Stated as two separate things, because conflating them is how a number nobody
+can meet ends up in a contract.
+
+**What the schedule implies today** — observed facts, not promises:
+
+| | |
+| --- | --- |
+| Backup frequency | daily at 02:17, jittered, `Persistent=true` |
+| Implied worst-case data loss | **~24 hours** of writes |
+| Observed restore duration | ~4 minutes for a 150 KB dump on a laptop, of which ~3½ was `pg_restore` |
+| What that says about a real database | very little — it scales with data volume and has never been measured against one |
+
+**What has not been adopted:** no RPO or RTO has been agreed by anybody. The
+numbers above are what the current configuration produces, not targets it is
+held to. Adopting an RPO shorter than a day means continuous archiving
+(`archive_command` plus base backups, or a managed provider's point-in-time
+recovery), which is a different mechanism rather than a more frequent
+`pg_dump`. Adopting an RTO means measuring a restore at production scale, which
+nobody has done because there is no production.
+
+---
+
 ## What this does not give you
 
 Stated plainly, because a backup page that implies more than it delivers is how
 somebody discovers the gap during an incident:
 
-- **A recovery point objective is a schedule, not a script.** Nightly backups
-  mean up to 24 hours of lost writes. If that is too much, the answer is
-  continuous archiving (`archive_command` plus base backups, or a managed
-  provider's point-in-time recovery), not a more frequent `pg_dump`.
-- **No off-host copy is configured here.** The script writes to a directory.
-  Getting that directory somewhere else is the deployment's job and is not
-  automated by this repository.
+- **No agreed RPO or RTO.** See above: what the schedule implies is written
+  down; what anybody has committed to is nothing.
+- **No off-host destination is configured by default.** The mechanism ships and
+  is proved; choosing a bucket, a region and a lifecycle policy is the
+  deployment's, and until that happens `BACKUP_DESTINATION=none` refuses to
+  report success.
+- **The destination has never been a real cloud.** The drill ran against MinIO
+  over the S3 API on a private network. That exercises the same client and the
+  same protocol, and it does not exercise a real provider's IAM, its TLS chain
+  or its rate limits.
 - **This has never run against production**, because there is no production.
   Every command on this page has been executed against local containers with
   synthetic data.
 - **Media is not covered.** See the top of this page.
+- **Redis is not covered**, deliberately. See the top of this page.

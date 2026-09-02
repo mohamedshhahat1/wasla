@@ -86,18 +86,45 @@ watching so nobody has to run this to find out something is wrong.
     redis-cli ZRANGE agent:jobs:delayed 0 4 WITHSCORES
   ```
   Paired with `wasla_job_failures_total{category=...}` and the provider counters, this is usually somebody else's outage.
-- **in-flight non-empty and static** — jobs were reserved by a worker that died. **Nothing reaps them** ([TASKS.md](../TASKS.md), phase 8). Moving one back is an operator decision, because re-running an agent job sends the customer a second reply:
+- **in-flight non-empty and static** — jobs a worker reserved and has not finished. **This now recovers itself** (ADR-074): every reservation carries a lease, a living worker renews it every third of `QUEUE_VISIBILITY_TIMEOUT_SECONDS`, and the `recovery` loop reclaims anything whose lease has run out. Expect in-flight to be non-zero and *moving* on a busy queue; static and growing is the thing to look at.
   ```bash
+  # What is stuck, and since when
   docker compose -f docker-compose.prod.yml exec redis \
-    redis-cli LMOVE agent:jobs:inflight agent:jobs:pending RIGHT LEFT
+    redis-cli HGETALL agent:jobs:reservations
   ```
-  Ingestion and media jobs are genuinely idempotent — a stored file is not fetched twice — so those can be requeued freely.
+  `wasla_queue_expired_reservations` is the same question as a metric. If it is above zero for more than a few minutes, either the `recovery` loop is not running anywhere (check `WORKER_KINDS`) or workers are dying faster than it reclaims.
+- **jobs being recovered** — `wasla_jobs_total{outcome="recovered"}` climbing means something is killing workers. The work is not lost; find out what.
 - **dead growing** — work that stopped being retried. Read the records before doing anything with them:
   ```bash
   docker compose -f docker-compose.prod.yml exec worker \
     python -m app.workers.queues dead-letters agent --limit 5
   ```
   Each record carries the job type, the workspace, the attempt count, the first and last attempt times and a failure *category* — never an exception string, and never message content. Find the rest in the logs by `worker.job_dead_lettered` and the `tenant_id`.
+
+### A worker died mid-send: uncertain deliveries
+
+`wasla_jobs_total{outcome="quarantined"}`, or `worker.job_dead_lettered` with
+`category=uncertain_delivery`. It means a worker stopped while an agent turn
+was talking to Meta, so the customer may or may not have received a reply and
+**nothing will send it again automatically**. That refusal is the design
+(ADR-074): a second answer to a question that already has one is worse than a
+late one.
+
+```bash
+docker compose -f docker-compose.prod.yml exec worker \
+  python -m app.workers.queues dead-letters agent --limit 10
+```
+
+The record carries the workspace and the conversation. Open the conversation:
+
+- **The customer was answered** — nothing to do. Note it and move on.
+- **The customer was not answered** — decide whether an answer is still useful.
+  A question from four hours ago may be better answered by a person than by
+  replaying the turn. If replaying is right, `replay agent --limit 1 --force`,
+  and read the next section first.
+
+There is no way to tell these apart from outside the conversation, which is why
+this is a runbook step and not a sweep.
 
 ### Replaying dead-lettered work
 
@@ -448,6 +475,60 @@ still commits, its delivery is just late. Watch for rows reaching `failed`
 with `exhausted: true`, which is the point at which the outage became data
 loss.
 
+### Backups have stopped
+
+`wasla_backup_age_seconds` above 36 hours, or absent entirely.
+
+```bash
+# What the last run actually did
+cat /var/backups/wasla/status.json
+
+# Whether anything even tried
+systemctl status wasla-backup.timer
+systemctl is-failed wasla-backup.service
+journalctl -u wasla-backup.service -n 100
+```
+
+Read `failed_stage` first — it is the whole diagnosis:
+
+- **`dump`** — PostgreSQL refused or was unreachable. The database is the
+  problem, not the backup.
+- **`validate`** — `pg_dump` produced something `pg_restore --list` cannot
+  read. Disk full is the usual cause; the artifact was deleted rather than
+  kept, deliberately.
+- **`upload`** — **the dangerous one.** The database is fine and the dumps are
+  fine and none of them is leaving the host, so the deployment has been losing
+  its recovery point silently. Check the object store's reachability and the
+  credentials in `/etc/wasla/backup.env`. The local artifacts are still in
+  `BACKUP_DIR`; copy one off by hand now, then fix the cause.
+- **`retention`** — harmless to the backup that just succeeded; the pruning
+  failed after the upload did not.
+
+**`last_success_at` never moves for a failed run.** If it says two days ago,
+the deployment's recovery point is two days ago whatever the newest file in
+`BACKUP_DIR` says.
+
+### Recovering from an off-host backup
+
+The full procedure, with the guards it goes through, is in
+[BACKUP.md](BACKUP.md). The short form:
+
+```bash
+sh scripts/fetch_backup.sh /var/tmp/recovery          # newest artifact
+sh scripts/restore_postgres.sh /var/tmp/recovery/<artifact> wasla_recovered --clean
+```
+
+The restore refuses to touch the database `DATABASE_URL` names unless
+`WASLA_RESTORE_ALLOW_PRODUCTION=yes` is set. That is deliberate: recovering
+into a scratch database and then switching to it is one decision at a time,
+and restoring over a live database is the one thing that cannot be undone.
+
+**Redis is not restored, and after a recovery it is empty.** Queued work is
+gone. The messages themselves are `messages` rows in PostgreSQL with no reply,
+and re-driving them means enqueueing agent jobs for the affected
+conversations — which nothing does automatically, and should not: answering a
+day-old question may be worse than silence.
+
 ## What to watch
 
 **Start with the metrics.** `/metrics` publishes request rates and latency,
@@ -472,6 +553,8 @@ that are more specific than a counter can be.
 | `worker.job_retry_scheduled` | A job failed transiently and will be tried again | Low alone, High as a rate |
 | `worker.dead_letters_replayed` | Somebody re-queued dead-lettered work | Informational, and worth an audit read |
 | `metrics.collection_failed` | The scrape could not read Redis; queue signals are absent, not zero | Medium |
+| `recovery.reservation_reclaimed` | A worker died holding a job. `action=requeued` is routine; `action=quarantined` needs a person | Medium / High |
+| `backup.status_unreadable` | The backup status file is corrupt; `wasla_backup_*` is absent, not stale | Medium |
 | `campaign.sweep_failed` | A broadcast is stalled | Medium |
 | `email.sweep_failed` | The email worker's sweep threw; nothing is being delivered | High |
 | `email.failed_permanently` | A message will never be sent — check `error_code` | Medium, High if sustained |
@@ -496,6 +579,7 @@ Stated plainly, because a runbook that pretends to cover everything is one that 
   delivery event has arrived from Resend's own infrastructure, so the first
   production send is also the first test of the DNS, the webhook endpoint and
   the sending reputation.
+- **A wedged event loop is invisible.** Lease renewal and the worker heartbeat both assert the same thing — the process is up and scheduling — so a loop blocked by a genuinely synchronous call keeps renewing its leases and is never reclaimed. Every loop here is I/O-bound async, so that is a bug rather than a state, but it is one this design cannot detect.
 - **Backups cover PostgreSQL and nothing else.** [BACKUP.md](BACKUP.md) has the scripts, the schedule, the retention policy and a restore drill that was actually executed — against synthetic data on local containers, never against production, because there is no production. **Redis is deliberately not backed up** (queued work is late rather than lost; the messages themselves are in PostgreSQL), and **media is not backed up at all**: attachments live on one host's volume and losing it loses them.
 - **No off-host copy is configured.** The backup script writes to a directory. Getting that directory somewhere else, encrypted, is the deployment's job and this repository does not automate it.
 - **There is no configured alerting.** [OBSERVABILITY.md](OBSERVABILITY.md) gives concrete expressions against metrics that now exist, and the table above lists the log events worth watching. Neither is a running alert: no Alertmanager, no monitoring vendor, nobody paged.

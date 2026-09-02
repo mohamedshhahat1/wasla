@@ -431,13 +431,13 @@ Opt-out lives in the base population of `AudienceRepository` rather than as a fi
 
 ## 14. Background jobs and Redis usage
 
-**Status: Implemented** — the Redis client, its health probe, the refresh-token denylist, the agent, ingestion and media job queues, and the AI, ingestion, follow-up, media, campaign and billing workers, all run by one worker process.
+**Status: Implemented** — the Redis client, its health probe, the refresh-token denylist, the agent, ingestion and media job queues with leased reservations and crash recovery, and the AI, ingestion, follow-up, media, campaign, billing, email and recovery workers, all run by one worker process.
 
-All six workers run in **one container**, concurrently in one event loop, selected by `WORKER_KINDS` (empty means all). Each is I/O-bound — waiting on Redis, PostgreSQL, OpenAI or Meta — so they interleave rather than compete, and one process is markedly simpler to deploy and watch than six. Splitting them apart later is an environment variable, not another image; `campaign` is the one that most often wants a replica of its own, because a workspace mid-broadcast is bandwidth against Meta rather than inference.
+All eight workers run in **one container**, concurrently in one event loop, selected by `WORKER_KINDS` (empty means all). Each is I/O-bound — waiting on Redis, PostgreSQL, OpenAI or Meta — so they interleave rather than compete, and one process is markedly simpler to deploy and watch than six. Splitting them apart later is an environment variable, not another image; `campaign` is the one that most often wants a replica of its own, because a workspace mid-broadcast is bandwidth against Meta rather than inference.
 
 Each loop publishes a heartbeat to Redis — one key per kind, short expiry, refreshed on a timer — and the container's health check (`scripts/entrypoint.sh worker-health`) exits non-zero unless every loop this container is configured to run has beaten recently. Before this the image's HEALTHCHECK curled the API's liveness endpoint, which a process serving no HTTP could never answer, so the worker reported unhealthy for its entire life; both compose files disabled it rather than fake it.
 
-What the heartbeat proves is that the process is up and its event loop is scheduling: the beat is an ordinary task, so a crash, a hang or a blocking call in async code stops it. What it does not prove is that any loop is making progress — a worker waiting on a query that never returns keeps beating. That needs the in-flight reaper, which will read the same keys.
+What the heartbeat proves is that the process is up and its event loop is scheduling: the beat is an ordinary task, so a crash, a hang or a blocking call in async code stops it. What it does not prove is that any loop is making progress — a worker waiting on a query that never returns keeps beating. Queue depth, the age of the oldest waiting job and the count of expired reservations are what answer that, and they are published beside it.
 
 SIGTERM asks each loop to stop and each finishes the job in its hand before returning, so a deploy does not dead-letter work that was about to succeed. The production compose gives the worker a longer `stop_grace_period` than the API: a worker mid-inference holds an HTTP call and an open transaction.
 
@@ -447,7 +447,40 @@ Redis provides job queues, caching, rate limiting and temporary state. The three
 
 There are three queues, not one, and the separation is deliberate (ADR-019). An agent job is a customer waiting for a reply; an ingestion job is a document that will be searchable in a minute; a media job is a customer waiting whose reply cannot even be composed yet. Sharing one list would let a bulk upload of a hundred documents sit in front of somebody's question, and a worker pool sized for downloading is the wrong shape for one doing inference.
 
-Each queue is three lists rather than one — for the agent queue, `agent:jobs:pending`, `agent:jobs:inflight`, and `agent:jobs:failed`. A worker reserves with a blocking `BLMOVE` into the in-flight list, removes the exact payload on success, and dead-letters it on failure, so a job whose worker dies is still visible instead of lost with the process (ADR-015). Payloads are compact JSON with sorted keys, because removal matches by exact value.
+Each queue is four lists, a sorted set and a hash — for the agent queue,
+`agent:jobs:pending`, `:inflight`, `:delayed`, `:failed` and `:reservations`. A
+worker reserves with a blocking `BLMOVE` into the in-flight list, removes the
+exact payload on success, schedules a retry into the delayed set on a transient
+failure, and writes a dead-letter *record* when the budget runs out (ADR-015,
+ADR-068). Payloads are compact JSON with sorted keys, because removal matches
+by exact value.
+
+### Surviving the worker
+
+Being visible is not the same as being recovered. A job whose worker died sat
+on the in-flight list for ever — no owner to ask about, no moment to measure
+staleness from, and nothing to say how far it had got. `:reservations` records
+all three per in-flight payload (ADR-074).
+
+**The lease is renewed rather than merely long.** A holding process extends its
+leases every third of `QUEUE_VISIBILITY_TIMEOUT_SECONDS`, so a job that
+legitimately takes ten minutes is never stolen from the process still working
+on it, and one whose process died is reclaimable within a couple of minutes
+rather than one worst-case-job-duration. The `recovery` loop reclaims what has
+expired; `LREM` returning 1 for exactly one caller is the whole of the mutual
+exclusion, so running it in every replica is expected rather than hazardous.
+
+**What it does with a reclaimed job depends on how far the job got.** The
+reservation carries a stage, and the agent worker writes `engaged` to Redis
+immediately *before* the HTTP client is built — so a crash cannot take that
+knowledge with it. A turn that had not engaged goes back for another attempt; a
+turn that had is dead-lettered as `uncertain_delivery`, because whether Meta
+accepted the message is unknowable from here and the one action that must not
+follow is another send. Ingestion and media declare themselves idempotent and
+are recovered at any stage.
+
+A crash spends an attempt, so a job that kills a worker every time exhausts its
+budget rather than looping for ever.
 
 Two gaps are known and recorded rather than implied away. Nothing reaps the in-flight list, so a job abandoned by a killed worker stalls until an operator moves it; and requeueing an *agent* job is an operator decision, because re-running one produces a second reply to the customer. Ingestion and media jobs are genuinely idempotent — a stored file is not fetched again and a read one is not read again — so requeueing those is safe.
 
@@ -697,10 +730,11 @@ Signals come from two places, and which one follows from whether the producing p
 | --- | --- |
 | HTTP | request count by method, route template and status class; latency histogram; in-flight; unhandled errors |
 | Dependencies | `wasla_dependency_up` and a failure counter per dependency, written by the readiness probe |
-| Queues | pending, in-flight, delayed, dead-lettered, and the age of the oldest waiting job, per queue |
+| Queues | pending, in-flight, delayed, dead-lettered, expired reservations, and the age of the oldest waiting job, per queue |
 | Workers | `wasla_worker_heartbeat_alive` per loop, read from the keys the container's own probe reads |
-| Jobs | outcomes by queue (`succeeded`, `retried`, `dead_lettered`) and failures by bounded category |
+| Jobs | outcomes by queue (`succeeded`, `retried`, `dead_lettered`, `recovered`, `quarantined`) and failures by bounded category |
 | Providers | OpenAI, WhatsApp, Paymob and email calls by operation and outcome |
+| Backups | age of the last backup that reached off-host storage, and failures by stage — read from a status file the backup container writes, because that process has exited by the time anybody scrapes (ADR-075) |
 
 The `route` label is the matched route *template*, never the requested path, and a request matching no route becomes `__unmatched__` so a scanner cannot name a series. AI spend and message counts are deliberately absent: they are metered into `usage_events`, which is what a bill is computed from, and a second tally would be a second number to reconcile.
 

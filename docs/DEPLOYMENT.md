@@ -44,7 +44,11 @@ Every secret in the production file is required and interpolated from the deploy
 | `RATE_LIMIT_*` | Limiting is on, at the application defaults |
 | `MAX_REQUEST_BYTES`, `REQUEST_TIMEOUT_SECONDS` | 32 MB and 60 seconds |
 | `METRICS_ENABLED` | Metrics are **on**. `/metrics` is served on the internal network, and the worker writes the cross-process counters the API renders. Set it to `false` on both processes to remove the endpoint and stop the counters; setting it on one publishes half the signals, which the deployment drift guard refuses |
-| `BACKUP_DIR`, `BACKUP_RETENTION_DAYS` | `./backups` on the host and fourteen days. Read by `scripts/backup_postgres.sh` and never by the application, which is why neither is a `Settings` field |
+| `BACKUP_DIR`, `BACKUP_RETENTION_DAYS` | `./backups` on the host and fourteen days of **local staging**. Read by `scripts/backup_postgres.sh` and never by the application, which is why neither is a `Settings` field |
+| `BACKUP_DESTINATION` | **`none`, and the backup then refuses to report success.** A dump on the same host as its database is not a backup, so a run with nowhere to put it fails rather than looking healthy. Set `s3` with a bucket (ADR-075) |
+| `BACKUP_S3_*`, `BACKUP_S3_ACCESS_KEY_ID/SECRET` | No off-host destination. These reach the `backup` service alone — neither the API nor the worker gets them, so a compromised application container cannot read or delete the backups |
+| `BACKUP_STATUS_PATH` | The API publishes no `wasla_backup_*` series, and the absence is the alert: "this deployment cannot tell you about its backups" |
+| `QUEUE_VISIBILITY_TIMEOUT_SECONDS` | 120 seconds. How long a worker's claim on a job is good for before a recovery pass may reclaim it; workers renew every third of it while they live (ADR-074). Must be the same on the API and the worker, which the drift guard enforces |
 
 `REDIS_PASSWORD` is consumed twice on purpose: as the server's `--requirepass` and as the credential inside `REDIS_URL`. The healthcheck authenticates too, so a mismatch fails the check rather than reporting a healthy server that refuses every real client.
 
@@ -405,18 +409,57 @@ happens nobody is paged for anything.
 
 ### Backups
 
-`docker compose -f docker-compose.prod.yml --profile backup run --rm backup`,
-fired by the host's cron or a systemd timer — a one-shot service like `migrate`,
-not a scheduler running inside the stack. It writes to `BACKUP_DIR` on the host.
+Install the shipped timer; do not write your own cron line:
 
-Two things are the operator's and are not automated here, and both matter more
-than the script does:
+```sh
+sudo cp deploy/systemd/wasla-backup.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now wasla-backup.timer
+```
 
-- **Copy the dumps off the host, encrypted.** A backup that only exists on the
-  machine running the database survives a dropped table and not a dead host.
-- **Rehearse the restore against your own data.** The procedure and a drill run
-  against synthetic data are in [BACKUP.md](BACKUP.md); a restore nobody on this
-  deployment has performed is a procedure, not a recovery capability.
+It runs `docker compose --profile backup run --rm backup` daily at 02:17, a
+one-shot service like `migrate`, with `Persistent=true` so a host that was down
+at 02:17 backs up when it returns rather than skipping the day.
+
+**Choose an off-host destination before this is worth anything.**
+`BACKUP_DESTINATION=none` refuses to report success, deliberately: a dump on
+the same host as its database survives a dropped table and not the machine, and
+the machine is what a backup is for. Put the bucket, the endpoint and the
+credentials in `/etc/wasla/backup.env`, root-owned, mode 0600 — the systemd unit
+reads it, and no application container ever sees it.
+
+Two things remain the operator's:
+
+- **Set a lifecycle policy on the bucket.** That is where off-host retention
+  belongs: it outlives this host and does not require giving the uploader
+  delete permission.
+- **Rehearse the restore on a cadence somebody agreed to.**
+  [BACKUP.md](BACKUP.md) has the drill and the commands; a restore nobody on
+  *this* deployment has performed is a procedure, not a recovery capability.
+
+Watch `wasla_backup_age_seconds` — the age of the last backup that reached its
+destination, not of the newest local file. That distinction is the point: a
+deployment whose dumps succeed and whose uploads have failed for a week has no
+recovery point, and only the first signal notices.
 
 Redis is deliberately not backed up, and media is not backed up at all.
 [BACKUP.md](BACKUP.md) says what each of those costs.
+
+### Worker crashes
+
+Nothing to configure; it is worth knowing what happens. A worker that dies
+holding a job leaves a leased reservation in Redis, and the `recovery` loop
+reclaims it once the lease expires — within a couple of minutes, because living
+workers renew (ADR-074). Recovered jobs keep their attempt history, so a job
+that kills a worker every time exhausts its budget rather than looping.
+
+**One case is deliberately not recovered.** An agent turn that had already begun
+talking to Meta is dead-lettered as `uncertain_delivery` rather than requeued,
+because whether the customer received the reply is unknowable and a second
+answer is worse than a late one. `wasla_jobs_total{outcome="quarantined"}` is
+the count, and [RUNBOOK.md](RUNBOOK.md) has the procedure — which begins with
+opening the conversation.
+
+Run the `recovery` kind somewhere. It is in `WORKER_KINDS` by default; a
+deployment that narrows that variable and leaves it out has no crash recovery
+at all.

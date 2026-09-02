@@ -2616,3 +2616,169 @@ protocol is the fix and it is P2.
 The scripts run from the *database* image, not the application one. `pg_dump`
 has to match the server's major version and the image that certainly does is the
 one running the server.
+
+---
+## ADR-074 — A Reservation Has a Lease, and a Crash Has a Stage
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Context:
+P1-C left one gap and named it: "a job reserved by a worker that dies remains
+in-flight until an operator moves it." Reproduced before anything was changed —
+a reserved job was still on the in-flight list after a simulated thirty days,
+invisible to `pending`, `delayed` and `failed` alike, with no method on the
+queue capable of recovering it.
+
+That is not an observability problem. A stranded job is not a failure anybody
+can see; it is an absence. The queue looked healthy the whole time.
+
+The obvious fix — expire in-flight entries by age and requeue them — is wrong
+here for the same reason a blanket retry was wrong in ADR-068. An agent turn
+ends in a WhatsApp send that carries no idempotency key. A worker can die at any
+instruction, including the one after Meta accepted the message, and a reaper
+that requeued on age alone would send a customer a second answer to a question
+that already had one.
+
+Decision:
+Three pieces, and the third is the one that makes the other two safe.
+
+**A reservation, recorded in Redis.** `<namespace>:reservations` is a hash
+keyed on the in-flight payload, holding the worker that took it, when, until
+when, and how far it had got. An in-flight entry used to *be* the whole
+reservation, which is why nothing could be asked about it.
+
+**A lease that is renewed, not merely long.** Two minutes, refreshed by the
+holding process every third of that. A lease without renewal forces a choice
+between a timeout long enough to cover the longest job anybody might run — an
+hour to notice a dead worker — and one short enough to notice quickly, which
+gets stolen out from under a worker still using it. Renewal removes the choice:
+the timeout can be short because a living process keeps saying so.
+
+**A stage, written before the provider is engaged.** `_TurnProgress.engaged`
+already existed and was in memory, which is exactly no use to a reaper looking
+at a process that no longer exists. `mark_engaged` now writes that transition
+to the reservation *before* the HTTP client is built, so the fact outlives the
+process that knew it. Recovery then classifies:
+
+    stage RESERVED   -> nothing left the process   -> requeue
+    stage ENGAGED    -> a message may have been sent -> quarantine
+    stage UNKNOWN    -> nobody recorded it        -> quarantine
+
+on a queue that is not idempotent, and requeues in every case on one that is —
+because re-ingesting a document replaces its chunks and a file already read is
+not read again. That is a per-queue `idempotent` flag rather than a list the
+reaper carries, so a new queue declares its own answer.
+
+Consequences:
+**A crash spends an attempt.** A recovered job returns as `next_attempt`
+carrying its history, so a job that kills a worker every time exhausts its
+budget rather than looping for ever, and one already on its last attempt is
+quarantined rather than given a hidden extra one. Both are tested as
+properties rather than examples.
+
+**Recovery is idempotent by the mechanism the rest of the module already
+uses.** `LREM` returns 1 for exactly one caller, so two reapers looking at the
+same expired entry produce one outcome between them. Proving that needed a test
+that holds both *at the claim* — an earlier version paused them inside the
+enumeration and proved nothing, because the first through deletes the
+reservation record and the second then adopts the entry instead of racing for
+it.
+
+**An in-flight entry with no reservation is adopted, not recovered.** That is
+the crash in the microseconds between `BLMOVE` and the `HSET`, and giving it a
+lease starts the clock so the next pass judges it by the same rule. Recovering
+it on the spot would race a worker that is reserving right now.
+
+`recovery` is a worker kind in `ALL_KINDS`. It is the only loop that does
+nothing for its own queue — it reclaims what other processes were holding — so
+a deployment running it nowhere has no crash recovery at all, and leaving it
+out should take a deliberate act.
+
+**What this does not detect.** A wedged event loop keeps renewing its leases,
+because renewal asserts what the heartbeat asserts: the process is up and
+scheduling. Every loop here is I/O-bound async, so a blocked one is a bug
+rather than a state — but it is a bug this design cannot see.
+
+---
+
+## ADR-075 — A Backup Is Not Done Until It Has Left the Host
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Context:
+ADR-073 established that a backup is a restore that happened, and proved one.
+What it did not establish was whether a real deployment would ever *take* those
+backups, or whether they would survive the thing they exist for. The schedule
+was a documented cron line rather than a shipped unit; the destination was a
+directory on the host running the database; and the freshness signal was going
+to be the age of the newest file in that directory.
+
+That last one is the trap. A deployment whose `pg_dump` succeeds nightly and
+whose upload has been failing for a week has plenty of dumps and no recovery
+point — and "newest file in `BACKUP_DIR`" calls it healthy.
+
+Decision:
+**A run succeeds when the artifact is verified at an off-host destination**,
+and not before. `backup_postgres.sh` dumps, validates with
+`pg_restore --list`, uploads through `scripts/upload_backup.sh`, has the store
+confirm the object's size, and only then advances the recorded last success.
+Anything that stops earlier leaves the previous success where it was.
+
+**One backend, which is not one provider.** `aws s3` with an optional
+`BACKUP_S3_ENDPOINT_URL` reaches AWS, MinIO, Cloudflare R2, Wasabi, Backblaze
+B2 and Ceph, so a single implementation covers every object store a deployment
+is likely to choose without this repository choosing one. `BACKUP_DESTINATION=none`
+is refused rather than skipped.
+
+**A deployment that needs something else replaces the script.** A file
+boundary, deliberately, rather than a `BACKUP_UPLOAD_COMMAND` string something
+would have to `eval` — nothing here ever hands attacker-influenced text to a
+shell.
+
+**The freshness signal is a file, because it has to be.** The backup runs in
+its own container and exits; an in-memory counter dies with it. So it writes a
+small JSON status — outcome, last success, artifact name, byte count,
+destination kind, failure count, failed stage — and the API mounts that
+**read-only** and publishes `wasla_backup_age_seconds` from it. Nothing in the
+file is a credential or a bucket name: it is exactly the sort of thing that
+gets pasted into a support ticket.
+
+**A shipped systemd timer**, not a documented cron line. `Persistent=true`, so
+a host that was down at 02:17 runs the backup when it comes back rather than
+skipping the day and silently doubling the recovery window.
+
+Consequences:
+The backup runs in its own image (`Dockerfile.backup`): the `pgvector` base for
+a `pg_dump` that matches the server's major version, plus `awscli` for the
+upload. Putting `postgresql-client` in the application image instead would add
+it to every container serving traffic for the benefit of a process that runs
+once a day. The **restore** script ships in that image too — on the day
+somebody needs it, the application image may not build and the repository may
+not be reachable, and what certainly exists is whatever was pulled to run last
+night's backup. The drill found that missing.
+
+**Only the backup container holds object-store credentials.** A compromised API
+or worker must not be able to delete the database *and* every copy of it, and
+the deployment drift guard now asserts both directions of that.
+
+Two retentions with different owners. Local staging is pruned by this script
+after the upload succeeds; what the object store keeps is a lifecycle rule
+there, which outlives this host, survives a bug in a shell script, and does not
+require giving the uploader delete permission on the bucket.
+
+The disaster drill destroys the staging volume before restoring, so what it
+proves is the remote copy. It ran against MinIO over the S3 API — the same
+client and the same protocol as a real provider, and not that provider's IAM,
+TLS chain or rate limits, which `docs/BACKUP.md` says plainly.
+
+No RPO or RTO is claimed. What the schedule *implies* is written down as an
+observed fact; adopting a target means measuring a restore at production scale,
+and there is no production.

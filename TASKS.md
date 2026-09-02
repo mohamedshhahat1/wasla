@@ -1087,3 +1087,95 @@ Deliberately not done here:
 - [ ] **An in-flight reaper.** A job reserved by a worker that died still sits
       in the in-flight list until an operator moves it. The runbook says so and
       says why moving one is a judgement rather than a sweep
+## Phase 26 — Closing P1: crash recovery and disaster-resistant backups
+
+P1-C shipped retries, dead letters, metrics and a verified restore, and left two
+things unproven that it named honestly. This phase closed both, and both were
+reproduced against the code before anything was written.
+
+### A worker crash no longer strands work
+
+- [x] **Reproduced first.** A reserved job was still on the in-flight list after
+      a simulated thirty days, invisible to `pending`, `delayed` and `failed`,
+      with no method on the queue capable of recovering it. Not an
+      observability problem: a stranded job is an absence, and the queue looked
+      healthy the whole time
+- [x] **A reservation is now a record** - `<namespace>:reservations`, holding
+      the worker, when it took the job, until when, and how far it had got
+- [x] **The lease is renewed, not merely long** (ADR-074). A holder extends its
+      leases every third of `QUEUE_VISIBILITY_TIMEOUT_SECONDS`, which removes
+      the choice between a timeout long enough to cover the longest job anybody
+      might run and one short enough to notice a death
+- [x] **The engagement stage is written to Redis before the HTTP client is
+      built.** `_TurnProgress.engaged` was in memory, which is exactly no use
+      to a reaper looking at a process that no longer exists
+- [x] **Recovery classifies rather than guesses.** `reserved` requeues,
+      `engaged` on a non-idempotent queue quarantines as `uncertain_delivery`,
+      and `unknown` is treated as unsafe there. Idempotent queues declare
+      themselves so and are recovered at any stage
+- [x] **A crash spends an attempt**, so a job that kills a worker every time
+      runs out of budget instead of looping; one already on its last attempt is
+      quarantined rather than given a hidden extra one
+- [x] **`recovery` is a worker kind in `ALL_KINDS`.** It is the only loop that
+      does nothing for its own queue, so a deployment running it nowhere has no
+      crash recovery - which should take a deliberate act
+- [x] Drilled with real containers: a process reserved a job through the
+      production path, was `SIGKILL`ed (exit 137), and a replacement worker
+      reclaimed it exactly once, attempt 1 -> 2, original enqueue time
+      preserved. Then the agent variant: reserved, marked engaged, killed -
+      quarantined, `agent:jobs:delayed` stayed at zero, and
+      `queues replay agent` refused without `--force`
+
+### A host failure no longer destroys every copy
+
+- [x] **A run succeeds only when the artifact is verified off-host** (ADR-075).
+      Dump, validate, upload, confirm the object's size at the destination, and
+      only then advance the recorded last success
+- [x] **One backend that is not one provider.** `aws s3` with an optional
+      endpoint URL reaches AWS, MinIO, R2, Wasabi, B2 and Ceph.
+      `BACKUP_DESTINATION=none` is refused rather than skipped, and a
+      deployment needing something else replaces the script - a file boundary
+      rather than a string something has to `eval`
+- [x] **A shipped systemd timer**, `Persistent=true`, so a host that was down
+      at 02:17 backs up when it returns rather than silently doubling the
+      recovery window
+- [x] **The freshness signal is a durable status file**, because the process
+      that knows the answer has exited by the time anybody scrapes.
+      `wasla_backup_age_seconds` is the age of the last *durable* backup, which
+      is what makes the alert mean something: "newest file in `BACKUP_DIR`"
+      would call a deployment healthy whose uploads had failed for a week
+- [x] **Only the backup container holds object-store credentials**, asserted in
+      both directions by the deployment drift guard. A compromised API must not
+      be able to delete the database and every copy of it
+- [x] **The restore script ships in the backup image.** The drill found it
+      missing: on the day somebody needs it, the application image may not
+      build and the repository may not be reachable
+- [x] Drilled against MinIO with the staging volume **destroyed** before the
+      restore, so what it proves is the remote copy. Fetched onto an empty
+      volume, restored into a fresh database, verified schema, `pgvector`,
+      migration head and rows, then read through the application's own ORM
+
+### Found while working
+
+- [x] **A label inconsistency, caught by a test written for it.** The recovery
+      counter first reported `queue="agent:jobs"` while every depth gauge
+      reported `queue="agent"`, which would have split one queue into two
+      unrelated series. One `label` per queue now, and a test that the registry
+      and the queues agree
+- [x] **Two mutation probes that passed and should not have.** The
+      concurrent-reaper test ran its reapers sequentially, so the second never
+      reached the claim; and the renewal test used one queue object as both
+      worker and reaper, so the worker's held set was emptied as a side effect.
+      Both rewritten, both now catch their probe
+
+Deliberately not done here:
+
+- [ ] **A wedged event loop is still invisible.** Renewal and the heartbeat
+      assert the same thing, so a loop blocked by a synchronous call keeps
+      renewing. Every loop is I/O-bound async, so that is a bug rather than a
+      state - but one this design cannot detect
+- [ ] **No RPO or RTO adopted.** What the schedule implies is written down;
+      what anybody has committed to is nothing, and adopting a target means
+      measuring a restore at production scale
+- [ ] **Media is still not backed up.** It needs object storage first, which
+      is P2

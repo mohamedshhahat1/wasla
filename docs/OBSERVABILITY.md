@@ -107,8 +107,16 @@ asking about.
 | `wasla_queue_inflight_jobs` | gauge | `queue` |
 | `wasla_queue_delayed_jobs` | gauge | `queue` |
 | `wasla_queue_dead_letter_jobs` | gauge | `queue` |
+| `wasla_queue_expired_reservations` | gauge | `queue` |
 | `wasla_queue_oldest_pending_age_seconds` | gauge | `queue` |
-| `wasla_worker_heartbeat_alive` | gauge | `kind` (the seven worker loops) |
+| `wasla_worker_heartbeat_alive` | gauge | `kind` (the eight worker loops) |
+
+`wasla_queue_expired_reservations` is the crash signal. An in-flight job whose
+worker has stopped renewing its lease is one nobody is working on, and before
+leases existed it was indistinguishable from one somebody *was* working on -
+which is how a job could sit in-flight for ever without anything looking wrong.
+A steady zero is healthy; anything sustained means a worker is dying faster
+than recovery is reclaiming.
 
 `oldest_pending_age_seconds` is **absent** for an empty queue rather than zero:
 zero would read as "nothing has been waiting long", which is a claim about
@@ -126,8 +134,20 @@ and age gauges are for, and needing both is why both exist.
 
 | Metric | Type | Labels |
 | --- | --- | --- |
-| `wasla_jobs_total` | counter | `queue`, `outcome` (`succeeded`, `retried`, `dead_lettered`) |
+| `wasla_jobs_total` | counter | `queue`, `outcome` (`succeeded`, `retried`, `dead_lettered`, `recovered`, `quarantined`) |
 | `wasla_job_failures_total` | counter | `queue`, `category` |
+
+The last two outcomes are the crash-recovery pair, and they are separate
+because an operator reads them differently. `recovered` is the system healing
+itself: a worker died holding a job that had done nothing anybody could see, so
+it went back for another attempt. `quarantined` is a job recovery *refused* to
+heal - an agent turn that had already begun talking to Meta, where trying again
+might send a customer a second reply. The first is routine; the second wants a
+person to read the conversation.
+
+Their categories are `worker_crashed` and `uncertain_delivery` respectively, so
+`wasla_job_failures_total{category="uncertain_delivery"}` is the count of
+conversations somebody should look at.
 
 `category` is a `FailureCategory` member — eleven values, fixed in code. Never
 an exception message: provider error text can echo a customer's phone number or
@@ -196,6 +216,40 @@ eleven failure categories, four providers.
 
 ---
 
+## Backups (from a file, not from this process)
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `wasla_backup_last_success_timestamp_seconds` | gauge | — |
+| `wasla_backup_age_seconds` | gauge | — |
+| `wasla_backup_failures_total` | counter | `stage` |
+
+**These do not come from an in-process counter, and they could not.** The
+backup runs in its own container, on its own schedule, and exits; a counter
+incremented inside it vanishes with it. So `backup_postgres.sh` writes a small
+JSON status file after its artifact is verified at the off-host destination,
+and the API reads that file and publishes the age (ADR-075).
+
+**The age is of the last *durable* backup, not the last dump.** That is the
+whole value of the distinction. Alerting on "the newest file in the backup
+directory" would call a deployment healthy whose `pg_dump` succeeds nightly and
+whose upload has been failing for a week - it has plenty of dumps and no
+recovery point. `last_success_at` advances only after the upload is verified,
+so an object store that has been unreachable for two days reads as two days
+stale, which is what it is.
+
+`stage` is one of `dump`, `validate`, `upload`, `retention` - a bounded set the
+script chooses. Never a message and never a bucket name: the status file is
+mounted **read-only** into the API and is exactly the sort of thing that gets
+pasted into a support ticket.
+
+Absent series are meaningful here. No `BACKUP_STATUS_PATH` configured, or no
+status ever written, publishes nothing at all - which says "this deployment
+cannot tell you about its backups", a truer alert than a zero that looks like a
+fresh one.
+
+---
+
 ## The retry safety matrix
 
 Which asynchronous work may be repeated, and what makes it safe. This is the
@@ -209,6 +263,9 @@ type.
 | **Media job** | Yes, 5 attempts | `IDEMPOTENT_RETRY`, 2s→60s | A file already stored is not downloaded again and one already read is not read again. The row is the idempotency key. |
 | **Agent turn, before the provider** | Yes, 3 attempts | `AGENT_RETRY`, 2s→30s | Loading a workspace, reading an allowance and looking up an agent happen inside a transaction that rolls back. Nothing has left the process. |
 | **Agent turn, after the provider** | **No** | `NO_RETRY` | May have reserved an allowance, called OpenAI, or sent a WhatsApp message. The Cloud API takes no idempotency key, so a repeat is a second answer to one question. `_TurnProgress.engaged` is the boundary. |
+| **Agent turn, worker crashed before engaging** | Yes, budget permitting | `AGENT_RETRY` | The reservation records stage `reserved`, which means nothing had left the process. Recovery requeues it as the next attempt (ADR-074). |
+| **Agent turn, worker crashed after engaging** | **No** | quarantine | The reservation records stage `engaged`, written to Redis *before* the HTTP client was built - so the crash cannot take that knowledge with it. Dead-lettered as `uncertain_delivery` for a person to read. |
+| **Ingestion or media, worker crashed** | Yes, budget permitting | `IDEMPOTENT_RETRY` | Safe at any stage: re-ingesting replaces chunks and a file already read is not read again. |
 | **Meta send (HTTP)** | Only 429 and connect errors | `WhatsAppClient`, 3 attempts | Those two prove nothing was accepted. A 5xx or a read timeout may have landed, and a duplicate reply is worse than a failure. Unchanged by this phase. |
 | **Meta media fetch (HTTP)** | Everything transient | `WhatsAppClient`, 3 attempts | A repeated read has no customer-visible effect. |
 | **OpenAI call (HTTP)** | 429, 5xx, transport | `ResponsesClient`, 3 attempts | A duplicated inference costs money and is never seen. `store: false`, so nothing accumulates provider-side. |
@@ -220,6 +277,11 @@ type.
 | **Follow-up sweep** | Next sweep | `FOR UPDATE SKIP LOCKED` | Two replicas step over each other rather than sending the customer the same nudge twice. |
 | **Campaign sweep** | Next sweep | Recipients claimed under lock | The rate limit lives on the row, not in the process, so a restart cannot double it. |
 | **WhatsApp webhook** | Meta retries | `UNIQUE` on Meta's message id | Idempotent event storage; a redelivery stores nothing new. |
+
+**A crash spends an attempt.** A recovered job goes back as `next_attempt`
+carrying its history, so a job that kills a worker every time runs out of
+budget rather than looping for ever - and one already on its last attempt is
+quarantined rather than given a hidden extra one.
 
 **Nothing in this phase changed how money moves.** The Paymob rows are here for
 completeness: recurring collection already had bounded attempts, backoff and an
@@ -264,6 +326,9 @@ against the metrics that actually exist, for whatever an operator points at
 | **Dead letters appearing** | `increase(wasla_queue_dead_letter_jobs[1h]) > 0` | warn | Work stopped being retried. **This is the signal that did not exist before.** |
 | Dead letters accumulating | `wasla_queue_dead_letter_jobs > 20` | **page** | A systemic failure, not a bad job. |
 | Retry storm | `sum(rate(wasla_jobs_total{outcome="retried"}[10m])) > sum(rate(wasla_jobs_total{outcome="succeeded"}[10m]))` for 15m | warn | More work is being retried than finished. |
+| **Reservations expiring** | `sum(wasla_queue_expired_reservations) > 0` for 10m | warn | Workers are dying while holding jobs, faster than recovery reclaims them. |
+| Jobs being recovered | `increase(wasla_jobs_total{outcome="recovered"}[1h]) > 0` | warn | Something is killing workers. The work is not lost; find out why. |
+| **Uncertain deliveries** | `increase(wasla_jobs_total{outcome="quarantined"}[1h]) > 0` | **page** | A worker died mid-send. A customer may or may not have been answered, and only a person can decide. |
 
 ### Providers
 
@@ -278,9 +343,16 @@ against the metrics that actually exist, for whatever an operator points at
 
 ### Backups
 
-Not a metric — the backup runs outside the application, so its signal is the
-scheduler's. Alert on the cron job's exit status, and on the age of the newest
-file in `BACKUP_DIR` exceeding a day and a half.
+| Alert | Condition | Severity | What it means |
+| --- | --- | --- | --- |
+| **Backup stale** | `wasla_backup_age_seconds > 129600` | **page** | No backup has reached off-host storage in 36 hours. The daily schedule allows 24; 36 tolerates one miss and no more. |
+| Backup never succeeded | `absent(wasla_backup_age_seconds)` for 1h | **page** | Either no status path is configured or no backup has ever completed. Misconfiguration, not breakage - a different thing to go and look at. |
+| Backup failing | `increase(wasla_backup_failures_total[24h]) > 0` | warn | Read `stage` for where: `upload` means the database is fine and the copies are not leaving the host. |
+| Upload failing specifically | `increase(wasla_backup_failures_total{stage="upload"}[24h]) > 0` | **page** | Dumps are succeeding and none of them is durable. This is the failure that looks healthy from every other angle. |
+
+Alert on the scheduler too - `systemctl is-failed wasla-backup.service`, or
+whatever the platform offers. The metrics say a backup has not *succeeded*; the
+unit status says whether anything even tried.
 
 ---
 
@@ -330,6 +402,11 @@ through one function.
 - **No per-workspace metrics, and there will not be any.** That is the
   cardinality rule, not an oversight. Per-workspace usage is a database
   question and the platform analytics API answers it.
+- **A blocked event loop looks like a live worker.** Lease renewal and the
+  heartbeat both assert the same thing - the process is up and scheduling - so
+  a loop wedged by a genuinely blocking call keeps renewing and is never
+  reclaimed. Every loop here is I/O-bound async, so that is a bug rather than a
+  state, but it is a bug this design cannot detect.
 - **No dashboards in this repository.** The metric names are stable and
   documented above; what an operator draws with them belongs with the
   monitoring stack they chose.
