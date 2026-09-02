@@ -7,12 +7,26 @@ memberships. There is deliberately no ``tenant_id`` on this table.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Final
 
 from sqlalchemy import Boolean, DateTime, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import PLATFORM_ROLE_TYPE, PlatformRole
+
+# The widths of the three columns an external identity provider can write into,
+# named because something outside this module has to check against them.
+#
+# A validator that repeated the number would be a second copy of a decision, and
+# the failure mode of the two disagreeing is silent: the value passes the check,
+# reaches PostgreSQL, and raises `DataError` - which is not `IntegrityError`, so
+# it escapes the handlers that exist and becomes a 500 (SEC-11). Exporting the
+# constants is what makes "bounded before persistence" checkable rather than
+# remembered.
+MAX_EMAIL_LENGTH: Final = 320
+MAX_FULL_NAME_LENGTH: Final = 200
+MAX_AVATAR_URL_LENGTH: Final = 512
 
 
 class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
@@ -26,11 +40,11 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     __tablename__ = "users"
     __table_args__ = (UniqueConstraint("email", name="uq_users_email"),)
 
-    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    email: Mapped[str] = mapped_column(String(MAX_EMAIL_LENGTH), nullable=False)
     # Set when a password is chosen: at registration, or when an invitation is
     # accepted. Hashing arrives with authentication in Phase 2.
     hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    full_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    full_name: Mapped[str | None] = mapped_column(String(MAX_FULL_NAME_LENGTH), nullable=True)
     # An avatar the product can render, wherever it came from. Deliberately a
     # column on the account rather than on `user_identities`: what the interface
     # needs is "this person's picture", and a field that had to be resolved by
@@ -41,7 +55,7 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     # anything longer before it reaches here. Nothing renders this without the
     # verifier having already established it is an https URL - the column holds
     # no other kind of value, and nothing else writes it.
-    avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(MAX_AVATAR_URL_LENGTH), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # When somebody last proved they could read mail at `email` above.
     #

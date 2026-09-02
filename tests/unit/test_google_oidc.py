@@ -19,13 +19,18 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from app.db.models.identity import MAX_PROVIDER_SUBJECT_LENGTH
+from app.db.models.user import MAX_AVATAR_URL_LENGTH, MAX_EMAIL_LENGTH, MAX_FULL_NAME_LENGTH
 from app.integrations.google.oidc import (
     GOOGLE_ISSUERS,
     JWKS_FRESH_SECONDS,
     JWKS_MIN_REFRESH_SECONDS,
     JWKS_STALE_SECONDS,
+    MAX_EMAIL_CLAIM_LENGTH,
     MAX_JWKS_BYTES,
+    MAX_NAME_LENGTH,
     MAX_PICTURE_URL_LENGTH,
+    MAX_SUBJECT_LENGTH,
     GoogleIdTokenVerifier,
     GoogleKeyRing,
     GoogleKeysUnavailableError,
@@ -597,3 +602,157 @@ async def test_a_picture_at_the_length_limit_is_kept():
     verifier, _ = _verifier()
     claims = await verifier.verify(id_token=_sign(_claims(picture=exact)), nonce=NONCE)
     assert claims.picture == exact
+
+
+# --- Claim bounds: what will not fit, and what happens to it (SEC-11) --------
+#
+# Google's own validation constrains all of these, so none is reachable by an
+# ordinary account. That is a statement about Google's input validation, not
+# about ours: an ID token is a signed assertion of whatever the account says,
+# and `picture` in the section above is the same argument already accepted once.
+#
+# The two answers are deliberately different, and the difference is the point.
+# An identifier that will not fit is refused, because shortening one merges two
+# identities. Decoration that will not fit is shortened, because refusing it
+# would deny a login over a display name.
+
+
+def test_the_bounds_are_the_columns_and_not_a_second_copy_of_them():
+    """The check and the column must be one number.
+
+    Two numbers that are meant to be equal and are written down separately are
+    a latent 500: the day the column changes, the validator keeps passing
+    values the column will refuse, and `DataError` is not `IntegrityError`, so
+    nothing catches it. This is the assertion that makes the import load-bearing
+    rather than decorative.
+    """
+    assert MAX_SUBJECT_LENGTH == MAX_PROVIDER_SUBJECT_LENGTH
+    assert MAX_EMAIL_CLAIM_LENGTH == MAX_EMAIL_LENGTH
+    assert MAX_NAME_LENGTH == MAX_FULL_NAME_LENGTH
+    assert MAX_PICTURE_URL_LENGTH == MAX_AVATAR_URL_LENGTH
+
+
+async def test_an_oversized_subject_is_refused_rather_than_shortened():
+    """The one claim where truncation would be an authentication bypass.
+
+    The subject is what every login looks an account up by. Two subjects
+    agreeing on their first `MAX_SUBJECT_LENGTH` characters, shortened to fit,
+    become one stored value and therefore one account - so the token is
+    declined instead.
+    """
+    verifier, _ = _verifier()
+
+    reason = await _reject(verifier, _sign(_claims(sub="9" * (MAX_SUBJECT_LENGTH + 1))))
+
+    assert reason == "subject_too_long"
+
+
+async def test_a_subject_at_the_limit_is_accepted_whole():
+    """The boundary, and that nothing was trimmed on the way through."""
+    exact = "9" * MAX_SUBJECT_LENGTH
+    verifier, _ = _verifier()
+
+    claims = await verifier.verify(id_token=_sign(_claims(sub=exact)), nonce=NONCE)
+
+    assert claims.subject == exact
+
+
+async def test_two_oversized_subjects_cannot_be_shortened_onto_one_identity():
+    """The collision the refusal exists to prevent, written as a test.
+
+    Two distinct Google accounts sharing a long common prefix. Under truncation
+    both would store the same `provider_subject`, and the second would sign in
+    as the first. Neither is accepted, so there is nothing to collide.
+    """
+    shared = "9" * MAX_SUBJECT_LENGTH
+    verifier, _ = _verifier()
+
+    first = await _reject(verifier, _sign(_claims(sub=shared + "1")))
+    second = await _reject(verifier, _sign(_claims(sub=shared + "2")))
+
+    assert first == second == "subject_too_long"
+
+
+async def test_an_oversized_email_is_refused_rather_than_shortened():
+    """At enrolment the address *is* the account, and the collision check
+    compares it - so a shortened one could be matched against somebody else's."""
+    verifier, _ = _verifier()
+    oversized = "e" * (MAX_EMAIL_CLAIM_LENGTH - len("@example.com") + 1) + "@example.com"
+    assert len(oversized) > MAX_EMAIL_CLAIM_LENGTH
+
+    assert await _reject(verifier, _sign(_claims(email=oversized))) == "email_too_long"
+
+
+async def test_an_email_is_measured_in_the_form_it_will_be_stored_in():
+    """Lower-casing can lengthen a string, and the stored form is lower-cased.
+
+    `str.lower()` maps U+0130 to two characters, so an address inside the bound
+    as written is outside it by the time `normalise_email` is done with it.
+    Measuring the value as it arrives would let exactly that through to the
+    column.
+    """
+    verifier, _ = _verifier()
+    grows = "İ" * (MAX_EMAIL_CLAIM_LENGTH - len("@example.com"))
+    address = grows + "@example.com"
+    assert len(address) <= MAX_EMAIL_CLAIM_LENGTH
+    assert len(address.lower()) > MAX_EMAIL_CLAIM_LENGTH
+
+    assert await _reject(verifier, _sign(_claims(email=address))) == "email_too_long"
+
+
+async def test_an_oversized_name_is_shortened_and_the_login_still_succeeds():
+    """The opposite call, for the reason `picture` degrades rather than raising.
+
+    Nothing is authorized by a display name, no lookup compares one, and no
+    column is unique on one - so shortening cannot merge two people. Refusing
+    would let an unusual Google profile name lock somebody out of a product
+    they have paid for, which is a real cost paid to prevent nothing.
+    """
+    verifier, _ = _verifier()
+
+    claims = await verifier.verify(
+        id_token=_sign(_claims(name="N" * (MAX_NAME_LENGTH + 300))),
+        nonce=NONCE,
+    )
+
+    assert len(claims.full_name or "") == MAX_NAME_LENGTH
+    # And the identity is untouched by any of it.
+    assert claims.subject == SUBJECT
+    assert claims.email == EMAIL
+
+
+async def test_a_name_at_the_limit_is_kept_whole():
+    """The boundary, so the cap cannot quietly become off-by-one."""
+    exact = "N" * MAX_NAME_LENGTH
+    verifier, _ = _verifier()
+
+    claims = await verifier.verify(id_token=_sign(_claims(name=exact)), nonce=NONCE)
+
+    assert claims.full_name == exact
+
+
+async def test_a_name_is_stripped_before_it_is_measured():
+    """Whitespace is not content, and counting it would shorten a name that fits."""
+    verifier, _ = _verifier()
+    padded = "   " + "N" * MAX_NAME_LENGTH + "   "
+
+    claims = await verifier.verify(id_token=_sign(_claims(name=padded)), nonce=NONCE)
+
+    assert claims.full_name == "N" * MAX_NAME_LENGTH
+
+
+async def test_a_refusal_over_a_length_carries_no_token_material():
+    """`reason` is a category. It must not become a way to read the claim back.
+
+    The reason travels into logs and the audit trail, and a value echoed there
+    is a second copy of provider data in a place people read.
+    """
+    verifier, _ = _verifier()
+    subject = "9" * (MAX_SUBJECT_LENGTH + 1)
+
+    with pytest.raises(GoogleTokenInvalidError) as caught:
+        await verifier.verify(id_token=_sign(_claims(sub=subject)), nonce=NONCE)
+
+    rendered = f"{caught.value.reason} {caught.value}"
+    assert subject not in rendered
+    assert "eyJ" not in rendered

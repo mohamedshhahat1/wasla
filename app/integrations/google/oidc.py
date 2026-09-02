@@ -55,6 +55,8 @@ from jwt.exceptions import (
 
 from app.core.logging import get_logger
 from app.core.net import UnsafeUrlError, build_guarded_client
+from app.db.models.identity import MAX_PROVIDER_SUBJECT_LENGTH
+from app.db.models.user import MAX_AVATAR_URL_LENGTH, MAX_EMAIL_LENGTH, MAX_FULL_NAME_LENGTH
 
 logger = get_logger(__name__)
 
@@ -106,7 +108,22 @@ MAX_JWKS_BYTES: Final = 64 * 1024
 # at the template means the value cannot be rendered dangerously by a caller
 # that forgets, including one written later.
 _PICTURE_SCHEMES: Final = frozenset({"https"})
-MAX_PICTURE_URL_LENGTH: Final = 512
+MAX_PICTURE_URL_LENGTH: Final = MAX_AVATAR_URL_LENGTH
+
+# The other three claims, bounded against the columns that will hold them
+# (SEC-11). Google constrains these itself, so nothing here is reachable by an
+# ordinary account - but "the issuer would not do that" is a statement about
+# Google's validation rather than about ours, and an ID token is a signed
+# assertion of whatever the account says. `picture` already had a bound; the
+# rest reached PostgreSQL unchecked and raised `DataError`, which is not
+# `IntegrityError`, so it escaped the handler in `_enrol` and became a 500.
+#
+# **The widths are imported, never repeated.** A number copied here would be a
+# second copy of a decision, and the two disagreeing fails silently in the
+# direction that matters: the value passes, reaches the column, and 500s.
+MAX_SUBJECT_LENGTH: Final = MAX_PROVIDER_SUBJECT_LENGTH
+MAX_EMAIL_CLAIM_LENGTH: Final = MAX_EMAIL_LENGTH
+MAX_NAME_LENGTH: Final = MAX_FULL_NAME_LENGTH
 
 
 class GoogleTokenInvalidError(Exception):
@@ -463,10 +480,27 @@ class GoogleIdTokenVerifier:
         compared against `True` and not evaluated for truthiness: the string
         "false" is truthy in Python, and a provider that sent one would
         otherwise be read as having verified the address.
+
+        Lengths are checked here rather than left to the columns, and the two
+        answers differ by what the claim is *for*. An identifier that will not
+        fit is refused; decoration that will not fit is shortened. The
+        distinction is not stylistic - shortening an identifier merges two
+        identities, and refusing decoration denies a login over a profile
+        photograph. Each branch says which it is and why.
         """
         subject = payload.get("sub")
         if not isinstance(subject, str) or not subject.strip():
             raise GoogleTokenInvalidError("missing_subject")
+        subject = subject.strip()
+        if len(subject) > MAX_SUBJECT_LENGTH:
+            # **Refused, never shortened.** The subject is the identity key:
+            # every login looks an account up by it, and two subjects that
+            # agree on their first 255 characters would be shortened onto one
+            # stored value and resolve to one account. Truncating an identifier
+            # to make it fit is how a length bound becomes an authentication
+            # bypass, so the only safe answer for an identifier we cannot store
+            # whole is to decline the token.
+            raise GoogleTokenInvalidError("subject_too_long")
 
         email = payload.get("email")
         if not isinstance(email, str) or not email.strip():
@@ -474,15 +508,38 @@ class GoogleIdTokenVerifier:
             # record a verification - is about an address. A token without one
             # cannot be acted on, so it is refused rather than half-handled.
             raise GoogleTokenInvalidError("missing_email")
+        email = email.strip()
+        # Measured lower-cased because that is the form `normalise_email`
+        # stores, and lower-casing can lengthen a string - `str.lower()` maps
+        # U+0130 to two characters. Measuring the value as written would let an
+        # address inside the bound become one outside it on the way to the
+        # column.
+        if len(email.lower()) > MAX_EMAIL_CLAIM_LENGTH:
+            # Refused for the reason the subject is. At enrolment the address
+            # *is* the account, and it is what the collision check compares, so
+            # a shortened one could be matched against somebody else's.
+            raise GoogleTokenInvalidError("email_too_long")
 
         full_name = payload.get("name")
         if not isinstance(full_name, str) or not full_name.strip():
             full_name = None
+        else:
+            # **Shortened, not refused** - the opposite call to the two above,
+            # for the reason `_safe_picture` degrades rather than raising.
+            # Nothing is authorized by a display name, no lookup compares one,
+            # and no column is unique on one, so shortening cannot collide two
+            # people onto one account. Refusing would let an unusual Google
+            # profile name lock somebody out of a product they have paid for,
+            # which is a real cost paid to prevent nothing.
+            #
+            # Shortened rather than dropped, because a name cut to fit is still
+            # a name and `None` is an account with nobody's name on it.
+            full_name = full_name.strip()[:MAX_NAME_LENGTH]
 
         return GoogleIdentityClaims(
-            subject=subject.strip(),
-            email=email.strip(),
+            subject=subject,
+            email=email,
             email_verified=payload.get("email_verified") is True,
-            full_name=full_name.strip() if full_name else None,
+            full_name=full_name,
             picture=_safe_picture(payload.get("picture")),
         )

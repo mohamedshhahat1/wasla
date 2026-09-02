@@ -45,11 +45,12 @@ from app.core.config import Settings
 from app.core.dependencies import SESSION_STATE_ATTRIBUTE, get_session
 from app.core.security import create_access_token
 from app.db.models.audit import AuditAction, AuditLog
-from app.db.models.identity import FederatedIdentity, IdentityProvider
-from app.db.models.user import User
+from app.db.models.identity import MAX_PROVIDER_SUBJECT_LENGTH, FederatedIdentity, IdentityProvider
+from app.db.models.user import MAX_EMAIL_LENGTH, MAX_FULL_NAME_LENGTH, User
 from app.integrations.google.client import GoogleOAuthClient
 from app.integrations.google.oidc import GoogleKeyRing
 from app.main import create_app
+from app.services.google_auth_service import GOOGLE_FAILED
 from tests.conftest import AllowingEntitlements, FakeDependency
 
 pytestmark = pytest.mark.integration
@@ -63,6 +64,10 @@ CLIENT_ID = "1234567890-testclient.apps.googleusercontent.com"
 REDIRECT_URI = "https://app.wasla.test/auth/google/callback"
 KID = "endpoint-test-key"
 ISSUER = "https://accounts.google.com"
+
+# The one message every failed Google authorization gets, imported rather than
+# copied so a test cannot pass against a message the service no longer sends.
+GOOGLE_FAILED_MESSAGE = GOOGLE_FAILED
 
 SUBJECT = "109876543210987654321"
 GOOGLE_EMAIL = "google-person@example.com"
@@ -1001,3 +1006,127 @@ async def test_the_stored_flow_is_opaque(http: AsyncClient, google_app: FastAPI)
         decoded = json.dumps(json.loads(payload)) if payload.startswith("{") else payload
         assert GOOGLE_EMAIL not in decoded
         assert base64.b64encode(GOOGLE_EMAIL.encode()).decode() not in decoded
+
+
+# --- Claim bounds at the storage boundary (SEC-11) ---------------------------
+#
+# `test_google_oidc.py` proves the verifier bounds these claims. This section
+# proves the thing that actually went wrong: an unbounded claim reached
+# PostgreSQL, raised `DataError` - which is not `IntegrityError`, so the
+# `except` in `_enrol` did not catch it - and the login became a 500. These are
+# the same tests asked at the boundary the defect lived at.
+
+
+async def test_an_oversized_name_signs_in_and_stores_a_value_the_column_accepts(
+    http: AsyncClient,
+    exchange: _Exchange,
+    db_session: AsyncSession,
+) -> None:
+    """The 500 is gone and the login is not: a name is decoration.
+
+    Before the bound this insert raised `StringDataRightTruncationError` and the
+    caller got an internal error for owning an unusual Google display name.
+    """
+    state, nonce = await _start(http, "/auth/google/authorize")
+    exchange.id_token = _id_token(nonce=nonce, name="N" * (MAX_FULL_NAME_LENGTH + 400))
+
+    response = await http.post(f"{API}/auth/google/callback", json={"code": "c", "state": state})
+
+    assert response.status_code == 200, response.text
+    user = await db_session.scalar(select(User).where(User.email == GOOGLE_EMAIL))
+    assert user is not None
+    assert user.full_name is not None
+    assert len(user.full_name) == MAX_FULL_NAME_LENGTH
+
+
+async def test_an_oversized_subject_is_refused_and_creates_nothing(
+    http: AsyncClient,
+    exchange: _Exchange,
+    db_session: AsyncSession,
+) -> None:
+    """A 401 with no account and no identity behind it.
+
+    The subject is the identity key, so it is refused rather than shortened -
+    and the assertion that matters is the second one. A refusal that had already
+    written a half-account would have moved the problem rather than fixed it.
+    """
+    state, nonce = await _start(http, "/auth/google/authorize")
+    exchange.id_token = _id_token(nonce=nonce, sub="9" * (MAX_PROVIDER_SUBJECT_LENGTH + 1))
+
+    response = await http.post(f"{API}/auth/google/callback", json={"code": "c", "state": state})
+
+    assert response.status_code == 401
+    # The single message every failed authorization gets: which check refused is
+    # not something an unauthenticated caller may learn.
+    assert response.json()["error"]["message"] == GOOGLE_FAILED_MESSAGE
+    assert await db_session.scalar(select(User).where(User.email == GOOGLE_EMAIL)) is None
+    assert await _identities(db_session) == []
+
+
+async def test_an_oversized_address_is_refused_and_creates_nothing(
+    http: AsyncClient,
+    exchange: _Exchange,
+    db_session: AsyncSession,
+) -> None:
+    """The third instance of the same class, which the audit did not name.
+
+    `users.email` is 320 and the claim was unbounded, so an over-long address
+    reached the column exactly as the name and the subject did. Refused rather
+    than shortened: at enrolment the address is the account, and it is what the
+    collision check compares.
+    """
+    state, nonce = await _start(http, "/auth/google/authorize")
+    oversized = "e" * (MAX_EMAIL_LENGTH - len("@example.com") + 1) + "@example.com"
+    exchange.id_token = _id_token(nonce=nonce, email=oversized)
+
+    response = await http.post(f"{API}/auth/google/callback", json={"code": "c", "state": state})
+
+    assert response.status_code == 401
+    assert await _identities(db_session) == []
+
+
+async def test_an_oversized_name_on_a_later_login_cannot_corrupt_an_account(
+    http: AsyncClient,
+    exchange: _Exchange,
+    db_session: AsyncSession,
+) -> None:
+    """The update path, not only enrolment.
+
+    `_refresh_profile` follows Google's name on every login, so an existing
+    account is a second place an unbounded claim reaches a column - and the one
+    where the damage would land on somebody who already had a working account.
+    """
+    state, nonce = await _start(http, "/auth/google/authorize")
+    exchange.id_token = _id_token(nonce=nonce)
+    first = await http.post(f"{API}/auth/google/callback", json={"code": "c", "state": state})
+    assert first.status_code == 200
+
+    state, nonce = await _start(http, "/auth/google/authorize")
+    exchange.id_token = _id_token(nonce=nonce, name="R" * (MAX_FULL_NAME_LENGTH + 400))
+    second = await http.post(f"{API}/auth/google/callback", json={"code": "c2", "state": state})
+
+    assert second.status_code == 200
+    db_session.expire_all()
+    user = await db_session.scalar(select(User).where(User.email == GOOGLE_EMAIL))
+    assert user is not None
+    assert user.full_name == "R" * MAX_FULL_NAME_LENGTH
+    # The account is otherwise exactly as it was: one identity, same address.
+    assert user.email == GOOGLE_EMAIL
+    assert len(await _identities(db_session)) == 1
+
+
+async def test_a_refused_length_puts_no_provider_data_in_the_response(
+    http: AsyncClient,
+    exchange: _Exchange,
+) -> None:
+    """The refusal must not echo the claim back, or the error becomes a mirror
+    for whatever the token carried."""
+    state, nonce = await _start(http, "/auth/google/authorize")
+    subject = "9" * (MAX_PROVIDER_SUBJECT_LENGTH + 40)
+    exchange.id_token = _id_token(nonce=nonce, sub=subject)
+
+    response = await http.post(f"{API}/auth/google/callback", json={"code": "c", "state": state})
+
+    assert subject not in response.text
+    assert exchange.id_token not in response.text
+    assert "eyJ" not in response.text

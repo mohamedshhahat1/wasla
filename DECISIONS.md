@@ -2037,3 +2037,67 @@ The exception type is recorded in the log and its message is not.
 `ConnectionError` from redis-py carries the address it failed to reach, and a
 configured URL may carry a password; this is also the log line most likely to
 be pasted into a ticket.
+
+## ADR-065 — An Identifier That Will Not Fit Is Refused; Decoration Is Shortened
+
+Date:
+2026-09-02
+
+Status:
+Accepted
+
+Decision:
+`GoogleIdTokenVerifier._extract` bounds every claim it returns against the
+column that will store it. `sub` and `email` are **refused** when they exceed
+their bound; `name` is **shortened**; `picture` already degraded to `None` and
+is unchanged. The four widths are imported from the models rather than written
+down again, and a test asserts each pair is equal.
+
+Context:
+Only `picture` was bounded. `name` (200), `sub` (255) and `email` (320) reached
+PostgreSQL unchecked, where an over-long value raises `DataError` — which is
+not `IntegrityError`, so the `except` in `_enrol` did not catch it and the
+login became a 500 (SEC-11). The audit named the first two; the address is a
+third instance of the same class, found by tracing the claim flow rather than
+by implementing the finding as written.
+
+None of this is reachable by an ordinary Google account, because Google
+constrains these fields itself. That is a statement about Google's input
+validation, not about ours: an ID token is a signed assertion of whatever the
+account says, and `_safe_picture` already accepted that argument once.
+
+Reason:
+**Shortening an identifier is an authentication bypass, not a tidy-up.** The
+subject is what every login looks an account up by. Two subjects agreeing on
+their first 255 characters would be shortened onto one stored `provider_subject`
+and resolve to one account, so the second person would sign in as the first. The
+same argument covers the address: at enrolment it *is* the account, and it is
+what the collision check compares. For a value we cannot store whole, declining
+the token is the only answer that cannot merge two people.
+
+**Refusing decoration would be a cost paid to prevent nothing.** Nothing is
+authorized by a display name, no lookup compares one, and no column is unique
+on one — so shortening cannot collide anybody. Refusing would let an unusual
+Google profile name lock somebody out of a product they have paid for, which is
+exactly the reasoning `_safe_picture` gives for degrading rather than raising.
+Shortened rather than dropped, because a name cut to fit is still a name and
+`None` is an account with nobody's name on it.
+
+**The address is measured lower-cased.** `normalise_email` stores the
+lower-cased form and `str.lower()` can lengthen a string — U+0130 maps to two
+characters — so measuring the value as written would let an address inside the
+bound become one outside it on the way to the column.
+
+Consequences:
+The bounds are imports, not literals. Two numbers meant to be equal and written
+down separately are a latent 500: the day a column changes, a copied validator
+keeps passing values the column will refuse. `MAX_PICTURE_URL_LENGTH` is now
+`MAX_AVATAR_URL_LENGTH` for the same reason, which removes a coincidence that
+had been holding.
+
+The update path is covered as well as enrolment. `_refresh_profile` follows
+Google's name on every login, so an existing account was a second place an
+unbounded claim reached a column — and the one where the damage would land on
+somebody who already had a working account.
+
+No migration: every bound is the width the schema already has.
