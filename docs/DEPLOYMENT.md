@@ -394,6 +394,14 @@ Deploy the previous digest. The procedure, and why a rollback must not run migra
 
 Migrations run as an explicit step before the new application version serves traffic; schema is never mutated manually. Readiness gates traffic on dependency availability while liveness stays independent of PostgreSQL. Health, logging, and observability details are in [../ARCHITECTURE.md](../ARCHITECTURE.md).
 
+### Migrations 0039 and 0040 rebuild indexes concurrently
+
+Both step outside Alembic's transaction to build `CONCURRENTLY`, because both touch a table that is written on the path answering customers: `document_chunks` during ingestion, `usage_events` on every metered action. A plain `CREATE INDEX` there blocks inserts for the length of the build, which blocks replies.
+
+`0040` drops and recreates `ix_usage_events_tenant_id_event_type_occurred_at` to add INCLUDE columns, because PostgreSQL cannot add them to an existing index. The drop comes first on purpose: holding both would need room for two copies, and the window in which neither exists costs the entitlement check a bitmap scan rather than an answer — the query still works, it is briefly the speed it was yesterday.
+
+The same `indisvalid` check below applies to either index if a build is interrupted.
+
 ### Migration 0039 builds a vector index, and it is not instant
 
 `ix_document_chunks_embedding_hnsw` is built `CONCURRENTLY`, so document ingestion keeps working while it runs, but the migration step itself will sit there: measured at ~14 minutes for 77,000 chunks, producing a 597MB index (roughly 8KB per chunk, which is the vectors themselves). Budget for it in the deployment window and do not kill it — a cancelled concurrent build leaves an index marked `INVALID`, which the planner ignores while it keeps occupying the disk.

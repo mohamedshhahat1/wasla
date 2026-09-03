@@ -127,11 +127,11 @@ async def test_the_index_carries_the_columns_the_sum_needs(db_connection):
 async def test_the_period_sum_is_answered_from_the_index_alone(db_session):
     """The plan, not the timing.
 
-    The narrower indexes are dropped and sequential scans refused, inside a
-    savepoint the test rolls back. On a few hundred rows PostgreSQL prefers
-    whichever index is smallest and filters the rest, and it is right to - what
-    is under test is not which plan it picks at this size but whether this
-    index *can* answer without the table. `Index Only Scan` is PostgreSQL
+    Every other index on the table is dropped and sequential scans refused,
+    inside a savepoint the test rolls back. On a few hundred rows PostgreSQL
+    prefers whichever index is narrowest and filters the rest, and it is right
+    to - what is under test is not which plan it picks at this size but whether
+    this index *can* answer without the table. `Index Only Scan` is PostgreSQL
     saying it can: it will not choose that node unless every column the query
     reads is available from the index, so removing the INCLUDE columns leaves a
     plain `Index Scan` and fails this.
@@ -146,16 +146,30 @@ async def test_the_period_sum_is_answered_from_the_index_alone(db_session):
     await _seed(db_session, tenant=tenant, offset=0)
 
     async with db_session.begin_nested():
-        await db_session.execute(text("DROP INDEX ix_usage_events_tenant_id_occurred_at"))
-        await db_session.execute(text("DROP INDEX ix_usage_events_tenant_id"))
-        # The primary key too, and it is not paranoia: a full scan of the
-        # narrow `id` index and a filter is a plan PostgreSQL will choose over
-        # a wider index on a few hundred rows, and whether it does depends on
-        # statistics this fixture does not control - so the same assertion
-        # passed alone and failed in a full run.
-        await db_session.execute(
-            text("ALTER TABLE usage_events DROP CONSTRAINT pk_usage_events CASCADE")
-        )
+        # Every other index goes, read off the catalogue rather than listed
+        # here. Listing them is how this test failed twice: on a few hundred
+        # rows PostgreSQL will happily range-scan the narrowest index it can
+        # find and filter the rest, and each time the answer was a different
+        # index I had not thought to drop - the primary key once, and
+        # `ix_usage_events_occurred_at` after that. Asking the catalogue leaves
+        # nothing to forget, and it keeps working when somebody adds the next
+        # index.
+        others = (
+            await db_session.execute(
+                text(
+                    "SELECT indexname FROM pg_indexes"
+                    " WHERE tablename = 'usage_events' AND indexname <> :keep"
+                ),
+                {"keep": INDEX},
+            )
+        ).scalars()
+        for name in others:
+            if name == "pk_usage_events":
+                await db_session.execute(
+                    text("ALTER TABLE usage_events DROP CONSTRAINT pk_usage_events CASCADE")
+                )
+            else:
+                await db_session.execute(text(f"DROP INDEX {name}"))
         await db_session.execute(text("SET LOCAL enable_seqscan = off"))
         plan = "\n".join(
             row[0]

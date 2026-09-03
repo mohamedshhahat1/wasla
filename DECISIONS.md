@@ -3375,6 +3375,18 @@ workspace's committed work. Per claim, a failure is contained to its own
 workspace and the rest of the pass stands. What still commits together is what
 always had to: a status change, its audit row and its notice (ADR-042).
 
+**One lock is deliberately held across an HTTP call, and it is the invoice's
+own.** `_collect_one` claims an invoice and then reaches Paymob inside that
+transaction. That is not an oversight and it is not avoidable: the lock *is* the
+mutual exclusion for "one attempt reaches the provider". Releasing it before the
+request would leave only the payment row's `UNIQUE(tenant_id, idempotency_key)`,
+which catches a duplicate after the money has moved rather than instead of it —
+demonstrated, by unlocking the re-claim and watching a charge duplicate once the
+key is bypassed too. What changed is the scope: the lock is held for the length
+of *that invoice's* request, where before one transaction held every claimed row
+for the sum of every request in the pass, including requests made on behalf of
+other workspaces.
+
 **Why the claim is taken twice.** A batch query claims ids and commits, which
 releases its locks; the transaction that acts re-claims by id with the same
 eligibility predicate. Acting on a row whose lock has been released is the
