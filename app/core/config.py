@@ -416,6 +416,25 @@ class Settings(BaseSettings):
     # How often the retention sweep runs. Daily by default: retention is a date,
     # and sweeping harder would be querying constantly to learn nothing.
     media_retention_poll_seconds: float = Field(default=86_400.0, gt=0)
+    # How long an upload intent must sit untouched before reconciliation treats
+    # it as abandoned rather than in progress (ADR-087).
+    #
+    # Fifteen minutes, and the number is chosen from the failure it must not
+    # cause. Too short and a pass verifies an object the original writer is
+    # still putting - finds it absent, abandons the row, and then has the
+    # finalisation land on a row it just changed. Too long and an attachment
+    # stays invisible. Fifteen minutes is far longer than any single write can
+    # take against a store on the deployment network (`MEDIA_S3_TIMEOUT_SECONDS`
+    # is thirty seconds) and short enough that a colleague reloading a
+    # conversation sees the file within the hour.
+    media_upload_grace_seconds: float = Field(default=900.0, gt=0)
+    # How often reconciliation looks. Minutes rather than days, because unlike
+    # retention the thing it finds is a file somebody is waiting for.
+    media_upload_recovery_poll_seconds: float = Field(default=300.0, gt=0)
+    # How many intents one pass settles. Each costs a HEAD and, if the object is
+    # there, one bounded GET - so this is the ceiling on how much a single pass
+    # reads back from the store.
+    media_upload_recovery_batch_size: int = Field(default=100, gt=0, le=5_000)
     # Larger than most of what WhatsApp permits, so the cap bites on video and
     # on nothing else. A file over it is recorded as skipped rather than
     # downloaded: the point is not to pay to move ninety megabytes in order to

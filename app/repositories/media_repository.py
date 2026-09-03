@@ -256,3 +256,67 @@ class PlatformMediaRepository(BaseRepository[MessageMedia]):
             .where(MessageMedia.storage_state == MediaStorageState.PURGING)
         )
         return int((await self._session.execute(statement)).scalar_one())
+
+    async def claim_stale_uploads(
+        self,
+        *,
+        cutoff: datetime,
+        limit: int,
+    ) -> list[MessageMedia]:
+        """Take ownership of upload intents whose write never finished.
+
+        `FOR UPDATE SKIP LOCKED`, so two reconcilers divide the work instead of
+        both verifying and both finalising the same object. The lock is what
+        makes the claim; there is no claim *column* here, unlike retention,
+        because unlike a purge this decision is cheap to repeat and the rows
+        are few - a healthy deployment has none. Adding a column would mean a
+        write before the work and a second write to release it, on a query that
+        normally returns nothing.
+
+        `cutoff` is the grace period: an intent younger than it belongs to a
+        request or job that is very probably still running, and reconciling
+        underneath it would race the finalisation it is about to do.
+
+        The lock is held only for the length of the claiming transaction, which
+        contains no network call. Verification happens afterwards, against a
+        connection this is not holding (ADR-080).
+        """
+        statement = (
+            select(MessageMedia)
+            .where(
+                MessageMedia.storage_state == MediaStorageState.PENDING,
+                MessageMedia.upload_started_at < cutoff,
+            )
+            .order_by(MessageMedia.upload_started_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        return list((await self._session.execute(statement)).scalars().all())
+
+    async def pending_upload_count(self) -> int:
+        """How many uploads are in flight or stuck, across every workspace.
+
+        A level, published like `pending_purge_count` is. Zero is the healthy
+        reading; a number that stays above it across passes is a store that is
+        accepting neither writes nor questions about them.
+        """
+        statement = (
+            select(func.count())
+            .select_from(MessageMedia)
+            .where(MessageMedia.storage_state == MediaStorageState.PENDING)
+        )
+        return int((await self._session.execute(statement)).scalar_one())
+
+    async def mismatched_count(self) -> int:
+        """How many objects were found to disagree with the row that owns them.
+
+        Never zero by accident. Anything above zero is an object in the bucket
+        that Wasla wrote a key for and did not write the contents of, and it
+        needs a person.
+        """
+        statement = (
+            select(func.count())
+            .select_from(MessageMedia)
+            .where(MessageMedia.storage_state == MediaStorageState.MISMATCHED)
+        )
+        return int((await self._session.execute(statement)).scalar_one())

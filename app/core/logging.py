@@ -172,6 +172,17 @@ def configure_logging(settings: Settings) -> None:
     # Access logs are emitted by RequestContextMiddleware in our own format.
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
+    # httpx logs every request at INFO, with its full URL. For most clients
+    # that is a provider endpoint and harmless; for the object store the URL
+    # *is* the bucket name, the tenant identifier and the object key, so at the
+    # default level every media read, write, HEAD and delete would put a
+    # customer's file path in the log (ADR-087). Wasla records its own outbound
+    # calls - `wasla_provider_requests_total`, the provider spans, and a warning
+    # on every failure - so what is lost here is a duplicate line, and what is
+    # kept is that a log can be read by somebody who should not learn which
+    # workspace received which file.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)

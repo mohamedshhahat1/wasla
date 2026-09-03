@@ -33,6 +33,7 @@ from app.workers.runner import (
     run,
     selected_kinds,
 )
+from app.workers.upload_worker import UploadRecoveryWorker
 from tests.fake_queue_redis import FakeQueueRedis
 from tests.fakes import as_database, as_redis_client
 
@@ -148,6 +149,11 @@ def test_each_kind_builds_its_own_worker(settings: Settings) -> None:
         # with nothing to say so. It removes nothing until MEDIA_RETENTION_DAYS
         # is set, but its reconciliation pass still has to run (ADR-078).
         RetentionWorker,
+        # And upload recovery for the sharpest version of that rule. A
+        # deployment running it nowhere has attachments sitting in the bucket
+        # that no query will ever finish - the process that would have finished
+        # them is the one that died (ADR-087).
+        UploadRecoveryWorker,
     ]
 
 

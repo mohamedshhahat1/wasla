@@ -47,6 +47,7 @@ from app.workers.media_worker import MediaWorker
 from app.workers.queue import LEASE_RENEWAL_FRACTION, ReliableQueue
 from app.workers.recovery import RecoveryWorker
 from app.workers.retention_worker import RetentionWorker
+from app.workers.upload_worker import UploadRecoveryWorker
 
 logger = get_logger(__name__)
 
@@ -59,6 +60,7 @@ BILLING: Final = "billing"
 EMAIL: Final = "email"
 RECOVERY: Final = "recovery"
 RETENTION: Final = "retention"
+UPLOADS: Final = "uploads"
 # Media comes before agent deliberately. It is the order the work flows in -
 # a file is read, then answered - and the order the log lines appear in at
 # startup, which is worth having match. Billing and email come last: billing
@@ -76,6 +78,12 @@ RETENTION: Final = "retention"
 # and it removes nothing, which is the intended default - but the loop still
 # has to run, because its reconciliation pass is what finishes rows an earlier
 # sweep claimed and could not complete (ADR-078).
+#
+# Uploads is last, and like recovery it is a loop a deployment must decide to
+# leave out rather than forget to include. It finishes object writes that were
+# interrupted between the store and the database, and a deployment running it
+# nowhere has attachments that are in the bucket and invisible, with nothing
+# looking for them (ADR-087).
 ALL_KINDS: Final = (
     MEDIA,
     AGENT,
@@ -86,6 +94,7 @@ ALL_KINDS: Final = (
     EMAIL,
     RECOVERY,
     RETENTION,
+    UPLOADS,
 )
 
 KINDS_VARIABLE: Final = "WORKER_KINDS"
@@ -166,6 +175,8 @@ def build_workers(
             workers.append(RecoveryWorker(redis=redis, settings=settings))
         elif kind == RETENTION:
             workers.append(RetentionWorker(database=database, settings=settings))
+        elif kind == UPLOADS:
+            workers.append(UploadRecoveryWorker(database=database, settings=settings))
     return workers
 
 

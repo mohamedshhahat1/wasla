@@ -202,6 +202,20 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Stored files the retention sweep removed, failed to remove, or is still holding.",
         ("outcome",),
     ),
+    # Upload reconciliation (ADR-087). One label again, six fixed values, and
+    # nothing that identifies a workspace, a file or an object: no tenant, no
+    # media id, no storage key, no filename, no hash, no bucket. The cardinality
+    # of this metric is six, for ever.
+    #
+    # `mismatched` is the one that means a person is needed - an object at a key
+    # Wasla owns whose contents are not what Wasla wrote - and it is expected to
+    # be zero always rather than usually. `pending` is the level to watch: a
+    # number that does not come back down across passes is a store accepting
+    # neither writes nor questions about them.
+    "wasla_media_upload_reconciliation_total": (
+        "Interrupted object writes by how reconciliation settled them.",
+        ("outcome",),
+    ),
 }
 
 # Distributions written across processes, by metric name: help text, the labels
@@ -460,6 +474,47 @@ async def record_retention_pass(*, purged: int, failed: int, pending: int) -> No
         await _increment_by("wasla_media_retention_total", {"outcome": "pending"}, pending)
 
 
+async def record_upload_reconciliation(
+    *,
+    finalized: int,
+    missing: int,
+    mismatched: int,
+    unreachable: int,
+    pending: int,
+    quarantined: int,
+) -> None:
+    """One reconciliation pass's result (ADR-087).
+
+    `pending` and `mismatched` are levels written to a counter, for the reason
+    `record_retention_pass` sets out: what an operator asks of either is "is it
+    going up?", and a monotonic sum answers that as well as a gauge would
+    without a fourth mechanism for cross-process gauges.
+
+    The two are not redundant with the per-pass verdicts beside them.
+    `mismatched` counts what *this* pass discovered; `quarantined` counts
+    everything still in that state, which is what stays above zero until
+    somebody looks at it.
+
+    Six plain integers rather than the reconciler's own result object, so this
+    module keeps importing nothing from `app.services` - `core` is underneath
+    the services, and a metric writer that had to know a service's types would
+    invert that.
+    """
+    counts = {
+        "finalized": finalized,
+        "missing": missing,
+        "mismatched": mismatched,
+        "unreachable": unreachable,
+        "pending": pending,
+        "quarantined": quarantined,
+    }
+    for label, amount in counts.items():
+        if amount:
+            await _increment_by(
+                "wasla_media_upload_reconciliation_total", {"outcome": label}, amount
+            )
+
+
 async def read_redis_counters(redis: Redis) -> dict[str, list[tuple[dict[str, str], float]]]:
     """Every cross-process counter, ready to render.
 
@@ -597,5 +652,6 @@ __all__ = [
     "record_job_outcome",
     "record_provider_call",
     "record_retention_pass",
+    "record_upload_reconciliation",
     "set_counter_sink",
 ]
