@@ -10,6 +10,8 @@ reading can escalate a conversation on its own.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 import pytest
@@ -26,7 +28,7 @@ from app.services.sentiment_reader import (
 MODEL = "gpt-4.1-mini"
 
 
-def _reply(payload: dict | str) -> dict:
+def _reply(payload: dict[str, Any] | str) -> dict[str, Any]:
     text = payload if isinstance(payload, str) else json.dumps(payload)
     return {
         "id": "resp_1",
@@ -41,7 +43,11 @@ def _reply(payload: dict | str) -> dict:
     }
 
 
-def _analyzer(handler, *, model: str = MODEL) -> SentimentAnalyzer:
+def _analyzer(
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    model: str = MODEL,
+) -> SentimentAnalyzer:
     client = ResponsesClient(
         http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         api_key="test-key",
@@ -50,7 +56,11 @@ def _analyzer(handler, *, model: str = MODEL) -> SentimentAnalyzer:
     return SentimentAnalyzer(responses=client, model=model)
 
 
-def _answering(payload: dict | str, *, seen: list | None = None):
+def _answering(
+    payload: dict[str, Any] | str,
+    *,
+    seen: list[Any] | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
     def handler(request: httpx.Request) -> httpx.Response:
         if seen is not None:
             seen.append(json.loads(request.content))
@@ -60,7 +70,7 @@ def _answering(payload: dict | str, *, seen: list | None = None):
 
 
 @pytest.mark.asyncio
-async def test_a_reading_comes_back_decoded():
+async def test_a_reading_comes_back_decoded() -> None:
     analyzer = _analyzer(
         _answering(
             {
@@ -83,9 +93,9 @@ async def test_a_reading_comes_back_decoded():
 
 
 @pytest.mark.asyncio
-async def test_the_provider_is_made_to_answer_in_a_fixed_shape():
+async def test_the_provider_is_made_to_answer_in_a_fixed_shape() -> None:
     """Asking for JSON in the prompt and hoping fails on the unusual message."""
-    seen: list = []
+    seen: list[Any] = []
     analyzer = _analyzer(
         _answering(
             {"sentiment": "neutral", "score": 0, "intent": None, "confidence": 0.5}, seen=seen
@@ -105,9 +115,9 @@ async def test_the_provider_is_made_to_answer_in_a_fixed_shape():
 
 
 @pytest.mark.asyncio
-async def test_classification_does_not_sample():
+async def test_classification_does_not_sample() -> None:
     """A rule that fires intermittently is worse than one that never fires."""
-    seen: list = []
+    seen: list[Any] = []
     analyzer = _analyzer(
         _answering(
             {"sentiment": "neutral", "score": 0, "intent": None, "confidence": 0.5}, seen=seen
@@ -121,8 +131,8 @@ async def test_classification_does_not_sample():
 
 
 @pytest.mark.asyncio
-async def test_a_very_long_message_is_bounded_before_it_is_sent():
-    seen: list = []
+async def test_a_very_long_message_is_bounded_before_it_is_sent() -> None:
+    seen: list[Any] = []
     analyzer = _analyzer(
         _answering(
             {"sentiment": "neutral", "score": 0, "intent": None, "confidence": 0.5}, seen=seen
@@ -135,7 +145,7 @@ async def test_a_very_long_message_is_bounded_before_it_is_sent():
 
 
 @pytest.mark.asyncio
-async def test_an_empty_message_is_never_sent_at_all():
+async def test_an_empty_message_is_never_sent_at_all() -> None:
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
         raise AssertionError("the provider should not have been called")
 
@@ -144,7 +154,7 @@ async def test_an_empty_message_is_never_sent_at_all():
 
 
 @pytest.mark.asyncio
-async def test_an_emphatic_score_is_pulled_into_range_rather_than_discarded():
+async def test_an_emphatic_score_is_pulled_into_range_rather_than_discarded() -> None:
     """A score of 1.4 is a model being emphatic, not a model being broken."""
     analyzer = _analyzer(
         _answering({"sentiment": "positive", "score": 1.4, "intent": "praise", "confidence": 3})
@@ -157,7 +167,7 @@ async def test_an_emphatic_score_is_pulled_into_range_rather_than_discarded():
 
 
 @pytest.mark.asyncio
-async def test_a_missing_confidence_is_read_as_no_confidence():
+async def test_a_missing_confidence_is_read_as_no_confidence() -> None:
     """Below every escalation floor. Silence must not be read as certainty."""
     analyzer = _analyzer(_answering({"sentiment": "angry", "score": -1, "intent": "complaint"}))
 
@@ -167,7 +177,7 @@ async def test_a_missing_confidence_is_read_as_no_confidence():
 
 
 @pytest.mark.asyncio
-async def test_a_label_outside_the_enum_is_refused():
+async def test_a_label_outside_the_enum_is_refused() -> None:
     """Guessing which mood was meant is how a rule fires on nobody's decision."""
     analyzer = _analyzer(
         _answering({"sentiment": "furious", "score": -1, "intent": None, "confidence": 0.9})
@@ -178,19 +188,19 @@ async def test_a_label_outside_the_enum_is_refused():
 
 
 @pytest.mark.asyncio
-async def test_an_unparseable_answer_is_refused():
+async def test_an_unparseable_answer_is_refused() -> None:
     with pytest.raises(ExternalServiceError):
         await _analyzer(_answering("not json at all")).read("hello")
 
 
 @pytest.mark.asyncio
-async def test_an_answer_that_is_not_an_object_is_refused():
+async def test_an_answer_that_is_not_an_object_is_refused() -> None:
     with pytest.raises(ExternalServiceError):
         await _analyzer(_answering("[1, 2, 3]")).read("hello")
 
 
 @pytest.mark.asyncio
-async def test_an_empty_answer_is_refused():
+async def test_an_empty_answer_is_refused() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"id": "resp_1", "output": []})
 
@@ -199,7 +209,7 @@ async def test_an_empty_answer_is_refused():
 
 
 @pytest.mark.asyncio
-async def test_an_overlong_intent_is_trimmed_to_what_the_column_holds():
+async def test_an_overlong_intent_is_trimmed_to_what_the_column_holds() -> None:
     analyzer = _analyzer(
         _answering(
             {
@@ -220,7 +230,7 @@ async def test_an_overlong_intent_is_trimmed_to_what_the_column_holds():
 
 
 @pytest.mark.asyncio
-async def test_a_blank_intent_is_stored_as_none():
+async def test_a_blank_intent_is_stored_as_none() -> None:
     analyzer = _analyzer(
         _answering({"sentiment": "neutral", "score": 0, "intent": "   ", "confidence": 0.4})
     )

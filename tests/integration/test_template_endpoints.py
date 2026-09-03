@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -67,14 +70,21 @@ class StubTemplates:
     """Records what the routes asked for."""
 
     def __init__(self) -> None:
-        self.list_calls: list[dict] = []
+        self.list_calls: list[dict[str, Any]] = []
         self.sync_calls: list[uuid.UUID] = []
 
-    async def list_templates(self, *, account_id=None, status=None, category=None, limit=100):
+    async def list_templates(
+        self,
+        *,
+        account_id: uuid.UUID | None = None,
+        status: TemplateStatus | None = None,
+        category: TemplateCategory | None = None,
+        limit: int = 100,
+    ) -> list[Any]:
         self.list_calls.append({"account_id": account_id, "status": status, "category": category})
         return [_template()]
 
-    async def get(self, template_id: uuid.UUID):
+    async def get(self, template_id: uuid.UUID) -> WhatsAppTemplate:
         return _template()
 
     async def sync(self, account_id: uuid.UUID) -> SyncOutcome:
@@ -101,7 +111,7 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
 
 
 @pytest.fixture
-def templates(app) -> StubTemplates:
+def templates(app: FastAPI) -> StubTemplates:
     stub = StubTemplates()
     app.dependency_overrides[get_template_service] = lambda: stub
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(TenantRole.TENANT_ADMIN)
@@ -109,11 +119,13 @@ def templates(app) -> StubTemplates:
 
 
 @pytest.fixture
-def as_member(app) -> None:
+def as_member(app: FastAPI) -> None:
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(TenantRole.MEMBER)
 
 
-async def test_a_member_can_read_the_registry(client, templates, as_member):
+async def test_a_member_can_read_the_registry(
+    client: AsyncClient, templates: StubTemplates, as_member: None
+) -> None:
     response = await client.get(PATH)
 
     assert response.status_code == 200
@@ -124,7 +136,7 @@ async def test_a_member_can_read_the_registry(client, templates, as_member):
     assert template["body_text"] == "Hello {{1}}"
 
 
-async def test_the_filters_reach_the_service(client, templates):
+async def test_the_filters_reach_the_service(client: AsyncClient, templates: StubTemplates) -> None:
     await client.get(PATH, params={"status": "approved", "category": "marketing"})
 
     call = templates.list_calls[0]
@@ -132,21 +144,25 @@ async def test_the_filters_reach_the_service(client, templates):
     assert call["category"] is TemplateCategory.MARKETING
 
 
-async def test_a_status_that_is_not_ours_is_refused(client, templates):
+async def test_a_status_that_is_not_ours_is_refused(
+    client: AsyncClient, templates: StubTemplates
+) -> None:
     response = await client.get(PATH, params={"status": "almost_approved"})
 
     assert response.status_code == 422
     assert templates.list_calls == []
 
 
-async def test_one_template_can_be_read_on_its_own(client, templates):
+async def test_one_template_can_be_read_on_its_own(
+    client: AsyncClient, templates: StubTemplates
+) -> None:
     response = await client.get(f"{PATH}/{TEMPLATE_ID}")
 
     assert response.status_code == 200
     assert response.json()["id"] == str(TEMPLATE_ID)
 
 
-async def test_an_admin_can_sync(client, templates):
+async def test_an_admin_can_sync(client: AsyncClient, templates: StubTemplates) -> None:
     response = await client.post(PATH + "/sync", params={"account_id": str(ACCOUNT_ID)})
 
     assert response.status_code == 200
@@ -159,7 +175,9 @@ async def test_an_admin_can_sync(client, templates):
     assert templates.sync_calls == [ACCOUNT_ID]
 
 
-async def test_a_member_cannot_sync(client, templates, as_member):
+async def test_a_member_cannot_sync(
+    client: AsyncClient, templates: StubTemplates, as_member: None
+) -> None:
     """Syncing calls Meta and rewrites the registry, so it takes an admin."""
     response = await client.post(PATH + "/sync", params={"account_id": str(ACCOUNT_ID)})
 
@@ -167,7 +185,9 @@ async def test_a_member_cannot_sync(client, templates, as_member):
     assert templates.sync_calls == []
 
 
-async def test_there_is_no_way_to_create_a_template(client, templates):
+async def test_there_is_no_way_to_create_a_template(
+    client: AsyncClient, templates: StubTemplates
+) -> None:
     """Approval belongs to Meta. A local one would be a fiction."""
     response = await client.post(PATH, json={"name": "invented", "language": "ar_EG"})
 

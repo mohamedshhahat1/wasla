@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -71,7 +72,11 @@ def stub_aws(tmp_path: Path, *, fail_on: str = "", size: int | None = None) -> P
     return binary
 
 
-def run(script: Path, *arguments: str, env: dict[str, str] | None = None):
+def run(
+    script: Path,
+    *arguments: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     assert SHELL is not None
     return subprocess.run(  # noqa: S603 - a fixed script path, no shell string
         [SHELL, str(script), *arguments],
@@ -104,7 +109,7 @@ def s3_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
 # ------------------------------------------------------------ it is shipped
 
 
-def test_the_uploader_and_the_fetcher_are_shipped_and_fail_fast():
+def test_the_uploader_and_the_fetcher_are_shipped_and_fail_fast() -> None:
     for script in (UPLOAD, FETCH):
         assert script.is_file()
         text = script.read_text(encoding="utf-8")
@@ -112,7 +117,7 @@ def test_the_uploader_and_the_fetcher_are_shipped_and_fail_fast():
         assert "set -eu" in text
 
 
-def test_no_shell_script_carries_a_carriage_return():
+def test_no_shell_script_carries_a_carriage_return() -> None:
     """A `#!/bin/sh\\r` shebang is a container that will not start."""
     for script in (UPLOAD, FETCH, BACKUP):
         assert b"\r" not in script.read_bytes()
@@ -122,7 +127,7 @@ def test_no_shell_script_carries_a_carriage_return():
 
 
 @needs_shell
-def test_a_backup_with_no_destination_is_refused(tmp_path: Path):
+def test_a_backup_with_no_destination_is_refused(tmp_path: Path) -> None:
     """A dump on the same host as its database is not a backup."""
     result = run(UPLOAD, str(artifact(tmp_path)), env={"BACKUP_DESTINATION": "none"})
 
@@ -131,7 +136,7 @@ def test_a_backup_with_no_destination_is_refused(tmp_path: Path):
 
 
 @needs_shell
-def test_local_only_is_possible_but_has_to_be_asked_for(tmp_path: Path):
+def test_local_only_is_possible_but_has_to_be_asked_for(tmp_path: Path) -> None:
     """The escape hatch for a laptop, and it says what it is giving up."""
     result = run(
         UPLOAD,
@@ -144,7 +149,7 @@ def test_local_only_is_possible_but_has_to_be_asked_for(tmp_path: Path):
 
 
 @needs_shell
-def test_a_successful_upload_verifies_what_the_store_holds(tmp_path: Path):
+def test_a_successful_upload_verifies_what_the_store_holds(tmp_path: Path) -> None:
     stub_aws(tmp_path)
     source = artifact(tmp_path)
 
@@ -160,7 +165,7 @@ def test_a_successful_upload_verifies_what_the_store_holds(tmp_path: Path):
 
 
 @needs_shell
-def test_an_upload_that_fails_fails_the_run(tmp_path: Path):
+def test_an_upload_that_fails_fails_the_run(tmp_path: Path) -> None:
     stub_aws(tmp_path, fail_on="s3")
     result = run(UPLOAD, str(artifact(tmp_path)), env=s3_env(tmp_path))
 
@@ -169,7 +174,7 @@ def test_an_upload_that_fails_fails_the_run(tmp_path: Path):
 
 
 @needs_shell
-def test_a_truncated_remote_copy_is_caught(tmp_path: Path):
+def test_a_truncated_remote_copy_is_caught(tmp_path: Path) -> None:
     """The failure `cp` cannot see: it finished, and what landed is wrong."""
     stub_aws(tmp_path, size=12)
     result = run(UPLOAD, str(artifact(tmp_path)), env=s3_env(tmp_path))
@@ -179,7 +184,7 @@ def test_a_truncated_remote_copy_is_caught(tmp_path: Path):
 
 
 @needs_shell
-def test_a_store_that_does_not_hold_the_object_is_caught(tmp_path: Path):
+def test_a_store_that_does_not_hold_the_object_is_caught(tmp_path: Path) -> None:
     stub_aws(tmp_path, fail_on="s3api")
     result = run(UPLOAD, str(artifact(tmp_path)), env=s3_env(tmp_path))
 
@@ -187,7 +192,7 @@ def test_a_store_that_does_not_hold_the_object_is_caught(tmp_path: Path):
 
 
 @needs_shell
-def test_the_uploader_never_prints_a_credential(tmp_path: Path):
+def test_the_uploader_never_prints_a_credential(tmp_path: Path) -> None:
     """`ps` shows a bucket and a key; the secret stays in the environment."""
     stub_aws(tmp_path)
     result = run(UPLOAD, str(artifact(tmp_path)), env=s3_env(tmp_path))
@@ -200,7 +205,7 @@ def test_the_uploader_never_prints_a_credential(tmp_path: Path):
 
 
 @needs_shell
-def test_an_unknown_destination_is_refused(tmp_path: Path):
+def test_an_unknown_destination_is_refused(tmp_path: Path) -> None:
     result = run(UPLOAD, str(artifact(tmp_path)), env={"BACKUP_DESTINATION": "carrier-pigeon"})
 
     assert result.returncode != 0
@@ -211,14 +216,14 @@ def test_an_unknown_destination_is_refused(tmp_path: Path):
 
 
 @needs_shell
-def test_the_fetcher_refuses_without_a_destination(tmp_path: Path):
+def test_the_fetcher_refuses_without_a_destination(tmp_path: Path) -> None:
     result = run(FETCH, str(tmp_path / "into"), env={"BACKUP_DESTINATION": "none"})
 
     assert result.returncode != 0
 
 
 @needs_shell
-def test_the_fetcher_never_prints_a_credential(tmp_path: Path):
+def test_the_fetcher_never_prints_a_credential(tmp_path: Path) -> None:
     stub_aws(tmp_path, fail_on="s3")
     result = run(FETCH, str(tmp_path / "into"), "some.dump", env=s3_env(tmp_path))
 
@@ -228,12 +233,13 @@ def test_the_fetcher_never_prints_a_credential(tmp_path: Path):
 # -------------------------------------------------------- the status contract
 
 
-def read_status(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+def read_status(path: Path) -> dict[str, Any]:
+    payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return payload
 
 
 @needs_shell
-def test_a_dump_that_never_uploads_does_not_advance_the_last_success(tmp_path: Path):
+def test_a_dump_that_never_uploads_does_not_advance_the_last_success(tmp_path: Path) -> None:
     """The false-healthy signal this whole design exists to avoid.
 
     Alerting on "the newest file in the backup directory" would call this
@@ -281,7 +287,7 @@ def test_a_dump_that_never_uploads_does_not_advance_the_last_success(tmp_path: P
 
 
 @needs_shell
-def test_a_failed_run_records_no_credential_in_the_status(tmp_path: Path):
+def test_a_failed_run_records_no_credential_in_the_status(tmp_path: Path) -> None:
     """This file is mounted into the API and ends up in support tickets."""
     status = tmp_path / "status.json"
     stub_aws(tmp_path, fail_on="s3")
@@ -354,7 +360,7 @@ def backup_env(tmp_path: Path, status: Path) -> dict[str, str]:
 
 
 @needs_shell
-def test_a_dump_alone_is_not_a_success(tmp_path: Path):
+def test_a_dump_alone_is_not_a_success(tmp_path: Path) -> None:
     """The distinction the whole design rests on.
 
     `pg_dump` worked. The artifact is valid. It never left the host, so this
@@ -374,7 +380,7 @@ def test_a_dump_alone_is_not_a_success(tmp_path: Path):
 
 
 @needs_shell
-def test_a_run_that_reaches_the_destination_is_a_success(tmp_path: Path):
+def test_a_run_that_reaches_the_destination_is_a_success(tmp_path: Path) -> None:
     """The other half: everything worked, so the recovery point moves."""
     stub_postgres(tmp_path)
     stub_aws(tmp_path)
@@ -391,7 +397,7 @@ def test_a_run_that_reaches_the_destination_is_a_success(tmp_path: Path):
 
 
 @needs_shell
-def test_a_failed_upload_leaves_the_local_artifact_for_a_manual_recovery(tmp_path: Path):
+def test_a_failed_upload_leaves_the_local_artifact_for_a_manual_recovery(tmp_path: Path) -> None:
     """The dump is still the best thing available; deleting it would be worse."""
     stub_postgres(tmp_path)
     stub_aws(tmp_path, fail_on="s3")
@@ -404,7 +410,7 @@ def test_a_failed_upload_leaves_the_local_artifact_for_a_manual_recovery(tmp_pat
 
 
 @needs_shell
-def test_a_failed_run_never_prunes_the_last_good_backup(tmp_path: Path):
+def test_a_failed_run_never_prunes_the_last_good_backup(tmp_path: Path) -> None:
     """Retention runs after the upload, so a failure cannot reach it."""
     stub_postgres(tmp_path)
     stub_aws(tmp_path, fail_on="s3")

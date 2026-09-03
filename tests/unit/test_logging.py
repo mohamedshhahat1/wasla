@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
+from typing import Any
 
 import pytest
 
@@ -18,13 +20,13 @@ from app.core.logging import (
 
 
 @pytest.fixture(autouse=True)
-def _reset_log_context():
+def _reset_log_context() -> Iterator[None]:
     clear_log_context()
     yield
     clear_log_context()
 
 
-def _record(message="hello", **extra):
+def _record(message: str = "hello", **extra: Any) -> logging.LogRecord:
     record = logging.LogRecord(
         name="app.test",
         level=logging.INFO,
@@ -39,7 +41,7 @@ def _record(message="hello", **extra):
     return record
 
 
-def test_json_formatter_emits_core_fields():
+def test_json_formatter_emits_core_fields() -> None:
     payload = json.loads(JsonFormatter().format(_record(event="test.event")))
 
     assert payload["level"] == "INFO"
@@ -49,7 +51,7 @@ def test_json_formatter_emits_core_fields():
     assert "timestamp" in payload
 
 
-def test_json_formatter_includes_bound_request_context():
+def test_json_formatter_includes_bound_request_context() -> None:
     bind_log_context(request_id="req-123", tenant_id="tenant-abc")
 
     payload = json.loads(JsonFormatter().format(_record()))
@@ -59,7 +61,7 @@ def test_json_formatter_includes_bound_request_context():
     assert "user_id" not in payload
 
 
-def test_json_formatter_redacts_sensitive_extras():
+def test_json_formatter_redacts_sensitive_extras() -> None:
     record = _record(
         api_key="sk-live-secret",
         authorization="Bearer abc",
@@ -75,7 +77,7 @@ def test_json_formatter_redacts_sensitive_extras():
     assert payload["tenant_name"] == "ACME"
 
 
-def test_redact_handles_nested_structures():
+def test_redact_handles_nested_structures() -> None:
     result = redact(
         {
             "outer": {"access_token": "abc", "keep": 1},
@@ -89,7 +91,7 @@ def test_redact_handles_nested_structures():
     }
 
 
-def test_console_formatter_appends_context():
+def test_console_formatter_appends_context() -> None:
     bind_log_context(request_id="req-9")
 
     output = ConsoleFormatter().format(_record())

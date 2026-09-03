@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -33,7 +36,8 @@ from app.db.models.lead import (
     LeadSource,
     LeadStatus,
 )
-from app.repositories.lead_repository import LeadStatistics
+from app.repositories.lead_repository import LeadFilters, LeadStatistics
+from app.services.lead_service import LeadUpdate
 
 pytestmark = pytest.mark.integration
 
@@ -44,8 +48,8 @@ LEAD_ID = uuid.UUID("44444444-4444-4444-4444-444444444444")
 MOMENT = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
 
 
-def _lead(**overrides) -> Lead:
-    values = {
+def _lead(**overrides: Any) -> Lead:
+    values: dict[str, Any] = {
         "id": LEAD_ID,
         "tenant_id": TENANT_ID,
         "contact_id": None,
@@ -77,12 +81,12 @@ class StubLeads:
     """Records what it was asked to do and returns canned rows."""
 
     def __init__(self) -> None:
-        self.created: list[dict] = []
-        self.updated: list[dict] = []
-        self.assigned: list[dict] = []
-        self.statuses: list[dict] = []
-        self.scores: list[dict] = []
-        self.notes: list[dict] = []
+        self.created: list[dict[str, Any]] = []
+        self.updated: list[dict[str, Any]] = []
+        self.assigned: list[dict[str, Any]] = []
+        self.statuses: list[dict[str, Any]] = []
+        self.scores: list[dict[str, Any]] = []
+        self.notes: list[dict[str, Any]] = []
         self.missing = False
         self.conflict = False
         self.invalid = False
@@ -92,15 +96,17 @@ class StubLeads:
         if self.missing:
             raise TenantIsolationError()
 
-    async def list_leads(self, *, filters=None, limit=50, cursor=None):
+    async def list_leads(
+        self, *, filters: LeadFilters | None = None, limit: int = 50, cursor: str | None = None
+    ) -> Page[Any]:
         self.filters = filters
         return Page(items=[self.lead], next_cursor=None)
 
-    async def get_lead(self, lead_id):
+    async def get_lead(self, lead_id: uuid.UUID) -> Lead:
         self._guard()
         return self.lead
 
-    async def statistics(self, *, filters=None):
+    async def statistics(self, *, filters: LeadFilters | None = None) -> LeadStatistics:
         return LeadStatistics(
             total=3,
             open_leads=2,
@@ -108,35 +114,67 @@ class StubLeads:
             by_status={LeadStatus.NEW: 2, LeadStatus.WON: 1},
         )
 
-    async def create_lead(self, **kwargs):
+    async def create_lead(self, **kwargs: Any) -> Lead:
         if self.conflict:
             raise ConflictError("That customer already has an open lead.")
         self.created.append(kwargs)
         return self.lead
 
-    async def update_lead(self, *, lead_id, actor_id, update):
+    async def update_lead(
+        self,
+        *,
+        lead_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        update: LeadUpdate,
+    ) -> Lead:
         self._guard()
         self.updated.append({"lead_id": lead_id, "update": update})
         return self.lead
 
-    async def change_status(self, *, lead_id, status, actor_id, reason=None):
+    async def change_status(
+        self,
+        *,
+        lead_id: uuid.UUID,
+        status: LeadStatus,
+        actor_id: uuid.UUID,
+        reason: str | None = None,
+    ) -> Lead:
         self._guard()
         if self.invalid:
             raise ValidationError("A lead cannot move from won to new.")
         self.statuses.append({"lead_id": lead_id, "status": status, "reason": reason})
         return _lead(status=status)
 
-    async def assign(self, *, lead_id, assigned_to_id, actor_id):
+    async def assign(
+        self,
+        *,
+        lead_id: uuid.UUID,
+        assigned_to_id: uuid.UUID | None,
+        actor_id: uuid.UUID,
+    ) -> Lead:
         self._guard()
         self.assigned.append({"lead_id": lead_id, "assigned_to_id": assigned_to_id})
         return _lead(assigned_to_id=assigned_to_id)
 
-    async def set_score(self, *, lead_id, score, actor_id):
+    async def set_score(
+        self,
+        *,
+        lead_id: uuid.UUID,
+        score: int,
+        actor_id: uuid.UUID,
+    ) -> Lead:
         self._guard()
         self.scores.append({"lead_id": lead_id, "score": score})
         return _lead(score=score)
 
-    async def add_note(self, *, lead_id, body, author_id, author_kind=ActorKind.USER):
+    async def add_note(
+        self,
+        *,
+        lead_id: uuid.UUID,
+        body: str,
+        author_id: uuid.UUID | None,
+        author_kind: ActorKind = ActorKind.USER,
+    ) -> LeadNote:
         self._guard()
         self.notes.append({"lead_id": lead_id, "body": body})
         return LeadNote(
@@ -149,7 +187,13 @@ class StubLeads:
             created_at=MOMENT,
         )
 
-    async def list_notes(self, *, lead_id, limit=50, cursor=None):
+    async def list_notes(
+        self,
+        *,
+        lead_id: uuid.UUID,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> Page[LeadNote]:
         self._guard()
         return Page(
             items=[
@@ -166,7 +210,13 @@ class StubLeads:
             next_cursor=None,
         )
 
-    async def list_activity(self, *, lead_id, limit=50, cursor=None):
+    async def list_activity(
+        self,
+        *,
+        lead_id: uuid.UUID,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> Page[LeadActivity]:
         self._guard()
         return Page(
             items=[
@@ -205,20 +255,20 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
 
 
 @pytest.fixture
-def leads(app) -> StubLeads:
+def leads(app: FastAPI) -> StubLeads:
     stub = StubLeads()
     app.dependency_overrides[get_lead_service] = lambda: stub
     return stub
 
 
-def _as(app, role: TenantRole) -> None:
+def _as(app: FastAPI, role: TenantRole) -> None:
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(role)
 
 
 # ------------------------------------------------------------ open to any member
 
 
-async def test_a_member_can_list_leads(client, app, leads):
+async def test_a_member_can_list_leads(client: AsyncClient, app: FastAPI, leads: StubLeads) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(PATH)
@@ -227,7 +277,9 @@ async def test_a_member_can_list_leads(client, app, leads):
     assert response.json()["items"][0]["name"] == "Ahmed Hassan"
 
 
-async def test_a_member_can_create_a_lead(client, app, leads):
+async def test_a_member_can_create_a_lead(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.post(PATH, json={"name": "Ahmed", "interest": "Finishing"})
@@ -236,7 +288,9 @@ async def test_a_member_can_create_a_lead(client, app, leads):
     assert leads.created[0]["name"] == "Ahmed"
 
 
-async def test_a_member_can_edit_a_lead(client, app, leads):
+async def test_a_member_can_edit_a_lead(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.patch(f"{PATH}/{LEAD_ID}", json={"interest": "Villa finishing"})
@@ -245,7 +299,9 @@ async def test_a_member_can_edit_a_lead(client, app, leads):
     assert leads.updated[0]["update"].interest == "Villa finishing"
 
 
-async def test_a_member_can_move_a_lead_through_the_pipeline(client, app, leads):
+async def test_a_member_can_move_a_lead_through_the_pipeline(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.post(f"{PATH}/{LEAD_ID}/status", json={"status": "contacted"})
@@ -254,7 +310,9 @@ async def test_a_member_can_move_a_lead_through_the_pipeline(client, app, leads)
     assert response.json()["status"] == "contacted"
 
 
-async def test_a_member_can_write_a_note(client, app, leads):
+async def test_a_member_can_write_a_note(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.post(f"{PATH}/{LEAD_ID}/notes", json={"body": "Wants a call."})
@@ -263,7 +321,9 @@ async def test_a_member_can_write_a_note(client, app, leads):
     assert leads.notes[0]["body"] == "Wants a call."
 
 
-async def test_a_member_can_read_the_activity_trail(client, app, leads):
+async def test_a_member_can_read_the_activity_trail(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(f"{PATH}/{LEAD_ID}/activity")
@@ -275,7 +335,9 @@ async def test_a_member_can_read_the_activity_trail(client, app, leads):
 # ----------------------------------------------------------- administrators only
 
 
-async def test_an_admin_can_assign_a_lead(client, app, leads):
+async def test_an_admin_can_assign_a_lead(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(
@@ -287,7 +349,9 @@ async def test_an_admin_can_assign_a_lead(client, app, leads):
     assert leads.assigned[0]["assigned_to_id"] == USER_ID
 
 
-async def test_a_member_cannot_assign_a_lead(client, app, leads):
+async def test_a_member_cannot_assign_a_lead(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     """Handing someone a deal is a management decision, unlike inbox triage."""
     _as(app, TenantRole.MEMBER)
 
@@ -300,7 +364,9 @@ async def test_a_member_cannot_assign_a_lead(client, app, leads):
     assert leads.assigned == []
 
 
-async def test_an_admin_can_read_pipeline_statistics(client, app, leads):
+async def test_an_admin_can_read_pipeline_statistics(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.get(f"{PATH}/statistics")
@@ -313,7 +379,9 @@ async def test_an_admin_can_read_pipeline_statistics(client, app, leads):
     assert body["by_status"]["lost"] == 0
 
 
-async def test_a_member_cannot_read_pipeline_statistics(client, app, leads):
+async def test_a_member_cannot_read_pipeline_statistics(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(f"{PATH}/statistics")
@@ -321,7 +389,9 @@ async def test_a_member_cannot_read_pipeline_statistics(client, app, leads):
     assert response.status_code == 403
 
 
-async def test_an_owner_has_administrator_rights(client, app, leads):
+async def test_an_owner_has_administrator_rights(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     _as(app, TenantRole.TENANT_OWNER)
 
     response = await client.get(f"{PATH}/statistics")
@@ -332,7 +402,9 @@ async def test_an_owner_has_administrator_rights(client, app, leads):
 # --------------------------------------------------------------- error mapping
 
 
-async def test_another_workspaces_lead_answers_not_found(client, app, leads):
+async def test_another_workspaces_lead_answers_not_found(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     """Never 403: that would confirm the lead exists somewhere."""
     _as(app, TenantRole.MEMBER)
     leads.missing = True
@@ -342,7 +414,9 @@ async def test_another_workspaces_lead_answers_not_found(client, app, leads):
     assert response.status_code == 404
 
 
-async def test_a_duplicate_open_lead_answers_conflict(client, app, leads):
+async def test_a_duplicate_open_lead_answers_conflict(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     _as(app, TenantRole.MEMBER)
     leads.conflict = True
 
@@ -351,7 +425,9 @@ async def test_a_duplicate_open_lead_answers_conflict(client, app, leads):
     assert response.status_code == 409
 
 
-async def test_an_illegal_transition_answers_unprocessable(client, app, leads):
+async def test_an_illegal_transition_answers_unprocessable(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     _as(app, TenantRole.MEMBER)
     leads.invalid = True
 
@@ -360,7 +436,9 @@ async def test_an_illegal_transition_answers_unprocessable(client, app, leads):
     assert response.status_code == 422
 
 
-async def test_an_unknown_field_is_refused(client, app, leads):
+async def test_an_unknown_field_is_refused(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     """`extra="forbid"`: a misspelled field must not be silently dropped."""
     _as(app, TenantRole.MEMBER)
 
@@ -370,7 +448,9 @@ async def test_an_unknown_field_is_refused(client, app, leads):
     assert leads.created == []
 
 
-async def test_a_score_outside_its_bounds_is_refused_at_the_edge(client, app, leads):
+async def test_a_score_outside_its_bounds_is_refused_at_the_edge(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     """Clamping is for model output; a person's typo deserves an error."""
     _as(app, TenantRole.MEMBER)
 
@@ -380,7 +460,7 @@ async def test_a_score_outside_its_bounds_is_refused_at_the_edge(client, app, le
     assert leads.scores == []
 
 
-async def test_authentication_is_required(client):
+async def test_authentication_is_required(client: AsyncClient) -> None:
     """Deliberately takes neither fixture.
 
     Overriding the service dependency would satisfy the route without ever
@@ -396,7 +476,9 @@ async def test_authentication_is_required(client):
 # -------------------------------------------------------------------- filtering
 
 
-async def test_filters_reach_the_service(client, app, leads):
+async def test_filters_reach_the_service(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(
@@ -405,13 +487,16 @@ async def test_filters_reach_the_service(client, app, leads):
     )
 
     assert response.status_code == 200
+    assert leads.filters is not None
     assert leads.filters.statuses == (LeadStatus.NEW, LeadStatus.CONTACTED)
     assert leads.filters.unassigned_only is True
     # Normalised on the way in, so a filter matches what the service stored.
     assert leads.filters.tags == ("hot",)
 
 
-async def test_an_unknown_status_filter_is_refused(client, app, leads):
+async def test_an_unknown_status_filter_is_refused(
+    client: AsyncClient, app: FastAPI, leads: StubLeads
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(PATH, params={"status": "prospecting"})

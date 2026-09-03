@@ -32,6 +32,7 @@ import uuid
 
 import pytest
 from sqlalchemy import inspect, text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.db.models.knowledge import DocumentChunk, DocumentStatus
 from app.repositories.knowledge_repository import DocumentChunkRepository
@@ -50,7 +51,7 @@ TOP_K = 5
 # ---------------------------------------------------------------- the schema
 
 
-async def test_the_chunk_embedding_carries_an_ann_index(db_connection):
+async def test_the_chunk_embedding_carries_an_ann_index(db_connection: AsyncConnection) -> None:
     """A schema property, read off the catalogue rather than off the migration."""
     indexes = await db_connection.run_sync(
         lambda sync: inspect(sync).get_indexes("document_chunks")
@@ -60,7 +61,9 @@ async def test_the_chunk_embedding_carries_an_ann_index(db_connection):
     assert ANN_INDEX in names
 
 
-async def test_the_ann_index_is_built_for_the_operator_retrieval_uses(db_connection):
+async def test_the_ann_index_is_built_for_the_operator_retrieval_uses(
+    db_connection: AsyncConnection,
+) -> None:
     """`vector_cosine_ops`, because `search` orders by `<=>`.
 
     Asserted against `pg_am`/`pg_opclass` rather than against the index
@@ -89,8 +92,8 @@ async def test_the_ann_index_is_built_for_the_operator_retrieval_uses(db_connect
 
 
 async def test_the_approximate_scan_returns_every_passage_that_was_asked_for(
-    db_session,
-):
+    db_session: AsyncSession,
+) -> None:
     """The regression test for a silently short answer.
 
     The workspace under test holds 2% of the corpus. Without the iterative
@@ -112,7 +115,7 @@ async def test_the_approximate_scan_returns_every_passage_that_was_asked_for(
     assert len(found) == TOP_K
 
 
-async def test_the_approximate_scan_stays_inside_the_workspace(db_session):
+async def test_the_approximate_scan_stays_inside_the_workspace(db_session: AsyncSession) -> None:
     """Indexing is not authorization.
 
     One index spans every workspace's vectors, so the question this answers is
@@ -131,7 +134,9 @@ async def test_the_approximate_scan_stays_inside_the_workspace(db_session):
     assert corpus.planted_id not in {scored.chunk.id for scored in found}
 
 
-async def test_the_approximate_scan_skips_a_document_that_is_not_ready(db_session):
+async def test_the_approximate_scan_skips_a_document_that_is_not_ready(
+    db_session: AsyncSession,
+) -> None:
     """The READY join is a post-filter on the approximate path too.
 
     A failed document's chunks keep their embeddings, so they are in the index
@@ -148,7 +153,9 @@ async def test_the_approximate_scan_skips_a_document_that_is_not_ready(db_sessio
     assert corpus.unready_chunk_ids.isdisjoint({scored.chunk.id for scored in found})
 
 
-async def test_a_chunk_written_after_the_index_exists_is_retrievable(db_session):
+async def test_a_chunk_written_after_the_index_exists_is_retrievable(
+    db_session: AsyncSession,
+) -> None:
     """HNSW takes inserts; this proves the write path still reaches the index."""
     corpus = await seed_corpus(db_session)
     chunks = DocumentChunkRepository(db_session, tenant_id=corpus.small.id)
@@ -174,7 +181,9 @@ async def test_a_chunk_written_after_the_index_exists_is_retrievable(db_session)
     assert found[0].distance == pytest.approx(0.0, abs=1e-6)
 
 
-async def test_the_approximate_answer_is_as_close_as_the_exact_one(db_session):
+async def test_the_approximate_answer_is_as_close_as_the_exact_one(
+    db_session: AsyncSession,
+) -> None:
     """Recall, measured - and measured as the thing retrieval actually needs.
 
     HNSW is approximate and may return the sixth-nearest passage instead of the
@@ -237,10 +246,10 @@ class _only_the_ann_index:  # noqa: N801 - a context manager, used as one
         "ALTER TABLE document_chunks DROP CONSTRAINT pk_document_chunks CASCADE",
     )
 
-    def __init__(self, session):
+    def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> _only_the_ann_index:
         await self._session.flush()
         self._savepoint = await self._session.begin_nested()
         for statement in self._DROPS:
@@ -253,7 +262,9 @@ class _only_the_ann_index:  # noqa: N801 - a context manager, used as one
         return False
 
 
-async def _plan_uses_the_ann_index(session, corpus: Corpus, tenant_id: uuid.UUID) -> bool:
+async def _plan_uses_the_ann_index(
+    session: AsyncSession, corpus: Corpus, tenant_id: uuid.UUID
+) -> bool:
     """Whether the plan for the retrieval query names the ANN index.
 
     Runs the query `search` builds, through the same repository, so the shape

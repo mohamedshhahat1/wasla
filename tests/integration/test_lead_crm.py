@@ -13,6 +13,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, TenantIsolationError, ValidationError
 from app.db.models.conversation import (
@@ -39,14 +40,20 @@ from app.services.lead_service import ExtractedLead, LeadService, LeadUpdate
 pytestmark = pytest.mark.integration
 
 
-async def _tenant(session, *, slug: str) -> Tenant:
+async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _user(session, *, tenant: Tenant, email: str, role=TenantRole.MEMBER) -> User:
+async def _user(
+    session: AsyncSession,
+    *,
+    tenant: Tenant,
+    email: str,
+    role: TenantRole = TenantRole.MEMBER,
+) -> User:
     user = User(email=email, hashed_password="x" * 60, is_active=True)
     session.add(user)
     await session.flush()
@@ -55,7 +62,7 @@ async def _user(session, *, tenant: Tenant, email: str, role=TenantRole.MEMBER) 
     return user
 
 
-async def _conversation(session, *, tenant: Tenant, wa_id: str) -> Conversation:
+async def _conversation(session: AsyncSession, *, tenant: Tenant, wa_id: str) -> Conversation:
     account = WhatsAppAccount(
         tenant_id=tenant.id,
         phone_number_id=f"phone-{tenant.slug}",
@@ -78,14 +85,14 @@ async def _conversation(session, *, tenant: Tenant, wa_id: str) -> Conversation:
     return conversation
 
 
-def _service(session, tenant: Tenant) -> LeadService:
+def _service(session: AsyncSession, tenant: Tenant) -> LeadService:
     return LeadService(session=session, tenant_id=tenant.id)
 
 
 # --------------------------------------------------------------- tenant isolation
 
 
-async def test_one_workspace_cannot_read_another_workspaces_lead(db_session):
+async def test_one_workspace_cannot_read_another_workspaces_lead(db_session: AsyncSession) -> None:
     """The property this whole system is built to guarantee."""
     acme = await _tenant(db_session, slug="acme")
     rival = await _tenant(db_session, slug="rival")
@@ -98,7 +105,7 @@ async def test_one_workspace_cannot_read_another_workspaces_lead(db_session):
         await _service(db_session, rival).get_lead(lead.id)
 
 
-async def test_a_lead_list_never_crosses_workspaces(db_session):
+async def test_a_lead_list_never_crosses_workspaces(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     rival = await _tenant(db_session, slug="rival")
     acme_owner = await _user(db_session, tenant=acme, email="a@example.com")
@@ -113,7 +120,7 @@ async def test_a_lead_list_never_crosses_workspaces(db_session):
     assert [lead.name for lead in page.items] == ["Acme customer"]
 
 
-async def test_a_search_cannot_reach_across_workspaces(db_session):
+async def test_a_search_cannot_reach_across_workspaces(db_session: AsyncSession) -> None:
     """A filter must narrow within the tenant, never widen beyond it."""
     # Acme needs no user of its own here: the point is that its empty pipeline
     # stays empty even when the search term matches a lead next door.
@@ -129,7 +136,7 @@ async def test_a_search_cannot_reach_across_workspaces(db_session):
     assert page.items == []
 
 
-async def test_statistics_count_only_the_callers_workspace(db_session):
+async def test_statistics_count_only_the_callers_workspace(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     rival = await _tenant(db_session, slug="rival")
     acme_owner = await _user(db_session, tenant=acme, email="a@example.com")
@@ -145,7 +152,7 @@ async def test_statistics_count_only_the_callers_workspace(db_session):
     assert statistics.total == 1
 
 
-async def test_a_note_cannot_be_added_to_another_workspaces_lead(db_session):
+async def test_a_note_cannot_be_added_to_another_workspaces_lead(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     rival = await _tenant(db_session, slug="rival")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
@@ -162,7 +169,9 @@ async def test_a_note_cannot_be_added_to_another_workspaces_lead(db_session):
         )
 
 
-async def test_a_lead_cannot_be_assigned_to_someone_outside_the_workspace(db_session):
+async def test_a_lead_cannot_be_assigned_to_someone_outside_the_workspace(
+    db_session: AsyncSession,
+) -> None:
     """The id arrives in a request body, so membership is verified not assumed."""
     acme = await _tenant(db_session, slug="acme")
     rival = await _tenant(db_session, slug="rival")
@@ -183,7 +192,9 @@ async def test_a_lead_cannot_be_assigned_to_someone_outside_the_workspace(db_ses
 # ------------------------------------------------------------ duplicate prevention
 
 
-async def test_an_agent_updates_the_open_lead_rather_than_creating_another(db_session):
+async def test_an_agent_updates_the_open_lead_rather_than_creating_another(
+    db_session: AsyncSession,
+) -> None:
     """The idempotency that keeps a chatty conversation from making five leads."""
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme, wa_id="201000000001")
@@ -207,7 +218,9 @@ async def test_an_agent_updates_the_open_lead_rather_than_creating_another(db_se
     assert len(page.items) == 1
 
 
-async def test_creating_a_second_open_lead_for_a_customer_is_refused(db_session):
+async def test_creating_a_second_open_lead_for_a_customer_is_refused(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     conversation = await _conversation(db_session, tenant=acme, wa_id="201000000002")
@@ -220,7 +233,7 @@ async def test_creating_a_second_open_lead_for_a_customer_is_refused(db_session)
         await service.create_lead(actor_id=owner.id, contact_id=conversation.contact_id)
 
 
-async def test_the_database_itself_refuses_a_second_open_lead(db_session):
+async def test_the_database_itself_refuses_a_second_open_lead(db_session: AsyncSession) -> None:
     """The service check is a courtesy; this index is the guarantee.
 
     Two webhook deliveries can be in flight at once, and only a constraint
@@ -242,7 +255,7 @@ async def test_the_database_itself_refuses_a_second_open_lead(db_session):
     await db_session.rollback()
 
 
-async def test_a_returning_customer_starts_a_fresh_lead(db_session):
+async def test_a_returning_customer_starts_a_fresh_lead(db_session: AsyncSession) -> None:
     """A closed lead releases the slot; reanimating it would lose the old deal."""
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
@@ -266,7 +279,7 @@ async def test_a_returning_customer_starts_a_fresh_lead(db_session):
     assert first.status is LeadStatus.WON
 
 
-async def test_leads_entered_without_a_contact_do_not_collide(db_session):
+async def test_leads_entered_without_a_contact_do_not_collide(db_session: AsyncSession) -> None:
     """The index is partial, so a null contact is not a shared slot."""
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
@@ -283,7 +296,9 @@ async def test_leads_entered_without_a_contact_do_not_collide(db_session):
 # --------------------------------------------------------- AI never overwrites a human
 
 
-async def test_extraction_does_not_overwrite_what_a_person_entered(db_session):
+async def test_extraction_does_not_overwrite_what_a_person_entered(
+    db_session: AsyncSession,
+) -> None:
     """The rule the whole provenance mechanism exists for."""
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
@@ -308,7 +323,7 @@ async def test_extraction_does_not_overwrite_what_a_person_entered(db_session):
     assert lead.interest == "Apartment finishing"
 
 
-async def test_an_agent_may_correct_its_own_earlier_guess(db_session):
+async def test_an_agent_may_correct_its_own_earlier_guess(db_session: AsyncSession) -> None:
     """Protection covers human entries only, or the AI could never improve."""
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme, wa_id="201000000006")
@@ -327,7 +342,9 @@ async def test_an_agent_may_correct_its_own_earlier_guess(db_session):
     assert lead.interest == "150m apartment finishing"
 
 
-async def test_a_field_a_person_deliberately_cleared_stays_cleared(db_session):
+async def test_a_field_a_person_deliberately_cleared_stays_cleared(
+    db_session: AsyncSession,
+) -> None:
     """ "This customer has no email" is knowledge, not an empty slot to fill."""
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
@@ -356,7 +373,7 @@ async def test_a_field_a_person_deliberately_cleared_stays_cleared(db_session):
     assert lead.email is None
 
 
-async def test_confirming_an_unchanged_value_still_protects_it(db_session):
+async def test_confirming_an_unchanged_value_still_protects_it(db_session: AsyncSession) -> None:
     """A person vouching for what is already there is still a person vouching."""
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
@@ -383,7 +400,7 @@ async def test_confirming_an_unchanged_value_still_protects_it(db_session):
     assert "name" in lead.human_verified_fields
 
 
-async def test_an_agent_cannot_reach_judgement_fields(db_session):
+async def test_an_agent_cannot_reach_judgement_fields(db_session: AsyncSession) -> None:
     """Status and score are decisions, and extraction offers no route to them."""
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme, wa_id="201000000009")
@@ -400,7 +417,7 @@ async def test_an_agent_cannot_reach_judgement_fields(db_session):
     assert lead.assigned_to_id is None
 
 
-async def test_extraction_stops_once_a_colleague_takes_over(db_session):
+async def test_extraction_stops_once_a_colleague_takes_over(db_session: AsyncSession) -> None:
     """A job queued before a handoff must not edit the record after it."""
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme, wa_id="201000000010")
@@ -414,7 +431,9 @@ async def test_extraction_stops_once_a_colleague_takes_over(db_session):
         )
 
 
-async def test_a_bad_extracted_value_is_dropped_without_losing_the_rest(db_session):
+async def test_a_bad_extracted_value_is_dropped_without_losing_the_rest(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme, wa_id="201000000011")
 
@@ -429,7 +448,7 @@ async def test_a_bad_extracted_value_is_dropped_without_losing_the_rest(db_sessi
     assert lead.budget_amount is None
 
 
-async def test_a_captured_lead_records_where_it_came_from(db_session):
+async def test_a_captured_lead_records_where_it_came_from(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme, wa_id="201000000012")
 
@@ -447,7 +466,9 @@ async def test_a_captured_lead_records_where_it_came_from(db_session):
 # ------------------------------------------------------------------ state transitions
 
 
-async def test_a_lead_moves_through_the_pipeline_and_is_timestamped(db_session):
+async def test_a_lead_moves_through_the_pipeline_and_is_timestamped(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     service = _service(db_session, acme)
@@ -463,7 +484,7 @@ async def test_a_lead_moves_through_the_pipeline_and_is_timestamped(db_session):
     assert lead.closed_at is not None
 
 
-async def test_an_illegal_transition_is_refused(db_session):
+async def test_an_illegal_transition_is_refused(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     service = _service(db_session, acme)
@@ -478,7 +499,7 @@ async def test_an_illegal_transition_is_refused(db_session):
         await service.change_status(lead_id=lead.id, status=LeadStatus.NEW, actor_id=owner.id)
 
 
-async def test_reopening_a_lost_lead_clears_its_closing_date(db_session):
+async def test_reopening_a_lost_lead_clears_its_closing_date(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     service = _service(db_session, acme)
@@ -494,7 +515,7 @@ async def test_reopening_a_lost_lead_clears_its_closing_date(db_session):
     assert lead.closed_at is None
 
 
-async def test_setting_the_current_status_again_changes_nothing(db_session):
+async def test_setting_the_current_status_again_changes_nothing(db_session: AsyncSession) -> None:
     """Retried jobs must be safe, and must not litter the timeline."""
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
@@ -514,7 +535,7 @@ async def test_setting_the_current_status_again_changes_nothing(db_session):
 # ------------------------------------------------------------------- activity log
 
 
-async def test_every_change_leaves_an_auditable_trace(db_session):
+async def test_every_change_leaves_an_auditable_trace(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     service = _service(db_session, acme)
@@ -543,7 +564,7 @@ async def test_every_change_leaves_an_auditable_trace(db_session):
     }
 
 
-async def test_the_trail_says_who_made_each_change(db_session):
+async def test_the_trail_says_who_made_each_change(db_session: AsyncSession) -> None:
     """A person and an agent must be distinguishable after the fact."""
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
@@ -567,7 +588,7 @@ async def test_the_trail_says_who_made_each_change(db_session):
     assert by_kind[LeadActivityKind.FIELDS_UPDATED].actor_id == owner.id
 
 
-async def test_an_update_records_the_previous_value(db_session):
+async def test_an_update_records_the_previous_value(db_session: AsyncSession) -> None:
     """ "Why does this say half a million" needs an answer."""
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
@@ -590,7 +611,7 @@ async def test_an_update_records_the_previous_value(db_session):
     assert updated.data["budget_amount"] == {"from": "100000.00", "to": "500000.00"}
 
 
-async def test_a_skipped_extraction_is_recorded_not_silent(db_session):
+async def test_a_skipped_extraction_is_recorded_not_silent(db_session: AsyncSession) -> None:
     """Someone has to be able to see that the AI tried and was refused."""
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
@@ -623,7 +644,7 @@ async def test_a_skipped_extraction_is_recorded_not_silent(db_session):
 # ------------------------------------------------------ notes, scoring and assignment
 
 
-async def test_a_note_is_attached_and_attributed(db_session):
+async def test_a_note_is_attached_and_attributed(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     service = _service(db_session, acme)
@@ -639,7 +660,7 @@ async def test_a_note_is_attached_and_attributed(db_session):
     assert page.items[0].author_kind is ActorKind.USER
 
 
-async def test_an_empty_note_is_refused(db_session):
+async def test_an_empty_note_is_refused(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     service = _service(db_session, acme)
@@ -651,7 +672,7 @@ async def test_an_empty_note_is_refused(db_session):
         await service.add_note(lead_id=lead.id, body="   ", author_id=owner.id)
 
 
-async def test_a_score_is_clamped_rather_than_rejected(db_session):
+async def test_a_score_is_clamped_rather_than_rejected(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     service = _service(db_session, acme)
@@ -663,7 +684,7 @@ async def test_a_score_is_clamped_rather_than_rejected(db_session):
     assert lead.score == 100
 
 
-async def test_an_assignment_can_be_cleared(db_session):
+async def test_an_assignment_can_be_cleared(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     service = _service(db_session, acme)
@@ -682,7 +703,7 @@ async def test_an_assignment_can_be_cleared(db_session):
 # --------------------------------------------------------- filtering and pagination
 
 
-async def test_filters_narrow_by_status_and_assignment(db_session):
+async def test_filters_narrow_by_status_and_assignment(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     service = _service(db_session, acme)
@@ -705,7 +726,7 @@ async def test_filters_narrow_by_status_and_assignment(db_session):
     assert [lead.name for lead in only_contacted.items] == ["Unassigned"]
 
 
-async def test_a_search_matches_across_the_fields_a_rep_would_try(db_session):
+async def test_a_search_matches_across_the_fields_a_rep_would_try(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     service = _service(db_session, acme)
@@ -726,7 +747,7 @@ async def test_a_search_matches_across_the_fields_a_rep_would_try(db_session):
     assert [lead.name for lead in by_interest.items] == ["Ahmed Hassan"]
 
 
-async def test_a_wildcard_in_a_search_is_treated_as_text(db_session):
+async def test_a_wildcard_in_a_search_is_treated_as_text(db_session: AsyncSession) -> None:
     """Otherwise searching for "%" returns the entire pipeline."""
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
@@ -741,7 +762,7 @@ async def test_a_wildcard_in_a_search_is_treated_as_text(db_session):
     assert [lead.name for lead in page.items] == ["100% deposit paid"]
 
 
-async def test_tags_filter_by_containment(db_session):
+async def test_tags_filter_by_containment(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     service = _service(db_session, acme)
@@ -755,7 +776,7 @@ async def test_tags_filter_by_containment(db_session):
     assert [lead.name for lead in page.items] == ["Hot"]
 
 
-async def test_pagination_walks_every_lead_exactly_once(db_session):
+async def test_pagination_walks_every_lead_exactly_once(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     service = _service(db_session, acme)
@@ -777,7 +798,7 @@ async def test_pagination_walks_every_lead_exactly_once(db_session):
     assert len(set(seen)) == 7
 
 
-async def test_statistics_report_the_pipeline(db_session):
+async def test_statistics_report_the_pipeline(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
     service = _service(db_session, acme)
@@ -799,7 +820,7 @@ async def test_statistics_report_the_pipeline(db_session):
     assert statistics.by_status[LeadStatus.WON] == 1
 
 
-async def test_a_budget_survives_a_round_trip_as_a_decimal(db_session):
+async def test_a_budget_survives_a_round_trip_as_a_decimal(db_session: AsyncSession) -> None:
     """Money read back as a float would eventually disagree with the customer."""
     acme = await _tenant(db_session, slug="acme")
     owner = await _user(db_session, tenant=acme, email="owner@example.com")
@@ -824,7 +845,7 @@ async def test_a_budget_survives_a_round_trip_as_a_decimal(db_session):
 # ---------------------------------------------------------------- the agent tool
 
 
-async def test_the_agent_tool_captures_a_lead_end_to_end(db_session):
+async def test_the_agent_tool_captures_a_lead_end_to_end(db_session: AsyncSession) -> None:
     """The tool, not just the service beneath it.
 
     Driven through `ToolRegistry.run`, so argument validation, the handler and
@@ -861,7 +882,7 @@ async def test_the_agent_tool_captures_a_lead_end_to_end(db_session):
     assert lead.source is LeadSource.AGENT
 
 
-async def test_the_agent_tool_is_idempotent_across_a_conversation(db_session):
+async def test_the_agent_tool_is_idempotent_across_a_conversation(db_session: AsyncSession) -> None:
     from app.agents.registry import RECORD_LEAD_TOOL, ToolContext, build_default_registry
 
     acme = await _tenant(db_session, slug="acme")
@@ -882,7 +903,7 @@ async def test_the_agent_tool_is_idempotent_across_a_conversation(db_session):
     assert page.items[0].phone == "01001234567"
 
 
-async def test_the_agent_tool_says_so_when_it_was_given_nothing(db_session):
+async def test_the_agent_tool_says_so_when_it_was_given_nothing(db_session: AsyncSession) -> None:
     """A call with no details must not create an empty lead."""
     from app.agents.registry import RECORD_LEAD_TOOL, ToolContext, build_default_registry
 
@@ -905,7 +926,9 @@ async def test_the_agent_tool_says_so_when_it_was_given_nothing(db_session):
     assert page.items == []
 
 
-async def test_the_agent_tool_stops_when_a_colleague_has_taken_over(db_session):
+async def test_the_agent_tool_stops_when_a_colleague_has_taken_over(
+    db_session: AsyncSession,
+) -> None:
     """A queued job running after a handoff must not edit the record.
 
     The tool answers in words the model can act on rather than raising, because

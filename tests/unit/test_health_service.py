@@ -13,7 +13,7 @@ async def _healthy() -> None:
     return None
 
 
-async def test_report_is_ready_when_every_probe_passes():
+async def test_report_is_ready_when_every_probe_passes() -> None:
     report = await HealthService({"postgresql": _healthy, "redis": _healthy}).check_readiness()
 
     assert report.is_ready
@@ -22,7 +22,7 @@ async def test_report_is_ready_when_every_probe_passes():
     assert all(component.duration_ms >= 0 for component in report.components)
 
 
-async def test_domain_failure_marks_only_that_component_down():
+async def test_domain_failure_marks_only_that_component_down() -> None:
     async def unavailable() -> None:
         raise DependencyUnavailableError("Redis is unavailable.", details={"dependency": "redis"})
 
@@ -36,7 +36,7 @@ async def test_domain_failure_marks_only_that_component_down():
     assert components["redis"].detail == "Redis is unavailable."
 
 
-async def test_unexpected_failure_is_contained_and_not_leaked():
+async def test_unexpected_failure_is_contained_and_not_leaked() -> None:
     async def boom() -> None:
         raise RuntimeError("asyncpg internal detail")
 
@@ -48,7 +48,7 @@ async def test_unexpected_failure_is_contained_and_not_leaked():
     assert "asyncpg" not in (component.detail or "")
 
 
-async def test_probes_run_concurrently():
+async def test_probes_run_concurrently() -> None:
     async def slow() -> None:
         await asyncio.sleep(0.05)
 

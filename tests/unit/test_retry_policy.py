@@ -6,6 +6,8 @@ without patching `random` or watching a clock. Production draws the fraction in
 `handle_failure`; nothing here does.
 """
 
+from typing import Any
+
 import httpx
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -74,11 +76,11 @@ from app.workers.retry import (
         ),
     ],
 )
-def test_a_failure_is_named(error, expected):
+def test_a_failure_is_named(error: Exception, expected: FailureCategory) -> None:
     assert classify(error) is expected
 
 
-def test_an_unrecognised_failure_is_not_retried():
+def test_an_unrecognised_failure_is_not_retried() -> None:
     """An exception nobody has argued about is one nobody has argued is safe.
 
     A bug that raises `AttributeError` would fail identically on every attempt,
@@ -88,12 +90,14 @@ def test_an_unrecognised_failure_is_not_retried():
     assert not IDEMPOTENT_RETRY.should_retry(FailureCategory.UNKNOWN, attempt=1)
 
 
-def test_a_malformed_payload_is_never_retried():
+def test_a_malformed_payload_is_never_retried() -> None:
     assert FailureCategory.MALFORMED not in RETRYABLE
 
 
 @pytest.mark.parametrize("category", sorted(RETRYABLE))
-def test_every_retryable_category_is_retried_while_budget_remains(category):
+def test_every_retryable_category_is_retried_while_budget_remains(
+    category: FailureCategory,
+) -> None:
     assert IDEMPOTENT_RETRY.should_retry(category, attempt=1)
 
 
@@ -101,11 +105,13 @@ def test_every_retryable_category_is_retried_while_budget_remains(category):
     "category",
     sorted(set(FailureCategory) - RETRYABLE),
 )
-def test_a_terminal_category_is_never_retried_however_much_budget_remains(category):
+def test_a_terminal_category_is_never_retried_however_much_budget_remains(
+    category: FailureCategory,
+) -> None:
     assert not IDEMPOTENT_RETRY.should_retry(category, attempt=1)
 
 
-def test_attempts_are_bounded():
+def test_attempts_are_bounded() -> None:
     """The gap this whole module exists to close: a poison job must stop."""
     policy = RetryPolicy(max_attempts=3, base_seconds=1.0, max_seconds=10.0)
 
@@ -114,11 +120,11 @@ def test_attempts_are_bounded():
     assert not policy.should_retry(FailureCategory.TIMEOUT, attempt=99)
 
 
-def test_no_retry_refuses_the_very_first_attempt():
+def test_no_retry_refuses_the_very_first_attempt() -> None:
     assert not NO_RETRY.should_retry(FailureCategory.TIMEOUT, attempt=1)
 
 
-def test_the_backoff_doubles():
+def test_the_backoff_doubles() -> None:
     policy = RetryPolicy(max_attempts=6, base_seconds=2.0, max_seconds=1000.0, jitter_ratio=0.0)
 
     delays = [policy.delay_for(attempt, jitter=0.0) for attempt in range(1, 5)]
@@ -126,14 +132,14 @@ def test_the_backoff_doubles():
     assert delays == [2.0, 4.0, 8.0, 16.0]
 
 
-def test_the_backoff_stops_growing():
+def test_the_backoff_stops_growing() -> None:
     """A Friday outage must not push a retry into next week."""
     policy = RetryPolicy(max_attempts=20, base_seconds=2.0, max_seconds=60.0, jitter_ratio=0.0)
 
     assert policy.delay_for(20, jitter=0.0) == 60.0
 
 
-def test_jitter_only_ever_adds():
+def test_jitter_only_ever_adds() -> None:
     """A retry landing earlier than the backoff intended defeats the backoff."""
     policy = RetryPolicy(max_attempts=5, base_seconds=10.0, max_seconds=100.0, jitter_ratio=0.25)
 
@@ -142,7 +148,7 @@ def test_jitter_only_ever_adds():
     assert policy.delay_for(1, jitter=0.5) > policy.delay_for(1, jitter=0.0)
 
 
-def test_jitter_is_bounded_by_the_ratio():
+def test_jitter_is_bounded_by_the_ratio() -> None:
     policy = RetryPolicy(max_attempts=5, base_seconds=8.0, max_seconds=100.0, jitter_ratio=0.25)
 
     for step in range(100):
@@ -150,7 +156,7 @@ def test_jitter_is_bounded_by_the_ratio():
         assert 8.0 <= delay <= 10.0
 
 
-def test_a_jitter_outside_the_unit_interval_is_refused():
+def test_a_jitter_outside_the_unit_interval_is_refused() -> None:
     with pytest.raises(ValueError, match="jitter"):
         IDEMPOTENT_RETRY.delay_for(1, jitter=1.0)
 
@@ -169,12 +175,12 @@ def test_a_jitter_outside_the_unit_interval_is_refused():
         ),
     ],
 )
-def test_an_unusable_policy_is_refused_at_construction(kwargs):
+def test_an_unusable_policy_is_refused_at_construction(kwargs: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         RetryPolicy(**kwargs)
 
 
-def test_the_shipped_policies_are_bounded():
+def test_the_shipped_policies_are_bounded() -> None:
     """Stated as a property, so raising a limit is a deliberate edit here too."""
     for policy in (IDEMPOTENT_RETRY, NO_RETRY):
         assert 1 <= policy.max_attempts <= 10

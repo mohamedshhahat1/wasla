@@ -6,7 +6,10 @@ the table, and that two workspaces receiving the same customer's photograph keep
 their copies apart.
 """
 
+from typing import Any
+
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.conversation import MessageKind
 from app.db.models.media import MediaStatus
@@ -15,6 +18,9 @@ from app.db.models.whatsapp import WhatsAppAccount
 from app.repositories.conversation_repository import MessageRepository
 from app.repositories.media_repository import MediaRepository
 from app.services.whatsapp_service import WhatsAppIngestionService
+from app.workers.media_queue import MediaJob
+from app.workers.queue import AgentJob
+from tests.fakes import as_agent_queue, as_media_queue
 
 pytestmark = pytest.mark.integration
 
@@ -24,14 +30,19 @@ CUSTOMER = "201234567890"
 SENT_AT = "1786000000"
 
 
-async def _tenant(session, *, slug):
+async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _account(session, *, tenant, phone_number_id):
+async def _account(
+    session: AsyncSession,
+    *,
+    tenant: Tenant,
+    phone_number_id: str,
+) -> WhatsAppAccount:
     account = WhatsAppAccount(
         tenant_id=tenant.id,
         phone_number_id=phone_number_id,
@@ -45,12 +56,12 @@ async def _account(session, *, tenant, phone_number_id):
 
 def _media_delivery(
     *,
-    phone_number_id=PHONE_NUMBER_ID,
-    message_id="wamid.image",
-    message_type="image",
-    descriptor=None,
-    caption=None,
-):
+    phone_number_id: str = PHONE_NUMBER_ID,
+    message_id: str = "wamid.image",
+    message_type: str = "image",
+    descriptor: dict[str, Any] | None = None,
+    caption: str | None = None,
+) -> dict[str, Any]:
     body = descriptor if descriptor is not None else {"id": "media-1", "mime_type": "image/jpeg"}
     if caption is not None:
         body = {**body, "caption": caption}
@@ -80,7 +91,7 @@ def _media_delivery(
     }
 
 
-async def test_an_image_is_stored_with_a_pending_media_row(db_session):
+async def test_an_image_is_stored_with_a_pending_media_row(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
 
@@ -104,7 +115,9 @@ async def test_an_image_is_stored_with_a_pending_media_row(db_session):
     assert media.storage_key is None
 
 
-async def test_a_caption_lands_on_the_message_and_not_on_the_media(db_session):
+async def test_a_caption_lands_on_the_message_and_not_on_the_media(
+    db_session: AsyncSession,
+) -> None:
     """The words are the customer's; the file's contents are not."""
     tenant = await _tenant(db_session, slug="acme")
     await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
@@ -124,7 +137,7 @@ async def test_a_caption_lands_on_the_message_and_not_on_the_media(db_session):
     assert media.transcript is None
 
 
-async def test_a_replayed_delivery_does_not_add_a_second_file(db_session):
+async def test_a_replayed_delivery_does_not_add_a_second_file(db_session: AsyncSession) -> None:
     """Meta retries. One message must never end up with two attachments."""
     tenant = await _tenant(db_session, slug="acme")
     await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
@@ -147,7 +160,7 @@ async def test_a_replayed_delivery_does_not_add_a_second_file(db_session):
     assert len(media) == 1
 
 
-async def test_a_voice_note_is_recorded_as_one(db_session):
+async def test_a_voice_note_is_recorded_as_one(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
 
@@ -171,7 +184,7 @@ async def test_a_voice_note_is_recorded_as_one(db_session):
     assert media.mime_type == "audio/ogg"
 
 
-async def test_a_text_message_creates_no_media_row(db_session):
+async def test_a_text_message_creates_no_media_row(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
 
@@ -208,7 +221,7 @@ async def test_a_text_message_creates_no_media_row(db_session):
     assert media is None
 
 
-async def test_two_workspaces_keep_their_copies_apart(db_session):
+async def test_two_workspaces_keep_their_copies_apart(db_session: AsyncSession) -> None:
     """The same customer photographs the same thing for two businesses."""
     acme = await _tenant(db_session, slug="acme")
     globex = await _tenant(db_session, slug="globex")
@@ -233,7 +246,7 @@ async def test_two_workspaces_keep_their_copies_apart(db_session):
     assert mine is not None
 
 
-async def test_an_unresolved_count_is_scoped_to_the_workspace(db_session):
+async def test_an_unresolved_count_is_scoped_to_the_workspace(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     globex = await _tenant(db_session, slug="globex")
     await _account(db_session, tenant=acme, phone_number_id=PHONE_NUMBER_ID)
@@ -252,7 +265,7 @@ async def test_an_unresolved_count_is_scoped_to_the_workspace(db_session):
     assert await globex_media.count_unresolved(message.conversation_id) == 0
 
 
-async def test_a_sticker_is_read_as_an_image(db_session):
+async def test_a_sticker_is_read_as_an_image(db_session: AsyncSession) -> None:
     """Meta gives stickers their own type; nothing downstream needs it apart.
 
     A sticker is a small image and is described the same way. The raw event
@@ -286,11 +299,13 @@ class RecordingQueue:
     def __init__(self) -> None:
         self.jobs: list[object] = []
 
-    async def enqueue(self, job) -> None:
+    async def enqueue(self, job: AgentJob) -> None:
         self.jobs.append(job)
 
 
-async def test_a_photograph_is_queued_for_reading_not_for_answering(db_session):
+async def test_a_photograph_is_queued_for_reading_not_for_answering(
+    db_session: AsyncSession,
+) -> None:
     """The ordering the phase turns on.
 
     An agent asked to answer now would see a message with no words in it. The
@@ -303,8 +318,8 @@ async def test_a_photograph_is_queued_for_reading_not_for_answering(db_session):
     media_queue = RecordingQueue()
     outcome = await WhatsAppIngestionService(
         session=db_session,
-        queue=agents,
-        media_queue=media_queue,
+        queue=as_agent_queue(agents),
+        media_queue=as_media_queue(media_queue),
     ).ingest(_media_delivery(caption="how much?"))
 
     assert outcome.stored == 1
@@ -319,10 +334,12 @@ async def test_a_photograph_is_queued_for_reading_not_for_answering(db_session):
     assert message is not None
     media = await MediaRepository(db_session, tenant_id=tenant.id).get_for_message(message.id)
     assert media is not None
-    assert media_queue.jobs[0].media_id == media.id
+    queued = media_queue.jobs[0]
+    assert isinstance(queued, MediaJob)
+    assert queued.media_id == media.id
 
 
-async def test_a_text_message_is_still_queued_for_answering(db_session):
+async def test_a_text_message_is_still_queued_for_answering(db_session: AsyncSession) -> None:
     """Nothing about the ordinary path changes."""
     tenant = await _tenant(db_session, slug="acme")
     await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
@@ -331,8 +348,8 @@ async def test_a_text_message_is_still_queued_for_answering(db_session):
     media_queue = RecordingQueue()
     outcome = await WhatsAppIngestionService(
         session=db_session,
-        queue=agents,
-        media_queue=media_queue,
+        queue=as_agent_queue(agents),
+        media_queue=as_media_queue(media_queue),
     ).ingest(
         {
             "entry": [
@@ -364,7 +381,7 @@ async def test_a_text_message_is_still_queued_for_answering(db_session):
     assert media_queue.jobs == []
 
 
-async def test_two_photographs_are_two_reading_jobs(db_session):
+async def test_two_photographs_are_two_reading_jobs(db_session: AsyncSession) -> None:
     """One job per file, unlike agent jobs, which are one per conversation.
 
     Two photographs are two things to read; collapsing them would leave one
@@ -374,7 +391,7 @@ async def test_two_photographs_are_two_reading_jobs(db_session):
     await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
 
     media_queue = RecordingQueue()
-    service = WhatsAppIngestionService(session=db_session, media_queue=media_queue)
+    service = WhatsAppIngestionService(session=db_session, media_queue=as_media_queue(media_queue))
     await service.ingest(_media_delivery(message_id="wamid.one"))
     await service.ingest(_media_delivery(message_id="wamid.two"))
 

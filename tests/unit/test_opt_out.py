@@ -26,21 +26,21 @@ HALT = "ايقاف"  # stop
 FATHA = "َ"  # a diacritic, which a customer may or may not type
 
 
-def test_a_bare_stop_is_a_stop():
+def test_a_bare_stop_is_a_stop() -> None:
     assert is_stop_request("stop") is True
 
 
-def test_case_and_punctuation_do_not_matter():
+def test_case_and_punctuation_do_not_matter() -> None:
     for written in ("STOP", "Stop.", "  stop  ", "!!STOP!!", "stop!"):
         assert is_stop_request(written) is True, written
 
 
-def test_the_other_english_wordings_are_recognised():
+def test_the_other_english_wordings_are_recognised() -> None:
     for written in ("unsubscribe", "opt out", "OptOut", "stop promotions"):
         assert is_stop_request(written) is True, written
 
 
-def test_a_word_inside_a_sentence_is_not_a_stop_request():
+def test_a_word_inside_a_sentence_is_not_a_stop_request() -> None:
     """The failure a substring match would make constantly."""
     for written in (
         "stop by the shop tomorrow",
@@ -50,39 +50,39 @@ def test_a_word_inside_a_sentence_is_not_a_stop_request():
         assert is_stop_request(written) is False, written
 
 
-def test_a_sentence_is_not_read_at_all():
+def test_a_sentence_is_not_read_at_all() -> None:
     """Beyond a few words this stops looking and lets a person decide."""
     assert is_stop_request("please take me off your marketing list, thank you") is False
 
 
-def test_nothing_is_not_a_stop_request():
+def test_nothing_is_not_a_stop_request() -> None:
     assert is_stop_request(None) is False
     assert is_stop_request("") is False
     assert is_stop_request("   ") is False
 
 
-def test_a_very_long_message_is_refused_before_it_is_normalised():
+def test_a_very_long_message_is_refused_before_it_is_normalised() -> None:
     assert is_stop_request("stop" + "!" * MAX_STOP_LENGTH) is False
 
 
-def test_arabic_is_recognised():
+def test_arabic_is_recognised() -> None:
     assert is_stop_request(CANCEL) is True
     assert is_stop_request(HALT) is True
 
 
-def test_the_hamza_a_keyboard_produces_does_not_hide_an_opt_out():
+def test_the_hamza_a_keyboard_produces_does_not_hide_an_opt_out() -> None:
     """A customer's keyboard must not decide whether they are left alone."""
     assert is_stop_request(CANCEL_HAMZA) is True
 
 
-def test_diacritics_are_ignored():
+def test_diacritics_are_ignored() -> None:
     assert is_stop_request(CANCEL[0] + FATHA + CANCEL[1:]) is True
 
 
-def test_repeated_spaces_collapse():
+def test_repeated_spaces_collapse() -> None:
     assert normalised("stop    promotions") == "stop promotions"
 
 
 @pytest.mark.parametrize("written", ["hello", "شكرا", "yes please", "1"])
-def test_ordinary_messages_are_left_alone(written):
+def test_ordinary_messages_are_left_alone(written: str) -> None:
     assert is_stop_request(written) is False

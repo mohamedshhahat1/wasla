@@ -8,10 +8,15 @@ orders nulls and ties.
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.pagination import Page
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -29,7 +34,7 @@ pytestmark = pytest.mark.integration
 START = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
 
 
-async def _workspace(session, *, slug="acme"):
+async def _workspace(session: AsyncSession, *, slug: str = "acme") -> tuple[Any, ...]:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
@@ -44,7 +49,14 @@ async def _workspace(session, *, slug="acme"):
     return tenant, account
 
 
-async def _conversation(session, *, tenant, account, index, last_message_at):
+async def _conversation(
+    session: AsyncSession,
+    *,
+    tenant: Tenant,
+    account: WhatsAppAccount,
+    index: int,
+    last_message_at: datetime | None,
+) -> Conversation:
     contact = Contact(tenant_id=tenant.id, wa_id=f"2012345678{index:02d}")
     session.add(contact)
     await session.flush()
@@ -59,9 +71,14 @@ async def _conversation(session, *, tenant, account, index, last_message_at):
     return conversation
 
 
-async def _walk(inbox, *, limit, lister):
+async def _walk(
+    inbox: InboxService,
+    *,
+    limit: int,
+    lister: Callable[[InboxService, int, str | None], Awaitable[Page[Any]]],
+) -> list[Any]:
     """Page all the way through, collecting ids and guarding against a loop."""
-    seen: list = []
+    seen: list[Any] = []
     cursor = None
     for _ in range(50):
         page = await lister(inbox, limit, cursor)
@@ -72,12 +89,18 @@ async def _walk(inbox, *, limit, lister):
     raise AssertionError("pagination did not terminate")
 
 
-async def _list_conversations(inbox, limit, cursor):
+async def _list_conversations(
+    inbox: InboxService,
+    limit: int,
+    cursor: str | None,
+) -> Page[Any]:
     return await inbox.list_conversations(limit=limit, cursor=cursor)
 
 
-def _list_messages(conversation_id):
-    async def lister(inbox, limit, cursor):
+def _list_messages(
+    conversation_id: uuid.UUID,
+) -> Callable[[InboxService, int, str | None], Awaitable[Page[Any]]]:
+    async def lister(inbox: InboxService, limit: int, cursor: str | None) -> Page[Any]:
         return await inbox.list_messages(
             conversation_id=conversation_id,
             limit=limit,
@@ -87,7 +110,7 @@ def _list_messages(conversation_id):
     return lister
 
 
-async def test_paging_visits_every_conversation_exactly_once(db_session):
+async def test_paging_visits_every_conversation_exactly_once(db_session: AsyncSession) -> None:
     tenant, account = await _workspace(db_session)
     for index in range(7):
         await _conversation(
@@ -105,7 +128,7 @@ async def test_paging_visits_every_conversation_exactly_once(db_session):
     assert len(set(seen)) == 7
 
 
-async def test_pages_stay_in_most_recent_first_order(db_session):
+async def test_pages_stay_in_most_recent_first_order(db_session: AsyncSession) -> None:
     tenant, account = await _workspace(db_session)
     expected = []
     for index in range(6):
@@ -124,7 +147,7 @@ async def test_pages_stay_in_most_recent_first_order(db_session):
     assert seen == expected
 
 
-async def test_conversations_sharing_an_instant_are_not_skipped(db_session):
+async def test_conversations_sharing_an_instant_are_not_skipped(db_session: AsyncSession) -> None:
     """The id tiebreaker is what makes the ordering total.
 
     Without it the boundary between two rows at the same instant is arbitrary,
@@ -147,7 +170,9 @@ async def test_conversations_sharing_an_instant_are_not_skipped(db_session):
     assert len(set(seen)) == 6
 
 
-async def test_a_conversation_with_no_messages_sorts_last_and_is_still_reached(db_session):
+async def test_a_conversation_with_no_messages_sorts_last_and_is_still_reached(
+    db_session: AsyncSession,
+) -> None:
     """A descending sort would otherwise put nulls first, ahead of live traffic."""
     tenant, account = await _workspace(db_session)
     silent = await _conversation(
@@ -173,7 +198,7 @@ async def test_a_conversation_with_no_messages_sorts_last_and_is_still_reached(d
     assert seen[-1] == silent.id
 
 
-async def test_several_silent_conversations_all_page_through(db_session):
+async def test_several_silent_conversations_all_page_through(db_session: AsyncSession) -> None:
     """The null block needs its own keyset, since null is not comparable."""
     tenant, account = await _workspace(db_session)
     for index in range(5):
@@ -191,7 +216,9 @@ async def test_several_silent_conversations_all_page_through(db_session):
     assert len(set(seen)) == 5
 
 
-async def test_a_conversation_arriving_mid_walk_never_duplicates_an_earlier_row(db_session):
+async def test_a_conversation_arriving_mid_walk_never_duplicates_an_earlier_row(
+    db_session: AsyncSession,
+) -> None:
     """The reason for keyset paging at all.
 
     An offset would shift under the insert and hand the reader a row it has
@@ -222,7 +249,7 @@ async def test_a_conversation_arriving_mid_walk_never_duplicates_an_earlier_row(
     assert {row.id for row in first.items}.isdisjoint({row.id for row in second.items})
 
 
-async def test_the_last_page_offers_no_cursor(db_session):
+async def test_the_last_page_offers_no_cursor(db_session: AsyncSession) -> None:
     tenant, account = await _workspace(db_session)
     for index in range(3):
         await _conversation(
@@ -240,7 +267,7 @@ async def test_the_last_page_offers_no_cursor(db_session):
     assert page.next_cursor is None
 
 
-async def test_paging_never_crosses_into_another_workspace(db_session):
+async def test_paging_never_crosses_into_another_workspace(db_session: AsyncSession) -> None:
     mine, my_account = await _workspace(db_session, slug="mine")
     theirs, their_account = await _workspace(db_session, slug="theirs")
     for index in range(3):
@@ -266,7 +293,9 @@ async def test_paging_never_crosses_into_another_workspace(db_session):
     assert len(seen) == 3
 
 
-async def test_a_cursor_from_another_workspace_still_reaches_nothing(db_session):
+async def test_a_cursor_from_another_workspace_still_reaches_nothing(
+    db_session: AsyncSession,
+) -> None:
     """The cursor is a position, not an authorisation.
 
     It is only ever applied inside a tenant-scoped query, so replaying one taken
@@ -302,7 +331,7 @@ async def test_a_cursor_from_another_workspace_still_reaches_nothing(db_session)
     assert all(row.tenant_id == mine.id for row in mine_page.items)
 
 
-async def test_paging_visits_every_message_exactly_once(db_session):
+async def test_paging_visits_every_message_exactly_once(db_session: AsyncSession) -> None:
     tenant, account = await _workspace(db_session)
     conversation = await _conversation(
         db_session,

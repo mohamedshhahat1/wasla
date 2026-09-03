@@ -14,12 +14,16 @@ assert the stub.
 from __future__ import annotations
 
 import io
+import uuid
 import zipfile
 import zlib
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.media_types import MediaTypeError
@@ -32,6 +36,7 @@ from app.integrations.whatsapp.client import DownloadedMedia, MediaDescriptor
 from app.services import messaging_service as messaging_module
 from app.services.media_service import MediaService
 from app.services.messaging_service import MessagingService
+from tests.fakes import as_whatsapp
 
 pytestmark = pytest.mark.integration
 
@@ -113,7 +118,7 @@ class Recorder:
 
 
 @pytest.fixture
-def meta(monkeypatch) -> Recorder:
+def meta(monkeypatch: pytest.MonkeyPatch) -> Recorder:
     recorder = Recorder()
     monkeypatch.setattr(
         messaging_module,
@@ -123,7 +128,7 @@ def meta(monkeypatch) -> Recorder:
     return recorder
 
 
-async def _conversation(session):
+async def _conversation(session: AsyncSession) -> tuple[Any, ...]:
     tenant = Tenant(name="Acme", slug="acme-media-types")
     session.add(tenant)
     await session.flush()
@@ -164,8 +169,13 @@ async def _conversation(session):
     ],
 )
 async def test_a_spoofed_upload_is_refused_and_nothing_is_sent(
-    db_session, settings, meta, claimed, content, label
-):
+    db_session: AsyncSession,
+    settings: Settings,
+    meta: Recorder,
+    claimed: str,
+    content: bytes,
+    label: str,
+) -> None:
     """Refused before Meta is called, so no message row and no stored file."""
     tenant, conversation = await _conversation(db_session)
     service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
@@ -181,7 +191,9 @@ async def test_a_spoofed_upload_is_refused_and_nothing_is_sent(
     assert meta.requests == [], f"{label}: a refused file still reached Meta"
 
 
-async def test_the_filename_extension_decides_nothing(db_session, settings, meta, tmp_path):
+async def test_the_filename_extension_decides_nothing(
+    db_session: AsyncSession, settings: Settings, meta: Recorder, tmp_path: Path
+) -> None:
     """`photo.jpg` is a string from a request body and carries no authority.
 
     These bytes are a PDF, so the file is perfectly acceptable - as a *document*.
@@ -205,7 +217,9 @@ async def test_the_filename_extension_decides_nothing(db_session, settings, meta
     assert b"image/jpeg" not in meta.upload.content
 
 
-async def test_an_extension_cannot_rescue_a_contradicted_claim(db_session, settings, meta):
+async def test_an_extension_cannot_rescue_a_contradicted_claim(
+    db_session: AsyncSession, settings: Settings, meta: Recorder
+) -> None:
     """The same file, now announced as the thing its name suggests. Refused."""
     tenant, conversation = await _conversation(db_session)
     service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
@@ -221,7 +235,9 @@ async def test_an_extension_cannot_rescue_a_contradicted_claim(db_session, setti
     assert meta.requests == []
 
 
-async def test_a_genuine_image_is_still_sent(db_session, settings, meta, tmp_path):
+async def test_a_genuine_image_is_still_sent(
+    db_session: AsyncSession, settings: Settings, meta: Recorder, tmp_path: Path
+) -> None:
     tenant, conversation = await _conversation(db_session)
     service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
 
@@ -238,8 +254,8 @@ async def test_a_genuine_image_is_still_sent(db_session, settings, meta, tmp_pat
 
 
 async def test_meta_is_told_the_canonical_type_not_the_callers(
-    db_session, settings, meta, tmp_path
-):
+    db_session: AsyncSession, settings: Settings, meta: Recorder, tmp_path: Path
+) -> None:
     """A caller writing an odd spelling must not have it forwarded verbatim.
 
     Meta renders an attachment by what it is told it is, so passing the claim
@@ -261,7 +277,9 @@ async def test_meta_is_told_the_canonical_type_not_the_callers(
     assert b"charset=binary" not in body
 
 
-async def test_the_stored_row_carries_the_detected_type(db_session, settings, meta, tmp_path):
+async def test_the_stored_row_carries_the_detected_type(
+    db_session: AsyncSession, settings: Settings, meta: Recorder, tmp_path: Path
+) -> None:
     """What is served back later comes from this column."""
     tenant, conversation = await _conversation(db_session)
     service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
@@ -282,7 +300,7 @@ async def test_the_stored_row_carries_the_detected_type(db_session, settings, me
     assert row.storage_key is not None
 
 
-async def _media_id(session, message_id):
+async def _media_id(session: AsyncSession, message_id: uuid.UUID) -> uuid.UUID:
     from sqlalchemy import select
 
     return (
@@ -315,7 +333,13 @@ class StubWhatsApp:
         )
 
 
-async def _attachment(session, tenant, conversation, *, mime_type):
+async def _attachment(
+    session: AsyncSession,
+    tenant: Tenant,
+    conversation: Conversation,
+    *,
+    mime_type: str,
+) -> MessageMedia:
     from app.db.models.conversation import Message, MessageDirection
 
     message = Message(
@@ -352,8 +376,12 @@ async def _attachment(session, tenant, conversation, *, mime_type):
     ],
 )
 async def test_an_inbound_file_that_contradicts_metas_claim_is_skipped(
-    db_session, settings, tmp_path, claimed, content
-):
+    db_session: AsyncSession,
+    settings: Settings,
+    tmp_path: Path,
+    claimed: str,
+    content: bytes,
+) -> None:
     """Meta's descriptor is a claim about a file, not the file.
 
     Skipped rather than failed: no retry turns these bytes into the announced
@@ -367,7 +395,7 @@ async def test_an_inbound_file_that_contradicts_metas_claim_is_skipped(
         tenant_id=tenant.id,
         settings=settings,
         storage=LocalMediaStorage(tmp_path),
-        whatsapp=StubWhatsApp(content=content, claimed=claimed),
+        whatsapp=as_whatsapp(StubWhatsApp(content=content, claimed=claimed)),
     )
     outcome = await service.download(media)
 
@@ -376,7 +404,9 @@ async def test_an_inbound_file_that_contradicts_metas_claim_is_skipped(
     assert list(tmp_path.rglob("*.*")) == [], "a refused file was written to the store anyway"
 
 
-async def test_a_skipped_mismatch_never_reaches_the_reader(db_session, settings, tmp_path):
+async def test_a_skipped_mismatch_never_reaches_the_reader(
+    db_session: AsyncSession, settings: Settings, tmp_path: Path
+) -> None:
     """The reader is what sends an image to a vision model. It must not run."""
     tenant, conversation = await _conversation(db_session)
     media = await _attachment(db_session, tenant, conversation, mime_type="image/jpeg")
@@ -386,12 +416,12 @@ async def test_a_skipped_mismatch_never_reaches_the_reader(db_session, settings,
         tenant_id=tenant.id,
         settings=settings,
         storage=LocalMediaStorage(tmp_path),
-        whatsapp=StubWhatsApp(content=PDF, claimed="image/jpeg"),
+        whatsapp=as_whatsapp(StubWhatsApp(content=PDF, claimed="image/jpeg")),
     )
     await service.download(media)
 
     class ExplodingReader:
-        async def read(self, *, content: bytes, mime_type: str | None):
+        async def read(self, *, content: bytes, mime_type: str | None) -> None:
             raise AssertionError("a mismatched file was handed to the reader")
 
     outcome = await service.understand(media, reader=ExplodingReader())  # type: ignore[arg-type]
@@ -399,8 +429,8 @@ async def test_a_skipped_mismatch_never_reaches_the_reader(db_session, settings,
 
 
 async def test_an_honest_inbound_file_is_stored_under_its_detected_type(
-    db_session, settings, tmp_path
-):
+    db_session: AsyncSession, settings: Settings, tmp_path: Path
+) -> None:
     tenant, conversation = await _conversation(db_session)
     media = await _attachment(db_session, tenant, conversation, mime_type="audio/ogg")
 
@@ -409,7 +439,7 @@ async def test_an_honest_inbound_file_is_stored_under_its_detected_type(
         tenant_id=tenant.id,
         settings=settings,
         storage=LocalMediaStorage(tmp_path),
-        whatsapp=StubWhatsApp(content=OGG, claimed="audio/ogg"),
+        whatsapp=as_whatsapp(StubWhatsApp(content=OGG, claimed="audio/ogg")),
     )
     outcome = await service.download(media)
 
@@ -418,7 +448,9 @@ async def test_an_honest_inbound_file_is_stored_under_its_detected_type(
     assert media.storage_key is not None
 
 
-async def test_the_refusal_message_does_not_repeat_the_bytes(db_session, settings, tmp_path):
+async def test_the_refusal_message_does_not_repeat_the_bytes(
+    db_session: AsyncSession, settings: Settings, tmp_path: Path
+) -> None:
     """A row's `last_error` is read by a colleague and stored in the database."""
     tenant, conversation = await _conversation(db_session)
     media = await _attachment(db_session, tenant, conversation, mime_type="image/jpeg")
@@ -428,7 +460,9 @@ async def test_the_refusal_message_does_not_repeat_the_bytes(db_session, setting
         tenant_id=tenant.id,
         settings=settings,
         storage=LocalMediaStorage(tmp_path),
-        whatsapp=StubWhatsApp(content=PDF + b"secret-marker-9f2a", claimed="image/jpeg"),
+        whatsapp=as_whatsapp(
+            StubWhatsApp(content=PDF + b"secret-marker-9f2a", claimed="image/jpeg")
+        ),
     )
     await service.download(media)
 
@@ -437,7 +471,9 @@ async def test_the_refusal_message_does_not_repeat_the_bytes(db_session, setting
     assert "%PDF" not in media.last_error
 
 
-async def test_an_oversized_download_is_abandoned_rather_than_held(db_session, settings, tmp_path):
+async def test_an_oversized_download_is_abandoned_rather_than_held(
+    db_session: AsyncSession, settings: Settings, tmp_path: Path
+) -> None:
     """The cap is enforced while reading, and the outcome is a decision not a failure."""
     from app.integrations.whatsapp.client import MediaTooLargeError
 
@@ -457,7 +493,7 @@ async def test_an_oversized_download_is_abandoned_rather_than_held(db_session, s
         tenant_id=tenant.id,
         settings=settings,
         storage=LocalMediaStorage(tmp_path),
-        whatsapp=Oversized(content=png(), claimed="image/png"),
+        whatsapp=as_whatsapp(Oversized(content=png(), claimed="image/png")),
     )
     outcome = await service.download(media)
 

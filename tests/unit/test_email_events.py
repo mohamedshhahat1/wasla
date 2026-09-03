@@ -52,6 +52,17 @@ class _StubRepository:
         self.looked_up.append(provider_message_id)
         return self.row
 
+    @property
+    def stored(self) -> _Row:
+        """The row this stub was built with.
+
+        `row` is optional because one test builds a repository that finds
+        nothing. Every other test put a row there, and says so here rather
+        than at each of the assertions that read it.
+        """
+        assert self.row is not None
+        return self.row
+
     async def mark_delivered(self, email: _Row, *, now: Any) -> None:
         self.delivered.append(email.id)
         email.status = EmailStatus.DELIVERED
@@ -87,21 +98,23 @@ def _event(kind: str, **data: Any) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_a_delivered_event_records_the_delivery():
+async def test_a_delivered_event_records_the_delivery() -> None:
     repository = _StubRepository(row=_Row())
+    assert repository is not None
 
     outcome = await _service(repository).record(_event("email.delivered"))
 
     assert outcome == APPLIED
-    assert repository.delivered == [repository.row.id]
+    assert repository.delivered == [repository.stored.id]
     assert repository.suppressed == []
 
 
 @pytest.mark.asyncio
-async def test_an_event_naming_a_message_we_never_sent_changes_nothing():
+async def test_an_event_naming_a_message_we_never_sent_changes_nothing() -> None:
     # The lookup is the trust boundary. Without it, every field below would be
     # attacker-chosen input to a write.
     repository = _StubRepository(row=None)
+    assert repository is not None
 
     event = _event("email.bounced", bounce={"type": "Permanent"})
     outcome = await _service(repository).record(event)
@@ -113,11 +126,12 @@ async def test_an_event_naming_a_message_we_never_sent_changes_nothing():
 
 
 @pytest.mark.asyncio
-async def test_a_forged_bounce_cannot_suppress_an_address_we_never_wrote_to():
+async def test_a_forged_bounce_cannot_suppress_an_address_we_never_wrote_to() -> None:
     # The attack this design exists to refuse: a bounce naming somebody else's
     # mailbox, to stop this platform ever mailing it. The address suppressed is
     # the one on our own row, so the payload's address is inert.
     repository = _StubRepository(row=_Row(recipient=OURS))
+    assert repository is not None
 
     await _service(repository).record(
         _event(
@@ -133,8 +147,9 @@ async def test_a_forged_bounce_cannot_suppress_an_address_we_never_wrote_to():
 
 
 @pytest.mark.asyncio
-async def test_a_permanent_bounce_suppresses_the_address_and_fails_the_message():
+async def test_a_permanent_bounce_suppresses_the_address_and_fails_the_message() -> None:
     repository = _StubRepository(row=_Row())
+    assert repository is not None
 
     outcome = await _service(repository).record(
         _event("email.bounced", bounce={"type": "Permanent"})
@@ -142,7 +157,7 @@ async def test_a_permanent_bounce_suppresses_the_address_and_fails_the_message()
 
     assert outcome == APPLIED
     assert repository.suppressed == [(OURS, "hard_bounce")]
-    assert repository.failed == [(repository.row.id, "bounced")]
+    assert repository.failed == [(repository.stored.id, "bounced")]
 
 
 @pytest.mark.asyncio
@@ -150,11 +165,14 @@ async def test_a_permanent_bounce_suppresses_the_address_and_fails_the_message()
     "bounce",
     [{"type": "Transient"}, {"type": "Undetermined"}, {}, None],
 )
-async def test_a_bounce_that_is_not_permanent_suppresses_nothing(bounce):
+async def test_a_bounce_that_is_not_permanent_suppresses_nothing(
+    bounce: dict[str, Any] | None,
+) -> None:
     # A full mailbox or a greylist. Refusing to write to the address again
     # would turn a temporary condition into a permanent one - and the address
     # in question is where somebody's password reset goes.
     repository = _StubRepository(row=_Row())
+    assert repository is not None
 
     await _service(repository).record(_event("email.bounced", bounce=bounce))
 
@@ -163,8 +181,9 @@ async def test_a_bounce_that_is_not_permanent_suppresses_nothing(bounce):
 
 
 @pytest.mark.asyncio
-async def test_a_complaint_suppresses_without_failing_a_message_that_arrived():
+async def test_a_complaint_suppresses_without_failing_a_message_that_arrived() -> None:
     repository = _StubRepository(row=_Row())
+    assert repository is not None
 
     await _service(repository).record(_event("email.complained"))
 
@@ -177,10 +196,11 @@ async def test_a_complaint_suppresses_without_failing_a_message_that_arrived():
     "kind",
     ["email.opened", "email.clicked", "email.sent", "email.delivery_delayed"],
 )
-async def test_events_that_prove_nothing_are_dropped(kind):
+async def test_events_that_prove_nothing_are_dropped(kind: str) -> None:
     # Opens and clicks are an image proxy and a link scanner. Nothing is stored,
     # so nothing can later be mistaken for evidence that a person read anything.
     repository = _StubRepository(row=_Row())
+    assert repository is not None
 
     outcome = await _service(repository).record(_event(kind))
 
@@ -191,38 +211,41 @@ async def test_events_that_prove_nothing_are_dropped(kind):
 
 
 @pytest.mark.asyncio
-async def test_replaying_an_event_lands_on_the_same_state():
+async def test_replaying_an_event_lands_on_the_same_state() -> None:
     # The replay story: repetition is harmless by construction, which is why
     # there is no table of seen delivery ids to keep.
     repository = _StubRepository(row=_Row())
+    assert repository is not None
     service = _service(repository)
 
     await service.record(_event("email.delivered"))
     await service.record(_event("email.delivered"))
 
-    assert repository.row.status is EmailStatus.DELIVERED
+    assert repository.stored.status is EmailStatus.DELIVERED
     assert repository.failed == []
 
 
 @pytest.mark.asyncio
-async def test_a_late_failure_does_not_undo_an_observed_delivery():
+async def test_a_late_failure_does_not_undo_an_observed_delivery() -> None:
     # Otherwise the final status would depend on the order the webhooks
     # happened to arrive in.
     repository = _StubRepository(row=_Row(status=EmailStatus.DELIVERED))
+    assert repository is not None
 
     await _service(repository).record(_event("email.failed"))
 
     assert repository.failed == []
-    assert repository.row.status is EmailStatus.DELIVERED
+    assert repository.stored.status is EmailStatus.DELIVERED
 
 
 @pytest.mark.asyncio
-async def test_a_failure_event_fails_a_sent_message():
+async def test_a_failure_event_fails_a_sent_message() -> None:
     repository = _StubRepository(row=_Row())
+    assert repository is not None
 
     await _service(repository).record(_event("email.failed"))
 
-    assert repository.failed == [(repository.row.id, "provider_failed")]
+    assert repository.failed == [(repository.stored.id, "provider_failed")]
 
 
 @pytest.mark.asyncio
@@ -240,9 +263,10 @@ async def test_a_failure_event_fails_a_sent_message():
         {"type": "something.invented", "data": {"email_id": PROVIDER_ID}},
     ],
 )
-async def test_a_malformed_payload_is_dropped_not_guessed_at(payload):
+async def test_a_malformed_payload_is_dropped_not_guessed_at(payload: dict[str, Any]) -> None:
     # A verified signature says who sent it, not that it is well-formed.
     repository = _StubRepository(row=_Row())
+    assert repository is not None
 
     outcome = await _service(repository).record(payload)
 

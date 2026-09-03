@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,7 +50,7 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"a stored photograph" * 8
 
 
 @pytest.fixture(params=["local", "s3"])
-def storage(request, tmp_path) -> MediaStorage:
+def storage(request: pytest.FixtureRequest, tmp_path: Path) -> MediaStorage:
     if request.param == "local":
         return LocalMediaStorage(tmp_path)
     endpoint = os.environ.get("TEST_S3_ENDPOINT_URL")
@@ -71,7 +72,7 @@ class RefusingStore:
         self._inner = inner
         self.delete_attempts = 0
 
-    async def put(self, *, tenant_id, data, mime_type=None) -> str:
+    async def put(self, *, tenant_id: uuid.UUID, data: bytes, mime_type: str | None = None) -> str:
         return await self._inner.put(tenant_id=tenant_id, data=data, mime_type=mime_type)
 
     async def get(self, key: str) -> bytes:
@@ -89,7 +90,7 @@ class CountingStore:
         self._inner = inner
         self.deleted: list[str] = []
 
-    async def put(self, *, tenant_id, data, mime_type=None) -> str:
+    async def put(self, *, tenant_id: uuid.UUID, data: bytes, mime_type: str | None = None) -> str:
         return await self._inner.put(tenant_id=tenant_id, data=data, mime_type=mime_type)
 
     async def get(self, key: str) -> bytes:
@@ -147,6 +148,7 @@ async def _stored_file(
     await session.flush()
 
     key = await storage.put(tenant_id=tenant.id, data=PNG, mime_type="image/png")
+    assert key is not None
     media = MessageMedia(
         tenant_id=tenant.id,
         message_id=message.id,
@@ -165,14 +167,16 @@ async def _stored_file(
     return media
 
 
-def _service(session: AsyncSession, storage) -> MediaRetentionService:
+def _service(session: AsyncSession, storage: MediaStorage) -> MediaRetentionService:
     return MediaRetentionService(session=session, storage=storage)
 
 
 # ================================================================ eligibility
 
 
-async def test_a_file_past_its_retention_is_removed(db_session, storage) -> None:
+async def test_a_file_past_its_retention_is_removed(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     tenant = await _tenant(db_session)
     media = await _stored_file(db_session, tenant, storage, age_days=RETENTION_DAYS + 1)
     key = media.storage_key
@@ -189,11 +193,12 @@ async def test_a_file_past_its_retention_is_removed(db_session, storage) -> None
         await storage.get(key)
 
 
-async def test_a_recent_file_is_untouched(db_session, storage) -> None:
+async def test_a_recent_file_is_untouched(db_session: AsyncSession, storage: MediaStorage) -> None:
     """The other half, and the one a wrong comparison breaks silently."""
     tenant = await _tenant(db_session)
     media = await _stored_file(db_session, tenant, storage, age_days=RETENTION_DAYS - 1)
     key = media.storage_key
+    assert key is not None
 
     outcome = await _service(db_session, storage).sweep(
         now=NOW, retention_days=RETENTION_DAYS, limit=100
@@ -205,12 +210,15 @@ async def test_a_recent_file_is_untouched(db_session, storage) -> None:
     assert await storage.get(key) == PNG
 
 
-async def test_old_and_recent_files_in_one_pass(db_session, storage) -> None:
+async def test_old_and_recent_files_in_one_pass(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """Both together, because a sweep that took everything would pass both above."""
     tenant = await _tenant(db_session)
     old = await _stored_file(db_session, tenant, storage, age_days=RETENTION_DAYS + 5)
     recent = await _stored_file(db_session, tenant, storage, age_days=1)
     recent_key = recent.storage_key
+    assert recent_key is not None
 
     outcome = await _service(db_session, storage).sweep(
         now=NOW, retention_days=RETENTION_DAYS, limit=100
@@ -222,7 +230,9 @@ async def test_old_and_recent_files_in_one_pass(db_session, storage) -> None:
     assert await storage.get(recent_key) == PNG
 
 
-async def test_a_file_exactly_at_the_boundary_is_kept(db_session, storage) -> None:
+async def test_a_file_exactly_at_the_boundary_is_kept(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """A retention of thirty days means thirty days, not twenty-nine and a bit."""
     tenant = await _tenant(db_session)
     media = await _stored_file(db_session, tenant, storage, age_days=RETENTION_DAYS)
@@ -235,7 +245,9 @@ async def test_a_file_exactly_at_the_boundary_is_kept(db_session, storage) -> No
     assert media.storage_key is not None
 
 
-async def test_retention_of_zero_deletes_nothing(db_session, storage) -> None:
+async def test_retention_of_zero_deletes_nothing(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """The default. A deployment that has not chosen a period keeps everything."""
     tenant = await _tenant(db_session)
     media = await _stored_file(db_session, tenant, storage, age_days=3650)
@@ -246,7 +258,7 @@ async def test_retention_of_zero_deletes_nothing(db_session, storage) -> None:
     assert media.storage_key is not None
 
 
-async def test_the_batch_bounds_one_pass(db_session, storage) -> None:
+async def test_the_batch_bounds_one_pass(db_session: AsyncSession, storage: MediaStorage) -> None:
     """A deployment with a backlog takes several passes, not one huge transaction."""
     tenant = await _tenant(db_session)
     for _ in range(3):
@@ -266,7 +278,9 @@ async def test_the_batch_bounds_one_pass(db_session, storage) -> None:
 # =========================================================== the record stays
 
 
-async def test_the_transcript_survives_the_file(db_session, storage) -> None:
+async def test_the_transcript_survives_the_file(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """Retention removes the bytes, never the record of the conversation.
 
     `transcript` is what the agent was shown and what a colleague reading the
@@ -284,7 +298,9 @@ async def test_the_transcript_survives_the_file(db_session, storage) -> None:
     assert media.byte_size == len(PNG)
 
 
-async def test_a_purged_row_can_explain_itself(db_session, storage) -> None:
+async def test_a_purged_row_can_explain_itself(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """ "Removed by retention" and "the store is broken" are different sentences."""
     tenant = await _tenant(db_session)
     media = await _stored_file(db_session, tenant, storage, age_days=RETENTION_DAYS + 1)
@@ -294,14 +310,17 @@ async def test_a_purged_row_can_explain_itself(db_session, storage) -> None:
 
     await _service(db_session, storage).sweep(now=NOW, retention_days=RETENTION_DAYS, limit=100)
 
-    assert media.is_purged is True
+    purged: bool = media.is_purged
+    assert purged is True
     assert "retention" in (purge_reason(media) or "")
 
 
 # ==================================================== failure and idempotence
 
 
-async def test_a_store_that_refuses_leaves_the_row_recoverable(db_session, storage) -> None:
+async def test_a_store_that_refuses_leaves_the_row_recoverable(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """The failure this whole design exists for.
 
     The claim is committed before the object is touched, so a refused deletion
@@ -311,6 +330,7 @@ async def test_a_store_that_refuses_leaves_the_row_recoverable(db_session, stora
     tenant = await _tenant(db_session)
     media = await _stored_file(db_session, tenant, storage, age_days=RETENTION_DAYS + 1)
     key = media.storage_key
+    assert key is not None
     refusing = RefusingStore(storage)
 
     outcome = await _service(db_session, refusing).sweep(
@@ -324,10 +344,13 @@ async def test_a_store_that_refuses_leaves_the_row_recoverable(db_session, stora
     assert await storage.get(key) == PNG
 
 
-async def test_the_next_pass_finishes_what_a_refusal_left(db_session, storage) -> None:
+async def test_the_next_pass_finishes_what_a_refusal_left(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     tenant = await _tenant(db_session)
     media = await _stored_file(db_session, tenant, storage, age_days=RETENTION_DAYS + 1)
     key = media.storage_key
+    assert key is not None
 
     await _service(db_session, RefusingStore(storage)).sweep(
         now=NOW, retention_days=RETENTION_DAYS, limit=100
@@ -343,7 +366,9 @@ async def test_the_next_pass_finishes_what_a_refusal_left(db_session, storage) -
         await storage.get(key)
 
 
-async def test_a_claimed_row_is_finished_even_when_retention_is_raised(db_session, storage) -> None:
+async def test_a_claimed_row_is_finished_even_when_retention_is_raised(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """The case the age query cannot see.
 
     Raise the retention period after a failed pass and the ordinary sweep stops
@@ -354,6 +379,7 @@ async def test_a_claimed_row_is_finished_even_when_retention_is_raised(db_sessio
     tenant = await _tenant(db_session)
     media = await _stored_file(db_session, tenant, storage, age_days=RETENTION_DAYS + 1)
     key = media.storage_key
+    assert key is not None
 
     await _service(db_session, RefusingStore(storage)).sweep(
         now=NOW, retention_days=RETENTION_DAYS, limit=100
@@ -371,7 +397,9 @@ async def test_a_claimed_row_is_finished_even_when_retention_is_raised(db_sessio
     assert media.storage_key is None
 
 
-async def test_purging_twice_is_not_an_error(db_session, storage) -> None:
+async def test_purging_twice_is_not_an_error(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """A retried pass must be able to delete the same object again."""
     tenant = await _tenant(db_session)
     media = await _stored_file(db_session, tenant, storage, age_days=RETENTION_DAYS + 1)
@@ -389,7 +417,9 @@ async def test_purging_twice_is_not_an_error(db_session, storage) -> None:
     assert again.claimed == 0
 
 
-async def test_a_partly_failed_pass_still_removes_what_it_can(db_session, storage) -> None:
+async def test_a_partly_failed_pass_still_removes_what_it_can(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """One store failure must not strand every other workspace's file behind it."""
     tenant = await _tenant(db_session)
     first = await _stored_file(db_session, tenant, storage, age_days=RETENTION_DAYS + 2)
@@ -411,7 +441,9 @@ async def test_a_partly_failed_pass_still_removes_what_it_can(db_session, storag
     assert second.storage_key is None
 
 
-async def test_pending_counts_only_unfinished_claims(db_session, storage) -> None:
+async def test_pending_counts_only_unfinished_claims(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """The number an operator alerts on.
 
     A store refusing deletions is otherwise invisible: rows are claimed, the
@@ -435,7 +467,9 @@ async def test_pending_counts_only_unfinished_claims(db_session, storage) -> Non
 # ================================================ retention meets the worker
 
 
-async def test_a_replayed_media_job_does_not_undo_a_purge(db_session, storage) -> None:
+async def test_a_replayed_media_job_does_not_undo_a_purge(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """A null `storage_key` used to mean one thing and now means two.
 
     Before retention it meant "not downloaded yet". It now also means "the file
@@ -458,10 +492,10 @@ async def test_a_replayed_media_job_does_not_undo_a_purge(db_session, storage) -
     assert media.is_purged
 
     class ExplodingWhatsApp:
-        async def probe_media(self, media_id: str):
+        async def probe_media(self, media_id: str) -> None:
             raise AssertionError("a purged file was re-fetched from Meta")
 
-        async def fetch_media(self, media_id: str, *, max_bytes: int):
+        async def fetch_media(self, media_id: str, *, max_bytes: int) -> None:
             raise AssertionError("a purged file was re-fetched from Meta")
 
     service = MediaService(
@@ -486,7 +520,9 @@ async def test_a_replayed_media_job_does_not_undo_a_purge(db_session, storage) -
     assert media.storage_key is None
 
 
-async def test_reading_a_purged_file_is_not_attempted(db_session, storage) -> None:
+async def test_reading_a_purged_file_is_not_attempted(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """The transcript is the answer, and the bytes are gone anyway."""
     from app.core.config import Settings
     from app.services.media_service import MediaService
@@ -498,7 +534,7 @@ async def test_reading_a_purged_file_is_not_attempted(db_session, storage) -> No
     await _service(db_session, storage).sweep(now=NOW, retention_days=RETENTION_DAYS, limit=100)
 
     class ExplodingReader:
-        async def read(self, *, content: bytes, mime_type: str | None):
+        async def read(self, *, content: bytes, mime_type: str | None) -> None:
             raise AssertionError("a purged file was handed to the reader")
 
     service = MediaService(
@@ -520,7 +556,9 @@ async def test_reading_a_purged_file_is_not_attempted(db_session, storage) -> No
     assert media.transcript == "A price list."
 
 
-async def test_a_sweep_with_no_clock_of_its_own_counts_honestly(db_session, storage) -> None:
+async def test_a_sweep_with_no_clock_of_its_own_counts_honestly(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """`sweep()` without a `now` must stamp and compare the same instant.
 
     Reading the clock twice - once to claim and once to count - makes every row
@@ -540,7 +578,9 @@ async def test_a_sweep_with_no_clock_of_its_own_counts_honestly(db_session, stor
 # ============================================================ still isolated
 
 
-async def test_a_sweep_never_touches_a_file_it_was_not_due_to(db_session, storage) -> None:
+async def test_a_sweep_never_touches_a_file_it_was_not_due_to(
+    db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """The sweep runs across every workspace, so it must select by date alone.
 
     A bug that widened the query would delete another workspace's current
@@ -551,6 +591,7 @@ async def test_a_sweep_never_touches_a_file_it_was_not_due_to(db_session, storag
     theirs = await _stored_file(db_session, keeping, storage, age_days=1)
     ours = await _stored_file(db_session, expiring, storage, age_days=RETENTION_DAYS + 1)
     theirs_key = theirs.storage_key
+    assert theirs_key is not None
 
     await _service(db_session, storage).sweep(now=NOW, retention_days=RETENTION_DAYS, limit=100)
 

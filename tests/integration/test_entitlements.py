@@ -9,10 +9,12 @@ never counting toward this one's allowance.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PlanLimitExceededError
 from app.db.models.agent import Agent, AgentStatus
@@ -20,6 +22,7 @@ from app.db.models.billing import (
     BillingInterval,
     LimitKey,
     Plan,
+    Subscription,
     SubscriptionStatus,
 )
 from app.db.models.enums import MembershipStatus, TenantRole
@@ -39,28 +42,40 @@ PERIOD_START = NOW - timedelta(days=5)
 PERIOD_END = NOW + timedelta(days=25)
 
 
-async def _tenant(session, slug: str = "acme") -> Tenant:
+async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _plan(session, *, code: str = "test", **limits) -> Plan:
+async def _plan(
+    session: AsyncSession,
+    limits: Mapping[LimitKey, int] | None = None,
+    *,
+    code: str = "test",
+) -> Plan:
     plan = Plan(
         code=code,
         name=code.title(),
         price=Decimal("10.00"),
         currency="USD",
         interval=BillingInterval.MONTHLY,
-        limits={key.value: value for key, value in limits.items()},
+        limits={key.value: value for key, value in (limits or {}).items()},
     )
     session.add(plan)
     await session.flush()
     return plan
 
 
-async def _subscribe(session, tenant, plan, *, start=PERIOD_START, end=PERIOD_END):
+async def _subscribe(
+    session: AsyncSession,
+    tenant: Tenant,
+    plan: Plan,
+    *,
+    start: datetime = PERIOD_START,
+    end: datetime = PERIOD_END,
+) -> Subscription:
     subscription = SubscriptionRepository(session, tenant_id=tenant.id).create(
         plan_id=plan.id,
         status=SubscriptionStatus.ACTIVE,
@@ -71,7 +86,9 @@ async def _subscribe(session, tenant, plan, *, start=PERIOD_START, end=PERIOD_EN
     return subscription
 
 
-def _service(session, tenant, *, default_plan_code: str | None = None) -> EntitlementService:
+def _service(
+    session: AsyncSession, tenant: Tenant, *, default_plan_code: str | None = None
+) -> EntitlementService:
     return EntitlementService(
         session,
         tenant_id=tenant.id,
@@ -79,7 +96,7 @@ def _service(session, tenant, *, default_plan_code: str | None = None) -> Entitl
     )
 
 
-async def _agent(session, tenant, name: str) -> Agent:
+async def _agent(session: AsyncSession, tenant: Tenant, name: str) -> Agent:
     agent = Agent(
         tenant_id=tenant.id,
         name=name,
@@ -95,9 +112,9 @@ async def _agent(session, tenant, name: str) -> Agent:
 # ------------------------------------------------------------ resource limits
 
 
-async def test_a_resource_limit_counts_what_exists_now(db_session):
+async def test_a_resource_limit_counts_what_exists_now(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, **{LimitKey.AGENTS: 2})
+    plan = await _plan(db_session, {LimitKey.AGENTS: 2})
     await _subscribe(db_session, tenant, plan)
     await _agent(db_session, tenant, "Sales")
 
@@ -108,9 +125,9 @@ async def test_a_resource_limit_counts_what_exists_now(db_session):
     assert entitlement.allowed is True
 
 
-async def test_the_last_slot_is_allowed_and_the_next_is_not(db_session):
+async def test_the_last_slot_is_allowed_and_the_next_is_not(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, **{LimitKey.AGENTS: 2})
+    plan = await _plan(db_session, {LimitKey.AGENTS: 2})
     await _subscribe(db_session, tenant, plan)
     await _agent(db_session, tenant, "Sales")
     service = _service(db_session, tenant)
@@ -123,9 +140,9 @@ async def test_the_last_slot_is_allowed_and_the_next_is_not(db_session):
     assert (await _service(db_session, tenant).check(LimitKey.AGENTS)).allowed is False
 
 
-async def test_refusing_says_what_to_do_about_it(db_session):
+async def test_refusing_says_what_to_do_about_it(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, code="tiny", **{LimitKey.AGENTS: 1})
+    plan = await _plan(db_session, {LimitKey.AGENTS: 1}, code="tiny")
     await _subscribe(db_session, tenant, plan)
     await _agent(db_session, tenant, "Sales")
 
@@ -136,10 +153,10 @@ async def test_refusing_says_what_to_do_about_it(db_session):
     assert "Upgrade" in str(raised.value)
 
 
-async def test_a_disabled_number_frees_its_slot(db_session):
+async def test_a_disabled_number_frees_its_slot(db_session: AsyncSession) -> None:
     """It is connected to nothing, and charging for it would charge for nothing."""
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, **{LimitKey.WHATSAPP_NUMBERS: 1})
+    plan = await _plan(db_session, {LimitKey.WHATSAPP_NUMBERS: 1})
     await _subscribe(db_session, tenant, plan)
     db_session.add(
         WhatsAppAccount(
@@ -155,11 +172,11 @@ async def test_a_disabled_number_frees_its_slot(db_session):
     assert (await _service(db_session, tenant).check(LimitKey.WHATSAPP_NUMBERS)).used == 0
 
 
-async def test_a_draft_agent_still_occupies_a_slot(db_session):
+async def test_a_draft_agent_still_occupies_a_slot(db_session: AsyncSession) -> None:
     """The asymmetry with numbers is deliberate: a limit that ignored drafts
     would be satisfied by twenty agents somebody toggles."""
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, **{LimitKey.AGENTS: 1})
+    plan = await _plan(db_session, {LimitKey.AGENTS: 1})
     await _subscribe(db_session, tenant, plan)
     agent = await _agent(db_session, tenant, "Draft")
     agent.status = AgentStatus.DRAFT
@@ -171,9 +188,9 @@ async def test_a_draft_agent_still_occupies_a_slot(db_session):
 # -------------------------------------------------------------- period limits
 
 
-async def test_a_period_limit_counts_usage_inside_the_period(db_session):
+async def test_a_period_limit_counts_usage_inside_the_period(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, **{LimitKey.PERIOD_AI_REQUESTS: 100})
+    plan = await _plan(db_session, {LimitKey.PERIOD_AI_REQUESTS: 100})
     await _subscribe(db_session, tenant, plan)
 
     recorder = UsageRecorder(db_session, tenant_id=tenant.id)
@@ -191,11 +208,11 @@ async def test_a_period_limit_counts_usage_inside_the_period(db_session):
     assert entitlement.remaining == 70
 
 
-async def test_messages_are_counted_in_both_directions(db_session):
+async def test_messages_are_counted_in_both_directions(db_session: AsyncSession) -> None:
     """A conversation is two-sided, and a workspace that received a hundred
     thousand messages consumed something whoever typed them."""
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, **{LimitKey.PERIOD_MESSAGES: 10})
+    plan = await _plan(db_session, {LimitKey.PERIOD_MESSAGES: 10})
     await _subscribe(db_session, tenant, plan)
 
     recorder = UsageRecorder(db_session, tenant_id=tenant.id)
@@ -206,10 +223,12 @@ async def test_messages_are_counted_in_both_directions(db_session):
     assert (await _service(db_session, tenant).check(LimitKey.PERIOD_MESSAGES)).used == 7
 
 
-async def test_a_plan_that_allows_no_campaigns_refuses_the_first_one(db_session):
+async def test_a_plan_that_allows_no_campaigns_refuses_the_first_one(
+    db_session: AsyncSession,
+) -> None:
     """Zero has to be expressible: it is what Starter allows."""
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, **{LimitKey.PERIOD_CAMPAIGN_MESSAGES: 0})
+    plan = await _plan(db_session, {LimitKey.PERIOD_CAMPAIGN_MESSAGES: 0})
     await _subscribe(db_session, tenant, plan)
 
     entitlement = await _service(db_session, tenant).check(LimitKey.PERIOD_CAMPAIGN_MESSAGES)
@@ -220,11 +239,13 @@ async def test_a_plan_that_allows_no_campaigns_refuses_the_first_one(db_session)
 # --------------------------------------------------------------- fallbacks
 
 
-async def test_a_workspace_with_no_subscription_falls_back_to_the_default_plan(db_session):
+async def test_a_workspace_with_no_subscription_falls_back_to_the_default_plan(
+    db_session: AsyncSession,
+) -> None:
     """Every workspace predating billing has none, and a product that stopped
     working for them would be worse than any limit."""
     tenant = await _tenant(db_session)
-    await _plan(db_session, code="starter", **{LimitKey.AGENTS: 1})
+    await _plan(db_session, {LimitKey.AGENTS: 1}, code="starter")
 
     entitlement = await _service(db_session, tenant, default_plan_code="starter").check(
         LimitKey.AGENTS
@@ -233,7 +254,7 @@ async def test_a_workspace_with_no_subscription_falls_back_to_the_default_plan(d
     assert entitlement.limit == 1
 
 
-async def test_no_plan_at_all_leaves_limits_unenforced(db_session):
+async def test_no_plan_at_all_leaves_limits_unenforced(db_session: AsyncSession) -> None:
     """Taking a working deployment offline over a missing catalogue row is not
     a failure mode a limit check should have."""
     tenant = await _tenant(db_session)
@@ -245,7 +266,7 @@ async def test_no_plan_at_all_leaves_limits_unenforced(db_session):
     assert entitlement.is_unlimited is True
 
 
-async def test_an_unlimited_plan_reports_no_remaining_number(db_session):
+async def test_an_unlimited_plan_reports_no_remaining_number(db_session: AsyncSession) -> None:
     """None rather than a large number: "999999 left" is a falsehood."""
     tenant = await _tenant(db_session)
     plan = await _plan(db_session, code="enterprise")
@@ -257,10 +278,12 @@ async def test_an_unlimited_plan_reports_no_remaining_number(db_session):
     assert entitlement.allowed is True
 
 
-async def test_a_workspace_without_a_subscription_counts_the_calendar_month(db_session):
+async def test_a_workspace_without_a_subscription_counts_the_calendar_month(
+    db_session: AsyncSession,
+) -> None:
     """Otherwise the sum runs from the beginning of time and refuses everybody."""
     tenant = await _tenant(db_session)
-    await _plan(db_session, code="starter", **{LimitKey.PERIOD_MESSAGES: 100})
+    await _plan(db_session, {LimitKey.PERIOD_MESSAGES: 100}, code="starter")
 
     recorder = UsageRecorder(db_session, tenant_id=tenant.id)
     recorder.record(UsageEventType.WHATSAPP_MESSAGE_SENT, quantity=5, occurred_at=NOW)
@@ -280,10 +303,12 @@ async def test_a_workspace_without_a_subscription_counts_the_calendar_month(db_s
 # --------------------------------------------------------------- isolation
 
 
-async def test_another_workspaces_usage_is_not_charged_to_this_one(db_session):
+async def test_another_workspaces_usage_is_not_charged_to_this_one(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, "acme")
     rival = await _tenant(db_session, "rival")
-    plan = await _plan(db_session, **{LimitKey.PERIOD_AI_REQUESTS: 10})
+    plan = await _plan(db_session, {LimitKey.PERIOD_AI_REQUESTS: 10})
     await _subscribe(db_session, acme, plan)
     await _subscribe(db_session, rival, plan)
 
@@ -299,10 +324,12 @@ async def test_another_workspaces_usage_is_not_charged_to_this_one(db_session):
     assert entitlement.allowed is True
 
 
-async def test_another_workspaces_agents_do_not_fill_this_ones_slots(db_session):
+async def test_another_workspaces_agents_do_not_fill_this_ones_slots(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, "acme")
     rival = await _tenant(db_session, "rival")
-    plan = await _plan(db_session, **{LimitKey.AGENTS: 1})
+    plan = await _plan(db_session, {LimitKey.AGENTS: 1})
     await _subscribe(db_session, acme, plan)
     await _agent(db_session, rival, "Theirs")
 
@@ -312,13 +339,13 @@ async def test_another_workspaces_agents_do_not_fill_this_ones_slots(db_session)
 # ---------------------------------------------------------------- catalogue
 
 
-async def test_the_seeded_catalogue_is_not_visible_to_this_suite(db_session):
+async def test_the_seeded_catalogue_is_not_visible_to_this_suite(db_session: AsyncSession) -> None:
     """The schema here is built from the models, so migration 0016's seed rows
     are absent. Recorded so the next reader does not hunt for them."""
     assert await PlanRepository(db_session).list_plans() == []
 
 
-async def test_a_private_plan_is_not_listed(db_session):
+async def test_a_private_plan_is_not_listed(db_session: AsyncSession) -> None:
     await _plan(db_session, code="public")
     bespoke = await _plan(db_session, code="bespoke")
     bespoke.is_public = False
@@ -328,7 +355,7 @@ async def test_a_private_plan_is_not_listed(db_session):
     assert codes == ["public"]
 
 
-async def test_a_retired_plan_is_kept_but_not_offered(db_session):
+async def test_a_retired_plan_is_kept_but_not_offered(db_session: AsyncSession) -> None:
     """Subscriptions still point at it, and their history has to keep meaning
     what it meant."""
     retired = await _plan(db_session, code="old")
@@ -340,9 +367,9 @@ async def test_a_retired_plan_is_kept_but_not_offered(db_session):
     assert await repository.get_by_code("old") is not None
 
 
-async def test_a_snapshot_reports_every_limit(db_session):
+async def test_a_snapshot_reports_every_limit(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, **{LimitKey.AGENTS: 3})
+    plan = await _plan(db_session, {LimitKey.AGENTS: 3})
     await _subscribe(db_session, tenant, plan)
 
     snapshot = await _service(db_session, tenant).snapshot()
@@ -351,7 +378,7 @@ async def test_a_snapshot_reports_every_limit(db_session):
     assert all(item.allowed for item in snapshot)
 
 
-async def test_a_released_number_frees_its_slot(db_session):
+async def test_a_released_number_frees_its_slot(db_session: AsyncSession) -> None:
     """Giving a number back must not cost a slot forever.
 
     A released row survives only because a customer's conversations hang off it
@@ -360,7 +387,7 @@ async def test_a_released_number_frees_its_slot(db_session):
     would make handing a number back a permanent charge.
     """
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, **{LimitKey.WHATSAPP_NUMBERS: 1})
+    plan = await _plan(db_session, {LimitKey.WHATSAPP_NUMBERS: 1})
     await _subscribe(db_session, tenant, plan)
     db_session.add(
         WhatsAppAccount(
@@ -377,7 +404,7 @@ async def test_a_released_number_frees_its_slot(db_session):
     assert (await _service(db_session, tenant).check(LimitKey.WHATSAPP_NUMBERS)).used == 0
 
 
-async def test_a_revoked_member_frees_their_seat(db_session):
+async def test_a_revoked_member_frees_their_seat(db_session: AsyncSession) -> None:
     """Otherwise removal is a one-way door.
 
     A workspace on a two-seat plan that removes a colleague could never hire a
@@ -385,7 +412,7 @@ async def test_a_revoked_member_frees_their_seat(db_session):
     only fix would be paying for capacity nobody is using (ADR-038).
     """
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, **{LimitKey.TEAM_MEMBERS: 2})
+    plan = await _plan(db_session, {LimitKey.TEAM_MEMBERS: 2})
     await _subscribe(db_session, tenant, plan)
     present = User(email=f"present-{uuid.uuid4().hex[:8]}@example.test", is_active=True)
     gone = User(email=f"gone-{uuid.uuid4().hex[:8]}@example.test", is_active=True)
@@ -427,9 +454,9 @@ async def test_a_revoked_member_frees_their_seat(db_session):
     [SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED],
 )
 async def test_a_subscription_that_has_ended_stops_granting_its_plan(
-    db_session,
+    db_session: AsyncSession,
     status: SubscriptionStatus,
-):
+) -> None:
     """Cancelling was a way to keep the entitlements and stop the invoices.
 
     `SERVING_STATUSES` and `Subscription.is_serving` both existed from the
@@ -439,8 +466,8 @@ async def test_a_subscription_that_has_ended_stops_granting_its_plan(
     for as long as nobody deleted the row.
     """
     tenant = await _tenant(db_session)
-    await _plan(db_session, code="starter", **{LimitKey.AGENTS: 1})
-    expensive = await _plan(db_session, code="enterprise", **{LimitKey.AGENTS: 500})
+    await _plan(db_session, {LimitKey.AGENTS: 1}, code="starter")
+    expensive = await _plan(db_session, {LimitKey.AGENTS: 500}, code="enterprise")
     subscription = await _subscribe(db_session, tenant, expensive)
 
     service = _service(db_session, tenant, default_plan_code="starter")
@@ -463,9 +490,9 @@ async def test_a_subscription_that_has_ended_stops_granting_its_plan(
     ],
 )
 async def test_a_serving_subscription_still_grants_its_plan(
-    db_session,
+    db_session: AsyncSession,
     status: SubscriptionStatus,
-):
+) -> None:
     """`PAST_DUE` is in the serving set deliberately (see the model).
 
     A failed payment is a conversation to have with a customer, not a decision
@@ -473,8 +500,8 @@ async def test_a_serving_subscription_still_grants_its_plan(
     cannot quietly become a lockout on the first declined card.
     """
     tenant = await _tenant(db_session)
-    await _plan(db_session, code="starter", **{LimitKey.AGENTS: 1})
-    paid = await _plan(db_session, code="pro", **{LimitKey.AGENTS: 50})
+    await _plan(db_session, {LimitKey.AGENTS: 1}, code="starter")
+    paid = await _plan(db_session, {LimitKey.AGENTS: 50}, code="pro")
     subscription = await _subscribe(db_session, tenant, paid)
     subscription.status = status
     await db_session.flush()
@@ -483,7 +510,9 @@ async def test_a_serving_subscription_still_grants_its_plan(
     assert (await service.check(LimitKey.AGENTS)).limit == 50
 
 
-async def test_an_ended_subscription_falls_back_rather_than_locking_out(db_session):
+async def test_an_ended_subscription_falls_back_rather_than_locking_out(
+    db_session: AsyncSession,
+) -> None:
     """Dropping to the free tier, not to nothing.
 
     With no default plan configured there is no plan at all and limits go
@@ -492,8 +521,8 @@ async def test_an_ended_subscription_falls_back_rather_than_locking_out(db_sessi
     Losing access outright would make cancelling unrecoverable.
     """
     tenant = await _tenant(db_session)
-    await _plan(db_session, code="starter", **{LimitKey.AGENTS: 1})
-    plan = await _plan(db_session, code="pro", **{LimitKey.AGENTS: 50})
+    await _plan(db_session, {LimitKey.AGENTS: 1}, code="starter")
+    plan = await _plan(db_session, {LimitKey.AGENTS: 50}, code="pro")
     subscription = await _subscribe(db_session, tenant, plan)
     subscription.status = SubscriptionStatus.CANCELLED
     await db_session.flush()

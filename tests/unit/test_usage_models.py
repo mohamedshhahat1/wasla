@@ -26,16 +26,17 @@ from app.services.usage_service import (
     resolve_window,
     summarise,
 )
+from tests.fakes import as_table
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
 
-def test_every_meter_declares_what_it_counts():
+def test_every_meter_declares_what_it_counts() -> None:
     """A member added without a unit has no answer to "how much"."""
     assert set(EVENT_UNITS) == set(UsageEventType)
 
 
-def test_the_unit_comes_from_the_meter():
+def test_the_unit_comes_from_the_meter() -> None:
     assert unit_for(UsageEventType.AI_INPUT_TOKEN) is UsageUnit.TOKEN
     assert unit_for(UsageEventType.STORAGE_USED) is UsageUnit.BYTE
     # A count of recordings, not their length: the configured transcription
@@ -44,15 +45,15 @@ def test_the_unit_comes_from_the_meter():
     assert unit_for(UsageEventType.WHATSAPP_MESSAGE_SENT) is UsageUnit.COUNT
 
 
-def test_the_table_carries_no_updated_at():
+def test_the_table_carries_no_updated_at() -> None:
     """Append-only. A column nothing can ever set is a claim the table cannot
     keep, and an update would make a past month's figure irreproducible."""
-    assert "updated_at" not in UsageEvent.__table__.columns
-    assert "occurred_at" in UsageEvent.__table__.columns
+    assert "updated_at" not in as_table(UsageEvent.__table__).columns
+    assert "occurred_at" in as_table(UsageEvent.__table__).columns
 
 
-def test_the_aggregate_queries_have_indexes_to_run_on():
-    names = {index.name for index in UsageEvent.__table__.indexes}
+def test_the_aggregate_queries_have_indexes_to_run_on() -> None:
+    names = {index.name for index in as_table(UsageEvent.__table__).indexes}
     assert "ix_usage_events_tenant_id" in names
     assert "ix_usage_events_tenant_id_occurred_at" in names
     assert "ix_usage_events_tenant_id_event_type_occurred_at" in names
@@ -61,32 +62,32 @@ def test_the_aggregate_queries_have_indexes_to_run_on():
     assert "ix_usage_events_occurred_at" in names
 
 
-def test_an_unbounded_request_looks_back_thirty_days():
+def test_an_unbounded_request_looks_back_thirty_days() -> None:
     window = resolve_window(now=NOW)
     assert window.until == NOW
     assert window.since == NOW - DEFAULT_WINDOW
 
 
-def test_a_naive_time_is_read_as_utc():
+def test_a_naive_time_is_read_as_utc() -> None:
     """The API declares its times in UTC, so this is unambiguous rather than
     sloppy - and refusing it gives a caller nothing to act on."""
     window = resolve_window(since=datetime(2026, 8, 1, 0, 0), now=NOW)
     assert window.since == datetime(2026, 8, 1, tzinfo=UTC)
 
 
-def test_a_backwards_window_is_refused():
+def test_a_backwards_window_is_refused() -> None:
     with pytest.raises(ValidationError):
         resolve_window(since=NOW, until=NOW - timedelta(days=1))
 
 
-def test_an_empty_window_is_refused():
+def test_an_empty_window_is_refused() -> None:
     """`since == until` is a half-open range containing nothing, which is never
     what a caller meant."""
     with pytest.raises(ValidationError):
         resolve_window(since=NOW, until=NOW)
 
 
-def test_a_window_wider_than_a_year_is_refused():
+def test_a_window_wider_than_a_year_is_refused() -> None:
     with pytest.raises(ValidationError):
         resolve_window(since=NOW - MAX_WINDOW - timedelta(days=1), until=NOW)
 
@@ -100,7 +101,7 @@ def _total(event_type: UsageEventType, quantity: int) -> UsageTotal:
     )
 
 
-def test_totals_fold_into_the_named_counters():
+def test_totals_fold_into_the_named_counters() -> None:
     window = UsageWindow(since=NOW - DEFAULT_WINDOW, until=NOW)
     summary = summarise(
         [
@@ -118,7 +119,7 @@ def test_totals_fold_into_the_named_counters():
     assert summary.campaign_messages == 0
 
 
-def test_the_unabridged_totals_survive_the_fold():
+def test_the_unabridged_totals_survive_the_fold() -> None:
     """A meter added later is visible before anything is renamed to carry it."""
     window = UsageWindow(since=NOW - DEFAULT_WINDOW, until=NOW)
     totals = [_total(UsageEventType.RAG_QUERY, 4)]

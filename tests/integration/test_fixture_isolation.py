@@ -13,10 +13,12 @@ which is the claim this file exists to check.
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.db.models.knowledge import KnowledgeBase
 from app.db.models.tenant import Tenant
@@ -28,24 +30,24 @@ pytestmark = pytest.mark.integration
 SHARED_SLUG = "isolation-probe"
 
 
-async def _count(session, model) -> int:
+async def _count(session: AsyncSession, model: type[Any]) -> int:
     result = await session.execute(select(func.count()).select_from(model))
     return int(result.scalar_one())
 
 
-async def test_the_database_starts_empty(db_session):
+async def test_the_database_starts_empty(db_session: AsyncSession) -> None:
     """Whatever ran before this must not be visible."""
     assert await _count(db_session, Tenant) == 0
 
 
-async def test_a_test_may_write_freely(db_session):
+async def test_a_test_may_write_freely(db_session: AsyncSession) -> None:
     db_session.add(Tenant(name="Probe", slug=SHARED_SLUG))
     await db_session.flush()
 
     assert await _count(db_session, Tenant) == 1
 
 
-async def test_the_previous_tests_writes_are_gone(db_session):
+async def test_the_previous_tests_writes_are_gone(db_session: AsyncSession) -> None:
     """Rollback, not deletion: the previous test never committed anything.
 
     Written to reuse the same unique slug, so a leak fails here on the
@@ -59,7 +61,7 @@ async def test_the_previous_tests_writes_are_gone(db_session):
     assert await _count(db_session, Tenant) == 1
 
 
-async def test_a_commit_inside_a_test_does_not_escape_it(db_session):
+async def test_a_commit_inside_a_test_does_not_escape_it(db_session: AsyncSession) -> None:
     """`join_transaction_mode="create_savepoint"` is what makes this true.
 
     No test commits today. One written later would otherwise leak its rows into
@@ -72,12 +74,12 @@ async def test_a_commit_inside_a_test_does_not_escape_it(db_session):
     assert await _count(db_session, Tenant) == 1
 
 
-async def test_the_committed_row_is_gone_too(db_session):
+async def test_the_committed_row_is_gone_too(db_session: AsyncSession) -> None:
     """The outer rollback undoes the savepoint release from the test above."""
     assert await _count(db_session, Tenant) == 0
 
 
-async def test_flush_makes_rows_visible_within_the_test(db_session):
+async def test_flush_makes_rows_visible_within_the_test(db_session: AsyncSession) -> None:
     """Every service in this project flushes and never commits.
 
     The fixture has to preserve that reading, or half the suite would be
@@ -91,7 +93,7 @@ async def test_flush_makes_rows_visible_within_the_test(db_session):
     assert found.scalar_one().id == tenant.id
 
 
-async def test_a_rolled_back_savepoint_leaves_the_test_usable(db_session):
+async def test_a_rolled_back_savepoint_leaves_the_test_usable(db_session: AsyncSession) -> None:
     """A failed flush must not poison the rest of the test."""
     db_session.add(Tenant(name="First", slug="unique-probe"))
     await db_session.flush()
@@ -105,7 +107,9 @@ async def test_a_rolled_back_savepoint_leaves_the_test_usable(db_session):
     assert await _count(db_session, Tenant) == 0
 
 
-async def test_the_schema_carries_every_table_not_just_the_ones_touched(db_session):
+async def test_the_schema_carries_every_table_not_just_the_ones_touched(
+    db_session: AsyncSession,
+) -> None:
     """The session-scoped build must create everything, not a subset."""
     tenant = Tenant(name="Probe", slug="schema-probe")
     db_session.add(tenant)
@@ -118,7 +122,9 @@ async def test_the_schema_carries_every_table_not_just_the_ones_touched(db_sessi
     assert await _count(db_session, KnowledgeBase) == 1
 
 
-async def test_each_test_gets_its_own_connection(db_session, db_connection):
+async def test_each_test_gets_its_own_connection(
+    db_session: AsyncSession, db_connection: AsyncConnection
+) -> None:
     """The session must be bound to the transaction the fixture opened.
 
     If it opened its own connection instead, the rollback would isolate
@@ -128,7 +134,9 @@ async def test_each_test_gets_its_own_connection(db_session, db_connection):
     assert db_connection.in_transaction()
 
 
-async def test_identifiers_are_generated_without_a_committed_sequence(db_session):
+async def test_identifiers_are_generated_without_a_committed_sequence(
+    db_session: AsyncSession,
+) -> None:
     """UUID keys, so rollback reuse cannot collide the way a serial would."""
     first = Tenant(name="One", slug=f"probe-{uuid.uuid4().hex[:8]}")
     second = Tenant(name="Two", slug=f"probe-{uuid.uuid4().hex[:8]}")

@@ -24,15 +24,17 @@ from __future__ import annotations
 import asyncio
 import secrets
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.sql import Executable
 
 from app.core.config import Settings
 from app.db.models.audit import AuditAction, AuditLog
@@ -44,8 +46,9 @@ from app.db.models.billing import (
     SubscriptionStatus,
 )
 from app.db.models.email import OutboundEmail
+from app.db.models.enums import TenantRole
 from app.db.models.invoice import Invoice, InvoiceStatus, Payment
-from app.db.models.membership import Membership, TenantRole
+from app.db.models.membership import Membership
 from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
@@ -54,6 +57,7 @@ from app.repositories.invoice_repository import PlatformInvoiceRepository
 from app.services.recurring_service import MAX_COLLECTION_ATTEMPTS
 from app.workers import billing_worker as worker_module
 from app.workers.billing_worker import BillingWorker
+from tests.fakes import as_database
 
 pytestmark = pytest.mark.integration
 
@@ -64,8 +68,8 @@ COHORT = 7
 CLAIM_LIMIT = 2
 
 
-def _settings(**overrides: object) -> Settings:
-    values: dict[str, object] = {
+def _settings(**overrides: Any) -> Settings:
+    values: dict[str, Any] = {
         "_env_file": None,
         "environment": "test",
         "log_format": "console",
@@ -91,7 +95,7 @@ class PooledHandle:
     to lose.
     """
 
-    def __init__(self, maker: async_sessionmaker) -> None:
+    def __init__(self, maker: async_sessionmaker[AsyncSession]) -> None:
         self._maker = maker
 
     @asynccontextmanager
@@ -144,7 +148,7 @@ class CountingProvider:
 
 
 @pytest_asyncio.fixture
-async def committing(prepared_database: str) -> AsyncIterator[async_sessionmaker]:
+async def committing(prepared_database: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     """Sessions that really commit, over an engine of this test's own.
 
     A real pool rather than `NullPool`: each worker takes a session per claim
@@ -160,7 +164,7 @@ async def committing(prepared_database: str) -> AsyncIterator[async_sessionmaker
 
 
 @pytest_asyncio.fixture
-async def plan(committing) -> AsyncIterator[uuid.UUID]:
+async def plan(committing: async_sessionmaker[AsyncSession]) -> AsyncIterator[uuid.UUID]:
     code = f"sweep-{uuid.uuid4().hex[:10]}"
     async with committing() as session:
         row = Plan(
@@ -183,7 +187,7 @@ async def plan(committing) -> AsyncIterator[uuid.UUID]:
 
 
 @pytest_asyncio.fixture
-async def tenants(committing) -> AsyncIterator[list[uuid.UUID]]:
+async def tenants(committing: async_sessionmaker[AsyncSession]) -> AsyncIterator[list[uuid.UUID]]:
     """A committed cohort, and a teardown that really removes it.
 
     Deleting the tenant cascades to subscriptions, invoices, payments, saved
@@ -212,7 +216,9 @@ async def tenants(committing) -> AsyncIterator[list[uuid.UUID]]:
 
 
 @pytest_asyncio.fixture
-async def owner(committing):
+async def owner(
+    committing: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[Callable[[uuid.UUID], Awaitable[None]]]:
     """A factory for workspace owners, removed afterwards.
 
     A `User` is a global identity with no `tenant_id` (claude.md section 7), so
@@ -246,7 +252,7 @@ async def owner(committing):
 
 
 async def _subscribe(
-    committing,
+    committing: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     plan_id: uuid.UUID,
     *,
@@ -267,7 +273,7 @@ async def _subscribe(
 
 
 async def _open_invoice(
-    committing,
+    committing: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     subscription_id: uuid.UUID,
     *,
@@ -293,7 +299,7 @@ async def _open_invoice(
         return invoice.id
 
 
-async def _card(committing, tenant_id: uuid.UUID) -> None:
+async def _card(committing: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> None:
     async with committing() as session:
         session.add(
             PaymentMethod(
@@ -310,15 +316,18 @@ async def _card(committing, tenant_id: uuid.UUID) -> None:
         await session.commit()
 
 
-def _worker(committing, **overrides: object) -> BillingWorker:
+def _worker(committing: async_sessionmaker[AsyncSession], **overrides: Any) -> BillingWorker:
     return BillingWorker(
-        database=PooledHandle(committing),
+        database=as_database(PooledHandle(committing)),
         settings=_settings(**overrides),
         claim_limit=CLAIM_LIMIT,
     )
 
 
-async def _count(committing, statement) -> int:
+async def _count(
+    committing: async_sessionmaker[AsyncSession],
+    statement: Executable,
+) -> int:
     async with committing() as session:
         return int(await session.scalar(statement) or 0)
 
@@ -327,10 +336,10 @@ async def _count(committing, statement) -> int:
 
 
 async def test_two_workers_advance_every_subscription_exactly_once(
-    committing,
-    plan,
-    tenants,
-):
+    committing: async_sessionmaker[AsyncSession],
+    plan: uuid.UUID,
+    tenants: list[uuid.UUID],
+) -> None:
     """GATE: a cohort divided between two workers, each row done once.
 
     Seven subscriptions, a claim limit of two, two workers. Every one is
@@ -367,7 +376,9 @@ async def test_two_workers_advance_every_subscription_exactly_once(
         assert set(rolled) == {PERIOD_END}
 
 
-async def test_neither_worker_bills_the_same_period_twice(committing, plan, tenants):
+async def test_neither_worker_bills_the_same_period_twice(
+    committing: async_sessionmaker[AsyncSession], plan: uuid.UUID, tenants: list[uuid.UUID]
+) -> None:
     """The unique key is still there; this asserts it is never reached.
 
     An `IntegrityError` on `uq_invoices_tenant_id_period_start` is what used to
@@ -396,10 +407,10 @@ async def test_neither_worker_bills_the_same_period_twice(committing, plan, tena
 
 
 async def test_a_row_another_worker_holds_is_skipped_rather_than_waited_for(
-    committing,
-    plan,
-    tenants,
-):
+    committing: async_sessionmaker[AsyncSession],
+    plan: uuid.UUID,
+    tenants: list[uuid.UUID],
+) -> None:
     """SKIP LOCKED, demonstrated as a skip rather than as a wait.
 
     One subscription is locked by a transaction this test holds open for the
@@ -442,11 +453,11 @@ async def test_a_row_another_worker_holds_is_skipped_rather_than_waited_for(
 
 
 async def test_two_workers_make_one_collection_attempt_per_invoice(
-    committing,
-    plan,
-    tenants,
-    monkeypatch,
-):
+    committing: async_sessionmaker[AsyncSession],
+    plan: uuid.UUID,
+    tenants: list[uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """GATE: no duplicate Paymob charge, counted at the provider.
 
     The payment row's `UNIQUE(tenant_id, idempotency_key)` would catch a second
@@ -509,11 +520,11 @@ async def test_two_workers_make_one_collection_attempt_per_invoice(
 
 
 async def test_one_workspaces_provider_failure_does_not_strand_the_others(
-    committing,
-    plan,
-    tenants,
-    monkeypatch,
-):
+    committing: async_sessionmaker[AsyncSession],
+    plan: uuid.UUID,
+    tenants: list[uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A failure is contained to its own claim, not to the pass.
 
     This is what the per-claim transaction buys. Under one transaction per
@@ -586,11 +597,11 @@ async def test_one_workspaces_provider_failure_does_not_strand_the_others(
 
 
 async def test_two_overdue_invoices_of_one_workspace_produce_one_transition(
-    committing,
-    plan,
-    tenants,
-    owner,
-):
+    committing: async_sessionmaker[AsyncSession],
+    plan: uuid.UUID,
+    tenants: list[uuid.UUID],
+    owner: Callable[[uuid.UUID], Awaitable[None]],
+) -> None:
     """GATE: dunning does not duplicate under concurrency.
 
     A workspace with two overdue invoices is the case a per-invoice claim gets
@@ -652,10 +663,10 @@ async def test_two_overdue_invoices_of_one_workspace_produce_one_transition(
 
 
 async def test_more_overdue_workspaces_than_the_claim_limit_all_get_chased(
-    committing,
-    plan,
-    tenants,
-):
+    committing: async_sessionmaker[AsyncSession],
+    plan: uuid.UUID,
+    tenants: list[uuid.UUID],
+) -> None:
     """The starvation fix, asserted.
 
     Chasing an invoice leaves it exactly as overdue as it was - only its
@@ -694,7 +705,9 @@ async def test_more_overdue_workspaces_than_the_claim_limit_all_get_chased(
     assert behind == COHORT, f"only {behind} of {COHORT} were chased"
 
 
-async def test_a_spent_collection_budget_stops_taking_a_slot(committing, plan, tenants):
+async def test_a_spent_collection_budget_stops_taking_a_slot(
+    committing: async_sessionmaker[AsyncSession], plan: uuid.UUID, tenants: list[uuid.UUID]
+) -> None:
     """The other half of the starvation fix.
 
     An invoice whose attempts are spent has `next_collection_at IS NULL`, which

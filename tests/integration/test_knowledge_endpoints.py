@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -50,7 +53,7 @@ def _base() -> KnowledgeBase:
     )
 
 
-def _document(**overrides) -> Document:
+def _document(**overrides: Any) -> Document:
     values = {
         "id": DOCUMENT_ID,
         "tenant_id": TENANT_ID,
@@ -77,45 +80,55 @@ class StubKnowledge:
     """Records what it was asked to do and returns canned rows."""
 
     def __init__(self) -> None:
-        self.submitted: list[dict] = []
+        self.submitted: list[dict[str, Any]] = []
         self.reingested: list[uuid.UUID] = []
         self.deleted: list[uuid.UUID] = []
-        self.created_bases: list[dict] = []
+        self.created_bases: list[dict[str, Any]] = []
         self.missing = False
         self.document = _document()
         self.created = True
 
-    async def list_knowledge_bases(self, *, limit=50):
+    async def list_knowledge_bases(self, *, limit: int = 50) -> list[Any]:
         return [_base()]
 
-    async def get_knowledge_base(self, knowledge_base_id):
+    async def get_knowledge_base(self, knowledge_base_id: uuid.UUID) -> KnowledgeBase:
         if self.missing:
             raise TenantIsolationError()
         return _base()
 
-    async def create_knowledge_base(self, *, name, description=None):
+    async def create_knowledge_base(
+        self,
+        *,
+        name: str,
+        description: str | None = None,
+    ) -> KnowledgeBase:
         self.created_bases.append({"name": name, "description": description})
         return _base()
 
-    async def list_documents(self, *, knowledge_base_id, limit=50):
+    async def list_documents(
+        self,
+        *,
+        knowledge_base_id: uuid.UUID | None = None,
+        limit: int = 50,
+    ) -> list[Any]:
         if self.missing:
             raise TenantIsolationError()
         return [self.document]
 
-    async def get_document(self, document_id):
+    async def get_document(self, document_id: uuid.UUID) -> Document:
         if self.missing:
             raise TenantIsolationError()
         return self.document
 
-    async def submit(self, **kwargs):
+    async def submit(self, **kwargs: Any) -> tuple[Any, ...]:
         self.submitted.append(kwargs)
         return self.document, self.created
 
-    async def reingest(self, document_id):
+    async def reingest(self, document_id: uuid.UUID) -> Document:
         self.reingested.append(document_id)
         return _document(status=DocumentStatus.PENDING)
 
-    async def delete_document(self, document_id):
+    async def delete_document(self, document_id: uuid.UUID) -> None:
         if self.missing:
             raise TenantIsolationError()
         self.deleted.append(document_id)
@@ -140,17 +153,19 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
 
 
 @pytest.fixture
-def knowledge(app) -> StubKnowledge:
+def knowledge(app: FastAPI) -> StubKnowledge:
     stub = StubKnowledge()
     app.dependency_overrides[get_knowledge_service] = lambda: stub
     return stub
 
 
-def _as(app, role: TenantRole) -> None:
+def _as(app: FastAPI, role: TenantRole) -> None:
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(role)
 
 
-async def test_a_member_can_list_knowledge_bases(client, app, knowledge):
+async def test_a_member_can_list_knowledge_bases(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(f"{PATH}/bases")
@@ -159,7 +174,9 @@ async def test_a_member_can_list_knowledge_bases(client, app, knowledge):
     assert response.json()[0]["name"] == "General"
 
 
-async def test_an_admin_can_create_a_knowledge_base(client, app, knowledge):
+async def test_an_admin_can_create_a_knowledge_base(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(f"{PATH}/bases", json={"name": "Products"})
@@ -168,7 +185,9 @@ async def test_an_admin_can_create_a_knowledge_base(client, app, knowledge):
     assert knowledge.created_bases[0]["name"] == "Products"
 
 
-async def test_a_member_cannot_create_a_knowledge_base(client, app, knowledge):
+async def test_a_member_cannot_create_a_knowledge_base(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.post(f"{PATH}/bases", json={"name": "Products"})
@@ -177,7 +196,9 @@ async def test_a_member_cannot_create_a_knowledge_base(client, app, knowledge):
     assert knowledge.created_bases == []
 
 
-async def test_an_admin_can_submit_a_document(client, app, knowledge):
+async def test_an_admin_can_submit_a_document(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(f"{PATH}/bases/{BASE_ID}/documents", json=DOCUMENT_BODY)
@@ -190,7 +211,9 @@ async def test_an_admin_can_submit_a_document(client, app, knowledge):
     assert knowledge.submitted[0]["title"] == "Finishing prices"
 
 
-async def test_a_member_cannot_submit_a_document(client, app, knowledge):
+async def test_a_member_cannot_submit_a_document(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     """A document here is something the AI will state to customers as fact."""
     _as(app, TenantRole.MEMBER)
 
@@ -200,7 +223,9 @@ async def test_a_member_cannot_submit_a_document(client, app, knowledge):
     assert knowledge.submitted == []
 
 
-async def test_a_repeat_submission_reports_created_false(client, app, knowledge):
+async def test_a_repeat_submission_reports_created_false(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     """Not an error: the upload was recognised, not duplicated."""
     _as(app, TenantRole.TENANT_ADMIN)
     knowledge.created = False
@@ -211,7 +236,9 @@ async def test_a_repeat_submission_reports_created_false(client, app, knowledge)
     assert response.json()["created"] is False
 
 
-async def test_an_unknown_field_is_rejected_rather_than_ignored(client, app, knowledge):
+async def test_an_unknown_field_is_rejected_rather_than_ignored(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(
@@ -223,7 +250,9 @@ async def test_an_unknown_field_is_rejected_rather_than_ignored(client, app, kno
     assert knowledge.submitted == []
 
 
-async def test_an_empty_document_is_refused(client, app, knowledge):
+async def test_an_empty_document_is_refused(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(
@@ -234,7 +263,9 @@ async def test_an_empty_document_is_refused(client, app, knowledge):
     assert response.status_code == 422
 
 
-async def test_a_member_can_read_a_documents_ingestion_state(client, app, knowledge):
+async def test_a_member_can_read_a_documents_ingestion_state(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.MEMBER)
     knowledge.document = _document(
         status=DocumentStatus.FAILED,
@@ -247,7 +278,9 @@ async def test_a_member_can_read_a_documents_ingestion_state(client, app, knowle
     assert body["error"] == "The AI provider is unavailable."
 
 
-async def test_a_ready_document_reports_its_chunk_count(client, app, knowledge):
+async def test_a_ready_document_reports_its_chunk_count(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.MEMBER)
     knowledge.document = _document(
         status=DocumentStatus.READY,
@@ -262,7 +295,9 @@ async def test_a_ready_document_reports_its_chunk_count(client, app, knowledge):
     assert body["ingested_at"] is not None
 
 
-async def test_the_document_read_does_not_return_the_extracted_text(client, app, knowledge):
+async def test_the_document_read_does_not_return_the_extracted_text(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     """The API reports what was ingested; it is not a document store."""
     _as(app, TenantRole.MEMBER)
 
@@ -271,7 +306,9 @@ async def test_the_document_read_does_not_return_the_extracted_text(client, app,
     assert "content" not in body
 
 
-async def test_an_admin_can_queue_a_reingest(client, app, knowledge):
+async def test_an_admin_can_queue_a_reingest(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(f"{PATH}/documents/{DOCUMENT_ID}/ingest")
@@ -280,7 +317,9 @@ async def test_an_admin_can_queue_a_reingest(client, app, knowledge):
     assert knowledge.reingested == [DOCUMENT_ID]
 
 
-async def test_a_member_cannot_queue_a_reingest(client, app, knowledge):
+async def test_a_member_cannot_queue_a_reingest(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.post(f"{PATH}/documents/{DOCUMENT_ID}/ingest")
@@ -289,7 +328,9 @@ async def test_a_member_cannot_queue_a_reingest(client, app, knowledge):
     assert knowledge.reingested == []
 
 
-async def test_an_admin_can_delete_a_document(client, app, knowledge):
+async def test_an_admin_can_delete_a_document(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.delete(f"{PATH}/documents/{DOCUMENT_ID}")
@@ -298,7 +339,9 @@ async def test_an_admin_can_delete_a_document(client, app, knowledge):
     assert knowledge.deleted == [DOCUMENT_ID]
 
 
-async def test_a_member_cannot_delete_a_document(client, app, knowledge):
+async def test_a_member_cannot_delete_a_document(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.delete(f"{PATH}/documents/{DOCUMENT_ID}")
@@ -307,7 +350,9 @@ async def test_a_member_cannot_delete_a_document(client, app, knowledge):
     assert knowledge.deleted == []
 
 
-async def test_another_workspaces_document_is_not_found(client, app, knowledge):
+async def test_another_workspaces_document_is_not_found(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
     knowledge.missing = True
 
@@ -317,7 +362,9 @@ async def test_another_workspaces_document_is_not_found(client, app, knowledge):
     assert "not found" in response.json()["error"]["message"].lower()
 
 
-async def test_a_malformed_document_id_is_rejected(client, app, knowledge):
+async def test_a_malformed_document_id_is_rejected(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(f"{PATH}/documents/not-a-uuid")
@@ -325,7 +372,7 @@ async def test_a_malformed_document_id_is_rejected(client, app, knowledge):
     assert response.status_code == 422
 
 
-async def test_knowledge_routes_require_authentication(client):
+async def test_knowledge_routes_require_authentication(client: AsyncClient) -> None:
     """No workspace override here: the real dependency chain runs."""
     response = await client.get(f"{PATH}/bases")
 

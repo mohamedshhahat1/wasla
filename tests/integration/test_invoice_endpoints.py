@@ -15,8 +15,11 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -40,7 +43,7 @@ PERIOD_START = datetime(2026, 7, 1, tzinfo=UTC)
 NOW = datetime(2026, 8, 1, tzinfo=UTC)
 
 
-def _invoice(**overrides) -> Invoice:
+def _invoice(**overrides: Any) -> Invoice:
     values = {
         "id": INVOICE_ID,
         "tenant_id": TENANT_ID,
@@ -82,14 +85,14 @@ class StubInvoices:
         if self.missing:
             raise TenantIsolationError()
 
-    async def list_invoices(self, *, limit: int = 50):
+    async def list_invoices(self, *, limit: int = 50) -> list[Any]:
         return [self.invoice]
 
-    async def get(self, invoice_id):
+    async def get(self, invoice_id: uuid.UUID) -> Invoice:
         self._guard()
         return self.invoice
 
-    async def payments_for(self, invoice_id):
+    async def payments_for(self, invoice_id: uuid.UUID) -> list[Any]:
         self._guard()
         return [
             Payment(
@@ -112,11 +115,19 @@ class StubPlatformBilling:
     """The platform's side: recording money and withdrawing bills."""
 
     def __init__(self) -> None:
-        self.recorded: list[dict] = []
+        self.recorded: list[dict[str, Any]] = []
         self.voided: list[uuid.UUID] = []
         self.conflict = False
 
-    async def record_payment(self, *, invoice_id, amount, provider, reference=None, actor=None):
+    async def record_payment(
+        self,
+        *,
+        invoice_id: uuid.UUID,
+        amount: Decimal,
+        provider: str,
+        reference: str | None = None,
+        actor: User | None = None,
+    ) -> Payment:
         self.recorded.append({"invoice_id": invoice_id, "amount": amount, "provider": provider})
         return Payment(
             id=uuid.uuid4(),
@@ -132,7 +143,13 @@ class StubPlatformBilling:
             updated_at=NOW,
         )
 
-    async def void(self, invoice_id, *, reason=None, actor=None):
+    async def void(
+        self,
+        invoice_id: uuid.UUID,
+        *,
+        reason: str | None = None,
+        actor: User | None = None,
+    ) -> Invoice:
         if self.conflict:
             raise ConflictError("A paid invoice cannot be voided. Refund it instead.")
         self.voided.append(invoice_id)
@@ -147,11 +164,11 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
     )
 
 
-def _as(app, role: TenantRole) -> None:
+def _as(app: FastAPI, role: TenantRole) -> None:
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(role)
 
 
-def _as_platform(app, platform_role: PlatformRole | None) -> None:
+def _as_platform(app: FastAPI, platform_role: PlatformRole | None) -> None:
     from app.api.dependencies import CurrentUser
     from app.core.security import TokenClaims, TokenType
 
@@ -173,14 +190,14 @@ def _as_platform(app, platform_role: PlatformRole | None) -> None:
 
 
 @pytest.fixture
-def invoices(app) -> StubInvoices:
+def invoices(app: FastAPI) -> StubInvoices:
     stub = StubInvoices()
     app.dependency_overrides[get_invoice_service] = lambda: stub
     return stub
 
 
 @pytest.fixture
-def platform_billing(app) -> StubPlatformBilling:
+def platform_billing(app: FastAPI) -> StubPlatformBilling:
     stub = StubPlatformBilling()
     app.dependency_overrides[get_platform_billing_service] = lambda: stub
     return stub
@@ -189,7 +206,9 @@ def platform_billing(app) -> StubPlatformBilling:
 # ----------------------------------------------------------------- reading
 
 
-async def test_an_owner_can_read_their_invoices(client, app, invoices):
+async def test_an_owner_can_read_their_invoices(
+    client: AsyncClient, app: FastAPI, invoices: StubInvoices
+) -> None:
     _as(app, TenantRole.TENANT_OWNER)
 
     response = await client.get(PATH)
@@ -203,7 +222,9 @@ async def test_an_owner_can_read_their_invoices(client, app, invoices):
     assert invoice["outstanding"] == "99.00"
 
 
-async def test_the_lines_are_returned_as_they_were_written(client, app, invoices):
+async def test_the_lines_are_returned_as_they_were_written(
+    client: AsyncClient, app: FastAPI, invoices: StubInvoices
+) -> None:
     _as(app, TenantRole.TENANT_OWNER)
 
     lines = (await client.get(f"{PATH}/{INVOICE_ID}")).json()["lines"]
@@ -215,7 +236,9 @@ async def test_the_lines_are_returned_as_they_were_written(client, app, invoices
     assert lines[1]["amount"] == "0.00"
 
 
-async def test_a_member_cannot_read_invoices(client, app, invoices):
+async def test_a_member_cannot_read_invoices(
+    client: AsyncClient, app: FastAPI, invoices: StubInvoices
+) -> None:
     """What the company spends is not something everyone staffing an inbox is
     entitled to see."""
     _as(app, TenantRole.MEMBER)
@@ -225,7 +248,9 @@ async def test_a_member_cannot_read_invoices(client, app, invoices):
     assert response.status_code == 403
 
 
-async def test_another_workspaces_invoice_is_not_found(client, app, invoices):
+async def test_another_workspaces_invoice_is_not_found(
+    client: AsyncClient, app: FastAPI, invoices: StubInvoices
+) -> None:
     _as(app, TenantRole.TENANT_OWNER)
     invoices.missing = True
 
@@ -234,7 +259,9 @@ async def test_another_workspaces_invoice_is_not_found(client, app, invoices):
     assert response.status_code == 404
 
 
-async def test_failed_attempts_are_shown_to_the_customer(client, app, invoices):
+async def test_failed_attempts_are_shown_to_the_customer(
+    client: AsyncClient, app: FastAPI, invoices: StubInvoices
+) -> None:
     """Somebody whose card was declined twice should see that without asking."""
     _as(app, TenantRole.TENANT_OWNER)
 
@@ -247,7 +274,9 @@ async def test_failed_attempts_are_shown_to_the_customer(client, app, invoices):
 # --------------------------------------------------------------- platform
 
 
-async def test_platform_staff_can_record_money_that_arrived(client, app, platform_billing):
+async def test_platform_staff_can_record_money_that_arrived(
+    client: AsyncClient, app: FastAPI, platform_billing: StubPlatformBilling
+) -> None:
     _as_platform(app, PlatformRole.PLATFORM_ADMIN)
 
     response = await client.post(
@@ -261,10 +290,10 @@ async def test_platform_staff_can_record_money_that_arrived(client, app, platfor
 
 
 async def test_a_workspace_owner_cannot_mark_their_own_invoice_paid(
-    client,
-    app,
-    platform_billing,
-):
+    client: AsyncClient,
+    app: FastAPI,
+    platform_billing: StubPlatformBilling,
+) -> None:
     """The whole reason this is a platform route: a customer who can do this
     pays nothing."""
     _as_platform(app, None)
@@ -279,10 +308,10 @@ async def test_a_workspace_owner_cannot_mark_their_own_invoice_paid(
 
 
 async def test_a_payment_for_nothing_is_rejected_before_the_service(
-    client,
-    app,
-    platform_billing,
-):
+    client: AsyncClient,
+    app: FastAPI,
+    platform_billing: StubPlatformBilling,
+) -> None:
     _as_platform(app, PlatformRole.PLATFORM_OWNER)
 
     response = await client.post(
@@ -294,7 +323,9 @@ async def test_a_payment_for_nothing_is_rejected_before_the_service(
     assert platform_billing.recorded == []
 
 
-async def test_platform_staff_can_withdraw_an_invoice(client, app, platform_billing):
+async def test_platform_staff_can_withdraw_an_invoice(
+    client: AsyncClient, app: FastAPI, platform_billing: StubPlatformBilling
+) -> None:
     _as_platform(app, PlatformRole.PLATFORM_OWNER)
 
     response = await client.post(
@@ -306,7 +337,9 @@ async def test_platform_staff_can_withdraw_an_invoice(client, app, platform_bill
     assert platform_billing.voided == [INVOICE_ID]
 
 
-async def test_voiding_a_paid_invoice_conflicts(client, app, platform_billing):
+async def test_voiding_a_paid_invoice_conflicts(
+    client: AsyncClient, app: FastAPI, platform_billing: StubPlatformBilling
+) -> None:
     """That is a refund, and a different conversation."""
     _as_platform(app, PlatformRole.PLATFORM_OWNER)
     platform_billing.conflict = True
@@ -316,7 +349,9 @@ async def test_voiding_a_paid_invoice_conflicts(client, app, platform_billing):
     assert response.status_code == 409
 
 
-async def test_a_workspace_cannot_void_its_own_bill(client, app, platform_billing):
+async def test_a_workspace_cannot_void_its_own_bill(
+    client: AsyncClient, app: FastAPI, platform_billing: StubPlatformBilling
+) -> None:
     _as_platform(app, None)
 
     response = await client.post(f"{PLATFORM_PATH}/{INVOICE_ID}/void", json={})

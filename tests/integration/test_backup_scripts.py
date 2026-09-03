@@ -35,7 +35,11 @@ needs_shell = pytest.mark.skipif(
 )
 
 
-def run(script: Path, *arguments: str, env: dict[str, str] | None = None):
+def run(
+    script: Path,
+    *arguments: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     environment = {
         # A deliberately minimal environment: the scripts must not depend on
         # anything a cron job would not have.
@@ -56,19 +60,19 @@ def run(script: Path, *arguments: str, env: dict[str, str] | None = None):
 # ------------------------------------------------------------ they are shipped
 
 
-def test_both_scripts_exist_and_are_executable():
+def test_both_scripts_exist_and_are_executable() -> None:
     for script in (BACKUP, RESTORE):
         assert script.is_file(), f"{script.name} is missing"
         assert script.read_text(encoding="utf-8").startswith("#!/bin/sh")
 
 
-def test_both_scripts_fail_on_the_first_error():
+def test_both_scripts_fail_on_the_first_error() -> None:
     """`set -eu` is what stops a half-finished backup being reported as done."""
     for script in (BACKUP, RESTORE):
         assert "set -eu" in script.read_text(encoding="utf-8")
 
 
-def test_no_dump_artefact_is_tracked_in_the_repository():
+def test_no_dump_artefact_is_tracked_in_the_repository() -> None:
     """A dump carries every customer record there is."""
     dumps = list(ROOT.rglob("*.dump")) + list(ROOT.rglob("*.sql.gz"))
     tracked = [
@@ -77,7 +81,7 @@ def test_no_dump_artefact_is_tracked_in_the_repository():
     assert not tracked, f"database dumps must never be committed: {tracked}"
 
 
-def test_the_ignore_file_refuses_dumps():
+def test_the_ignore_file_refuses_dumps() -> None:
     ignored = (ROOT / ".gitignore").read_text(encoding="utf-8")
     assert "*.dump" in ignored
 
@@ -86,7 +90,7 @@ def test_the_ignore_file_refuses_dumps():
 
 
 @needs_shell
-def test_the_backup_refuses_to_run_without_a_destination():
+def test_the_backup_refuses_to_run_without_a_destination() -> None:
     """A cron job with no configuration must fail, not guess."""
     result = run(BACKUP, env={"BACKUP_DIR": "/nonexistent-root/wasla"})
 
@@ -95,7 +99,7 @@ def test_the_backup_refuses_to_run_without_a_destination():
 
 
 @needs_shell
-def test_the_backup_never_prints_the_password(tmp_path: Path):
+def test_the_backup_never_prints_the_password(tmp_path: Path) -> None:
     """The one thing a backup log must never carry."""
     secret = "hunter2-must-never-be-printed"
     result = run(
@@ -112,7 +116,7 @@ def test_the_backup_never_prints_the_password(tmp_path: Path):
 
 
 @needs_shell
-def test_a_failed_backup_leaves_no_artefact_behind(tmp_path: Path):
+def test_a_failed_backup_leaves_no_artefact_behind(tmp_path: Path) -> None:
     """A truncated dump that looks like a backup is worse than no backup."""
     run(
         BACKUP,
@@ -130,7 +134,7 @@ def test_a_failed_backup_leaves_no_artefact_behind(tmp_path: Path):
 
 
 @needs_shell
-def test_the_restore_requires_both_arguments():
+def test_the_restore_requires_both_arguments() -> None:
     """There is no "restore to the default database" path, deliberately."""
     result = run(RESTORE)
 
@@ -139,7 +143,7 @@ def test_the_restore_requires_both_arguments():
 
 
 @needs_shell
-def test_the_restore_refuses_a_dump_that_is_not_there():
+def test_the_restore_refuses_a_dump_that_is_not_there() -> None:
     result = run(RESTORE, "/no/such/file.dump", "scratch")
 
     assert result.returncode == 1
@@ -147,7 +151,7 @@ def test_the_restore_refuses_a_dump_that_is_not_there():
 
 
 @needs_shell
-def test_the_restore_refuses_the_configured_database(tmp_path: Path):
+def test_the_restore_refuses_the_configured_database(tmp_path: Path) -> None:
     """The guard that makes this safe to run from a shell at 3am."""
     dump = tmp_path / "any.dump"
     dump.write_bytes(b"not really a dump")
@@ -164,7 +168,7 @@ def test_the_restore_refuses_the_configured_database(tmp_path: Path):
 
 
 @needs_shell
-def test_the_production_refusal_can_be_overridden_deliberately(tmp_path: Path):
+def test_the_production_refusal_can_be_overridden_deliberately(tmp_path: Path) -> None:
     """Overwriting production is possible; it is not reachable by accident.
 
     With the opt-in set the guard is passed and the run fails later, on the
@@ -190,7 +194,7 @@ def test_the_production_refusal_can_be_overridden_deliberately(tmp_path: Path):
 
 
 @needs_shell
-def test_the_restore_never_prints_the_password(tmp_path: Path):
+def test_the_restore_never_prints_the_password(tmp_path: Path) -> None:
     secret = "hunter2-must-never-be-printed"
     dump = tmp_path / "any.dump"
     dump.write_bytes(b"not really a dump")
@@ -209,7 +213,7 @@ def test_the_restore_never_prints_the_password(tmp_path: Path):
 # ------------------------------------------------------------- documentation
 
 
-def test_the_restore_procedure_is_documented():
+def test_the_restore_procedure_is_documented() -> None:
     """A script nobody knows how to run is not a recovery plan."""
     guide = (ROOT / "docs" / "BACKUP.md").read_text(encoding="utf-8")
 
@@ -223,7 +227,7 @@ def test_the_restore_procedure_is_documented():
         assert expected in guide, f"docs/BACKUP.md does not mention {expected}"
 
 
-def test_the_runbook_no_longer_claims_there_is_no_backup_system():
+def test_the_runbook_no_longer_claims_there_is_no_backup_system() -> None:
     """The line this phase exists to make untrue."""
     runbook = (ROOT / "docs" / "RUNBOOK.md").read_text(encoding="utf-8")
 
@@ -231,7 +235,7 @@ def test_the_runbook_no_longer_claims_there_is_no_backup_system():
 
 
 @pytest.mark.parametrize("script", sorted(p.name for p in (ROOT / "scripts").glob("*.sh")))
-def test_no_shell_script_carries_a_carriage_return(script: str):
+def test_no_shell_script_carries_a_carriage_return(script: str) -> None:
     """A `#!/bin/sh\r` shebang is a container that will not start.
 
     Linux looks for an interpreter literally named `/bin/sh\r`, fails, and

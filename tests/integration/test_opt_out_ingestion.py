@@ -12,9 +12,13 @@ refusing marketing is not refusing an answer.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.campaign import OptOutSource
+from app.db.models.conversation import Contact
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.repositories.conversation_repository import ContactRepository
@@ -30,7 +34,7 @@ CUSTOMER = "201234567890"
 CANCEL = "الغاء"
 
 
-async def _account(session, *, slug: str) -> WhatsAppAccount:
+async def _account(session: AsyncSession, *, slug: str) -> WhatsAppAccount:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
@@ -46,7 +50,7 @@ async def _account(session, *, slug: str) -> WhatsAppAccount:
     return account
 
 
-def _inbound(*, text: str, message_id: str = "wamid.one") -> dict:
+def _inbound(*, text: str, message_id: str = "wamid.one") -> dict[str, Any]:
     return {
         "entry": [
             {
@@ -72,11 +76,13 @@ def _inbound(*, text: str, message_id: str = "wamid.one") -> dict:
     }
 
 
-async def _contact(session, account: WhatsAppAccount):
-    return await ContactRepository(session, tenant_id=account.tenant_id).get_by_wa_id(CUSTOMER)
+async def _contact(session: AsyncSession, account: WhatsAppAccount) -> Contact:
+    found = await ContactRepository(session, tenant_id=account.tenant_id).get_by_wa_id(CUSTOMER)
+    assert found is not None
+    return found
 
 
-async def test_a_customer_saying_stop_is_opted_out(db_session):
+async def test_a_customer_saying_stop_is_opted_out(db_session: AsyncSession) -> None:
     account = await _account(db_session, slug="stop-english")
 
     outcome = await WhatsAppIngestionService(session=db_session).ingest(_inbound(text="STOP"))
@@ -90,7 +96,7 @@ async def test_a_customer_saying_stop_is_opted_out(db_session):
     assert contact.accepts_campaigns is False
 
 
-async def test_the_same_works_in_arabic(db_session):
+async def test_the_same_works_in_arabic(db_session: AsyncSession) -> None:
     account = await _account(db_session, slug="stop-arabic")
 
     await WhatsAppIngestionService(session=db_session).ingest(_inbound(text=CANCEL))
@@ -100,7 +106,7 @@ async def test_the_same_works_in_arabic(db_session):
     assert contact is not None and contact.accepts_campaigns is False
 
 
-async def test_an_ordinary_message_changes_nothing(db_session):
+async def test_an_ordinary_message_changes_nothing(db_session: AsyncSession) -> None:
     account = await _account(db_session, slug="ordinary-message")
 
     outcome = await WhatsAppIngestionService(session=db_session).ingest(
@@ -113,7 +119,7 @@ async def test_an_ordinary_message_changes_nothing(db_session):
     assert contact is not None and contact.accepts_campaigns is True
 
 
-async def test_saying_stop_twice_does_not_move_the_timestamp(db_session):
+async def test_saying_stop_twice_does_not_move_the_timestamp(db_session: AsyncSession) -> None:
     """The first refusal is the one that counts."""
     account = await _account(db_session, slug="stop-twice")
     service = WhatsAppIngestionService(session=db_session)
@@ -133,7 +139,7 @@ async def test_saying_stop_twice_does_not_move_the_timestamp(db_session):
     assert contact.marketing_opt_out_at == first
 
 
-async def test_a_stop_still_produces_a_message_and_an_agent_job(db_session):
+async def test_a_stop_still_produces_a_message_and_an_agent_job(db_session: AsyncSession) -> None:
     """Refusing marketing is not refusing an answer."""
     account = await _account(db_session, slug="stop-still-answered")
 

@@ -27,7 +27,7 @@ import uuid
 
 import pytest
 from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.core.exceptions import AuthenticationError
@@ -36,7 +36,8 @@ from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
 from app.repositories import MembershipRepository
-from app.services.auth_service import AuthService
+from app.services.auth_service import AuthenticatedSession, AuthService
+from tests.fakes import as_credentials, as_redis_client
 
 pytestmark = pytest.mark.integration
 
@@ -54,13 +55,19 @@ class _Redis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
 
-    async def set(self, key, value, ex=None, nx=False):
+    async def set(
+        self,
+        key: str,
+        value: str,
+        ex: int | None = None,
+        nx: bool = False,
+    ) -> bool | None:
         if nx and key in self.values:
             return None
         self.values[key] = value
         return True
 
-    async def exists(self, key) -> int:
+    async def exists(self, key: str) -> int:
         return 1 if key in self.values else 0
 
 
@@ -79,11 +86,11 @@ def auth(db_session: AsyncSession, settings: Settings, redis: _RedisClient) -> A
     return AuthService(
         session=db_session,
         settings=settings,
-        token_store=RefreshTokenStore(redis),
+        token_store=RefreshTokenStore(as_redis_client(redis)),
     )
 
 
-async def _register(auth: AuthService, session: AsyncSession):
+async def _register(auth: AuthService, session: AsyncSession) -> AuthenticatedSession:
     result = await auth.register(
         email="ahmed@example.test",
         password=PASSWORD,
@@ -102,10 +109,11 @@ async def _entries(session: AsyncSession) -> list[AuditLog]:
 # ------------------------------------------------------------- the happy path
 
 
-async def test_a_refresh_returns_a_new_pair(auth, db_session):
+async def test_a_refresh_returns_a_new_pair(auth: AuthService, db_session: AsyncSession) -> None:
     """The control. Every refusal below has to be the reuse check firing, not
     refreshing being broken."""
     session = await _register(auth, db_session)
+    assert session is not None
 
     refreshed = await auth.refresh(refresh_token=session.refresh_token)
 
@@ -113,10 +121,13 @@ async def test_a_refresh_returns_a_new_pair(auth, db_session):
     assert refreshed.refresh_token != session.refresh_token
 
 
-async def test_a_chain_of_refreshes_keeps_working(auth, db_session):
+async def test_a_chain_of_refreshes_keeps_working(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     """Rotation must not be self-detonating: using each new token in turn is
     exactly what a well-behaved client does."""
     session = await _register(auth, db_session)
+    assert session is not None
 
     token = session.refresh_token
     for _ in range(4):
@@ -125,8 +136,11 @@ async def test_a_chain_of_refreshes_keeps_working(auth, db_session):
     assert token
 
 
-async def test_the_spent_token_is_denylisted_immediately(auth, db_session, redis, settings):
+async def test_the_spent_token_is_denylisted_immediately(
+    auth: AuthService, db_session: AsyncSession, redis: _RedisClient, settings: Settings
+) -> None:
     session = await _register(auth, db_session)
+    assert session is not None
     claims = decode_token(
         session.refresh_token,
         settings=settings,
@@ -135,24 +149,30 @@ async def test_the_spent_token_is_denylisted_immediately(auth, db_session, redis
 
     await auth.refresh(refresh_token=session.refresh_token)
 
-    assert await RefreshTokenStore(redis).is_revoked(claims.token_id)
+    assert await RefreshTokenStore(as_redis_client(redis)).is_revoked(claims.token_id)
 
 
 # ----------------------------------------------------------------- the replay
 
 
-async def test_replaying_a_spent_token_is_refused(auth, db_session):
+async def test_replaying_a_spent_token_is_refused(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     session = await _register(auth, db_session)
+    assert session is not None
     await auth.refresh(refresh_token=session.refresh_token)
 
     with pytest.raises(AuthenticationError):
         await auth.refresh(refresh_token=session.refresh_token)
 
 
-async def test_replaying_bumps_the_token_version(auth, db_session):
+async def test_replaying_bumps_the_token_version(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     """The teardown. Without it, detection is a shrug: the presented copy is
     refused and the other chain carries on."""
     session = await _register(auth, db_session)
+    assert session is not None
     before = session.user.token_version
     await auth.refresh(refresh_token=session.refresh_token)
 
@@ -163,7 +183,9 @@ async def test_replaying_bumps_the_token_version(auth, db_session):
     assert session.user.token_version == before + 1
 
 
-async def test_the_replay_kills_the_chain_the_thief_took(auth, db_session):
+async def test_the_replay_kills_the_chain_the_thief_took(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     """The scenario end to end.
 
     The thief refreshes first and holds a fresh, otherwise-valid pair. The real
@@ -172,6 +194,7 @@ async def test_the_replay_kills_the_chain_the_thief_took(auth, db_session):
     robbed.
     """
     session = await _register(auth, db_session)
+    assert session is not None
     stolen = await auth.refresh(refresh_token=session.refresh_token)
 
     with pytest.raises(AuthenticationError):
@@ -182,12 +205,15 @@ async def test_the_replay_kills_the_chain_the_thief_took(auth, db_session):
         await auth.refresh(refresh_token=stolen.refresh_token)
 
 
-async def test_the_access_token_the_thief_holds_stops_working(auth, db_session, settings):
+async def test_the_access_token_the_thief_holds_stops_working(
+    auth: AuthService, db_session: AsyncSession, settings: Settings
+) -> None:
     """Access tokens are not denylisted - they are checked against the version,
     which is what makes a bump reach them (ADR-036)."""
     from app.api.dependencies import get_current_user
 
     session = await _register(auth, db_session)
+    assert session is not None
     stolen = await auth.refresh(refresh_token=session.refresh_token)
 
     with pytest.raises(AuthenticationError):
@@ -201,14 +227,17 @@ async def test_the_access_token_the_thief_holds_stops_working(auth, db_session, 
         await get_current_user(
             settings=settings,
             session=db_session,
-            credentials=_Credentials(),
+            credentials=as_credentials(_Credentials()),
         )
 
 
-async def test_the_real_person_can_sign_in_again_immediately(auth, db_session):
+async def test_the_real_person_can_sign_in_again_immediately(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     """The account is not disabled. Only its sessions end, and the password the
     thief does not have is what gets it back."""
     session = await _register(auth, db_session)
+    assert session is not None
     await auth.refresh(refresh_token=session.refresh_token)
     with pytest.raises(AuthenticationError):
         await auth.refresh(refresh_token=session.refresh_token)
@@ -221,12 +250,15 @@ async def test_the_real_person_can_sign_in_again_immediately(auth, db_session):
     assert await auth.refresh(refresh_token=recovered.refresh_token)
 
 
-async def test_logging_out_then_refreshing_is_treated_as_a_replay(auth, db_session):
+async def test_logging_out_then_refreshing_is_treated_as_a_replay(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     """Logout denylists the token, so presenting it afterwards is a spent token
     by the same definition. The teardown is the right response either way: a
     client that refreshes after logging out is either confused or not the
     client."""
     session = await _register(auth, db_session)
+    assert session is not None
     before = session.user.token_version
     await auth.logout(refresh_token=session.refresh_token)
 
@@ -248,9 +280,9 @@ async def test_logging_out_then_refreshing_is_treated_as_a_replay(auth, db_sessi
 
 
 async def test_two_simultaneous_presentations_produce_exactly_one_new_pair(
-    engine,
-    settings,
-):
+    engine: AsyncEngine,
+    settings: Settings,
+) -> None:
     """The race that a check-then-write implementation loses silently.
 
     Both callers read "unspent", both are issued a pair, and the leak is never
@@ -268,7 +300,7 @@ async def test_two_simultaneous_presentations_produce_exactly_one_new_pair(
             service = AuthService(
                 session=session,
                 settings=settings,
-                token_store=RefreshTokenStore(shared_redis),
+                token_store=RefreshTokenStore(as_redis_client(shared_redis)),
             )
             try:
                 await service.refresh(refresh_token=refresh_token)
@@ -286,7 +318,9 @@ async def test_two_simultaneous_presentations_produce_exactly_one_new_pair(
         await _cleanup(sessions, email)
 
 
-async def test_concurrent_replays_do_not_lose_an_increment(engine, settings):
+async def test_concurrent_replays_do_not_lose_an_increment(
+    engine: AsyncEngine, settings: Settings
+) -> None:
     """`token_version += 1` in Python reads a value and writes it back, so two
     teardowns running together would collapse into one increment and leave the
     account on a version an outstanding token still matches.
@@ -302,7 +336,7 @@ async def test_concurrent_replays_do_not_lose_an_increment(engine, settings):
             service = AuthService(
                 session=session,
                 settings=settings,
-                token_store=RefreshTokenStore(shared_redis),
+                token_store=RefreshTokenStore(as_redis_client(shared_redis)),
             )
             await service.refresh(refresh_token=refresh_token)
             await session.commit()
@@ -314,7 +348,7 @@ async def test_concurrent_replays_do_not_lose_an_increment(engine, settings):
             service = AuthService(
                 session=session,
                 settings=settings,
-                token_store=RefreshTokenStore(shared_redis),
+                token_store=RefreshTokenStore(as_redis_client(shared_redis)),
             )
             with pytest.raises(AuthenticationError):
                 await service.refresh(refresh_token=refresh_token)
@@ -330,13 +364,17 @@ async def test_concurrent_replays_do_not_lose_an_increment(engine, settings):
         await _cleanup(sessions, email)
 
 
-async def _seed_account_with(sessions, settings, redis) -> tuple[str, str]:
+async def _seed_account_with(
+    sessions: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    redis: _RedisClient,
+) -> tuple[str, str]:
     email = f"race-{uuid.uuid4().hex[:10]}@example.test"
     async with sessions() as session:
         service = AuthService(
             session=session,
             settings=settings,
-            token_store=RefreshTokenStore(redis),
+            token_store=RefreshTokenStore(as_redis_client(redis)),
         )
         result = await service.register(
             email=email,
@@ -348,7 +386,7 @@ async def _seed_account_with(sessions, settings, redis) -> tuple[str, str]:
         return email, result.refresh_token
 
 
-async def _cleanup(sessions, email: str) -> None:
+async def _cleanup(sessions: async_sessionmaker[AsyncSession], email: str) -> None:
     """Remove what the race tests committed.
 
     They cannot use the rolled-back fixture transaction, so they tidy up after
@@ -378,8 +416,11 @@ async def _cleanup(sessions, email: str) -> None:
 # ----------------------------------------------------------- what it records
 
 
-async def test_the_replay_is_recorded_in_the_audit_trail(auth, db_session):
+async def test_the_replay_is_recorded_in_the_audit_trail(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     session = await _register(auth, db_session)
+    assert session is not None
     await auth.refresh(refresh_token=session.refresh_token)
 
     with pytest.raises(AuthenticationError):
@@ -397,13 +438,16 @@ async def test_the_replay_is_recorded_in_the_audit_trail(auth, db_session):
     assert entry.target_type == "user"
     assert entry.target_id == session.user.id
     assert entry.target_label == "ahmed@example.test"
+    assert entry.meta is not None
     assert entry.meta["token_version"] == session.user.token_version
     # Platform-level: an account is a global identity, so this is not one
     # workspace's business.
     assert entry.tenant_id is None
 
 
-async def test_the_entry_survives_the_failed_request(auth, db_session):
+async def test_the_entry_survives_the_failed_request(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     """The teardown commits before the refusal is raised.
 
     A revocation staged the ordinary way would be rolled back by the very
@@ -411,6 +455,7 @@ async def test_the_entry_survives_the_failed_request(auth, db_session):
     something that did not happen and leave the estate live.
     """
     session = await _register(auth, db_session)
+    assert session is not None
     await auth.refresh(refresh_token=session.refresh_token)
 
     with pytest.raises(AuthenticationError):
@@ -426,8 +471,11 @@ async def test_the_entry_survives_the_failed_request(auth, db_session):
     assert len(survivors) == 1
 
 
-async def test_no_token_material_reaches_the_audit_trail(auth, db_session):
+async def test_no_token_material_reaches_the_audit_trail(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     session = await _register(auth, db_session)
+    assert session is not None
     await auth.refresh(refresh_token=session.refresh_token)
 
     with pytest.raises(AuthenticationError):
@@ -439,8 +487,11 @@ async def test_no_token_material_reaches_the_audit_trail(auth, db_session):
         assert session.access_token not in rendered
 
 
-async def test_no_token_material_reaches_the_log(auth, db_session, caplog):
+async def test_no_token_material_reaches_the_log(
+    auth: AuthService, db_session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
     session = await _register(auth, db_session)
+    assert session is not None
     await auth.refresh(refresh_token=session.refresh_token)
 
     with caplog.at_level(logging.DEBUG), pytest.raises(AuthenticationError):
@@ -454,10 +505,13 @@ async def test_no_token_material_reaches_the_log(auth, db_session, caplog):
     assert "auth.refresh_token_reused" in text
 
 
-async def test_the_refusal_says_nothing_about_what_happened(auth, db_session):
+async def test_the_refusal_says_nothing_about_what_happened(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     """A caller replaying a token learns only that it did not work. Telling
     them the estate was just torn down tells a thief to move faster."""
     session = await _register(auth, db_session)
+    assert session is not None
     await auth.refresh(refresh_token=session.refresh_token)
 
     with pytest.raises(AuthenticationError) as raised:
@@ -471,12 +525,19 @@ async def test_the_refusal_says_nothing_about_what_happened(auth, db_session):
 # ------------------------------------------------------- the odd cases
 
 
-async def test_a_replay_for_a_deleted_account_is_refused_without_a_trail(auth, db_session):
+async def test_a_replay_for_a_deleted_account_is_refused_without_a_trail(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     """The token was signed by us, so this is a deleted user rather than a
     forgery. There is nothing left to revoke and nothing to record it against."""
     session = await _register(auth, db_session)
+    assert session is not None
     await auth.refresh(refresh_token=session.refresh_token)
-    memberships = MembershipRepository(db_session, tenant_id=session.workspace.tenant.id)
+    assert session.workspace is not None
+    memberships = MembershipRepository(
+        db_session,
+        tenant_id=session.workspace.tenant.id,
+    )
     await memberships.get_for_user(session.user.id)
     await db_session.delete(session.user)
     await db_session.flush()
@@ -492,11 +553,14 @@ async def test_a_replay_for_a_deleted_account_is_refused_without_a_trail(auth, d
     assert entries == []
 
 
-async def test_a_forged_token_never_reaches_the_teardown(auth, db_session):
+async def test_a_forged_token_never_reaches_the_teardown(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     """Signature verification happens first, so an unsigned string cannot be
     used to raise somebody else's token version - which would otherwise be a
     denial-of-service against any account whose id an attacker could guess."""
     session = await _register(auth, db_session)
+    assert session is not None
     before = session.user.token_version
 
     with pytest.raises(AuthenticationError):
@@ -506,17 +570,24 @@ async def test_a_forged_token_never_reaches_the_teardown(auth, db_session):
     assert session.user.token_version == before
 
 
-async def test_an_access_token_cannot_be_presented_as_a_refresh_token(auth, db_session):
+async def test_an_access_token_cannot_be_presented_as_a_refresh_token(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     session = await _register(auth, db_session)
+    assert session is not None
 
     with pytest.raises(AuthenticationError):
         await auth.refresh(refresh_token=session.access_token)
 
 
-async def test_a_workspace_owner_keeps_their_workspace_after_a_teardown(auth, db_session):
+async def test_a_workspace_owner_keeps_their_workspace_after_a_teardown(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     """The teardown ends sessions. It must not touch membership - being robbed
     is not a reason to lose a company."""
     session = await _register(auth, db_session)
+    assert session is not None
+    assert session.workspace is not None
     tenant = session.workspace.tenant
     await auth.refresh(refresh_token=session.refresh_token)
     with pytest.raises(AuthenticationError):

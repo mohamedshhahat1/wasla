@@ -21,6 +21,7 @@ message is what is ours to get wrong, and it is what is pinned.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -62,7 +63,7 @@ def _provider() -> PaymobProvider:
     )
 
 
-def _signed(token: dict, *, secret: str = SECRET) -> tuple[bytes, str]:
+def _signed(token: dict[str, Any], *, secret: str = SECRET) -> tuple[bytes, str]:
     body = json.dumps({"type": "TOKEN", "obj": token}).encode("utf-8")
     return body, token_hmac_signature(token, secret=secret)
 

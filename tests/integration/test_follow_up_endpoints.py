@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -38,7 +41,7 @@ FOLLOW_UP_ID = uuid.UUID("44444444-4444-4444-4444-444444444444")
 MOMENT = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
 
 
-def _follow_up(**overrides) -> FollowUp:
+def _follow_up(**overrides: Any) -> FollowUp:
     values = {
         "id": FOLLOW_UP_ID,
         "tenant_id": TENANT_ID,
@@ -68,8 +71,8 @@ def _follow_up(**overrides) -> FollowUp:
 
 class StubFollowUps:
     def __init__(self) -> None:
-        self.scheduled: list[dict] = []
-        self.cancelled: list[dict] = []
+        self.scheduled: list[dict[str, Any]] = []
+        self.cancelled: list[dict[str, Any]] = []
         self.missing = False
         self.invalid = False
         self.follow_up = _follow_up()
@@ -78,21 +81,26 @@ class StubFollowUps:
         if self.missing:
             raise TenantIsolationError()
 
-    async def list_follow_ups(self, **kwargs):
+    async def list_follow_ups(self, **kwargs: Any) -> Page[Any]:
         self.filters = kwargs
         return Page(items=[self.follow_up], next_cursor=None)
 
-    async def get(self, follow_up_id):
+    async def get(self, follow_up_id: uuid.UUID) -> FollowUp:
         self._guard()
         return self.follow_up
 
-    async def schedule(self, **kwargs):
+    async def schedule(self, **kwargs: Any) -> FollowUp:
         if self.invalid:
             raise ValidationError("This conversation is closed.")
         self.scheduled.append(kwargs)
         return self.follow_up
 
-    async def cancel(self, *, follow_up_id, reason=None):
+    async def cancel(
+        self,
+        *,
+        follow_up_id: uuid.UUID,
+        reason: str | None = None,
+    ) -> FollowUp:
         self._guard()
         self.cancelled.append({"follow_up_id": follow_up_id, "reason": reason})
         return _follow_up(
@@ -116,17 +124,19 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
 
 
 @pytest.fixture
-def follow_ups(app) -> StubFollowUps:
+def follow_ups(app: FastAPI) -> StubFollowUps:
     stub = StubFollowUps()
     app.dependency_overrides[get_follow_up_service] = lambda: stub
     return stub
 
 
-def _as(app, role: TenantRole) -> None:
+def _as(app: FastAPI, role: TenantRole) -> None:
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(role)
 
 
-async def test_a_member_can_list_scheduled_follow_ups(client, app, follow_ups):
+async def test_a_member_can_list_scheduled_follow_ups(
+    client: AsyncClient, app: FastAPI, follow_ups: StubFollowUps
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(PATH)
@@ -135,7 +145,9 @@ async def test_a_member_can_list_scheduled_follow_ups(client, app, follow_ups):
     assert response.json()["items"][0]["body"] == "Still thinking it over?"
 
 
-async def test_a_member_can_schedule_a_follow_up(client, app, follow_ups):
+async def test_a_member_can_schedule_a_follow_up(
+    client: AsyncClient, app: FastAPI, follow_ups: StubFollowUps
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.post(
@@ -152,7 +164,9 @@ async def test_a_member_can_schedule_a_follow_up(client, app, follow_ups):
     assert follow_ups.scheduled[0]["created_by_id"] == USER_ID
 
 
-async def test_a_member_can_cancel_a_follow_up(client, app, follow_ups):
+async def test_a_member_can_cancel_a_follow_up(
+    client: AsyncClient, app: FastAPI, follow_ups: StubFollowUps
+) -> None:
     """Whoever is watching the conversation must be able to stop the nudge."""
     _as(app, TenantRole.MEMBER)
 
@@ -166,7 +180,9 @@ async def test_a_member_can_cancel_a_follow_up(client, app, follow_ups):
     assert follow_ups.cancelled[0]["reason"] == "The customer called instead."
 
 
-async def test_an_absolute_time_is_accepted(client, app, follow_ups):
+async def test_an_absolute_time_is_accepted(
+    client: AsyncClient, app: FastAPI, follow_ups: StubFollowUps
+) -> None:
     _as(app, TenantRole.MEMBER)
     when = datetime.now(UTC) + timedelta(days=1)
 
@@ -184,7 +200,9 @@ async def test_an_absolute_time_is_accepted(client, app, follow_ups):
     assert follow_ups.scheduled[0]["scheduled_at"] is not None
 
 
-async def test_supplying_both_a_delay_and_a_time_is_refused(client, app, follow_ups):
+async def test_supplying_both_a_delay_and_a_time_is_refused(
+    client: AsyncClient, app: FastAPI, follow_ups: StubFollowUps
+) -> None:
     """Accepting both would leave the service picking a winner silently."""
     _as(app, TenantRole.MEMBER)
 
@@ -202,7 +220,9 @@ async def test_supplying_both_a_delay_and_a_time_is_refused(client, app, follow_
     assert follow_ups.scheduled == []
 
 
-async def test_a_follow_up_with_nothing_to_send_is_refused(client, app, follow_ups):
+async def test_a_follow_up_with_nothing_to_send_is_refused(
+    client: AsyncClient, app: FastAPI, follow_ups: StubFollowUps
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.post(
@@ -214,7 +234,9 @@ async def test_a_follow_up_with_nothing_to_send_is_refused(client, app, follow_u
     assert follow_ups.scheduled == []
 
 
-async def test_a_template_only_follow_up_is_accepted(client, app, follow_ups):
+async def test_a_template_only_follow_up_is_accepted(
+    client: AsyncClient, app: FastAPI, follow_ups: StubFollowUps
+) -> None:
     """The only thing that works outside the 24-hour window."""
     _as(app, TenantRole.MEMBER)
 
@@ -232,7 +254,9 @@ async def test_a_template_only_follow_up_is_accepted(client, app, follow_ups):
     assert follow_ups.scheduled[0]["template_name"] == "gentle_nudge"
 
 
-async def test_a_delay_beyond_the_maximum_is_refused(client, app, follow_ups):
+async def test_a_delay_beyond_the_maximum_is_refused(
+    client: AsyncClient, app: FastAPI, follow_ups: StubFollowUps
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.post(
@@ -247,7 +271,9 @@ async def test_a_delay_beyond_the_maximum_is_refused(client, app, follow_ups):
     assert response.status_code == 422
 
 
-async def test_another_workspaces_follow_up_answers_not_found(client, app, follow_ups):
+async def test_another_workspaces_follow_up_answers_not_found(
+    client: AsyncClient, app: FastAPI, follow_ups: StubFollowUps
+) -> None:
     """Never 403: that would confirm it exists."""
     _as(app, TenantRole.MEMBER)
     follow_ups.missing = True
@@ -257,7 +283,9 @@ async def test_another_workspaces_follow_up_answers_not_found(client, app, follo
     assert response.status_code == 404
 
 
-async def test_a_closed_conversation_answers_unprocessable(client, app, follow_ups):
+async def test_a_closed_conversation_answers_unprocessable(
+    client: AsyncClient, app: FastAPI, follow_ups: StubFollowUps
+) -> None:
     _as(app, TenantRole.MEMBER)
     follow_ups.invalid = True
 
@@ -273,7 +301,9 @@ async def test_a_closed_conversation_answers_unprocessable(client, app, follow_u
     assert response.status_code == 422
 
 
-async def test_an_unknown_field_is_refused(client, app, follow_ups):
+async def test_an_unknown_field_is_refused(
+    client: AsyncClient, app: FastAPI, follow_ups: StubFollowUps
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.post(
@@ -290,7 +320,9 @@ async def test_an_unknown_field_is_refused(client, app, follow_ups):
     assert follow_ups.scheduled == []
 
 
-async def test_a_status_filter_reaches_the_service(client, app, follow_ups):
+async def test_a_status_filter_reaches_the_service(
+    client: AsyncClient, app: FastAPI, follow_ups: StubFollowUps
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(PATH, params={"status": ["pending", "sent"]})
@@ -299,7 +331,9 @@ async def test_a_status_filter_reaches_the_service(client, app, follow_ups):
     assert follow_ups.filters["statuses"] == (FollowUpStatus.PENDING, FollowUpStatus.SENT)
 
 
-async def test_an_unknown_status_filter_is_refused(client, app, follow_ups):
+async def test_an_unknown_status_filter_is_refused(
+    client: AsyncClient, app: FastAPI, follow_ups: StubFollowUps
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(PATH, params={"status": "snoozed"})
@@ -307,7 +341,7 @@ async def test_an_unknown_status_filter_is_refused(client, app, follow_ups):
     assert response.status_code == 422
 
 
-async def test_authentication_is_required(client):
+async def test_authentication_is_required(client: AsyncClient) -> None:
     """Deliberately takes no stub.
 
     Overriding the service would satisfy the route without ever resolving the

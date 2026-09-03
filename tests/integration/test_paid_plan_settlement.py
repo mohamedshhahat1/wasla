@@ -24,11 +24,12 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI, Request
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -70,7 +71,7 @@ class _Infra:
         self.commands = self
 
     @property
-    def client(self):
+    def client(self) -> _Infra:
         return self.commands
 
     async def incr(self, key: str) -> int:
@@ -212,8 +213,8 @@ async def _checkout_rows(
     return invoice, payment
 
 
-def _transaction(*, reference: str | None, amount_cents: int, **overrides) -> dict:
-    transaction: dict = {
+def _transaction(*, reference: str | None, amount_cents: int, **overrides: Any) -> dict[str, Any]:
+    transaction: dict[str, Any] = {
         "id": 900000000 + uuid.uuid4().int % 10_000_000,
         "pending": False,
         "amount_cents": amount_cents,
@@ -237,7 +238,7 @@ def _transaction(*, reference: str | None, amount_cents: int, **overrides) -> di
     return transaction
 
 
-async def _deliver(http: AsyncClient, transaction: dict):
+async def _deliver(http: AsyncClient, transaction: dict[str, Any]) -> Response:
     """A callback exactly as Paymob sends one, signed with the real scheme."""
     signature = hmac_signature(transaction, secret=HMAC_SECRET)
     return await http.post(

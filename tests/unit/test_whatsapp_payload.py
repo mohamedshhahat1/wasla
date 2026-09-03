@@ -7,6 +7,7 @@ and a webhook that fails on the unfamiliar drops legitimate traffic.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -15,14 +16,14 @@ from app.integrations.whatsapp.payload import parse_webhook
 PHONE_NUMBER_ID = "109876543210"
 
 
-def _envelope(value):
+def _envelope(value: dict[str, Any]) -> dict[str, Any]:
     return {
         "object": "whatsapp_business_account",
         "entry": [{"id": "WABA", "changes": [{"field": "messages", "value": value}]}],
     }
 
 
-def _value(**extra):
+def _value(**extra: Any) -> dict[str, Any]:
     return {
         "messaging_product": "whatsapp",
         "metadata": {"display_phone_number": "+201000000", "phone_number_id": PHONE_NUMBER_ID},
@@ -30,7 +31,7 @@ def _value(**extra):
     }
 
 
-def test_a_text_message_is_parsed():
+def test_a_text_message_is_parsed() -> None:
     payload = _envelope(
         _value(
             messages=[
@@ -58,7 +59,7 @@ def test_a_text_message_is_parsed():
     assert message.raw["type"] == "text"
 
 
-def test_a_non_text_message_is_kept_without_text():
+def test_a_non_text_message_is_kept_without_text() -> None:
     payload = _envelope(
         _value(
             messages=[
@@ -79,7 +80,7 @@ def test_a_non_text_message_is_kept_without_text():
     assert envelope.messages[0].raw["image"]["id"] == "media-1"
 
 
-def test_statuses_for_one_message_get_distinct_event_ids():
+def test_statuses_for_one_message_get_distinct_event_ids() -> None:
     payload = _envelope(
         _value(
             statuses=[
@@ -102,7 +103,7 @@ def test_statuses_for_one_message_get_distinct_event_ids():
     assert {status.message_id for status in envelope.statuses} == {"wamid.sent"}
 
 
-def test_messages_and_statuses_arrive_together():
+def test_messages_and_statuses_arrive_together() -> None:
     payload = _envelope(
         _value(
             messages=[{"from": "2012", "id": "wamid.in", "type": "text", "text": {"body": "hi"}}],
@@ -118,7 +119,7 @@ def test_messages_and_statuses_arrive_together():
     assert not envelope.is_empty
 
 
-def test_an_entry_without_a_phone_number_id_is_counted_not_dropped_silently():
+def test_an_entry_without_a_phone_number_id_is_counted_not_dropped_silently() -> None:
     payload = _envelope({"messaging_product": "whatsapp", "messages": [{"id": "x"}]})
 
     envelope = parse_webhook(payload)
@@ -127,7 +128,7 @@ def test_an_entry_without_a_phone_number_id_is_counted_not_dropped_silently():
     assert envelope.ignored == 1
 
 
-def test_entries_missing_required_identifiers_are_counted():
+def test_entries_missing_required_identifiers_are_counted() -> None:
     payload = _envelope(
         _value(
             messages=[{"id": "wamid.no.sender"}, {"from": "2012"}],
@@ -153,13 +154,13 @@ def test_entries_missing_required_identifiers_are_counted():
         {"entry": [{"changes": [{"value": {"metadata": "nonsense"}}]}]},
     ],
 )
-def test_junk_never_raises(payload):
+def test_junk_never_raises(payload: dict[str, Any]) -> None:
     envelope = parse_webhook(payload)
 
     assert envelope.is_empty
 
 
-def test_an_unparseable_timestamp_does_not_lose_the_message():
+def test_an_unparseable_timestamp_does_not_lose_the_message() -> None:
     payload = _envelope(
         _value(messages=[{"from": "2012", "id": "wamid.x", "type": "text", "timestamp": "soon"}])
     )
@@ -170,7 +171,7 @@ def test_an_unparseable_timestamp_does_not_lose_the_message():
     assert envelope.messages[0].timestamp is None
 
 
-def test_several_entries_are_flattened():
+def test_several_entries_are_flattened() -> None:
     payload = {
         "entry": [
             {"changes": [{"value": _value(messages=[{"from": "1", "id": "a", "type": "text"}])}]},
@@ -183,7 +184,7 @@ def test_several_entries_are_flattened():
     assert [message.event_id for message in envelope.messages] == ["a", "b"]
 
 
-def test_an_image_carries_its_media_descriptor():
+def test_an_image_carries_its_media_descriptor() -> None:
     payload = _envelope(
         _value(
             messages=[
@@ -212,7 +213,7 @@ def test_an_image_carries_its_media_descriptor():
     assert media.is_voice is False
 
 
-def test_a_caption_is_the_message_text():
+def test_a_caption_is_the_message_text() -> None:
     """The customer's own sentence, and often the whole question.
 
     Dropping it would leave the agent with a photograph and no idea what was
@@ -237,7 +238,7 @@ def test_a_caption_is_the_message_text():
     assert message.media is not None
 
 
-def test_a_document_keeps_the_filename_it_arrived_with():
+def test_a_document_keeps_the_filename_it_arrived_with() -> None:
     payload = _envelope(
         _value(
             messages=[
@@ -261,7 +262,7 @@ def test_a_document_keeps_the_filename_it_arrived_with():
     assert media.filename == "quote.pdf"
 
 
-def test_a_hostile_filename_is_passed_through_untouched():
+def test_a_hostile_filename_is_passed_through_untouched() -> None:
     """The parser does not sanitise it, because the parser is not what protects.
 
     Storage derives its own key from a generated identifier and never consults
@@ -287,7 +288,7 @@ def test_a_hostile_filename_is_passed_through_untouched():
     assert media.filename == "../../etc/passwd"
 
 
-def test_a_voice_note_is_distinguished_from_an_audio_file():
+def test_a_voice_note_is_distinguished_from_an_audio_file() -> None:
     """Both are transcribed; only one is somebody speaking to the business."""
     payload = _envelope(
         _value(
@@ -323,7 +324,7 @@ def test_a_voice_note_is_distinguished_from_an_audio_file():
     assert attached.media.is_voice is False
 
 
-def test_a_media_message_without_an_id_still_parses():
+def test_a_media_message_without_an_id_still_parses() -> None:
     """There is nothing to download, but the message itself is worth storing."""
     payload = _envelope(
         _value(
@@ -345,7 +346,7 @@ def test_a_media_message_without_an_id_still_parses():
     assert envelope.messages[0].text == "look"
 
 
-def test_a_text_message_carries_no_media():
+def test_a_text_message_carries_no_media() -> None:
     payload = _envelope(
         _value(
             messages=[

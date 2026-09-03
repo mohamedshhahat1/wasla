@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, TenantIsolationError
 from app.db.models import (
@@ -38,14 +39,16 @@ DISPLAY_NUMBER = "+201000000000"
 PAYLOAD = {"messages": [{"id": "wamid.one", "text": {"body": "hello"}}]}
 
 
-async def _tenant(session, *, slug: str) -> Tenant:
+async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
     tenant = Tenant(name=slug.capitalize(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _account(session, *, tenant: Tenant, phone_number_id: str) -> WhatsAppAccount:
+async def _account(
+    session: AsyncSession, *, tenant: Tenant, phone_number_id: str
+) -> WhatsAppAccount:
     account = await WhatsAppAccountRepository(session, tenant_id=tenant.id).connect(
         phone_number_id=phone_number_id,
         waba_id=WABA_ID,
@@ -55,7 +58,7 @@ async def _account(session, *, tenant: Tenant, phone_number_id: str) -> WhatsApp
     return account
 
 
-async def test_connect_persists_an_active_account(db_session):
+async def test_connect_persists_an_active_account(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
 
     account = await WhatsAppAccountRepository(db_session, tenant_id=tenant.id).connect(
@@ -76,7 +79,7 @@ async def test_connect_persists_an_active_account(db_session):
     assert account.created_at is not None
 
 
-async def test_a_number_cannot_be_claimed_by_two_workspaces(db_session):
+async def test_a_number_cannot_be_claimed_by_two_workspaces(db_session: AsyncSession) -> None:
     first = await _tenant(db_session, slug="first")
     second = await _tenant(db_session, slug="second")
     await _account(db_session, tenant=first, phone_number_id=PHONE_NUMBER_ID)
@@ -89,7 +92,7 @@ async def test_a_number_cannot_be_claimed_by_two_workspaces(db_session):
         )
 
 
-async def test_the_database_rejects_a_duplicate_number(db_session):
+async def test_the_database_rejects_a_duplicate_number(db_session: AsyncSession) -> None:
     """The repository read is the fast path; the constraint is the guarantee."""
     first = await _tenant(db_session, slug="first")
     second = await _tenant(db_session, slug="second")
@@ -110,7 +113,7 @@ async def test_the_database_rejects_a_duplicate_number(db_session):
     await db_session.rollback()
 
 
-async def test_the_directory_resolves_a_number_across_workspaces(db_session):
+async def test_the_directory_resolves_a_number_across_workspaces(db_session: AsyncSession) -> None:
     """The one unscoped lookup: inbound traffic has no workspace yet."""
     tenant = await _tenant(db_session, slug="acme")
     account = await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
@@ -123,7 +126,7 @@ async def test_the_directory_resolves_a_number_across_workspaces(db_session):
     assert await WhatsAppAccountDirectory(db_session).get_by_phone_number_id("404") is None
 
 
-async def test_accounts_are_invisible_to_another_workspace(db_session):
+async def test_accounts_are_invisible_to_another_workspace(db_session: AsyncSession) -> None:
     owner = await _tenant(db_session, slug="owner")
     outsider = await _tenant(db_session, slug="outsider")
     account = await _account(db_session, tenant=owner, phone_number_id=PHONE_NUMBER_ID)
@@ -139,7 +142,7 @@ async def test_accounts_are_invisible_to_another_workspace(db_session):
     assert [row.id for row in await owner_repository.list_all()] == [account.id]
 
 
-async def test_recording_the_same_event_twice_stores_one_row(db_session):
+async def test_recording_the_same_event_twice_stores_one_row(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     account = await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
     repository = WhatsAppEventRepository(db_session, tenant_id=tenant.id)
@@ -172,7 +175,7 @@ async def test_recording_the_same_event_twice_stores_one_row(db_session):
     assert total == 1
 
 
-async def test_one_workspace_cannot_suppress_anothers_event(db_session):
+async def test_one_workspace_cannot_suppress_anothers_event(db_session: AsyncSession) -> None:
     """Idempotency is per workspace, so a shared event id stores twice."""
     first = await _tenant(db_session, slug="first")
     second = await _tenant(db_session, slug="second")
@@ -200,7 +203,9 @@ async def test_one_workspace_cannot_suppress_anothers_event(db_session):
     assert total == 2
 
 
-async def test_the_database_rejects_a_duplicate_event_for_one_workspace(db_session):
+async def test_the_database_rejects_a_duplicate_event_for_one_workspace(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session, slug="acme")
     account = await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
     received_at = datetime.now(UTC)
@@ -224,7 +229,7 @@ async def test_the_database_rejects_a_duplicate_event_for_one_workspace(db_sessi
     await db_session.rollback()
 
 
-async def test_events_are_listed_newest_first(db_session):
+async def test_events_are_listed_newest_first(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     account = await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
     repository = WhatsAppEventRepository(db_session, tenant_id=tenant.id)

@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -84,7 +85,9 @@ async def http(app: FastAPI) -> AsyncIterator[AsyncClient]:
         yield client
 
 
-def _signed(payload: dict, *, secret: str = SECRET, timestamp: int | None = None) -> tuple:
+def _signed(
+    payload: dict[str, Any], *, secret: str = SECRET, timestamp: int | None = None
+) -> tuple[Any, ...]:
     """The body and the three headers a genuine delivery arrives with."""
     body = json.dumps(payload).encode()
     message_id = f"msg_{uuid.uuid4().hex}"
@@ -103,7 +106,7 @@ def _signed(payload: dict, *, secret: str = SECRET, timestamp: int | None = None
     }
 
 
-def _event(kind: str, email_id: str, **data) -> dict:
+def _event(kind: str, email_id: str, **data: Any) -> dict[str, Any]:
     return {"type": kind, "data": {"email_id": email_id, **data}}
 
 
@@ -135,7 +138,9 @@ async def _suppressions(session: AsyncSession) -> list[str]:
     return sorted(rows.scalars())
 
 
-async def test_a_valid_delivery_event_marks_the_row_delivered(http, db_session):
+async def test_a_valid_delivery_event_marks_the_row_delivered(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     email = await _sent_email(db_session)
     body, headers = _signed(_event("email.delivered", "prov-1"))
 
@@ -146,7 +151,7 @@ async def test_a_valid_delivery_event_marks_the_row_delivered(http, db_session):
     assert email.status is EmailStatus.DELIVERED
 
 
-async def test_an_unsigned_request_is_refused(http, db_session):
+async def test_an_unsigned_request_is_refused(http: AsyncClient, db_session: AsyncSession) -> None:
     await _sent_email(db_session)
 
     response = await http.post(WEBHOOK, json=_event("email.delivered", "prov-1"))
@@ -154,7 +159,7 @@ async def test_an_unsigned_request_is_refused(http, db_session):
     assert response.status_code == 403
 
 
-async def test_a_forged_signature_is_refused(http, db_session):
+async def test_a_forged_signature_is_refused(http: AsyncClient, db_session: AsyncSession) -> None:
     email = await _sent_email(db_session)
     body, headers = _signed(_event("email.delivered", "prov-1"))
     headers["svix-signature"] = "v1,Zm9yZ2VkLXNpZ25hdHVyZS12YWx1ZQ=="
@@ -166,7 +171,9 @@ async def test_a_forged_signature_is_refused(http, db_session):
     assert email.status is EmailStatus.SENT
 
 
-async def test_a_signature_from_another_secret_is_refused(http, db_session):
+async def test_a_signature_from_another_secret_is_refused(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     await _sent_email(db_session)
     body, headers = _signed(
         _event("email.delivered", "prov-1"),
@@ -178,7 +185,7 @@ async def test_a_signature_from_another_secret_is_refused(http, db_session):
     assert response.status_code == 403
 
 
-async def test_a_tampered_body_is_refused(http, db_session):
+async def test_a_tampered_body_is_refused(http: AsyncClient, db_session: AsyncSession) -> None:
     """The signature covers the exact bytes, so a swapped id must not verify."""
     await _sent_email(db_session)
     _, headers = _signed(_event("email.delivered", "prov-1"))
@@ -189,7 +196,7 @@ async def test_a_tampered_body_is_refused(http, db_session):
     assert response.status_code == 403
 
 
-async def test_a_stale_timestamp_is_refused(http, db_session):
+async def test_a_stale_timestamp_is_refused(http: AsyncClient, db_session: AsyncSession) -> None:
     """A signature never expires, so the window is what bounds a replay."""
     await _sent_email(db_session)
     body, headers = _signed(
@@ -202,7 +209,9 @@ async def test_a_stale_timestamp_is_refused(http, db_session):
     assert response.status_code == 403
 
 
-async def test_a_timestamp_far_in_the_future_is_refused(http, db_session):
+async def test_a_timestamp_far_in_the_future_is_refused(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     await _sent_email(db_session)
     body, headers = _signed(
         _event("email.delivered", "prov-1"),
@@ -214,7 +223,9 @@ async def test_a_timestamp_far_in_the_future_is_refused(http, db_session):
     assert response.status_code == 403
 
 
-async def test_a_missing_signature_header_is_refused(http, db_session):
+async def test_a_missing_signature_header_is_refused(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     await _sent_email(db_session)
     body, headers = _signed(_event("email.delivered", "prov-1"))
     del headers["svix-signature"]
@@ -224,7 +235,9 @@ async def test_a_missing_signature_header_is_refused(http, db_session):
     assert response.status_code == 403
 
 
-async def test_one_valid_signature_among_several_is_accepted(http, db_session):
+async def test_one_valid_signature_among_several_is_accepted(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     """Secret rotation: any one entry matching is a genuine delivery."""
     email = await _sent_email(db_session)
     body, headers = _signed(_event("email.delivered", "prov-1"))
@@ -238,7 +251,9 @@ async def test_one_valid_signature_among_several_is_accepted(http, db_session):
     assert email.status is EmailStatus.DELIVERED
 
 
-async def test_a_hard_bounce_suppresses_the_address_we_recorded(http, db_session):
+async def test_a_hard_bounce_suppresses_the_address_we_recorded(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     email = await _sent_email(db_session, recipient="gone@example.com")
     body, headers = _signed(_event("email.bounced", "prov-1", bounce={"type": "Permanent"}))
 
@@ -250,7 +265,9 @@ async def test_a_hard_bounce_suppresses_the_address_we_recorded(http, db_session
     assert await _suppressions(db_session) == ["gone@example.com"]
 
 
-async def test_a_transient_bounce_suppresses_nothing(http, db_session):
+async def test_a_transient_bounce_suppresses_nothing(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     """A full mailbox is not a dead one, and must not be made one."""
     email = await _sent_email(db_session, recipient="busy@example.com")
     body, headers = _signed(_event("email.bounced", "prov-1", bounce={"type": "Transient"}))
@@ -263,7 +280,9 @@ async def test_a_transient_bounce_suppresses_nothing(http, db_session):
     assert await _suppressions(db_session) == []
 
 
-async def test_a_bounce_with_no_permanence_suppresses_nothing(http, db_session):
+async def test_a_bounce_with_no_permanence_suppresses_nothing(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     """Unknown permanence costs a retry; guessing the other way costs a reset."""
     await _sent_email(db_session, recipient="unclear@example.com")
     body, headers = _signed(_event("email.bounced", "prov-1"))
@@ -273,7 +292,9 @@ async def test_a_bounce_with_no_permanence_suppresses_nothing(http, db_session):
     assert await _suppressions(db_session) == []
 
 
-async def test_a_complaint_suppresses_the_address_but_keeps_the_status(http, db_session):
+async def test_a_complaint_suppresses_the_address_but_keeps_the_status(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     """It arrived - somebody read it and pressed the button."""
     email = await _sent_email(db_session, recipient="annoyed@example.com")
     body, headers = _signed(_event("email.complained", "prov-1"))
@@ -285,7 +306,9 @@ async def test_a_complaint_suppresses_the_address_but_keeps_the_status(http, db_
     assert await _suppressions(db_session) == ["annoyed@example.com"]
 
 
-async def test_a_forged_recipient_in_the_payload_is_ignored(http, db_session):
+async def test_a_forged_recipient_in_the_payload_is_ignored(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     """The attack this endpoint exists to refuse.
 
     A verified delivery still cannot nominate whose mailbox to close: the
@@ -309,7 +332,9 @@ async def test_a_forged_recipient_in_the_payload_is_ignored(http, db_session):
     assert "victim@example.com" not in await _suppressions(db_session)
 
 
-async def test_an_event_for_an_unknown_message_id_changes_nothing(http, db_session):
+async def test_an_event_for_an_unknown_message_id_changes_nothing(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     email = await _sent_email(db_session, provider_message_id="prov-known")
     body, headers = _signed(_event("email.bounced", "prov-unknown", bounce={"type": "Permanent"}))
 
@@ -321,7 +346,9 @@ async def test_an_event_for_an_unknown_message_id_changes_nothing(http, db_sessi
     assert await _suppressions(db_session) == []
 
 
-async def test_the_answer_is_the_same_whether_the_id_is_known(http, db_session):
+async def test_the_answer_is_the_same_whether_the_id_is_known(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     """Otherwise the reply is an oracle for which ids this system has issued."""
     await _sent_email(db_session, provider_message_id="prov-known")
     known_body, known_headers = _signed(_event("email.delivered", "prov-known"))
@@ -334,7 +361,9 @@ async def test_the_answer_is_the_same_whether_the_id_is_known(http, db_session):
     assert known.json() == unknown.json()
 
 
-async def test_a_replayed_delivery_event_is_harmless(http, db_session):
+async def test_a_replayed_delivery_event_is_harmless(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     email = await _sent_email(db_session)
     body, headers = _signed(_event("email.delivered", "prov-1"))
 
@@ -346,7 +375,9 @@ async def test_a_replayed_delivery_event_is_harmless(http, db_session):
     assert email.status is EmailStatus.DELIVERED
 
 
-async def test_a_replayed_bounce_writes_one_suppression(http, db_session):
+async def test_a_replayed_bounce_writes_one_suppression(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     await _sent_email(db_session, recipient="gone@example.com")
     body, headers = _signed(_event("email.bounced", "prov-1", bounce={"type": "Permanent"}))
 
@@ -366,7 +397,9 @@ async def test_a_replayed_bounce_writes_one_suppression(http, db_session):
         {"type": "something.invented", "data": {"email_id": "prov-1"}},
     ],
 )
-async def test_an_event_type_we_do_not_act_on_is_acknowledged(http, db_session, payload):
+async def test_an_event_type_we_do_not_act_on_is_acknowledged(
+    http: AsyncClient, db_session: AsyncSession, payload: dict[str, Any]
+) -> None:
     """A non-2xx eventually disables the endpoint, so nothing here refuses."""
     email = await _sent_email(db_session)
     body, headers = _signed(payload)
@@ -390,7 +423,9 @@ async def test_an_event_type_we_do_not_act_on_is_acknowledged(http, db_session, 
         {"type": 42, "data": {"email_id": "prov-1"}},
     ],
 )
-async def test_a_malformed_payload_is_acknowledged_without_acting(http, db_session, payload):
+async def test_a_malformed_payload_is_acknowledged_without_acting(
+    http: AsyncClient, db_session: AsyncSession, payload: dict[str, Any]
+) -> None:
     email = await _sent_email(db_session)
     body, headers = _signed(payload)
 
@@ -401,7 +436,9 @@ async def test_a_malformed_payload_is_acknowledged_without_acting(http, db_sessi
     assert email.status is EmailStatus.SENT
 
 
-async def test_a_body_that_is_not_json_is_acknowledged(http, db_session):
+async def test_a_body_that_is_not_json_is_acknowledged(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     await _sent_email(db_session)
     body = b"<html>not json</html>"
     message_id = "msg_x"
@@ -423,7 +460,9 @@ async def test_a_body_that_is_not_json_is_acknowledged(http, db_session):
     assert response.status_code == 200
 
 
-async def test_a_json_array_body_is_acknowledged(http, db_session):
+async def test_a_json_array_body_is_acknowledged(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     await _sent_email(db_session)
     body, headers = _signed([])  # type: ignore[arg-type]
 
@@ -432,7 +471,7 @@ async def test_a_json_array_body_is_acknowledged(http, db_session):
     assert response.status_code == 200
 
 
-async def test_an_oversized_body_is_refused_before_it_is_read(http):
+async def test_an_oversized_body_is_refused_before_it_is_read(http: AsyncClient) -> None:
     """The webhook cap, which is tighter than the general one."""
     response = await http.post(
         WEBHOOK,
@@ -445,7 +484,7 @@ async def test_an_oversized_body_is_refused_before_it_is_read(http):
 
 async def test_the_endpoint_refuses_everything_when_no_secret_is_configured(
     db_session: AsyncSession,
-):
+) -> None:
     """Absent means refuse every delivery rather than trust any."""
     settings = Settings(
         _env_file=None,

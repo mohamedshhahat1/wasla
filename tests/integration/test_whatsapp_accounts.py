@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -53,7 +56,7 @@ CONNECT_BODY = {
 }
 
 
-def _account(**overrides) -> WhatsAppAccount:
+def _account(**overrides: Any) -> WhatsAppAccount:
     values = {
         "id": ACCOUNT_ID,
         "tenant_id": TENANT_ID,
@@ -91,18 +94,18 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
 
 
 class StubAccounts:
-    def __init__(self):
-        self.connect_calls = []
-        self.status_calls = []
-        self.released = []
-        self.verified = []
-        self.listed = []
+    def __init__(self) -> None:
+        self.connect_calls: list[Any] = []
+        self.status_calls: list[Any] = []
+        self.released: list[Any] = []
+        self.verified: list[Any] = []
+        self.listed: list[Any] = []
         self.conflict = False
         self.unverified = False
         self.no_verifier = False
         self.missing = False
 
-    async def connect(self, **kwargs):
+    async def connect(self, **kwargs: Any) -> WhatsAppAccount:
         if self.unverified:
             raise NumberOwnershipError()
         if self.no_verifier:
@@ -117,17 +120,17 @@ class StubAccounts:
             phone_number_id=kwargs["phone_number_id"],
         )
 
-    async def list_accounts(self, **kwargs):
+    async def list_accounts(self, **kwargs: Any) -> list[Any]:
         self.listed.append(kwargs)
         return [_account()]
 
-    async def set_status(self, **kwargs):
+    async def set_status(self, **kwargs: Any) -> WhatsAppAccount:
         if self.missing:
             raise TenantIsolationError("That WhatsApp account could not be found.")
         self.status_calls.append(kwargs)
         return _account(status=kwargs["status"])
 
-    async def reverify(self, **kwargs):
+    async def reverify(self, **kwargs: Any) -> WhatsAppAccount:
         if self.missing:
             raise TenantIsolationError("That WhatsApp account could not be found.")
         if self.unverified:
@@ -135,7 +138,7 @@ class StubAccounts:
         self.verified.append(kwargs)
         return _account()
 
-    async def release(self, **kwargs):
+    async def release(self, **kwargs: Any) -> WhatsAppAccount:
         if self.missing:
             raise TenantIsolationError("That WhatsApp account could not be found.")
         self.released.append(kwargs)
@@ -146,17 +149,19 @@ class StubAccounts:
 
 
 @pytest.fixture
-def accounts(app) -> StubAccounts:
+def accounts(app: FastAPI) -> StubAccounts:
     stub = StubAccounts()
     app.dependency_overrides[get_whatsapp_account_service] = lambda: stub
     return stub
 
 
-def _as(app, role: TenantRole) -> None:
+def _as(app: FastAPI, role: TenantRole) -> None:
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(role)
 
 
-async def test_an_admin_can_connect_a_number(app, client, accounts):
+async def test_an_admin_can_connect_a_number(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(PATH, json=CONNECT_BODY)
@@ -170,10 +175,10 @@ async def test_an_admin_can_connect_a_number(app, client, accounts):
 
 
 async def test_the_credential_reaches_the_service_and_comes_back_from_nowhere(
-    app,
-    client,
-    accounts,
-):
+    app: FastAPI,
+    client: AsyncClient,
+    accounts: StubAccounts,
+) -> None:
     """The whole point of the credential: it goes in, it proves the claim, and
     no response model anywhere can return it."""
     _as(app, TenantRole.TENANT_ADMIN)
@@ -185,7 +190,9 @@ async def test_the_credential_reaches_the_service_and_comes_back_from_nowhere(
     assert "access_token" not in response.json()
 
 
-async def test_a_connect_without_a_credential_is_rejected(app, client, accounts):
+async def test_a_connect_without_a_credential_is_rejected(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     """Fail closed. Without a credential there is no proof that this workspace
     controls this number, and the platform token deliberately does not count."""
     _as(app, TenantRole.TENANT_ADMIN)
@@ -197,7 +204,9 @@ async def test_a_connect_without_a_credential_is_rejected(app, client, accounts)
     assert accounts.connect_calls == []
 
 
-async def test_an_empty_credential_is_rejected(app, client, accounts):
+async def test_an_empty_credential_is_rejected(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(PATH, json={**CONNECT_BODY, "access_token": ""})
@@ -206,7 +215,9 @@ async def test_an_empty_credential_is_rejected(app, client, accounts):
     assert accounts.connect_calls == []
 
 
-async def test_an_unprovable_claim_is_refused_without_saying_why(app, client, accounts):
+async def test_an_unprovable_claim_is_refused_without_saying_why(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     """One message for every cause. Distinguishing "no such number" from "your
     token cannot read it" would turn this into an oracle for mapping other
     businesses' numbers."""
@@ -227,10 +238,10 @@ async def test_an_unprovable_claim_is_refused_without_saying_why(app, client, ac
 
 
 async def test_a_deployment_without_verification_refuses_rather_than_trusting(
-    app,
-    client,
-    accounts,
-):
+    app: FastAPI,
+    client: AsyncClient,
+    accounts: StubAccounts,
+) -> None:
     """503, not 201. A deployment that cannot verify must not accept unproven
     claims, and this is our misconfiguration rather than the caller's mistake."""
     _as(app, TenantRole.TENANT_ADMIN)
@@ -241,7 +252,9 @@ async def test_a_deployment_without_verification_refuses_rather_than_trusting(
     assert response.status_code == 503
 
 
-async def test_the_waba_id_is_optional_because_meta_is_the_authority(app, client, accounts):
+async def test_the_waba_id_is_optional_because_meta_is_the_authority(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
     body = {key: value for key, value in CONNECT_BODY.items() if key != "waba_id"}
 
@@ -251,7 +264,9 @@ async def test_the_waba_id_is_optional_because_meta_is_the_authority(app, client
     assert accounts.connect_calls[0]["waba_id"] is None
 
 
-async def test_the_display_number_cannot_be_supplied_by_the_caller(app, client, accounts):
+async def test_the_display_number_cannot_be_supplied_by_the_caller(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     """It comes back from Meta during verification. Accepting one would let a
     workspace label somebody else's number however it liked."""
     _as(app, TenantRole.TENANT_ADMIN)
@@ -265,7 +280,9 @@ async def test_the_display_number_cannot_be_supplied_by_the_caller(app, client, 
     assert accounts.connect_calls == []
 
 
-async def test_a_member_cannot_connect_a_number(app, client, accounts):
+async def test_a_member_cannot_connect_a_number(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.post(PATH, json=CONNECT_BODY)
@@ -274,7 +291,9 @@ async def test_a_member_cannot_connect_a_number(app, client, accounts):
     assert accounts.connect_calls == []
 
 
-async def test_an_owner_can_connect_a_number(app, client, accounts):
+async def test_an_owner_can_connect_a_number(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.TENANT_OWNER)
 
     response = await client.post(PATH, json=CONNECT_BODY)
@@ -282,7 +301,9 @@ async def test_an_owner_can_connect_a_number(app, client, accounts):
     assert response.status_code == 201
 
 
-async def test_a_duplicate_number_is_a_conflict_without_naming_the_holder(app, client, accounts):
+async def test_a_duplicate_number_is_a_conflict_without_naming_the_holder(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
     accounts.conflict = True
 
@@ -293,7 +314,9 @@ async def test_a_duplicate_number_is_a_conflict_without_naming_the_holder(app, c
     assert "workspace" not in response.text.lower()
 
 
-async def test_an_unknown_field_is_rejected_rather_than_ignored(app, client, accounts):
+async def test_an_unknown_field_is_rejected_rather_than_ignored(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(PATH, json={**CONNECT_BODY, "tenant_id": str(OTHER_TENANT_ID)})
@@ -302,7 +325,9 @@ async def test_an_unknown_field_is_rejected_rather_than_ignored(app, client, acc
     assert accounts.connect_calls == []
 
 
-async def test_a_member_can_list_connected_numbers(app, client, accounts):
+async def test_a_member_can_list_connected_numbers(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(PATH)
@@ -315,7 +340,9 @@ async def test_a_member_can_list_connected_numbers(app, client, accounts):
     assert accounts.listed[0]["tenant_id"] == TENANT_ID
 
 
-async def test_disabling_an_account_sets_it_disabled(app, client, accounts):
+async def test_disabling_an_account_sets_it_disabled(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(f"{PATH}/{ACCOUNT_ID}/disable")
@@ -325,7 +352,9 @@ async def test_disabling_an_account_sets_it_disabled(app, client, accounts):
     assert accounts.status_calls[0]["status"] is WhatsAppAccountStatus.DISABLED
 
 
-async def test_enabling_an_account_sets_it_active(app, client, accounts):
+async def test_enabling_an_account_sets_it_active(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(f"{PATH}/{ACCOUNT_ID}/enable")
@@ -334,7 +363,9 @@ async def test_enabling_an_account_sets_it_active(app, client, accounts):
     assert accounts.status_calls[0]["status"] is WhatsAppAccountStatus.ACTIVE
 
 
-async def test_releasing_an_account_gives_the_number_up(app, client, accounts):
+async def test_releasing_an_account_gives_the_number_up(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(f"{PATH}/{ACCOUNT_ID}/release")
@@ -344,7 +375,9 @@ async def test_releasing_an_account_gives_the_number_up(app, client, accounts):
     assert accounts.released[0]["tenant_id"] == TENANT_ID
 
 
-async def test_a_member_cannot_release_a_number(app, client, accounts):
+async def test_a_member_cannot_release_a_number(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     """Handing a number back frees it for anybody on the platform to claim.
     That is administration, not day-to-day work."""
     _as(app, TenantRole.MEMBER)
@@ -355,7 +388,9 @@ async def test_a_member_cannot_release_a_number(app, client, accounts):
     assert accounts.released == []
 
 
-async def test_a_member_cannot_disable_an_account(app, client, accounts):
+async def test_a_member_cannot_disable_an_account(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.post(f"{PATH}/{ACCOUNT_ID}/disable")
@@ -364,7 +399,9 @@ async def test_a_member_cannot_disable_an_account(app, client, accounts):
     assert accounts.status_calls == []
 
 
-async def test_another_workspaces_account_is_not_found(app, client, accounts):
+async def test_another_workspaces_account_is_not_found(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
     accounts.missing = True
 
@@ -374,7 +411,9 @@ async def test_another_workspaces_account_is_not_found(app, client, accounts):
     assert response.status_code == 404
 
 
-async def test_another_workspaces_account_cannot_be_released(app, client, accounts):
+async def test_another_workspaces_account_cannot_be_released(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     """The dangerous half of the scoped lookup: releasing somebody else's
     number would free it for the caller to claim a moment later."""
     _as(app, TenantRole.TENANT_ADMIN)
@@ -386,7 +425,9 @@ async def test_another_workspaces_account_cannot_be_released(app, client, accoun
     assert accounts.released == []
 
 
-async def test_a_malformed_account_id_is_rejected(app, client, accounts):
+async def test_a_malformed_account_id_is_rejected(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(f"{PATH}/not-a-uuid/disable")
@@ -395,7 +436,9 @@ async def test_a_malformed_account_id_is_rejected(app, client, accounts):
     assert accounts.status_calls == []
 
 
-async def test_an_admin_can_prove_a_number_they_already_hold(app, client, accounts):
+async def test_an_admin_can_prove_a_number_they_already_hold(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     """The migration path for a number claimed before proof existed (ADR-041)."""
     _as(app, TenantRole.TENANT_ADMIN)
 
@@ -410,7 +453,9 @@ async def test_an_admin_can_prove_a_number_they_already_hold(app, client, accoun
     assert TOKEN not in response.text
 
 
-async def test_the_number_cannot_be_named_when_verifying(app, client, accounts):
+async def test_the_number_cannot_be_named_when_verifying(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     """It comes from the row. Accepting one would make this a second way to
     claim a number rather than a way to prove one already held."""
     _as(app, TenantRole.TENANT_ADMIN)
@@ -424,7 +469,9 @@ async def test_the_number_cannot_be_named_when_verifying(app, client, accounts):
     assert accounts.verified == []
 
 
-async def test_a_member_cannot_verify_a_number(app, client, accounts):
+async def test_a_member_cannot_verify_a_number(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.post(f"{PATH}/{ACCOUNT_ID}/verify", json={"access_token": TOKEN})
@@ -433,7 +480,9 @@ async def test_a_member_cannot_verify_a_number(app, client, accounts):
     assert accounts.verified == []
 
 
-async def test_verifying_without_a_credential_is_rejected(app, client, accounts):
+async def test_verifying_without_a_credential_is_rejected(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.post(f"{PATH}/{ACCOUNT_ID}/verify", json={})
@@ -442,7 +491,9 @@ async def test_verifying_without_a_credential_is_rejected(app, client, accounts)
     assert accounts.verified == []
 
 
-async def test_an_unprovable_verification_is_refused_without_saying_why(app, client, accounts):
+async def test_an_unprovable_verification_is_refused_without_saying_why(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
     accounts.unverified = True
 
@@ -453,7 +504,9 @@ async def test_an_unprovable_verification_is_refused_without_saying_why(app, cli
     assert TOKEN.lower() not in response.text.lower()
 
 
-async def test_another_workspaces_number_cannot_be_verified(app, client, accounts):
+async def test_another_workspaces_number_cannot_be_verified(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     """Stamping somebody else's row would be a claim about their traffic."""
     _as(app, TenantRole.TENANT_ADMIN)
     accounts.missing = True
@@ -464,7 +517,9 @@ async def test_another_workspaces_number_cannot_be_verified(app, client, account
     assert accounts.verified == []
 
 
-async def test_the_listing_says_whether_a_number_is_proven(app, client, accounts):
+async def test_the_listing_says_whether_a_number_is_proven(
+    app: FastAPI, client: AsyncClient, accounts: StubAccounts
+) -> None:
     """The security state of a number is readable without reasoning about a
     null timestamp."""
     _as(app, TenantRole.MEMBER)

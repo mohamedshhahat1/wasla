@@ -28,6 +28,7 @@ cannot reach, because they are properties of the whole request:
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -76,7 +77,9 @@ class _Redis:
         if self.down:
             raise RedisConnectionError(OUTAGE_MESSAGE)
 
-    async def set(self, key: str, value: str, ex: int | None = None, nx: bool = False):
+    async def set(
+        self, key: str, value: str, ex: int | None = None, nx: bool = False
+    ) -> bool | None:
         self._guard()
         if nx and key in self.values:
             return None
@@ -184,13 +187,14 @@ async def account(db_session: AsyncSession) -> User:
     return user
 
 
-async def _login(http: AsyncClient) -> dict:
+async def _login(http: AsyncClient) -> dict[str, Any]:
     response = await http.post(
         f"{API}/auth/login",
         json={"email": EMAIL, "password": PASSWORD},
     )
     assert response.status_code == 200, response.text
-    return response.json()
+    payload: dict[str, Any] = response.json()
+    return payload
 
 
 # --------------------------------------------------------------------- refresh

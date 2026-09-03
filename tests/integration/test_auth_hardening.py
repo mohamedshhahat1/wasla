@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -43,6 +44,7 @@ from app.core.rate_limit import account_identity
 from app.integrations.openai.types import ToolCall
 from app.main import create_app
 from tests.conftest import AllowingEntitlements, FakeDependency
+from tests.fakes import as_request, as_responses
 
 pytestmark = pytest.mark.integration
 
@@ -66,18 +68,18 @@ class _Request:
 # ------------------------------------------------- the rate-limit identity
 
 
-def test_a_forwarding_header_is_ignored_when_no_proxy_is_configured():
+def test_a_forwarding_header_is_ignored_when_no_proxy_is_configured() -> None:
     """The default topology. Nothing is in front, so nothing may speak for the
     client, and the socket address is the only honest answer."""
     identity = client_identity(
-        _Request(peer="203.0.113.9", headers={"X-Forwarded-For": "10.0.0.7"}),
+        as_request(_Request(peer="203.0.113.9", headers={"X-Forwarded-For": "10.0.0.7"})),
         trusted_proxies=(),
     )
 
     assert identity == "203.0.113.9"
 
 
-def test_a_forged_forwarding_header_cannot_move_the_bucket():
+def test_a_forged_forwarding_header_cannot_move_the_bucket() -> None:
     """The attack the old implementation permitted.
 
     A caller rotating `X-Forwarded-For` per request used to land in a fresh
@@ -89,20 +91,24 @@ def test_a_forged_forwarding_header_cannot_move_the_bucket():
     ]
 
     identities = {
-        client_identity(_Request(peer="203.0.113.9", headers=headers), trusted_proxies=())
+        client_identity(
+            as_request(_Request(peer="203.0.113.9", headers=headers)), trusted_proxies=()
+        )
         for headers in forged
     }
 
     assert identities == {"203.0.113.9"}
 
 
-def test_behind_a_trusted_proxy_the_proxy_set_header_wins():
+def test_behind_a_trusted_proxy_the_proxy_set_header_wins() -> None:
     """nginx sets `X-Real-IP` from `$remote_addr`, which a client cannot
     influence, so it is preferred over the appendable one."""
     identity = client_identity(
-        _Request(
-            peer="10.1.0.5",
-            headers={"X-Real-IP": "198.51.100.4", "X-Forwarded-For": "10.0.0.7, 198.51.100.4"},
+        as_request(
+            _Request(
+                peer="10.1.0.5",
+                headers={"X-Real-IP": "198.51.100.4", "X-Forwarded-For": "10.0.0.7, 198.51.100.4"},
+            )
         ),
         trusted_proxies=("10.1.0.5",),
     )
@@ -110,13 +116,12 @@ def test_behind_a_trusted_proxy_the_proxy_set_header_wins():
     assert identity == "198.51.100.4"
 
 
-def test_behind_a_trusted_proxy_forwarded_for_is_read_from_the_right():
+def test_behind_a_trusted_proxy_forwarded_for_is_read_from_the_right() -> None:
     """`$proxy_add_x_forwarded_for` appends, so the address the proxy actually
     saw is last. Anything a caller prepends can never reach that position."""
     identity = client_identity(
-        _Request(
-            peer="10.1.0.5",
-            headers={"X-Forwarded-For": "1.2.3.4, 5.6.7.8, 198.51.100.4"},
+        as_request(
+            _Request(peer="10.1.0.5", headers={"X-Forwarded-For": "1.2.3.4, 5.6.7.8, 198.51.100.4"})
         ),
         trusted_proxies=("10.1.0.5",),
     )
@@ -124,11 +129,10 @@ def test_behind_a_trusted_proxy_forwarded_for_is_read_from_the_right():
     assert identity == "198.51.100.4"
 
 
-def test_a_chain_of_trusted_proxies_resolves_to_the_first_untrusted_entry():
+def test_a_chain_of_trusted_proxies_resolves_to_the_first_untrusted_entry() -> None:
     identity = client_identity(
-        _Request(
-            peer="10.1.0.5",
-            headers={"X-Forwarded-For": "198.51.100.4, 10.1.0.6"},
+        as_request(
+            _Request(peer="10.1.0.5", headers={"X-Forwarded-For": "198.51.100.4, 10.1.0.6"})
         ),
         trusted_proxies=("10.1.0.5", "10.1.0.6"),
     )
@@ -136,32 +140,32 @@ def test_a_chain_of_trusted_proxies_resolves_to_the_first_untrusted_entry():
     assert identity == "198.51.100.4"
 
 
-def test_an_untrusted_peer_claiming_to_be_a_proxy_is_not_believed():
+def test_an_untrusted_peer_claiming_to_be_a_proxy_is_not_believed() -> None:
     """The header is only as good as the peer that set it."""
     identity = client_identity(
-        _Request(peer="203.0.113.9", headers={"X-Real-IP": "10.0.0.7"}),
+        as_request(_Request(peer="203.0.113.9", headers={"X-Real-IP": "10.0.0.7"})),
         trusted_proxies=("10.1.0.5",),
     )
 
     assert identity == "203.0.113.9"
 
 
-def test_a_transport_reporting_no_address_shares_one_bucket():
+def test_a_transport_reporting_no_address_shares_one_bucket() -> None:
     """Skipping would make "no address" the way around the limit."""
-    assert client_identity(_Request(peer=None), trusted_proxies=()) == UNKNOWN_CLIENT
+    assert client_identity(as_request(_Request(peer=None)), trusted_proxies=()) == UNKNOWN_CLIENT
 
 
-def test_a_proxy_may_be_named_by_network():
+def test_a_proxy_may_be_named_by_network() -> None:
     """The shipped topology puts nginx on a known subnet (ADR-060)."""
     identity = client_identity(
-        _Request(peer="10.89.0.10", headers={"X-Real-IP": "198.51.100.4"}),
+        as_request(_Request(peer="10.89.0.10", headers={"X-Real-IP": "198.51.100.4"})),
         trusted_proxies=("10.89.0.0/24",),
     )
 
     assert identity == "198.51.100.4"
 
 
-def test_two_clients_behind_one_trusted_proxy_land_in_different_buckets():
+def test_two_clients_behind_one_trusted_proxy_land_in_different_buckets() -> None:
     """The property the whole fix exists for.
 
     With the peer never recognised as trusted, every client on the internet
@@ -170,11 +174,11 @@ def test_two_clients_behind_one_trusted_proxy_land_in_different_buckets():
     merely a weakened limit.
     """
     first = client_identity(
-        _Request(peer="10.89.0.10", headers={"X-Forwarded-For": "198.51.100.4"}),
+        as_request(_Request(peer="10.89.0.10", headers={"X-Forwarded-For": "198.51.100.4"})),
         trusted_proxies=("10.89.0.10",),
     )
     second = client_identity(
-        _Request(peer="10.89.0.10", headers={"X-Forwarded-For": "203.0.113.7"}),
+        as_request(_Request(peer="10.89.0.10", headers={"X-Forwarded-For": "203.0.113.7"})),
         trusted_proxies=("10.89.0.10",),
     )
 
@@ -183,7 +187,7 @@ def test_two_clients_behind_one_trusted_proxy_land_in_different_buckets():
     assert first != second
 
 
-def test_a_service_name_never_trusts_the_peer_it_names():
+def test_a_service_name_never_trusts_the_peer_it_names() -> None:
     """`TRUSTED_PROXY_IPS=nginx` is refused by `Settings` before it reaches here.
 
     Asserted at this layer too, because `client_identity` is called with
@@ -192,17 +196,16 @@ def test_a_service_name_never_trusts_the_peer_it_names():
     """
     with pytest.raises(ValueError):
         client_identity(
-            _Request(peer="10.89.0.10", headers={"X-Real-IP": "198.51.100.4"}),
+            as_request(_Request(peer="10.89.0.10", headers={"X-Real-IP": "198.51.100.4"})),
             trusted_proxies=("nginx",),
         )
 
 
-def test_an_unparseable_forwarded_entry_is_skipped_not_returned():
+def test_an_unparseable_forwarded_entry_is_skipped_not_returned() -> None:
     """`unknown` is a documented `X-Forwarded-For` value, and is not a client."""
     identity = client_identity(
-        _Request(
-            peer="10.89.0.10",
-            headers={"X-Forwarded-For": "198.51.100.4, unknown"},
+        as_request(
+            _Request(peer="10.89.0.10", headers={"X-Forwarded-For": "198.51.100.4, unknown"})
         ),
         trusted_proxies=("10.89.0.10",),
     )
@@ -210,12 +213,13 @@ def test_an_unparseable_forwarded_entry_is_skipped_not_returned():
     assert identity == "198.51.100.4"
 
 
-def test_a_forged_real_ip_from_an_untrusted_peer_is_ignored_even_now():
+def test_a_forged_real_ip_from_an_untrusted_peer_is_ignored_even_now() -> None:
     """The rule that must survive the fix: the header is only as good as the peer."""
     identity = client_identity(
-        _Request(
-            peer="203.0.113.9",
-            headers={"X-Real-IP": "10.0.0.7", "X-Forwarded-For": "10.0.0.8"},
+        as_request(
+            _Request(
+                peer="203.0.113.9", headers={"X-Real-IP": "10.0.0.7", "X-Forwarded-For": "10.0.0.8"}
+            )
         ),
         trusted_proxies=("10.89.0.0/24",),
     )
@@ -223,7 +227,7 @@ def test_a_forged_real_ip_from_an_untrusted_peer_is_ignored_even_now():
     assert identity == "203.0.113.9"
 
 
-def test_the_account_bucket_does_not_leak_the_address_it_counts():
+def test_the_account_bucket_does_not_leak_the_address_it_counts() -> None:
     """The key lives in Redis, which shows up in slow logs and screenshots."""
     identity = account_identity("Ahmed@Example.COM")
 
@@ -414,9 +418,9 @@ class _Recorder:
         # Kept so a test can assert which workspace the tool was given, not
         # merely that it ran.
         self.context: ToolContext | None = None
-        self.arguments: dict | None = None
+        self.arguments: dict[str, Any] | None = None
 
-    async def __call__(self, context: ToolContext, arguments: dict) -> str:
+    async def __call__(self, context: ToolContext, arguments: dict[str, Any]) -> str:
         self.ran = True
         self.context = context
         self.arguments = arguments
@@ -459,7 +463,7 @@ async def test_an_ungranted_tool_is_refused_at_execution(db_session: AsyncSessio
     orchestrator = AgentOrchestrator(
         session=db_session,
         tenant_id=uuid.uuid4(),
-        client=object(),  # never reached: `_run` does not call the provider
+        client=as_responses(object()),  # never reached: `_run` does not call the provider
         registry=registry,
     )
     context = ToolContext(
@@ -485,7 +489,7 @@ async def test_a_granted_tool_still_runs(db_session: AsyncSession) -> None:
     orchestrator = AgentOrchestrator(
         session=db_session,
         tenant_id=uuid.uuid4(),
-        client=object(),
+        client=as_responses(object()),
         registry=registry,
     )
     context = ToolContext(
@@ -513,7 +517,7 @@ async def test_a_disabled_grant_does_not_authorise_the_tool(db_session: AsyncSes
     orchestrator = AgentOrchestrator(
         session=db_session,
         tenant_id=uuid.uuid4(),
-        client=object(),
+        client=as_responses(object()),
         registry=registry,
     )
     context = ToolContext(
@@ -559,7 +563,7 @@ async def test_a_persuaded_model_still_cannot_run_an_ungranted_tool(
     orchestrator = AgentOrchestrator(
         session=db_session,
         tenant_id=uuid.uuid4(),
-        client=object(),
+        client=as_responses(object()),
         registry=registry,
     )
     context = ToolContext(
@@ -600,7 +604,7 @@ async def test_the_refusal_tells_the_model_nothing_worth_knowing(
     orchestrator = AgentOrchestrator(
         session=db_session,
         tenant_id=uuid.uuid4(),
-        client=object(),
+        client=as_responses(object()),
         registry=registry,
     )
     context = ToolContext(
@@ -635,7 +639,7 @@ async def test_a_tool_name_invented_by_the_model_is_refused(
     orchestrator = AgentOrchestrator(
         session=db_session,
         tenant_id=uuid.uuid4(),
-        client=object(),
+        client=as_responses(object()),
         registry=registry,
     )
     context = ToolContext(
@@ -677,7 +681,7 @@ async def test_an_argument_the_tool_never_declared_is_refused(
     orchestrator = AgentOrchestrator(
         session=db_session,
         tenant_id=uuid.uuid4(),
-        client=object(),
+        client=as_responses(object()),
         registry=registry,
     )
     context = ToolContext(
@@ -718,7 +722,7 @@ async def test_a_tool_that_does_run_acts_in_the_conversation_workspace(
     orchestrator = AgentOrchestrator(
         session=db_session,
         tenant_id=uuid.uuid4(),
-        client=object(),
+        client=as_responses(object()),
         registry=registry,
     )
     context = ToolContext(
@@ -735,7 +739,9 @@ async def test_a_tool_that_does_run_acts_in_the_conversation_workspace(
     )
 
     assert recorders["create_lead"].ran is True
-    assert recorders["create_lead"].context.tenant_id == orchestrator._tenant_id
+    recorded = recorders["create_lead"].context
+    assert recorded is not None
+    assert recorded.tenant_id == orchestrator._tenant_id
     # The context carries no field a model's arguments could reach.
     assert {field.name for field in fields(ToolContext)} == {
         "tenant_id",

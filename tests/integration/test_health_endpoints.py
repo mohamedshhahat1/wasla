@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import pytest
+from httpx import AsyncClient
+
+from tests.conftest import FakeDependency
 
 pytestmark = pytest.mark.integration
 
 
-async def test_summary_does_not_probe_dependencies(client, fake_database, fake_redis):
+async def test_summary_does_not_probe_dependencies(
+    client: AsyncClient, fake_database: FakeDependency, fake_redis: FakeDependency
+) -> None:
     response = await client.get("/health")
 
     assert response.status_code == 200
@@ -19,7 +24,9 @@ async def test_summary_does_not_probe_dependencies(client, fake_database, fake_r
     assert fake_redis.calls == 0
 
 
-async def test_liveness_is_independent_of_dependencies(client, fake_database, fake_redis):
+async def test_liveness_is_independent_of_dependencies(
+    client: AsyncClient, fake_database: FakeDependency, fake_redis: FakeDependency
+) -> None:
     fake_database.healthy = False
     fake_redis.healthy = False
 
@@ -30,7 +37,7 @@ async def test_liveness_is_independent_of_dependencies(client, fake_database, fa
     assert fake_database.calls == 0
 
 
-async def test_readiness_reports_every_dependency(client):
+async def test_readiness_reports_every_dependency(client: AsyncClient) -> None:
     response = await client.get("/health/ready")
 
     assert response.status_code == 200
@@ -41,7 +48,9 @@ async def test_readiness_reports_every_dependency(client):
     assert all(component["status"] == "up" for component in components.values())
 
 
-async def test_readiness_is_503_when_a_dependency_is_down(client, fake_redis):
+async def test_readiness_is_503_when_a_dependency_is_down(
+    client: AsyncClient, fake_redis: FakeDependency
+) -> None:
     fake_redis.healthy = False
 
     response = await client.get("/health/ready")
@@ -55,19 +64,19 @@ async def test_readiness_is_503_when_a_dependency_is_down(client, fake_redis):
     assert components["redis"]["detail"] == "redis is unavailable."
 
 
-async def test_request_id_header_is_echoed(client):
+async def test_request_id_header_is_echoed(client: AsyncClient) -> None:
     response = await client.get("/health/live", headers={"X-Request-ID": "req-test-1"})
 
     assert response.headers["X-Request-ID"] == "req-test-1"
 
 
-async def test_request_id_is_generated_when_absent(client):
+async def test_request_id_is_generated_when_absent(client: AsyncClient) -> None:
     response = await client.get("/health/live")
 
     assert response.headers.get("X-Request-ID")
 
 
-async def test_unknown_route_returns_the_error_envelope(client):
+async def test_unknown_route_returns_the_error_envelope(client: AsyncClient) -> None:
     response = await client.get("/does-not-exist")
 
     assert response.status_code == 404
@@ -76,7 +85,7 @@ async def test_unknown_route_returns_the_error_envelope(client):
     assert error["request_id"]
 
 
-async def test_openapi_schema_exposes_health_routes(client):
+async def test_openapi_schema_exposes_health_routes(client: AsyncClient) -> None:
     response = await client.get("/openapi.json")
 
     assert response.status_code == 200

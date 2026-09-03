@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
 from redis.exceptions import ConnectionError
 
 from app.core.exceptions import DependencyUnavailableError
 from app.core.token_store import RefreshTokenStore
+from tests.fakes import as_redis_client
 
 
 class FakeCommands:
@@ -18,29 +20,35 @@ class FakeCommands:
     exists - because that is the entire mechanism behind replay detection.
     """
 
-    def __init__(self):
-        self.values = {}
-        self.expiries = {}
+    def __init__(self) -> None:
+        self.values: dict[str, Any] = {}
+        self.expiries: dict[str, Any] = {}
 
-    async def set(self, key, value, ex=None, nx=False):
+    async def set(
+        self,
+        key: str,
+        value: str,
+        ex: int | None = None,
+        nx: bool = False,
+    ) -> bool | None:
         if nx and key in self.values:
             return None
         self.values[key] = value
         self.expiries[key] = ex
         return True
 
-    async def exists(self, key):
+    async def exists(self, key: str) -> int:
         return 1 if key in self.values else 0
 
 
 class FakeRedis:
-    def __init__(self):
+    def __init__(self) -> None:
         self.client = FakeCommands()
 
 
-async def test_a_revoked_token_is_reported_as_revoked():
+async def test_a_revoked_token_is_reported_as_revoked() -> None:
     redis = FakeRedis()
-    store = RefreshTokenStore(redis)
+    store = RefreshTokenStore(as_redis_client(redis))
     token_id = uuid.uuid4()
 
     assert not await store.is_revoked(token_id)
@@ -50,9 +58,9 @@ async def test_a_revoked_token_is_reported_as_revoked():
     assert await store.is_revoked(token_id)
 
 
-async def test_the_record_expires_with_the_token():
+async def test_the_record_expires_with_the_token() -> None:
     redis = FakeRedis()
-    store = RefreshTokenStore(redis)
+    store = RefreshTokenStore(as_redis_client(redis))
 
     await store.revoke(uuid.uuid4(), ttl_seconds=60)
 
@@ -61,9 +69,9 @@ async def test_the_record_expires_with_the_token():
     assert set(redis.client.expiries.values()) == {60}
 
 
-async def test_an_already_expired_token_is_not_recorded():
+async def test_an_already_expired_token_is_not_recorded() -> None:
     redis = FakeRedis()
-    store = RefreshTokenStore(redis)
+    store = RefreshTokenStore(as_redis_client(redis))
     token_id = uuid.uuid4()
 
     await store.revoke(token_id, ttl_seconds=0)
@@ -72,9 +80,9 @@ async def test_an_already_expired_token_is_not_recorded():
     assert not await store.is_revoked(token_id)
 
 
-async def test_tokens_are_tracked_one_by_one():
+async def test_tokens_are_tracked_one_by_one() -> None:
     redis = FakeRedis()
-    store = RefreshTokenStore(redis)
+    store = RefreshTokenStore(as_redis_client(redis))
     spent = uuid.uuid4()
     still_good = uuid.uuid4()
 
@@ -84,9 +92,9 @@ async def test_tokens_are_tracked_one_by_one():
     assert not await store.is_revoked(still_good)
 
 
-async def test_spending_a_token_succeeds_once_and_then_reports_a_replay():
+async def test_spending_a_token_succeeds_once_and_then_reports_a_replay() -> None:
     redis = FakeRedis()
-    store = RefreshTokenStore(redis)
+    store = RefreshTokenStore(as_redis_client(redis))
     token_id = uuid.uuid4()
 
     assert await store.spend(token_id, ttl_seconds=60) is True
@@ -95,18 +103,18 @@ async def test_spending_a_token_succeeds_once_and_then_reports_a_replay():
     assert await store.spend(token_id, ttl_seconds=60) is False
 
 
-async def test_spending_records_the_token_for_exactly_its_remaining_life():
+async def test_spending_records_the_token_for_exactly_its_remaining_life() -> None:
     redis = FakeRedis()
-    store = RefreshTokenStore(redis)
+    store = RefreshTokenStore(as_redis_client(redis))
 
     await store.spend(uuid.uuid4(), ttl_seconds=45)
 
     assert set(redis.client.expiries.values()) == {45}
 
 
-async def test_an_expired_token_cannot_be_spent():
+async def test_an_expired_token_cannot_be_spent() -> None:
     redis = FakeRedis()
-    store = RefreshTokenStore(redis)
+    store = RefreshTokenStore(as_redis_client(redis))
 
     # Nothing left to record, and nobody presenting one is entitled to a new
     # pair, so refusing is right on both readings.
@@ -114,9 +122,9 @@ async def test_an_expired_token_cannot_be_spent():
     assert redis.client.values == {}
 
 
-async def test_a_token_revoked_by_logout_cannot_then_be_spent():
+async def test_a_token_revoked_by_logout_cannot_then_be_spent() -> None:
     redis = FakeRedis()
-    store = RefreshTokenStore(redis)
+    store = RefreshTokenStore(as_redis_client(redis))
     token_id = uuid.uuid4()
 
     await store.revoke(token_id, ttl_seconds=60)
@@ -126,11 +134,11 @@ async def test_a_token_revoked_by_logout_cannot_then_be_spent():
     assert await store.spend(token_id, ttl_seconds=60) is False
 
 
-async def test_concurrent_spends_of_one_token_produce_exactly_one_winner():
+async def test_concurrent_spends_of_one_token_produce_exactly_one_winner() -> None:
     import asyncio
 
     redis = FakeRedis()
-    store = RefreshTokenStore(redis)
+    store = RefreshTokenStore(as_redis_client(redis))
     token_id = uuid.uuid4()
 
     results = await asyncio.gather(
@@ -153,10 +161,16 @@ class FailingCommands(FakeCommands):
         super().__init__()
         self._message = message
 
-    async def set(self, key, value, ex=None, nx=False):
+    async def set(
+        self,
+        key: str,
+        value: str,
+        ex: int | None = None,
+        nx: bool = False,
+    ) -> None:
         raise ConnectionError(self._message)
 
-    async def exists(self, key):
+    async def exists(self, key: str) -> int:
         raise ConnectionError(self._message)
 
 
@@ -165,8 +179,8 @@ class FailingRedis:
         self.client = FailingCommands(message=message)
 
 
-async def test_spending_a_token_refuses_rather_than_guessing_when_redis_is_down():
-    store = RefreshTokenStore(FailingRedis())
+async def test_spending_a_token_refuses_rather_than_guessing_when_redis_is_down() -> None:
+    store = RefreshTokenStore(as_redis_client(FailingRedis()))
 
     # Not `True`. An unreachable denylist answering "you are the first" is a
     # replay control failing open, and the caller would be handed a fresh
@@ -179,8 +193,8 @@ async def test_spending_a_token_refuses_rather_than_guessing_when_redis_is_down(
     assert refusal.value.details == {"dependency": "redis"}
 
 
-async def test_revoking_refuses_rather_than_claiming_a_logout_that_did_not_happen():
-    store = RefreshTokenStore(FailingRedis())
+async def test_revoking_refuses_rather_than_claiming_a_logout_that_did_not_happen() -> None:
+    store = RefreshTokenStore(as_redis_client(FailingRedis()))
 
     # Returning quietly here would answer 204 to somebody signing out of a
     # shared machine while their refresh token stayed usable for weeks.
@@ -188,8 +202,8 @@ async def test_revoking_refuses_rather_than_claiming_a_logout_that_did_not_happe
         await store.revoke(uuid.uuid4(), ttl_seconds=60)
 
 
-async def test_reading_the_denylist_refuses_rather_than_reporting_not_revoked():
-    store = RefreshTokenStore(FailingRedis())
+async def test_reading_the_denylist_refuses_rather_than_reporting_not_revoked() -> None:
+    store = RefreshTokenStore(as_redis_client(FailingRedis()))
 
     # "Not found" and "could not look" are different answers, and only one of
     # them means the token is still live.
@@ -197,8 +211,8 @@ async def test_reading_the_denylist_refuses_rather_than_reporting_not_revoked():
         await store.is_revoked(uuid.uuid4())
 
 
-async def test_an_expired_token_is_answered_without_reaching_redis_at_all():
-    store = RefreshTokenStore(FailingRedis())
+async def test_an_expired_token_is_answered_without_reaching_redis_at_all() -> None:
+    store = RefreshTokenStore(as_redis_client(FailingRedis()))
     token_id = uuid.uuid4()
 
     # Both short-circuit on the TTL before any command is issued, so a token
@@ -208,14 +222,16 @@ async def test_an_expired_token_is_answered_without_reaching_redis_at_all():
     await store.revoke(token_id, ttl_seconds=0)
 
 
-async def test_the_refusal_carries_no_connection_detail():
+async def test_the_refusal_carries_no_connection_detail() -> None:
     """The message a person sees names the service, never the server.
 
     redis-py puts the host and port it failed to reach into `ConnectionError`,
     and a URL configured with a password is one string away from that. The
     dependency name is the whole of what a caller is told.
     """
-    store = RefreshTokenStore(FailingRedis(message="Error connecting to redis://:hunter2@db:6379"))
+    store = RefreshTokenStore(
+        as_redis_client(FailingRedis(message="Error connecting to redis://:hunter2@db:6379"))
+    )
 
     with pytest.raises(DependencyUnavailableError) as refusal:
         await store.spend(uuid.uuid4(), ttl_seconds=60)
@@ -227,10 +243,10 @@ async def test_the_refusal_carries_no_connection_detail():
     assert "ConnectionError" not in rendered
 
 
-async def test_the_store_works_again_once_redis_returns():
+async def test_the_store_works_again_once_redis_returns() -> None:
     """No sticky failure state: the outage is per call, not per store."""
     redis = FakeRedis()
-    store = RefreshTokenStore(redis)
+    store = RefreshTokenStore(as_redis_client(redis))
     token_id = uuid.uuid4()
 
     broken = FailingCommands()

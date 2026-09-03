@@ -12,6 +12,7 @@ import asyncio
 
 import pytest
 
+from app.core.config import Settings
 from app.workers.ai_worker import AgentWorker
 from app.workers.billing_worker import BillingWorker
 from app.workers.campaign_worker import CampaignWorker
@@ -27,18 +28,21 @@ from app.workers.runner import (
     FOLLOW_UP,
     INGESTION,
     MEDIA,
+    Worker,
     build_workers,
     run,
     selected_kinds,
 )
+from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import as_database, as_redis_client
 
 
 class FakeRedis:
     """Stands in for RedisClient; the workers only reach for `.client`."""
 
     @property
-    def client(self):
-        return object()
+    def client(self) -> FakeQueueRedis:
+        return FakeQueueRedis()
 
 
 class SpyWorker:
@@ -60,28 +64,28 @@ class SpyWorker:
         self._stopping.set()
 
 
-def test_no_setting_runs_every_worker():
+def test_no_setting_runs_every_worker() -> None:
     """The safe default: a deployment that forgets the variable still works."""
     assert selected_kinds("") == ALL_KINDS
     assert selected_kinds("   ") == ALL_KINDS
 
 
-def test_a_subset_can_be_selected():
+def test_a_subset_can_be_selected() -> None:
     assert selected_kinds("agent") == (AGENT,)
     assert selected_kinds("ingestion,follow_up") == (INGESTION, FOLLOW_UP)
 
 
-def test_selection_is_normalised():
+def test_selection_is_normalised() -> None:
     """Whitespace, case and duplicates must not change what starts."""
     assert selected_kinds(" AGENT , agent,  Follow_Up ") == (AGENT, FOLLOW_UP)
 
 
-def test_the_order_is_stable_however_it_was_written():
+def test_the_order_is_stable_however_it_was_written() -> None:
     """So logs read the same across deployments."""
     assert selected_kinds("follow_up,agent") == selected_kinds("agent,follow_up")
 
 
-def test_campaigns_can_be_run_on_their_own():
+def test_campaigns_can_be_run_on_their_own() -> None:
     """Sending a broadcast is bandwidth against Meta, not inference.
 
     A workspace mid-campaign is the case that most wants its own replica, and
@@ -90,12 +94,12 @@ def test_campaigns_can_be_run_on_their_own():
     assert selected_kinds("campaign") == (CAMPAIGN,)
 
 
-def test_media_is_ordered_before_the_agent_it_feeds():
+def test_media_is_ordered_before_the_agent_it_feeds() -> None:
     """The order work actually flows in: a file is read, then answered."""
     assert selected_kinds("agent,media") == (MEDIA, AGENT)
 
 
-def test_an_unknown_kind_is_refused():
+def test_an_unknown_kind_is_refused() -> None:
     """A typo would otherwise start a process that quietly does nothing.
 
     The symptom — work piling up in a queue nobody is reading — shows up far
@@ -105,12 +109,12 @@ def test_an_unknown_kind_is_refused():
         selected_kinds("agent,agnt")
 
 
-def test_the_error_names_the_valid_choices():
+def test_the_error_names_the_valid_choices() -> None:
     with pytest.raises(ValueError, match="media, agent, ingestion, follow_up, campaign"):
         selected_kinds("nonsense")
 
 
-def test_media_can_be_run_on_its_own():
+def test_media_can_be_run_on_its_own() -> None:
     """Downloading files is a different shape of work from inference.
 
     A deployment that wants to scale them apart does it with this variable
@@ -119,11 +123,11 @@ def test_media_can_be_run_on_its_own():
     assert selected_kinds("media") == (MEDIA,)
 
 
-def test_each_kind_builds_its_own_worker(settings):
+def test_each_kind_builds_its_own_worker(settings: Settings) -> None:
     workers = build_workers(
         kinds=ALL_KINDS,
-        database=object(),  # type: ignore[arg-type]
-        redis=FakeRedis(),  # type: ignore[arg-type]
+        database=as_database(object()),
+        redis=as_redis_client(FakeRedis()),
         settings=settings,
     )
 
@@ -147,59 +151,61 @@ def test_each_kind_builds_its_own_worker(settings):
     ]
 
 
-def test_only_the_selected_kinds_are_built(settings):
+def test_only_the_selected_kinds_are_built(settings: Settings) -> None:
     workers = build_workers(
         kinds=(FOLLOW_UP,),
-        database=object(),  # type: ignore[arg-type]
-        redis=FakeRedis(),  # type: ignore[arg-type]
+        database=as_database(object()),
+        redis=as_redis_client(FakeRedis()),
         settings=settings,
     )
 
     assert [type(worker) for worker in workers] == [FollowUpWorker]
 
 
-def test_selecting_nothing_builds_nothing(settings):
+def test_selecting_nothing_builds_nothing(settings: Settings) -> None:
     assert (
         build_workers(
             kinds=(),
-            database=object(),  # type: ignore[arg-type]
-            redis=FakeRedis(),  # type: ignore[arg-type]
+            database=as_database(object()),
+            redis=as_redis_client(FakeRedis()),
             settings=settings,
         )
         == []
     )
 
 
-async def test_running_no_workers_returns_rather_than_hanging():
+async def test_running_no_workers_returns_rather_than_hanging() -> None:
     """A misconfigured process should exit, not sit there looking healthy."""
     await asyncio.wait_for(run([]), timeout=2)
 
 
-async def test_every_worker_runs_concurrently():
-    workers = [SpyWorker(), SpyWorker(), SpyWorker()]
-    task = asyncio.create_task(run(workers))  # type: ignore[arg-type]
+async def test_every_worker_runs_concurrently() -> None:
+    spies = [SpyWorker(), SpyWorker(), SpyWorker()]
+    workers: list[Worker] = list(spies)
+    task = asyncio.create_task(run(workers))
     await asyncio.sleep(0.05)
 
-    assert all(worker.started for worker in workers)
+    assert all(spy.started for spy in spies)
 
-    for worker in workers:
-        worker.stop()
+    for spy in spies:
+        spy.stop()
     await asyncio.wait_for(task, timeout=2)
 
 
-async def test_stopping_every_worker_ends_the_run():
-    workers = [SpyWorker(), SpyWorker()]
-    task = asyncio.create_task(run(workers))  # type: ignore[arg-type]
+async def test_stopping_every_worker_ends_the_run() -> None:
+    spies = [SpyWorker(), SpyWorker()]
+    workers: list[Worker] = list(spies)
+    task = asyncio.create_task(run(workers))
     await asyncio.sleep(0.05)
 
-    for worker in workers:
-        worker.stop()
+    for spy in spies:
+        spy.stop()
 
     await asyncio.wait_for(task, timeout=2)
-    assert all(worker.stopped for worker in workers)
+    assert all(spy.stopped for spy in spies)
 
 
-async def test_a_worker_that_returns_does_not_cancel_its_siblings():
+async def test_a_worker_that_returns_does_not_cancel_its_siblings() -> None:
     """Gather, not a task group.
 
     A task group would cancel the others the instant one finished, and
@@ -207,7 +213,7 @@ async def test_a_worker_that_returns_does_not_cancel_its_siblings():
     """
     finishing = SpyWorker(forever=False)
     lasting = SpyWorker()
-    task = asyncio.create_task(run([finishing, lasting]))  # type: ignore[arg-type]
+    task = asyncio.create_task(run([finishing, lasting]))
     await asyncio.sleep(0.05)
 
     assert finishing.started

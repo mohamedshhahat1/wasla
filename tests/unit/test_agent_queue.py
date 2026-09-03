@@ -23,6 +23,7 @@ from app.workers.queue import (
 )
 from app.workers.retry import FailureCategory
 from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import as_redis
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 CONVERSATION = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -36,7 +37,11 @@ FAILED = "agent:jobs:failed"
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 
 
-def record(category=FailureCategory.PROVIDER_ERROR, attempts=1, body="{}"):
+def record(
+    category: FailureCategory = FailureCategory.PROVIDER_ERROR,
+    attempts: int = 1,
+    body: str = "{}",
+) -> DeadLetterRecord:
     return DeadLetterRecord(
         queue="agent:jobs",
         job_type="agent",
@@ -55,13 +60,13 @@ def record(category=FailureCategory.PROVIDER_ERROR, attempts=1, body="{}"):
 # ------------------------------------------------------------- the payload
 
 
-def test_a_job_survives_a_round_trip():
+def test_a_job_survives_a_round_trip() -> None:
     job = AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION, agent_id=AGENT)
 
     assert AgentJob.decode(job.encode()) == job
 
 
-def test_a_job_without_a_chosen_agent_survives_a_round_trip():
+def test_a_job_without_a_chosen_agent_survives_a_round_trip() -> None:
     job = AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION)
 
     decoded = AgentJob.decode(job.encode())
@@ -70,7 +75,7 @@ def test_a_job_without_a_chosen_agent_survives_a_round_trip():
     assert decoded.agent_id is None
 
 
-def test_identical_jobs_encode_identically():
+def test_identical_jobs_encode_identically() -> None:
     """Releasing a job removes it by exact value, so encoding must be stable."""
     first = AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION)
     second = AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION)
@@ -78,28 +83,28 @@ def test_identical_jobs_encode_identically():
     assert first.encode() == second.encode()
 
 
-def test_encoded_keys_are_sorted():
+def test_encoded_keys_are_sorted() -> None:
     encoded = AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION).encode()
 
     assert encoded.index("conversation_id") < encoded.index("tenant_id")
 
 
-def test_text_that_is_not_json_is_malformed():
+def test_text_that_is_not_json_is_malformed() -> None:
     with pytest.raises(MalformedJobError):
         AgentJob.decode("not json at all")
 
 
-def test_json_that_is_not_an_object_is_malformed():
+def test_json_that_is_not_an_object_is_malformed() -> None:
     with pytest.raises(MalformedJobError):
         AgentJob.decode("[1, 2, 3]")
 
 
-def test_a_missing_identifier_is_malformed():
+def test_a_missing_identifier_is_malformed() -> None:
     with pytest.raises(MalformedJobError):
         AgentJob.decode('{"tenant_id": "11111111-1111-1111-1111-111111111111"}')
 
 
-def test_an_unusable_identifier_is_malformed():
+def test_an_unusable_identifier_is_malformed() -> None:
     with pytest.raises(MalformedJobError):
         AgentJob.decode('{"tenant_id": "not-a-uuid", "conversation_id": "also-not"}')
 
@@ -107,7 +112,7 @@ def test_an_unusable_identifier_is_malformed():
 # ------------------------------------------------------------ the envelope
 
 
-def test_an_envelope_carries_the_payload_through_unchanged():
+def test_an_envelope_carries_the_payload_through_unchanged() -> None:
     """The body is opaque, so a job type's own encoding is never re-derived."""
     job = AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION)
     envelope = JobEnvelope.wrap(job.encode(), now=NOW)
@@ -118,11 +123,11 @@ def test_an_envelope_carries_the_payload_through_unchanged():
     assert AgentJob.decode(decoded.body) == job
 
 
-def test_a_fresh_envelope_is_attempt_one():
+def test_a_fresh_envelope_is_attempt_one() -> None:
     assert JobEnvelope.wrap("{}", now=NOW).attempt == 1
 
 
-def test_a_bare_payload_left_over_from_an_earlier_release_is_attempt_one():
+def test_a_bare_payload_left_over_from_an_earlier_release_is_attempt_one() -> None:
     """A deploy must not strand jobs that were already sitting in the queue."""
     job = AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION)
 
@@ -132,7 +137,7 @@ def test_a_bare_payload_left_over_from_an_earlier_release_is_attempt_one():
     assert AgentJob.decode(envelope.body) == job
 
 
-def test_an_entry_that_is_not_json_at_all_becomes_a_body_rather_than_an_error():
+def test_an_entry_that_is_not_json_at_all_becomes_a_body_rather_than_an_error() -> None:
     """Deciding an entry is unreadable belongs to the job decoder, not here."""
     envelope = JobEnvelope.decode("garbage")
 
@@ -141,7 +146,7 @@ def test_an_entry_that_is_not_json_at_all_becomes_a_body_rather_than_an_error():
         AgentJob.decode(envelope.body)
 
 
-def test_the_next_attempt_keeps_the_original_enqueue_time():
+def test_the_next_attempt_keeps_the_original_enqueue_time() -> None:
     """Queue age must measure how long the customer waited, not the last try."""
     first = JobEnvelope.wrap("{}", now=NOW)
 
@@ -153,7 +158,7 @@ def test_the_next_attempt_keeps_the_original_enqueue_time():
     assert second.last_failure is FailureCategory.TIMEOUT
 
 
-def test_the_first_attempt_time_is_recorded_once():
+def test_the_first_attempt_time_is_recorded_once() -> None:
     first = JobEnvelope.wrap("{}", now=NOW)
     second = first.next_attempt(category=FailureCategory.TIMEOUT, now=NOW + timedelta(minutes=1))
 
@@ -165,9 +170,9 @@ def test_the_first_attempt_time_is_recorded_once():
 # --------------------------------------------------------------- the queue
 
 
-async def test_enqueue_appends_an_envelope_to_the_pending_list():
+async def test_enqueue_appends_an_envelope_to_the_pending_list() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     job = AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION)
 
     await queue.enqueue(job, now=NOW)
@@ -176,43 +181,46 @@ async def test_enqueue_appends_an_envelope_to_the_pending_list():
     assert JobEnvelope.decode(redis.lists[PENDING][0]).body == job.encode()
 
 
-async def test_reserving_moves_the_job_to_the_in_flight_list():
+async def test_reserving_moves_the_job_to_the_in_flight_list() -> None:
     """Popping outright would lose the job if the worker died mid-turn."""
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     job = AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION)
     await queue.enqueue(job, now=NOW)
 
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
 
     assert raw is not None
     assert redis.lists[PENDING] == []
     assert redis.lists[INFLIGHT] == [raw]
 
 
-async def test_reserving_returns_nothing_when_the_queue_is_quiet():
-    queue = AgentQueue(FakeQueueRedis())
+async def test_reserving_returns_nothing_when_the_queue_is_quiet() -> None:
+    queue = AgentQueue(as_redis(FakeQueueRedis()))
 
     assert await queue.reserve(wait_seconds=1, now=NOW) is None
 
 
-async def test_releasing_removes_the_job_from_the_in_flight_list():
+async def test_releasing_removes_the_job_from_the_in_flight_list() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
 
     await queue.release(raw)
 
     assert redis.lists[INFLIGHT] == []
 
 
-async def test_a_job_a_worker_never_released_stays_recoverable():
+async def test_a_job_a_worker_never_released_stays_recoverable() -> None:
     """The whole reason reserve moves rather than pops."""
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
 
     # The worker dies here: no release, no fail.
     assert redis.lists[INFLIGHT] == [raw]
@@ -221,11 +229,12 @@ async def test_a_job_a_worker_never_released_stays_recoverable():
 # ------------------------------------------------------------- retrying
 
 
-async def test_a_retry_leaves_the_pending_list_and_lands_in_the_delayed_set():
+async def test_a_retry_leaves_the_pending_list_and_lands_in_the_delayed_set() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
     envelope = JobEnvelope.decode(raw)
 
     taken = await queue.schedule_retry(
@@ -238,11 +247,12 @@ async def test_a_retry_leaves_the_pending_list_and_lands_in_the_delayed_set():
     assert await queue.delayed_depth() == 1
 
 
-async def test_a_retry_increments_the_attempt_and_records_the_category():
+async def test_a_retry_increments_the_attempt_and_records_the_category() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
 
     await queue.schedule_retry(
         raw,
@@ -258,11 +268,12 @@ async def test_a_retry_increments_the_attempt_and_records_the_category():
     assert envelope.last_failure is FailureCategory.RATE_LIMITED
 
 
-async def test_a_retry_is_not_visible_before_its_moment():
+async def test_a_retry_is_not_visible_before_its_moment() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
     await queue.schedule_retry(
         raw,
         JobEnvelope.decode(raw),
@@ -275,12 +286,13 @@ async def test_a_retry_is_not_visible_before_its_moment():
     assert await queue.reserve(wait_seconds=1, now=NOW + timedelta(seconds=61)) is not None
 
 
-async def test_promoting_twice_does_not_queue_the_same_retry_twice():
+async def test_promoting_twice_does_not_queue_the_same_retry_twice() -> None:
     """The `zrem` is the claim; a second promoter must find nothing."""
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
     await queue.schedule_retry(
         raw,
         JobEnvelope.decode(raw),
@@ -295,11 +307,12 @@ async def test_promoting_twice_does_not_queue_the_same_retry_twice():
     assert len(redis.lists[PENDING]) == 1
 
 
-async def test_a_retry_a_worker_no_longer_holds_is_refused():
+async def test_a_retry_a_worker_no_longer_holds_is_refused() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
     envelope = JobEnvelope.decode(raw)
     await queue.release(raw)
 
@@ -314,12 +327,13 @@ async def test_a_retry_a_worker_no_longer_holds_is_refused():
 # ---------------------------------------------------------- dead-lettering
 
 
-async def test_dead_lettering_records_the_job():
+async def test_dead_lettering_records_the_job() -> None:
     """A failed job is the only evidence a customer went unanswered."""
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
 
     assert await queue.dead_letter(raw, record()) is True
 
@@ -328,11 +342,12 @@ async def test_dead_lettering_records_the_job():
     assert json.loads(written)["category"] == "provider_error"
 
 
-async def test_dead_lettering_the_same_reservation_twice_writes_one_record():
+async def test_dead_lettering_the_same_reservation_twice_writes_one_record() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
 
     first = await queue.dead_letter(raw, record())
     second = await queue.dead_letter(raw, record())
@@ -341,11 +356,12 @@ async def test_dead_lettering_the_same_reservation_twice_writes_one_record():
     assert await queue.failed_depth() == 1
 
 
-async def test_a_dead_letter_record_carries_what_an_operator_needs():
+async def test_a_dead_letter_record_carries_what_an_operator_needs() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
 
     await queue.dead_letter(raw, record(attempts=5))
 
@@ -359,12 +375,13 @@ async def test_a_dead_letter_record_carries_what_an_operator_needs():
     )
 
 
-async def test_a_dead_letter_record_carries_no_exception_text():
+async def test_a_dead_letter_record_carries_no_exception_text() -> None:
     """The category is the whole vocabulary; a repr could leak anything."""
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
 
     await queue.dead_letter(raw, record())
 
@@ -384,9 +401,9 @@ async def test_a_dead_letter_record_carries_no_exception_text():
     }
 
 
-async def test_the_dead_letter_list_is_capped_and_keeps_the_newest():
+async def test_the_dead_letter_list_is_capped_and_keeps_the_newest() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     for index in range(DEAD_LETTER_LIMIT + 5):
         redis.lists.setdefault("agent:jobs:inflight", []).append(f"job-{index}")
         await queue.dead_letter(f"job-{index}", record(body=f"body-{index}"))
@@ -396,9 +413,9 @@ async def test_the_dead_letter_list_is_capped_and_keeps_the_newest():
     assert newest["body"] == f"body-{DEAD_LETTER_LIMIT + 4}"
 
 
-async def test_dead_letters_are_readable_newest_first():
+async def test_dead_letters_are_readable_newest_first() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     for index in range(3):
         redis.lists.setdefault("agent:jobs:inflight", []).append(f"job-{index}")
         await queue.dead_letter(f"job-{index}", record(body=f"body-{index}"))
@@ -411,13 +428,13 @@ async def test_dead_letters_are_readable_newest_first():
 # ----------------------------------------------------------------- depths
 
 
-async def test_depth_counts_only_waiting_jobs():
+async def test_depth_counts_only_waiting_jobs() -> None:
     redis = FakeQueueRedis()
     redis.lists[PENDING] = ["a", "b", "c"]
     redis.lists[FAILED] = ["x"] * 7
     redis.lists[INFLIGHT] = ["y"] * 2
     redis.zsets[DELAYED] = {"z": 1.0}
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
 
     assert await queue.depth() == 3
     assert await queue.failed_depth() == 7
@@ -425,9 +442,9 @@ async def test_depth_counts_only_waiting_jobs():
     assert await queue.delayed_depth() == 1
 
 
-async def test_the_oldest_pending_age_measures_the_head_of_the_queue():
+async def test_the_oldest_pending_age_measures_the_head_of_the_queue() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=NOW)
     await queue.enqueue(
         AgentJob(tenant_id=TENANT, conversation_id=AGENT), now=NOW + timedelta(minutes=4)
@@ -438,6 +455,6 @@ async def test_the_oldest_pending_age_measures_the_head_of_the_queue():
     assert age == pytest.approx(300.0)
 
 
-async def test_an_empty_queue_has_no_oldest_age_rather_than_a_zero_one():
+async def test_an_empty_queue_has_no_oldest_age_rather_than_a_zero_one() -> None:
     """Zero would read as "nothing is waiting long", which is a different claim."""
-    assert await AgentQueue(FakeQueueRedis()).oldest_pending_age_seconds(now=NOW) is None
+    assert await AgentQueue(as_redis(FakeQueueRedis())).oldest_pending_age_seconds(now=NOW) is None

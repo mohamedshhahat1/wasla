@@ -11,6 +11,7 @@ safe to run in production:
 from __future__ import annotations
 
 import re
+from collections.abc import AsyncIterator
 
 import pytest
 from fastapi import FastAPI
@@ -20,6 +21,7 @@ from app.core.config import Settings
 from app.core.metrics import REGISTRY
 from app.core.request_metrics import UNMATCHED
 from app.main import create_app
+from tests.conftest import FakeDependency
 from tests.fake_queue_redis import FakeQueueRedis
 
 pytestmark = pytest.mark.integration
@@ -45,13 +47,13 @@ class QueueRedis:
 
 
 @pytest.fixture
-def metrics_app(settings: Settings, fake_database, app: FastAPI) -> FastAPI:
+def metrics_app(settings: Settings, fake_database: FakeDependency, app: FastAPI) -> FastAPI:
     app.state.redis = QueueRedis()
     return app
 
 
 @pytest.fixture
-async def metrics_client(metrics_app: FastAPI):
+async def metrics_client(metrics_app: FastAPI) -> AsyncIterator[AsyncClient]:
     async with AsyncClient(
         transport=ASGITransport(app=metrics_app),
         base_url="http://wasla.test",
@@ -66,7 +68,7 @@ def series(body: str, name: str) -> list[str]:
 # ------------------------------------------------------------ the endpoint
 
 
-async def test_the_endpoint_answers_in_prometheus_text_format(metrics_client):
+async def test_the_endpoint_answers_in_prometheus_text_format(metrics_client: AsyncClient) -> None:
     response = await metrics_client.get("/metrics")
 
     assert response.status_code == 200
@@ -75,7 +77,7 @@ async def test_the_endpoint_answers_in_prometheus_text_format(metrics_client):
     assert "# TYPE wasla_http_requests_total counter" in response.text
 
 
-async def test_the_queue_and_worker_signals_are_present(metrics_client):
+async def test_the_queue_and_worker_signals_are_present(metrics_client: AsyncClient) -> None:
     response = await metrics_client.get("/metrics")
 
     for name in (
@@ -88,7 +90,9 @@ async def test_the_queue_and_worker_signals_are_present(metrics_client):
         assert series(response.text, name), f"{name} is missing from the exposition"
 
 
-async def test_the_endpoint_can_be_switched_off(fake_database, fake_redis):
+async def test_the_endpoint_can_be_switched_off(
+    fake_database: FakeDependency, fake_redis: FakeDependency
+) -> None:
     """404, not 403: "this deployment serves no metrics" is the true answer.
 
     403 would also confirm the endpoint exists, which a disabled one should not.
@@ -114,7 +118,7 @@ async def test_the_endpoint_can_be_switched_off(fake_database, fake_redis):
     assert response.status_code == 404
 
 
-async def test_the_endpoint_is_absent_from_the_public_schema(metrics_app):
+async def test_the_endpoint_is_absent_from_the_public_schema(metrics_app: FastAPI) -> None:
     """A scrape path is deployment shape, not part of the product's API."""
     assert "/metrics" not in metrics_app.openapi()["paths"]
 
@@ -122,7 +126,7 @@ async def test_the_endpoint_is_absent_from_the_public_schema(metrics_app):
 # ------------------------------------------------------------ the labels
 
 
-async def test_requests_are_counted_under_the_route_template(metrics_client):
+async def test_requests_are_counted_under_the_route_template(metrics_client: AsyncClient) -> None:
     before = REGISTRY.render()
     await metrics_client.get("/health")
 
@@ -132,7 +136,7 @@ async def test_requests_are_counted_under_the_route_template(metrics_client):
     assert body != before
 
 
-async def test_a_path_parameter_never_becomes_a_series(metrics_client):
+async def test_a_path_parameter_never_becomes_a_series(metrics_client: AsyncClient) -> None:
     """The whole point of the route label: one series per route, not per lead."""
     await metrics_client.get("/api/v1/leads/2fb0f0a4-9e6c-4a6a-9d1e-2e4b1f6a7c31")
 
@@ -141,7 +145,7 @@ async def test_a_path_parameter_never_becomes_a_series(metrics_client):
     assert "2fb0f0a4" not in body
 
 
-async def test_an_unmatched_path_collapses_into_one_series(metrics_client):
+async def test_an_unmatched_path_collapses_into_one_series(metrics_client: AsyncClient) -> None:
     """A scanner must not be able to name a time series."""
     for path in ("/wp-login.php", "/.env", "/admin/config"):
         await metrics_client.get(path)
@@ -153,7 +157,7 @@ async def test_an_unmatched_path_collapses_into_one_series(metrics_client):
     assert "admin/config" not in body
 
 
-async def test_an_unknown_method_collapses_into_one_series(metrics_client):
+async def test_an_unknown_method_collapses_into_one_series(metrics_client: AsyncClient) -> None:
     await metrics_client.request("PROPFIND", "/health")
 
     body = (await metrics_client.get("/metrics")).text
@@ -162,7 +166,7 @@ async def test_an_unknown_method_collapses_into_one_series(metrics_client):
     assert 'method="OTHER"' in body
 
 
-async def test_no_metric_label_carries_an_identifier(metrics_client):
+async def test_no_metric_label_carries_an_identifier(metrics_client: AsyncClient) -> None:
     """Scanned over the whole document rather than spot-checked.
 
     A UUID anywhere in the exposition means something put an identifier into a
@@ -178,7 +182,7 @@ async def test_no_metric_label_carries_an_identifier(metrics_client):
     assert "@" not in body
 
 
-async def test_the_scrape_does_not_count_itself(metrics_client):
+async def test_the_scrape_does_not_count_itself(metrics_client: AsyncClient) -> None:
     """A scraper counting its own scrapes is a closed loop with a busy route."""
     await metrics_client.get("/metrics")
 
@@ -191,17 +195,17 @@ async def test_the_scrape_does_not_count_itself(metrics_client):
 # --------------------------------------------------------- it cannot break
 
 
-async def test_a_dependency_outage_still_serves_what_it_can(metrics_app):
+async def test_a_dependency_outage_still_serves_what_it_can(metrics_app: FastAPI) -> None:
     """Half an exposition beats a 503 during the outage being investigated."""
 
     class DeadRedis(QueueRedis):
         @property
-        def client(self):
+        def client(self) -> FakeQueueRedis:
             class Broken(FakeQueueRedis):
-                async def llen(self, key):
+                async def llen(self, key: str) -> int:
                     raise RuntimeError("Redis is gone")
 
-                async def hgetall(self, key):
+                async def hgetall(self, key: str) -> dict[str, float]:
                     raise RuntimeError("Redis is gone")
 
             return Broken()
@@ -217,7 +221,9 @@ async def test_a_dependency_outage_still_serves_what_it_can(metrics_app):
     assert not series(response.text, "wasla_queue_pending_jobs")
 
 
-async def test_instrumentation_never_fails_a_business_request(metrics_client, monkeypatch):
+async def test_instrumentation_never_fails_a_business_request(
+    metrics_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The invariant: a metric is an observation, never a participant.
 
     The recorder is broken outright, and the request it was measuring must

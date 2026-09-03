@@ -75,6 +75,12 @@ dev = [
     "ruff==0.12.12",
     "black==26.5.1",
     "mypy==1.20.2",
+    # Stubs for the one third-party library the tests import that ships none.
+    # `tests/unit/test_delivery_pipeline.py` reads the GitHub Actions workflows
+    # to check what CI actually runs, and without these mypy has no types for
+    # `yaml.safe_load` - which is a real gap rather than something to silence
+    # with a per-module override.
+    "types-PyYAML==6.0.12.20260815",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -122,10 +128,6 @@ strict = true
 warn_unreachable = true
 show_error_codes = true
 exclude = "^alembic/versions/"
-
-[[tool.mypy.overrides]]
-module = ["tests.*"]
-disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
 # Insurance: the published wheel is typed, but a build without py.typed must

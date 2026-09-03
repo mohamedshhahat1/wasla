@@ -13,14 +13,21 @@ counting something that did not happen.
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.orchestrator import AgentOutcome
 from app.core.config import Settings
 from app.core.storage import LocalMediaStorage
+from app.db.models.agent import Agent
 from app.db.models.campaign import Campaign, CampaignRecipient, CampaignStatus
 from app.db.models.conversation import (
     Contact,
@@ -30,10 +37,13 @@ from app.db.models.conversation import (
     MessageKind,
     MessageStatus,
 )
+from app.db.models.enums import TenantRole
 from app.db.models.lead import LeadSource
 from app.db.models.media import MediaStatus, MessageMedia
+from app.db.models.membership import Membership
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEventType
+from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount
 from app.db.models.whatsapp_template import (
     TemplateCategory,
@@ -50,8 +60,10 @@ from app.services.media_reader import TRANSCRIPTION_METHOD, VISION_METHOD, ReadR
 from app.services.media_service import MediaService
 from app.services.messaging_service import MessagingService
 from app.services.whatsapp_service import WhatsAppIngestionService
-from app.workers.ai_worker import _TurnProgress
+from app.workers.ai_worker import AgentWorker, _TurnProgress
 from app.workers.queue import AgentJob
+from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import as_database, as_media_reader, as_redis_client, as_whatsapp
 
 pytestmark = pytest.mark.integration
 
@@ -89,7 +101,7 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-def meta(monkeypatch):
+def meta(monkeypatch: pytest.MonkeyPatch) -> None:
     """Answers as Meta would, so a send reaches the code that meters it."""
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -110,7 +122,7 @@ def meta(monkeypatch):
 
 
 @pytest.fixture
-def refusing_meta(monkeypatch):
+def refusing_meta(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rejects every send, so the failure path can be checked for silence."""
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -123,14 +135,14 @@ def refusing_meta(monkeypatch):
     )
 
 
-async def _tenant(session, slug: str = "acme") -> Tenant:
+async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _account(session, tenant: Tenant) -> WhatsAppAccount:
+async def _account(session: AsyncSession, tenant: Tenant) -> WhatsAppAccount:
     account = WhatsAppAccount(
         tenant_id=tenant.id,
         phone_number_id=PHONE_NUMBER_ID,
@@ -142,7 +154,9 @@ async def _account(session, tenant: Tenant) -> WhatsAppAccount:
     return account
 
 
-async def _conversation(session, tenant: Tenant, account: WhatsAppAccount) -> Conversation:
+async def _conversation(
+    session: AsyncSession, tenant: Tenant, account: WhatsAppAccount
+) -> Conversation:
     contact = Contact(tenant_id=tenant.id, wa_id=CUSTOMER)
     session.add(contact)
     await session.flush()
@@ -158,7 +172,7 @@ async def _conversation(session, tenant: Tenant, account: WhatsAppAccount) -> Co
     return conversation
 
 
-def _inbound(*, message_id: str = "wamid.in", text: str = "Hello") -> dict:
+def _inbound(*, message_id: str = "wamid.in", text: str = "Hello") -> dict[str, Any]:
     return {
         "entry": [
             {
@@ -184,7 +198,7 @@ def _inbound(*, message_id: str = "wamid.in", text: str = "Hello") -> dict:
     }
 
 
-async def _totals(session, tenant: Tenant) -> dict[UsageEventType, int]:
+async def _totals(session: AsyncSession, tenant: Tenant) -> dict[UsageEventType, int]:
     rows = await UsageEventRepository(session, tenant_id=tenant.id).totals()
     return {row.event_type: row.quantity for row in rows}
 
@@ -192,7 +206,9 @@ async def _totals(session, tenant: Tenant) -> dict[UsageEventType, int]:
 # --------------------------------------------------------------------- inbound
 
 
-async def test_an_inbound_message_and_its_first_conversation_are_metered(db_session):
+async def test_an_inbound_message_and_its_first_conversation_are_metered(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session)
     await _account(db_session, tenant)
 
@@ -204,7 +220,7 @@ async def test_an_inbound_message_and_its_first_conversation_are_metered(db_sess
     assert totals[UsageEventType.CONVERSATION_CREATED] == 1
 
 
-async def test_a_replayed_delivery_is_not_metered_twice(db_session):
+async def test_a_replayed_delivery_is_not_metered_twice(db_session: AsyncSession) -> None:
     """Meta retries; a bill must not.
 
     The event id already stops the message being stored twice, and the meter
@@ -223,7 +239,7 @@ async def test_a_replayed_delivery_is_not_metered_twice(db_session):
     assert totals[UsageEventType.CONVERSATION_CREATED] == 1
 
 
-async def test_a_second_message_opens_no_second_conversation(db_session):
+async def test_a_second_message_opens_no_second_conversation(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     await _account(db_session, tenant)
     service = WhatsAppIngestionService(session=db_session)
@@ -240,7 +256,9 @@ async def test_a_second_message_opens_no_second_conversation(db_session):
 # -------------------------------------------------------------------- outbound
 
 
-async def test_a_sent_message_is_metered(db_session, settings, meta):
+async def test_a_sent_message_is_metered(
+    db_session: AsyncSession, settings: Settings, meta: None
+) -> None:
     tenant = await _tenant(db_session)
     account = await _account(db_session, tenant)
     conversation = await _conversation(db_session, tenant, account)
@@ -253,7 +271,9 @@ async def test_a_sent_message_is_metered(db_session, settings, meta):
     assert totals[UsageEventType.WHATSAPP_MESSAGE_SENT] == 1
 
 
-async def test_a_refused_send_is_not_metered(db_session, settings, refusing_meta):
+async def test_a_refused_send_is_not_metered(
+    db_session: AsyncSession, settings: Settings, refusing_meta: None
+) -> None:
     """Nothing was delivered, so nothing was consumed.
 
     The message row still exists in `failed` state - the attempt is recorded -
@@ -274,7 +294,9 @@ async def test_a_refused_send_is_not_metered(db_session, settings, refusing_meta
 # ------------------------------------------------------------------------ CRM
 
 
-async def test_a_lead_captured_from_a_conversation_is_metered_once(db_session):
+async def test_a_lead_captured_from_a_conversation_is_metered_once(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session)
     account = await _account(db_session, tenant)
     conversation = await _conversation(db_session, tenant, account)
@@ -296,11 +318,23 @@ async def test_a_lead_captured_from_a_conversation_is_metered_once(db_session):
     assert totals[UsageEventType.LEAD_CREATED] == 1
 
 
-async def test_a_lead_entered_by_a_person_is_metered(db_session):
+async def test_a_lead_entered_by_a_person_is_metered(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
+    # An actual row, because the activity this writes carries actor_kind=user
+    # and a foreign key to it. A NULL actor satisfies the constraint without
+    # satisfying the sentence in this test's name.
+    actor = User(email="sales@acme.test", hashed_password="x" * 60, is_active=True)
+    db_session.add(actor)
+    await db_session.flush()
+    db_session.add(Membership(user_id=actor.id, tenant_id=tenant.id, role=TenantRole.MEMBER))
+    await db_session.flush()
     service = LeadService(session=db_session, tenant_id=tenant.id)
 
-    await service.create_lead(actor_id=None, source=LeadSource.MANUAL, name="Walk-in")
+    await service.create_lead(
+        actor_id=actor.id,
+        source=LeadSource.MANUAL,
+        name="Walk-in",
+    )
     await db_session.flush()
 
     totals = await _totals(db_session, tenant)
@@ -310,7 +344,7 @@ async def test_a_lead_entered_by_a_person_is_metered(db_session):
 # ------------------------------------------------------------------ campaigns
 
 
-async def _campaign(session, tenant: Tenant, account: WhatsAppAccount) -> Campaign:
+async def _campaign(session: AsyncSession, tenant: Tenant, account: WhatsAppAccount) -> Campaign:
     template = WhatsAppTemplate(
         tenant_id=tenant.id,
         account_id=account.id,
@@ -337,10 +371,10 @@ async def _campaign(session, tenant: Tenant, account: WhatsAppAccount) -> Campai
 
 
 async def test_a_campaign_message_is_metered_as_both_a_message_and_campaign_traffic(
-    db_session,
-    settings,
-    meta,
-):
+    db_session: AsyncSession,
+    settings: Settings,
+    meta: None,
+) -> None:
     """Two meters, two questions.
 
     A messaging allowance is spent by every message; a workspace looking at why
@@ -405,7 +439,14 @@ class StubReader:
         return ReadResult(transcript="what it said", method=self._method)
 
 
-async def _attachment(session, tenant, account, *, is_voice: bool, mime_type: str):
+async def _attachment(
+    session: AsyncSession,
+    tenant: Tenant,
+    account: WhatsAppAccount,
+    *,
+    is_voice: bool,
+    mime_type: str,
+) -> MessageMedia:
     conversation = await _conversation(session, tenant, account)
     message = Message(
         tenant_id=tenant.id,
@@ -431,7 +472,9 @@ async def _attachment(session, tenant, account, *, is_voice: bool, mime_type: st
     return media
 
 
-async def test_a_stored_file_meters_the_bytes_it_took(db_session, settings, tmp_path):
+async def test_a_stored_file_meters_the_bytes_it_took(
+    db_session: AsyncSession, settings: Settings, tmp_path: Path
+) -> None:
     """Metered when bytes are written, not by sweeping the store: a sweep
     reports a level, and a level cannot be billed for a period already closed."""
     tenant = await _tenant(db_session)
@@ -443,7 +486,7 @@ async def test_a_stored_file_meters_the_bytes_it_took(db_session, settings, tmp_
         tenant_id=tenant.id,
         settings=settings,
         storage=LocalMediaStorage(tmp_path),
-        whatsapp=StubWhatsApp(PNG_BYTES, "image/png"),
+        whatsapp=as_whatsapp(StubWhatsApp(PNG_BYTES, "image/png")),
     )
     await service.download(media)
     await db_session.flush()
@@ -453,10 +496,10 @@ async def test_a_stored_file_meters_the_bytes_it_took(db_session, settings, tmp_
 
 
 async def test_reading_a_voice_note_meters_the_read_and_the_transcription(
-    db_session,
-    settings,
-    tmp_path,
-):
+    db_session: AsyncSession,
+    settings: Settings,
+    tmp_path: Path,
+) -> None:
     """Two providers, two meters. The transcription is a count of recordings
     rather than of seconds - the configured models report no duration, and a
     number inferred from a compressed byte count does not belong in a bill."""
@@ -469,10 +512,10 @@ async def test_reading_a_voice_note_meters_the_read_and_the_transcription(
         tenant_id=tenant.id,
         settings=settings,
         storage=LocalMediaStorage(tmp_path),
-        whatsapp=StubWhatsApp(OGG_BYTES, "audio/ogg"),
+        whatsapp=as_whatsapp(StubWhatsApp(OGG_BYTES, "audio/ogg")),
     )
     await service.download(media)
-    await service.understand(media, reader=StubReader(TRANSCRIPTION_METHOD))
+    await service.understand(media, reader=as_media_reader(StubReader(TRANSCRIPTION_METHOD)))
     await db_session.flush()
 
     totals = await _totals(db_session, tenant)
@@ -480,7 +523,9 @@ async def test_reading_a_voice_note_meters_the_read_and_the_transcription(
     assert totals[UsageEventType.VOICE_TRANSCRIPTION] == 1
 
 
-async def test_reading_a_photograph_meters_no_transcription(db_session, settings, tmp_path):
+async def test_reading_a_photograph_meters_no_transcription(
+    db_session: AsyncSession, settings: Settings, tmp_path: Path
+) -> None:
     tenant = await _tenant(db_session)
     account = await _account(db_session, tenant)
     media = await _attachment(db_session, tenant, account, is_voice=False, mime_type="image/png")
@@ -490,10 +535,10 @@ async def test_reading_a_photograph_meters_no_transcription(db_session, settings
         tenant_id=tenant.id,
         settings=settings,
         storage=LocalMediaStorage(tmp_path),
-        whatsapp=StubWhatsApp(PNG_BYTES, "image/png"),
+        whatsapp=as_whatsapp(StubWhatsApp(PNG_BYTES, "image/png")),
     )
     await service.download(media)
-    await service.understand(media, reader=StubReader(VISION_METHOD))
+    await service.understand(media, reader=as_media_reader(StubReader(VISION_METHOD)))
     await db_session.flush()
 
     totals = await _totals(db_session, tenant)
@@ -501,7 +546,9 @@ async def test_reading_a_photograph_meters_no_transcription(db_session, settings
     assert UsageEventType.VOICE_TRANSCRIPTION not in totals
 
 
-async def test_a_file_already_read_is_not_metered_again(db_session, settings, tmp_path):
+async def test_a_file_already_read_is_not_metered_again(
+    db_session: AsyncSession, settings: Settings, tmp_path: Path
+) -> None:
     """The media job can be retried, and a second read would be paid for twice."""
     tenant = await _tenant(db_session)
     account = await _account(db_session, tenant)
@@ -512,12 +559,12 @@ async def test_a_file_already_read_is_not_metered_again(db_session, settings, tm
         tenant_id=tenant.id,
         settings=settings,
         storage=LocalMediaStorage(tmp_path),
-        whatsapp=StubWhatsApp(PNG_BYTES, "image/png"),
+        whatsapp=as_whatsapp(StubWhatsApp(PNG_BYTES, "image/png")),
     )
     await service.download(media)
     await service.download(media)
-    await service.understand(media, reader=StubReader(VISION_METHOD))
-    await service.understand(media, reader=StubReader(VISION_METHOD))
+    await service.understand(media, reader=as_media_reader(StubReader(VISION_METHOD)))
+    await service.understand(media, reader=as_media_reader(StubReader(VISION_METHOD)))
     await db_session.flush()
 
     totals = await _totals(db_session, tenant)
@@ -531,18 +578,18 @@ async def test_a_file_already_read_is_not_metered_again(db_session, settings, tm
 class SessionHandle:
     """Hands the worker the test's own session, so its writes roll back."""
 
-    def __init__(self, session) -> None:
+    def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     @asynccontextmanager
-    async def session(self):
+    async def session(self) -> AsyncIterator[AsyncSession]:
         yield self._session
 
 
 class FakeRedis:
     @property
-    def client(self):
-        return object()
+    def client(self) -> FakeQueueRedis:
+        return FakeQueueRedis()
 
 
 class StubOrchestrator:
@@ -552,14 +599,24 @@ class StubOrchestrator:
     it has just run - so the turn itself is a value rather than an inference.
     """
 
-    def __init__(self, outcome) -> None:
+    def __init__(self, outcome: AgentOutcome) -> None:
         self._outcome = outcome
 
-    async def answer(self, *, conversation_id, agent=None):
+    async def answer(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        agent: Agent | None = None,
+    ) -> AgentOutcome:
         return self._outcome
 
 
-def _worker(monkeypatch, db_session, settings, outcome):
+def _worker(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    settings: Settings,
+    outcome: AgentOutcome,
+) -> AgentWorker:
     from app.workers import ai_worker as worker_module
 
     monkeypatch.setattr(worker_module, "AgentOrchestrator", lambda **_: StubOrchestrator(outcome))
@@ -571,15 +628,15 @@ def _worker(monkeypatch, db_session, settings, outcome):
         ),
     )
     return worker_module.AgentWorker(
-        database=SessionHandle(db_session),
-        redis=FakeRedis(),
+        database=as_database(SessionHandle(db_session)),
+        redis=as_redis_client(FakeRedis()),
         settings=settings,
     )
 
 
-def _outcome(*, reply=None, handed_off=False, rounds=1):
-    from app.agents.orchestrator import AgentOutcome
-
+def _outcome(
+    *, reply: str | None = None, handed_off: bool = False, rounds: int = 1
+) -> AgentOutcome:
     return AgentOutcome(
         reply=reply,
         handed_off=handed_off,
@@ -591,11 +648,11 @@ def _outcome(*, reply=None, handed_off=False, rounds=1):
 
 
 async def test_an_agent_turn_meters_its_provider_calls_and_tokens(
-    db_session,
-    settings,
-    meta,
-    monkeypatch,
-):
+    db_session: AsyncSession,
+    settings: Settings,
+    meta: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     tenant = await _tenant(db_session)
     account = await _account(db_session, tenant)
     conversation = await _conversation(db_session, tenant, account)
@@ -626,10 +683,10 @@ async def test_an_agent_turn_meters_its_provider_calls_and_tokens(
 
 
 async def test_a_turn_that_says_nothing_is_still_metered(
-    db_session,
-    settings,
-    monkeypatch,
-):
+    db_session: AsyncSession,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A handoff cost the same inference as an answer.
 
     Metering only the turns that produced words would under-count exactly the
@@ -658,7 +715,9 @@ async def test_a_turn_that_says_nothing_is_still_metered(
 # ------------------------------------------------------------------- isolation
 
 
-async def test_metering_stays_inside_the_workspace_that_consumed_it(db_session, settings, meta):
+async def test_metering_stays_inside_the_workspace_that_consumed_it(
+    db_session: AsyncSession, settings: Settings, meta: None
+) -> None:
     """Two workspaces, one busy and one silent. The silent one owes nothing."""
     acme = await _tenant(db_session, "acme")
     rival = await _tenant(db_session, "rival")
@@ -673,7 +732,9 @@ async def test_metering_stays_inside_the_workspace_that_consumed_it(db_session, 
     assert (await _totals(db_session, acme))[UsageEventType.WHATSAPP_MESSAGE_SENT] == 1
 
 
-async def test_a_window_that_ended_before_the_work_reports_nothing(db_session, settings, meta):
+async def test_a_window_that_ended_before_the_work_reports_nothing(
+    db_session: AsyncSession, settings: Settings, meta: None
+) -> None:
     tenant = await _tenant(db_session)
     account = await _account(db_session, tenant)
     conversation = await _conversation(db_session, tenant, account)

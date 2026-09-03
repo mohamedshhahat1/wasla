@@ -8,10 +8,15 @@ row locks rather than about Python.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.core.storage import LocalMediaStorage
 from app.db.models.conversation import (
     Contact,
@@ -24,10 +29,13 @@ from app.db.models.conversation import (
 from app.db.models.media import MediaStatus, MessageMedia
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
-from app.integrations.whatsapp.client import DownloadedMedia, MediaDescriptor
+from app.integrations.whatsapp.client import DownloadedMedia, MediaDescriptor, SentMessage
 from app.services.media_reader import ReadResult
 from app.workers.media_queue import MediaJob
 from app.workers.media_worker import MediaWorker
+from app.workers.queue import AgentJob
+from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import as_media_reader, as_whatsapp
 
 pytestmark = pytest.mark.integration
 
@@ -37,12 +45,12 @@ PIXEL = b"\x89PNG\r\n\x1a\n" + b"0" * 64
 class SessionHandle:
     """Hands the worker the test's own session, so its writes roll back."""
 
-    def __init__(self, session) -> None:
+    def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self.opened = 0
 
     @asynccontextmanager
-    async def session(self):
+    async def session(self) -> AsyncIterator[AsyncSession]:
         self.opened += 1
         yield self._session
 
@@ -51,17 +59,17 @@ class FakeRedis:
     """The worker only reaches for `.client`; the queues are replaced after."""
 
     @property
-    def client(self):
-        return object()
+    def client(self) -> FakeQueueRedis:
+        return FakeQueueRedis()
 
 
 class RecordingQueue:
     """Stands in for a Redis queue and remembers what was put on it."""
 
     def __init__(self) -> None:
-        self.jobs: list[object] = []
+        self.jobs: list[AgentJob] = []
 
-    async def enqueue(self, job) -> None:
+    async def enqueue(self, job: AgentJob) -> None:
         self.jobs.append(job)
 
 
@@ -99,7 +107,7 @@ class StubReader:
         return ReadResult(transcript=self._transcript, method="vision")
 
 
-async def _conversation(session, *, slug="acme"):
+async def _conversation(session: AsyncSession, *, slug: str = "acme") -> tuple[Any, ...]:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
@@ -124,7 +132,13 @@ async def _conversation(session, *, slug="acme"):
     return tenant, conversation
 
 
-async def _attachment(session, *, tenant, conversation, wa_media_id="media-1"):
+async def _attachment(
+    session: AsyncSession,
+    *,
+    tenant: Tenant,
+    conversation: Conversation,
+    wa_media_id: str = "media-1",
+) -> MessageMedia:
     message = Message(
         tenant_id=tenant.id,
         conversation_id=conversation.id,
@@ -152,20 +166,29 @@ async def _attachment(session, *, tenant, conversation, wa_media_id="media-1"):
     return media
 
 
-def _worker(db_session, tmp_path, settings, *, whatsapp=None, reader=None):
+def _worker(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    settings: Settings,
+    *,
+    whatsapp: StubWhatsApp | None = None,
+    reader: StubReader | None = None,
+) -> MediaWorker:
     worker = MediaWorker(
         database=SessionHandle(db_session),  # type: ignore[arg-type]
         redis=FakeRedis(),  # type: ignore[arg-type]
         settings=settings,
         storage=LocalMediaStorage(tmp_path),
-        whatsapp_factory=lambda http: whatsapp or StubWhatsApp(),
-        reader_factory=lambda http: reader or StubReader(),
+        whatsapp_factory=lambda http: as_whatsapp(whatsapp or StubWhatsApp()),
+        reader_factory=lambda http: as_media_reader(reader or StubReader()),
     )
     worker._agents = RecordingQueue()  # type: ignore[assignment]
     return worker
 
 
-async def test_a_file_is_downloaded_read_and_released(db_session, tmp_path, settings):
+async def test_a_file_is_downloaded_read_and_released(
+    db_session: AsyncSession, tmp_path: Path, settings: Settings
+) -> None:
     tenant, conversation = await _conversation(db_session)
     media = await _attachment(db_session, tenant=tenant, conversation=conversation)
 
@@ -184,11 +207,15 @@ async def test_a_file_is_downloaded_read_and_released(db_session, tmp_path, sett
     assert reader.reads == 1
 
     # The conversation is now answerable, and only now.
-    assert len(worker._agents.jobs) == 1
-    assert worker._agents.jobs[0].conversation_id == conversation.id
+    agents = worker._agents
+    assert isinstance(agents, RecordingQueue)
+    assert len(agents.jobs) == 1
+    assert agents.jobs[0].conversation_id == conversation.id
 
 
-async def test_two_files_on_one_conversation_produce_one_agent_job(db_session, tmp_path, settings):
+async def test_two_files_on_one_conversation_produce_one_agent_job(
+    db_session: AsyncSession, tmp_path: Path, settings: Settings
+) -> None:
     """The reason `ConversationMediaGate` exists.
 
     An agent turn is not idempotent, so two jobs mean the customer is answered
@@ -206,7 +233,9 @@ async def test_two_files_on_one_conversation_produce_one_agent_job(db_session, t
     await worker._handle(MediaJob(tenant_id=tenant.id, media_id=first.id))
     # The first file is read, but its sibling is still pending, so nothing is
     # released yet.
-    assert worker._agents.jobs == []
+    agents = worker._agents
+    assert isinstance(agents, RecordingQueue)
+    assert agents.jobs == []
 
     await worker._handle(MediaJob(tenant_id=tenant.id, media_id=second.id))
 
@@ -214,12 +243,14 @@ async def test_two_files_on_one_conversation_produce_one_agent_job(db_session, t
     await db_session.refresh(second)
     assert first.status is MediaStatus.READY
     assert second.status is MediaStatus.READY
-    assert len(worker._agents.jobs) == 1
+    agents = worker._agents
+    assert isinstance(agents, RecordingQueue)
+    assert len(agents.jobs) == 1
 
 
 async def test_an_oversized_file_is_skipped_and_still_releases_the_reply(
-    db_session, tmp_path, settings
-):
+    db_session: AsyncSession, tmp_path: Path, settings: Settings
+) -> None:
     """A decision, not a failure - and the customer is still owed an answer."""
     tenant, conversation = await _conversation(db_session)
     media = await _attachment(db_session, tenant=tenant, conversation=conversation)
@@ -235,10 +266,14 @@ async def test_an_oversized_file_is_skipped_and_still_releases_the_reply(
     assert media.last_error is not None
     # Never fetched: the size was known before the bytes were moved.
     assert huge.fetched == 0
-    assert len(worker._agents.jobs) == 1
+    agents = worker._agents
+    assert isinstance(agents, RecordingQueue)
+    assert len(agents.jobs) == 1
 
 
-async def test_a_job_for_a_row_that_is_gone_does_nothing(db_session, tmp_path, settings):
+async def test_a_job_for_a_row_that_is_gone_does_nothing(
+    db_session: AsyncSession, tmp_path: Path, settings: Settings
+) -> None:
     """The message was deleted, or the job outlived its workspace."""
     tenant, _ = await _conversation(db_session)
     worker = _worker(db_session, tmp_path, settings)
@@ -247,10 +282,14 @@ async def test_a_job_for_a_row_that_is_gone_does_nothing(db_session, tmp_path, s
 
     await worker._handle(MediaJob(tenant_id=tenant.id, media_id=_uuid.uuid4()))
 
-    assert worker._agents.jobs == []
+    agents = worker._agents
+    assert isinstance(agents, RecordingQueue)
+    assert agents.jobs == []
 
 
-async def test_a_job_from_another_workspace_finds_nothing(db_session, tmp_path, settings):
+async def test_a_job_from_another_workspace_finds_nothing(
+    db_session: AsyncSession, tmp_path: Path, settings: Settings
+) -> None:
     """Tenant isolation on the worker path, where no request context exists.
 
     The job carries a tenant id, and the repository is scoped to it. A job
@@ -266,10 +305,14 @@ async def test_a_job_from_another_workspace_finds_nothing(db_session, tmp_path, 
     await db_session.refresh(media)
     assert media.status is MediaStatus.PENDING
     assert media.storage_key is None
-    assert worker._agents.jobs == []
+    agents = worker._agents
+    assert isinstance(agents, RecordingQueue)
+    assert agents.jobs == []
 
 
-async def test_a_second_run_over_a_read_file_does_not_pay_again(db_session, tmp_path, settings):
+async def test_a_second_run_over_a_read_file_does_not_pay_again(
+    db_session: AsyncSession, tmp_path: Path, settings: Settings
+) -> None:
     """Media jobs are idempotent, unlike agent turns.
 
     A retry must not re-download the bytes or re-run the provider over a file
@@ -294,23 +337,21 @@ class UploadingWhatsApp:
     """A client that records an upload and then acknowledges the send."""
 
     def __init__(self) -> None:
-        self.uploads: list[dict] = []
-        self.sends: list[dict] = []
+        self.uploads: list[dict[str, Any]] = []
+        self.sends: list[dict[str, Any]] = []
 
-    async def upload_media(self, **kwargs) -> str:
+    async def upload_media(self, **kwargs: Any) -> str:
         self.uploads.append(kwargs)
         return "uploaded-1"
 
-    async def send_media(self, **kwargs):
+    async def send_media(self, **kwargs: Any) -> SentMessage:
         self.sends.append(kwargs)
-        from app.integrations.whatsapp.client import SentMessage
-
         return SentMessage(message_id="wamid.out", recipient="201234567890", raw={})
 
 
 async def test_an_attachment_is_uploaded_then_sent_and_recorded(
-    db_session, tmp_path, settings, monkeypatch
-):
+    db_session: AsyncSession, tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Uploaded rather than linked.
 
     A link needs a publicly reachable URL for as long as Meta might fetch it;
@@ -365,8 +406,8 @@ async def test_an_attachment_is_uploaded_then_sent_and_recorded(
 
 
 async def test_a_hostile_filename_is_replaced_before_it_reaches_meta(
-    db_session, tmp_path, settings, monkeypatch
-):
+    db_session: AsyncSession, tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The name travels to a third party and is shown to the recipient.
 
     It is never used to build a path on this side, but anything that is not
@@ -404,7 +445,9 @@ async def test_a_hostile_filename_is_replaced_before_it_reaches_meta(
     assert whatsapp.uploads[0]["filename"] == "attachment.pdf"
 
 
-async def test_an_attachment_outside_the_service_window_is_refused(db_session, tmp_path, settings):
+async def test_an_attachment_outside_the_service_window_is_refused(
+    db_session: AsyncSession, tmp_path: Path, settings: Settings
+) -> None:
     """An attachment is a free-form message, so the same rule applies as to text."""
     from app.core.exceptions import ValidationError
     from app.services.messaging_service import MessagingService
@@ -421,7 +464,9 @@ async def test_an_attachment_outside_the_service_window_is_refused(db_session, t
         )
 
 
-async def test_a_type_meta_will_not_accept_is_refused(db_session, tmp_path, settings):
+async def test_a_type_meta_will_not_accept_is_refused(
+    db_session: AsyncSession, tmp_path: Path, settings: Settings
+) -> None:
     from datetime import UTC, datetime
 
     from app.core.exceptions import ValidationError
@@ -440,7 +485,9 @@ async def test_a_type_meta_will_not_accept_is_refused(db_session, tmp_path, sett
         )
 
 
-async def test_a_stored_file_is_read_without_a_whatsapp_token(db_session, tmp_path, settings):
+async def test_a_stored_file_is_read_without_a_whatsapp_token(
+    db_session: AsyncSession, tmp_path: Path, settings: Settings
+) -> None:
     """Found by running the container, not by the suite.
 
     The worker used to build a `WhatsAppClient` before it knew whether the job
@@ -476,10 +523,14 @@ async def test_a_stored_file_is_read_without_a_whatsapp_token(db_session, tmp_pa
     await db_session.refresh(media)
     assert media.status is MediaStatus.READY
     assert media.transcript == "the warranty lasts two years"
-    assert len(worker._agents.jobs) == 1
+    agents = worker._agents
+    assert isinstance(agents, RecordingQueue)
+    assert len(agents.jobs) == 1
 
 
-async def test_a_document_is_read_with_no_provider_configured(db_session, tmp_path, settings):
+async def test_a_document_is_read_with_no_provider_configured(
+    db_session: AsyncSession, tmp_path: Path, settings: Settings
+) -> None:
     """Extraction needs no OpenAI key, and must not pretend otherwise."""
     tenant, conversation = await _conversation(db_session)
     media = await _attachment(db_session, tenant=tenant, conversation=conversation)

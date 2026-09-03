@@ -12,10 +12,13 @@ under test is which branch the compliance logic takes, not whether httpx works.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ExternalServiceError, TenantIsolationError, ValidationError
 from app.db.models.conversation import (
@@ -41,7 +44,7 @@ pytestmark = pytest.mark.integration
 SOON = timedelta(minutes=30)
 
 
-async def _tenant(session, *, slug: str) -> Tenant:
+async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
@@ -49,7 +52,7 @@ async def _tenant(session, *, slug: str) -> Tenant:
 
 
 async def _conversation(
-    session,
+    session: AsyncSession,
     *,
     tenant: Tenant,
     wa_id: str = "201000000001",
@@ -85,21 +88,23 @@ class StubMessaging:
     does, because that decision is the thing under test.
     """
 
-    def __init__(self, session, *, tenant_id, outcome: str = "sent") -> None:
+    def __init__(
+        self, session: AsyncSession, *, tenant_id: uuid.UUID, outcome: str = "sent"
+    ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self.outcome = outcome
         self.texts: list[str] = []
         self.templates: list[tuple[str, str]] = []
 
-    def window_open(self, conversation) -> bool:
+    def window_open(self, conversation: Conversation) -> bool:
         from app.services.messaging_service import SERVICE_WINDOW
 
         if conversation.last_inbound_at is None:
             return False
         return datetime.now(UTC) - conversation.last_inbound_at <= SERVICE_WINDOW
 
-    async def _record(self, conversation_id, *, kind: MessageKind) -> Message:
+    async def _record(self, conversation_id: uuid.UUID, *, kind: MessageKind) -> Message:
         message = Message(
             tenant_id=self._tenant_id,
             conversation_id=conversation_id,
@@ -112,20 +117,29 @@ class StubMessaging:
         await self._session.flush()
         return message
 
-    async def send_text(self, *, conversation_id, body, **kwargs) -> Message:
+    async def send_text(self, *, conversation_id: uuid.UUID, body: str, **kwargs: Any) -> Message:
         if self.outcome == "raise":
             raise ExternalServiceError("The network went away.")
         self.texts.append(body)
         return await self._record(conversation_id, kind=MessageKind.TEXT)
 
-    async def send_template(self, *, conversation_id, name, language, components=None) -> Message:
+    async def send_template(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        name: str,
+        language: str,
+        components: Sequence[Any] | None = None,
+    ) -> Message:
         if self.outcome == "raise":
             raise ExternalServiceError("The network went away.")
         self.templates.append((name, language))
         return await self._record(conversation_id, kind=MessageKind.TEMPLATE)
 
 
-def _service(session, tenant, *, messaging: StubMessaging | None = None) -> FollowUpService:
+def _service(
+    session: AsyncSession, tenant: Tenant, *, messaging: StubMessaging | None = None
+) -> FollowUpService:
     """A service with its sending collaborator injected.
 
     The stub goes in through the constructor rather than by patching a module
@@ -141,7 +155,9 @@ def _service(session, tenant, *, messaging: StubMessaging | None = None) -> Foll
 # --------------------------------------------------------------- tenant isolation
 
 
-async def test_one_workspace_cannot_read_another_workspaces_follow_up(db_session):
+async def test_one_workspace_cannot_read_another_workspaces_follow_up(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, slug="acme")
     rival = await _tenant(db_session, slug="rival")
     conversation = await _conversation(db_session, tenant=acme)
@@ -157,7 +173,7 @@ async def test_one_workspace_cannot_read_another_workspaces_follow_up(db_session
         await FollowUpService(session=db_session, tenant_id=rival.id).get(follow_up.id)
 
 
-async def test_a_follow_up_list_never_crosses_workspaces(db_session):
+async def test_a_follow_up_list_never_crosses_workspaces(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     rival = await _tenant(db_session, slug="rival")
     acme_conversation = await _conversation(db_session, tenant=acme, wa_id="201000000011")
@@ -180,7 +196,9 @@ async def test_a_follow_up_list_never_crosses_workspaces(db_session):
     assert [row.body for row in page.items] == ["Acme nudge"]
 
 
-async def test_a_follow_up_cannot_be_scheduled_on_another_workspaces_conversation(db_session):
+async def test_a_follow_up_cannot_be_scheduled_on_another_workspaces_conversation(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, slug="acme")
     rival = await _tenant(db_session, slug="rival")
     conversation = await _conversation(db_session, tenant=acme)
@@ -197,7 +215,9 @@ async def test_a_follow_up_cannot_be_scheduled_on_another_workspaces_conversatio
 # ----------------------------------------------------------- one pending per conversation
 
 
-async def test_scheduling_twice_reschedules_rather_than_queueing_a_second(db_session):
+async def test_scheduling_twice_reschedules_rather_than_queueing_a_second(
+    db_session: AsyncSession,
+) -> None:
     """Otherwise an agent that schedules every turn stacks up notifications."""
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme)
@@ -223,7 +243,9 @@ async def test_scheduling_twice_reschedules_rather_than_queueing_a_second(db_ses
     assert len(page.items) == 1
 
 
-async def test_the_database_itself_refuses_a_second_pending_follow_up(db_session):
+async def test_the_database_itself_refuses_a_second_pending_follow_up(
+    db_session: AsyncSession,
+) -> None:
     """The service check is a courtesy; this index is the guarantee."""
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme)
@@ -250,7 +272,9 @@ async def test_the_database_itself_refuses_a_second_pending_follow_up(db_session
     await db_session.rollback()
 
 
-async def test_a_conversation_can_be_followed_up_again_after_the_first_is_done(db_session):
+async def test_a_conversation_can_be_followed_up_again_after_the_first_is_done(
+    db_session: AsyncSession,
+) -> None:
     """Partial index: a finished nudge releases the slot."""
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme)
@@ -271,7 +295,7 @@ async def test_a_conversation_can_be_followed_up_again_after_the_first_is_done(d
 # ------------------------------------------------------------------- scheduling rules
 
 
-async def test_a_follow_up_needs_something_to_send(db_session):
+async def test_a_follow_up_needs_something_to_send(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme)
 
@@ -283,7 +307,10 @@ async def test_a_follow_up_needs_something_to_send(db_session):
 
 
 @pytest.mark.parametrize("delay", [timedelta(seconds=5), timedelta(days=400)])
-async def test_a_delay_outside_the_bounds_is_refused(db_session, delay):
+async def test_a_delay_outside_the_bounds_is_refused(
+    db_session: AsyncSession,
+    delay: timedelta,
+) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme)
 
@@ -295,7 +322,7 @@ async def test_a_delay_outside_the_bounds_is_refused(db_session, delay):
         )
 
 
-async def test_a_closed_conversation_cannot_be_followed_up(db_session):
+async def test_a_closed_conversation_cannot_be_followed_up(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme)
     conversation.status = ConversationStatus.CLOSED
@@ -309,7 +336,7 @@ async def test_a_closed_conversation_cannot_be_followed_up(db_session):
         )
 
 
-async def test_an_absolute_time_is_accepted_and_stored(db_session):
+async def test_an_absolute_time_is_accepted_and_stored(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme)
     when = datetime.now(UTC) + timedelta(days=2)
@@ -327,7 +354,7 @@ async def test_an_absolute_time_is_accepted_and_stored(db_session):
 # --------------------------------------------------------------- cancellation on reply
 
 
-async def test_a_customer_reply_cancels_the_waiting_nudge(db_session):
+async def test_a_customer_reply_cancels_the_waiting_nudge(db_session: AsyncSession) -> None:
     """The nudge existed because they went quiet; they have stopped being quiet."""
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme)
@@ -349,7 +376,9 @@ async def test_a_customer_reply_cancels_the_waiting_nudge(db_session):
     assert follow_up.cancelled_reason == "The customer replied."
 
 
-async def test_cancelling_a_conversation_with_nothing_waiting_is_harmless(db_session):
+async def test_cancelling_a_conversation_with_nothing_waiting_is_harmless(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme)
 
@@ -360,7 +389,9 @@ async def test_cancelling_a_conversation_with_nothing_waiting_is_harmless(db_ses
     assert cancelled == 0
 
 
-async def test_cancelling_an_already_sent_follow_up_changes_nothing(db_session):
+async def test_cancelling_an_already_sent_follow_up_changes_nothing(
+    db_session: AsyncSession,
+) -> None:
     """Losing that race is not the caller's mistake, and their intent holds."""
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme)
@@ -381,7 +412,7 @@ async def test_cancelling_an_already_sent_follow_up_changes_nothing(db_session):
     assert result.cancelled_at is None
 
 
-async def test_cancellation_does_not_reach_another_workspace(db_session):
+async def test_cancellation_does_not_reach_another_workspace(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     rival = await _tenant(db_session, slug="rival")
     conversation = await _conversation(db_session, tenant=acme)
@@ -405,7 +436,7 @@ async def test_cancellation_does_not_reach_another_workspace(db_session):
 # -------------------------------------------------------------------- due claiming
 
 
-async def test_only_follow_ups_whose_time_has_come_are_claimed(db_session):
+async def test_only_follow_ups_whose_time_has_come_are_claimed(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     due_conversation = await _conversation(db_session, tenant=acme, wa_id="201000000021")
     later_conversation = await _conversation(db_session, tenant=acme, wa_id="201000000022")
@@ -434,7 +465,7 @@ async def test_only_follow_ups_whose_time_has_come_are_claimed(db_session):
     assert [row.body for row in claimed] == ["Due"]
 
 
-async def test_finished_follow_ups_are_never_claimed(db_session):
+async def test_finished_follow_ups_are_never_claimed(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     now = datetime.now(UTC)
 
@@ -461,7 +492,9 @@ async def test_finished_follow_ups_are_never_claimed(db_session):
     assert await DueFollowUpClaim(db_session).claim_due(now=now) == []
 
 
-async def test_the_claim_crosses_workspaces_because_the_worker_does(db_session):
+async def test_the_claim_crosses_workspaces_because_the_worker_does(
+    db_session: AsyncSession,
+) -> None:
     """The one unscoped query in the codebase, and this is why it exists."""
     acme = await _tenant(db_session, slug="acme")
     rival = await _tenant(db_session, slug="rival")
@@ -484,7 +517,7 @@ async def test_the_claim_crosses_workspaces_because_the_worker_does(db_session):
     assert {row.tenant_id for row in claimed} == {acme.id, rival.id}
 
 
-async def test_a_claim_is_bounded(db_session):
+async def test_a_claim_is_bounded(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     now = datetime.now(UTC)
 
@@ -505,7 +538,7 @@ async def test_a_claim_is_bounded(db_session):
     assert len(claimed) == 2
 
 
-async def test_the_claim_takes_the_oldest_first(db_session):
+async def test_the_claim_takes_the_oldest_first(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     now = datetime.now(UTC)
 
@@ -530,7 +563,7 @@ async def test_the_claim_takes_the_oldest_first(db_session):
 # ------------------------------------------------------- window and template compliance
 
 
-async def test_inside_the_window_a_follow_up_sends_free_text(db_session):
+async def test_inside_the_window_a_follow_up_sends_free_text(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(
         db_session,
@@ -555,7 +588,7 @@ async def test_inside_the_window_a_follow_up_sends_free_text(db_session):
     assert follow_up.message_id is not None
 
 
-async def test_outside_the_window_a_follow_up_uses_its_template(db_session):
+async def test_outside_the_window_a_follow_up_uses_its_template(db_session: AsyncSession) -> None:
     """Meta accepts approved templates only once the 24 hours have passed."""
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(
@@ -582,7 +615,9 @@ async def test_outside_the_window_a_follow_up_uses_its_template(db_session):
     assert messaging.texts == []
 
 
-async def test_outside_the_window_without_a_template_it_is_skipped(db_session):
+async def test_outside_the_window_without_a_template_it_is_skipped(
+    db_session: AsyncSession,
+) -> None:
     """Not sent, and not a failure: sending would breach WhatsApp's rules."""
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(
@@ -610,7 +645,9 @@ async def test_outside_the_window_without_a_template_it_is_skipped(db_session):
     assert "service window" in follow_up.last_error
 
 
-async def test_a_conversation_the_customer_never_wrote_in_has_no_window(db_session):
+async def test_a_conversation_the_customer_never_wrote_in_has_no_window(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme, last_inbound_at=None)
     messaging = StubMessaging(db_session, tenant_id=acme.id)
@@ -628,7 +665,9 @@ async def test_a_conversation_the_customer_never_wrote_in_has_no_window(db_sessi
     assert outcome.status is FollowUpStatus.SKIPPED
 
 
-async def test_a_conversation_closed_before_the_due_time_is_skipped(db_session):
+async def test_a_conversation_closed_before_the_due_time_is_skipped(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(
         db_session,
@@ -653,7 +692,7 @@ async def test_a_conversation_closed_before_the_due_time_is_skipped(db_session):
     assert messaging.texts == []
 
 
-async def test_a_skipped_follow_up_is_not_retried(db_session):
+async def test_a_skipped_follow_up_is_not_retried(db_session: AsyncSession) -> None:
     """Terminal on purpose: the window does not reopen on its own."""
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(
@@ -679,7 +718,9 @@ async def test_a_skipped_follow_up_is_not_retried(db_session):
 # ------------------------------------------------------------------ failure handling
 
 
-async def test_a_rejected_send_is_retried_until_the_attempts_run_out(db_session):
+async def test_a_rejected_send_is_retried_until_the_attempts_run_out(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(
         db_session,
@@ -710,7 +751,7 @@ async def test_a_rejected_send_is_retried_until_the_attempts_run_out(db_session)
     assert follow_up.last_error is not None
 
 
-async def test_a_network_failure_is_recorded_rather_than_raised(db_session):
+async def test_a_network_failure_is_recorded_rather_than_raised(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(
         db_session,
@@ -734,7 +775,9 @@ async def test_a_network_failure_is_recorded_rather_than_raised(db_session):
     assert follow_up.last_error is not None
 
 
-async def test_dispatching_something_already_finished_does_nothing(db_session):
+async def test_dispatching_something_already_finished_does_nothing(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(
         db_session,
@@ -762,7 +805,7 @@ async def test_dispatching_something_already_finished_does_nothing(db_session):
 # --------------------------------------------------------------------- attribution
 
 
-async def test_a_follow_up_records_who_scheduled_it(db_session):
+async def test_a_follow_up_records_who_scheduled_it(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme)
 
@@ -780,7 +823,7 @@ async def test_a_follow_up_records_who_scheduled_it(db_session):
     assert follow_up.reason == "The customer said they would think about it."
 
 
-async def test_pagination_walks_every_follow_up_exactly_once(db_session):
+async def test_pagination_walks_every_follow_up_exactly_once(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     service = FollowUpService(session=db_session, tenant_id=acme.id)
 
@@ -806,7 +849,7 @@ async def test_pagination_walks_every_follow_up_exactly_once(db_session):
     assert len(set(seen)) == 7
 
 
-async def test_a_status_filter_narrows_the_list(db_session):
+async def test_a_status_filter_narrows_the_list(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, slug="acme")
     service = FollowUpService(session=db_session, tenant_id=acme.id)
 
@@ -823,7 +866,9 @@ async def test_a_status_filter_narrows_the_list(db_session):
     assert [row.body for row in page.items] == ["Kept"]
 
 
-async def test_the_repository_finds_the_pending_nudge_for_a_conversation(db_session):
+async def test_the_repository_finds_the_pending_nudge_for_a_conversation(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme)
     service = FollowUpService(session=db_session, tenant_id=acme.id)
@@ -846,7 +891,7 @@ async def test_the_repository_finds_the_pending_nudge_for_a_conversation(db_sess
 # -------------------------------------------------- cancellation through the webhook
 
 
-async def test_an_inbound_webhook_cancels_the_waiting_nudge(db_session):
+async def test_an_inbound_webhook_cancels_the_waiting_nudge(db_session: AsyncSession) -> None:
     """The whole path, not just the service.
 
     Cancellation lives on the inbound path so that a reply stops the nudge
@@ -912,11 +957,12 @@ async def test_an_inbound_webhook_cancels_the_waiting_nudge(db_session):
     await db_session.flush()
 
     assert outcome.cancelled_follow_ups == 1
-    assert follow_up.status is FollowUpStatus.CANCELLED
+    status: FollowUpStatus = follow_up.status
+    assert status is FollowUpStatus.CANCELLED
     assert follow_up.cancelled_reason == "The customer replied."
 
 
-async def test_a_delivery_status_does_not_cancel_a_nudge(db_session):
+async def test_a_delivery_status_does_not_cancel_a_nudge(db_session: AsyncSession) -> None:
     """Only the customer speaking counts. Our own message being delivered is not
     a reply, and treating it as one would cancel every follow-up we scheduled.
     """
@@ -979,7 +1025,9 @@ async def test_a_delivery_status_does_not_cancel_a_nudge(db_session):
     assert follow_up.status is FollowUpStatus.PENDING
 
 
-async def test_a_new_follow_up_can_be_serialised_without_a_further_flush(db_session):
+async def test_a_new_follow_up_can_be_serialised_without_a_further_flush(
+    db_session: AsyncSession,
+) -> None:
     """The 500 a stubbed endpoint test cannot see.
 
     `POST /api/v1/follow-ups` returns the row the service just staged, and the

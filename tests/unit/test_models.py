@@ -23,25 +23,26 @@ from app.db.models import (
     TenantStatus,
     User,
 )
+from tests.fakes import as_table
 
 TENANT_SCOPED_TABLES = ("memberships", "tenant_invitations")
 
 
-def test_expected_tables_are_registered():
+def test_expected_tables_are_registered() -> None:
     expected = {"tenants", "users", "memberships", "tenant_invitations"}
 
     assert expected <= set(Base.metadata.tables)
 
 
-def test_identity_is_global():
+def test_identity_is_global() -> None:
     # Tenancy belongs on the membership, never on the user row.
-    assert "tenant_id" not in User.__table__.columns
+    assert "tenant_id" not in as_table(User.__table__).columns
 
 
-def test_membership_is_unique_per_user_and_tenant():
+def test_membership_is_unique_per_user_and_tenant() -> None:
     unique_column_sets = {
         tuple(sorted(column.name for column in constraint.columns))
-        for constraint in Membership.__table__.constraints
+        for constraint in as_table(Membership.__table__).constraints
         if isinstance(constraint, UniqueConstraint)
     }
 
@@ -49,7 +50,7 @@ def test_membership_is_unique_per_user_and_tenant():
 
 
 @pytest.mark.parametrize("table_name", TENANT_SCOPED_TABLES)
-def test_tenant_scoped_tables_index_tenant_id(table_name):
+def test_tenant_scoped_tables_index_tenant_id(table_name: str) -> None:
     table = Base.metadata.tables[table_name]
     indexed_columns = {column.name for index in table.indexes for column in index.columns}
 
@@ -58,7 +59,7 @@ def test_tenant_scoped_tables_index_tenant_id(table_name):
 
 
 @pytest.mark.parametrize("table_name", TENANT_SCOPED_TABLES)
-def test_tenant_rows_are_removed_with_their_tenant(table_name):
+def test_tenant_rows_are_removed_with_their_tenant(table_name: str) -> None:
     table = Base.metadata.tables[table_name]
     tenant_fk = next(
         foreign_key
@@ -69,14 +70,14 @@ def test_tenant_rows_are_removed_with_their_tenant(table_name):
     assert tenant_fk.ondelete == "CASCADE"
 
 
-def test_invitations_store_only_a_token_hash():
-    columns = set(TenantInvitation.__table__.columns.keys())
+def test_invitations_store_only_a_token_hash() -> None:
+    columns = set(as_table(TenantInvitation.__table__).columns.keys())
 
     assert "token_hash" in columns
     assert "token" not in columns
 
 
-def test_stored_enum_values_are_stable():
+def test_stored_enum_values_are_stable() -> None:
     # These strings live in PostgreSQL enum types: renaming one is a migration,
     # not an edit.
     assert [role.value for role in TenantRole] == ["tenant_owner", "tenant_admin", "member"]
@@ -85,20 +86,22 @@ def test_stored_enum_values_are_stable():
     assert TenantStatus.ACTIVE.value == "active"
 
 
-def test_tenant_is_usable_only_while_live():
+def test_tenant_is_usable_only_while_live() -> None:
     tenant = Tenant(name="Acme", slug="acme", status=TenantStatus.ACTIVE)
     assert tenant.is_active
 
     tenant.status = TenantStatus.SUSPENDED
-    assert not tenant.is_active
+    suspended: bool = tenant.is_active
+    assert not suspended
 
     tenant.status = TenantStatus.ACTIVE
     tenant.deleted_at = datetime(2026, 8, 21, tzinfo=UTC)
-    assert not tenant.is_active
+    deleted: bool = tenant.is_active
+    assert not deleted
     assert tenant.is_deleted
 
 
-def test_platform_role_is_opt_in():
+def test_platform_role_is_opt_in() -> None:
     assert not User(email="member@example.com").is_platform_staff
     staff = User(email="staff@example.com", platform_role=PlatformRole.PLATFORM_OWNER)
     assert staff.is_platform_staff
@@ -112,12 +115,12 @@ def test_platform_role_is_opt_in():
         (TenantRole.MEMBER, False),
     ],
 )
-def test_only_owners_and_admins_administer_a_tenant(role, expected):
+def test_only_owners_and_admins_administer_a_tenant(role: TenantRole, expected: bool) -> None:
     membership = Membership(role=role, status=MembershipStatus.ACTIVE)
     assert membership.can_administer_tenant is expected
 
 
-def test_a_revoked_membership_administers_nothing_whatever_its_role():
+def test_a_revoked_membership_administers_nothing_whatever_its_role() -> None:
     """The role survives revocation on the row - it is what somebody is
     readmitted at - so the property has to check the status as well.
 
@@ -132,7 +135,7 @@ def test_a_revoked_membership_administers_nothing_whatever_its_role():
     assert membership.can_administer_tenant is False
 
 
-def test_invitation_is_open_until_revoked_or_expired():
+def test_invitation_is_open_until_revoked_or_expired() -> None:
     now = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
     invitation = TenantInvitation(
         email="new@example.com",

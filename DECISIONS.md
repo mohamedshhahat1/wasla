@@ -3720,3 +3720,67 @@ Only the API's pool is observable. A worker running out of connections shows up
 as queue depth and job latency rather than directly, and that is written down
 in `docs/OBSERVABILITY.md` rather than left for somebody to infer from an
 absent series.
+
+---
+
+## ADR-086 — The Test Suite Is Type-Checked Too, and the Fakes Are Named
+
+**Context.** CI ran `mypy app` — 231 modules, 51,045 lines. The code that
+calls those modules is mostly somewhere else: 197 test modules and 68,760
+lines, more than the application itself, where every stand-in, every fixture
+and every helper calls an application API and is believed to describe it.
+
+`pyproject.toml` carried
+`[[tool.mypy.overrides]] module = ["tests.*"] disallow_untyped_defs = false`,
+which is the conventional exemption, and it had the conventional effect: a test
+could pass `None` to a parameter typed `uuid.UUID`, a stub could return a
+narrower type than the repository it stands for, and nothing said so.
+
+Turning the check on produced 2,107 errors.
+
+**Decision.**
+
+**No `tests.*` override at all, rather than the sanctioned one.** This was
+settled by measurement, not preference: restoring
+`disallow_untyped_defs = false` removes 47 of 739 remaining errors. The other
+692 come from `disallow_incomplete_defs`, `disallow_untyped_calls` and
+`check_untyped_defs`, which the override does not touch. The exemption everyone
+reaches for buys 6% of the work and costs the whole guarantee, so the suite is
+checked under the same strict settings as `app` with no per-module relaxation.
+
+**One named conversion function per stand-in family, in `tests/fakes.py`,
+instead of `cast(Any, ...)` at the call site.** A fake WhatsApp client handed to
+a service typed against the real one needs *something* at the boundary. Scatter
+`cast(Any, ...)` and there are a hundred of them, each individually invisible
+and collectively a hole; the type checker is then being asked to ignore exactly
+the seam that most needs checking. Twenty-one functions — `as_session`,
+`as_whatsapp`, `as_embeddings`, `as_messaging` and so on — each carry a
+docstring saying which protocol the stand-in is claiming to satisfy. They are
+greppable, countable, and reviewable as a list, which a cast never is.
+
+`as_table` is the exception that proves the shape is right: it is a real
+narrowing, `assert isinstance(clause, Table)`, and during this work it failed
+loudly on ten model tests where a rewrite had wrapped the class instead of its
+`__table__`. A cast would have passed all ten and left the tests asserting
+against the wrong object.
+
+**CI runs `mypy app tests`.** Proved by mutation rather than asserted: a test
+helper calling `AuthService.register(workspace_slug=12345)` fails
+`mypy app tests` with an `arg-type` error and passes `mypy app` with
+"Success: no issues found". The old command could not see the seam it was
+supposed to be guarding.
+
+**Consequences.** The typing pass found five tests asserting something weaker
+than their names claimed — a lead "entered by a person" whose actor was `NULL`
+and therefore exempt from the foreign key; a stub subscription repository that
+could not represent a workspace without a subscription; a stub media reader
+that could not represent a missing file; a subclass taken through a variable,
+which made its base `Any` and hid every inherited return type; and a
+parametrised delay whose call had been rewritten to match a wrong annotation.
+None of these was a type error anyone had been shown. They are the argument for
+the change, and they are why the exemption was worth removing rather than
+narrowing.
+
+The cost is real: annotating 175 files is a large diff, and future test code
+must be annotated to land. That is the intended trade. A test suite is a claim
+about how the application is called, and an unchecked claim is a comment.

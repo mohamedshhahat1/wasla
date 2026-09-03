@@ -26,6 +26,8 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -64,7 +66,7 @@ def _s3_or_skip() -> S3MediaStorage:
 
 
 @pytest.fixture(params=["local", "s3"])
-def storage(request, tmp_path) -> Iterator[MediaStorage]:
+def storage(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[MediaStorage]:
     """One body, both backends. A divergence fails on the parameter that has it."""
     if request.param == "local":
         yield LocalMediaStorage(tmp_path)
@@ -75,13 +77,15 @@ def storage(request, tmp_path) -> Iterator[MediaStorage]:
 # ============================================== the contract, on both backends
 
 
-async def test_what_is_put_comes_back_byte_for_byte(storage) -> None:
+async def test_what_is_put_comes_back_byte_for_byte(storage: MediaStorage) -> None:
     key = await storage.put(tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
 
     assert await storage.get(key) == PNG
 
 
-async def test_a_key_is_tenant_prefixed_and_matches_the_shared_pattern(storage) -> None:
+async def test_a_key_is_tenant_prefixed_and_matches_the_shared_pattern(
+    storage: MediaStorage,
+) -> None:
     """Both backends produce keys from the same `build_key`.
 
     That is what lets a deployment move between them: a key written by one is
@@ -95,7 +99,7 @@ async def test_a_key_is_tenant_prefixed_and_matches_the_shared_pattern(storage) 
     assert SAFE_KEY.match(key)
 
 
-async def test_a_key_is_never_built_from_the_content_or_a_filename(storage) -> None:
+async def test_a_key_is_never_built_from_the_content_or_a_filename(storage: MediaStorage) -> None:
     """A customer's filename arrives from a stranger's phone. It builds nothing."""
     key = await storage.put(tenant_id=uuid.uuid4(), data=b"invoice.pdf %PDF-1.7", mime_type=None)
 
@@ -103,7 +107,7 @@ async def test_a_key_is_never_built_from_the_content_or_a_filename(storage) -> N
     assert "pdf" not in key.rsplit("/", 1)[-1].split(".")[0]
 
 
-async def test_two_workspaces_never_share_a_prefix(storage) -> None:
+async def test_two_workspaces_never_share_a_prefix(storage: MediaStorage) -> None:
     first, second = uuid.uuid4(), uuid.uuid4()
 
     one = await storage.put(tenant_id=first, data=PNG, mime_type="image/png")
@@ -113,7 +117,7 @@ async def test_two_workspaces_never_share_a_prefix(storage) -> None:
     assert not one.startswith(f"{second}/")
 
 
-async def test_one_workspaces_key_never_returns_anothers_bytes(storage) -> None:
+async def test_one_workspaces_key_never_returns_anothers_bytes(storage: MediaStorage) -> None:
     """Key separation is not authorization, and it is still worth asserting."""
     one = await storage.put(tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
     two = await storage.put(tenant_id=uuid.uuid4(), data=PDF, mime_type="application/pdf")
@@ -122,7 +126,7 @@ async def test_one_workspaces_key_never_returns_anothers_bytes(storage) -> None:
     assert await storage.get(two) == PDF
 
 
-async def test_reading_a_key_that_was_never_stored_fails_cleanly(storage) -> None:
+async def test_reading_a_key_that_was_never_stored_fails_cleanly(storage: MediaStorage) -> None:
     absent = f"{uuid.uuid4()}/2026/09/{uuid.uuid4()}.png"
 
     with pytest.raises(StorageError):
@@ -139,13 +143,15 @@ async def test_reading_a_key_that_was_never_stored_fails_cleanly(storage) -> Non
         "tenant/2026/09/file.png\x00.txt",
     ],
 )
-async def test_a_key_that_is_not_one_we_produced_is_refused(storage, key: str) -> None:
+async def test_a_key_that_is_not_one_we_produced_is_refused(
+    storage: MediaStorage, key: str
+) -> None:
     """A key read back from a database row is input, whatever wrote it."""
     with pytest.raises(StorageError):
         await storage.get(key)
 
 
-async def test_deleting_removes_the_object(storage) -> None:
+async def test_deleting_removes_the_object(storage: MediaStorage) -> None:
     key = await storage.put(tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
 
     await storage.delete(key)
@@ -154,7 +160,7 @@ async def test_deleting_removes_the_object(storage) -> None:
         await storage.get(key)
 
 
-async def test_deleting_is_idempotent(storage) -> None:
+async def test_deleting_is_idempotent(storage: MediaStorage) -> None:
     """The retention sweep retries, and a second delete must be a no-op.
 
     Without this a partially-failed pass could never be safely re-run: the
@@ -168,19 +174,19 @@ async def test_deleting_is_idempotent(storage) -> None:
     await storage.delete(f"{uuid.uuid4()}/2026/09/{uuid.uuid4()}.png")
 
 
-async def test_a_key_that_escapes_cannot_be_deleted_either(storage) -> None:
+async def test_a_key_that_escapes_cannot_be_deleted_either(storage: MediaStorage) -> None:
     with pytest.raises(StorageError):
         await storage.delete("../../etc/passwd")
 
 
-async def test_an_empty_file_round_trips(storage) -> None:
+async def test_an_empty_file_round_trips(storage: MediaStorage) -> None:
     """Nothing upstream stores one, and a store that could not would be surprising."""
     key = await storage.put(tenant_id=uuid.uuid4(), data=b"", mime_type="text/plain")
 
     assert await storage.get(key) == b""
 
 
-async def test_a_large_file_round_trips(storage) -> None:
+async def test_a_large_file_round_trips(storage: MediaStorage) -> None:
     """A megabyte, which is an ordinary voice note and not an ordinary test string."""
     payload = bytes(range(256)) * 4096
     key = await storage.put(tenant_id=uuid.uuid4(), data=payload, mime_type="audio/ogg")
@@ -285,7 +291,7 @@ async def test_an_unreachable_store_is_a_storage_error_not_an_httpx_error() -> N
 # ================================================================ the factory
 
 
-def _settings(**overrides) -> Settings:
+def _settings(**overrides: Any) -> Settings:
     return Settings(
         _env_file=None,
         environment="test",

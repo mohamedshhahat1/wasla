@@ -30,12 +30,13 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
@@ -68,7 +69,7 @@ class _Infra:
         self.commands = self
 
     @property
-    def client(self):
+    def client(self) -> _Infra:
         return self.commands
 
     async def incr(self, key: str) -> int:
@@ -84,7 +85,7 @@ class _Infra:
         return None
 
 
-def _settings(**overrides: object) -> Settings:
+def _settings(**overrides: Any) -> Settings:
     values: dict[str, object] = {
         "environment": "test",
         "log_format": "console",
@@ -235,7 +236,9 @@ async def _collected(session: AsyncSession, tenant: Tenant) -> tuple[Invoice, Pa
 
 
 @pytest.mark.parametrize("role", [TenantRole.MEMBER, TenantRole.TENANT_ADMIN])
-async def test_only_an_owner_may_start_a_checkout(http, app, db_session, role):
+async def test_only_an_owner_may_start_a_checkout(
+    http: AsyncClient, app: FastAPI, db_session: AsyncSession, role: TenantRole
+) -> None:
     """An administrator runs the workspace; an owner spends its money.
 
     Somebody who can invite colleagues and configure agents is not thereby
@@ -252,7 +255,9 @@ async def test_only_an_owner_may_start_a_checkout(http, app, db_session, role):
 
 
 @pytest.mark.parametrize("role", [TenantRole.MEMBER, TenantRole.TENANT_ADMIN])
-async def test_only_an_owner_may_refund(http, app, db_session, role):
+async def test_only_an_owner_may_refund(
+    http: AsyncClient, app: FastAPI, db_session: AsyncSession, role: TenantRole
+) -> None:
     """The one action that moves money *out* takes the highest role there is."""
     tenant, user = await _workspace_rows(db_session, "acme")
     _, payment = await _collected(db_session, tenant)
@@ -264,7 +269,9 @@ async def test_only_an_owner_may_refund(http, app, db_session, role):
 
 
 @pytest.mark.parametrize("role", [TenantRole.MEMBER, TenantRole.TENANT_ADMIN])
-async def test_only_an_owner_may_read_a_payment(http, app, db_session, role):
+async def test_only_an_owner_may_read_a_payment(
+    http: AsyncClient, app: FastAPI, db_session: AsyncSession, role: TenantRole
+) -> None:
     """What the company paid is not something every colleague may read.
 
     The same line `GET /invoices` draws, and drawn here too because a payment
@@ -279,7 +286,9 @@ async def test_only_an_owner_may_read_a_payment(http, app, db_session, role):
     assert response.status_code == 403
 
 
-async def test_an_owner_may_do_all_three(http, app, db_session):
+async def test_an_owner_may_do_all_three(
+    http: AsyncClient, app: FastAPI, db_session: AsyncSession
+) -> None:
     """The other half: the restriction is a role check, not a broken route."""
     tenant, user = await _workspace_rows(db_session, "acme")
     plan = await _plan(db_session)
@@ -297,10 +306,10 @@ async def test_an_owner_may_do_all_three(http, app, db_session):
 
 
 async def test_another_workspaces_payment_is_not_found_rather_than_forbidden(
-    http,
-    app,
-    db_session,
-):
+    http: AsyncClient,
+    app: FastAPI,
+    db_session: AsyncSession,
+) -> None:
     """404, deliberately, and it is the difference that matters.
 
     A 403 would confirm the id names a real payment - which is exactly what
@@ -321,10 +330,10 @@ async def test_another_workspaces_payment_is_not_found_rather_than_forbidden(
 
 
 async def test_a_checkout_cannot_be_started_against_another_workspaces_invoice(
-    http,
-    app,
-    db_session,
-):
+    http: AsyncClient,
+    app: FastAPI,
+    db_session: AsyncSession,
+) -> None:
     """Paying somebody else's bill is not generosity, it is a way in.
 
     A settled invoice moves that workspace's subscription out of `past_due`, so
@@ -344,7 +353,9 @@ async def test_a_checkout_cannot_be_started_against_another_workspaces_invoice(
     assert response.status_code == 404
 
 
-async def test_a_private_plan_cannot_be_bought_by_naming_its_code(http, app, db_session):
+async def test_a_private_plan_cannot_be_bought_by_naming_its_code(
+    http: AsyncClient, app: FastAPI, db_session: AsyncSession
+) -> None:
     """The catalogue filter is a display rule; this is the authorization rule.
 
     `GET /billing/plans` hides a bespoke plan, and hiding is not preventing.
@@ -362,7 +373,7 @@ async def test_a_private_plan_cannot_be_bought_by_naming_its_code(http, app, db_
 
     # Compared without the request id, which is per-request by design and is
     # the only thing that legitimately differs between the two answers.
-    def _said(response) -> tuple[str, str]:
+    def _said(response: Response) -> tuple[str, str]:
         error = response.json()["error"]
         return error["code"], error["message"]
 
@@ -373,10 +384,10 @@ async def test_a_private_plan_cannot_be_bought_by_naming_its_code(http, app, db_
 
 
 async def test_a_client_cannot_ask_to_be_charged_a_figure_of_its_choosing(
-    http,
-    app,
-    db_session,
-):
+    http: AsyncClient,
+    app: FastAPI,
+    db_session: AsyncSession,
+) -> None:
     """`extra="forbid"`, so trying is a 422 rather than a field ignored.
 
     A quietly-ignored `amount` is indistinguishable from a working one to
@@ -394,7 +405,9 @@ async def test_a_client_cannot_ask_to_be_charged_a_figure_of_its_choosing(
     assert response.status_code == 422
 
 
-async def test_a_checkout_must_name_exactly_one_thing_to_pay_for(http, app, db_session):
+async def test_a_checkout_must_name_exactly_one_thing_to_pay_for(
+    http: AsyncClient, app: FastAPI, db_session: AsyncSession
+) -> None:
     tenant, user = await _workspace_rows(db_session, "acme")
     _act_as(app, tenant, user, TenantRole.TENANT_OWNER)
 
@@ -409,10 +422,10 @@ async def test_a_checkout_must_name_exactly_one_thing_to_pay_for(http, app, db_s
 
 
 async def test_the_client_secret_travels_only_inside_the_redirect_url(
-    http,
-    app,
-    db_session,
-):
+    http: AsyncClient,
+    app: FastAPI,
+    db_session: AsyncSession,
+) -> None:
     """It is a bearer token for one payment page.
 
     The browser has to carry it, so it is in the URL. A field of its own would
@@ -434,7 +447,9 @@ async def test_the_client_secret_travels_only_inside_the_redirect_url(
     assert CLIENT_SECRET not in polled.text
 
 
-async def test_no_response_carries_a_credential_of_ours(http, app, db_session):
+async def test_no_response_carries_a_credential_of_ours(
+    http: AsyncClient, app: FastAPI, db_session: AsyncSession
+) -> None:
     """The secret key and the HMAC secret belong to the deployment, not a page.
 
     Either one in a response body would let any authenticated customer create
@@ -457,10 +472,10 @@ async def test_no_response_carries_a_credential_of_ours(http, app, db_session):
 
 
 async def test_a_polled_payment_reports_pending_rather_than_pretending(
-    http,
-    app,
-    db_session,
-):
+    http: AsyncClient,
+    app: FastAPI,
+    db_session: AsyncSession,
+) -> None:
     """The state a client must not read as failure.
 
     3-D Secure and several local methods complete after the customer has
@@ -479,7 +494,9 @@ async def test_a_polled_payment_reports_pending_rather_than_pretending(
     assert polled["invoice_id"] == started["invoice_id"]
 
 
-async def test_a_requested_refund_says_pending_rather_than_refunded(http, app, db_session):
+async def test_a_requested_refund_says_pending_rather_than_refunded(
+    http: AsyncClient, app: FastAPI, db_session: AsyncSession
+) -> None:
     """202 and `refund_pending`, because the money has not moved yet.
 
     A client rendering "refunded" from this response would tell a customer
@@ -518,7 +535,9 @@ async def _saved_card(session: AsyncSession, tenant: Tenant, *, token: str) -> P
 
 
 @pytest.mark.parametrize("role", [TenantRole.MEMBER, TenantRole.TENANT_ADMIN])
-async def test_only_an_owner_may_read_saved_cards(http, app, db_session, role):
+async def test_only_an_owner_may_read_saved_cards(
+    http: AsyncClient, app: FastAPI, db_session: AsyncSession, role: TenantRole
+) -> None:
     """Which card the company pays with is not everyone's business.
 
     The same line invoices draw, and drawn here because a saved card names a
@@ -534,7 +553,9 @@ async def test_only_an_owner_may_read_saved_cards(http, app, db_session, role):
 
 
 @pytest.mark.parametrize("role", [TenantRole.MEMBER, TenantRole.TENANT_ADMIN])
-async def test_only_an_owner_may_change_which_card_renewals_use(http, app, db_session, role):
+async def test_only_an_owner_may_change_which_card_renewals_use(
+    http: AsyncClient, app: FastAPI, db_session: AsyncSession, role: TenantRole
+) -> None:
     """Pointing automatic renewals at a different card is a billing decision."""
     tenant, user = await _workspace_rows(db_session, "acme")
     method = await _saved_card(db_session, tenant, token=f"tok-{uuid.uuid4().hex[:8]}")
@@ -547,7 +568,9 @@ async def test_only_an_owner_may_change_which_card_renewals_use(http, app, db_se
     assert removed.status_code == 403
 
 
-async def test_an_owner_may_manage_saved_cards(http, app, db_session):
+async def test_an_owner_may_manage_saved_cards(
+    http: AsyncClient, app: FastAPI, db_session: AsyncSession
+) -> None:
     """The other half: the restriction is a role check, not a broken route."""
     tenant, user = await _workspace_rows(db_session, "acme")
     method = await _saved_card(db_session, tenant, token=f"tok-{uuid.uuid4().hex[:8]}")
@@ -564,7 +587,9 @@ async def test_an_owner_may_manage_saved_cards(http, app, db_session):
     assert removed.json()["is_default"] is False
 
 
-async def test_another_workspaces_card_is_not_found(http, app, db_session):
+async def test_another_workspaces_card_is_not_found(
+    http: AsyncClient, app: FastAPI, db_session: AsyncSession
+) -> None:
     """404 on an object that can be charged, which is where it matters most."""
     acme, acme_user = await _workspace_rows(db_session, "acme")
     globex, _ = await _workspace_rows(db_session, "globex")
@@ -580,7 +605,9 @@ async def test_another_workspaces_card_is_not_found(http, app, db_session):
     assert listed.json() == [], "another workspace's card is invisible, not merely unusable"
 
 
-async def test_the_card_token_never_leaves_through_the_api(http, app, db_session):
+async def test_the_card_token_never_leaves_through_the_api(
+    http: AsyncClient, app: FastAPI, db_session: AsyncSession
+) -> None:
     """It is what charges the card, and a client has no use for it.
 
     A response carrying it would be one more place it could be logged, cached

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -21,21 +22,29 @@ import yaml
 WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 
 
-def _load(name: str) -> dict:
+def _load(name: str) -> dict[Any, Any]:
+    """One workflow document.
+
+    The key type is `Any` rather than `str` for one specific reason: YAML's
+    `on:` is parsed by PyYAML as the boolean `True`, and this file reads it.
+    """
     with (WORKFLOWS / name).open(encoding="utf-8") as handle:
-        return yaml.safe_load(handle)
+        document: dict[Any, Any] = yaml.safe_load(handle)
+        return document
 
 
-def _steps(workflow: dict, job: str) -> list[dict]:
-    return workflow["jobs"][job]["steps"]
+def _steps(workflow: dict[Any, Any], job: str) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = workflow["jobs"][job]["steps"]
+    return steps
 
 
 def _text(value: object) -> str:
-    return yaml.safe_dump(value)
+    rendered: str = yaml.safe_dump(value)
+    return rendered
 
 
 @pytest.mark.parametrize("name", ["ci.yml", "security.yml", "deploy.yml"])
-def test_every_workflow_parses(name: str):
+def test_every_workflow_parses(name: str) -> None:
     """A workflow that does not parse does not run, and GitHub reports that
     quietly enough to miss."""
     workflow = _load(name)
@@ -44,7 +53,7 @@ def test_every_workflow_parses(name: str):
 
 
 @pytest.mark.parametrize("name", ["ci.yml", "security.yml", "deploy.yml"])
-def test_every_workflow_declares_its_permissions(name: str):
+def test_every_workflow_declares_its_permissions(name: str) -> None:
     """The default token is broad. Every workflow narrows it, so a compromised
     action cannot do more than the workflow needs."""
     workflow = _load(name)
@@ -52,7 +61,7 @@ def test_every_workflow_declares_its_permissions(name: str):
     assert "permissions" in workflow, f"{name} does not narrow its token"
 
 
-def test_deployment_waits_for_ci_rather_than_repeating_it():
+def test_deployment_waits_for_ci_rather_than_repeating_it() -> None:
     """ "Do not deploy if tests fail" as a dependency, not a second copy of the
     test job that could drift from the first."""
     deploy = _load("deploy.yml")
@@ -64,13 +73,13 @@ def test_deployment_waits_for_ci_rather_than_repeating_it():
     assert triggers["workflow_run"]["branches"] == ["main"]
 
 
-def test_a_failed_ci_run_publishes_nothing():
+def test_a_failed_ci_run_publishes_nothing() -> None:
     condition = _load("deploy.yml")["jobs"]["publish"]["if"]
 
     assert "conclusion == 'success'" in condition
 
 
-def test_publishing_checks_out_the_commit_ci_verified():
+def test_publishing_checks_out_the_commit_ci_verified() -> None:
     """Between CI finishing and this starting, main may have moved. Publishing
     the branch head would ship a commit no test ever saw."""
     checkout = next(
@@ -82,7 +91,7 @@ def test_publishing_checks_out_the_commit_ci_verified():
     assert "workflow_run.head_sha" in checkout["with"]["ref"]
 
 
-def test_the_deployed_image_is_named_by_digest():
+def test_the_deployed_image_is_named_by_digest() -> None:
     """A tag can be moved; a digest is the image that was built and scanned."""
     publish = _load("deploy.yml")["jobs"]["publish"]
 
@@ -90,13 +99,13 @@ def test_the_deployed_image_is_named_by_digest():
     assert "digest" in publish["outputs"]["image"] or "reference" in _text(publish["outputs"])
 
 
-def test_the_published_image_is_scanned():
+def test_the_published_image_is_scanned() -> None:
     steps = _text(_steps(_load("deploy.yml"), "publish"))
 
     assert "trivy-action" in steps
 
 
-def test_a_deployment_without_a_target_fails_rather_than_pretending():
+def test_a_deployment_without_a_target_fails_rather_than_pretending() -> None:
     """A workflow that "succeeds" without touching a server is worse than one
     that fails: the green tick is read as "it shipped"."""
     steps = _text(_steps(_load("deploy.yml"), "deploy"))
@@ -105,7 +114,7 @@ def test_a_deployment_without_a_target_fails_rather_than_pretending():
     assert "exit 1" in steps
 
 
-def test_the_deploy_host_key_is_pinned():
+def test_the_deploy_host_key_is_pinned() -> None:
     """Trusting an unknown host on first connection is how a deploy ends up
     talking to somebody else's server."""
     steps = _text(_steps(_load("deploy.yml"), "deploy"))
@@ -114,7 +123,7 @@ def test_the_deploy_host_key_is_pinned():
     assert "StrictHostKeyChecking=no" not in steps
 
 
-def test_migrations_run_before_the_new_version_serves():
+def test_migrations_run_before_the_new_version_serves() -> None:
     steps = _text(_steps(_load("deploy.yml"), "deploy"))
     migrate = steps.index("run --rm migrate")
     start = steps.index("up -d --wait")
@@ -122,7 +131,7 @@ def test_migrations_run_before_the_new_version_serves():
     assert migrate < start, "the new version would serve against an unmigrated schema"
 
 
-def test_the_deployment_is_verified_rather_than_assumed():
+def test_the_deployment_is_verified_rather_than_assumed() -> None:
     """A deployment is finished when the thing it started answers, not when the
     command that started it exits zero."""
     steps = _text(_steps(_load("deploy.yml"), "deploy"))
@@ -136,7 +145,7 @@ def test_the_deployment_is_verified_rather_than_assumed():
 CI_ONLY_VALUES = ("continuous-integration-secret-value-not-for-deployment",)
 
 
-def test_the_deployment_workflows_write_no_credential_literally():
+def test_the_deployment_workflows_write_no_credential_literally() -> None:
     """Every credential on the path to a server is a reference to a secret. A
     literal would be in the git history for good.
 
@@ -166,7 +175,7 @@ def test_the_deployment_workflows_write_no_credential_literally():
             ), f"{name} may assign a literal credential: {stripped}"
 
 
-def test_every_ci_jwt_secret_is_generated_or_announces_itself():
+def test_every_ci_jwt_secret_is_generated_or_announces_itself() -> None:
     """Two assignment forms, and they now answer to different rules.
 
     The pytest job sets `JWT_SECRET:` as YAML env and runs as `ENVIRONMENT=test`,
@@ -208,7 +217,7 @@ def test_every_ci_jwt_secret_is_generated_or_announces_itself():
         ), f"an unrecognised literal secret appeared in ci.yml: {line}"
 
 
-def test_the_security_workflow_scans_dependencies_secrets_and_the_image():
+def test_the_security_workflow_scans_dependencies_secrets_and_the_image() -> None:
     """All three, because they fail differently: a vulnerable dependency, a
     leaked credential, and a base image nobody has rebuilt."""
     jobs = _load("security.yml")["jobs"]
@@ -219,7 +228,7 @@ def test_the_security_workflow_scans_dependencies_secrets_and_the_image():
     assert "trivy-action" in _text(jobs["image"])
 
 
-def test_a_pull_request_is_not_failed_by_an_unfixable_finding():
+def test_a_pull_request_is_not_failed_by_an_unfixable_finding() -> None:
     """A gate nobody can pass is a gate people learn to bypass. Unfixable
     findings are reported by the second scan, which never fails."""
     image_job = _load("security.yml")["jobs"]["image"]

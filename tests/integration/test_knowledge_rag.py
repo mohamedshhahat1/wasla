@@ -9,8 +9,10 @@ here: that one company's question cannot reach another company's documents.
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ExternalServiceError, TenantIsolationError, ValidationError
 from app.db.models.knowledge import DocumentSource, DocumentStatus
@@ -19,6 +21,7 @@ from app.repositories.knowledge_repository import DocumentChunkRepository
 from app.services.knowledge_service import KnowledgeService
 from app.services.retrieval_service import RetrievalService
 from tests.fake_embeddings import BrokenEmbeddings, FakeEmbeddings
+from tests.fakes import as_embeddings
 
 pytestmark = pytest.mark.integration
 
@@ -50,14 +53,21 @@ photographs. The gold package covers a full day and includes an album.
 """
 
 
-async def _tenant(session, *, slug):
+async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _ingested(session, *, tenant, title, text, embeddings=None):
+async def _ingested(
+    session: AsyncSession,
+    *,
+    tenant: Tenant,
+    title: str,
+    text: str,
+    embeddings: FakeEmbeddings | BrokenEmbeddings | None = None,
+) -> tuple[Any, ...]:
     """Submit and ingest a document, returning it ready to retrieve."""
     knowledge = KnowledgeService(session=session, tenant_id=tenant.id)
     base = await knowledge.ensure_default_knowledge_base()
@@ -68,20 +78,24 @@ async def _ingested(session, *, tenant, title, text, embeddings=None):
     )
     await knowledge.ingest(
         document_id=document.id,
-        embeddings=embeddings or FakeEmbeddings(),
+        embeddings=as_embeddings(embeddings or FakeEmbeddings()),
     )
     return base, document
 
 
-def _service(session, tenant, embeddings=None):
+def _service(
+    session: AsyncSession,
+    tenant: Tenant,
+    embeddings: FakeEmbeddings | BrokenEmbeddings | None = None,
+) -> RetrievalService:
     return RetrievalService(
         session=session,
         tenant_id=tenant.id,
-        embeddings=embeddings or FakeEmbeddings(),
+        embeddings=as_embeddings(embeddings or FakeEmbeddings()),
     )
 
 
-async def test_a_document_becomes_retrievable_chunks(db_session):
+async def test_a_document_becomes_retrievable_chunks(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
 
     _, document = await _ingested(
@@ -103,7 +117,7 @@ async def test_a_document_becomes_retrievable_chunks(db_session):
     assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
 
 
-async def test_a_question_finds_the_passage_that_answers_it(db_session):
+async def test_a_question_finds_the_passage_that_answers_it(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     await _ingested(db_session, tenant=tenant, title="Prices", text=FINISHING_PRICES)
     await _ingested(db_session, tenant=tenant, title="Returns", text=RETURNS_POLICY)
@@ -117,7 +131,7 @@ async def test_a_question_finds_the_passage_that_answers_it(db_session):
     assert found.passages[0].document_title == "Prices"
 
 
-async def test_the_nearest_passage_comes_first(db_session):
+async def test_the_nearest_passage_comes_first(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     await _ingested(db_session, tenant=tenant, title="Prices", text=FINISHING_PRICES)
     await _ingested(db_session, tenant=tenant, title="Returns", text=RETURNS_POLICY)
@@ -129,7 +143,7 @@ async def test_the_nearest_passage_comes_first(db_session):
     assert distances == sorted(distances)
 
 
-async def test_a_question_about_nothing_stored_finds_nothing(db_session):
+async def test_a_question_about_nothing_stored_finds_nothing(db_session: AsyncSession) -> None:
     """The distance threshold is what stops a least-bad match being returned."""
     tenant = await _tenant(db_session, slug="acme")
     await _ingested(db_session, tenant=tenant, title="Prices", text=FINISHING_PRICES)
@@ -141,7 +155,9 @@ async def test_a_question_about_nothing_stored_finds_nothing(db_session):
     assert found.is_empty
 
 
-async def test_an_empty_knowledge_base_answers_empty_rather_than_failing(db_session):
+async def test_an_empty_knowledge_base_answers_empty_rather_than_failing(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session, slug="acme")
     knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
     await knowledge.ensure_default_knowledge_base()
@@ -152,7 +168,7 @@ async def test_an_empty_knowledge_base_answers_empty_rather_than_failing(db_sess
     assert found.passages == ()
 
 
-async def test_an_empty_result_tells_the_model_not_to_guess(db_session):
+async def test_an_empty_result_tells_the_model_not_to_guess(db_session: AsyncSession) -> None:
     """The wording is load-bearing.
 
     A model handed an empty string fills the silence from its training data. It
@@ -168,7 +184,7 @@ async def test_an_empty_result_tells_the_model_not_to_guess(db_session):
     assert "rather than guessing" in context.lower()
 
 
-async def test_one_workspace_cannot_retrieve_anothers_documents(db_session):
+async def test_one_workspace_cannot_retrieve_anothers_documents(db_session: AsyncSession) -> None:
     """The single most important test in this file."""
     mine = await _tenant(db_session, slug="mine")
     theirs = await _tenant(db_session, slug="theirs")
@@ -187,7 +203,7 @@ async def test_one_workspace_cannot_retrieve_anothers_documents(db_session):
     assert found.is_empty
 
 
-async def test_a_search_returns_only_the_asking_workspaces_chunks(db_session):
+async def test_a_search_returns_only_the_asking_workspaces_chunks(db_session: AsyncSession) -> None:
     """Both workspaces hold the same text; each sees only its own copy."""
     mine = await _tenant(db_session, slug="mine")
     theirs = await _tenant(db_session, slug="theirs")
@@ -211,7 +227,7 @@ async def test_a_search_returns_only_the_asking_workspaces_chunks(db_session):
     assert my_document.id != their_document.id
 
 
-async def test_a_knowledge_base_filter_stays_inside_the_workspace(db_session):
+async def test_a_knowledge_base_filter_stays_inside_the_workspace(db_session: AsyncSession) -> None:
     mine = await _tenant(db_session, slug="mine")
     theirs = await _tenant(db_session, slug="theirs")
     _, _ = await _ingested(db_session, tenant=mine, title="Mine", text=RETURNS_POLICY)
@@ -231,7 +247,7 @@ async def test_a_knowledge_base_filter_stays_inside_the_workspace(db_session):
     assert found.is_empty
 
 
-async def test_submitting_the_same_text_twice_is_one_document(db_session):
+async def test_submitting_the_same_text_twice_is_one_document(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
     base = await knowledge.ensure_default_knowledge_base()
@@ -252,7 +268,7 @@ async def test_submitting_the_same_text_twice_is_one_document(db_session):
     assert first.id == second.id
 
 
-async def test_ingesting_twice_does_not_double_the_chunks(db_session):
+async def test_ingesting_twice_does_not_double_the_chunks(db_session: AsyncSession) -> None:
     """Re-ingestion replaces chunks; a duplicated job must change nothing."""
     tenant = await _tenant(db_session, slug="acme")
     _, document = await _ingested(
@@ -265,14 +281,14 @@ async def test_ingesting_twice_does_not_double_the_chunks(db_session):
 
     knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
     await knowledge.reingest(document.id)
-    await knowledge.ingest(document_id=document.id, embeddings=FakeEmbeddings())
+    await knowledge.ingest(document_id=document.id, embeddings=as_embeddings(FakeEmbeddings()))
 
     chunks = DocumentChunkRepository(db_session, tenant_id=tenant.id)
     assert await chunks.count_for_document(document_id=document.id) == first_count
     assert document.chunk_count == first_count
 
 
-async def test_a_document_already_ready_is_left_alone(db_session):
+async def test_a_document_already_ready_is_left_alone(db_session: AsyncSession) -> None:
     """What makes a duplicated queue job harmless."""
     tenant = await _tenant(db_session, slug="acme")
     _, document = await _ingested(
@@ -284,7 +300,7 @@ async def test_a_document_already_ready_is_left_alone(db_session):
     knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
     embeddings = FakeEmbeddings()
 
-    result = await knowledge.ingest(document_id=document.id, embeddings=embeddings)
+    result = await knowledge.ingest(document_id=document.id, embeddings=as_embeddings(embeddings))
 
     assert result.reused is True
     assert result.chunks_written == 0
@@ -292,7 +308,7 @@ async def test_a_document_already_ready_is_left_alone(db_session):
     assert embeddings.calls == 0
 
 
-async def test_a_provider_failure_marks_the_document_failed(db_session):
+async def test_a_provider_failure_marks_the_document_failed(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
     base = await knowledge.ensure_default_knowledge_base()
@@ -305,7 +321,9 @@ async def test_a_provider_failure_marks_the_document_failed(db_session):
     with pytest.raises(ExternalServiceError):
         await knowledge.ingest(
             document_id=document.id,
-            embeddings=BrokenEmbeddings(ExternalServiceError("The AI provider is unavailable.")),
+            embeddings=as_embeddings(
+                BrokenEmbeddings(ExternalServiceError("The AI provider is unavailable."))
+            ),
         )
 
     assert document.status is DocumentStatus.FAILED
@@ -315,7 +333,7 @@ async def test_a_provider_failure_marks_the_document_failed(db_session):
     assert document.chunk_count == 0
 
 
-async def test_a_failed_document_is_not_retrievable(db_session):
+async def test_a_failed_document_is_not_retrievable(db_session: AsyncSession) -> None:
     """Chunks written before a failure must not answer questions."""
     tenant = await _tenant(db_session, slug="acme")
     knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
@@ -325,14 +343,16 @@ async def test_a_failed_document_is_not_retrievable(db_session):
         title="Prices",
         raw=FINISHING_PRICES,
     )
-    await knowledge.ingest(document_id=document.id, embeddings=FakeEmbeddings())
+    await knowledge.ingest(document_id=document.id, embeddings=as_embeddings(FakeEmbeddings()))
 
     # Now break it: the chunks still exist, but the document is not READY.
     await knowledge.reingest(document.id)
     with pytest.raises(ExternalServiceError):
         await knowledge.ingest(
             document_id=document.id,
-            embeddings=BrokenEmbeddings(ExternalServiceError("The AI provider is unavailable.")),
+            embeddings=as_embeddings(
+                BrokenEmbeddings(ExternalServiceError("The AI provider is unavailable."))
+            ),
         )
 
     found = await _service(db_session, tenant).search(query="premium finishing cost")
@@ -340,7 +360,9 @@ async def test_a_failed_document_is_not_retrievable(db_session):
     assert found.is_empty
 
 
-async def test_a_failed_document_can_be_retried_once_the_cause_is_fixed(db_session):
+async def test_a_failed_document_can_be_retried_once_the_cause_is_fixed(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session, slug="acme")
     knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
     base = await knowledge.ensure_default_knowledge_base()
@@ -352,11 +374,13 @@ async def test_a_failed_document_can_be_retried_once_the_cause_is_fixed(db_sessi
     with pytest.raises(ExternalServiceError):
         await knowledge.ingest(
             document_id=document.id,
-            embeddings=BrokenEmbeddings(ExternalServiceError("down")),
+            embeddings=as_embeddings(BrokenEmbeddings(ExternalServiceError("down"))),
         )
 
     await knowledge.reingest(document.id)
-    result = await knowledge.ingest(document_id=document.id, embeddings=FakeEmbeddings())
+    result = await knowledge.ingest(
+        document_id=document.id, embeddings=as_embeddings(FakeEmbeddings())
+    )
 
     assert result.chunks_written > 0
     assert document.status is DocumentStatus.READY
@@ -364,7 +388,7 @@ async def test_a_failed_document_can_be_retried_once_the_cause_is_fixed(db_sessi
     assert document.error is None
 
 
-async def test_a_document_with_no_indexable_text_is_refused(db_session):
+async def test_a_document_with_no_indexable_text_is_refused(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
     base = await knowledge.ensure_default_knowledge_base()
@@ -373,7 +397,9 @@ async def test_a_document_with_no_indexable_text_is_refused(db_session):
         await knowledge.submit(knowledge_base_id=base.id, title="Empty", raw="   \n\n  ")
 
 
-async def test_pdf_is_refused_explicitly_rather_than_silently_empty(db_session):
+async def test_pdf_is_refused_explicitly_rather_than_silently_empty(
+    db_session: AsyncSession,
+) -> None:
     """Better a clear refusal than a document that looks ingested and answers nothing."""
     tenant = await _tenant(db_session, slug="acme")
     knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
@@ -388,7 +414,7 @@ async def test_pdf_is_refused_explicitly_rather_than_silently_empty(db_session):
         )
 
 
-async def test_deleting_a_document_removes_its_chunks(db_session):
+async def test_deleting_a_document_removes_its_chunks(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     _, document = await _ingested(
         db_session,
@@ -406,7 +432,7 @@ async def test_deleting_a_document_removes_its_chunks(db_session):
     assert found.is_empty
 
 
-async def test_another_workspaces_document_is_not_found(db_session):
+async def test_another_workspaces_document_is_not_found(db_session: AsyncSession) -> None:
     mine = await _tenant(db_session, slug="mine")
     theirs = await _tenant(db_session, slug="theirs")
     _, hidden = await _ingested(
@@ -423,7 +449,7 @@ async def test_another_workspaces_document_is_not_found(db_session):
         await knowledge.delete_document(hidden.id)
 
 
-async def test_two_workspaces_may_name_a_knowledge_base_the_same(db_session):
+async def test_two_workspaces_may_name_a_knowledge_base_the_same(db_session: AsyncSession) -> None:
     mine = await _tenant(db_session, slug="mine")
     theirs = await _tenant(db_session, slug="theirs")
 
@@ -439,7 +465,7 @@ async def test_two_workspaces_may_name_a_knowledge_base_the_same(db_session):
     assert first.id != second.id
 
 
-async def test_an_unknown_document_id_is_not_found(db_session):
+async def test_an_unknown_document_id_is_not_found(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
 

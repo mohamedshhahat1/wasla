@@ -13,9 +13,13 @@ Both are what stop this API being a bulk-messaging tool.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -36,7 +40,7 @@ from app.db.models.campaign import (
     CampaignStatus,
     RecipientStatus,
 )
-from app.repositories.campaign_repository import CampaignStatistics
+from app.repositories.campaign_repository import AudienceFilter, CampaignStatistics
 
 pytestmark = pytest.mark.integration
 
@@ -88,47 +92,71 @@ class StubCampaigns:
     """Records what the routes asked for."""
 
     def __init__(self) -> None:
-        self.created: list[dict] = []
-        self.audiences: list[dict] = []
-        self.previews: list[dict] = []
-        self.scheduled: list[dict] = []
+        self.created: list[dict[str, Any]] = []
+        self.audiences: list[dict[str, Any]] = []
+        self.previews: list[dict[str, Any]] = []
+        self.scheduled: list[dict[str, Any]] = []
         self.paused: list[uuid.UUID] = []
         self.cancelled: list[uuid.UUID] = []
 
-    async def list_campaigns(self, *, statuses=(), account_id=None, limit=50, cursor=None):
+    async def list_campaigns(
+        self,
+        *,
+        statuses: Sequence[CampaignStatus] = (),
+        account_id: uuid.UUID | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> Page[Campaign]:
         return Page(items=[_campaign()], next_cursor=NEXT_CURSOR)
 
-    async def get(self, campaign_id):
+    async def get(self, campaign_id: uuid.UUID) -> Campaign:
         return _campaign()
 
-    async def create(self, **kwargs):
+    async def create(self, **kwargs: Any) -> Campaign:
         self.created.append(kwargs)
         return _campaign()
 
-    async def preview_audience(self, *, account_id, filters):
+    async def preview_audience(self, *, account_id: uuid.UUID, filters: AudienceFilter) -> int:
         self.previews.append({"account_id": account_id, "filters": filters})
         return 7
 
-    async def set_audience(self, *, campaign_id, filters):
+    async def set_audience(
+        self,
+        *,
+        campaign_id: uuid.UUID,
+        filters: AudienceFilter,
+    ) -> Campaign:
         self.audiences.append({"campaign_id": campaign_id, "filters": filters})
         return _campaign()
 
-    async def schedule(self, *, campaign_id, scheduled_at=None, actor=None):
+    async def schedule(
+        self,
+        *,
+        campaign_id: uuid.UUID,
+        scheduled_at: datetime | None = None,
+        actor: User | None = None,
+    ) -> Campaign:
         self.scheduled.append({"campaign_id": campaign_id, "scheduled_at": scheduled_at})
         return _campaign(CampaignStatus.SCHEDULED)
 
-    async def pause(self, campaign_id):
+    async def pause(self, campaign_id: uuid.UUID) -> Campaign:
         self.paused.append(campaign_id)
         return _campaign(CampaignStatus.PAUSED)
 
-    async def cancel(self, campaign_id, *, actor=None):
+    async def cancel(self, campaign_id: uuid.UUID, *, actor: User | None = None) -> Campaign:
         self.cancelled.append(campaign_id)
         return _campaign(CampaignStatus.CANCELLED)
 
-    async def statistics(self, campaign_id):
+    async def statistics(self, campaign_id: uuid.UUID) -> CampaignStatistics:
         return CampaignStatistics(pending=1, sent=2, failed=0, skipped=1, delivered=2, read=1)
 
-    async def list_recipients(self, campaign_id, *, status=None, limit=100):
+    async def list_recipients(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        status: RecipientStatus | None = None,
+        limit: int = 100,
+    ) -> list[Any]:
         return [_recipient()]
 
 
@@ -146,7 +174,7 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
 
 
 @pytest.fixture
-def campaigns(app) -> StubCampaigns:
+def campaigns(app: FastAPI) -> StubCampaigns:
     stub = StubCampaigns()
     app.dependency_overrides[get_campaign_service] = lambda: stub
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(TenantRole.TENANT_ADMIN)
@@ -154,14 +182,16 @@ def campaigns(app) -> StubCampaigns:
 
 
 @pytest.fixture
-def as_member(app) -> None:
+def as_member(app: FastAPI) -> None:
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(TenantRole.MEMBER)
 
 
 # ---------------------------------------------------------------------- reads
 
 
-async def test_the_campaign_list_answers_a_page(client, campaigns, as_member):
+async def test_the_campaign_list_answers_a_page(
+    client: AsyncClient, campaigns: StubCampaigns, as_member: None
+) -> None:
     response = await client.get(PATH)
 
     assert response.status_code == 200
@@ -171,14 +201,18 @@ async def test_the_campaign_list_answers_a_page(client, campaigns, as_member):
     assert body["next_cursor"] == NEXT_CURSOR
 
 
-async def test_a_member_can_read_one_campaign(client, campaigns, as_member):
+async def test_a_member_can_read_one_campaign(
+    client: AsyncClient, campaigns: StubCampaigns, as_member: None
+) -> None:
     response = await client.get(f"{PATH}/{CAMPAIGN_ID}")
 
     assert response.status_code == 200
     assert response.json()["audience_size"] == 12
 
 
-async def test_statistics_report_delivery_as_well_as_outcome(client, campaigns, as_member):
+async def test_statistics_report_delivery_as_well_as_outcome(
+    client: AsyncClient, campaigns: StubCampaigns, as_member: None
+) -> None:
     body = (await client.get(f"{PATH}/{CAMPAIGN_ID}/statistics")).json()
 
     assert body == {
@@ -192,7 +226,9 @@ async def test_statistics_report_delivery_as_well_as_outcome(client, campaigns, 
     }
 
 
-async def test_the_recipient_list_says_who_was_reached(client, campaigns, as_member):
+async def test_the_recipient_list_says_who_was_reached(
+    client: AsyncClient, campaigns: StubCampaigns, as_member: None
+) -> None:
     body = (await client.get(f"{PATH}/{CAMPAIGN_ID}/recipients")).json()
 
     assert body["recipients"][0]["status"] == "sent"
@@ -202,7 +238,9 @@ async def test_the_recipient_list_says_who_was_reached(client, campaigns, as_mem
 # -------------------------------------------------------------------- writes
 
 
-async def test_an_admin_can_compose_a_campaign(client, campaigns):
+async def test_an_admin_can_compose_a_campaign(
+    client: AsyncClient, campaigns: StubCampaigns
+) -> None:
     response = await client.post(
         PATH,
         json={
@@ -220,7 +258,9 @@ async def test_an_admin_can_compose_a_campaign(client, campaigns):
     assert campaigns.created[0]["created_by_id"] == USER_ID
 
 
-async def test_a_campaign_cannot_carry_free_text_to_send(client, campaigns):
+async def test_a_campaign_cannot_carry_free_text_to_send(
+    client: AsyncClient, campaigns: StubCampaigns
+) -> None:
     """Meta accepts approved templates only outside the service window."""
     response = await client.post(
         PATH,
@@ -236,7 +276,9 @@ async def test_a_campaign_cannot_carry_free_text_to_send(client, campaigns):
     assert campaigns.created == []
 
 
-async def test_an_audience_cannot_name_a_phone_number(client, campaigns):
+async def test_an_audience_cannot_name_a_phone_number(
+    client: AsyncClient, campaigns: StubCampaigns
+) -> None:
     """The absence that stops this being a bulk-messaging tool."""
     response = await client.post(
         f"{PATH}/{CAMPAIGN_ID}/audience",
@@ -247,7 +289,9 @@ async def test_an_audience_cannot_name_a_phone_number(client, campaigns):
     assert campaigns.audiences == []
 
 
-async def test_the_audience_filters_reach_the_service(client, campaigns):
+async def test_the_audience_filters_reach_the_service(
+    client: AsyncClient, campaigns: StubCampaigns
+) -> None:
     await client.post(
         f"{PATH}/{CAMPAIGN_ID}/audience",
         json={"last_inbound_within_days": 30, "lead_statuses": ["qualified"]},
@@ -258,7 +302,9 @@ async def test_the_audience_filters_reach_the_service(client, campaigns):
     assert [status.value for status in filters.lead_statuses] == ["qualified"]
 
 
-async def test_a_preview_counts_without_creating_anything(client, campaigns):
+async def test_a_preview_counts_without_creating_anything(
+    client: AsyncClient, campaigns: StubCampaigns
+) -> None:
     response = await client.post(
         f"{PATH}/audience/preview",
         json={"account_id": str(ACCOUNT_ID), "last_inbound_within_days": 7},
@@ -269,7 +315,9 @@ async def test_a_preview_counts_without_creating_anything(client, campaigns):
     assert campaigns.previews[0]["account_id"] == ACCOUNT_ID
 
 
-async def test_scheduling_without_a_time_means_now(client, campaigns):
+async def test_scheduling_without_a_time_means_now(
+    client: AsyncClient, campaigns: StubCampaigns
+) -> None:
     response = await client.post(f"{PATH}/{CAMPAIGN_ID}/schedule", json={})
 
     assert response.status_code == 200
@@ -277,14 +325,18 @@ async def test_scheduling_without_a_time_means_now(client, campaigns):
     assert campaigns.scheduled[0]["scheduled_at"] is None
 
 
-async def test_pausing_and_cancelling_are_named_transitions(client, campaigns):
+async def test_pausing_and_cancelling_are_named_transitions(
+    client: AsyncClient, campaigns: StubCampaigns
+) -> None:
     assert (await client.post(f"{PATH}/{CAMPAIGN_ID}/pause")).json()["status"] == "paused"
     assert (await client.post(f"{PATH}/{CAMPAIGN_ID}/cancel")).json()["status"] == "cancelled"
     assert campaigns.paused == [CAMPAIGN_ID]
     assert campaigns.cancelled == [CAMPAIGN_ID]
 
 
-async def test_there_is_no_way_to_set_a_status_directly(client, campaigns):
+async def test_there_is_no_way_to_set_a_status_directly(
+    client: AsyncClient, campaigns: StubCampaigns
+) -> None:
     response = await client.patch(f"{PATH}/{CAMPAIGN_ID}", json={"status": "running"})
 
     assert response.status_code == 405
@@ -293,7 +345,9 @@ async def test_there_is_no_way_to_set_a_status_directly(client, campaigns):
 # ------------------------------------------------------------------ the roles
 
 
-async def test_a_member_cannot_compose_a_campaign(client, campaigns, as_member):
+async def test_a_member_cannot_compose_a_campaign(
+    client: AsyncClient, campaigns: StubCampaigns, as_member: None
+) -> None:
     response = await client.post(
         PATH,
         json={
@@ -307,14 +361,18 @@ async def test_a_member_cannot_compose_a_campaign(client, campaigns, as_member):
     assert campaigns.created == []
 
 
-async def test_a_member_cannot_start_a_campaign(client, campaigns, as_member):
+async def test_a_member_cannot_start_a_campaign(
+    client: AsyncClient, campaigns: StubCampaigns, as_member: None
+) -> None:
     response = await client.post(f"{PATH}/{CAMPAIGN_ID}/schedule", json={})
 
     assert response.status_code == 403
     assert campaigns.scheduled == []
 
 
-async def test_a_member_cannot_change_the_audience(client, campaigns, as_member):
+async def test_a_member_cannot_change_the_audience(
+    client: AsyncClient, campaigns: StubCampaigns, as_member: None
+) -> None:
     response = await client.post(f"{PATH}/{CAMPAIGN_ID}/audience", json={})
 
     assert response.status_code == 403

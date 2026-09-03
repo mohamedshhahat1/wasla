@@ -13,9 +13,14 @@ refuses.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -26,6 +31,8 @@ from app.core.exceptions import PlanLimitExceededError
 from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.db.models.billing import LimitKey
 from app.services.entitlement_service import Entitlement
+from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import as_database, as_redis_client
 
 pytestmark = pytest.mark.integration
 
@@ -39,11 +46,11 @@ class ExhaustedEntitlements:
     def __init__(self) -> None:
         self.asked: list[LimitKey] = []
 
-    async def check(self, key, *, additional: int = 1) -> Entitlement:
+    async def check(self, key: LimitKey, *, additional: int = 1) -> Entitlement:
         self.asked.append(key)
         return Entitlement(key=key, limit=1, used=1, allowed=False, plan_code="starter")
 
-    async def require(self, key, *, additional: int = 1) -> Entitlement:
+    async def require(self, key: LimitKey, *, additional: int = 1) -> Entitlement:
         # Recorded, then refused: the real service does the same.
         await self.check(key, additional=additional)
         raise PlanLimitExceededError(
@@ -51,11 +58,11 @@ class ExhaustedEntitlements:
             "Upgrade the plan to continue."
         )
 
-    async def allows(self, key, *, additional: int = 1) -> bool:
+    async def allows(self, key: LimitKey, *, additional: int = 1) -> bool:
         self.asked.append(key)
         return False
 
-    async def snapshot(self, keys=None) -> list[Entitlement]:
+    async def snapshot(self, keys: Sequence[LimitKey] | None = None) -> list[Entitlement]:
         return [await self.check(key, additional=0) for key in LimitKey]
 
 
@@ -68,7 +75,7 @@ def _workspace(role: TenantRole = TenantRole.TENANT_OWNER) -> ActiveWorkspace:
 
 
 @pytest.fixture
-def exhausted(app) -> ExhaustedEntitlements:
+def exhausted(app: FastAPI) -> ExhaustedEntitlements:
     stub = ExhaustedEntitlements()
     app.dependency_overrides[get_entitlement_service] = lambda: stub
     app.dependency_overrides[get_active_workspace] = lambda: _workspace()
@@ -78,7 +85,9 @@ def exhausted(app) -> ExhaustedEntitlements:
 # ----------------------------------------------------------------- refusals
 
 
-async def test_a_full_plan_refuses_another_agent(client, app, exhausted):
+async def test_a_full_plan_refuses_another_agent(
+    client: AsyncClient, app: FastAPI, exhausted: ExhaustedEntitlements
+) -> None:
     response = await client.post(
         "/api/v1/agents",
         json={"name": "Second", "system_prompt": "Be helpful."},
@@ -89,7 +98,9 @@ async def test_a_full_plan_refuses_another_agent(client, app, exhausted):
     assert exhausted.asked == [LimitKey.AGENTS]
 
 
-async def test_the_refusal_says_what_to_do_about_it(client, app, exhausted):
+async def test_the_refusal_says_what_to_do_about_it(
+    client: AsyncClient, app: FastAPI, exhausted: ExhaustedEntitlements
+) -> None:
     """402 rather than 403 because the answer is "upgrade", not "ask an
     administrator" - a client that cannot tell them apart shows the wrong
     dialogue to somebody trying to give us money."""
@@ -101,7 +112,9 @@ async def test_the_refusal_says_what_to_do_about_it(client, app, exhausted):
     assert "Upgrade" in response.json()["error"]["message"]
 
 
-async def test_a_full_plan_refuses_another_number(client, app, exhausted):
+async def test_a_full_plan_refuses_another_number(
+    client: AsyncClient, app: FastAPI, exhausted: ExhaustedEntitlements
+) -> None:
     response = await client.post(
         "/api/v1/whatsapp/accounts",
         json={
@@ -115,7 +128,9 @@ async def test_a_full_plan_refuses_another_number(client, app, exhausted):
     assert exhausted.asked == [LimitKey.WHATSAPP_NUMBERS]
 
 
-async def test_a_full_plan_refuses_another_colleague(client, app, exhausted):
+async def test_a_full_plan_refuses_another_colleague(
+    client: AsyncClient, app: FastAPI, exhausted: ExhaustedEntitlements
+) -> None:
     """Checked when the invitation is issued rather than when it is accepted:
     refusing somebody at the moment they click is worse than telling the
     inviter now."""
@@ -128,7 +143,9 @@ async def test_a_full_plan_refuses_another_colleague(client, app, exhausted):
     assert exhausted.asked == [LimitKey.TEAM_MEMBERS]
 
 
-async def test_a_full_plan_refuses_another_document(client, app, exhausted):
+async def test_a_full_plan_refuses_another_document(
+    client: AsyncClient, app: FastAPI, exhausted: ExhaustedEntitlements
+) -> None:
     response = await client.post(
         f"/api/v1/knowledge/bases/{uuid.uuid4()}/documents",
         json={"title": "Prices", "content": "Everything costs money."},
@@ -138,7 +155,9 @@ async def test_a_full_plan_refuses_another_document(client, app, exhausted):
     assert exhausted.asked == [LimitKey.KNOWLEDGE_DOCUMENTS]
 
 
-async def test_the_guard_runs_before_the_handler_touches_anything(client, app, exhausted):
+async def test_the_guard_runs_before_the_handler_touches_anything(
+    client: AsyncClient, app: FastAPI, exhausted: ExhaustedEntitlements
+) -> None:
     """The refusal is a dependency, so nothing in the handler has run - which
     is why an unbound session in these tests never gets queried."""
     response = await client.post(
@@ -156,11 +175,13 @@ async def test_the_guard_runs_before_the_handler_touches_anything(client, app, e
 class StubAgents:
     """Only the read the next test performs."""
 
-    async def list_agents(self, *, limit: int = 50):
+    async def list_agents(self, *, limit: int = 50) -> list[Any]:
         return []
 
 
-async def test_reading_is_never_refused(client, app, exhausted):
+async def test_reading_is_never_refused(
+    client: AsyncClient, app: FastAPI, exhausted: ExhaustedEntitlements
+) -> None:
     """A workspace over its limit can still see what it has. Locking somebody
     out of their own data over a bill is not a limit, it is a hostage."""
     from app.api.dependencies import get_agent_service
@@ -173,7 +194,9 @@ async def test_reading_is_never_refused(client, app, exhausted):
     assert exhausted.asked == []
 
 
-async def test_a_customers_message_is_never_refused_for_a_billing_reason(client, app, exhausted):
+async def test_a_customers_message_is_never_refused_for_a_billing_reason(
+    client: AsyncClient, app: FastAPI, exhausted: ExhaustedEntitlements
+) -> None:
     """The inbound path carries no limit check at all, and this is the test that
     says so. Meta retries a non-2xx until it disables the subscription, and the
     words belong to a customer who owes us nothing (ADR-030).
@@ -193,24 +216,24 @@ async def test_a_customers_message_is_never_refused_for_a_billing_reason(client,
 
 
 class SessionHandle:
-    def __init__(self, session) -> None:
+    def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     @asynccontextmanager
-    async def session(self):
+    async def session(self) -> AsyncIterator[AsyncSession]:
         yield self._session
 
 
 class FakeRedis:
     @property
-    def client(self):
-        return object()
+    def client(self) -> FakeQueueRedis:
+        return FakeQueueRedis()
 
 
 async def test_an_exhausted_ai_allowance_stops_the_turn_without_failing_the_job(
-    db_session,
-    monkeypatch,
-):
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A workspace out of AI requests has a billing problem; its customer has a
     question. Raising here would dead-letter the job and lose the second."""
     from app.core.config import Settings
@@ -240,8 +263,8 @@ async def test_an_exhausted_ai_allowance_stops_the_turn_without_failing_the_job(
         openai_api_key="test-key",
     )
     worker = worker_module.AgentWorker(
-        database=SessionHandle(db_session),
-        redis=FakeRedis(),
+        database=as_database(SessionHandle(db_session)),
+        redis=as_redis_client(FakeRedis()),
         settings=settings,
     )
 

@@ -34,6 +34,7 @@ import socket
 import uuid
 from collections.abc import AsyncIterator
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
@@ -219,7 +220,9 @@ async def _forget(engine: AsyncEngine, *, slug: str, email: str, plan_code: str)
         await connection.execute(text("DELETE FROM plans WHERE code = :code"), {"code": plan_code})
 
 
-def _transaction(*, reference: str, transaction: int = 900000001, **overrides) -> dict:
+def _transaction(
+    *, reference: str, transaction: int = 900000001, **overrides: Any
+) -> dict[str, Any]:
     """A callback shaped exactly like the documented one."""
     body = {
         "id": transaction,
@@ -245,7 +248,7 @@ def _transaction(*, reference: str, transaction: int = 900000001, **overrides) -
     return body
 
 
-async def _deliver(client: httpx.AsyncClient, transaction: dict) -> httpx.Response:
+async def _deliver(client: httpx.AsyncClient, transaction: dict[str, Any]) -> httpx.Response:
     """Post a signed callback the way the provider posts one."""
     return await client.post(
         "/api/v1/webhooks/paymob",

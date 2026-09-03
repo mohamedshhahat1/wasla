@@ -21,10 +21,12 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.billing import (
     BillingInterval,
@@ -56,7 +58,9 @@ MOTO_INTEGRATION = 9900001
 CARD_TOKEN = "3f22ce8a4e77125c70f0bc69830e34c36df469351e2fa6be76428be4"
 
 
-def _transport(seen: list[dict] | None = None, *, fail: bool = False) -> httpx.MockTransport:
+def _transport(
+    seen: list[dict[str, Any]] | None = None, *, fail: bool = False
+) -> httpx.MockTransport:
     """Paymob's two-step merchant-initiated charge, faked at the socket."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -95,7 +99,7 @@ def _provider(
 
 
 async def _workspace(
-    session,
+    session: AsyncSession,
     *,
     slug: str = "acme",
     status: SubscriptionStatus = SubscriptionStatus.ACTIVE,
@@ -158,7 +162,13 @@ async def _workspace(
     return tenant, subscription, invoice
 
 
-def _service(session, tenant, *, transport=None, moto: int | None = MOTO_INTEGRATION):
+def _service(
+    session: AsyncSession,
+    tenant: Tenant,
+    *,
+    transport: httpx.MockTransport | None = None,
+    moto: int | None = MOTO_INTEGRATION,
+) -> RecurringService:
     return RecurringService(
         session,
         tenant_id=tenant.id,
@@ -169,7 +179,7 @@ def _service(session, tenant, *, transport=None, moto: int | None = MOTO_INTEGRA
 # ----------------------------------------------------------------- charging
 
 
-async def test_a_due_renewal_is_taken_from_the_saved_card(db_session):
+async def test_a_due_renewal_is_taken_from_the_saved_card(db_session: AsyncSession) -> None:
     """The happy path, and note what it does *not* assert.
 
     Nothing here is paid. The charge request went out; whether money moved is
@@ -177,7 +187,7 @@ async def test_a_due_renewal_is_taken_from_the_saved_card(db_session):
     customer-initiated payment uses.
     """
     tenant, subscription, invoice = await _workspace(db_session)
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     outcome = await _service(db_session, tenant, transport=_transport(seen)).collect(
         invoice,
@@ -196,11 +206,13 @@ async def test_a_due_renewal_is_taken_from_the_saved_card(db_session):
     assert payment.provider_intent_reference == "700000123"
 
 
-async def test_the_charge_uses_the_moto_integration_and_our_own_reference(db_session):
+async def test_the_charge_uses_the_moto_integration_and_our_own_reference(
+    db_session: AsyncSession,
+) -> None:
     """Two documented requirements, both easy to get wrong and both invisible
     until a live merchant account rejects them."""
     tenant, subscription, invoice = await _workspace(db_session)
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     outcome = await _service(db_session, tenant, transport=_transport(seen)).collect(
         invoice,
@@ -217,10 +229,10 @@ async def test_the_charge_uses_the_moto_integration_and_our_own_reference(db_ses
     assert pay["body"]["payment_token"] == "a-payment-token"
 
 
-async def test_the_card_token_is_sent_and_never_the_card_number(db_session):
+async def test_the_card_token_is_sent_and_never_the_card_number(db_session: AsyncSession) -> None:
     """There is no card number to send, which is the point of the token."""
     tenant, subscription, invoice = await _workspace(db_session)
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     await _service(db_session, tenant, transport=_transport(seen)).collect(
         invoice,
@@ -239,7 +251,7 @@ async def test_the_card_token_is_sent_and_never_the_card_number(db_session):
 # ----------------------------------------------------------------- refusals
 
 
-async def test_a_cancelled_workspace_is_never_charged(db_session):
+async def test_a_cancelled_workspace_is_never_charged(db_session: AsyncSession) -> None:
     """The refusal that matters most in the whole subsystem.
 
     Debiting somebody who has cancelled is not a recoverable billing error. It
@@ -250,7 +262,7 @@ async def test_a_cancelled_workspace_is_never_charged(db_session):
         db_session,
         status=SubscriptionStatus.CANCELLED,
     )
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     outcome = await _service(db_session, tenant, transport=_transport(seen)).collect(
         invoice,
@@ -264,13 +276,13 @@ async def test_a_cancelled_workspace_is_never_charged(db_session):
     assert invoice.collection_attempts == 0
 
 
-async def test_an_expired_workspace_is_never_charged(db_session):
+async def test_an_expired_workspace_is_never_charged(db_session: AsyncSession) -> None:
     """A trial that lapsed is not a customer who agreed to pay."""
     tenant, subscription, invoice = await _workspace(
         db_session,
         status=SubscriptionStatus.EXPIRED,
     )
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     outcome = await _service(db_session, tenant, transport=_transport(seen)).collect(
         invoice,
@@ -282,10 +294,10 @@ async def test_an_expired_workspace_is_never_charged(db_session):
     assert seen == []
 
 
-async def test_a_subscription_that_vanished_is_never_charged(db_session):
+async def test_a_subscription_that_vanished_is_never_charged(db_session: AsyncSession) -> None:
     """An invoice whose subscription is gone has nobody to bill."""
     tenant, _, invoice = await _workspace(db_session)
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     outcome = await _service(db_session, tenant, transport=_transport(seen)).collect(
         invoice,
@@ -297,7 +309,7 @@ async def test_a_subscription_that_vanished_is_never_charged(db_session):
     assert seen == []
 
 
-async def test_a_workspace_with_no_card_is_not_charged(db_session):
+async def test_a_workspace_with_no_card_is_not_charged(db_session: AsyncSession) -> None:
     tenant, subscription, invoice = await _workspace(db_session, with_card=False)
 
     outcome = await _service(db_session, tenant).collect(
@@ -309,13 +321,13 @@ async def test_a_workspace_with_no_card_is_not_charged(db_session):
     assert outcome.reason == NO_CARD
 
 
-async def test_a_revoked_card_is_not_charged(db_session):
+async def test_a_revoked_card_is_not_charged(db_session: AsyncSession) -> None:
     """Removing a card must actually stop renewals, not merely hide it."""
     tenant, subscription, invoice = await _workspace(
         db_session,
         card_status=PaymentMethodStatus.REVOKED,
     )
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     outcome = await _service(db_session, tenant, transport=_transport(seen)).collect(
         invoice,
@@ -327,7 +339,7 @@ async def test_a_revoked_card_is_not_charged(db_session):
     assert seen == []
 
 
-async def test_a_paid_invoice_is_not_charged_again(db_session):
+async def test_a_paid_invoice_is_not_charged_again(db_session: AsyncSession) -> None:
     tenant, subscription, invoice = await _workspace(db_session)
     invoice.status = InvoiceStatus.PAID
     invoice.amount_paid = Decimal("25.00")
@@ -342,7 +354,7 @@ async def test_a_paid_invoice_is_not_charged_again(db_session):
     assert outcome.reason == NOT_COLLECTIBLE
 
 
-async def test_nothing_is_charged_without_the_merchant_capability(db_session):
+async def test_nothing_is_charged_without_the_merchant_capability(db_session: AsyncSession) -> None:
     """No Moto integration configured, so no automatic collection happens.
 
     This is the state the account this was built against is actually in, and it
@@ -350,7 +362,7 @@ async def test_nothing_is_charged_without_the_merchant_capability(db_session):
     how the product billed before saved cards existed.
     """
     tenant, subscription, invoice = await _workspace(db_session)
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     outcome = await _service(db_session, tenant, transport=_transport(seen), moto=None).collect(
         invoice,
@@ -363,7 +375,7 @@ async def test_nothing_is_charged_without_the_merchant_capability(db_session):
     assert invoice.collection_attempts == 0
 
 
-async def test_the_service_reports_whether_it_can_collect_at_all(db_session):
+async def test_the_service_reports_whether_it_can_collect_at_all(db_session: AsyncSession) -> None:
     tenant, _, _ = await _workspace(db_session)
 
     assert _service(db_session, tenant).available is True
@@ -374,7 +386,7 @@ async def test_the_service_reports_whether_it_can_collect_at_all(db_session):
 # ------------------------------------------------------------------ retries
 
 
-async def test_a_refused_charge_records_a_failed_attempt(db_session):
+async def test_a_refused_charge_records_a_failed_attempt(db_session: AsyncSession) -> None:
     """The invoice stays open and the workspace is not marked paid."""
     tenant, subscription, invoice = await _workspace(db_session)
 
@@ -394,7 +406,7 @@ async def test_a_refused_charge_records_a_failed_attempt(db_session):
     assert payment.status is PaymentStatus.FAILED
 
 
-async def test_attempts_are_counted_and_spaced_out(db_session):
+async def test_attempts_are_counted_and_spaced_out(db_session: AsyncSession) -> None:
     """A declined card is asked again later, not immediately.
 
     The commonest recoverable decline is a temporary funds problem, and a
@@ -413,13 +425,13 @@ async def test_attempts_are_counted_and_spaced_out(db_session):
     assert invoice.next_collection_at > NOW
 
 
-async def test_an_attempt_before_its_time_is_not_made(db_session):
+async def test_an_attempt_before_its_time_is_not_made(db_session: AsyncSession) -> None:
     """The sweep runs every ten minutes; retries must not."""
     tenant, subscription, invoice = await _workspace(db_session)
     invoice.collection_attempts = 1
     invoice.next_collection_at = NOW + timedelta(days=1)
     await db_session.flush()
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     outcome = await _service(db_session, tenant, transport=_transport(seen)).collect(
         invoice,
@@ -431,7 +443,7 @@ async def test_an_attempt_before_its_time_is_not_made(db_session):
     assert seen == []
 
 
-async def test_the_attempt_budget_is_bounded(db_session):
+async def test_the_attempt_budget_is_bounded(db_session: AsyncSession) -> None:
     """A card that has declined three times will not work on the fourth.
 
     Retrying for ever is also how a merchant account gets looked at by the
@@ -441,7 +453,7 @@ async def test_the_attempt_budget_is_bounded(db_session):
     invoice.collection_attempts = MAX_COLLECTION_ATTEMPTS
     invoice.next_collection_at = None
     await db_session.flush()
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     outcome = await _service(db_session, tenant, transport=_transport(seen)).collect(
         invoice,
@@ -453,7 +465,7 @@ async def test_the_attempt_budget_is_bounded(db_session):
     assert seen == []
 
 
-async def test_the_last_attempt_schedules_nothing_further(db_session):
+async def test_the_last_attempt_schedules_nothing_further(db_session: AsyncSession) -> None:
     """`next_collection_at` becomes NULL so "we have stopped" is queryable."""
     tenant, subscription, invoice = await _workspace(db_session)
     invoice.collection_attempts = MAX_COLLECTION_ATTEMPTS - 1
@@ -469,7 +481,9 @@ async def test_the_last_attempt_schedules_nothing_further(db_session):
     assert invoice.next_collection_at is None
 
 
-async def test_the_attempt_is_counted_before_the_provider_is_called(db_session):
+async def test_the_attempt_is_counted_before_the_provider_is_called(
+    db_session: AsyncSession,
+) -> None:
     """A request that times out has still been made, and a scheme counts it.
 
     Counting afterwards would let a provider that never answers be retried for
@@ -495,7 +509,7 @@ async def test_the_attempt_is_counted_before_the_provider_is_called(db_session):
     assert invoice.collection_attempts == 1
 
 
-async def test_two_sweeps_cannot_both_make_the_same_attempt(db_session):
+async def test_two_sweeps_cannot_both_make_the_same_attempt(db_session: AsyncSession) -> None:
     """The idempotency key names the invoice and the attempt number.
 
     Two workers reaching the same invoice at once would otherwise both charge.

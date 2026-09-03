@@ -15,6 +15,7 @@ from app.workers.media_queue import MEDIA_NAMESPACE, MediaJob, MediaQueue
 from app.workers.queue import QUEUE_NAMESPACE, DeadLetterRecord, JobEnvelope, MalformedJobError
 from app.workers.retry import FailureCategory
 from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import as_redis
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 MEDIA = uuid.UUID("33333333-3333-3333-3333-333333333333")
@@ -24,13 +25,13 @@ INFLIGHT = "media:understanding:inflight"
 FAILED = "media:understanding:failed"
 
 
-def test_a_job_survives_a_round_trip():
+def test_a_job_survives_a_round_trip() -> None:
     job = MediaJob(tenant_id=TENANT, media_id=MEDIA)
 
     assert MediaJob.decode(job.encode()) == job
 
 
-def test_encoding_is_stable():
+def test_encoding_is_stable() -> None:
     """Releasing removes by exact value, so two encodings must match byte for byte."""
     first = MediaJob(tenant_id=TENANT, media_id=MEDIA).encode()
     second = MediaJob(tenant_id=TENANT, media_id=MEDIA).encode()
@@ -48,13 +49,13 @@ def test_encoding_is_stable():
         pytest.param(f'{{"tenant_id": "{TENANT}", "media_id": 7}}', id="not-a-string"),
     ],
 )
-def test_a_malformed_job_is_refused(raw):
+def test_a_malformed_job_is_refused(raw: str) -> None:
     """Retrying an unreadable job would fail identically forever."""
     with pytest.raises(MalformedJobError):
         MediaJob.decode(raw)
 
 
-def test_media_has_its_own_queue():
+def test_media_has_its_own_queue() -> None:
     """Not the agent queue: a download pool is the wrong shape for inference.
 
     Not the ingestion queue either: a hundred uploaded documents must not sit in
@@ -65,49 +66,52 @@ def test_media_has_its_own_queue():
     assert not PENDING.startswith(INGESTION_NAMESPACE)
 
 
-async def test_enqueue_pushes_an_envelope_onto_the_pending_list():
+async def test_enqueue_pushes_an_envelope_onto_the_pending_list() -> None:
     redis = FakeQueueRedis()
 
-    await MediaQueue(redis).enqueue(MediaJob(tenant_id=TENANT, media_id=MEDIA))
+    await MediaQueue(as_redis(redis)).enqueue(MediaJob(tenant_id=TENANT, media_id=MEDIA))
 
     (value,) = redis.lists[PENDING]
     assert MediaJob.decode(JobEnvelope.decode(value).body).media_id == MEDIA
 
 
-async def test_reserving_moves_the_job_to_the_in_flight_list():
+async def test_reserving_moves_the_job_to_the_in_flight_list() -> None:
     """A worker killed mid-job must leave the job recoverable."""
     redis = FakeQueueRedis()
-    queue = MediaQueue(redis)
+    queue = MediaQueue(as_redis(redis))
     await queue.enqueue(MediaJob(tenant_id=TENANT, media_id=MEDIA))
 
     reserved = await queue.reserve(wait_seconds=3)
+    assert reserved is not None
 
     assert reserved is not None
     assert redis.lists[INFLIGHT] == [reserved]
     assert redis.lists[PENDING] == []
 
 
-async def test_reserving_an_empty_queue_returns_nothing():
-    assert await MediaQueue(FakeQueueRedis()).reserve() is None
+async def test_reserving_an_empty_queue_returns_nothing() -> None:
+    assert await MediaQueue(as_redis(FakeQueueRedis())).reserve() is None
 
 
-async def test_releasing_removes_the_exact_payload():
+async def test_releasing_removes_the_exact_payload() -> None:
     redis = FakeQueueRedis()
-    queue = MediaQueue(redis)
+    queue = MediaQueue(as_redis(redis))
     await queue.enqueue(MediaJob(tenant_id=TENANT, media_id=MEDIA))
     reserved = await queue.reserve()
+    assert reserved is not None
 
     await queue.release(reserved)
 
     assert redis.lists[INFLIGHT] == []
 
 
-async def test_a_transient_failure_is_retried_rather_than_dead_lettered():
+async def test_a_transient_failure_is_retried_rather_than_dead_lettered() -> None:
     """A file already stored is not fetched again, so another attempt is free."""
     redis = FakeQueueRedis()
-    queue = MediaQueue(redis)
+    queue = MediaQueue(as_redis(redis))
     await queue.enqueue(MediaJob(tenant_id=TENANT, media_id=MEDIA))
     reserved = await queue.reserve()
+    assert reserved is not None
 
     await queue.schedule_retry(
         reserved,
@@ -120,12 +124,13 @@ async def test_a_transient_failure_is_retried_rather_than_dead_lettered():
     assert await queue.failed_depth() == 0
 
 
-async def test_dead_lettering_records_rather_than_discarding():
+async def test_dead_lettering_records_rather_than_discarding() -> None:
     """The job records that an attempt was made; the row records why it broke."""
     redis = FakeQueueRedis()
-    queue = MediaQueue(redis)
+    queue = MediaQueue(as_redis(redis))
     await queue.enqueue(MediaJob(tenant_id=TENANT, media_id=MEDIA))
     reserved = await queue.reserve()
+    assert reserved is not None
     envelope = JobEnvelope.decode(reserved)
 
     written = await queue.dead_letter(
@@ -150,16 +155,16 @@ async def test_dead_lettering_records_rather_than_discarding():
     assert await queue.failed_depth() == 1
 
 
-async def test_depths_report_every_list():
+async def test_depths_report_every_list() -> None:
     redis = FakeQueueRedis()
     redis.lists = {PENDING: ["a"] * 5, FAILED: ["b"]}
-    queue = MediaQueue(redis)
+    queue = MediaQueue(as_redis(redis))
 
     assert await queue.depth() == 5
     assert await queue.failed_depth() == 1
 
 
-def test_the_block_interval_leaves_room_under_the_socket_timeout():
+def test_the_block_interval_leaves_room_under_the_socket_timeout() -> None:
     """The phase 8 bug, guarded.
 
     redis-py applies its read timeout to every read including a deliberate

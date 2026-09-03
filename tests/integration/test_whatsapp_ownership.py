@@ -19,7 +19,7 @@ import uuid
 
 import pytest
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.core.crypto import generate_key
@@ -57,7 +57,7 @@ def _service(
     )
 
 
-async def test_a_workspace_that_proves_control_gets_the_number(db_session):
+async def test_a_workspace_that_proves_control_gets_the_number(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, "acme")
 
     account = await _service(db_session).connect(
@@ -72,7 +72,7 @@ async def test_a_workspace_that_proves_control_gets_the_number(db_session):
     assert account.waba_id == "555000111"
 
 
-async def test_a_workspace_cannot_claim_a_number_it_cannot_prove(db_session):
+async def test_a_workspace_cannot_claim_a_number_it_cannot_prove(db_session: AsyncSession) -> None:
     """The hijack, refused. The attacker knows the number - that was never the
     hard part - and has a perfectly valid credential of their own. What they do
     not have is a credential that can read *this* number."""
@@ -94,7 +94,7 @@ async def test_a_workspace_cannot_claim_a_number_it_cannot_prove(db_session):
     assert rows.scalars().all() == []
 
 
-async def test_a_deployment_without_a_verifier_refuses_to_connect(db_session):
+async def test_a_deployment_without_a_verifier_refuses_to_connect(db_session: AsyncSession) -> None:
     """Fail closed. A service built without verification does not fall back to
     trusting the caller."""
     tenant = await _tenant(db_session, "acme")
@@ -108,7 +108,7 @@ async def test_a_deployment_without_a_verifier_refuses_to_connect(db_session):
         )
 
 
-async def test_the_platform_token_is_not_a_route_to_a_claim(db_session):
+async def test_the_platform_token_is_not_a_route_to_a_claim(db_session: AsyncSession) -> None:
     """The bypass that had to be removed. A platform credential can read every
     number the platform is connected to, so proving a claim with it would prove
     nothing about the workspace making it.
@@ -122,7 +122,7 @@ async def test_the_platform_token_is_not_a_route_to_a_claim(db_session):
     assert "meta_access_token" not in repr(service.__dict__)
 
 
-async def test_two_workspaces_cannot_hold_the_same_number(db_session):
+async def test_two_workspaces_cannot_hold_the_same_number(db_session: AsyncSession) -> None:
     first = await _tenant(db_session, "first")
     second = await _tenant(db_session, "second")
 
@@ -143,7 +143,9 @@ async def test_two_workspaces_cannot_hold_the_same_number(db_session):
         )
 
 
-async def test_the_conflict_does_not_name_the_workspace_holding_the_number(db_session):
+async def test_the_conflict_does_not_name_the_workspace_holding_the_number(
+    db_session: AsyncSession,
+) -> None:
     first = await _tenant(db_session, "first")
     second = await _tenant(db_session, "second")
     await _service(db_session).connect(
@@ -164,7 +166,9 @@ async def test_the_conflict_does_not_name_the_workspace_holding_the_number(db_se
     assert str(first.id) not in message
 
 
-async def test_concurrent_claims_produce_one_winner_and_one_conflict(engine, prepared_database):
+async def test_concurrent_claims_produce_one_winner_and_one_conflict(
+    engine: AsyncEngine, prepared_database: str
+) -> None:
     """Two claims arriving together, in separate transactions.
 
     This is the case the read-then-insert check cannot cover: both callers see
@@ -227,7 +231,7 @@ async def test_concurrent_claims_produce_one_winner_and_one_conflict(engine, pre
             await cleanup.commit()
 
 
-async def test_releasing_a_number_frees_it_for_another_workspace(db_session):
+async def test_releasing_a_number_frees_it_for_another_workspace(db_session: AsyncSession) -> None:
     first = await _tenant(db_session, "first")
     second = await _tenant(db_session, "second")
     account = await _service(db_session).connect(
@@ -249,7 +253,9 @@ async def test_releasing_a_number_frees_it_for_another_workspace(db_session):
     assert account.status is WhatsAppAccountStatus.RELEASED
 
 
-async def test_a_released_number_no_longer_resolves_inbound_traffic(db_session):
+async def test_a_released_number_no_longer_resolves_inbound_traffic(
+    db_session: AsyncSession,
+) -> None:
     """The half that would be easy to miss. A released row still exists - it
     holds the conversations - and must never resolve a webhook, or a number
     handed to a new workspace would keep delivering to the old one."""
@@ -267,7 +273,7 @@ async def test_a_released_number_no_longer_resolves_inbound_traffic(db_session):
     assert await WhatsAppAccountDirectory(db_session).get_by_phone_number_id(NUMBER) is None
 
 
-async def test_releasing_drops_the_stored_credential(db_session):
+async def test_releasing_drops_the_stored_credential(db_session: AsyncSession) -> None:
     """A credential for a number this workspace no longer holds is a live
     sending capability retained past any authority to use it."""
     settings = Settings(
@@ -291,7 +297,7 @@ async def test_releasing_drops_the_stored_credential(db_session):
     assert account.access_token_encrypted is None
 
 
-async def test_a_released_account_cannot_be_re_enabled(db_session):
+async def test_a_released_account_cannot_be_re_enabled(db_session: AsyncSession) -> None:
     """Enabling it would mean sending on a number somebody else may hold."""
     tenant = await _tenant(db_session, "acme")
     service = _service(db_session)
@@ -312,7 +318,9 @@ async def test_a_released_account_cannot_be_re_enabled(db_session):
         )
 
 
-async def test_another_workspace_cannot_release_a_number_it_does_not_hold(db_session):
+async def test_another_workspace_cannot_release_a_number_it_does_not_hold(
+    db_session: AsyncSession,
+) -> None:
     """The scoped lookup, on the operation where a gap would be worst: releasing
     somebody else's number frees it for the caller to claim a moment later."""
     owner = await _tenant(db_session, "owner")
@@ -329,7 +337,7 @@ async def test_another_workspace_cannot_release_a_number_it_does_not_hold(db_ses
         await _service(db_session).release(tenant_id=attacker.id, account_id=account.id)
 
 
-async def test_the_stored_credential_is_ciphertext_in_the_column(db_session):
+async def test_the_stored_credential_is_ciphertext_in_the_column(db_session: AsyncSession) -> None:
     """Read back through SQL rather than the ORM, because what is being checked
     is what a database dump would contain."""
     settings = Settings(
@@ -356,7 +364,9 @@ async def test_the_stored_credential_is_ciphertext_in_the_column(db_session):
     assert value.startswith("v1.")
 
 
-async def test_a_deployment_without_a_key_still_connects_but_keeps_nothing(db_session):
+async def test_a_deployment_without_a_key_still_connects_but_keeps_nothing(
+    db_session: AsyncSession,
+) -> None:
     """Proof and storage are separate questions. Refusing to store a secret we
     do not need to keep is not a reason to refuse the claim."""
     settings = Settings(_env_file=None, environment="test", credential_encryption_keys=[])
@@ -372,7 +382,7 @@ async def test_a_deployment_without_a_key_still_connects_but_keeps_nothing(db_se
     assert account.access_token_encrypted is None
 
 
-async def test_the_credential_is_what_gets_verified(db_session):
+async def test_the_credential_is_what_gets_verified(db_session: AsyncSession) -> None:
     """Not a hash of it, not a truncation - the value the caller supplied is
     what is presented to Meta, or the proof is of something else."""
     tenant = await _tenant(db_session, "acme")
@@ -388,7 +398,9 @@ async def test_the_credential_is_what_gets_verified(db_session):
     assert verifier.calls[0]["phone_number_id"] == NUMBER
 
 
-async def test_surrounding_whitespace_does_not_create_a_second_claim(db_session):
+async def test_surrounding_whitespace_does_not_create_a_second_claim(
+    db_session: AsyncSession,
+) -> None:
     """Identifiers are copied by hand from a dashboard. A trailing space that
     survived would break webhook resolution for every inbound message, and
     would let the same number be claimed twice."""
@@ -408,7 +420,9 @@ async def test_surrounding_whitespace_does_not_create_a_second_claim(db_session)
         )
 
 
-async def test_a_claim_that_slips_past_the_read_check_still_conflicts(db_session, monkeypatch):
+async def test_a_claim_that_slips_past_the_read_check_still_conflicts(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The race window, forced open.
 
     `asyncio.gather` above proves the pair of outcomes but cannot guarantee the
@@ -428,7 +442,7 @@ async def test_a_claim_that_slips_past_the_read_check_still_conflicts(db_session
     )
     await db_session.flush()
 
-    async def blind(self, phone_number_id: str):
+    async def blind(self: object, phone_number_id: str) -> None:
         return None
 
     monkeypatch.setattr(WhatsAppAccountDirectory, "get_by_phone_number_id", blind)

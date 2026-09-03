@@ -19,6 +19,8 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+from collections.abc import Sequence
+from typing import Any
 
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 
@@ -57,14 +59,15 @@ class FakeEmbeddings:
         self.embedded: list[str] = []
         self.calls = 0
 
-    async def embed(self, texts):
+    async def embed(self, texts: Sequence[str]) -> list[Any]:
         self.calls += 1
         self.embedded.extend(texts)
         return [embed_text(text, dimensions=self.dimensions) for text in texts]
 
-    async def embed_one(self, text):
+    async def embed_one(self, text: str) -> list[float]:
         vectors = await self.embed([text])
-        return vectors[0]
+        vector: list[float] = vectors[0]
+        return vector
 
 
 class BrokenEmbeddings:
@@ -74,8 +77,8 @@ class BrokenEmbeddings:
         self.error = error
         self.dimensions = EMBEDDING_DIMENSIONS
 
-    async def embed(self, texts):
+    async def embed(self, texts: Sequence[str]) -> None:
         raise self.error
 
-    async def embed_one(self, text):
+    async def embed_one(self, text: str) -> None:
         raise self.error

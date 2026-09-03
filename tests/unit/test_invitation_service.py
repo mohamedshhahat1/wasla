@@ -10,53 +10,58 @@ service logic.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
+from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Executable
 
 from app.core.exceptions import PermissionDeniedError
 from app.core.security import hash_invitation_token
 from app.db.models import InvitationStatus, TenantRole, User
 from app.services.invitation_service import InvitationService
+from tests.fakes import as_session
 
 TENANT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 INVITER_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
 
 
 class _FakeScalars:
-    def __init__(self, rows):
+    def __init__(self, rows: Sequence[Any]) -> None:
         self._rows = rows
 
-    def first(self):
+    def first(self) -> Any:
         return self._rows[0] if self._rows else None
 
-    def all(self):
+    def all(self) -> Sequence[Any]:
         return list(self._rows)
 
 
 class _FakeResult:
-    def __init__(self, rows):
+    def __init__(self, rows: Sequence[Any]) -> None:
         self._rows = rows
 
-    def scalars(self):
+    def scalars(self) -> _FakeScalars:
         return _FakeScalars(self._rows)
 
 
 class RecordingSession:
     """Answers every read with nothing found, and records what was staged."""
 
-    def __init__(self):
-        self.added = []
+    def __init__(self) -> None:
+        self.added: list[Any] = []
 
-    async def execute(self, statement):
+    async def execute(self, statement: Executable) -> _FakeResult:
         return _FakeResult([])
 
-    def add(self, entity):
+    def add(self, entity: object) -> None:
         self.added.append(entity)
 
-    async def flush(self):
+    async def flush(self) -> None:
         return None
 
-    async def commit(self):
+    async def commit(self) -> None:
         return None
 
 
@@ -65,7 +70,13 @@ def inviter() -> User:
     return User(id=INVITER_ID, email="owner@example.com", is_active=True)
 
 
-async def _issue(session, inviter, *, role=TenantRole.MEMBER, inviter_role=TenantRole.TENANT_OWNER):
+async def _issue(
+    session: AsyncSession,
+    inviter: User,
+    *,
+    role: TenantRole = TenantRole.MEMBER,
+    inviter_role: TenantRole = TenantRole.TENANT_OWNER,
+) -> tuple[Any, ...]:
     return await InvitationService(session=session).issue(
         tenant_id=TENANT_ID,
         inviter=inviter,
@@ -75,10 +86,10 @@ async def _issue(session, inviter, *, role=TenantRole.MEMBER, inviter_role=Tenan
     )
 
 
-async def test_the_returned_token_is_the_one_that_opens_the_invitation(inviter):
+async def test_the_returned_token_is_the_one_that_opens_the_invitation(inviter: User) -> None:
     session = RecordingSession()
 
-    invitation, raw_token = await _issue(session, inviter)
+    invitation, raw_token = await _issue(as_session(session), inviter)
 
     # The regression this exists for: the generator returns a (token, hash)
     # pair, and treating that pair as the token stored an unusable digest and
@@ -87,19 +98,19 @@ async def test_the_returned_token_is_the_one_that_opens_the_invitation(inviter):
     assert invitation.token_hash == hash_invitation_token(raw_token)
 
 
-async def test_the_raw_token_is_never_persisted(inviter):
+async def test_the_raw_token_is_never_persisted(inviter: User) -> None:
     session = RecordingSession()
 
-    invitation, raw_token = await _issue(session, inviter)
+    invitation, raw_token = await _issue(as_session(session), inviter)
 
     assert invitation.token_hash != raw_token
     assert raw_token not in invitation.token_hash
 
 
-async def test_the_invitation_is_staged_pending_and_scoped_to_the_workspace(inviter):
+async def test_the_invitation_is_staged_pending_and_scoped_to_the_workspace(inviter: User) -> None:
     session = RecordingSession()
 
-    invitation, _ = await _issue(session, inviter)
+    invitation, _ = await _issue(as_session(session), inviter)
 
     # The invitation and its audit entry are staged together, in that order:
     # letting somebody into a workspace is a recorded act (phase 14).
@@ -111,17 +122,17 @@ async def test_the_invitation_is_staged_pending_and_scoped_to_the_workspace(invi
     assert invitation.invited_by_id == INVITER_ID
 
 
-async def test_two_invitations_never_share_a_token(inviter):
-    _, first = await _issue(RecordingSession(), inviter)
-    _, second = await _issue(RecordingSession(), inviter)
+async def test_two_invitations_never_share_a_token(inviter: User) -> None:
+    _, first = await _issue(as_session(RecordingSession()), inviter)
+    _, second = await _issue(as_session(RecordingSession()), inviter)
 
     assert first != second
 
 
-async def test_an_admin_cannot_invite_an_owner(inviter):
+async def test_an_admin_cannot_invite_an_owner(inviter: User) -> None:
     with pytest.raises(PermissionDeniedError):
         await _issue(
-            RecordingSession(),
+            as_session(RecordingSession()),
             inviter,
             role=TenantRole.TENANT_OWNER,
             inviter_role=TenantRole.TENANT_ADMIN,

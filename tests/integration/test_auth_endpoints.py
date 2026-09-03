@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import CurrentUser, get_auth_service, get_current_user
 from app.core.exceptions import AuthenticationError, TenantIsolationError
@@ -68,12 +70,12 @@ def workspace(user: User) -> WorkspaceContext:
 class StubAuthService:
     """Records what it was asked to do and returns a canned session."""
 
-    def __init__(self, *, user, workspace):
+    def __init__(self, *, user: User, workspace: WorkspaceContext) -> None:
         self.user = user
         self.workspace = workspace
-        self.calls = []
+        self.calls: list[Any] = []
 
-    def _session(self):
+    def _session(self) -> AuthenticatedSession:
         return AuthenticatedSession(
             user=self.user,
             access_token="access-value",
@@ -82,22 +84,22 @@ class StubAuthService:
             workspace=self.workspace,
         )
 
-    async def register(self, **kwargs):
+    async def register(self, **kwargs: Any) -> AuthenticatedSession:
         self.calls.append(("register", kwargs))
         return self._session()
 
-    async def login(self, **kwargs):
+    async def login(self, **kwargs: Any) -> AuthenticatedSession:
         self.calls.append(("login", kwargs))
         return self._session()
 
-    async def refresh(self, **kwargs):
+    async def refresh(self, **kwargs: Any) -> AuthenticatedSession:
         self.calls.append(("refresh", kwargs))
         return self._session()
 
-    async def logout(self, **kwargs):
+    async def logout(self, **kwargs: Any) -> None:
         self.calls.append(("logout", kwargs))
 
-    async def select_workspace(self, *, user, workspace_slug):
+    async def select_workspace(self, *, user: User, workspace_slug: str) -> WorkspaceAccess:
         self.calls.append(("select_workspace", {"workspace_slug": workspace_slug}))
         return WorkspaceAccess(
             access_token="switched-value",
@@ -105,7 +107,7 @@ class StubAuthService:
             workspace=self.workspace,
         )
 
-    async def list_workspaces(self, *, user):
+    async def list_workspaces(self, *, user: User) -> list[Any]:
         self.calls.append(("list_workspaces", {}))
         return [self.workspace]
 
@@ -133,7 +135,9 @@ def authenticated(app: FastAPI, user: User, workspace: WorkspaceContext) -> Curr
     return current
 
 
-async def test_registration_returns_a_session_and_the_new_workspace(client, service):
+async def test_registration_returns_a_session_and_the_new_workspace(
+    client: AsyncClient, service: StubAuthService
+) -> None:
     response = await client.post("/api/v1/auth/register", json=REGISTRATION)
 
     assert response.status_code == 201
@@ -145,7 +149,9 @@ async def test_registration_returns_a_session_and_the_new_workspace(client, serv
     assert body["active_workspace"]["role"] == "tenant_owner"
 
 
-async def test_a_short_password_never_reaches_the_service(client, service):
+async def test_a_short_password_never_reaches_the_service(
+    client: AsyncClient, service: StubAuthService
+) -> None:
     response = await client.post(
         "/api/v1/auth/register",
         json={**REGISTRATION, "password": "short"},
@@ -155,7 +161,7 @@ async def test_a_short_password_never_reaches_the_service(client, service):
     assert service.calls == []
 
 
-async def test_unknown_fields_are_rejected(client, service):
+async def test_unknown_fields_are_rejected(client: AsyncClient, service: StubAuthService) -> None:
     # extra="forbid": a misspelled field must fail loudly, and a caller must not
     # be able to smuggle in a tenant id.
     response = await client.post(
@@ -167,7 +173,9 @@ async def test_unknown_fields_are_rejected(client, service):
     assert service.calls == []
 
 
-async def test_login_passes_the_requested_workspace_through(client, service):
+async def test_login_passes_the_requested_workspace_through(
+    client: AsyncClient, service: StubAuthService
+) -> None:
     response = await client.post(
         "/api/v1/auth/login",
         json={**CREDENTIALS, "workspace_slug": "acme"},
@@ -178,13 +186,13 @@ async def test_login_passes_the_requested_workspace_through(client, service):
 
 
 async def test_a_failed_login_answers_401_through_the_error_envelope(
-    client,
+    client: AsyncClient,
     app: FastAPI,
     user: User,
     workspace: WorkspaceContext,
-):
+) -> None:
     class Failing(StubAuthService):
-        async def login(self, **kwargs):
+        async def login(self, **kwargs: Any) -> AuthenticatedSession:
             raise AuthenticationError("The email address or password is incorrect.")
 
     app.dependency_overrides[get_auth_service] = lambda: Failing(
@@ -199,7 +207,7 @@ async def test_a_failed_login_answers_401_through_the_error_envelope(
     assert "incorrect" in response.text
 
 
-async def test_logout_answers_no_content(client, service):
+async def test_logout_answers_no_content(client: AsyncClient, service: StubAuthService) -> None:
     response = await client.post(
         "/api/v1/auth/logout",
         json={"refresh_token": "refresh-value"},
@@ -209,7 +217,9 @@ async def test_logout_answers_no_content(client, service):
     assert service.calls[0][0] == "logout"
 
 
-async def test_switching_workspace_requires_authentication(client, service):
+async def test_switching_workspace_requires_authentication(
+    client: AsyncClient, service: StubAuthService
+) -> None:
     response = await client.post(
         "/api/v1/auth/workspace",
         json={"workspace_slug": "acme"},
@@ -220,10 +230,10 @@ async def test_switching_workspace_requires_authentication(client, service):
 
 
 async def test_switching_workspace_leaves_the_refresh_token_alone(
-    client,
-    service,
-    authenticated,
-):
+    client: AsyncClient,
+    service: StubAuthService,
+    authenticated: CurrentUser,
+) -> None:
     response = await client.post(
         "/api/v1/auth/workspace",
         json={"workspace_slug": "acme"},
@@ -237,14 +247,14 @@ async def test_switching_workspace_leaves_the_refresh_token_alone(
 
 
 async def test_a_workspace_the_caller_is_not_in_looks_missing(
-    client,
+    client: AsyncClient,
     app: FastAPI,
     user: User,
     workspace: WorkspaceContext,
-    authenticated,
-):
+    authenticated: CurrentUser,
+) -> None:
     class Denying(StubAuthService):
-        async def select_workspace(self, *, user, workspace_slug):
+        async def select_workspace(self, *, user: User, workspace_slug: str) -> WorkspaceAccess:
             raise TenantIsolationError()
 
     app.dependency_overrides[get_auth_service] = lambda: Denying(
@@ -261,7 +271,9 @@ async def test_a_workspace_the_caller_is_not_in_looks_missing(
     assert response.status_code == 404
 
 
-async def test_the_profile_lists_the_callers_workspaces(client, service, authenticated):
+async def test_the_profile_lists_the_callers_workspaces(
+    client: AsyncClient, service: StubAuthService, authenticated: CurrentUser
+) -> None:
     response = await client.get("/api/v1/auth/me")
 
     assert response.status_code == 200
@@ -275,7 +287,9 @@ async def test_the_profile_lists_the_callers_workspaces(client, service, authent
     assert body["avatar_url"] == "https://lh3.googleusercontent.com/a/abc123=s96-c"
 
 
-async def test_the_profile_requires_authentication(client, service):
+async def test_the_profile_requires_authentication(
+    client: AsyncClient, service: StubAuthService
+) -> None:
     response = await client.get("/api/v1/auth/me")
 
     assert response.status_code == 401

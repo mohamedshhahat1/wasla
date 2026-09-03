@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
@@ -38,6 +39,7 @@ from app.core.tracing import (
 from app.workers.dispatch import job_span
 from app.workers.queue import AgentJob, AgentQueue, JobEnvelope
 from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import as_redis
 from tests.tracing_recorder import Recording, recording_spans
 
 # Values chosen to be findable and to be nothing else. If one of these turns up
@@ -65,7 +67,7 @@ CONVERSATION = uuid.UUID("22222222-2222-2222-2222-222222222222")
 
 
 @pytest.fixture
-def record():
+def record() -> Iterator[Recording]:
     yield from recording_spans()
 
 
@@ -86,7 +88,7 @@ def exported(record: Recording) -> str:
 async def test_every_attribute_on_every_span_is_on_the_allowlist(record: Recording) -> None:
     """The structural half. A new attribute fails here whatever it is named."""
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     with span("api.request", kind=SpanKind.SERVER):
         await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION))
     envelope = JobEnvelope.decode(redis.lists[queue.namespace + ":pending"][0])
@@ -198,7 +200,7 @@ async def test_a_span_records_no_exception_event(record: Recording) -> None:
 async def test_a_queue_span_carries_no_job_payload(record: Recording) -> None:
     """The envelope's body names a tenant and a conversation. The span does not."""
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
 
     with span("api.request", kind=SpanKind.SERVER):
         await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION))
@@ -232,7 +234,7 @@ async def test_a_worker_span_carries_no_job_payload(record: Recording) -> None:
 async def test_no_span_name_carries_an_identifier(record: Recording) -> None:
     """Span names are what a backend groups by, so they are bounded too."""
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION))
     envelope = JobEnvelope.decode(redis.lists[queue.namespace + ":pending"][0])
     with job_span(job_type="agent", envelope=envelope):

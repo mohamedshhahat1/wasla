@@ -30,12 +30,15 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import TypedDict
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.pool import QueuePool
 
-from app.agents.orchestrator import AgentOrchestrator
+from app.agents.orchestrator import AgentOrchestrator, AgentOutcome
 from app.agents.registry import ToolRegistry
 from app.core.config import Settings
 from app.core.metrics import MetricsRegistry
@@ -65,8 +68,17 @@ from app.integrations.openai.types import AgentReply, TokenUsage
 from app.repositories.billing_repository import SubscriptionRepository
 from app.services.entitlement_service import EntitlementService
 from app.services.metrics_service import API_ROLE, MetricsService
+from tests.fakes import as_responses
 
 pytestmark = pytest.mark.integration
+
+
+class Workspace(TypedDict):
+    """What the fixture below hands each test: one tenant, two conversations."""
+
+    tenant_id: uuid.UUID
+    conversations: list[uuid.UUID]
+
 
 MODEL = "claude-opus-5"
 TURNS = 2
@@ -116,7 +128,7 @@ class BlockingProvider:
 
 
 @pytest_asyncio.fixture
-async def one_connection(prepared_database: str):
+async def one_connection(prepared_database: str) -> AsyncIterator[Database]:
     """A `Database` whose pool holds exactly one connection.
 
     `pool_timeout` is short on purpose: on the broken code the second turn asks
@@ -146,7 +158,9 @@ async def one_connection(prepared_database: str):
 
 
 @pytest_asyncio.fixture
-async def workspace(one_connection) -> AsyncIterator[dict[str, uuid.UUID]]:
+async def workspace(
+    one_connection: Database,
+) -> AsyncIterator[Workspace]:
     """A committed workspace with two conversations, removed afterwards.
 
     Committed rather than staged, because the code under test commits and a
@@ -211,13 +225,19 @@ async def workspace(one_connection) -> AsyncIterator[dict[str, uuid.UUID]]:
         await session.commit()
 
 
-async def _turn(factory, *, tenant_id: uuid.UUID, conversation_id: uuid.UUID, provider):
+async def _turn(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    provider: BlockingProvider,
+) -> AgentOutcome:
     """One agent turn on its own session, as the worker runs it."""
     async with factory() as session:
         orchestrator = AgentOrchestrator(
             session=session,
             tenant_id=tenant_id,
-            client=provider,
+            client=as_responses(provider),
             registry=ToolRegistry(),
         )
         outcome = await orchestrator.answer(conversation_id=conversation_id)
@@ -226,9 +246,9 @@ async def _turn(factory, *, tenant_id: uuid.UUID, conversation_id: uuid.UUID, pr
 
 
 async def test_two_turns_wait_on_the_provider_at_once_through_a_pool_of_one(
-    one_connection,
-    workspace,
-):
+    one_connection: Database,
+    workspace: Workspace,
+) -> None:
     """GATE: the connection is in the pool while the provider is thinking.
 
     Two assertions, and the second is the one that cannot be argued with. The
@@ -236,7 +256,7 @@ async def test_two_turns_wait_on_the_provider_at_once_through_a_pool_of_one(
     impossible unless the first released. The pool's own checkout count,
     sampled while both are parked, says the same thing from the other side.
     """
-    engine, factory = one_connection.engine, one_connection.session_factory
+    factory = one_connection.session_factory
     provider = BlockingProvider()
 
     turns = [
@@ -260,7 +280,7 @@ async def test_two_turns_wait_on_the_provider_at_once_through_a_pool_of_one(
 
         # Sampled while both turns are parked inside the provider and neither
         # can have resumed, because only this line lets them.
-        checked_out_while_waiting = engine.pool.checkedout()
+        checked_out_while_waiting = _pool(one_connection).checkedout()
         provider.resume.set()
         outcomes = await asyncio.gather(*turns)
     finally:
@@ -274,7 +294,9 @@ async def test_two_turns_wait_on_the_provider_at_once_through_a_pool_of_one(
     assert [outcome.reply for outcome in outcomes] == ["answered"] * TURNS
 
 
-async def test_the_pool_metric_agrees_with_the_pool(one_connection, workspace):
+async def test_the_pool_metric_agrees_with_the_pool(
+    one_connection: Database, workspace: Workspace
+) -> None:
     """What `/metrics` publishes is what `checkedout()` says, at the same instant.
 
     The gate above proves the connection is released while the provider is
@@ -307,7 +329,7 @@ async def test_the_pool_metric_agrees_with_the_pool(one_connection, workspace):
             for _ in range(TURNS):
                 await provider.arrived.acquire()
 
-        checked_out = database.engine.pool.checkedout()
+        checked_out = _pool(database).checkedout()
         exposition = await service.render()
         provider.resume.set()
         await asyncio.gather(*turns)
@@ -323,7 +345,7 @@ async def test_the_pool_metric_agrees_with_the_pool(one_connection, workspace):
     assert _gauge(exposition, "wasla_db_pool_max_overflow") == 0.0
 
 
-async def test_the_pool_metric_sees_a_connection_that_is_held(one_connection):
+async def test_the_pool_metric_sees_a_connection_that_is_held(one_connection: Database) -> None:
     """The control for the test above.
 
     A gauge that answered zero unconditionally would satisfy it. This holds a
@@ -342,7 +364,7 @@ async def test_the_pool_metric_sees_a_connection_that_is_held(one_connection):
     assert _gauge(released, "wasla_db_pool_checked_out") == 0.0
 
 
-async def test_the_pool_metric_names_the_process_it_describes(one_connection):
+async def test_the_pool_metric_names_the_process_it_describes(one_connection: Database) -> None:
     """The API can only see its own pool, and the series has to say so.
 
     Without the label this reads as "the deployment's database pool", which it
@@ -356,6 +378,18 @@ async def test_the_pool_metric_names_the_process_it_describes(one_connection):
     assert 'wasla_db_pool_checked_out{process_role="api"}' in exposition
 
 
+def _pool(database: Database) -> QueuePool:
+    """The pool, narrowed the way `MetricsService` narrows it.
+
+    `AsyncEngine.pool` is declared as the base `Pool`, which has no
+    `checkedout`. Every engine this application builds has a `QueuePool`,
+    and the `isinstance` proves it rather than claiming it.
+    """
+    pool = database.engine.pool
+    assert isinstance(pool, QueuePool)
+    return pool
+
+
 def _gauge(exposition: str, name: str) -> float:
     prefix = f'{name}{{process_role="{API_ROLE}"}} '
     for line in exposition.splitlines():
@@ -364,27 +398,29 @@ def _gauge(exposition: str, name: str) -> float:
     raise AssertionError(f"{name} is not in the exposition:\n{exposition}")
 
 
-async def test_the_pool_is_genuinely_one_connection(one_connection, workspace):
+async def test_the_pool_is_genuinely_one_connection(
+    one_connection: Database, workspace: Workspace
+) -> None:
     """The control.
 
     If the pool silently allowed two connections the test above would pass on
     the broken code and mean nothing, so this asserts the constraint it relies
     on: a second connection, asked for while the first is held, is refused.
     """
-    engine, factory = one_connection.engine, one_connection.session_factory
+    factory = one_connection.session_factory
 
     async with factory() as held:
         await held.execute(text("SELECT 1"))
-        assert engine.pool.checkedout() == 1
+        assert _pool(one_connection).checkedout() == 1
         async with factory() as second:
             with pytest.raises(Exception, match="(?i)timeout|QueuePool"):
                 await second.execute(text("SELECT 1"))
 
 
 async def test_a_release_makes_the_turns_work_committed_rather_than_pending(
-    one_connection,
-    workspace,
-):
+    one_connection: Database,
+    workspace: Workspace,
+) -> None:
     """What the release costs, asserted rather than described.
 
     A turn is no longer one transaction, so a reply that is composed and then
@@ -394,7 +430,7 @@ async def test_a_release_makes_the_turns_work_committed_rather_than_pending(
     not be if the turn were holding an uncommitted transaction over the only
     connection in the pool.
     """
-    engine, factory = one_connection.engine, one_connection.session_factory
+    factory = one_connection.session_factory
     provider = BlockingProvider()
     conversation_id = workspace["conversations"][0]
 
@@ -416,7 +452,7 @@ async def test_a_release_makes_the_turns_work_committed_rather_than_pending(
                 select(Conversation.mode).where(Conversation.id == conversation_id)
             )
         assert mode is ConversationMode.AI
-        assert engine.pool.checkedout() == 0
+        assert _pool(one_connection).checkedout() == 0
         provider.resume.set()
         outcome = await turn
     finally:
@@ -428,7 +464,9 @@ async def test_a_release_makes_the_turns_work_committed_rather_than_pending(
 # ------------------------ what the release means for state that moves under it
 
 
-async def test_the_allowance_is_resolved_again_for_every_round(one_connection, workspace):
+async def test_the_allowance_is_resolved_again_for_every_round(
+    one_connection: Database, workspace: Workspace
+) -> None:
     """A plan that changes mid-turn is seen by the next round, not cached.
 
     The reservation is what enforces the AI-request limit, and moving the
@@ -518,9 +556,9 @@ async def test_the_allowance_is_resolved_again_for_every_round(one_connection, w
 
 
 async def test_a_reservation_can_be_taken_while_a_provider_call_is_in_flight(
-    one_connection,
-    workspace,
-):
+    one_connection: Database,
+    workspace: Workspace,
+) -> None:
     """The deadlock this ordering exists to avoid.
 
     `reserve_round` needs a session of its own, because `consume` holds an
@@ -540,12 +578,12 @@ async def test_a_reservation_can_be_taken_while_a_provider_call_is_in_flight(
             reserved.append(True)
             return True
 
-    async def turn():
+    async def turn() -> AgentOutcome:
         async with factory() as session:
             orchestrator = AgentOrchestrator(
                 session=session,
                 tenant_id=workspace["tenant_id"],
-                client=provider,
+                client=as_responses(provider),
                 registry=ToolRegistry(),
                 reserve_round=reserve,
             )

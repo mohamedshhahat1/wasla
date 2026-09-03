@@ -50,7 +50,12 @@ def _unit(vector: list[float]) -> list[float]:
     return [value / norm for value in vector]
 
 
-def clustered_vector(around: list[float], *, spread: float, rng: random.Random | None = None):
+def clustered_vector(
+    around: list[float],
+    *,
+    spread: float,
+    rng: random.Random | None = None,
+) -> list[float]:
     """A unit vector near `around`. `spread=0` returns `around` itself."""
     if spread == 0.0:
         return list(around)

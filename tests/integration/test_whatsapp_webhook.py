@@ -10,8 +10,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.v1.webhooks import get_ingestion_service
 from app.core.config import Settings
@@ -43,10 +46,10 @@ PAYLOAD = {
 
 
 class StubIngestion:
-    def __init__(self):
-        self.calls = []
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
 
-    async def ingest(self, payload):
+    async def ingest(self, payload: dict[str, Any]) -> IngestionOutcome:
         self.calls.append(payload)
         return IngestionOutcome(stored=1)
 
@@ -57,7 +60,7 @@ def _signed(body: bytes) -> dict[str, str]:
 
 
 @pytest.fixture
-def configured(app) -> Settings:
+def configured(app: FastAPI) -> Settings:
     settings = Settings(
         _env_file=None,
         environment="test",
@@ -69,13 +72,15 @@ def configured(app) -> Settings:
 
 
 @pytest.fixture
-def ingestion(app) -> StubIngestion:
+def ingestion(app: FastAPI) -> StubIngestion:
     stub = StubIngestion()
     app.dependency_overrides[get_ingestion_service] = lambda: stub
     return stub
 
 
-async def test_verification_echoes_the_challenge_to_a_caller_with_the_token(client, configured):
+async def test_verification_echoes_the_challenge_to_a_caller_with_the_token(
+    client: AsyncClient, configured: Settings
+) -> None:
     response = await client.get(
         PATH,
         params={
@@ -89,7 +94,9 @@ async def test_verification_echoes_the_challenge_to_a_caller_with_the_token(clie
     assert response.text == "1158201444"
 
 
-async def test_verification_with_the_wrong_token_never_echoes_the_challenge(client, configured):
+async def test_verification_with_the_wrong_token_never_echoes_the_challenge(
+    client: AsyncClient, configured: Settings
+) -> None:
     response = await client.get(
         PATH,
         params={
@@ -103,7 +110,9 @@ async def test_verification_with_the_wrong_token_never_echoes_the_challenge(clie
     assert "1158201444" not in response.text
 
 
-async def test_verification_requires_the_subscribe_mode(client, configured):
+async def test_verification_requires_the_subscribe_mode(
+    client: AsyncClient, configured: Settings
+) -> None:
     response = await client.get(
         PATH,
         params={
@@ -116,7 +125,9 @@ async def test_verification_requires_the_subscribe_mode(client, configured):
     assert response.status_code == 403
 
 
-async def test_a_signed_delivery_is_ingested(client, configured, ingestion):
+async def test_a_signed_delivery_is_ingested(
+    client: AsyncClient, configured: Settings, ingestion: StubIngestion
+) -> None:
     body = json.dumps(PAYLOAD).encode()
 
     response = await client.post(PATH, content=body, headers=_signed(body))
@@ -126,7 +137,9 @@ async def test_a_signed_delivery_is_ingested(client, configured, ingestion):
     assert ingestion.calls == [PAYLOAD]
 
 
-async def test_an_unsigned_delivery_never_reaches_ingestion(client, configured, ingestion):
+async def test_an_unsigned_delivery_never_reaches_ingestion(
+    client: AsyncClient, configured: Settings, ingestion: StubIngestion
+) -> None:
     body = json.dumps(PAYLOAD).encode()
 
     response = await client.post(PATH, content=body, headers={"Content-Type": "application/json"})
@@ -135,7 +148,9 @@ async def test_an_unsigned_delivery_never_reaches_ingestion(client, configured, 
     assert ingestion.calls == []
 
 
-async def test_a_forged_signature_never_reaches_ingestion(client, configured, ingestion):
+async def test_a_forged_signature_never_reaches_ingestion(
+    client: AsyncClient, configured: Settings, ingestion: StubIngestion
+) -> None:
     body = json.dumps(PAYLOAD).encode()
     forged = hmac.new(b"wrong-secret", body, hashlib.sha256).hexdigest()
 
@@ -149,7 +164,9 @@ async def test_a_forged_signature_never_reaches_ingestion(client, configured, in
     assert ingestion.calls == []
 
 
-async def test_a_signature_for_a_different_body_is_refused(client, configured, ingestion):
+async def test_a_signature_for_a_different_body_is_refused(
+    client: AsyncClient, configured: Settings, ingestion: StubIngestion
+) -> None:
     headers = _signed(b'{"object":"something else"}')
 
     response = await client.post(PATH, content=json.dumps(PAYLOAD).encode(), headers=headers)
@@ -159,8 +176,8 @@ async def test_a_signature_for_a_different_body_is_refused(client, configured, i
 
 
 async def test_an_unparseable_body_is_acknowledged_rather_than_retried(
-    client, configured, ingestion
-):
+    client: AsyncClient, configured: Settings, ingestion: StubIngestion
+) -> None:
     body = b"not json at all"
 
     response = await client.post(PATH, content=body, headers=_signed(body))
@@ -171,7 +188,9 @@ async def test_an_unparseable_body_is_acknowledged_rather_than_retried(
     assert ingestion.calls == []
 
 
-async def test_a_json_body_that_is_not_an_object_is_acknowledged(client, configured, ingestion):
+async def test_a_json_body_that_is_not_an_object_is_acknowledged(
+    client: AsyncClient, configured: Settings, ingestion: StubIngestion
+) -> None:
     body = b"[1, 2, 3]"
 
     response = await client.post(PATH, content=body, headers=_signed(body))

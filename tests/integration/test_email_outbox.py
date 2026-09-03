@@ -10,14 +10,17 @@ tried again.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.email import EmailStatus, EmailSuppression, OutboundEmail
 from app.db.models.tenant import Tenant
-from app.integrations.email.base import EmailSendResult, EmailSendState
+from app.integrations.email.base import EmailProvider, EmailSendResult, EmailSendState
 from app.integrations.email.fake import FakeEmailProvider
 from app.repositories.email_repository import (
     STUCK_AFTER_SECONDS,
@@ -25,6 +28,7 @@ from app.repositories.email_repository import (
 )
 from app.services.email_templates import EmailTemplate
 from app.workers.email_worker import MAX_BACKOFF_SECONDS, EmailWorker
+from tests.fakes import as_database, as_settings
 
 pytestmark = pytest.mark.integration
 
@@ -39,17 +43,17 @@ class SessionHandle:
     is asserted.
     """
 
-    def __init__(self, session) -> None:
+    def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self.opened = 0
 
     @asynccontextmanager
-    async def session(self):
+    async def session(self) -> AsyncIterator[AsyncSession]:
         self.opened += 1
         yield self._session
 
 
-class Settings:
+class _WorkerSettings:
     """Only what the worker and the outbox read."""
 
     email_enabled = True
@@ -62,7 +66,7 @@ class Settings:
 
 
 async def _enqueue(
-    session,
+    session: AsyncSession,
     *,
     recipient: str = "person@example.com",
     template: EmailTemplate = EmailTemplate.PASSWORD_CHANGED,
@@ -82,21 +86,28 @@ async def _enqueue(
     )
 
 
-def _worker(session, provider=None, **kwargs) -> EmailWorker:
+def _worker(
+    session: AsyncSession,
+    provider: EmailProvider | None = None,
+    **kwargs: Any,
+) -> EmailWorker:
     return EmailWorker(
-        database=SessionHandle(session),
-        settings=Settings(),
+        database=as_database(SessionHandle(session)),
+        settings=as_settings(_WorkerSettings()),
         provider=provider if provider is not None else FakeEmailProvider(),
         **kwargs,
     )
 
 
-async def _reload(session, email_id: uuid.UUID) -> OutboundEmail:
-    return await session.get(OutboundEmail, email_id)
+async def _reload(session: AsyncSession, email_id: uuid.UUID) -> OutboundEmail:
+    found = await session.get(OutboundEmail, email_id)
+    assert found is not None
+    return found
 
 
-async def test_a_queued_email_starts_pending_and_due(db_session):
+async def test_a_queued_email_starts_pending_and_due(db_session: AsyncSession) -> None:
     email = await _enqueue(db_session)
+    assert email is not None
 
     assert email is not None
     assert email.status is EmailStatus.PENDING
@@ -104,7 +115,7 @@ async def test_a_queued_email_starts_pending_and_due(db_session):
     assert email.available_at == NOW
 
 
-async def test_a_duplicate_idempotency_key_inserts_nothing(db_session):
+async def test_a_duplicate_idempotency_key_inserts_nothing(db_session: AsyncSession) -> None:
     """The constraint is the guarantee, not the caller's discipline."""
     first = await _enqueue(db_session, key="invitation:1")
     second = await _enqueue(db_session, key="invitation:1")
@@ -113,16 +124,20 @@ async def test_a_duplicate_idempotency_key_inserts_nothing(db_session):
     assert second is None
 
 
-async def test_a_recipient_is_stored_lower_cased(db_session):
+async def test_a_recipient_is_stored_lower_cased(db_session: AsyncSession) -> None:
     """Suppression is a string comparison, so the form has to be one form."""
     email = await _enqueue(db_session, recipient="Person@Example.COM")
+    assert email is not None
 
     assert email is not None
     assert email.recipient == "person@example.com"
 
 
-async def test_claiming_marks_the_row_sending_and_counts_the_attempt(db_session):
+async def test_claiming_marks_the_row_sending_and_counts_the_attempt(
+    db_session: AsyncSession,
+) -> None:
     email = await _enqueue(db_session)
+    assert email is not None
     repository = EmailOutboxRepository(db_session)
 
     claimed = await repository.claim_due(now=NOW)
@@ -133,13 +148,13 @@ async def test_claiming_marks_the_row_sending_and_counts_the_attempt(db_session)
     assert claimed[0].claimed_at == NOW
 
 
-async def test_a_row_not_yet_due_is_not_claimed(db_session):
+async def test_a_row_not_yet_due_is_not_claimed(db_session: AsyncSession) -> None:
     await _enqueue(db_session, available_at=NOW + timedelta(minutes=5))
 
     assert await EmailOutboxRepository(db_session).claim_due(now=NOW) == []
 
 
-async def test_a_claimed_row_is_not_claimed_again(db_session):
+async def test_a_claimed_row_is_not_claimed_again(db_session: AsyncSession) -> None:
     await _enqueue(db_session)
     repository = EmailOutboxRepository(db_session)
     await repository.claim_due(now=NOW)
@@ -147,7 +162,7 @@ async def test_a_claimed_row_is_not_claimed_again(db_session):
     assert await repository.claim_due(now=NOW) == []
 
 
-async def test_the_claim_is_bounded_by_its_limit(db_session):
+async def test_the_claim_is_bounded_by_its_limit(db_session: AsyncSession) -> None:
     for index in range(5):
         await _enqueue(db_session, key=f"bulk-{index}")
 
@@ -156,9 +171,10 @@ async def test_the_claim_is_bounded_by_its_limit(db_session):
     assert len(claimed) == 2
 
 
-async def test_a_stuck_claim_returns_to_the_queue(db_session):
+async def test_a_stuck_claim_returns_to_the_queue(db_session: AsyncSession) -> None:
     """The at-least-once half: a crashed send goes again rather than vanishing."""
     email = await _enqueue(db_session)
+    assert email is not None
     repository = EmailOutboxRepository(db_session)
     await repository.claim_due(now=NOW)
     later = NOW + timedelta(seconds=STUCK_AFTER_SECONDS + 1)
@@ -169,7 +185,7 @@ async def test_a_stuck_claim_returns_to_the_queue(db_session):
     assert (await _reload(db_session, email.id)).status is EmailStatus.PENDING
 
 
-async def test_a_recent_claim_is_left_alone(db_session):
+async def test_a_recent_claim_is_left_alone(db_session: AsyncSession) -> None:
     """A slow provider must never be mistaken for a dead worker."""
     await _enqueue(db_session)
     repository = EmailOutboxRepository(db_session)
@@ -178,13 +194,16 @@ async def test_a_recent_claim_is_left_alone(db_session):
     assert await repository.recover_stuck(now=NOW + timedelta(seconds=30)) == 0
 
 
-async def test_a_sent_message_records_the_provider_id_and_clears_its_context(db_session):
+async def test_a_sent_message_records_the_provider_id_and_clears_its_context(
+    db_session: AsyncSession,
+) -> None:
     """The reset link's life ends with the send, not with the row."""
     email = await _enqueue(
         db_session,
         template=EmailTemplate.PASSWORD_RESET,
         context={"token": "super-secret-token"},
     )
+    assert email is not None
     provider = FakeEmailProvider()
 
     await _worker(db_session, provider).run_once(now=NOW)
@@ -196,7 +215,7 @@ async def test_a_sent_message_records_the_provider_id_and_clears_its_context(db_
     assert provider.sent[0].to == ("person@example.com",)
 
 
-async def test_the_sent_message_carries_the_rendered_link(db_session):
+async def test_the_sent_message_carries_the_rendered_link(db_session: AsyncSession) -> None:
     await _enqueue(
         db_session,
         template=EmailTemplate.PASSWORD_RESET,
@@ -209,8 +228,9 @@ async def test_the_sent_message_carries_the_rendered_link(db_session):
     assert "https://app.example.com/reset-password?token=tok-9" in provider.sent[0].text
 
 
-async def test_a_permanent_refusal_fails_the_row_at_once(db_session):
+async def test_a_permanent_refusal_fails_the_row_at_once(db_session: AsyncSession) -> None:
     email = await _enqueue(db_session)
+    assert email is not None
     provider = FakeEmailProvider()
     provider.script = [
         EmailSendResult(
@@ -227,8 +247,11 @@ async def test_a_permanent_refusal_fails_the_row_at_once(db_session):
     assert row.last_error_code == "invalid_recipient"
 
 
-async def test_a_transient_refusal_schedules_a_retry_in_the_future(db_session):
+async def test_a_transient_refusal_schedules_a_retry_in_the_future(
+    db_session: AsyncSession,
+) -> None:
     email = await _enqueue(db_session)
+    assert email is not None
     provider = FakeEmailProvider()
     provider.script = [
         EmailSendResult(
@@ -246,9 +269,10 @@ async def test_a_transient_refusal_schedules_a_retry_in_the_future(db_session):
     assert row.attempts == 1
 
 
-async def test_the_backoff_grows_and_stays_under_its_ceiling(db_session):
+async def test_the_backoff_grows_and_stays_under_its_ceiling(db_session: AsyncSession) -> None:
     """Exponential with jitter, but never past the cap."""
     email = await _enqueue(db_session)
+    assert email is not None
     email.attempts = 20
     email.status = EmailStatus.SENDING
     email.claimed_at = NOW
@@ -265,9 +289,10 @@ async def test_the_backoff_grows_and_stays_under_its_ceiling(db_session):
     assert delay.total_seconds() <= MAX_BACKOFF_SECONDS * 1.25
 
 
-async def test_a_row_that_exhausts_its_attempts_fails(db_session):
+async def test_a_row_that_exhausts_its_attempts_fails(db_session: AsyncSession) -> None:
     """`EMAIL_MAX_ATTEMPTS` is 3 in this test's settings."""
     email = await _enqueue(db_session)
+    assert email is not None
     email.attempts = 3
     email.status = EmailStatus.SENDING
     email.claimed_at = NOW
@@ -283,9 +308,12 @@ async def test_a_row_that_exhausts_its_attempts_fails(db_session):
     assert (await _reload(db_session, email.id)).status is EmailStatus.FAILED
 
 
-async def test_a_row_whose_context_is_missing_fails_rather_than_looping(db_session):
+async def test_a_row_whose_context_is_missing_fails_rather_than_looping(
+    db_session: AsyncSession,
+) -> None:
     """A reset with no token will not grow one tomorrow."""
     email = await _enqueue(db_session, template=EmailTemplate.PASSWORD_RESET, context={})
+    assert email is not None
     provider = FakeEmailProvider()
 
     await _worker(db_session, provider).run_once(now=NOW)
@@ -296,7 +324,7 @@ async def test_a_row_whose_context_is_missing_fails_rather_than_looping(db_sessi
     assert provider.sent == []
 
 
-async def test_a_broken_row_does_not_strand_the_rest(db_session):
+async def test_a_broken_row_does_not_strand_the_rest(db_session: AsyncSession) -> None:
     """One workspace's poisonous message must not hold up everybody else's."""
     broken = await _enqueue(
         db_session,
@@ -305,7 +333,9 @@ async def test_a_broken_row_does_not_strand_the_rest(db_session):
         context={},
         available_at=NOW - timedelta(seconds=1),
     )
+    assert broken is not None
     healthy = await _enqueue(db_session, key="healthy")
+    assert healthy is not None
     provider = FakeEmailProvider()
 
     await _worker(db_session, provider).run_once(now=NOW)
@@ -314,8 +344,9 @@ async def test_a_broken_row_does_not_strand_the_rest(db_session):
     assert (await _reload(db_session, healthy.id)).status is EmailStatus.SENT
 
 
-async def test_a_suppressed_recipient_is_never_written_to(db_session):
+async def test_a_suppressed_recipient_is_never_written_to(db_session: AsyncSession) -> None:
     email = await _enqueue(db_session, recipient="bounced@example.com")
+    assert email is not None
     db_session.add(EmailSuppression(recipient="bounced@example.com", reason="hard_bounce"))
     await db_session.flush()
     provider = FakeEmailProvider()
@@ -328,9 +359,10 @@ async def test_a_suppressed_recipient_is_never_written_to(db_session):
     assert provider.sent == []
 
 
-async def test_suppression_ignores_the_case_of_the_address(db_session):
+async def test_suppression_ignores_the_case_of_the_address(db_session: AsyncSession) -> None:
     """A mixed-case row must not slip past a suppression written lower-cased."""
     email = await _enqueue(db_session, recipient="Bounced@Example.com")
+    assert email is not None
     await EmailOutboxRepository(db_session).suppress("BOUNCED@EXAMPLE.COM", reason="hard_bounce")
     await db_session.flush()
     provider = FakeEmailProvider()
@@ -341,7 +373,7 @@ async def test_suppression_ignores_the_case_of_the_address(db_session):
     assert provider.sent == []
 
 
-async def test_suppressing_the_same_address_twice_is_harmless(db_session):
+async def test_suppressing_the_same_address_twice_is_harmless(db_session: AsyncSession) -> None:
     """A replayed bounce webhook is normal traffic, not an anomaly."""
     repository = EmailOutboxRepository(db_session)
     await repository.suppress("x@example.com", reason="hard_bounce")
@@ -351,18 +383,18 @@ async def test_suppressing_the_same_address_twice_is_harmless(db_session):
     assert await repository.is_suppressed("x@example.com") is True
 
 
-async def test_an_empty_sweep_touches_nothing(db_session):
+async def test_an_empty_sweep_touches_nothing(db_session: AsyncSession) -> None:
     assert await _worker(db_session).run_once(now=NOW) == 0
 
 
-async def test_each_message_is_delivered_in_its_own_transaction(db_session):
+async def test_each_message_is_delivered_in_its_own_transaction(db_session: AsyncSession) -> None:
     """The crash window is one message, not the batch (see `run_once`)."""
     for index in range(3):
         await _enqueue(db_session, key=f"batch-{index}")
     handle = SessionHandle(db_session)
     worker = EmailWorker(
-        database=handle,
-        settings=Settings(),
+        database=as_database(handle),
+        settings=as_settings(_WorkerSettings()),
         provider=FakeEmailProvider(),
     )
 
@@ -373,9 +405,10 @@ async def test_each_message_is_delivered_in_its_own_transaction(db_session):
     assert handle.opened == 4
 
 
-async def test_a_row_recovered_by_another_sweep_is_not_sent_twice(db_session):
+async def test_a_row_recovered_by_another_sweep_is_not_sent_twice(db_session: AsyncSession) -> None:
     """`get_claimed` only answers for a row still marked `sending`."""
     email = await _enqueue(db_session)
+    assert email is not None
     repository = EmailOutboxRepository(db_session)
     await repository.claim_due(now=NOW)
     email.status = EmailStatus.PENDING
@@ -384,8 +417,9 @@ async def test_a_row_recovered_by_another_sweep_is_not_sent_twice(db_session):
     assert await repository.get_claimed(email.id) is None
 
 
-async def test_delivery_upgrades_a_sent_row(db_session):
+async def test_delivery_upgrades_a_sent_row(db_session: AsyncSession) -> None:
     email = await _enqueue(db_session)
+    assert email is not None
     await _worker(db_session).run_once(now=NOW)
     repository = EmailOutboxRepository(db_session)
 
@@ -394,9 +428,10 @@ async def test_delivery_upgrades_a_sent_row(db_session):
     assert (await _reload(db_session, email.id)).status is EmailStatus.DELIVERED
 
 
-async def test_delivery_never_resurrects_a_failed_row(db_session):
+async def test_delivery_never_resurrects_a_failed_row(db_session: AsyncSession) -> None:
     """Otherwise the status depends on the order webhooks happened to arrive."""
     email = await _enqueue(db_session)
+    assert email is not None
     repository = EmailOutboxRepository(db_session)
     await repository.mark_failed(email, now=NOW, error_code="bounced", error_message=None)
 
@@ -405,7 +440,7 @@ async def test_delivery_never_resurrects_a_failed_row(db_session):
     assert (await _reload(db_session, email.id)).status is EmailStatus.FAILED
 
 
-async def test_a_message_is_found_by_the_provider_id_we_recorded(db_session):
+async def test_a_message_is_found_by_the_provider_id_we_recorded(db_session: AsyncSession) -> None:
     await _enqueue(db_session)
     await _worker(db_session).run_once(now=NOW)
 
@@ -415,16 +450,17 @@ async def test_a_message_is_found_by_the_provider_id_we_recorded(db_session):
     assert found.provider_message_id == "fake-1"
 
 
-async def test_an_unknown_provider_id_finds_nothing(db_session):
+async def test_an_unknown_provider_id_finds_nothing(db_session: AsyncSession) -> None:
     assert await EmailOutboxRepository(db_session).get_by_provider_message_id("nope") is None
 
 
-async def test_a_tenant_scoped_email_keeps_its_tenant(db_session):
+async def test_a_tenant_scoped_email_keeps_its_tenant(db_session: AsyncSession) -> None:
     tenant = Tenant(name="Acme", slug="acme-outbox")
     db_session.add(tenant)
     await db_session.flush()
 
     email = await _enqueue(db_session, tenant_id=tenant.id)
+    assert email is not None
 
     assert email is not None
     assert email.tenant_id == tenant.id

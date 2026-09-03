@@ -9,10 +9,12 @@ attribute, and that one workspace's readings are invisible to another.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import TenantIsolationError
 from app.db.models.agent import Agent, AgentStatus
@@ -34,8 +36,9 @@ from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.integrations.openai.types import TokenUsage
 from app.repositories.sentiment_repository import SentimentRepository
-from app.services.sentiment_reader import SentimentReading
+from app.services.sentiment_reader import SentimentAnalyzer, SentimentReading
 from app.services.sentiment_service import SentimentService
+from tests.fakes import as_analyzer
 
 pytestmark = pytest.mark.integration
 
@@ -68,7 +71,7 @@ class StubAnalyzer:
         return self._reading
 
 
-async def _conversation(session, *, slug="acme"):
+async def _conversation(session: AsyncSession, *, slug: str = "acme") -> tuple[Any, ...]:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
@@ -94,14 +97,14 @@ async def _conversation(session, *, slug="acme"):
 
 
 async def _said(
-    session,
+    session: AsyncSession,
     *,
-    tenant,
-    conversation,
-    body,
-    wa_message_id="wamid.1",
-    at=None,
-):
+    tenant: Tenant,
+    conversation: Conversation,
+    body: str,
+    wa_message_id: str = "wamid.1",
+    at: datetime | None = None,
+) -> Message:
     """Store one inbound message.
 
     `at` is set explicitly wherever the order of two messages is the point.
@@ -125,11 +128,15 @@ async def _said(
     return message
 
 
-def _service(session, tenant, analyzer=None) -> SentimentService:
+def _service(
+    session: AsyncSession,
+    tenant: Tenant,
+    analyzer: SentimentAnalyzer | None = None,
+) -> SentimentService:
     return SentimentService(session=session, tenant_id=tenant.id, analyzer=analyzer)
 
 
-async def test_an_angry_message_escalates_and_is_recorded(db_session):
+async def test_an_angry_message_escalates_and_is_recorded(db_session: AsyncSession) -> None:
     tenant, conversation = await _conversation(db_session)
     message = await _said(
         db_session,
@@ -138,7 +145,7 @@ async def test_an_angry_message_escalates_and_is_recorded(db_session):
         body="This is the third time I have asked and nobody has answered me.",
     )
 
-    outcome = await _service(db_session, tenant, StubAnalyzer()).assess(
+    outcome = await _service(db_session, tenant, as_analyzer(StubAnalyzer())).assess(
         conversation_id=conversation.id,
         escalation_sentiment=SentimentLabel.ANGRY,
     )
@@ -161,7 +168,9 @@ async def test_an_angry_message_escalates_and_is_recorded(db_session):
     assert reading.model == "gpt-4.1-mini"
 
 
-async def test_a_second_reading_on_one_message_is_refused_by_the_database(db_session):
+async def test_a_second_reading_on_one_message_is_refused_by_the_database(
+    db_session: AsyncSession,
+) -> None:
     """The idempotency key, enforced where it cannot be skipped."""
     tenant, conversation = await _conversation(db_session)
     message = await _said(db_session, tenant=tenant, conversation=conversation, body="hello")
@@ -183,12 +192,14 @@ async def test_a_second_reading_on_one_message_is_refused_by_the_database(db_ses
         await db_session.flush()
 
 
-async def test_a_retried_assessment_does_not_pay_for_a_second_reading(db_session):
+async def test_a_retried_assessment_does_not_pay_for_a_second_reading(
+    db_session: AsyncSession,
+) -> None:
     tenant, conversation = await _conversation(db_session)
     await _said(db_session, tenant=tenant, conversation=conversation, body="unacceptable")
     analyzer = StubAnalyzer()
 
-    first = await _service(db_session, tenant, analyzer).assess(
+    first = await _service(db_session, tenant, as_analyzer(analyzer)).assess(
         conversation_id=conversation.id,
         escalation_sentiment=SentimentLabel.ANGRY,
     )
@@ -198,7 +209,7 @@ async def test_a_retried_assessment_does_not_pay_for_a_second_reading(db_session
     conversation.mode = ConversationMode.AI
     await db_session.flush()
 
-    second = await _service(db_session, tenant, analyzer).assess(
+    second = await _service(db_session, tenant, as_analyzer(analyzer)).assess(
         conversation_id=conversation.id,
         escalation_sentiment=SentimentLabel.ANGRY,
     )
@@ -210,7 +221,7 @@ async def test_a_retried_assessment_does_not_pay_for_a_second_reading(db_session
     assert second.escalated is True
 
 
-async def test_the_newest_message_is_the_one_judged(db_session):
+async def test_the_newest_message_is_the_one_judged(db_session: AsyncSession) -> None:
     tenant, conversation = await _conversation(db_session)
     await _said(
         db_session,
@@ -229,7 +240,7 @@ async def test_the_newest_message_is_the_one_judged(db_session):
         at=LATER,
     )
 
-    await _service(db_session, tenant, StubAnalyzer()).assess(
+    await _service(db_session, tenant, as_analyzer(StubAnalyzer())).assess(
         conversation_id=conversation.id,
         escalation_sentiment=SentimentLabel.ANGRY,
     )
@@ -239,14 +250,16 @@ async def test_the_newest_message_is_the_one_judged(db_session):
     assert [reading.message_id for reading in readings] == [newest.id]
 
 
-async def test_a_calm_message_leaves_the_conversation_with_the_agent(db_session):
+async def test_a_calm_message_leaves_the_conversation_with_the_agent(
+    db_session: AsyncSession,
+) -> None:
     tenant, conversation = await _conversation(db_session)
     await _said(db_session, tenant=tenant, conversation=conversation, body="what are your hours?")
 
     outcome = await _service(
         db_session,
         tenant,
-        StubAnalyzer(SentimentLabel.NEUTRAL, intent="question"),
+        as_analyzer(StubAnalyzer(SentimentLabel.NEUTRAL, intent="question")),
     ).assess(conversation_id=conversation.id, escalation_sentiment=SentimentLabel.ANGRY)
     await db_session.flush()
     await db_session.refresh(conversation)
@@ -257,7 +270,9 @@ async def test_a_calm_message_leaves_the_conversation_with_the_agent(db_session)
     assert conversation.intent == "question"
 
 
-async def test_priority_set_by_hand_is_not_raised_back_by_a_calm_message(db_session):
+async def test_priority_set_by_hand_is_not_raised_back_by_a_calm_message(
+    db_session: AsyncSession,
+) -> None:
     """Down is a person's decision; a later good reading must not undo it either way."""
     tenant, conversation = await _conversation(db_session)
     await _said(db_session, tenant=tenant, conversation=conversation, body="thanks, all sorted")
@@ -267,7 +282,7 @@ async def test_priority_set_by_hand_is_not_raised_back_by_a_calm_message(db_sess
     await _service(
         db_session,
         tenant,
-        StubAnalyzer(SentimentLabel.POSITIVE, intent="praise"),
+        as_analyzer(StubAnalyzer(SentimentLabel.POSITIVE, intent="praise")),
     ).assess(conversation_id=conversation.id, escalation_sentiment=SentimentLabel.ANGRY)
     await db_session.flush()
     await db_session.refresh(conversation)
@@ -281,12 +296,14 @@ async def test_priority_set_by_hand_is_not_raised_back_by_a_calm_message(db_sess
     assert updated.priority is ConversationPriority.NORMAL
 
 
-async def test_one_workspace_cannot_see_another_workspace_readings(db_session):
+async def test_one_workspace_cannot_see_another_workspace_readings(
+    db_session: AsyncSession,
+) -> None:
     tenant, conversation = await _conversation(db_session, slug="acme")
     other, _ = await _conversation(db_session, slug="rival")
     message = await _said(db_session, tenant=tenant, conversation=conversation, body="furious")
 
-    await _service(db_session, tenant, StubAnalyzer()).assess(
+    await _service(db_session, tenant, as_analyzer(StubAnalyzer())).assess(
         conversation_id=conversation.id,
         escalation_sentiment=SentimentLabel.ANGRY,
     )
@@ -297,19 +314,21 @@ async def test_one_workspace_cannot_see_another_workspace_readings(db_session):
     assert await intruder.list_for_conversation(conversation.id) == []
 
 
-async def test_one_workspace_cannot_assess_another_workspace_conversation(db_session):
+async def test_one_workspace_cannot_assess_another_workspace_conversation(
+    db_session: AsyncSession,
+) -> None:
     tenant, conversation = await _conversation(db_session, slug="acme")
     other, _ = await _conversation(db_session, slug="rival")
     await _said(db_session, tenant=tenant, conversation=conversation, body="furious")
 
     with pytest.raises(TenantIsolationError):
-        await _service(db_session, other, StubAnalyzer()).assess(
+        await _service(db_session, other, as_analyzer(StubAnalyzer())).assess(
             conversation_id=conversation.id,
             escalation_sentiment=SentimentLabel.ANGRY,
         )
 
 
-async def test_an_existing_agent_escalates_by_default(db_session):
+async def test_an_existing_agent_escalates_by_default(db_session: AsyncSession) -> None:
     """Agents created before this phase are not silently opted out.
 
     The column carries a server default rather than a null, so a workspace that

@@ -14,7 +14,9 @@ so they are the difference this batch made rather than a restatement of it.
 
 import json
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -24,6 +26,7 @@ from app.workers.dispatch import JobIdentity, handle_failure, record_success
 from app.workers.queue import AgentJob, AgentQueue, JobEnvelope
 from app.workers.retry import IDEMPOTENT_RETRY, NO_RETRY, FailureCategory, RetryPolicy
 from tests.fake_queue_redis import FailingRedis, FakeQueueRedis
+from tests.fakes import as_redis
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 CONVERSATION = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -37,29 +40,35 @@ POLICY = RetryPolicy(max_attempts=3, base_seconds=10.0, max_seconds=100.0, jitte
 
 
 @pytest.fixture(autouse=True)
-def _no_counter_sink():
+def _no_counter_sink() -> Iterator[None]:
     """Counters are off unless a test opts in, and never leak into the next one."""
     set_counter_sink(None)
     yield
     set_counter_sink(None)
 
 
-async def reserved(queue, redis, *, now=NOW):
+async def reserved(
+    queue: AgentQueue,
+    redis: FakeQueueRedis,
+    *,
+    now: datetime = NOW,
+) -> tuple[Any, ...]:
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=now)
     raw = await queue.reserve(wait_seconds=1, now=now)
+    assert raw is not None
     return raw, JobEnvelope.decode(raw)
 
 
-def identity():
+def identity() -> JobIdentity:
     return JobIdentity(tenant_id=TENANT, job_id=CONVERSATION)
 
 
 # ------------------------------------------------------- transient failure
 
 
-async def test_a_transient_failure_keeps_the_job_and_counts_the_attempt():
+async def test_a_transient_failure_keeps_the_job_and_counts_the_attempt() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     raw, envelope = await reserved(queue, redis)
 
     outcome = await handle_failure(
@@ -82,9 +91,9 @@ async def test_a_transient_failure_keeps_the_job_and_counts_the_attempt():
     assert JobEnvelope.decode(scheduled).attempt == 2
 
 
-async def test_the_retry_becomes_due_at_the_computed_delay():
+async def test_the_retry_becomes_due_at_the_computed_delay() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     raw, envelope = await reserved(queue, redis)
 
     await handle_failure(
@@ -104,10 +113,10 @@ async def test_the_retry_becomes_due_at_the_computed_delay():
     assert redis.zsets[DELAYED][scheduled] == pytest.approx(due_at)
 
 
-async def test_attempts_climb_across_successive_failures():
+async def test_attempts_climb_across_successive_failures() -> None:
     """Two failures then a success: the side effect happens exactly once."""
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     raw, envelope = await reserved(queue, redis)
     sent: list[int] = []
 
@@ -145,9 +154,9 @@ async def test_attempts_climb_across_successive_failures():
 # ------------------------------------------------------ permanent failure
 
 
-async def test_a_permanent_failure_is_not_retried_even_on_the_first_attempt():
+async def test_a_permanent_failure_is_not_retried_even_on_the_first_attempt() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     raw, envelope = await reserved(queue, redis)
 
     outcome = await handle_failure(
@@ -167,10 +176,10 @@ async def test_a_permanent_failure_is_not_retried_even_on_the_first_attempt():
     assert await queue.failed_depth() == 1
 
 
-async def test_a_malformed_job_goes_straight_to_the_dead_letter_list():
+async def test_a_malformed_job_goes_straight_to_the_dead_letter_list() -> None:
     """The category is supplied rather than classified: there is no exception."""
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     raw, envelope = await reserved(queue, redis)
 
     outcome = await handle_failure(
@@ -193,9 +202,9 @@ async def test_a_malformed_job_goes_straight_to_the_dead_letter_list():
 # ---------------------------------------------------------- max attempts
 
 
-async def test_reaching_the_attempt_limit_leaves_the_queue_for_the_dead_letter_list():
+async def test_reaching_the_attempt_limit_leaves_the_queue_for_the_dead_letter_list() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     raw, envelope = await reserved(queue, redis)
 
     now = NOW
@@ -231,10 +240,10 @@ async def test_reaching_the_attempt_limit_leaves_the_queue_for_the_dead_letter_l
     assert json.loads(redis.lists[FAILED][0])["attempts"] == 3
 
 
-async def test_a_job_can_never_retry_for_ever():
+async def test_a_job_can_never_retry_for_ever() -> None:
     """The property, rather than the arithmetic: the loop terminates."""
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     raw, envelope = await reserved(queue, redis)
 
     now = NOW
@@ -265,9 +274,9 @@ async def test_a_job_can_never_retry_for_ever():
 # ------------------------------------------------------------- duplication
 
 
-async def test_the_same_failure_reported_twice_writes_one_dead_letter_record():
+async def test_the_same_failure_reported_twice_writes_one_dead_letter_record() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     raw, envelope = await reserved(queue, redis)
 
     first = await handle_failure(
@@ -295,9 +304,9 @@ async def test_the_same_failure_reported_twice_writes_one_dead_letter_record():
     assert await queue.failed_depth() == 1
 
 
-async def test_a_reservation_another_worker_took_is_not_retried_twice():
+async def test_a_reservation_another_worker_took_is_not_retried_twice() -> None:
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     raw, envelope = await reserved(queue, redis)
 
     first = await handle_failure(
@@ -330,10 +339,10 @@ async def test_a_reservation_another_worker_took_is_not_retried_twice():
 # ---------------------------------------------------------------- counters
 
 
-async def test_outcomes_are_counted_for_an_operator():
+async def test_outcomes_are_counted_for_an_operator() -> None:
     redis = FakeQueueRedis()
-    set_counter_sink(redis)
-    queue = AgentQueue(redis)
+    set_counter_sink(as_redis(redis))
+    queue = AgentQueue(as_redis(redis))
     raw, envelope = await reserved(queue, redis)
 
     await handle_failure(
@@ -356,11 +365,11 @@ async def test_outcomes_are_counted_for_an_operator():
     assert failures["category=provider_error,queue=agent"] == 1
 
 
-async def test_a_counter_that_cannot_be_written_does_not_lose_the_job():
+async def test_a_counter_that_cannot_be_written_does_not_lose_the_job() -> None:
     """Instrumentation observes the work; it must never take part in it."""
     redis = FailingRedis(failing=frozenset({"hincrby"}))
-    set_counter_sink(redis)
-    queue = AgentQueue(redis)
+    set_counter_sink(as_redis(redis))
+    queue = AgentQueue(as_redis(redis))
     raw, envelope = await reserved(queue, redis)
 
     outcome = await handle_failure(
@@ -378,10 +387,10 @@ async def test_a_counter_that_cannot_be_written_does_not_lose_the_job():
     assert await queue.failed_depth() == 1
 
 
-async def test_a_worker_with_no_counter_sink_still_handles_the_failure():
+async def test_a_worker_with_no_counter_sink_still_handles_the_failure() -> None:
     """Counting is optional beside the work; the sink is unset by default here."""
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     raw, envelope = await reserved(queue, redis)
 
     outcome = await handle_failure(

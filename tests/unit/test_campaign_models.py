@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from sqlalchemy import Index, Table
+
 from app.db.models import Base
 from app.db.models.campaign import (
     DEFAULT_MESSAGES_PER_MINUTE,
@@ -30,21 +32,23 @@ RECIPIENTS = Base.metadata.tables["campaign_recipients"]
 CONTACTS = Base.metadata.tables["contacts"]
 
 
-def _index(table, name):
-    return next((index for index in table.indexes if index.name == name), None)
+def _index(table: Table, name: str) -> Index:
+    found = next((index for index in table.indexes if index.name == name), None)
+    assert found is not None
+    return found
 
 
 # --------------------------------------------------------------- the schema
 
 
-def test_a_person_appears_in_a_campaign_once():
+def test_a_person_appears_in_a_campaign_once() -> None:
     """The idempotency key: a restarted worker must not send twice."""
     names = {constraint.name for constraint in RECIPIENTS.constraints}
 
     assert "uq_campaign_recipients_campaign_id_contact_id" in names
 
 
-def test_the_pending_index_covers_only_pending_recipients():
+def test_the_pending_index_covers_only_pending_recipients() -> None:
     """Finished work is the bulk of the table and must not be scanned."""
     index = _index(RECIPIENTS, "ix_campaign_recipients_pending")
 
@@ -52,21 +56,21 @@ def test_the_pending_index_covers_only_pending_recipients():
     assert index.dialect_options["postgresql"]["where"] is not None
 
 
-def test_the_due_index_covers_only_campaigns_that_could_send():
+def test_the_due_index_covers_only_campaigns_that_could_send() -> None:
     index = _index(CAMPAIGNS, "ix_campaigns_due")
 
     assert index is not None
     assert index.dialect_options["postgresql"]["where"] is not None
 
 
-def test_both_campaign_tables_are_tenant_scoped():
+def test_both_campaign_tables_are_tenant_scoped() -> None:
     assert "tenant_id" in CAMPAIGNS.c
     assert "tenant_id" in RECIPIENTS.c
     assert _index(CAMPAIGNS, "ix_campaigns_tenant_id") is not None
     assert _index(RECIPIENTS, "ix_campaign_recipients_tenant_id") is not None
 
 
-def test_deleting_a_message_does_not_erase_the_record_that_it_was_sent():
+def test_deleting_a_message_does_not_erase_the_record_that_it_was_sent() -> None:
     """SET NULL, not CASCADE: the recipient row is the evidence."""
     message_fk = next(fk for fk in RECIPIENTS.c.message_id.foreign_keys)
     conversation_fk = next(fk for fk in RECIPIENTS.c.conversation_id.foreign_keys)
@@ -75,19 +79,19 @@ def test_deleting_a_message_does_not_erase_the_record_that_it_was_sent():
     assert conversation_fk.ondelete == "SET NULL"
 
 
-def test_a_recipient_goes_with_its_campaign():
+def test_a_recipient_goes_with_its_campaign() -> None:
     campaign_fk = next(fk for fk in RECIPIENTS.c.campaign_id.foreign_keys)
 
     assert campaign_fk.ondelete == "CASCADE"
 
 
-def test_a_campaign_must_name_a_template():
+def test_a_campaign_must_name_a_template() -> None:
     """There is no free-text body, and never will be: Meta would refuse it."""
     assert "body" not in CAMPAIGNS.c
     assert CAMPAIGNS.c.template_id.nullable is False
 
 
-def test_a_contact_records_when_it_opted_out_not_merely_that_it_did():
+def test_a_contact_records_when_it_opted_out_not_merely_that_it_did() -> None:
     assert "marketing_opt_out_at" in CONTACTS.c
     assert CONTACTS.c.marketing_opt_out_at.nullable is True
     assert "opt_out_source" in CONTACTS.c
@@ -96,7 +100,7 @@ def test_a_contact_records_when_it_opted_out_not_merely_that_it_did():
 # -------------------------------------------------------------- the vocabulary
 
 
-def test_a_paused_campaign_is_not_finished_but_a_cancelled_one_is():
+def test_a_paused_campaign_is_not_finished_but_a_cancelled_one_is() -> None:
     """The distinction that gives a hesitating person a way back."""
     assert CampaignStatus.PAUSED not in TERMINAL_CAMPAIGN_STATUSES
     assert CampaignStatus.CANCELLED in TERMINAL_CAMPAIGN_STATUSES
@@ -104,26 +108,26 @@ def test_a_paused_campaign_is_not_finished_but_a_cancelled_one_is():
     assert CampaignStatus.FAILED in TERMINAL_CAMPAIGN_STATUSES
 
 
-def test_a_draft_is_not_finished():
+def test_a_draft_is_not_finished() -> None:
     assert CampaignStatus.DRAFT not in TERMINAL_CAMPAIGN_STATUSES
     assert CampaignStatus.SCHEDULED not in TERMINAL_CAMPAIGN_STATUSES
     assert CampaignStatus.RUNNING not in TERMINAL_CAMPAIGN_STATUSES
 
 
-def test_a_campaign_knows_whether_it_is_finished():
+def test_a_campaign_knows_whether_it_is_finished() -> None:
     assert Campaign(status=CampaignStatus.RUNNING).is_finished is False
     assert Campaign(status=CampaignStatus.RUNNING).is_running is True
     assert Campaign(status=CampaignStatus.CANCELLED).is_finished is True
     assert Campaign(status=CampaignStatus.CANCELLED).is_running is False
 
 
-def test_the_rate_ceiling_protects_the_number_not_metas_throughput():
+def test_the_rate_ceiling_protects_the_number_not_metas_throughput() -> None:
     """Far below what Meta allows, on purpose."""
     assert DEFAULT_MESSAGES_PER_MINUTE < MAX_MESSAGES_PER_MINUTE
     assert MAX_MESSAGES_PER_MINUTE <= 600
 
 
-def test_a_recipient_gives_up_after_a_few_attempts():
+def test_a_recipient_gives_up_after_a_few_attempts() -> None:
     """Every attempt is a message that might actually arrive."""
     assert MAX_RECIPIENT_ATTEMPTS <= 3
 
@@ -135,11 +139,11 @@ def test_a_recipient_gives_up_after_a_few_attempts():
     assert recipient.is_exhausted is True
 
 
-def test_a_contact_that_has_not_opted_out_accepts_campaigns():
+def test_a_contact_that_has_not_opted_out_accepts_campaigns() -> None:
     assert Contact(wa_id="201000000001").accepts_campaigns is True
 
 
-def test_a_contact_that_opted_out_does_not():
+def test_a_contact_that_opted_out_does_not() -> None:
     contact = Contact(
         wa_id="201000000001",
         marketing_opt_out_at=datetime.now(UTC),

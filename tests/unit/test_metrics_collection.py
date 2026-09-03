@@ -8,6 +8,7 @@ without a customer telling them.
 """
 
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -21,12 +22,13 @@ from app.core.telemetry import (
     record_provider_call,
     set_counter_sink,
 )
-from app.services.metrics_service import QUEUES, MetricsService
+from app.services.metrics_service import MetricsService
 from app.workers.heartbeat import heartbeat_key
-from app.workers.queue import AgentJob, AgentQueue, JobEnvelope
+from app.workers.queue import QUEUES, AgentJob, AgentQueue, JobEnvelope
 from app.workers.retry import FailureCategory
 from app.workers.runner import ALL_KINDS
 from tests.fake_queue_redis import FailingRedis, FakeQueueRedis
+from tests.fakes import as_redis
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 TENANT = "11111111-1111-1111-1111-111111111111"
@@ -34,21 +36,21 @@ CONVERSATION = "22222222-2222-2222-2222-222222222222"
 
 
 @pytest.fixture
-def redis():
+def redis() -> FakeQueueRedis:
     return FakeQueueRedis()
 
 
 @pytest.fixture
-def sink(redis):
+def sink(redis: FakeQueueRedis) -> Iterator[FakeQueueRedis]:
     """Point the cross-process counters at this test's fake, then unhook it."""
-    set_counter_sink(redis)
+    set_counter_sink(as_redis(redis))
     yield redis
     set_counter_sink(None)
 
 
 @pytest.fixture
-def service(redis):
-    return MetricsService(redis, registry=MetricsRegistry())
+def service(redis: FakeQueueRedis) -> MetricsService:
+    return MetricsService(as_redis(redis), registry=MetricsRegistry())
 
 
 def sample(rendered: str, name: str, labels: str = "") -> float:
@@ -68,8 +70,8 @@ def absent(rendered: str, name: str) -> bool:
 # ------------------------------------------------------------ queue depth
 
 
-async def test_queue_depth_is_published(service, redis):
-    queue = AgentQueue(redis)
+async def test_queue_depth_is_published(service: MetricsService, redis: FakeQueueRedis) -> None:
+    queue = AgentQueue(as_redis(redis))
     for _ in range(3):
         await queue.enqueue_body('{"x":1}', now=NOW)
 
@@ -79,7 +81,7 @@ async def test_queue_depth_is_published(service, redis):
     assert sample(rendered, "wasla_queue_pending_jobs", 'queue="media"') == 0
 
 
-async def test_every_queue_appears_even_when_empty(service):
+async def test_every_queue_appears_even_when_empty(service: MetricsService) -> None:
     """An absent series and a zero one mean different things to an alert."""
     rendered = await service.render(now=NOW)
 
@@ -87,7 +89,9 @@ async def test_every_queue_appears_even_when_empty(service):
         assert sample(rendered, "wasla_queue_pending_jobs", f'queue="{name}"') == 0
 
 
-async def test_in_flight_delayed_and_dead_letter_depths_are_separate(service, redis):
+async def test_in_flight_delayed_and_dead_letter_depths_are_separate(
+    service: MetricsService, redis: FakeQueueRedis
+) -> None:
     redis.lists["agent:jobs:inflight"] = ["a", "b"]
     redis.lists["agent:jobs:failed"] = ["r"] * 4
     redis.zsets["agent:jobs:delayed"] = {"z": 1.0}
@@ -99,7 +103,9 @@ async def test_in_flight_delayed_and_dead_letter_depths_are_separate(service, re
     assert sample(rendered, "wasla_queue_delayed_jobs", 'queue="agent"') == 1
 
 
-async def test_a_growing_dead_letter_list_is_visible(service, redis):
+async def test_a_growing_dead_letter_list_is_visible(
+    service: MetricsService, redis: FakeQueueRedis
+) -> None:
     """The signal that did not exist: failed work accumulating silently."""
     before = await service.render(now=NOW)
     assert sample(before, "wasla_queue_dead_letter_jobs", 'queue="agent"') == 0
@@ -113,26 +119,31 @@ async def test_a_growing_dead_letter_list_is_visible(service, redis):
 # ------------------------------------------------------------- queue age
 
 
-async def test_the_oldest_pending_job_age_is_published(service, redis):
-    await AgentQueue(redis).enqueue_body('{"x":1}', now=NOW - timedelta(minutes=7))
+async def test_the_oldest_pending_job_age_is_published(
+    service: MetricsService, redis: FakeQueueRedis
+) -> None:
+    await AgentQueue(as_redis(redis)).enqueue_body('{"x":1}', now=NOW - timedelta(minutes=7))
 
     rendered = await service.render(now=NOW)
 
     assert sample(rendered, "wasla_queue_oldest_pending_age_seconds", 'queue="agent"') == 420
 
 
-async def test_an_empty_queue_publishes_no_age_at_all(service):
+async def test_an_empty_queue_publishes_no_age_at_all(service: MetricsService) -> None:
     """Zero would read as "nothing has waited long", which is a different claim."""
     rendered = await service.render(now=NOW)
 
     assert absent(rendered, "wasla_queue_oldest_pending_age_seconds")
 
 
-async def test_a_retried_job_keeps_measuring_from_its_first_enqueue(service, redis):
+async def test_a_retried_job_keeps_measuring_from_its_first_enqueue(
+    service: MetricsService, redis: FakeQueueRedis
+) -> None:
     """Queue age is how long the *customer* waited, not how long since the retry."""
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue_body('{"x":1}', now=NOW - timedelta(minutes=10))
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
     await queue.schedule_retry(
         raw,
         JobEnvelope.decode(raw),
@@ -151,7 +162,9 @@ async def test_a_retried_job_keeps_measuring_from_its_first_enqueue(service, red
 # -------------------------------------------------------- worker heartbeat
 
 
-async def test_a_beating_worker_reports_alive(service, redis):
+async def test_a_beating_worker_reports_alive(
+    service: MetricsService, redis: FakeQueueRedis
+) -> None:
     redis.lists[heartbeat_key("agent")] = ["1"]
 
     rendered = await service.render(now=NOW)
@@ -159,7 +172,9 @@ async def test_a_beating_worker_reports_alive(service, redis):
     assert sample(rendered, "wasla_worker_heartbeat_alive", 'kind="agent"') == 1
 
 
-async def test_a_stale_worker_reports_dead_without_anything_else_failing(service, redis):
+async def test_a_stale_worker_reports_dead_without_anything_else_failing(
+    service: MetricsService, redis: FakeQueueRedis
+) -> None:
     """The key has expired, which is what a stopped loop looks like."""
     rendered = await service.render(now=NOW)
 
@@ -168,7 +183,7 @@ async def test_a_stale_worker_reports_dead_without_anything_else_failing(service
     assert sample(rendered, "wasla_queue_pending_jobs", 'queue="agent"') == 0
 
 
-async def test_every_worker_kind_is_reported(service):
+async def test_every_worker_kind_is_reported(service: MetricsService) -> None:
     rendered = await service.render(now=NOW)
 
     for kind in ALL_KINDS:
@@ -178,7 +193,9 @@ async def test_every_worker_kind_is_reported(service):
 # ------------------------------------------------------ cross-process counters
 
 
-async def test_job_outcomes_written_by_a_worker_reach_the_scrape(sink, service):
+async def test_job_outcomes_written_by_a_worker_reach_the_scrape(
+    sink: FakeQueueRedis, service: MetricsService
+) -> None:
     await record_job_outcome(queue="agent", outcome=JobOutcome.SUCCEEDED)
     await record_job_outcome(
         queue="media", outcome=JobOutcome.DEAD_LETTERED, category="provider_error"
@@ -193,7 +210,9 @@ async def test_job_outcomes_written_by_a_worker_reach_the_scrape(sink, service):
     )
 
 
-async def test_provider_calls_are_counted_by_outcome(sink, service):
+async def test_provider_calls_are_counted_by_outcome(
+    sink: FakeQueueRedis, service: MetricsService
+) -> None:
     await record_provider_call(
         provider=Provider.WHATSAPP, operation="send_message", outcome=CallOutcome.SUCCESS
     )
@@ -232,7 +251,9 @@ async def test_provider_calls_are_counted_by_outcome(sink, service):
     )
 
 
-async def test_a_cross_process_total_is_typed_as_a_counter(sink, service):
+async def test_a_cross_process_total_is_typed_as_a_counter(
+    sink: FakeQueueRedis, service: MetricsService
+) -> None:
     """A scraper needs the type to know it may compute a rate and expect resets."""
     await record_job_outcome(queue="agent", outcome=JobOutcome.SUCCEEDED)
 
@@ -241,7 +262,7 @@ async def test_a_cross_process_total_is_typed_as_a_counter(sink, service):
     assert "# TYPE wasla_jobs_total counter" in rendered
 
 
-async def test_counters_with_no_sink_are_a_no_op():
+async def test_counters_with_no_sink_are_a_no_op() -> None:
     """The ordinary state of a test and of any process that has not opted in."""
     set_counter_sink(None)
     await record_job_outcome(queue="agent", outcome=JobOutcome.SUCCEEDED)
@@ -250,31 +271,33 @@ async def test_counters_with_no_sink_are_a_no_op():
 # -------------------------------------------------------------- resilience
 
 
-async def test_redis_being_down_does_not_empty_the_exposition():
+async def test_redis_being_down_does_not_empty_the_exposition() -> None:
     """A 503 during the outage being investigated is worse than half a page."""
 
     class DeadRedis(FakeQueueRedis):
-        async def llen(self, key):
+        async def llen(self, key: str) -> int:
             raise RuntimeError("Redis is gone")
 
     registry = MetricsRegistry()
     registry.counter("wasla_local_total", "help").increment()
-    rendered = await MetricsService(DeadRedis(), registry=registry).render(now=NOW)
+    rendered = await MetricsService(as_redis(DeadRedis()), registry=registry).render(now=NOW)
 
     assert sample(rendered, "wasla_local_total") == 1
     # And the queue gauges are simply absent, which is itself alertable.
     assert absent(rendered, "wasla_queue_pending_jobs")
 
 
-async def test_an_unreadable_counter_hash_does_not_lose_the_rest():
+async def test_an_unreadable_counter_hash_does_not_lose_the_rest() -> None:
     redis = FailingRedis(failing=frozenset({"hgetall"}))
-    rendered = await MetricsService(redis, registry=MetricsRegistry()).render(now=NOW)
+    rendered = await MetricsService(as_redis(redis), registry=MetricsRegistry()).render(now=NOW)
 
     # Counters could not be read, but the live queue gauges still could.
     assert sample(rendered, "wasla_queue_pending_jobs", 'queue="agent"') == 0
 
 
-async def test_a_counter_field_from_an_older_release_is_skipped(service, redis):
+async def test_a_counter_field_from_an_older_release_is_skipped(
+    service: MetricsService, redis: FakeQueueRedis
+) -> None:
     """The scrape reads whatever is in Redis, including what it did not write."""
     redis.hashes["metrics:counter:wasla_jobs_total"] = {
         "outcome=succeeded,queue=agent": 2,
@@ -291,14 +314,16 @@ async def test_a_counter_field_from_an_older_release_is_skipped(service, redis):
 # ------------------------------------------------------------- no identifiers
 
 
-async def test_no_identifier_reaches_a_label(sink, service, redis):
+async def test_no_identifier_reaches_a_label(
+    sink: FakeQueueRedis, service: MetricsService, redis: FakeQueueRedis
+) -> None:
     """The privacy property, asserted over the whole rendered document.
 
     Not a spot check: the exposition is scanned for the identifiers this test
     put into the *work*, because the failure being guarded against is somebody
     adding a helpful `tenant_id=` to an instrumentation call years from now.
     """
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
     await queue.enqueue(
         AgentJob(tenant_id=uuid.UUID(TENANT), conversation_id=uuid.UUID(CONVERSATION)),
         now=NOW,

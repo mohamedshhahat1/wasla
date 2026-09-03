@@ -90,7 +90,7 @@ def _set_cookie(response: Response) -> str:
 # --- the value ---------------------------------------------------------------
 
 
-def test_a_minted_secret_is_full_entropy_and_url_safe():
+def test_a_minted_secret_is_full_entropy_and_url_safe() -> None:
     """256 bits, and shaped so it survives a cookie header unescaped."""
     secret = ensure(_request(None), _settings("test"))
 
@@ -99,14 +99,14 @@ def test_a_minted_secret_is_full_entropy_and_url_safe():
     assert set(secret) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 
-def test_two_browsers_never_receive_the_same_secret():
+def test_two_browsers_never_receive_the_same_secret() -> None:
     settings = _settings("test")
     minted = {ensure(_request(None), settings) for _ in range(50)}
 
     assert len(minted) == 50
 
 
-def test_the_stored_value_is_a_digest_and_never_the_secret():
+def test_the_stored_value_is_a_digest_and_never_the_secret() -> None:
     """A reader of the Redis keyspace must not come away able to finish a flow."""
     digest = hash_binding(SECRET)
 
@@ -115,7 +115,7 @@ def test_the_stored_value_is_a_digest_and_never_the_secret():
     assert digest == hash_binding(SECRET)
 
 
-def test_only_the_matching_secret_verifies():
+def test_only_the_matching_secret_verifies() -> None:
     expected = hash_binding(SECRET)
 
     assert matches(secret=SECRET, expected=expected)
@@ -127,7 +127,7 @@ def test_only_the_matching_secret_verifies():
     assert not matches(secret=None, expected=expected)
 
 
-def test_a_flow_with_no_stored_binding_verifies_nothing():
+def test_a_flow_with_no_stored_binding_verifies_nothing() -> None:
     """Belt and braces on the store's own refusal to decode such a record.
 
     If an empty digest ever reached here it must not be satisfiable, or "no
@@ -140,7 +140,7 @@ def test_a_flow_with_no_stored_binding_verifies_nothing():
 # --- reading what the browser sent -------------------------------------------
 
 
-def test_a_browser_with_a_cookie_keeps_it():
+def test_a_browser_with_a_cookie_keeps_it() -> None:
     """One secret per browser, not per flow: a second tab must not break the first."""
     settings = _settings("test")
     request = _request(f"{COOKIE_NAME}={SECRET}")
@@ -158,7 +158,7 @@ def test_a_browser_with_a_cookie_keeps_it():
         pytest.param("has spaces in it and is forty three!!!!!!!!", id="wrong-alphabet"),
     ],
 )
-def test_a_malformed_cookie_is_treated_as_absent(value):
+def test_a_malformed_cookie_is_treated_as_absent(value: str) -> None:
     """The cookie is caller-supplied, so it is shape-checked before it is hashed.
 
     Absent and malformed are one answer. Telling them apart would only help
@@ -174,7 +174,7 @@ def test_a_malformed_cookie_is_treated_as_absent(value):
     assert len(ensure(request, settings)) == 43
 
 
-def test_a_cookie_under_the_other_environment_s_name_is_not_read():
+def test_a_cookie_under_the_other_environment_s_name_is_not_read() -> None:
     """The names are not interchangeable.
 
     A production deployment must not accept a binding presented under the
@@ -192,7 +192,7 @@ def test_a_cookie_under_the_other_environment_s_name_is_not_read():
 # --- the cookie on the wire --------------------------------------------------
 
 
-def test_the_production_cookie_carries_every_attribute_it_needs():
+def test_the_production_cookie_carries_every_attribute_it_needs() -> None:
     """`__Host-`, `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, and no `Domain`.
 
     The prefix is the load-bearing part and the rest is what makes it valid: a
@@ -216,7 +216,7 @@ def test_the_production_cookie_carries_every_attribute_it_needs():
     assert "Domain=" not in header
 
 
-def test_the_cookie_cannot_outlive_the_flow_it_binds():
+def test_the_cookie_cannot_outlive_the_flow_it_binds() -> None:
     settings = _settings("staging")
     response = Response()
 
@@ -225,7 +225,7 @@ def test_the_cookie_cannot_outlive_the_flow_it_binds():
     assert f"Max-Age={FLOW_TTL_SECONDS}" in _set_cookie(response)
 
 
-def test_development_drops_the_prefix_rather_than_shipping_an_invalid_cookie():
+def test_development_drops_the_prefix_rather_than_shipping_an_invalid_cookie() -> None:
     """Over plain HTTP a `__Host-` cookie is rejected outright, not weakened.
 
     Keeping the prefix locally would mean no cookie, and therefore no Google
@@ -248,7 +248,7 @@ def test_development_drops_the_prefix_rather_than_shipping_an_invalid_cookie():
     ("environment", "secure"),
     [("local", False), ("test", False), ("staging", True), ("production", True)],
 )
-def test_which_environments_serve_a_secure_cookie(environment, secure):
+def test_which_environments_serve_a_secure_cookie(environment: str, secure: bool) -> None:
     """Every environment, named, so adding one cannot silently take the default.
 
     Staging is on the secure side deliberately: a staging deployment running a
@@ -261,7 +261,7 @@ def test_which_environments_serve_a_secure_cookie(environment, secure):
     assert cookie_name(settings) == (SECURE_COOKIE_NAME if secure else COOKIE_NAME)
 
 
-def test_clearing_matches_the_cookie_it_is_meant_to_remove():
+def test_clearing_matches_the_cookie_it_is_meant_to_remove() -> None:
     """A deletion is matched on name, path and domain.
 
     A `delete_cookie` that disagreed with `attach` about any of them would look

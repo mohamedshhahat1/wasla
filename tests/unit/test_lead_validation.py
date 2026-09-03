@@ -38,7 +38,7 @@ from app.services.lead_service import (
         (0, Decimal("0.00")),
     ],
 )
-def test_a_budget_is_parsed_when_it_is_unambiguous(raw, expected):
+def test_a_budget_is_parsed_when_it_is_unambiguous(raw: str, expected: Decimal) -> None:
     assert _validated_budget(raw) == expected
 
 
@@ -57,18 +57,18 @@ def test_a_budget_is_parsed_when_it_is_unambiguous(raw, expected):
         -1,
     ],
 )
-def test_an_unparseable_or_impossible_budget_is_refused(raw):
+def test_an_unparseable_or_impossible_budget_is_refused(raw: bool | int | str) -> None:
     with pytest.raises(ValidationError):
         _validated_budget(raw)
 
 
-def test_a_budget_beyond_the_column_is_refused():
+def test_a_budget_beyond_the_column_is_refused() -> None:
     """Better a clear error than a database overflow mid-request."""
     with pytest.raises(ValidationError):
         _validated_budget("9" * 15)
 
 
-def test_a_model_guess_is_dropped_rather_than_failing_the_whole_capture():
+def test_a_model_guess_is_dropped_rather_than_failing_the_whole_capture() -> None:
     """Lenient mode: one bad field must not lose the others."""
     cleaned = _validated(
         {"name": "Ahmed", "email": "not-an-email", "budget_amount": "500k"},
@@ -78,76 +78,76 @@ def test_a_model_guess_is_dropped_rather_than_failing_the_whole_capture():
     assert cleaned == {"name": "Ahmed"}
 
 
-def test_a_persons_bad_input_is_reported_rather_than_dropped():
+def test_a_persons_bad_input_is_reported_rather_than_dropped() -> None:
     """Strict mode: someone typing into a form deserves to be told."""
     with pytest.raises(ValidationError):
         _validated({"email": "not-an-email"})
 
 
 @pytest.mark.parametrize("raw", ["ahmed@example.com", "AHMED@Example.COM"])
-def test_an_email_is_accepted_and_normalised(raw):
+def test_an_email_is_accepted_and_normalised(raw: str) -> None:
     assert _validated({"email": raw})["email"] == "ahmed@example.com"
 
 
 @pytest.mark.parametrize("raw", ["ahmed@", "@example.com", "ahmed example.com", "a@b"])
-def test_text_that_is_not_an_email_is_refused(raw):
+def test_text_that_is_not_an_email_is_refused(raw: str) -> None:
     with pytest.raises(ValidationError):
         _validated({"email": raw})
 
 
 @pytest.mark.parametrize("raw", ["+20 100 123 4567", "01001234567", "(202) 555-0143"])
-def test_a_phone_number_keeps_the_punctuation_people_type(raw):
+def test_a_phone_number_keeps_the_punctuation_people_type(raw: str) -> None:
     assert _validated({"phone": raw})["phone"] == raw.strip()
 
 
 @pytest.mark.parametrize("raw", ["call me", "12", "+" + "9" * 40])
-def test_text_that_is_not_a_phone_number_is_refused(raw):
+def test_text_that_is_not_a_phone_number_is_refused(raw: str) -> None:
     with pytest.raises(ValidationError):
         _validated({"phone": raw})
 
 
-def test_a_currency_must_be_a_three_letter_code():
+def test_a_currency_must_be_a_three_letter_code() -> None:
     assert _validated({"budget_currency": "egp"})["budget_currency"] == "EGP"
     with pytest.raises(ValidationError):
         _validated({"budget_currency": "Egyptian Pounds"})
 
 
-def test_a_blank_field_is_not_a_value():
+def test_a_blank_field_is_not_a_value() -> None:
     """An empty string would otherwise overwrite a real name with nothing."""
     assert _validated({"name": "   "}, lenient=True) == {}
 
 
-def test_null_clears_a_field_only_when_clearing_is_allowed():
+def test_null_clears_a_field_only_when_clearing_is_allowed() -> None:
     assert _validated({"email": None}, allow_null=True) == {"email": None}
     # Creation passes no nulls: an absent field is absent, not cleared.
     assert _validated({"email": None}) == {}
 
 
-def test_tags_are_normalised_and_deduplicated():
+def test_tags_are_normalised_and_deduplicated() -> None:
     assert _validated_tags([" Hot ", "HOT", "cairo", ""]) == ["hot", "cairo"]
 
 
-def test_too_many_tags_are_refused():
+def test_too_many_tags_are_refused() -> None:
     with pytest.raises(ValidationError):
         _validated_tags([f"tag-{index}" for index in range(MAX_TAGS + 1)])
 
 
-def test_an_overlong_tag_is_refused():
+def test_an_overlong_tag_is_refused() -> None:
     with pytest.raises(ValidationError):
         _validated_tags(["x" * 51])
 
 
-def test_extraction_reports_only_the_fields_it_actually_found():
+def test_extraction_reports_only_the_fields_it_actually_found() -> None:
     extracted = ExtractedLead(name="Ahmed", email=None, interest="")
 
     assert extracted.as_fields() == {"name": "Ahmed"}
 
 
-def test_an_empty_extraction_reports_nothing():
+def test_an_empty_extraction_reports_nothing() -> None:
     assert ExtractedLead().as_fields() == {}
 
 
-def test_an_omitted_field_is_left_alone_and_an_explicit_null_clears_it():
+def test_an_omitted_field_is_left_alone_and_an_explicit_null_clears_it() -> None:
     """The distinction the sentinel exists for.
 
     Sending `{"email": null}` must clear the address; sending `{}` must not.
@@ -161,7 +161,7 @@ def test_an_omitted_field_is_left_alone_and_an_explicit_null_clears_it():
     assert untouched.email is UNSET
 
 
-def test_supplying_a_value_carries_it_through():
+def test_supplying_a_value_carries_it_through() -> None:
     update = LeadUpdateRequest.model_validate({"name": "Ahmed"}).to_update()
 
     assert update.name == "Ahmed"

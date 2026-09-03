@@ -31,6 +31,7 @@ import re
 import secrets
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -54,8 +55,8 @@ BASE = {
 }
 
 
-def _settings(**overrides) -> Settings:
-    values = {**BASE, "jwt_secret": secrets.token_urlsafe(32)}
+def _settings(**overrides: Any) -> Settings:
+    values: dict[str, Any] = {**BASE, "jwt_secret": secrets.token_urlsafe(32)}
     values.update(overrides)
     return Settings(**values)
 
@@ -167,14 +168,14 @@ def test_no_integrations_is_fine_when_no_processor_is_configured() -> None:
 
 def _captured_intention(
     integration_ids: list[int | str],
-) -> tuple[PaymobProvider, list[dict]]:
+) -> tuple[PaymobProvider, list[dict[str, Any]]]:
     """A real provider whose intention requests are recorded rather than sent.
 
     The provider is genuine - the real body is built and the real response
     parsed - so what lands in `seen` is exactly what Paymob would have been
     given.
     """
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(json.loads(request.content))
@@ -256,6 +257,10 @@ def test_the_provider_is_built_from_settings_alone() -> None:
     provider = build_checkout_provider(_settings(paymob_integration_ids="1234567,card"))
 
     assert provider is not None
+    # `build_checkout_provider` answers the `CheckoutProvider` protocol, which
+    # deliberately does not publish how a provider stores its configuration.
+    # This test is about that storage, so it narrows to the concrete adapter.
+    assert isinstance(provider, PaymobProvider)
     assert provider._integration_ids == [1234567, "card"]
 
 

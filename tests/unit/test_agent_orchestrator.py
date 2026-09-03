@@ -5,15 +5,23 @@ and a registry rather than building its own, and this is what that buys.
 """
 
 import uuid
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import orchestrator as orchestrator_module
 from app.agents.orchestrator import AgentOrchestrator
 from app.agents.registry import (
     HANDOFF_TOOL,
     SEARCH_KNOWLEDGE_TOOL,
+    ToolContext,
     ToolDefinition,
+    ToolHandler,
     ToolParameter,
     ToolRegistry,
     build_default_registry,
@@ -31,6 +39,7 @@ from app.db.models.media import MediaStatus, MessageMedia
 from app.db.models.sentiment import SentimentLabel
 from app.integrations.openai.types import AgentReply, TokenUsage, ToolCall
 from app.services.sentiment_service import SentimentOutcome
+from tests.fakes import as_embeddings, as_http_client, as_responses, as_sentiment, as_session
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 CONVERSATION = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -40,14 +49,19 @@ SENT_AT = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
 class StubClient:
     """Hands out queued replies and records how it was asked."""
 
-    def __init__(self, replies, *, timeline=None):
+    def __init__(
+        self,
+        replies: Sequence[AgentReply],
+        *,
+        timeline: list[str] | None = None,
+    ) -> None:
         self._replies = list(replies)
-        self.calls = []
+        self.calls: list[dict[str, Any]] = []
         # Shared with FakeSession, so a test can assert that the connection was
         # handed back *before* the call rather than merely at some point.
         self._timeline = timeline if timeline is not None else []
 
-    async def respond(self, **kwargs):
+    async def respond(self, **kwargs: Any) -> AgentReply:
         self._timeline.append("respond")
         self.calls.append(kwargs)
         if not self._replies:
@@ -67,54 +81,69 @@ class FakeSession:
     per round, and the shared timeline is how it knows the release came first.
     """
 
-    def __init__(self, *, mode=ConversationMode.AI, timeline=None):
+    def __init__(
+        self,
+        *,
+        mode: ConversationMode = ConversationMode.AI,
+        timeline: list[str] | None = None,
+    ) -> None:
         self.mode = mode
         self.commits = 0
         self.mode_reads = 0
         self.timeline = timeline if timeline is not None else []
 
-    async def commit(self):
+    async def commit(self) -> None:
         self.commits += 1
         self.timeline.append("commit")
 
-    async def scalar(self, statement):
+    async def scalar(self, statement: object) -> ConversationMode:
         self.mode_reads += 1
         self.timeline.append("mode")
         return self.mode
 
 
 class FakeConversations:
-    def __init__(self, conversation):
+    def __init__(self, conversation: Conversation) -> None:
         self._conversation = conversation
 
-    async def require_by_id(self, conversation_id):
+    async def require_by_id(self, conversation_id: uuid.UUID) -> Conversation:
         return self._conversation
 
 
 class FakeAgents:
-    def __init__(self, agent):
+    def __init__(self, agent: Agent | None) -> None:
         self._agent = agent
 
-    async def get_answering_default(self):
+    async def get_answering_default(self) -> Agent | None:
         return self._agent
 
-    async def get_by_id(self, agent_id):
+    async def get_by_id(self, agent_id: uuid.UUID) -> Agent | None:
         return self._agent
 
 
 class FakeGrants:
-    def __init__(self, names):
+    def __init__(self, names: Sequence[str]) -> None:
         self._names = tuple(names)
 
-    async def list_for_agent(self, *, agent_id, enabled_only=True):
+    async def list_for_agent(
+        self,
+        *,
+        agent_id: uuid.UUID,
+        enabled_only: bool = True,
+    ) -> list[SimpleNamespace]:
         return [SimpleNamespace(name=name) for name in self._names]
 
 
 class FakeMessages:
-    def __init__(self, messages):
+    def __init__(self, messages: Sequence[Message]) -> None:
         self._messages = list(messages)
 
-    async def list_for_conversation(self, *, conversation_id, limit):
+    async def list_for_conversation(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        limit: int,
+    ) -> list[Message]:
         return self._messages
 
 
@@ -125,10 +154,16 @@ class FakeMedia:
     with no files must render exactly as it did before media existed.
     """
 
-    def __init__(self, attachments=None):
+    def __init__(
+        self,
+        attachments: Mapping[uuid.UUID, MessageMedia] | None = None,
+    ) -> None:
         self._attachments = attachments or {}
 
-    async def map_for_messages(self, message_ids):
+    async def map_for_messages(
+        self,
+        message_ids: Sequence[uuid.UUID],
+    ) -> dict[uuid.UUID, MessageMedia]:
         return {
             message_id: self._attachments[message_id]
             for message_id in message_ids
@@ -143,27 +178,32 @@ class FakeSentiment:
         self._escalates = escalates
         self.thresholds: list[object] = []
 
-    async def assess(self, *, conversation_id, escalation_sentiment):
+    async def assess(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        escalation_sentiment: object,
+    ) -> SentimentOutcome:
         self.thresholds.append(escalation_sentiment)
         return SentimentOutcome(escalated=self._escalates)
 
 
-def _returns(instance):
-    def build(*args: object, **kwargs: object):
+def _returns[T](instance: T) -> Callable[..., T]:
+    def build(*args: object, **kwargs: object) -> T:
         return instance
 
     return build
 
 
-async def _found(context, arguments):
+async def _found(context: ToolContext, arguments: dict[str, Any]) -> str:
     return "found it"
 
 
-async def _handed_over(context, arguments):
+async def _handed_over(context: ToolContext, arguments: dict[str, Any]) -> str:
     return "handed over"
 
 
-async def _empty_search(context, arguments):
+async def _empty_search(context: ToolContext, arguments: dict[str, Any]) -> str:
     """What the real tool returns when the knowledge base holds nothing."""
     return (
         "No information about this was found in the company's knowledge base. "
@@ -172,7 +212,7 @@ async def _empty_search(context, arguments):
     )
 
 
-def _agent(**overrides):
+def _agent(**overrides: Any) -> Agent:
     values = {
         "id": uuid.uuid4(),
         "name": "Sales",
@@ -189,7 +229,7 @@ def _agent(**overrides):
     return Agent(**values)
 
 
-def _inbound(body):
+def _inbound(body: str) -> Message:
     return Message(
         direction=MessageDirection.INBOUND,
         status=MessageStatus.RECEIVED,
@@ -199,7 +239,11 @@ def _inbound(body):
     )
 
 
-def _reply(text=None, tool_calls=(), tokens=10):
+def _reply(
+    text: str | None = None,
+    tool_calls: Sequence[ToolCall] = (),
+    tokens: int = 10,
+) -> AgentReply:
     return AgentReply(
         text=text,
         tool_calls=tuple(tool_calls),
@@ -213,7 +257,7 @@ def _reply(text=None, tool_calls=(), tokens=10):
     )
 
 
-def _call(name, arguments=None):
+def _call(name: str, arguments: dict[str, Any] | None = None) -> ToolCall:
     return ToolCall(
         call_id="call_1",
         name=name,
@@ -222,7 +266,11 @@ def _call(name, arguments=None):
     )
 
 
-def _registry_with(name, parameters=(), handler=None):
+def _registry_with(
+    name: str,
+    parameters: tuple[ToolParameter, ...] = (),
+    handler: ToolHandler | None = None,
+) -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(
         ToolDefinition(
@@ -236,20 +284,20 @@ def _registry_with(name, parameters=(), handler=None):
 
 
 def _build(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     *,
-    client,
-    conversation=None,
-    agent=None,
-    messages=None,
-    grants=(),
-    registry=None,
-    max_rounds=3,
-    embeddings=None,
-    attachments=None,
-    sentiment=None,
-    session=None,
-):
+    client: AsyncClient,
+    conversation: Conversation | None = None,
+    agent: Agent | None = None,
+    messages: Sequence[Message] | None = None,
+    grants: Sequence[str] = (),
+    registry: ToolRegistry | None = None,
+    max_rounds: int = 3,
+    embeddings: object | None = None,
+    attachments: Mapping[uuid.UUID, MessageMedia] | None = None,
+    sentiment: FakeSentiment | None = None,
+    session: AsyncSession | None = None,
+) -> AgentOrchestrator:
     fakes = {
         "ConversationRepository": FakeConversations(
             conversation if conversation is not None else Conversation(mode=ConversationMode.AI)
@@ -265,21 +313,23 @@ def _build(
         monkeypatch.setattr(orchestrator_module, name, _returns(fake))
 
     return AgentOrchestrator(
-        session=session if session is not None else FakeSession(),
+        session=as_session(session if session is not None else FakeSession()),
         tenant_id=TENANT,
-        client=client,
+        client=as_responses(client),
         registry=registry,
         max_rounds=max_rounds,
-        embeddings=embeddings,
-        sentiment=sentiment,
+        embeddings=as_embeddings(embeddings),
+        sentiment=as_sentiment(sentiment) if sentiment is not None else None,
     )
 
 
-async def test_a_conversation_a_human_owns_is_never_answered(monkeypatch):
+async def test_a_conversation_a_human_owns_is_never_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = StubClient([])
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         conversation=Conversation(mode=ConversationMode.HUMAN),
         agent=_agent(),
     )
@@ -291,9 +341,9 @@ async def test_a_conversation_a_human_owns_is_never_answered(monkeypatch):
     assert client.calls == []
 
 
-async def test_no_active_agent_means_no_reply(monkeypatch):
+async def test_no_active_agent_means_no_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     client = StubClient([])
-    orchestrator = _build(monkeypatch, client=client, agent=None)
+    orchestrator = _build(monkeypatch, client=as_http_client(client), agent=None)
 
     outcome = await orchestrator.answer(conversation_id=CONVERSATION)
 
@@ -301,10 +351,10 @@ async def test_no_active_agent_means_no_reply(monkeypatch):
     assert client.calls == []
 
 
-async def test_a_disabled_agent_does_not_answer(monkeypatch):
+async def test_a_disabled_agent_does_not_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     client = StubClient([])
     disabled = _agent(status=AgentStatus.DISABLED)
-    orchestrator = _build(monkeypatch, client=client, agent=disabled)
+    orchestrator = _build(monkeypatch, client=as_http_client(client), agent=disabled)
 
     outcome = await orchestrator.answer(conversation_id=CONVERSATION, agent=disabled)
 
@@ -312,9 +362,9 @@ async def test_a_disabled_agent_does_not_answer(monkeypatch):
     assert client.calls == []
 
 
-async def test_an_empty_conversation_has_nothing_to_answer(monkeypatch):
+async def test_an_empty_conversation_has_nothing_to_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     client = StubClient([])
-    orchestrator = _build(monkeypatch, client=client, agent=_agent(), messages=[])
+    orchestrator = _build(monkeypatch, client=as_http_client(client), agent=_agent(), messages=[])
 
     outcome = await orchestrator.answer(conversation_id=CONVERSATION)
 
@@ -322,9 +372,9 @@ async def test_an_empty_conversation_has_nothing_to_answer(monkeypatch):
     assert client.calls == []
 
 
-async def test_a_plain_reply_is_returned_for_sending(monkeypatch):
+async def test_a_plain_reply_is_returned_for_sending(monkeypatch: pytest.MonkeyPatch) -> None:
     client = StubClient([_reply(text="Hello there.")])
-    orchestrator = _build(monkeypatch, client=client, agent=_agent())
+    orchestrator = _build(monkeypatch, client=as_http_client(client), agent=_agent())
 
     outcome = await orchestrator.answer(conversation_id=CONVERSATION)
 
@@ -333,10 +383,12 @@ async def test_a_plain_reply_is_returned_for_sending(monkeypatch):
     assert outcome.rounds == 1
 
 
-async def test_the_agent_configuration_reaches_the_provider(monkeypatch):
+async def test_the_agent_configuration_reaches_the_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = StubClient([_reply(text="Hello.")])
     agent = _agent(model="gpt-4.1", system_prompt="Be brief.", temperature=0.1)
-    orchestrator = _build(monkeypatch, client=client, agent=agent)
+    orchestrator = _build(monkeypatch, client=as_http_client(client), agent=agent)
 
     await orchestrator.answer(conversation_id=CONVERSATION)
 
@@ -347,11 +399,11 @@ async def test_the_agent_configuration_reaches_the_provider(monkeypatch):
     assert [turn.text for turn in call["turns"]] == ["hello"]
 
 
-async def test_only_granted_tools_are_offered(monkeypatch):
+async def test_only_granted_tools_are_offered(monkeypatch: pytest.MonkeyPatch) -> None:
     client = StubClient([_reply(text="Hello.")])
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=["lookup_order"],
         registry=_registry_with("lookup_order"),
@@ -362,7 +414,7 @@ async def test_only_granted_tools_are_offered(monkeypatch):
     assert [spec.name for spec in client.calls[0]["tools"]] == ["lookup_order"]
 
 
-async def test_a_tool_result_is_returned_to_the_model(monkeypatch):
+async def test_a_tool_result_is_returned_to_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
     client = StubClient(
         [
             _reply(tool_calls=[_call("lookup_order")]),
@@ -371,7 +423,7 @@ async def test_a_tool_result_is_returned_to_the_model(monkeypatch):
     )
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=["lookup_order"],
         registry=_registry_with("lookup_order"),
@@ -385,7 +437,9 @@ async def test_a_tool_result_is_returned_to_the_model(monkeypatch):
     assert client.calls[1]["tool_results"][0].output == "found it"
 
 
-async def test_text_said_alongside_a_tool_call_is_carried_forward(monkeypatch):
+async def test_text_said_alongside_a_tool_call_is_carried_forward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Tool results replay the call, not the words around it."""
     client = StubClient(
         [
@@ -395,7 +449,7 @@ async def test_text_said_alongside_a_tool_call_is_carried_forward(monkeypatch):
     )
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=["lookup_order"],
         registry=_registry_with("lookup_order"),
@@ -407,7 +461,9 @@ async def test_text_said_alongside_a_tool_call_is_carried_forward(monkeypatch):
     assert second_round == ["hello", "Let me check."]
 
 
-async def test_a_rejected_argument_becomes_output_the_model_can_read(monkeypatch):
+async def test_a_rejected_argument_becomes_output_the_model_can_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = StubClient(
         [
             _reply(tool_calls=[_call("lookup_order")]),
@@ -422,7 +478,7 @@ async def test_a_rejected_argument_becomes_output_the_model_can_read(monkeypatch
     )
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=["lookup_order"],
         registry=registry,
@@ -434,12 +490,12 @@ async def test_a_rejected_argument_becomes_output_the_model_can_read(monkeypatch
     assert outcome.reply == "Sorry, which order?"
 
 
-async def test_a_handoff_suppresses_the_reply(monkeypatch):
+async def test_a_handoff_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     """The conversation belongs to a person, so an AI message must not follow."""
     client = StubClient([_reply(text="Getting someone.", tool_calls=[_call(HANDOFF_TOOL)])])
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=[HANDOFF_TOOL],
         registry=_registry_with(HANDOFF_TOOL, handler=_handed_over),
@@ -453,7 +509,9 @@ async def test_a_handoff_suppresses_the_reply(monkeypatch):
     assert len(client.calls) == 1
 
 
-async def test_the_round_limit_stops_the_loop_but_keeps_the_text(monkeypatch):
+async def test_the_round_limit_stops_the_loop_but_keeps_the_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = StubClient(
         [
             _reply(text="Checking.", tool_calls=[_call("lookup_order")]),
@@ -462,7 +520,7 @@ async def test_the_round_limit_stops_the_loop_but_keeps_the_text(monkeypatch):
     )
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=["lookup_order"],
         registry=_registry_with("lookup_order"),
@@ -476,7 +534,7 @@ async def test_the_round_limit_stops_the_loop_but_keeps_the_text(monkeypatch):
     assert len(client.calls) == 2
 
 
-async def test_usage_is_summed_across_rounds(monkeypatch):
+async def test_usage_is_summed_across_rounds(monkeypatch: pytest.MonkeyPatch) -> None:
     client = StubClient(
         [
             _reply(tool_calls=[_call("lookup_order")], tokens=10),
@@ -485,7 +543,7 @@ async def test_usage_is_summed_across_rounds(monkeypatch):
     )
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=["lookup_order"],
         registry=_registry_with("lookup_order"),
@@ -500,7 +558,7 @@ async def test_usage_is_summed_across_rounds(monkeypatch):
 # --- Grounding: what the agent does with retrieved knowledge -----------------
 
 
-def _search_registry(handler):
+def _search_registry(handler: ToolHandler) -> ToolRegistry:
     """A registry holding only search_knowledge, backed by `handler`."""
     registry = ToolRegistry()
     registry.register(
@@ -516,11 +574,13 @@ def _search_registry(handler):
     return registry
 
 
-async def test_the_agent_can_actually_invoke_search_knowledge(monkeypatch):
+async def test_the_agent_can_actually_invoke_search_knowledge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The whole chain: a granted tool, a call, and a handler that ran."""
     searched = []
 
-    async def fake_search(context, arguments):
+    async def fake_search(context: ToolContext, arguments: dict[str, Any]) -> str:
         searched.append(arguments)
         return "Premium finishing costs 7200 EGP per square metre."
 
@@ -532,7 +592,7 @@ async def test_the_agent_can_actually_invoke_search_knowledge(monkeypatch):
     )
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=(SEARCH_KNOWLEDGE_TOOL,),
         registry=_search_registry(fake_search),
@@ -545,7 +605,9 @@ async def test_the_agent_can_actually_invoke_search_knowledge(monkeypatch):
     assert outcome.reply == "Premium finishing is 7200 EGP per square metre."
 
 
-async def test_a_granted_search_tool_is_offered_to_the_model(monkeypatch):
+async def test_a_granted_search_tool_is_offered_to_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A granted tool must reach the provider payload, or it can never be called.
 
     Uses the real default registry, so a tool renamed or dropped from it fails
@@ -554,7 +616,7 @@ async def test_a_granted_search_tool_is_offered_to_the_model(monkeypatch):
     client = StubClient([_reply(text="hello")])
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=(SEARCH_KNOWLEDGE_TOOL,),
         registry=build_default_registry(),
@@ -565,12 +627,14 @@ async def test_a_granted_search_tool_is_offered_to_the_model(monkeypatch):
     assert SEARCH_KNOWLEDGE_TOOL in [spec.name for spec in client.calls[0]["tools"]]
 
 
-async def test_an_agent_without_the_grant_is_never_offered_it(monkeypatch):
+async def test_an_agent_without_the_grant_is_never_offered_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Tools are granted per agent; a booking agent need not read the price list."""
     client = StubClient([_reply(text="hello")])
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=(HANDOFF_TOOL,),
         registry=build_default_registry(),
@@ -581,11 +645,13 @@ async def test_an_agent_without_the_grant_is_never_offered_it(monkeypatch):
     assert SEARCH_KNOWLEDGE_TOOL not in [spec.name for spec in client.calls[0]["tools"]]
 
 
-async def test_retrieved_knowledge_reaches_the_next_provider_call(monkeypatch):
+async def test_retrieved_knowledge_reaches_the_next_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Retrieval is worthless if the passages never enter the model's context."""
     passage = "Economy finishing costs 4500 EGP per square metre."
 
-    async def fake_search(context, arguments):
+    async def fake_search(context: ToolContext, arguments: dict[str, Any]) -> str:
         return passage
 
     client = StubClient(
@@ -596,7 +662,7 @@ async def test_retrieved_knowledge_reaches_the_next_provider_call(monkeypatch):
     )
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=(SEARCH_KNOWLEDGE_TOOL,),
         registry=_search_registry(fake_search),
@@ -608,7 +674,9 @@ async def test_retrieved_knowledge_reaches_the_next_provider_call(monkeypatch):
     assert passage in outputs
 
 
-async def test_an_empty_retrieval_reaches_the_model_as_an_instruction(monkeypatch):
+async def test_an_empty_retrieval_reaches_the_model_as_an_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The agent must be told there was nothing, not handed silence.
 
     A model given a blank tool result fills the gap from its training data,
@@ -622,7 +690,7 @@ async def test_an_empty_retrieval_reaches_the_model_as_an_instruction(monkeypatc
     )
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=(SEARCH_KNOWLEDGE_TOOL,),
         registry=_search_registry(_empty_search),
@@ -635,7 +703,9 @@ async def test_an_empty_retrieval_reaches_the_model_as_an_instruction(monkeypatc
     assert "do not have that information" in output.lower()
 
 
-async def test_a_search_without_a_provider_says_so_rather_than_failing(monkeypatch):
+async def test_a_search_without_a_provider_says_so_rather_than_failing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Missing configuration is ours, not the model's mistake.
 
     Saying so plainly lets it fall back to a handoff instead of retrying a tool
@@ -650,7 +720,7 @@ async def test_a_search_without_a_provider_says_so_rather_than_failing(monkeypat
     )
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=(SEARCH_KNOWLEDGE_TOOL,),
         registry=build_default_registry(),
@@ -665,7 +735,7 @@ async def test_a_search_without_a_provider_says_so_rather_than_failing(monkeypat
     assert outcome.reply == "Let me pass you to a colleague."
 
 
-async def test_an_image_description_reaches_the_model(monkeypatch):
+async def test_an_image_description_reaches_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
     """End to end through the orchestrator, not just the renderer.
 
     This is the assertion the whole phase exists for: what the customer
@@ -696,7 +766,7 @@ async def test_an_image_description_reaches_the_model(monkeypatch):
     client = StubClient([_reply("It is 4,500 EGP.")])
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         messages=[photo],
         attachments={photo.id: attachment},
@@ -710,7 +780,7 @@ async def test_an_image_description_reaches_the_model(monkeypatch):
     assert "how much?" in prompt
 
 
-async def test_an_escalated_conversation_is_never_answered(monkeypatch):
+async def test_an_escalated_conversation_is_never_answered(monkeypatch: pytest.MonkeyPatch) -> None:
     """The whole point of assessing before composing.
 
     The provider is not called at all - not called and discarded. A reply that
@@ -720,7 +790,7 @@ async def test_an_escalated_conversation_is_never_answered(monkeypatch):
     client = StubClient([])
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         sentiment=FakeSentiment(escalates=True),
     )
@@ -733,11 +803,11 @@ async def test_an_escalated_conversation_is_never_answered(monkeypatch):
     assert client.calls == []
 
 
-async def test_a_calm_conversation_is_answered_as_usual(monkeypatch):
+async def test_a_calm_conversation_is_answered_as_usual(monkeypatch: pytest.MonkeyPatch) -> None:
     client = StubClient([_reply("Of course, here you go.")])
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         sentiment=FakeSentiment(escalates=False),
     )
@@ -749,13 +819,13 @@ async def test_a_calm_conversation_is_answered_as_usual(monkeypatch):
     assert len(client.calls) == 1
 
 
-async def test_the_answering_agent_decides_the_threshold(monkeypatch):
+async def test_the_answering_agent_decides_the_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     """Not a global setting: the agent that will reply is the one whose rules apply."""
     sentiment = FakeSentiment()
     client = StubClient([_reply("hello")])
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(escalation_sentiment=SentimentLabel.NEGATIVE),
         sentiment=sentiment,
     )
@@ -765,13 +835,15 @@ async def test_the_answering_agent_decides_the_threshold(monkeypatch):
     assert sentiment.thresholds == [SentimentLabel.NEGATIVE]
 
 
-async def test_an_agent_that_cannot_answer_is_never_assessed(monkeypatch):
+async def test_an_agent_that_cannot_answer_is_never_assessed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """No reply to stop, so nothing worth paying a provider to judge."""
     sentiment = FakeSentiment(escalates=True)
     disabled = _agent(status=AgentStatus.DISABLED)
     orchestrator = _build(
         monkeypatch,
-        client=StubClient([]),
+        client=as_http_client(StubClient([])),
         agent=disabled,
         sentiment=sentiment,
     )
@@ -785,14 +857,16 @@ async def test_an_agent_that_cannot_answer_is_never_assessed(monkeypatch):
 # ------------------------------------------- the connection is not held (ADR-080)
 
 
-async def test_the_session_is_released_before_every_provider_call(monkeypatch):
+async def test_the_session_is_released_before_every_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """One release per round, and each one before its inference.
 
     The ordering is the whole assertion. A commit that happened *after* the
     call would satisfy a count and prove nothing: the connection would still
     have been checked out for the length of the wait.
     """
-    timeline = []
+    timeline: list[Any] = []
     session = FakeSession(timeline=timeline)
     client = StubClient(
         [
@@ -803,10 +877,10 @@ async def test_the_session_is_released_before_every_provider_call(monkeypatch):
     )
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=(HANDOFF_TOOL,),
-        session=session,
+        session=as_session(session),
     )
 
     await orchestrator.answer(conversation_id=CONVERSATION)
@@ -817,12 +891,14 @@ async def test_the_session_is_released_before_every_provider_call(monkeypatch):
     assert session.commits == 1
 
 
-async def test_every_round_of_a_tool_using_turn_releases_the_connection(monkeypatch):
+async def test_every_round_of_a_tool_using_turn_releases_the_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Two inferences, two releases, and neither inference between them."""
-    timeline = []
+    timeline: list[Any] = []
     session = FakeSession(timeline=timeline)
 
-    async def note(context, arguments):
+    async def note(context: ToolContext, arguments: dict[str, Any]) -> str:
         return "noted"
 
     registry = ToolRegistry()
@@ -843,11 +919,11 @@ async def test_every_round_of_a_tool_using_turn_releases_the_connection(monkeypa
     )
     orchestrator = _build(
         monkeypatch,
-        client=client,
+        client=as_http_client(client),
         agent=_agent(),
         grants=("note",),
         registry=registry,
-        session=session,
+        session=as_session(session),
     )
 
     outcome = await orchestrator.answer(conversation_id=CONVERSATION)
@@ -863,7 +939,9 @@ async def test_every_round_of_a_tool_using_turn_releases_the_connection(monkeypa
     ]
 
 
-async def test_a_conversation_taken_over_during_the_turn_is_not_answered(monkeypatch):
+async def test_a_conversation_taken_over_during_the_turn_is_not_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A colleague opened it while the model was composing.
 
     The mode was AI when the turn started - the repository fake says so - and
@@ -873,7 +951,9 @@ async def test_a_conversation_taken_over_during_the_turn_is_not_answered(monkeyp
     """
     session = FakeSession(mode=ConversationMode.HUMAN)
     client = StubClient([_reply("here is your answer")])
-    orchestrator = _build(monkeypatch, client=client, agent=_agent(), session=session)
+    orchestrator = _build(
+        monkeypatch, client=as_http_client(client), agent=_agent(), session=as_session(session)
+    )
 
     outcome = await orchestrator.answer(conversation_id=CONVERSATION)
 
@@ -886,14 +966,14 @@ async def test_a_conversation_taken_over_during_the_turn_is_not_answered(monkeyp
     assert session.mode_reads == 1
 
 
-async def test_a_conversation_still_in_ai_mode_is_answered(monkeypatch):
+async def test_a_conversation_still_in_ai_mode_is_answered(monkeypatch: pytest.MonkeyPatch) -> None:
     """The companion to the above, so the re-read is not just always refusing."""
     session = FakeSession(mode=ConversationMode.AI)
     orchestrator = _build(
         monkeypatch,
-        client=StubClient([_reply("here is your answer")]),
+        client=as_http_client(StubClient([_reply("here is your answer")])),
         agent=_agent(),
-        session=session,
+        session=as_session(session),
     )
 
     outcome = await orchestrator.answer(conversation_id=CONVERSATION)

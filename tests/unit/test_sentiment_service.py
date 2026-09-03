@@ -8,8 +8,11 @@ cases in which nothing should be judged at all.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
+from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ExternalServiceError, RateLimitedError
 from app.db.models.analytics import AnalyticsSource
@@ -30,13 +33,13 @@ from app.services.sentiment_service import (
     MIN_ESCALATION_CONFIDENCE,
     SentimentService,
 )
+from tests.fakes import as_analyzer, as_session
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 CONVERSATION = uuid.UUID("22222222-2222-2222-2222-222222222222")
 MESSAGE = uuid.UUID("33333333-3333-3333-3333-333333333333")
 
 # Distinguishes "use the default message" from "this conversation has none".
-DEFAULT = object()
 
 
 def _reading(
@@ -59,7 +62,12 @@ def _reading(
 class StubAnalyzer:
     """Returns a queued reading, or raises what it was given."""
 
-    def __init__(self, reading=None, *, raises: Exception | None = None) -> None:
+    def __init__(
+        self,
+        reading: SentimentReading | None = None,
+        *,
+        raises: Exception | None = None,
+    ) -> None:
         self._reading = reading if reading is not None else _reading()
         self._raises = raises
         self.seen: list[str] = []
@@ -72,40 +80,40 @@ class StubAnalyzer:
 
 
 class FakeConversations:
-    def __init__(self, conversation) -> None:
+    def __init__(self, conversation: Conversation) -> None:
         self._conversation = conversation
 
-    async def require_by_id(self, conversation_id):
+    async def require_by_id(self, conversation_id: uuid.UUID) -> Conversation:
         return self._conversation
 
 
 class FakeMessages:
-    def __init__(self, message) -> None:
+    def __init__(self, message: Message | None) -> None:
         self._message = message
 
-    async def latest_inbound(self, conversation_id):
+    async def latest_inbound(self, conversation_id: uuid.UUID) -> Message | None:
         return self._message
 
 
 class FakeMedia:
-    def __init__(self, media=None) -> None:
+    def __init__(self, media: MessageMedia | None = None) -> None:
         self._media = media
 
-    async def get_for_message(self, message_id):
+    async def get_for_message(self, message_id: uuid.UUID) -> MessageMedia | None:
         return self._media
 
 
 class FakeReadings:
     """Remembers what was stored, and what was already there."""
 
-    def __init__(self, stored=None) -> None:
+    def __init__(self, stored: MessageSentiment | None = None) -> None:
         self._stored = stored
-        self.recorded: list[dict] = []
+        self.recorded: list[dict[str, Any]] = []
 
-    async def get_for_message(self, message_id):
+    async def get_for_message(self, message_id: uuid.UUID) -> MessageSentiment | None:
         return self._stored
 
-    async def record(self, **fields):
+    async def record(self, **fields: Any) -> tuple[Any, ...]:
         self.recorded.append(fields)
         return MessageSentiment(**fields, tenant_id=TENANT), True
 
@@ -114,9 +122,9 @@ class FakeUsage:
     """Remembers what was metered, without a session to stage it in."""
 
     def __init__(self) -> None:
-        self.requests: list[dict] = []
+        self.requests: list[dict[str, Any]] = []
 
-    def ai_request(self, **fields) -> None:
+    def ai_request(self, **fields: Any) -> None:
         self.requests.append(fields)
 
 
@@ -124,9 +132,9 @@ class FakeAnalytics:
     """Remembers the handoffs an escalation recorded."""
 
     def __init__(self) -> None:
-        self.handoffs: list[dict] = []
+        self.handoffs: list[dict[str, Any]] = []
 
-    def handoff(self, **fields) -> None:
+    def handoff(self, **fields: Any) -> None:
         self.handoffs.append(fields)
 
 
@@ -153,8 +161,8 @@ def _voice_note(transcript: str | None, *, is_voice: bool = True) -> MessageMedi
     )
 
 
-def _returns(instance):
-    def build(*args: object, **kwargs: object):
+def _returns[T](instance: T) -> Callable[..., T]:
+    def build(*args: object, **kwargs: object) -> T:
         return instance
 
     return build
@@ -177,18 +185,22 @@ class FakeSession:
         self.commits += 1
 
 
+#: What `_build` uses when a test does not name a message of its own.
+DEFAULT = _inbound()
+
+
 def _build(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     *,
-    analyzer=None,
-    conversation=None,
-    message=DEFAULT,
-    media=None,
-    stored=None,
-    readings=None,
-    usage=None,
-    analytics=None,
-    session=None,
+    analyzer: StubAnalyzer | None = None,
+    conversation: Conversation | None = None,
+    message: Message | None = DEFAULT,
+    media: MessageMedia | None = None,
+    stored: MessageSentiment | None = None,
+    readings: FakeReadings | None = None,
+    usage: FakeUsage | None = None,
+    analytics: FakeAnalytics | None = None,
+    session: AsyncSession | None = None,
 ) -> SentimentService:
     fakes = {
         "UsageRecorder": usage if usage is not None else FakeUsage(),
@@ -206,13 +218,13 @@ def _build(
         monkeypatch.setattr(service_module, name, _returns(fake))
 
     return SentimentService(
-        session=session if session is not None else FakeSession(),
+        session=as_session(session if session is not None else FakeSession()),
         tenant_id=TENANT,
-        analyzer=analyzer,
+        analyzer=as_analyzer(analyzer),
     )
 
 
-async def test_an_angry_customer_is_handed_to_a_person(monkeypatch):
+async def test_an_angry_customer_is_handed_to_a_person(monkeypatch: pytest.MonkeyPatch) -> None:
     conversation = Conversation(mode=ConversationMode.AI, priority=ConversationPriority.NORMAL)
     service = _build(monkeypatch, analyzer=StubAnalyzer(), conversation=conversation)
 
@@ -228,7 +240,7 @@ async def test_an_angry_customer_is_handed_to_a_person(monkeypatch):
     assert conversation.handoff_reason is not None
 
 
-async def test_the_reason_says_the_handoff_was_automatic(monkeypatch):
+async def test_the_reason_says_the_handoff_was_automatic(monkeypatch: pytest.MonkeyPatch) -> None:
     """A colleague opens with different words depending on who decided."""
     conversation = Conversation(mode=ConversationMode.AI, priority=ConversationPriority.NORMAL)
     service = _build(monkeypatch, analyzer=StubAnalyzer(), conversation=conversation)
@@ -242,7 +254,9 @@ async def test_the_reason_says_the_handoff_was_automatic(monkeypatch):
     assert "angry" in (conversation.handoff_reason or "")
 
 
-async def test_an_unhappy_customer_is_flagged_but_still_answered(monkeypatch):
+async def test_an_unhappy_customer_is_flagged_but_still_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The default threshold is anger, not disappointment."""
     conversation = Conversation(mode=ConversationMode.AI, priority=ConversationPriority.NORMAL)
     service = _build(
@@ -261,7 +275,9 @@ async def test_an_unhappy_customer_is_flagged_but_still_answered(monkeypatch):
     assert conversation.priority is ConversationPriority.HIGH
 
 
-async def test_a_low_confidence_reading_never_silences_the_agent(monkeypatch):
+async def test_a_low_confidence_reading_never_silences_the_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Silencing an agent on a guess leaves the customer waiting on nobody."""
     conversation = Conversation(mode=ConversationMode.AI, priority=ConversationPriority.NORMAL)
     service = _build(
@@ -281,7 +297,9 @@ async def test_a_low_confidence_reading_never_silences_the_agent(monkeypatch):
     assert conversation.priority is ConversationPriority.URGENT
 
 
-async def test_a_workspace_can_switch_automatic_handoff_off(monkeypatch):
+async def test_a_workspace_can_switch_automatic_handoff_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     conversation = Conversation(mode=ConversationMode.AI, priority=ConversationPriority.NORMAL)
     service = _build(monkeypatch, analyzer=StubAnalyzer(), conversation=conversation)
 
@@ -295,7 +313,7 @@ async def test_a_workspace_can_switch_automatic_handoff_off(monkeypatch):
     assert conversation.priority is ConversationPriority.URGENT
 
 
-async def test_a_workspace_can_escalate_earlier(monkeypatch):
+async def test_a_workspace_can_escalate_earlier(monkeypatch: pytest.MonkeyPatch) -> None:
     conversation = Conversation(mode=ConversationMode.AI, priority=ConversationPriority.NORMAL)
     service = _build(
         monkeypatch,
@@ -312,7 +330,7 @@ async def test_a_workspace_can_escalate_earlier(monkeypatch):
     assert conversation.mode is ConversationMode.HUMAN
 
 
-async def test_the_reading_is_stored_with_what_decided_it(monkeypatch):
+async def test_the_reading_is_stored_with_what_decided_it(monkeypatch: pytest.MonkeyPatch) -> None:
     readings = FakeReadings()
     service = _build(monkeypatch, analyzer=StubAnalyzer(), readings=readings)
 
@@ -328,7 +346,9 @@ async def test_the_reading_is_stored_with_what_decided_it(monkeypatch):
     assert stored["model"] == "gpt-4.1-mini"
 
 
-async def test_a_conversation_a_person_already_owns_is_not_analysed(monkeypatch):
+async def test_a_conversation_a_person_already_owns_is_not_analysed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Nothing left to escalate, so nothing worth paying a provider for."""
     analyzer = StubAnalyzer()
     service = _build(
@@ -346,7 +366,7 @@ async def test_a_conversation_a_person_already_owns_is_not_analysed(monkeypatch)
     assert analyzer.seen == []
 
 
-async def test_a_message_already_read_is_not_read_again(monkeypatch):
+async def test_a_message_already_read_is_not_read_again(monkeypatch: pytest.MonkeyPatch) -> None:
     """What stops a retried job paying for a second inference."""
     analyzer = StubAnalyzer()
     stored = MessageSentiment(
@@ -371,7 +391,9 @@ async def test_a_message_already_read_is_not_read_again(monkeypatch):
     assert outcome.escalated is True
 
 
-async def test_a_conversation_handed_back_is_not_re_escalated(monkeypatch):
+async def test_a_conversation_handed_back_is_not_re_escalated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The case the stored reading exists to prevent.
 
     A colleague looked at an escalated conversation, decided it was fine and
@@ -399,7 +421,9 @@ async def test_a_conversation_handed_back_is_not_re_escalated(monkeypatch):
     assert conversation.mode is ConversationMode.AI
 
 
-async def test_a_conversation_with_nothing_said_is_not_analysed(monkeypatch):
+async def test_a_conversation_with_nothing_said_is_not_analysed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     analyzer = StubAnalyzer()
     service = _build(monkeypatch, analyzer=analyzer, message=None)
 
@@ -412,7 +436,9 @@ async def test_a_conversation_with_nothing_said_is_not_analysed(monkeypatch):
     assert analyzer.seen == []
 
 
-async def test_a_deployment_without_a_provider_still_answers(monkeypatch):
+async def test_a_deployment_without_a_provider_still_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = _build(monkeypatch, analyzer=None)
 
     outcome = await service.assess(
@@ -425,7 +451,10 @@ async def test_a_deployment_without_a_provider_still_answers(monkeypatch):
 
 
 @pytest.mark.parametrize("failure", [ExternalServiceError("down"), RateLimitedError("slow down")])
-async def test_a_provider_failure_does_not_cost_the_customer_a_reply(monkeypatch, failure):
+async def test_a_provider_failure_does_not_cost_the_customer_a_reply(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
     """A reading is an enhancement. The reply is the product."""
     conversation = Conversation(mode=ConversationMode.AI, priority=ConversationPriority.NORMAL)
     service = _build(
@@ -443,7 +472,7 @@ async def test_a_provider_failure_does_not_cost_the_customer_a_reply(monkeypatch
     assert conversation.mode is ConversationMode.AI
 
 
-async def test_a_voice_note_is_judged_on_what_was_said(monkeypatch):
+async def test_a_voice_note_is_judged_on_what_was_said(monkeypatch: pytest.MonkeyPatch) -> None:
     """A transcript is the customer's own words, so it is read like any other."""
     analyzer = StubAnalyzer()
     service = _build(
@@ -461,7 +490,9 @@ async def test_a_voice_note_is_judged_on_what_was_said(monkeypatch):
     assert analyzer.seen == ["you have wasted my entire morning"]
 
 
-async def test_a_caption_and_a_voice_note_are_read_together(monkeypatch):
+async def test_a_caption_and_a_voice_note_are_read_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     analyzer = StubAnalyzer()
     service = _build(
         monkeypatch,
@@ -478,7 +509,9 @@ async def test_a_caption_and_a_voice_note_are_read_together(monkeypatch):
     assert analyzer.seen == ["look at this\nthis is the third time"]
 
 
-async def test_a_photograph_is_not_judged_from_our_own_description(monkeypatch):
+async def test_a_photograph_is_not_judged_from_our_own_description(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The description is this system's prose, not something the customer said.
 
     Reading a mood off it would be treating our own inference as evidence.
@@ -500,7 +533,7 @@ async def test_a_photograph_is_not_judged_from_our_own_description(monkeypatch):
     assert outcome.reading is None
 
 
-async def test_priority_can_be_given_back_by_hand(monkeypatch):
+async def test_priority_can_be_given_back_by_hand(monkeypatch: pytest.MonkeyPatch) -> None:
     """The only way it comes down."""
     conversation = Conversation(mode=ConversationMode.AI, priority=ConversationPriority.URGENT)
     service = _build(monkeypatch, conversation=conversation)
@@ -513,7 +546,9 @@ async def test_priority_can_be_given_back_by_hand(monkeypatch):
     assert updated.priority is ConversationPriority.NORMAL
 
 
-async def test_an_assessment_is_metered_as_a_provider_call_of_its_own(monkeypatch):
+async def test_an_assessment_is_metered_as_a_provider_call_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The caller never sees this call, so the caller cannot count it.
 
     Folding it into the agent turn's figures would hide a cost from the
@@ -537,7 +572,7 @@ async def test_an_assessment_is_metered_as_a_provider_call_of_its_own(monkeypatc
     ]
 
 
-async def test_a_provider_failure_is_not_metered(monkeypatch):
+async def test_a_provider_failure_is_not_metered(monkeypatch: pytest.MonkeyPatch) -> None:
     """Nothing was read, so nothing was consumed."""
     usage = FakeUsage()
     service = _build(
@@ -555,7 +590,9 @@ async def test_a_provider_failure_is_not_metered(monkeypatch):
     assert usage.requests == []
 
 
-async def test_a_reading_already_taken_is_not_metered_again(monkeypatch):
+async def test_a_reading_already_taken_is_not_metered_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A retried job must not pay twice for a message already read."""
     usage = FakeUsage()
     service = _build(
@@ -581,7 +618,9 @@ async def test_a_reading_already_taken_is_not_metered_again(monkeypatch):
     assert usage.requests == []
 
 
-async def test_an_escalation_records_the_classifier_as_the_one_who_decided(monkeypatch):
+async def test_an_escalation_records_the_classifier_as_the_one_who_decided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Three things can hand a conversation over, and the conversation row
     cannot tell them apart afterwards. This is the one that says the product
     judged a customer angry."""
@@ -598,7 +637,9 @@ async def test_an_escalation_records_the_classifier_as_the_one_who_decided(monke
     assert analytics.handoffs[0]["conversation_id"] == CONVERSATION
 
 
-async def test_a_reading_that_does_not_escalate_records_no_handoff(monkeypatch):
+async def test_a_reading_that_does_not_escalate_records_no_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     analytics = FakeAnalytics()
     service = _build(
         monkeypatch,
@@ -615,7 +656,9 @@ async def test_a_reading_that_does_not_escalate_records_no_handoff(monkeypatch):
     assert analytics.handoffs == []
 
 
-async def test_the_connection_is_handed_back_before_the_classifier_is_called(monkeypatch):
+async def test_the_connection_is_handed_back_before_the_classifier_is_called(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A release, and it happens before the call rather than after it (ADR-080).
 
     An assessment is a provider round trip like any other, so it should not
@@ -629,19 +672,21 @@ async def test_the_connection_is_handed_back_before_the_classifier_is_called(mon
     seen_at_call: list[int] = []
     original = analyzer.read
 
-    async def read(text):
+    async def read(text: str) -> SentimentReading:
         seen_at_call.append(session.commits)
         return await original(text)
 
     analyzer.read = read  # type: ignore[method-assign]
-    service = _build(monkeypatch, analyzer=analyzer, session=session)
+    service = _build(monkeypatch, analyzer=analyzer, session=as_session(session))
 
     await service.assess(conversation_id=CONVERSATION, escalation_sentiment=None)
 
     assert seen_at_call == [1], "the session was not committed before the classifier ran"
 
 
-async def test_a_classifier_failure_still_leaves_the_connection_released(monkeypatch):
+async def test_a_classifier_failure_still_leaves_the_connection_released(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The release is not undone by the thing it was released for failing.
 
     A reading is an enhancement and its failure is contained, so the turn
@@ -652,7 +697,7 @@ async def test_a_classifier_failure_still_leaves_the_connection_released(monkeyp
     service = _build(
         monkeypatch,
         analyzer=StubAnalyzer(raises=ExternalServiceError("the classifier is down")),
-        session=session,
+        session=as_session(session),
     )
 
     outcome = await service.assess(conversation_id=CONVERSATION, escalation_sentiment=None)

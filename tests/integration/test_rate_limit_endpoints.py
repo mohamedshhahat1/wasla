@@ -9,9 +9,11 @@ load, it loses a customer's message and then the integration (ADR-032).
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 
 import pytest
 from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -23,6 +25,7 @@ from app.core.config import Settings
 from app.core.exceptions import AuthenticationError
 from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.main import create_app
+from tests.conftest import FakeDependency
 
 pytestmark = pytest.mark.integration
 
@@ -73,7 +76,9 @@ def limited_settings() -> Settings:
 
 
 @pytest.fixture
-def limited_app(limited_settings: Settings, fake_database, fake_redis) -> FastAPI:
+def limited_app(
+    limited_settings: Settings, fake_database: FakeDependency, fake_redis: FakeDependency
+) -> FastAPI:
     app = create_app(limited_settings)
     app.state.database = fake_database
     app.state.redis = fake_redis
@@ -81,7 +86,7 @@ def limited_app(limited_settings: Settings, fake_database, fake_redis) -> FastAP
 
 
 @pytest.fixture
-async def limited_client(limited_app: FastAPI):
+async def limited_client(limited_app: FastAPI) -> AsyncIterator[AsyncClient]:
     from httpx import ASGITransport, AsyncClient
 
     async with AsyncClient(
@@ -94,7 +99,9 @@ async def limited_client(limited_app: FastAPI):
 # ------------------------------------------------------------ authentication
 
 
-async def test_repeated_logins_are_refused_after_the_limit(limited_app, limited_client):
+async def test_repeated_logins_are_refused_after_the_limit(
+    limited_app: FastAPI, limited_client: AsyncClient
+) -> None:
     limited_app.dependency_overrides[get_auth_service] = RefusingAuth
     body = {"email": "someone@example.com", "password": "a-very-long-password-1"}
 
@@ -107,7 +114,9 @@ async def test_repeated_logins_are_refused_after_the_limit(limited_app, limited_
     assert statuses == [401, 401, 401, 429]
 
 
-async def test_the_refusal_says_when_to_come_back(limited_app, limited_client):
+async def test_the_refusal_says_when_to_come_back(
+    limited_app: FastAPI, limited_client: AsyncClient
+) -> None:
     limited_app.dependency_overrides[get_auth_service] = RefusingAuth
     body = {"email": "someone@example.com", "password": "a-very-long-password-1"}
     for _ in range(3):
@@ -120,7 +129,9 @@ async def test_the_refusal_says_when_to_come_back(limited_app, limited_client):
     assert int(response.headers["Retry-After"]) > 0
 
 
-async def test_registration_shares_the_authentication_budget(limited_app, limited_client):
+async def test_registration_shares_the_authentication_budget(
+    limited_app: FastAPI, limited_client: AsyncClient
+) -> None:
     """Both are unauthenticated attempts from one address, and a script that
     cannot log in should not be able to make accounts instead."""
     limited_app.dependency_overrides[get_auth_service] = RefusingAuth
@@ -144,7 +155,9 @@ async def test_registration_shares_the_authentication_budget(limited_app, limite
 # --------------------------------------------------------------- workspaces
 
 
-async def test_a_workspace_is_limited_across_its_routes(limited_app, limited_client):
+async def test_a_workspace_is_limited_across_its_routes(
+    limited_app: FastAPI, limited_client: AsyncClient
+) -> None:
     limited_app.dependency_overrides[get_active_workspace] = lambda: _workspace(TENANT_ID)
     limited_app.dependency_overrides[get_agent_service] = StubAgents
 
@@ -153,7 +166,9 @@ async def test_a_workspace_is_limited_across_its_routes(limited_app, limited_cli
     assert statuses == [200, 200, 200, 200, 429]
 
 
-async def test_one_workspace_cannot_exhaust_anothers_budget(limited_app, limited_client):
+async def test_one_workspace_cannot_exhaust_anothers_budget(
+    limited_app: FastAPI, limited_client: AsyncClient
+) -> None:
     """Counted per workspace, so a busy customer cannot refuse a quiet one."""
     limited_app.dependency_overrides[get_agent_service] = StubAgents
     limited_app.dependency_overrides[get_active_workspace] = lambda: _workspace(TENANT_ID)
@@ -167,9 +182,9 @@ async def test_one_workspace_cannot_exhaust_anothers_budget(limited_app, limited
 
 
 async def test_an_unauthenticated_request_is_refused_for_being_unauthenticated(
-    limited_app,
-    limited_client,
-):
+    limited_app: FastAPI,
+    limited_client: AsyncClient,
+) -> None:
     """Not for being frequent: the workspace guard resolves the caller first,
     and 401 is the honest answer."""
     for _ in range(6):
@@ -181,7 +196,9 @@ async def test_an_unauthenticated_request_is_refused_for_being_unauthenticated(
 # ------------------------------------------------------------- the webhook
 
 
-async def test_the_whatsapp_webhook_is_never_rate_limited(limited_app, limited_client):
+async def test_the_whatsapp_webhook_is_never_rate_limited(
+    limited_app: FastAPI, limited_client: AsyncClient
+) -> None:
     """The most important assertion in this file.
 
     Meta retries anything that is not a 2xx and eventually disables a
@@ -204,9 +221,9 @@ async def test_the_whatsapp_webhook_is_never_rate_limited(limited_app, limited_c
 
 
 async def test_the_webhook_verification_handshake_is_never_limited(
-    limited_app,
-    limited_client,
-):
+    limited_app: FastAPI,
+    limited_client: AsyncClient,
+) -> None:
     """Meta re-verifies a subscription, and a refusal there breaks the
     connection at exactly the moment somebody is setting it up."""
     statuses = []
@@ -223,7 +240,7 @@ async def test_the_webhook_verification_handshake_is_never_limited(
 # ------------------------------------------------------------- switched off
 
 
-async def test_limiting_can_be_switched_off(client, app):
+async def test_limiting_can_be_switched_off(client: AsyncClient, app: FastAPI) -> None:
     """The default in this suite: a limiter counting across a file makes every
     test in it order-dependent."""
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(TENANT_ID)
@@ -234,7 +251,9 @@ async def test_limiting_can_be_switched_off(client, app):
     assert set(statuses) == {200}
 
 
-async def test_logout_shares_the_authentication_budget(limited_app, limited_client):
+async def test_logout_shares_the_authentication_budget(
+    limited_app: FastAPI, limited_client: AsyncClient
+) -> None:
     """Logout is limited rather than authenticated (ADR-040).
 
     Requiring an access token would break it exactly when people use it - the
@@ -258,7 +277,9 @@ async def test_logout_shares_the_authentication_budget(limited_app, limited_clie
     assert refused.status_code == 429
 
 
-async def test_logout_needs_no_credential_beyond_the_token_itself(client, app):
+async def test_logout_needs_no_credential_beyond_the_token_itself(
+    client: AsyncClient, app: FastAPI
+) -> None:
     """The property that must survive the limit: no authentication.
 
     A caller whose access token has already expired must still be able to revoke

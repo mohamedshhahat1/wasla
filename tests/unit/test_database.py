@@ -6,6 +6,9 @@ The failure probe points at a closed local port, which is refused immediately.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from typing import Any
+
 import pytest
 
 from app.core.config import Settings
@@ -14,11 +17,11 @@ from app.db.base import Base, SoftDeleteMixin
 from app.db.session import Database
 
 
-def _settings(**overrides):
+def _settings(**overrides: Any) -> Settings:
     return Settings(_env_file=None, **overrides)
 
 
-async def test_engine_is_configured_from_settings():
+async def test_engine_is_configured_from_settings() -> None:
     database = Database(
         _settings(
             database_url="postgresql+asyncpg://wasla:pw@db:5432/wasla_test",
@@ -37,7 +40,7 @@ async def test_engine_is_configured_from_settings():
         await database.dispose()
 
 
-async def test_rendered_url_hides_the_password():
+async def test_rendered_url_hides_the_password() -> None:
     database = Database(_settings(database_url="postgresql+asyncpg://wasla:pw@db:5432/wasla"))
 
     try:
@@ -47,7 +50,7 @@ async def test_rendered_url_hides_the_password():
         await database.dispose()
 
 
-async def test_check_raises_dependency_unavailable_when_unreachable():
+async def test_check_raises_dependency_unavailable_when_unreachable() -> None:
     database = Database(
         _settings(
             database_url="postgresql+asyncpg://wasla:pw@127.0.0.1:1/wasla",
@@ -65,7 +68,7 @@ async def test_check_raises_dependency_unavailable_when_unreachable():
         await database.dispose()
 
 
-def test_asyncpg_connect_args_are_skipped_for_other_drivers():
+def test_asyncpg_connect_args_are_skipped_for_other_drivers() -> None:
     assert Database._connect_args(_settings(database_url="sqlite+aiosqlite:///:memory:")) == {}
 
     args = Database._connect_args(
@@ -75,17 +78,17 @@ def test_asyncpg_connect_args_are_skipped_for_other_drivers():
     assert args["server_settings"]["application_name"] == "wasla"
 
 
-def test_metadata_uses_explicit_naming_convention():
+def test_metadata_uses_explicit_naming_convention() -> None:
     assert Base.metadata.naming_convention["pk"] == "pk_%(table_name)s"
     assert Base.metadata.naming_convention["fk"] == (
         "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s"
     )
 
 
-def test_soft_delete_mixin_reports_state():
+def test_soft_delete_mixin_reports_state() -> None:
     class Example(SoftDeleteMixin):
-        def __init__(self, deleted_at=None):
+        def __init__(self, deleted_at: datetime | None = None) -> None:
             self.deleted_at = deleted_at
 
     assert not Example().is_deleted
-    assert Example(deleted_at=object()).is_deleted
+    assert Example(deleted_at=datetime.now(UTC)).is_deleted

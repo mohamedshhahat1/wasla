@@ -11,10 +11,15 @@ the company to a subscription.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -29,6 +34,7 @@ from app.db.models.billing import (
     BillingInterval,
     LimitKey,
     Plan,
+    Subscription,
     SubscriptionStatus,
 )
 from app.services.entitlement_service import Entitlement
@@ -42,7 +48,7 @@ USER_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
 
-async def _tenant(session, slug: str = "acme") -> Tenant:
+async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
@@ -50,13 +56,13 @@ async def _tenant(session, slug: str = "acme") -> Tenant:
 
 
 async def _plan(
-    session,
+    session: AsyncSession,
+    limits: Mapping[LimitKey, int] | None = None,
     *,
     code: str,
     trial_days: int = 0,
     is_public: bool = True,
     price: str = "99.00",
-    **limits,
 ) -> Plan:
     plan = Plan(
         code=code,
@@ -66,7 +72,7 @@ async def _plan(
         interval=BillingInterval.MONTHLY,
         trial_days=trial_days,
         is_public=is_public,
-        limits={key.value: value for key, value in limits.items()},
+        limits={key.value: value for key, value in (limits or {}).items()},
     )
     session.add(plan)
     await session.flush()
@@ -76,7 +82,7 @@ async def _plan(
 # ------------------------------------------------------------------- service
 
 
-async def test_a_plan_with_a_trial_starts_the_workspace_on_it(db_session):
+async def test_a_plan_with_a_trial_starts_the_workspace_on_it(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     await _plan(db_session, code="pro", trial_days=14)
 
@@ -91,7 +97,9 @@ async def test_a_plan_with_a_trial_starts_the_workspace_on_it(db_session):
     assert subscription.current_period_end == subscription.trial_ends_at
 
 
-async def test_a_plan_without_a_trial_starts_active_for_a_full_period(db_session):
+async def test_a_plan_without_a_trial_starts_active_for_a_full_period(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session)
     await _plan(db_session, code="pro")
 
@@ -105,7 +113,7 @@ async def test_a_plan_without_a_trial_starts_active_for_a_full_period(db_session
     assert subscription.current_period_end == datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 
 
-async def test_a_workspace_cannot_hold_two_subscriptions(db_session):
+async def test_a_workspace_cannot_hold_two_subscriptions(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     await _plan(db_session, code="pro")
     service = SubscriptionService(db_session, tenant_id=tenant.id)
@@ -115,7 +123,7 @@ async def test_a_workspace_cannot_hold_two_subscriptions(db_session):
         await service.start(plan_code="pro", now=NOW, self_service=False)
 
 
-async def test_a_plan_nobody_offers_is_refused(db_session):
+async def test_a_plan_nobody_offers_is_refused(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     retired = await _plan(db_session, code="old")
     retired.is_active = False
@@ -128,7 +136,7 @@ async def test_a_plan_nobody_offers_is_refused(db_session):
         await service.start(plan_code="imaginary", now=NOW)
 
 
-async def test_a_private_plan_cannot_be_self_selected(db_session):
+async def test_a_private_plan_cannot_be_self_selected(db_session: AsyncSession) -> None:
     """The catalogue filter was standing in for an authorization rule.
 
     `GET /billing/plans` has always excluded non-public plans, so Enterprise
@@ -144,7 +152,7 @@ async def test_a_private_plan_cannot_be_self_selected(db_session):
         await service.start(plan_code="enterprise", now=NOW)
 
 
-async def test_a_private_plan_cannot_be_switched_to_either(db_session):
+async def test_a_private_plan_cannot_be_switched_to_either(db_session: AsyncSession) -> None:
     """`change_plan` is the same hole by another door."""
     tenant = await _tenant(db_session)
     await _plan(db_session, code="pro")
@@ -157,8 +165,8 @@ async def test_a_private_plan_cannot_be_switched_to_either(db_session):
 
 
 async def test_a_private_plan_is_refused_exactly_like_one_that_does_not_exist(
-    db_session,
-):
+    db_session: AsyncSession,
+) -> None:
     """Same message, deliberately.
 
     A distinct refusal would confirm that a private plan code is real, which is
@@ -176,7 +184,7 @@ async def test_a_private_plan_is_refused_exactly_like_one_that_does_not_exist(
     assert str(private.value) == str(absent.value)
 
 
-async def test_the_platform_can_still_assign_a_private_plan(db_session):
+async def test_the_platform_can_still_assign_a_private_plan(db_session: AsyncSession) -> None:
     """`self_service=False` is the door registration comes through.
 
     A deployment whose configured default plan is private is making a
@@ -194,7 +202,9 @@ async def test_the_platform_can_still_assign_a_private_plan(db_session):
     assert subscription.status is SubscriptionStatus.ACTIVE
 
 
-async def test_changing_plan_restarts_the_period_and_ends_the_trial(db_session):
+async def test_changing_plan_restarts_the_period_and_ends_the_trial(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session)
     await _plan(db_session, code="starter", trial_days=14, price="0.00")
     await _plan(db_session, code="pro")
@@ -210,7 +220,7 @@ async def test_changing_plan_restarts_the_period_and_ends_the_trial(db_session):
     assert subscription.current_period_end == datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
 
 
-async def test_changing_to_the_plan_already_held_is_refused(db_session):
+async def test_changing_to_the_plan_already_held_is_refused(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     await _plan(db_session, code="pro")
     service = SubscriptionService(db_session, tenant_id=tenant.id)
@@ -220,7 +230,9 @@ async def test_changing_to_the_plan_already_held_is_refused(db_session):
         await service.change_plan(plan_code="pro", now=NOW, self_service=False)
 
 
-async def test_cancelling_leaves_the_customer_the_period_they_paid_for(db_session):
+async def test_cancelling_leaves_the_customer_the_period_they_paid_for(
+    db_session: AsyncSession,
+) -> None:
     """Ending it the instant they click takes something they bought, and is
     what makes people afraid to click."""
     tenant = await _tenant(db_session)
@@ -236,7 +248,7 @@ async def test_cancelling_leaves_the_customer_the_period_they_paid_for(db_sessio
     assert subscription.ended_at is None
 
 
-async def test_cancelling_immediately_ends_the_period_too(db_session):
+async def test_cancelling_immediately_ends_the_period_too(db_session: AsyncSession) -> None:
     """Nothing should count against an allowance the workspace no longer has."""
     tenant = await _tenant(db_session)
     await _plan(db_session, code="pro")
@@ -251,7 +263,7 @@ async def test_cancelling_immediately_ends_the_period_too(db_session):
     assert subscription.is_serving is False
 
 
-async def test_a_cancellation_can_be_taken_back_before_it_happens(db_session):
+async def test_a_cancellation_can_be_taken_back_before_it_happens(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     await _plan(db_session, code="pro")
     service = SubscriptionService(db_session, tenant_id=tenant.id)
@@ -264,7 +276,9 @@ async def test_a_cancellation_can_be_taken_back_before_it_happens(db_session):
     assert subscription.cancelled_at is None
 
 
-async def test_choosing_a_new_plan_takes_back_a_pending_cancellation(db_session):
+async def test_choosing_a_new_plan_takes_back_a_pending_cancellation(
+    db_session: AsyncSession,
+) -> None:
     """Somebody choosing a plan has plainly changed their mind about leaving."""
     tenant = await _tenant(db_session)
     await _plan(db_session, code="starter", price="0.00")
@@ -278,7 +292,7 @@ async def test_choosing_a_new_plan_takes_back_a_pending_cancellation(db_session)
     assert subscription.cancel_at_period_end is False
 
 
-async def test_an_ended_subscription_cannot_be_resumed_or_changed(db_session):
+async def test_an_ended_subscription_cannot_be_resumed_or_changed(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     await _plan(db_session, code="starter", price="0.00")
     await _plan(db_session, code="pro")
@@ -292,19 +306,21 @@ async def test_an_ended_subscription_cannot_be_resumed_or_changed(db_session):
         await service.change_plan(plan_code="pro", now=NOW, self_service=False)
 
 
-async def test_a_workspace_with_no_subscription_has_nothing_to_cancel(db_session):
+async def test_a_workspace_with_no_subscription_has_nothing_to_cancel(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session)
     with pytest.raises(NotFoundError):
         await SubscriptionService(db_session, tenant_id=tenant.id).cancel()
 
 
-async def test_a_new_plans_limits_apply_at_once(db_session):
+async def test_a_new_plans_limits_apply_at_once(db_session: AsyncSession) -> None:
     """The point of an upgrade: the allowance arrives when the customer pays."""
     from app.services.entitlement_service import EntitlementService
 
     tenant = await _tenant(db_session)
-    await _plan(db_session, code="starter", price="0.00", **{LimitKey.AGENTS: 1})
-    await _plan(db_session, code="pro", **{LimitKey.AGENTS: 5})
+    await _plan(db_session, {LimitKey.AGENTS: 1}, code="starter", price="0.00")
+    await _plan(db_session, {LimitKey.AGENTS: 5}, code="pro")
     service = SubscriptionService(db_session, tenant_id=tenant.id)
     await service.start(plan_code="starter", now=NOW)
 
@@ -316,7 +332,7 @@ async def test_a_new_plans_limits_apply_at_once(db_session):
     assert after.limit == 5
 
 
-async def test_one_workspace_cannot_reach_anothers_subscription(db_session):
+async def test_one_workspace_cannot_reach_anothers_subscription(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, "acme")
     rival = await _tenant(db_session, "rival")
     await _plan(db_session, code="pro")
@@ -340,7 +356,8 @@ class StubSubscriptions:
         self.changed: list[str] = []
         self.cancelled: list[bool] = []
         self.resumed = 0
-        self.subscription = None
+        # Set by whichever operation the test drives; the route reads it back.
+        self.subscription: Subscription | None = None
         self.plan = Plan(
             id=uuid.uuid4(),
             code="pro",
@@ -352,9 +369,7 @@ class StubSubscriptions:
             limits={LimitKey.AGENTS.value: 5},
         )
 
-    def _row(self, **overrides):
-        from app.db.models.billing import Subscription
-
+    def _row(self, **overrides: Any) -> Subscription:
         values = {
             "id": uuid.uuid4(),
             "tenant_id": TENANT_ID,
@@ -367,35 +382,57 @@ class StubSubscriptions:
         values.update(overrides)
         return Subscription(**values)
 
-    async def get(self):
+    async def get(self) -> Subscription | None:
         return self.subscription
 
-    async def plan_for(self, subscription):
+    async def plan_for(self, subscription: Subscription) -> Plan:
         return self.plan
 
-    async def start(self, *, plan_code, now=None, actor=None):
+    async def start(
+        self,
+        *,
+        plan_code: str,
+        now: datetime | None = None,
+        actor: User | None = None,
+    ) -> Subscription:
         self.started.append(plan_code)
         self.subscription = self._row(status=SubscriptionStatus.TRIALING)
+        assert self.subscription is not None
         return self.subscription
 
-    async def change_plan(self, *, plan_code, now=None, actor=None):
+    async def change_plan(
+        self,
+        *,
+        plan_code: str,
+        now: datetime | None = None,
+        actor: User | None = None,
+    ) -> Subscription:
         self.changed.append(plan_code)
         self.subscription = self._row()
+        assert self.subscription is not None
         return self.subscription
 
-    async def cancel(self, *, immediately=False, now=None, actor=None):
+    async def cancel(
+        self,
+        *,
+        immediately: bool = False,
+        now: datetime | None = None,
+        actor: User | None = None,
+    ) -> Subscription:
         self.cancelled.append(immediately)
         self.subscription = self._row(cancel_at_period_end=not immediately)
+        assert self.subscription is not None
         return self.subscription
 
-    async def resume(self, *, actor=None):
+    async def resume(self, *, actor: User | None = None) -> Subscription:
         self.resumed += 1
         self.subscription = self._row()
+        assert self.subscription is not None
         return self.subscription
 
 
 class StubEntitlements:
-    async def snapshot(self, keys=None):
+    async def snapshot(self, keys: Sequence[LimitKey] | None = None) -> list[Any]:
         return [
             Entitlement(key=LimitKey.AGENTS, limit=5, used=2, allowed=True, plan_code="pro"),
             Entitlement(key=LimitKey.PERIOD_MESSAGES, limit=None, used=9, allowed=True),
@@ -415,7 +452,7 @@ class StubPlans:
             limits={LimitKey.AGENTS.value: 5},
         )
 
-    async def list_plans(self, *, public_only=True, active_only=True):
+    async def list_plans(self, *, public_only: bool = True, active_only: bool = True) -> list[Any]:
         return [self.plan]
 
 
@@ -427,12 +464,12 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
     )
 
 
-def _as(app, role: TenantRole) -> None:
+def _as(app: FastAPI, role: TenantRole) -> None:
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(role)
 
 
 @pytest.fixture
-def subscriptions(app) -> StubSubscriptions:
+def subscriptions(app: FastAPI) -> StubSubscriptions:
     stub = StubSubscriptions()
     app.dependency_overrides[get_subscription_service] = lambda: stub
     app.dependency_overrides[get_entitlement_service] = lambda: StubEntitlements()
@@ -440,7 +477,9 @@ def subscriptions(app) -> StubSubscriptions:
     return stub
 
 
-async def test_any_member_can_read_the_catalogue(client, app, subscriptions):
+async def test_any_member_can_read_the_catalogue(
+    client: AsyncClient, app: FastAPI, subscriptions: StubSubscriptions
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(f"{PATH}/plans")
@@ -455,7 +494,9 @@ async def test_any_member_can_read_the_catalogue(client, app, subscriptions):
     assert limits["period_messages"] is None
 
 
-async def test_a_member_sees_where_the_workspace_stands(client, app, subscriptions):
+async def test_a_member_sees_where_the_workspace_stands(
+    client: AsyncClient, app: FastAPI, subscriptions: StubSubscriptions
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(f"{PATH}/entitlements")
@@ -468,10 +509,10 @@ async def test_a_member_sees_where_the_workspace_stands(client, app, subscriptio
 
 
 async def test_a_workspace_without_a_subscription_still_reports_its_limits(
-    client,
-    app,
-    subscriptions,
-):
+    client: AsyncClient,
+    app: FastAPI,
+    subscriptions: StubSubscriptions,
+) -> None:
     """It is being held to the default plan, and an empty list would say the
     opposite."""
     _as(app, TenantRole.MEMBER)
@@ -484,7 +525,9 @@ async def test_a_workspace_without_a_subscription_still_reports_its_limits(
     assert len(body["entitlements"]) == 2
 
 
-async def test_an_owner_can_choose_a_plan(client, app, subscriptions):
+async def test_an_owner_can_choose_a_plan(
+    client: AsyncClient, app: FastAPI, subscriptions: StubSubscriptions
+) -> None:
     _as(app, TenantRole.TENANT_OWNER)
 
     response = await client.post(f"{PATH}/subscription", json={"plan_code": "pro"})
@@ -495,10 +538,10 @@ async def test_an_owner_can_choose_a_plan(client, app, subscriptions):
 
 
 async def test_an_administrator_cannot_commit_the_company_to_a_subscription(
-    client,
-    app,
-    subscriptions,
-):
+    client: AsyncClient,
+    app: FastAPI,
+    subscriptions: StubSubscriptions,
+) -> None:
     """Inviting colleagues and signing a contract are different authorities."""
     _as(app, TenantRole.TENANT_ADMIN)
 
@@ -508,7 +551,9 @@ async def test_an_administrator_cannot_commit_the_company_to_a_subscription(
     assert subscriptions.started == []
 
 
-async def test_a_member_cannot_cancel(client, app, subscriptions):
+async def test_a_member_cannot_cancel(
+    client: AsyncClient, app: FastAPI, subscriptions: StubSubscriptions
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.post(f"{PATH}/subscription/cancel", json={})
@@ -517,7 +562,9 @@ async def test_a_member_cannot_cancel(client, app, subscriptions):
     assert subscriptions.cancelled == []
 
 
-async def test_cancelling_defaults_to_the_end_of_the_period(client, app, subscriptions):
+async def test_cancelling_defaults_to_the_end_of_the_period(
+    client: AsyncClient, app: FastAPI, subscriptions: StubSubscriptions
+) -> None:
     _as(app, TenantRole.TENANT_OWNER)
 
     response = await client.post(f"{PATH}/subscription/cancel", json={})
@@ -527,7 +574,9 @@ async def test_cancelling_defaults_to_the_end_of_the_period(client, app, subscri
     assert response.json()["cancel_at_period_end"] is True
 
 
-async def test_an_owner_can_give_up_the_rest_of_the_period(client, app, subscriptions):
+async def test_an_owner_can_give_up_the_rest_of_the_period(
+    client: AsyncClient, app: FastAPI, subscriptions: StubSubscriptions
+) -> None:
     _as(app, TenantRole.TENANT_OWNER)
 
     response = await client.post(f"{PATH}/subscription/cancel", json={"immediately": True})
@@ -536,7 +585,9 @@ async def test_an_owner_can_give_up_the_rest_of_the_period(client, app, subscrip
     assert subscriptions.cancelled == [True]
 
 
-async def test_a_plan_change_is_its_own_route(client, app, subscriptions):
+async def test_a_plan_change_is_its_own_route(
+    client: AsyncClient, app: FastAPI, subscriptions: StubSubscriptions
+) -> None:
     """Not a PATCH on a status field: that route lets a customer end their own
     trial and start a free forever."""
     _as(app, TenantRole.TENANT_OWNER)
@@ -547,7 +598,9 @@ async def test_a_plan_change_is_its_own_route(client, app, subscriptions):
     assert subscriptions.changed == ["business"]
 
 
-async def test_a_resume_is_a_route_of_its_own(client, app, subscriptions):
+async def test_a_resume_is_a_route_of_its_own(
+    client: AsyncClient, app: FastAPI, subscriptions: StubSubscriptions
+) -> None:
     _as(app, TenantRole.TENANT_OWNER)
 
     response = await client.post(f"{PATH}/subscription/resume")
@@ -556,7 +609,9 @@ async def test_a_resume_is_a_route_of_its_own(client, app, subscriptions):
     assert subscriptions.resumed == 1
 
 
-async def test_an_unknown_field_is_rejected_rather_than_ignored(client, app, subscriptions):
+async def test_an_unknown_field_is_rejected_rather_than_ignored(
+    client: AsyncClient, app: FastAPI, subscriptions: StubSubscriptions
+) -> None:
     _as(app, TenantRole.TENANT_OWNER)
 
     response = await client.post(

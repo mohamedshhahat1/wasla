@@ -18,9 +18,10 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from httpx import AsyncClient
 
 from app.core.exceptions import ExternalServiceError, ValidationError
-from app.workers.ai_worker import AGENT_RETRY, AgentWorker
+from app.workers.ai_worker import AGENT_RETRY, AgentWorker, _TurnProgress
 from app.workers.queue import AgentJob, JobEnvelope
 from app.workers.retry import NO_RETRY
 from tests.fake_queue_redis import FakeQueueRedis
@@ -31,39 +32,39 @@ NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 
 
 class FakeRedisClient:
-    def __init__(self, client) -> None:
+    def __init__(self, client: AsyncClient) -> None:
         self.client = client
 
 
-class Settings:
+class _WorkerSettings:
     default_plan_code = "starter"
     openai_api_key = None
     openai_embedding_model = "text-embedding-3-small"
     openai_sentiment_model = "gpt-4.1-mini"
 
 
-def build_worker(redis):
+def build_worker(redis: FakeQueueRedis) -> AgentWorker:
     return AgentWorker(
         database=object(),  # type: ignore[arg-type]
         redis=FakeRedisClient(redis),  # type: ignore[arg-type]
-        settings=Settings(),  # type: ignore[arg-type]
+        settings=_WorkerSettings(),  # type: ignore[arg-type]
     )
 
 
-async def enqueue(worker):
+async def enqueue(worker: AgentWorker) -> None:
     await worker.queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=NOW)
 
 
 # --------------------------------------------- before the provider is engaged
 
 
-async def test_a_blip_before_the_provider_is_retried():
+async def test_a_blip_before_the_provider_is_retried() -> None:
     """Loading a workspace and reading an allowance touch nothing outside."""
     redis = FakeQueueRedis()
     worker = build_worker(redis)
     await enqueue(worker)
 
-    async def fail_early(job, progress):
+    async def fail_early(job: AgentJob, progress: _TurnProgress) -> None:
         raise ExternalServiceError("the database was restarting")
 
     worker._handle = fail_early  # type: ignore[method-assign]
@@ -73,12 +74,12 @@ async def test_a_blip_before_the_provider_is_retried():
     assert await worker.queue.failed_depth() == 0
 
 
-async def test_the_retried_job_carries_the_next_attempt():
+async def test_the_retried_job_carries_the_next_attempt() -> None:
     redis = FakeQueueRedis()
     worker = build_worker(redis)
     await enqueue(worker)
 
-    async def fail_early(job, progress):
+    async def fail_early(job: AgentJob, progress: _TurnProgress) -> None:
         raise ExternalServiceError("502")
 
     worker._handle = fail_early  # type: ignore[method-assign]
@@ -91,13 +92,13 @@ async def test_the_retried_job_carries_the_next_attempt():
 # ---------------------------------------------- after the provider is engaged
 
 
-async def test_a_failure_after_the_provider_is_engaged_is_never_retried():
+async def test_a_failure_after_the_provider_is_engaged_is_never_retried() -> None:
     """The invariant: a retry here could send a customer a second reply."""
     redis = FakeQueueRedis()
     worker = build_worker(redis)
     await enqueue(worker)
 
-    async def fail_late(job, progress):
+    async def fail_late(job: AgentJob, progress: _TurnProgress) -> None:
         progress.engaged = True
         raise ExternalServiceError("Meta rejected the message")
 
@@ -108,13 +109,13 @@ async def test_a_failure_after_the_provider_is_engaged_is_never_retried():
     assert await worker.queue.failed_depth() == 1
 
 
-async def test_the_engaged_policy_is_the_refusing_one():
+async def test_the_engaged_policy_is_the_refusing_one() -> None:
     """Stated directly, so the two constants cannot drift into agreeing."""
     assert NO_RETRY.max_attempts == 1
     assert AGENT_RETRY.max_attempts > 1
 
 
-async def test_a_timeout_after_the_provider_is_engaged_is_not_retried():
+async def test_a_timeout_after_the_provider_is_engaged_is_not_retried() -> None:
     """The failure most tempting to retry, and the one that duplicates a reply.
 
     A timed-out send may have landed. `WhatsAppClient` already refuses to retry
@@ -125,7 +126,7 @@ async def test_a_timeout_after_the_provider_is_engaged_is_not_retried():
     worker = build_worker(redis)
     await enqueue(worker)
 
-    async def time_out_late(job, progress):
+    async def time_out_late(job: AgentJob, progress: _TurnProgress) -> None:
         progress.engaged = True
         raise TimeoutError
 
@@ -139,12 +140,12 @@ async def test_a_timeout_after_the_provider_is_engaged_is_not_retried():
 # -------------------------------------------------------------- other paths
 
 
-async def test_a_permanent_failure_before_the_provider_is_still_terminal():
+async def test_a_permanent_failure_before_the_provider_is_still_terminal() -> None:
     redis = FakeQueueRedis()
     worker = build_worker(redis)
     await enqueue(worker)
 
-    async def refuse(job, progress):
+    async def refuse(job: AgentJob, progress: _TurnProgress) -> None:
         raise ValidationError("that conversation is not answerable")
 
     worker._handle = refuse  # type: ignore[method-assign]
@@ -153,7 +154,7 @@ async def test_a_permanent_failure_before_the_provider_is_still_terminal():
     assert await worker.queue.failed_depth() == 1
 
 
-async def test_a_malformed_job_is_dead_lettered_without_a_retry():
+async def test_a_malformed_job_is_dead_lettered_without_a_retry() -> None:
     redis = FakeQueueRedis()
     worker = build_worker(redis)
     await worker.queue.enqueue_body("not a job at all", now=NOW)
@@ -164,12 +165,12 @@ async def test_a_malformed_job_is_dead_lettered_without_a_retry():
     assert await worker.queue.failed_depth() == 1
 
 
-async def test_a_successful_turn_leaves_no_trace_in_either_list():
+async def test_a_successful_turn_leaves_no_trace_in_either_list() -> None:
     redis = FakeQueueRedis()
     worker = build_worker(redis)
     await enqueue(worker)
 
-    async def succeed(job, progress):
+    async def succeed(job: AgentJob, progress: _TurnProgress) -> None:
         progress.engaged = True
 
     worker._handle = succeed  # type: ignore[method-assign]
@@ -181,20 +182,20 @@ async def test_a_successful_turn_leaves_no_trace_in_either_list():
     assert redis.lists["agent:jobs:inflight"] == []
 
 
-async def test_an_empty_queue_is_not_a_job():
+async def test_an_empty_queue_is_not_a_job() -> None:
     worker = build_worker(FakeQueueRedis())
 
     assert await worker.run_once(wait_seconds=1) is False
 
 
 @pytest.mark.parametrize("attempt", [1, 2, 3])
-async def test_the_budget_is_spent_and_then_the_job_stops(attempt):
+async def test_the_budget_is_spent_and_then_the_job_stops(attempt: int) -> None:
     """Three attempts, then the dead-letter list - never a fourth."""
     redis = FakeQueueRedis()
     worker = build_worker(redis)
     await enqueue(worker)
 
-    async def fail_early(job, progress):
+    async def fail_early(job: AgentJob, progress: _TurnProgress) -> None:
         raise ExternalServiceError("502")
 
     worker._handle = fail_early  # type: ignore[method-assign]
@@ -227,7 +228,7 @@ def _line_of(node: ast.AST) -> int:
     return getattr(node, "lineno", 0)
 
 
-def test_the_turn_is_marked_engaged_before_anything_leaves_the_process():
+def test_the_turn_is_marked_engaged_before_anything_leaves_the_process() -> None:
     """Read out of `_handle` itself, because the tests above cannot see it.
 
     Every other test in this file stubs `_handle` and drives `progress` by
@@ -271,7 +272,7 @@ def test_the_turn_is_marked_engaged_before_anything_leaves_the_process():
     )
 
 
-async def test_marking_the_turn_engaged_persists_it_outside_the_process():
+async def test_marking_the_turn_engaged_persists_it_outside_the_process() -> None:
     """The in-memory flag is not enough, and this is why.
 
     A worker that dies takes `_TurnProgress` with it. If the fact never
@@ -283,10 +284,11 @@ async def test_marking_the_turn_engaged_persists_it_outside_the_process():
     worker = build_worker(redis)
     await enqueue(worker)
     raw = await worker.queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
 
     engaged: list[bool] = []
 
-    async def engage_then_fail(job, progress):
+    async def engage_then_fail(job: AgentJob, progress: _TurnProgress) -> None:
         await progress.engage()
         engaged.append(progress.engaged)
         raise ExternalServiceError("Meta rejected the message")

@@ -18,6 +18,7 @@ from app.workers.ingestion_queue import (
 from app.workers.queue import QUEUE_NAMESPACE, DeadLetterRecord, JobEnvelope, MalformedJobError
 from app.workers.retry import FailureCategory
 from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import as_redis
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 DOCUMENT = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -27,13 +28,13 @@ INFLIGHT = "knowledge:ingestion:inflight"
 FAILED = "knowledge:ingestion:failed"
 
 
-def test_a_job_survives_a_round_trip():
+def test_a_job_survives_a_round_trip() -> None:
     job = IngestionJob(tenant_id=TENANT, document_id=DOCUMENT)
 
     assert IngestionJob.decode(job.encode()) == job
 
 
-def test_encoding_is_stable():
+def test_encoding_is_stable() -> None:
     """Releasing removes by exact value, so two encodings must match byte for byte."""
     first = IngestionJob(tenant_id=TENANT, document_id=DOCUMENT).encode()
     second = IngestionJob(tenant_id=TENANT, document_id=DOCUMENT).encode()
@@ -50,61 +51,67 @@ def test_encoding_is_stable():
         pytest.param(f'{{"tenant_id": "x", "document_id": "{DOCUMENT}"}}', id="bad-uuid"),
     ],
 )
-def test_a_malformed_job_is_refused(raw):
+def test_a_malformed_job_is_refused(raw: str) -> None:
     """Retrying an unreadable job would fail identically forever."""
     with pytest.raises(MalformedJobError):
         IngestionJob.decode(raw)
 
 
-async def test_ingestion_does_not_share_the_agent_queue():
+async def test_ingestion_does_not_share_the_agent_queue() -> None:
     """A bulk upload must not sit in front of a customer waiting for a reply."""
-    assert INGESTION_NAMESPACE != QUEUE_NAMESPACE
+    ingestion: str = INGESTION_NAMESPACE
+    assert ingestion != QUEUE_NAMESPACE
     assert not PENDING.startswith(QUEUE_NAMESPACE)
 
 
-async def test_enqueue_pushes_an_envelope_onto_the_pending_list():
+async def test_enqueue_pushes_an_envelope_onto_the_pending_list() -> None:
     redis = FakeQueueRedis()
 
-    await IngestionQueue(redis).enqueue(IngestionJob(tenant_id=TENANT, document_id=DOCUMENT))
+    await IngestionQueue(as_redis(redis)).enqueue(
+        IngestionJob(tenant_id=TENANT, document_id=DOCUMENT)
+    )
 
     (value,) = redis.lists[PENDING]
     assert IngestionJob.decode(JobEnvelope.decode(value).body).document_id == DOCUMENT
 
 
-async def test_reserving_moves_the_job_to_the_in_flight_list():
+async def test_reserving_moves_the_job_to_the_in_flight_list() -> None:
     """A worker killed mid-job must leave the job recoverable."""
     redis = FakeQueueRedis()
-    queue = IngestionQueue(redis)
+    queue = IngestionQueue(as_redis(redis))
     await queue.enqueue(IngestionJob(tenant_id=TENANT, document_id=DOCUMENT))
 
     reserved = await queue.reserve(wait_seconds=3)
+    assert reserved is not None
 
     assert reserved is not None
     assert redis.lists[INFLIGHT] == [reserved]
     assert redis.lists[PENDING] == []
 
 
-async def test_reserving_an_empty_queue_returns_nothing():
-    assert await IngestionQueue(FakeQueueRedis()).reserve() is None
+async def test_reserving_an_empty_queue_returns_nothing() -> None:
+    assert await IngestionQueue(as_redis(FakeQueueRedis())).reserve() is None
 
 
-async def test_releasing_removes_the_exact_payload():
+async def test_releasing_removes_the_exact_payload() -> None:
     redis = FakeQueueRedis()
-    queue = IngestionQueue(redis)
+    queue = IngestionQueue(as_redis(redis))
     await queue.enqueue(IngestionJob(tenant_id=TENANT, document_id=DOCUMENT))
     reserved = await queue.reserve()
+    assert reserved is not None
 
     await queue.release(reserved)
 
     assert redis.lists[INFLIGHT] == []
 
 
-async def test_a_transient_failure_is_retried_rather_than_dead_lettered():
+async def test_a_transient_failure_is_retried_rather_than_dead_lettered() -> None:
     """Re-ingesting replaces a document's chunks, so another attempt is free."""
     redis = FakeQueueRedis()
-    queue = IngestionQueue(redis)
+    queue = IngestionQueue(as_redis(redis))
     await queue.enqueue(IngestionJob(tenant_id=TENANT, document_id=DOCUMENT))
     reserved = await queue.reserve()
+    assert reserved is not None
 
     await queue.schedule_retry(
         reserved,
@@ -117,12 +124,13 @@ async def test_a_transient_failure_is_retried_rather_than_dead_lettered():
     assert await queue.failed_depth() == 0
 
 
-async def test_dead_lettering_records_rather_than_discarding():
+async def test_dead_lettering_records_rather_than_discarding() -> None:
     """The job records that an attempt was made; the document records why it broke."""
     redis = FakeQueueRedis()
-    queue = IngestionQueue(redis)
+    queue = IngestionQueue(as_redis(redis))
     await queue.enqueue(IngestionJob(tenant_id=TENANT, document_id=DOCUMENT))
     reserved = await queue.reserve()
+    assert reserved is not None
     envelope = JobEnvelope.decode(reserved)
 
     written = await queue.dead_letter(
@@ -147,10 +155,10 @@ async def test_dead_lettering_records_rather_than_discarding():
     assert await queue.failed_depth() == 1
 
 
-async def test_depths_report_every_list():
+async def test_depths_report_every_list() -> None:
     redis = FakeQueueRedis()
     redis.lists = {PENDING: ["a"] * 4, FAILED: ["b"] * 2}
-    queue = IngestionQueue(redis)
+    queue = IngestionQueue(as_redis(redis))
 
     assert await queue.depth() == 4
     assert await queue.failed_depth() == 2

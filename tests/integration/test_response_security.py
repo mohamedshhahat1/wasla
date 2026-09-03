@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -137,7 +138,7 @@ async def test_a_rejected_meta_access_token_is_not_read_back(http: AsyncClient) 
         {"email": "a@b.com", "password": SECRET, "unexpected": SECRET},
     ],
 )
-async def test_no_login_payload_is_ever_echoed(http: AsyncClient, payload: dict) -> None:
+async def test_no_login_payload_is_ever_echoed(http: AsyncClient, payload: dict[str, Any]) -> None:
     """Several shapes of invalid login, including an unexpected extra field -
     the schemas use `extra="forbid"`, and the rejection names the field."""
     response = await http.post(f"{API}/auth/login", json=payload)

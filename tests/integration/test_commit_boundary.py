@@ -148,9 +148,9 @@ def scratch_engine(prepared_database: str) -> AsyncEngine:
 
 
 async def test_a_token_from_register_works_on_the_very_first_request(
-    prepared_database,
-    scratch_engine,
-):
+    prepared_database: str,
+    scratch_engine: AsyncEngine,
+) -> None:
     """The regression, stated as a customer would experience it.
 
     One attempt, no retry, no sleep. This failed for 25-75 ms before the commit
@@ -184,9 +184,9 @@ async def test_a_token_from_register_works_on_the_very_first_request(
 
 
 async def test_the_row_exists_the_moment_the_response_lands(
-    prepared_database,
-    scratch_engine,
-):
+    prepared_database: str,
+    scratch_engine: AsyncEngine,
+) -> None:
     """The same property, read straight from the database.
 
     Stronger than the test above, which could in principle be satisfied by
@@ -217,7 +217,9 @@ async def test_the_row_exists_the_moment_the_response_lands(
         await scratch_engine.dispose()
 
 
-async def test_a_failed_request_commits_nothing(prepared_database, scratch_engine):
+async def test_a_failed_request_commits_nothing(
+    prepared_database: str, scratch_engine: AsyncEngine
+) -> None:
     """The other half. Moving the commit must not weaken the rollback.
 
     The second registration fails on the duplicate slug *after* its user row has

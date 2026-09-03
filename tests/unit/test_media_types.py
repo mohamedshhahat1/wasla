@@ -22,6 +22,7 @@ from __future__ import annotations
 import io
 import zipfile
 import zlib
+from typing import cast
 
 import pytest
 
@@ -519,7 +520,8 @@ def test_a_csv_can_be_claimed_as_one() -> None:
 
 def test_identification_needs_only_the_sniff_prefix() -> None:
     """A caller that streams hands over `SNIFF_BYTES` and gets the same answer."""
-    for data, expected in [(p.values[0], p.values[1]) for p in SUPPORTED]:
+    for case in SUPPORTED:
+        data, expected = cast("tuple[bytes, str]", case.values[:2])
         padded = data + b"\x00" * (SNIFF_BYTES * 4)
         if expected == "text/plain":
             continue  # padding with NULs stops it being text, which is correct

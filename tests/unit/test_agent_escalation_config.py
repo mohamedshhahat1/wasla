@@ -15,14 +15,14 @@ from app.db.models.sentiment import SentimentLabel
 from app.schemas.agent import AgentCreate, AgentUpdate
 
 
-def test_a_new_agent_escalates_on_anger_unless_told_otherwise():
+def test_a_new_agent_escalates_on_anger_unless_told_otherwise() -> None:
     payload = AgentCreate(name="Sales", system_prompt="Be helpful.")
 
     assert payload.escalation_sentiment is DEFAULT_ESCALATION_SENTIMENT
     assert payload.escalation_sentiment is SentimentLabel.ANGRY
 
 
-def test_a_new_agent_can_be_created_with_handoff_switched_off():
+def test_a_new_agent_can_be_created_with_handoff_switched_off() -> None:
     payload = AgentCreate(
         name="Sales",
         system_prompt="Be helpful.",
@@ -32,7 +32,7 @@ def test_a_new_agent_can_be_created_with_handoff_switched_off():
     assert payload.escalation_sentiment is None
 
 
-def test_a_new_agent_can_escalate_earlier():
+def test_a_new_agent_can_escalate_earlier() -> None:
     payload = AgentCreate(
         name="Support",
         system_prompt="Be helpful.",
@@ -42,13 +42,13 @@ def test_a_new_agent_can_escalate_earlier():
     assert payload.escalation_sentiment is SentimentLabel.NEGATIVE
 
 
-def test_an_update_that_omits_the_threshold_leaves_it_alone():
+def test_an_update_that_omits_the_threshold_leaves_it_alone() -> None:
     payload = AgentUpdate(name="Renamed")
 
     assert payload.was_sent("escalation_sentiment") is False
 
 
-def test_an_update_that_sends_null_means_switch_it_off():
+def test_an_update_that_sends_null_means_switch_it_off() -> None:
     """The case a plain `is None` check would silently discard."""
     payload = AgentUpdate.model_validate({"escalation_sentiment": None})
 
@@ -56,13 +56,13 @@ def test_an_update_that_sends_null_means_switch_it_off():
     assert payload.escalation_sentiment is None
 
 
-def test_an_update_that_sends_a_threshold_reports_it():
+def test_an_update_that_sends_a_threshold_reports_it() -> None:
     payload = AgentUpdate.model_validate({"escalation_sentiment": "negative"})
 
     assert payload.was_sent("escalation_sentiment") is True
     assert payload.escalation_sentiment is SentimentLabel.NEGATIVE
 
 
-def test_a_threshold_outside_the_enum_is_refused():
+def test_a_threshold_outside_the_enum_is_refused() -> None:
     with pytest.raises(ValidationError):
         AgentUpdate.model_validate({"escalation_sentiment": "furious"})

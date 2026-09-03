@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -39,7 +42,7 @@ MOMENT = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
 
 class StubCampaigns:
     def __init__(self) -> None:
-        self.set_calls: list[dict] = []
+        self.set_calls: list[dict[str, Any]] = []
         self.cleared: list[uuid.UUID] = []
 
     def _contact(self, *, opted_out: bool, source: OptOutSource | None = None) -> Contact:
@@ -52,11 +55,17 @@ class StubCampaigns:
             opt_out_source=source,
         )
 
-    async def set_opt_out(self, *, contact_id, source, at=None):
+    async def set_opt_out(
+        self,
+        *,
+        contact_id: uuid.UUID,
+        source: OptOutSource,
+        at: datetime | None = None,
+    ) -> Contact:
         self.set_calls.append({"contact_id": contact_id, "source": source})
         return self._contact(opted_out=True, source=source)
 
-    async def clear_opt_out(self, contact_id):
+    async def clear_opt_out(self, contact_id: uuid.UUID) -> Contact:
         self.cleared.append(contact_id)
         return self._contact(opted_out=False)
 
@@ -75,7 +84,7 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
 
 
 @pytest.fixture
-def campaigns(app) -> StubCampaigns:
+def campaigns(app: FastAPI) -> StubCampaigns:
     stub = StubCampaigns()
     app.dependency_overrides[get_campaign_service] = lambda: stub
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(TenantRole.MEMBER)
@@ -83,11 +92,13 @@ def campaigns(app) -> StubCampaigns:
 
 
 @pytest.fixture
-def as_admin(app) -> None:
+def as_admin(app: FastAPI) -> None:
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(TenantRole.TENANT_ADMIN)
 
 
-async def test_a_member_can_record_an_opt_out(client, campaigns):
+async def test_a_member_can_record_an_opt_out(
+    client: AsyncClient, campaigns: StubCampaigns
+) -> None:
     response = await client.post(f"{PATH}/{CONTACT_ID}/opt-out", json={})
 
     assert response.status_code == 200
@@ -97,27 +108,35 @@ async def test_a_member_can_record_an_opt_out(client, campaigns):
     assert campaigns.set_calls[0]["source"] is OptOutSource.TEAM
 
 
-async def test_the_source_can_say_the_customer_asked(client, campaigns):
+async def test_the_source_can_say_the_customer_asked(
+    client: AsyncClient, campaigns: StubCampaigns
+) -> None:
     await client.post(f"{PATH}/{CONTACT_ID}/opt-out", json={"source": "customer"})
 
     assert campaigns.set_calls[0]["source"] is OptOutSource.CUSTOMER
 
 
-async def test_a_source_that_is_not_ours_is_refused(client, campaigns):
+async def test_a_source_that_is_not_ours_is_refused(
+    client: AsyncClient, campaigns: StubCampaigns
+) -> None:
     response = await client.post(f"{PATH}/{CONTACT_ID}/opt-out", json={"source": "vibes"})
 
     assert response.status_code == 422
     assert campaigns.set_calls == []
 
 
-async def test_a_member_cannot_undo_a_customers_refusal(client, campaigns):
+async def test_a_member_cannot_undo_a_customers_refusal(
+    client: AsyncClient, campaigns: StubCampaigns
+) -> None:
     response = await client.delete(f"{PATH}/{CONTACT_ID}/opt-out")
 
     assert response.status_code == 403
     assert campaigns.cleared == []
 
 
-async def test_an_admin_can_clear_one_recorded_in_error(client, campaigns, as_admin):
+async def test_an_admin_can_clear_one_recorded_in_error(
+    client: AsyncClient, campaigns: StubCampaigns, as_admin: None
+) -> None:
     response = await client.delete(f"{PATH}/{CONTACT_ID}/opt-out")
 
     assert response.status_code == 200

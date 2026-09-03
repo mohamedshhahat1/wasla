@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -109,7 +110,7 @@ class _Infra:
         return None
 
 
-def _settings(**overrides: object) -> Settings:
+def _settings(**overrides: Any) -> Settings:
     values: dict[str, object] = {
         "environment": "test",
         "log_format": "console",
@@ -473,7 +474,7 @@ async def test_every_rejection_looks_the_same(
     # Everything except the request id, which is per-request by design and is
     # the one field that is *supposed* to differ - it is how an operator ties a
     # complaint to a log line, and it says nothing about the code.
-    def _without_request_id(response: object) -> dict:
+    def _without_request_id(response: object) -> dict[str, Any]:
         body = dict(response.json()["error"])  # type: ignore[attr-defined]
         body.pop("request_id", None)
         return body

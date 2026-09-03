@@ -8,11 +8,14 @@ grant cascade - and that neither can be reached across workspaces.
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.core.exceptions import ConflictError, TenantIsolationError
 from app.db.models.agent import Agent, AgentStatus, AgentTool
 from app.db.models.sentiment import SentimentLabel
@@ -26,21 +29,27 @@ MODEL = "claude-opus-5"
 PROMPT = "You answer as the sales desk."
 
 
-async def _tenant(session, *, slug):
+async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _agent(session, *, tenant, name="Sales", **overrides):
+async def _agent(
+    session: AsyncSession,
+    *,
+    tenant: Tenant,
+    name: str = "Sales",
+    **overrides: Any,
+) -> Agent:
     repository = AgentRepository(session, tenant_id=tenant.id)
     agent = await repository.create(name=name, model=MODEL, system_prompt=PROMPT, **overrides)
     await session.flush()
     return agent
 
 
-async def test_two_workspaces_can_both_name_an_agent_sales(db_session):
+async def test_two_workspaces_can_both_name_an_agent_sales(db_session: AsyncSession) -> None:
     first = await _tenant(db_session, slug="first")
     second = await _tenant(db_session, slug="second")
 
@@ -51,7 +60,7 @@ async def test_two_workspaces_can_both_name_an_agent_sales(db_session):
     assert mine.name == theirs.name == "Sales"
 
 
-async def test_a_duplicate_name_in_one_workspace_is_a_conflict(db_session):
+async def test_a_duplicate_name_in_one_workspace_is_a_conflict(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     await _agent(db_session, tenant=tenant)
 
@@ -59,7 +68,9 @@ async def test_a_duplicate_name_in_one_workspace_is_a_conflict(db_session):
         await _agent(db_session, tenant=tenant)
 
 
-async def test_the_database_rejects_a_duplicate_name_even_without_the_check(db_session):
+async def test_the_database_rejects_a_duplicate_name_even_without_the_check(
+    db_session: AsyncSession,
+) -> None:
     """The constraint is the guarantee; the repository check is only a message."""
     tenant = await _tenant(db_session, slug="acme")
     await _agent(db_session, tenant=tenant)
@@ -69,7 +80,7 @@ async def test_the_database_rejects_a_duplicate_name_even_without_the_check(db_s
         await db_session.flush()
 
 
-async def test_another_workspaces_agent_is_not_found(db_session):
+async def test_another_workspaces_agent_is_not_found(db_session: AsyncSession) -> None:
     mine = await _tenant(db_session, slug="mine")
     theirs = await _tenant(db_session, slug="theirs")
     hidden = await _agent(db_session, tenant=theirs)
@@ -81,7 +92,7 @@ async def test_another_workspaces_agent_is_not_found(db_session):
         await repository.require_by_id(hidden.id)
 
 
-async def test_a_disabled_default_answers_nobody(db_session):
+async def test_a_disabled_default_answers_nobody(db_session: AsyncSession) -> None:
     """ "No agent" is the right answer, not "here is a disabled configuration"."""
     tenant = await _tenant(db_session, slug="acme")
     await _agent(db_session, tenant=tenant, status=AgentStatus.DISABLED, is_default=True)
@@ -91,7 +102,7 @@ async def test_a_disabled_default_answers_nobody(db_session):
     assert await repository.get_answering_default() is None
 
 
-async def test_an_active_default_answers(db_session):
+async def test_an_active_default_answers(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     agent = await _agent(db_session, tenant=tenant, status=AgentStatus.ACTIVE, is_default=True)
 
@@ -102,7 +113,7 @@ async def test_an_active_default_answers(db_session):
     assert found.id == agent.id
 
 
-async def test_clearing_defaults_leaves_another_workspace_alone(db_session):
+async def test_clearing_defaults_leaves_another_workspace_alone(db_session: AsyncSession) -> None:
     mine = await _tenant(db_session, slug="mine")
     theirs = await _tenant(db_session, slug="theirs")
     await _agent(db_session, tenant=mine, status=AgentStatus.ACTIVE, is_default=True)
@@ -115,7 +126,7 @@ async def test_clearing_defaults_leaves_another_workspace_alone(db_session):
     assert await AgentRepository(db_session, tenant_id=mine.id).get_answering_default() is None
 
 
-async def test_a_tool_is_granted_once_per_agent(db_session):
+async def test_a_tool_is_granted_once_per_agent(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     agent = await _agent(db_session, tenant=tenant)
     tools = AgentToolRepository(db_session, tenant_id=tenant.id)
@@ -128,7 +139,7 @@ async def test_a_tool_is_granted_once_per_agent(db_session):
         await db_session.flush()
 
 
-async def test_regranting_updates_rather_than_duplicating(db_session):
+async def test_regranting_updates_rather_than_duplicating(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     agent = await _agent(db_session, tenant=tenant)
     tools = AgentToolRepository(db_session, tenant_id=tenant.id)
@@ -145,7 +156,7 @@ async def test_regranting_updates_rather_than_duplicating(db_session):
     assert grants[0].config == {"reason": "angry"}
 
 
-async def test_a_disabled_grant_is_hidden_from_the_orchestrator(db_session):
+async def test_a_disabled_grant_is_hidden_from_the_orchestrator(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     agent = await _agent(db_session, tenant=tenant)
     tools = AgentToolRepository(db_session, tenant_id=tenant.id)
@@ -157,7 +168,7 @@ async def test_a_disabled_grant_is_hidden_from_the_orchestrator(db_session):
     assert len(await tools.list_for_agent(agent_id=agent.id, enabled_only=False)) == 1
 
 
-async def test_grants_die_with_their_agent(db_session):
+async def test_grants_die_with_their_agent(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     agent = await _agent(db_session, tenant=tenant)
     tools = AgentToolRepository(db_session, tenant_id=tenant.id)
@@ -171,7 +182,7 @@ async def test_grants_die_with_their_agent(db_session):
     assert remaining.scalars().all() == []
 
 
-async def test_another_workspaces_grant_is_invisible(db_session):
+async def test_another_workspaces_grant_is_invisible(db_session: AsyncSession) -> None:
     mine = await _tenant(db_session, slug="mine")
     theirs = await _tenant(db_session, slug="theirs")
     hidden = await _agent(db_session, tenant=theirs)
@@ -187,7 +198,7 @@ async def test_another_workspaces_grant_is_invisible(db_session):
     assert await mine_tools.get(agent_id=hidden.id, name="request_human_handoff") is None
 
 
-async def test_an_unknown_agent_id_is_not_found(db_session):
+async def test_an_unknown_agent_id_is_not_found(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     repository = AgentRepository(db_session, tenant_id=tenant.id)
 
@@ -195,11 +206,13 @@ async def test_an_unknown_agent_id_is_not_found(db_session):
         await repository.require_by_id(uuid.uuid4())
 
 
-def _service(session, tenant, settings) -> AgentService:
+def _service(session: AsyncSession, tenant: Tenant, settings: Settings) -> AgentService:
     return AgentService(session=session, settings=settings, tenant_id=tenant.id)
 
 
-async def test_a_created_agent_escalates_on_anger_by_default(db_session, settings):
+async def test_a_created_agent_escalates_on_anger_by_default(
+    db_session: AsyncSession, settings: Settings
+) -> None:
     tenant = await _tenant(db_session, slug="acme")
 
     agent = await _service(db_session, tenant, settings).create(
@@ -210,7 +223,9 @@ async def test_a_created_agent_escalates_on_anger_by_default(db_session, setting
     assert agent.escalation_sentiment is SentimentLabel.ANGRY
 
 
-async def test_automatic_handoff_can_be_switched_off(db_session, settings):
+async def test_automatic_handoff_can_be_switched_off(
+    db_session: AsyncSession, settings: Settings
+) -> None:
     """Null is a setting, not an absence - so it has to survive the update."""
     tenant = await _tenant(db_session, slug="acme")
     service = _service(db_session, tenant, settings)
@@ -223,7 +238,9 @@ async def test_automatic_handoff_can_be_switched_off(db_session, settings):
     assert agent.escalation_sentiment is None
 
 
-async def test_an_update_that_says_nothing_leaves_the_threshold_alone(db_session, settings):
+async def test_an_update_that_says_nothing_leaves_the_threshold_alone(
+    db_session: AsyncSession, settings: Settings
+) -> None:
     """The reason the sentinel exists.
 
     A rename must not quietly switch off a workspace's escalation rule because

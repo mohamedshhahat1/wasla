@@ -76,11 +76,11 @@ def _blank_pdf() -> bytes:
     return out.getvalue()
 
 
-def test_a_pdf_gives_up_its_text():
+def test_a_pdf_gives_up_its_text() -> None:
     assert "Invoice" in extract_pdf(_pdf_with_text("Invoice 2026"))
 
 
-def test_a_scan_reads_as_empty_rather_than_failing():
+def test_a_scan_reads_as_empty_rather_than_failing() -> None:
     """The distinction that matters to whoever uploaded it.
 
     An empty result means a valid PDF with nothing to read - it needs OCR. A
@@ -90,53 +90,53 @@ def test_a_scan_reads_as_empty_rather_than_failing():
     assert extract_pdf(_blank_pdf()) == ""
 
 
-def test_something_that_is_not_a_pdf_is_refused():
+def test_something_that_is_not_a_pdf_is_refused() -> None:
     with pytest.raises(UnreadableDocumentError):
         extract_pdf(b"this is not a pdf at all")
 
 
-def test_an_empty_file_is_refused():
+def test_an_empty_file_is_refused() -> None:
     with pytest.raises(UnreadableDocumentError):
         extract_pdf(b"")
 
 
-def test_a_truncated_pdf_is_refused_rather_than_crashing():
+def test_a_truncated_pdf_is_refused_rather_than_crashing() -> None:
     """Half a file is exactly what an interrupted download leaves behind."""
     whole = _pdf_with_text("Invoice")
     with pytest.raises(UnreadableDocumentError):
         extract_pdf(whole[: len(whole) // 3])
 
 
-def test_utf8_text_is_decoded():
+def test_utf8_text_is_decoded() -> None:
     assert extract_text("مرحبا".encode()) == "مرحبا"
 
 
-def test_windows_1256_arabic_is_decoded():
+def test_windows_1256_arabic_is_decoded() -> None:
     """What Arabic saved from older Windows software actually arrives as."""
     assert extract_text("مرحبا".encode("cp1256")) != ""
 
 
-def test_decoding_never_raises():
+def test_decoding_never_raises() -> None:
     """Latin-1 is last and maps every byte, so this always terminates."""
     assert isinstance(extract_text(bytes(range(256))), str)
 
 
-def test_a_document_is_routed_by_type():
+def test_a_document_is_routed_by_type() -> None:
     assert extract_document(content=b"hello", mime_type="text/plain") == "hello"
     assert "Invoice" in extract_document(
         content=_pdf_with_text("Invoice"), mime_type="application/pdf"
     )
 
 
-def test_the_type_is_matched_case_insensitively():
+def test_the_type_is_matched_case_insensitively() -> None:
     assert extract_document(content=b"hello", mime_type="TEXT/PLAIN") == "hello"
 
 
-def test_an_unsupported_type_is_refused():
+def test_an_unsupported_type_is_refused() -> None:
     with pytest.raises(UnreadableDocumentError):
         extract_document(content=b"...", mime_type="application/vnd.ms-excel")
 
 
-def test_a_missing_type_is_refused():
+def test_a_missing_type_is_refused() -> None:
     with pytest.raises(UnreadableDocumentError):
         extract_document(content=b"...", mime_type=None)

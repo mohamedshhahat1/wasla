@@ -10,12 +10,15 @@ appears in *that workspace's* trail rather than only in the platform's.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models.audit import AuditAction, AuditActorKind
+from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
 from app.db.models.billing import BillingInterval, Plan
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
@@ -35,28 +38,30 @@ pytestmark = pytest.mark.integration
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
 
-async def _tenant(session, slug: str = "acme") -> Tenant:
+async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _user(session, email: str = "owner@acme-example.com", **kwargs) -> User:
+async def _user(
+    session: AsyncSession, email: str = "owner@acme-example.com", **kwargs: Any
+) -> User:
     user = User(email=email, hashed_password="x", full_name="Owner", **kwargs)
     session.add(user)
     await session.flush()
     return user
 
 
-async def _entries(session, tenant):
+async def _entries(session: AsyncSession, tenant: Tenant) -> Sequence[AuditLog]:
     return await AuditLogRepository(session, tenant_id=tenant.id).list_entries()
 
 
 # ------------------------------------------------------------- the recorder
 
 
-async def test_an_entry_names_the_person_not_their_id(db_session):
+async def test_an_entry_names_the_person_not_their_id(db_session: AsyncSession) -> None:
     """ "user 8f3c… did something" is useless precisely when somebody asks."""
     tenant = await _tenant(db_session)
     user = await _user(db_session)
@@ -74,7 +79,7 @@ async def test_an_entry_names_the_person_not_their_id(db_session):
     assert entry.target_label == "colleague@example.com"
 
 
-async def test_an_entry_survives_the_actor_being_deleted(db_session):
+async def test_an_entry_survives_the_actor_being_deleted(db_session: AsyncSession) -> None:
     """Deleting an account must not erase what it did - which is exactly what
     somebody would do if it worked."""
     tenant = await _tenant(db_session)
@@ -94,7 +99,7 @@ async def test_an_entry_survives_the_actor_being_deleted(db_session):
     assert entry.actor_label == "owner@acme-example.com"
 
 
-async def test_an_action_by_nobody_is_recorded_as_the_system(db_session):
+async def test_an_action_by_nobody_is_recorded_as_the_system(db_session: AsyncSession) -> None:
     """ "Nobody did this, time did" is a real answer to "who cancelled my plan"."""
     tenant = await _tenant(db_session)
 
@@ -106,7 +111,7 @@ async def test_an_action_by_nobody_is_recorded_as_the_system(db_session):
     assert entry.actor_label == "system"
 
 
-async def test_a_platform_action_needs_no_workspace(db_session):
+async def test_a_platform_action_needs_no_workspace(db_session: AsyncSession) -> None:
     """A platform administrator acts across workspaces rather than inside one,
     and those acts are the ones most worth recording."""
     staff = await _user(db_session, email="staff@example.com")
@@ -123,7 +128,7 @@ async def test_a_platform_action_needs_no_workspace(db_session):
     assert entries[0].actor_kind is AuditActorKind.PLATFORM_STAFF
 
 
-async def test_an_entry_that_rolled_back_did_not_happen(db_session):
+async def test_an_entry_that_rolled_back_did_not_happen(db_session: AsyncSession) -> None:
     """A log claiming somebody did something they did not is worse than no log,
     because it is believed."""
     tenant = await _tenant(db_session)
@@ -137,7 +142,7 @@ async def test_an_entry_that_rolled_back_did_not_happen(db_session):
     assert await AuditLogRepository(db_session, tenant_id=tenant_id).list_entries() == []
 
 
-def _account_service(session) -> WhatsAppAccountService:
+def _account_service(session: AsyncSession) -> WhatsAppAccountService:
     """The real service, with ownership verification faked but still required.
 
     Built through the fake rather than omitted, because a service with no
@@ -153,7 +158,7 @@ def _account_service(session) -> WhatsAppAccountService:
 # -------------------------------------------------- written by real actions
 
 
-async def test_connecting_a_number_is_recorded(db_session):
+async def test_connecting_a_number_is_recorded(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     user = await _user(db_session)
 
@@ -172,7 +177,9 @@ async def test_connecting_a_number_is_recorded(db_session):
     assert entry.target_label == "+201000000000"
 
 
-async def test_disabling_a_number_is_a_different_action_from_enabling(db_session):
+async def test_disabling_a_number_is_a_different_action_from_enabling(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     service = _account_service(db_session)
@@ -203,7 +210,7 @@ async def test_disabling_a_number_is_a_different_action_from_enabling(db_session
     assert AuditAction.WHATSAPP_ACCOUNT_ENABLED in actions
 
 
-async def test_starting_a_subscription_is_recorded_with_its_plan(db_session):
+async def test_starting_a_subscription_is_recorded_with_its_plan(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     plan = Plan(
@@ -231,7 +238,9 @@ async def test_starting_a_subscription_is_recorded_with_its_plan(db_session):
     assert entry.target_label == "pro"
 
 
-async def test_a_subscription_started_by_registration_is_recorded_as_the_system(db_session):
+async def test_a_subscription_started_by_registration_is_recorded_as_the_system(
+    db_session: AsyncSession,
+) -> None:
     """Nobody chose it: the workspace was put on the default plan at signup."""
     tenant = await _tenant(db_session)
     plan = Plan(
@@ -255,7 +264,9 @@ async def test_a_subscription_started_by_registration_is_recorded_as_the_system(
     assert entry.actor_kind is AuditActorKind.SYSTEM
 
 
-async def test_a_platform_payment_appears_in_the_workspaces_own_trail(db_session):
+async def test_a_platform_payment_appears_in_the_workspaces_own_trail(
+    db_session: AsyncSession,
+) -> None:
     """The customer is entitled to see who marked their invoice paid."""
     from app.db.models.invoice import Invoice, InvoiceStatus
     from app.platform.platform_billing import PlatformBillingService
@@ -293,7 +304,7 @@ async def test_a_platform_payment_appears_in_the_workspaces_own_trail(db_session
 # ----------------------------------------------------------------- reading
 
 
-async def test_one_workspace_cannot_read_anothers_trail(db_session):
+async def test_one_workspace_cannot_read_anothers_trail(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, "acme")
     rival = await _tenant(db_session, "rival")
     AuditTrail(db_session, tenant_id=acme.id).record(AuditAction.CAMPAIGN_SCHEDULED)
@@ -303,7 +314,9 @@ async def test_one_workspace_cannot_read_anothers_trail(db_session):
     assert len(await _entries(db_session, acme)) == 1
 
 
-async def test_the_platform_reader_sees_every_workspace_and_the_platform(db_session):
+async def test_the_platform_reader_sees_every_workspace_and_the_platform(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, "acme")
     rival = await _tenant(db_session, "rival")
     AuditTrail(db_session, tenant_id=acme.id).record(AuditAction.CAMPAIGN_SCHEDULED)
@@ -315,7 +328,9 @@ async def test_the_platform_reader_sees_every_workspace_and_the_platform(db_sess
     assert len(entries) == 3
 
 
-async def test_the_platform_reader_can_be_narrowed_to_one_workspace(db_session):
+async def test_the_platform_reader_can_be_narrowed_to_one_workspace(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, "acme")
     rival = await _tenant(db_session, "rival")
     AuditTrail(db_session, tenant_id=acme.id).record(AuditAction.CAMPAIGN_SCHEDULED)
@@ -326,7 +341,7 @@ async def test_the_platform_reader_can_be_narrowed_to_one_workspace(db_session):
     assert [entry.tenant_id for entry in entries] == [acme.id]
 
 
-async def test_entries_can_be_filtered_by_action(db_session):
+async def test_entries_can_be_filtered_by_action(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     trail = AuditTrail(db_session, tenant_id=tenant.id)
     trail.record(AuditAction.CAMPAIGN_SCHEDULED)
@@ -339,7 +354,7 @@ async def test_entries_can_be_filtered_by_action(db_session):
     assert [entry.action for entry in entries] == [AuditAction.MEMBER_INVITED]
 
 
-async def test_entries_can_be_filtered_by_actor(db_session):
+async def test_entries_can_be_filtered_by_actor(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     one = await _user(db_session, email="one@example.com")
     two = await _user(db_session, email="two@example.com")
@@ -354,7 +369,7 @@ async def test_entries_can_be_filtered_by_actor(db_session):
     assert [entry.actor_label for entry in entries] == ["two@example.com"]
 
 
-async def test_there_is_no_way_to_edit_an_entry(db_session):
+async def test_there_is_no_way_to_edit_an_entry(db_session: AsyncSession) -> None:
     """The repository offers no update and no delete: handing somebody the
     ability to edit the record of what they did defeats the purpose."""
     repository = AuditLogRepository(db_session, tenant_id=uuid.uuid4())

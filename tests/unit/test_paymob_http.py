@@ -25,7 +25,9 @@ connect rather than quietly succeed against somebody's live merchant account.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
@@ -46,7 +48,10 @@ CLIENT_SECRET = "egy_csk_test_0123456789abcdef"
 HMAC_SECRET = "a-test-hmac-secret"
 
 
-def _provider(handler, **overrides) -> PaymobProvider:
+def _provider(
+    handler: Callable[[httpx.Request], httpx.Response],
+    **overrides: Any,
+) -> PaymobProvider:
     settings = {
         "secret_key": SECRET_KEY,
         "public_key": PUBLIC_KEY,
@@ -58,7 +63,9 @@ def _provider(handler, **overrides) -> PaymobProvider:
     return PaymobProvider(**settings)  # type: ignore[arg-type]
 
 
-def _intention_ok(seen: list[httpx.Request] | None = None):
+def _intention_ok(
+    seen: list[httpx.Request] | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
     def handler(request: httpx.Request) -> httpx.Response:
         if seen is not None:
             seen.append(request)
@@ -67,7 +74,9 @@ def _intention_ok(seen: list[httpx.Request] | None = None):
     return handler
 
 
-def _refund_ok(seen: list[httpx.Request] | None = None):
+def _refund_ok(
+    seen: list[httpx.Request] | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
     def handler(request: httpx.Request) -> httpx.Response:
         if seen is not None:
             seen.append(request)

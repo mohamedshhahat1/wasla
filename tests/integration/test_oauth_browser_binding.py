@@ -32,7 +32,7 @@ from collections.abc import AsyncIterator, Iterator
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI, Request
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -154,7 +154,12 @@ def _binding(client: AsyncClient) -> str | None:
     return client.cookies.get(COOKIE_NAME)
 
 
-async def _callback(client: AsyncClient, state: str, *, code: str = "an-authorization-code"):
+async def _callback(
+    client: AsyncClient,
+    state: str,
+    *,
+    code: str = "an-authorization-code",
+) -> Response:
     return await client.post(f"{API}/auth/google/callback", json={"code": code, "state": state})
 
 

@@ -20,7 +20,8 @@ here (ADR-038).
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -94,7 +95,7 @@ def _service(session: AsyncSession, tenant: Tenant) -> MembershipService:
 # ------------------------------------------------------------------- the rules
 
 
-async def test_an_admin_can_remove_a_member(db_session):
+async def test_an_admin_can_remove_a_member(db_session: AsyncSession) -> None:
     tenant = await _workspace(db_session, "acme")
     owner = await _person(db_session, "owner@acme.test")
     admin = await _person(db_session, "admin@acme.test")
@@ -114,7 +115,7 @@ async def test_an_admin_can_remove_a_member(db_session):
     assert revoked.revoked_at is not None
 
 
-async def test_a_member_cannot_remove_a_colleague(db_session):
+async def test_a_member_cannot_remove_a_colleague(db_session: AsyncSession) -> None:
     """Otherwise the role boundary is decorative."""
     tenant = await _workspace(db_session, "acme")
     owner = await _person(db_session, "owner@acme.test")
@@ -132,7 +133,7 @@ async def test_a_member_cannot_remove_a_colleague(db_session):
         )
 
 
-async def test_a_member_can_leave_without_permission(db_session):
+async def test_a_member_can_leave_without_permission(db_session: AsyncSession) -> None:
     """Leaving is not an administrative act."""
     tenant = await _workspace(db_session, "acme")
     owner = await _person(db_session, "owner@acme.test")
@@ -149,7 +150,7 @@ async def test_a_member_can_leave_without_permission(db_session):
     assert revoked.status is MembershipStatus.REVOKED
 
 
-async def test_an_admin_cannot_remove_an_owner(db_session):
+async def test_an_admin_cannot_remove_an_owner(db_session: AsyncSession) -> None:
     """Otherwise an administrator promotes themselves by subtraction."""
     tenant = await _workspace(db_session, "acme")
     first_owner = await _person(db_session, "owner@acme.test")
@@ -167,7 +168,7 @@ async def test_an_admin_cannot_remove_an_owner(db_session):
         )
 
 
-async def test_an_owner_can_remove_another_owner(db_session):
+async def test_an_owner_can_remove_another_owner(db_session: AsyncSession) -> None:
     tenant = await _workspace(db_session, "acme")
     first = await _person(db_session, "owner@acme.test")
     second = await _person(db_session, "owner2@acme.test")
@@ -183,7 +184,7 @@ async def test_an_owner_can_remove_another_owner(db_session):
     assert revoked.status is MembershipStatus.REVOKED
 
 
-async def test_the_last_owner_cannot_be_removed(db_session):
+async def test_the_last_owner_cannot_be_removed(db_session: AsyncSession) -> None:
     """A workspace with no owner has nobody who can invite one. It is not
     recoverable from inside, and the person doing it rarely means to."""
     tenant = await _workspace(db_session, "acme")
@@ -200,7 +201,7 @@ async def test_the_last_owner_cannot_be_removed(db_session):
         )
 
 
-async def test_the_last_owner_cannot_leave_either(db_session):
+async def test_the_last_owner_cannot_leave_either(db_session: AsyncSession) -> None:
     """Self-removal is not a way around the rule above."""
     tenant = await _workspace(db_session, "acme")
     owner = await _person(db_session, "owner@acme.test")
@@ -214,7 +215,9 @@ async def test_the_last_owner_cannot_leave_either(db_session):
         )
 
 
-async def test_a_revoked_owner_no_longer_counts_towards_the_last_owner_rule(db_session):
+async def test_a_revoked_owner_no_longer_counts_towards_the_last_owner_rule(
+    db_session: AsyncSession,
+) -> None:
     """The count reads active owners. A revoked one propping the rule up would
     make the workspace unrecoverable in the opposite direction."""
     tenant = await _workspace(db_session, "acme")
@@ -238,7 +241,7 @@ async def test_a_revoked_owner_no_longer_counts_towards_the_last_owner_rule(db_s
         )
 
 
-async def test_removing_somebody_already_removed_is_a_conflict(db_session):
+async def test_removing_somebody_already_removed_is_a_conflict(db_session: AsyncSession) -> None:
     """The caller is looking at a stale roster and should see it refreshed."""
     tenant = await _workspace(db_session, "acme")
     owner = await _person(db_session, "owner@acme.test")
@@ -252,7 +255,9 @@ async def test_removing_somebody_already_removed_is_a_conflict(db_session):
         await service.revoke(actor=owner, actor_role=TenantRole.TENANT_OWNER, user_id=member.id)
 
 
-async def test_somebody_from_another_workspace_cannot_be_removed_from_this_one(db_session):
+async def test_somebody_from_another_workspace_cannot_be_removed_from_this_one(
+    db_session: AsyncSession,
+) -> None:
     """The service is workspace-scoped, so a stranger's id is simply not a
     member here - and the answer says nothing about whether they exist."""
     acme = await _workspace(db_session, "acme")
@@ -278,7 +283,7 @@ async def test_somebody_from_another_workspace_cannot_be_removed_from_this_one(d
 # --------------------------------------------------------------- readmission
 
 
-async def test_a_removed_member_can_be_reinstated(db_session):
+async def test_a_removed_member_can_be_reinstated(db_session: AsyncSession) -> None:
     tenant = await _workspace(db_session, "acme")
     owner = await _person(db_session, "owner@acme.test")
     member = await _person(db_session, "member@acme.test")
@@ -301,7 +306,7 @@ async def test_a_removed_member_can_be_reinstated(db_session):
     assert restored.revoked_by_id is None
 
 
-async def test_reinstating_reuses_the_existing_row(db_session):
+async def test_reinstating_reuses_the_existing_row(db_session: AsyncSession) -> None:
     """`UNIQUE(user_id, tenant_id)` requires it, and a second row would give
     authorization two grants to rank."""
     tenant = await _workspace(db_session, "acme")
@@ -326,7 +331,7 @@ async def test_reinstating_reuses_the_existing_row(db_session):
     assert len(everyone) == 2
 
 
-async def test_an_admin_cannot_reinstate_somebody_as_an_owner(db_session):
+async def test_an_admin_cannot_reinstate_somebody_as_an_owner(db_session: AsyncSession) -> None:
     """Matches the invitation path exactly: an administrator who could do this
     could mint themselves a peer with authority they do not have."""
     tenant = await _workspace(db_session, "acme")
@@ -348,7 +353,7 @@ async def test_an_admin_cannot_reinstate_somebody_as_an_owner(db_session):
         )
 
 
-async def test_a_member_cannot_reinstate_anybody(db_session):
+async def test_a_member_cannot_reinstate_anybody(db_session: AsyncSession) -> None:
     tenant = await _workspace(db_session, "acme")
     owner = await _person(db_session, "owner@acme.test")
     one = await _person(db_session, "one@acme.test")
@@ -371,7 +376,9 @@ async def test_a_member_cannot_reinstate_anybody(db_session):
 # ------------------------------------------------------------- what it records
 
 
-async def test_a_removal_is_audited_as_a_removal_and_a_departure_as_a_departure(db_session):
+async def test_a_removal_is_audited_as_a_removal_and_a_departure_as_a_departure(
+    db_session: AsyncSession,
+) -> None:
     """ "Who threw them out" and "they walked" are different answers."""
     tenant = await _workspace(db_session, "acme")
     owner = await _person(db_session, "owner@acme.test")
@@ -410,7 +417,9 @@ async def test_a_removal_is_audited_as_a_removal_and_a_departure_as_a_departure(
 # ------------------------------------------------------- what it stops working
 
 
-async def test_the_workspace_switcher_stops_offering_a_revoked_workspace(db_session):
+async def test_the_workspace_switcher_stops_offering_a_revoked_workspace(
+    db_session: AsyncSession,
+) -> None:
     """It has to disappear at the same moment it stops answering, or somebody
     keeps a dead entry in their sidebar and reads the 404 as a bug."""
     acme = await _workspace(db_session, "acme")
@@ -476,7 +485,7 @@ def _workspace_scoped_routes(app: FastAPI) -> list[tuple[str, str]]:
     anybody remembering this file exists.
     """
 
-    def effective(routes):
+    def effective(routes: Sequence[Any]) -> Iterator[Any]:
         for route in routes:
             if isinstance(route, _IncludedRouter):
                 candidates = list(route.effective_candidates())
@@ -489,12 +498,15 @@ def _workspace_scoped_routes(app: FastAPI) -> list[tuple[str, str]]:
             elif isinstance(route, APIRoute):
                 yield route
 
-    def flatten(dependant, acc=None):
+    def flatten(dependant: Any, acc: list[Any] | None = None) -> list[Any]:
         acc = [] if acc is None else acc
+        assert acc is not None
         acc.append(dependant)
         for sub in dependant.dependencies:
             flatten(sub, acc)
-        return acc
+        found = acc
+        assert found is not None
+        return found
 
     app.openapi()
     found: list[tuple[str, str]] = []
@@ -511,11 +523,11 @@ def _workspace_scoped_routes(app: FastAPI) -> list[tuple[str, str]]:
 
 
 async def test_a_revoked_member_is_refused_by_every_workspace_route(
-    db_session,
-    settings,
-    revocation_app,
-    http,
-):
+    db_session: AsyncSession,
+    settings: Settings,
+    revocation_app: FastAPI,
+    http: AsyncClient,
+) -> None:
     """The test this whole feature exists for.
 
     The token is real: signed by the application, unexpired, carrying the right
@@ -574,10 +586,10 @@ async def test_a_revoked_member_is_refused_by_every_workspace_route(
 
 
 async def test_revocation_does_not_disturb_the_persons_other_workspaces(
-    db_session,
-    settings,
-    http,
-):
+    db_session: AsyncSession,
+    settings: Settings,
+    http: AsyncClient,
+) -> None:
     """Being removed from one company is not a reason to be signed out of
     another. This is why revocation is a membership status rather than a bump
     of `users.token_version` - a bump would end every session everywhere."""
@@ -612,7 +624,7 @@ async def test_revocation_does_not_disturb_the_persons_other_workspaces(
     assert person.token_version == 1
 
 
-async def test_a_revoked_member_can_be_invited_back(db_session):
+async def test_a_revoked_member_can_be_invited_back(db_session: AsyncSession) -> None:
     """`issue` reads active memberships, so a removed person is invitable; and
     `accept` reactivates the row rather than inserting a second one."""
     from app.services.invitation_service import InvitationService
@@ -644,7 +656,7 @@ async def test_a_revoked_member_can_be_invited_back(db_session):
     assert accepted.membership.role is TenantRole.TENANT_ADMIN
 
 
-async def test_an_active_member_still_cannot_be_invited_twice(db_session):
+async def test_an_active_member_still_cannot_be_invited_twice(db_session: AsyncSession) -> None:
     """The readmission path must not have loosened the ordinary conflict."""
     from app.services.invitation_service import InvitationService
 
@@ -677,7 +689,9 @@ async def _token(settings: Settings, user: User, tenant: Tenant) -> dict[str, st
     return {"Authorization": f"Bearer {token}"}
 
 
-async def test_the_roster_excludes_removed_people_unless_asked(db_session, settings, http):
+async def test_the_roster_excludes_removed_people_unless_asked(
+    db_session: AsyncSession, settings: Settings, http: AsyncClient
+) -> None:
     """A member list that silently counts former colleagues is how somebody
     ends up believing a removed person still has access."""
     tenant = await _workspace(db_session, "acme")
@@ -707,7 +721,9 @@ async def test_the_roster_excludes_removed_people_unless_asked(db_session, setti
     assert revoked["revoked_at"] is not None
 
 
-async def test_removing_a_member_over_http(db_session, settings, http):
+async def test_removing_a_member_over_http(
+    db_session: AsyncSession, settings: Settings, http: AsyncClient
+) -> None:
     tenant = await _workspace(db_session, "acme")
     owner = await _person(db_session, "owner@acme.test")
     member = await _person(db_session, "member@acme.test")
@@ -723,7 +739,9 @@ async def test_removing_a_member_over_http(db_session, settings, http):
     assert response.json()["status"] == "revoked"
 
 
-async def test_a_member_removing_a_colleague_over_http_is_forbidden(db_session, settings, http):
+async def test_a_member_removing_a_colleague_over_http_is_forbidden(
+    db_session: AsyncSession, settings: Settings, http: AsyncClient
+) -> None:
     tenant = await _workspace(db_session, "acme")
     owner = await _person(db_session, "owner@acme.test")
     one = await _person(db_session, "one@acme.test")
@@ -740,7 +758,9 @@ async def test_a_member_removing_a_colleague_over_http_is_forbidden(db_session, 
     assert response.status_code == 403
 
 
-async def test_a_member_can_leave_over_http(db_session, settings, http):
+async def test_a_member_can_leave_over_http(
+    db_session: AsyncSession, settings: Settings, http: AsyncClient
+) -> None:
     """The reason the route is not behind the admin guard: a dependency
     evaluated before the path parameter is bound cannot tell self-removal from
     removing somebody else."""
@@ -759,10 +779,10 @@ async def test_a_member_can_leave_over_http(db_session, settings, http):
 
 
 async def test_a_member_of_another_workspace_cannot_be_removed_over_http(
-    db_session,
-    settings,
-    http,
-):
+    db_session: AsyncSession,
+    settings: Settings,
+    http: AsyncClient,
+) -> None:
     acme = await _workspace(db_session, "acme")
     other = await _workspace(db_session, "other")
     owner = await _person(db_session, "owner@acme.test")
@@ -779,7 +799,9 @@ async def test_a_member_of_another_workspace_cannot_be_removed_over_http(
     assert str(other.id) not in response.text
 
 
-async def test_reinstating_over_http_requires_an_administrator(db_session, settings, http):
+async def test_reinstating_over_http_requires_an_administrator(
+    db_session: AsyncSession, settings: Settings, http: AsyncClient
+) -> None:
     tenant = await _workspace(db_session, "acme")
     owner = await _person(db_session, "owner@acme.test")
     one = await _person(db_session, "one@acme.test")

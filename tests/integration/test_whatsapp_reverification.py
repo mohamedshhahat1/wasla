@@ -25,6 +25,7 @@ import uuid
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DependencyUnavailableError, TenantIsolationError
 from app.db.models import Tenant, TenantStatus, WhatsAppAccount, WhatsAppAccountStatus
@@ -40,14 +41,16 @@ NUMBER = "109876543210"
 TOKEN = "EAAG-the-workspaces-own-credential"
 
 
-async def _tenant(session, slug: str) -> Tenant:
+async def _tenant(session: AsyncSession, slug: str) -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _legacy_account(session, tenant: Tenant, number: str = NUMBER) -> WhatsAppAccount:
+async def _legacy_account(
+    session: AsyncSession, tenant: Tenant, number: str = NUMBER
+) -> WhatsAppAccount:
     """A row exactly as migration 0022 leaves a pre-ADR-037 claim.
 
     Written directly rather than through the service, because the service can no
@@ -67,7 +70,9 @@ async def _legacy_account(session, tenant: Tenant, number: str = NUMBER) -> What
     return account
 
 
-def _service(session, verifier: FakeOwnershipVerifier | None = None) -> WhatsAppAccountService:
+def _service(
+    session: AsyncSession, verifier: FakeOwnershipVerifier | None = None
+) -> WhatsAppAccountService:
     return WhatsAppAccountService(
         session=session,
         ownership=verifier if verifier is not None else FakeOwnershipVerifier().owns(NUMBER),
@@ -77,7 +82,7 @@ def _service(session, verifier: FakeOwnershipVerifier | None = None) -> WhatsApp
 # ------------------------------------------------------- the state is visible
 
 
-async def test_a_legacy_row_reports_itself_unverified(db_session):
+async def test_a_legacy_row_reports_itself_unverified(db_session: AsyncSession) -> None:
     """The security state of a number is not something to deduce from a null."""
     tenant = await _tenant(db_session, "legacy")
     account = await _legacy_account(db_session, tenant)
@@ -86,7 +91,7 @@ async def test_a_legacy_row_reports_itself_unverified(db_session):
     assert account.ownership_verified_at is None
 
 
-async def test_a_freshly_connected_number_reports_itself_verified(db_session):
+async def test_a_freshly_connected_number_reports_itself_verified(db_session: AsyncSession) -> None:
     """The control. A flag that read False for everything would tell an
     operator nothing."""
     tenant = await _tenant(db_session, "fresh")
@@ -101,7 +106,7 @@ async def test_a_freshly_connected_number_reports_itself_verified(db_session):
 # ------------------------------------------------------ what a legacy row can do
 
 
-async def test_a_legacy_row_still_carries_traffic(db_session):
+async def test_a_legacy_row_still_carries_traffic(db_session: AsyncSession) -> None:
     """Deliberate, and worth pinning so nobody "fixes" it into an outage.
 
     Refusing unverified numbers would break every number connected before
@@ -117,7 +122,7 @@ async def test_a_legacy_row_still_carries_traffic(db_session):
     assert resolved.id == account.id
 
 
-async def test_nobody_else_can_claim_a_legacy_number(db_session):
+async def test_nobody_else_can_claim_a_legacy_number(db_session: AsyncSession) -> None:
     """Unverified does not mean unclaimed. The row still holds the number."""
     from app.core.exceptions import ConflictError
 
@@ -134,7 +139,9 @@ async def test_nobody_else_can_claim_a_legacy_number(db_session):
 # --------------------------------------------------------------- the rescue
 
 
-async def test_re_verifying_stamps_the_row_without_giving_the_number_up(db_session):
+async def test_re_verifying_stamps_the_row_without_giving_the_number_up(
+    db_session: AsyncSession,
+) -> None:
     """The whole point: proof in place, with no window in which somebody else
     could take the number."""
     tenant = await _tenant(db_session, "legacy")
@@ -150,7 +157,9 @@ async def test_re_verifying_stamps_the_row_without_giving_the_number_up(db_sessi
     assert await WhatsAppAccountDirectory(db_session).get_by_phone_number_id(NUMBER) is not None
 
 
-async def test_meta_overwrites_the_identifiers_nobody_ever_checked(db_session):
+async def test_meta_overwrites_the_identifiers_nobody_ever_checked(
+    db_session: AsyncSession,
+) -> None:
     """A legacy row's business account was typed in. Meta's answer is the first
     trustworthy value it has ever had."""
     tenant = await _tenant(db_session, "legacy")
@@ -166,7 +175,9 @@ async def test_meta_overwrites_the_identifiers_nobody_ever_checked(db_session):
     assert verified.verified_name == "Acme Ltd"
 
 
-async def test_a_claim_that_cannot_be_proven_leaves_the_row_untouched(db_session):
+async def test_a_claim_that_cannot_be_proven_leaves_the_row_untouched(
+    db_session: AsyncSession,
+) -> None:
     """An administrator who cannot prove control does not get a stamp - and does
     not lose the number either."""
     tenant = await _tenant(db_session, "legacy")
@@ -182,7 +193,9 @@ async def test_a_claim_that_cannot_be_proven_leaves_the_row_untouched(db_session
     assert account.is_active is True
 
 
-async def test_the_number_is_read_from_the_row_and_not_from_the_caller(db_session):
+async def test_the_number_is_read_from_the_row_and_not_from_the_caller(
+    db_session: AsyncSession,
+) -> None:
     """The property that stops this being a second way to claim a number.
 
     Whatever an administrator supplies, what gets proven is the number they
@@ -204,7 +217,9 @@ async def test_the_number_is_read_from_the_row_and_not_from_the_caller(db_sessio
     assert verifier.calls[0]["claimed_waba_id"] is None
 
 
-async def test_another_workspace_cannot_verify_a_number_it_does_not_hold(db_session):
+async def test_another_workspace_cannot_verify_a_number_it_does_not_hold(
+    db_session: AsyncSession,
+) -> None:
     """The scoped lookup. Stamping somebody else's row would be a claim about
     their traffic."""
     owner = await _tenant(db_session, "owner")
@@ -217,7 +232,7 @@ async def test_another_workspace_cannot_verify_a_number_it_does_not_hold(db_sess
         )
 
 
-async def test_a_released_number_cannot_be_verified(db_session):
+async def test_a_released_number_cannot_be_verified(db_session: AsyncSession) -> None:
     """Proof on a row that no longer entitles the workspace to anything is
     meaningless, and if somebody else now holds the number it is worse."""
     tenant = await _tenant(db_session, "legacy")
@@ -229,7 +244,7 @@ async def test_a_released_number_cannot_be_verified(db_session):
         await service.reverify(tenant_id=tenant.id, account_id=account.id, access_token=TOKEN)
 
 
-async def test_a_deployment_without_a_verifier_refuses_to_stamp(db_session):
+async def test_a_deployment_without_a_verifier_refuses_to_stamp(db_session: AsyncSession) -> None:
     """Fail closed, exactly as `connect` does."""
     tenant = await _tenant(db_session, "legacy")
     account = await _legacy_account(db_session, tenant)
@@ -239,7 +254,7 @@ async def test_a_deployment_without_a_verifier_refuses_to_stamp(db_session):
         await service.reverify(tenant_id=tenant.id, account_id=account.id, access_token=TOKEN)
 
 
-async def test_re_verification_is_audited_with_what_changed(db_session):
+async def test_re_verification_is_audited_with_what_changed(db_session: AsyncSession) -> None:
     """A business account that changed is worth seeing: on a legacy row it means
     the typed-in value was wrong, and on a proven one it means the number
     moved."""
@@ -258,14 +273,17 @@ async def test_re_verification_is_audited_with_what_changed(db_session):
         .all()
     )
     entry = next(e for e in entries if e.action is AuditAction.WHATSAPP_ACCOUNT_VERIFIED)
+    assert entry.meta is not None
     assert entry.meta["waba_id"] == "the-real-business-account"
+    assert entry.meta is not None
     assert entry.meta["previous_waba_id"] == "waba-nobody-verified"
+    assert entry.meta is not None
     assert entry.meta["waba_changed"] is True
     # The credential is named nowhere.
     assert TOKEN not in f"{entry.meta} {entry.target_label}"
 
 
-async def test_a_verified_number_can_be_verified_again(db_session):
+async def test_a_verified_number_can_be_verified_again(db_session: AsyncSession) -> None:
     """Not only a migration tool. Re-proving is how an operator establishes that
     a number they still hold is still theirs at Meta."""
     tenant = await _tenant(db_session, "fresh")
@@ -276,10 +294,13 @@ async def test_a_verified_number_can_be_verified_again(db_session):
     again = await service.reverify(tenant_id=tenant.id, account_id=account.id, access_token=TOKEN)
 
     assert again.ownership_verified_at is not None
+    assert first is not None
     assert again.ownership_verified_at >= first
 
 
-async def test_re_verification_stores_the_credential_when_a_key_exists(db_session):
+async def test_re_verification_stores_the_credential_when_a_key_exists(
+    db_session: AsyncSession,
+) -> None:
     """A legacy row had no way to acquire one: there is no update-credential
     endpoint, and `connect` refuses an already-claimed number. This is the only
     path by which such a number starts sending as itself."""
@@ -308,7 +329,7 @@ async def test_re_verification_stores_the_credential_when_a_key_exists(db_sessio
     assert TOKEN not in verified.access_token_encrypted
 
 
-async def test_an_unknown_account_id_is_not_found(db_session):
+async def test_an_unknown_account_id_is_not_found(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, "legacy")
 
     with pytest.raises(TenantIsolationError):

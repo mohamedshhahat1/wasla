@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.db.models.audit import AuditAction, AuditLog
@@ -55,7 +57,7 @@ REVERSAL_TRANSACTION = "579305"
 
 
 def _refund_transport(
-    seen: list[dict] | None = None,
+    seen: list[dict[str, Any]] | None = None,
     *,
     response: httpx.Response | None = None,
     error: Exception | None = None,
@@ -83,14 +85,14 @@ def _provider(transport: httpx.MockTransport | None = None) -> PaymobProvider:
     )
 
 
-async def _tenant(session, slug: str = "acme") -> Tenant:
+async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _user(session, email: str = "owner@acme-example.com") -> User:
+async def _user(session: AsyncSession, email: str = "owner@acme-example.com") -> User:
     user = User(email=email, full_name="Owner Person", hashed_password="x", is_active=True)
     session.add(user)
     await session.flush()
@@ -98,7 +100,7 @@ async def _user(session, email: str = "owner@acme-example.com") -> User:
 
 
 async def _paid(
-    session,
+    session: AsyncSession,
     tenant: Tenant,
     *,
     amount: str = "99.00",
@@ -158,7 +160,7 @@ def _reversal(
     parent: str | None = None,
     currency: str = "EGP",
     voided: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """A callback shaped like the documented reversal notification."""
     body = {
         "id": int(transaction),
@@ -186,7 +188,7 @@ def _reversal(
     return body
 
 
-async def _apply(session, tenant, transaction: dict) -> str:
+async def _apply(session: AsyncSession, tenant: Tenant, transaction: dict[str, Any]) -> str:
     body = json.dumps({"type": "TRANSACTION", "obj": transaction}).encode("utf-8")
     signature = hmac_signature(transaction, secret=HMAC_SECRET)
     event = _provider().verify_callback(payload=body, signature=signature)
@@ -197,7 +199,9 @@ async def _apply(session, tenant, transaction: dict) -> str:
 # ------------------------------------------------------------ asking for one
 
 
-async def test_a_refund_asks_the_provider_for_the_unreturned_balance(db_session):
+async def test_a_refund_asks_the_provider_for_the_unreturned_balance(
+    db_session: AsyncSession,
+) -> None:
     """The amount is ours, computed from the row, and never a caller's.
 
     A request that could name a figure is a request that could name a larger
@@ -206,7 +210,7 @@ async def test_a_refund_asks_the_provider_for_the_unreturned_balance(db_session)
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     _, payment = await _paid(db_session, tenant, amount="99.00")
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     await RefundService(
         db_session,
@@ -217,7 +221,9 @@ async def test_a_refund_asks_the_provider_for_the_unreturned_balance(db_session)
     assert seen == [{"transaction_id": PAID_TRANSACTION, "amount_cents": 9900}]
 
 
-async def test_asking_for_a_refund_does_not_make_the_money_come_back(db_session):
+async def test_asking_for_a_refund_does_not_make_the_money_come_back(
+    db_session: AsyncSession,
+) -> None:
     """The whole reason the request and the confirmation are separate.
 
     A 200 from a refund API means the reversal was accepted, not that a
@@ -244,7 +250,7 @@ async def test_asking_for_a_refund_does_not_make_the_money_come_back(db_session)
     assert payment.refund_reference == REVERSAL_TRANSACTION
 
 
-async def test_the_request_is_audited_with_who_asked(db_session):
+async def test_the_request_is_audited_with_who_asked(db_session: AsyncSession) -> None:
     """A refund is the one billing action that moves money out.
 
     "Who authorised this" is the question the audit log exists to answer.
@@ -271,12 +277,16 @@ async def test_the_request_is_audited_with_who_asked(db_session):
     )
     assert len(rows) == 1
     assert rows[0].actor_id == user.id
+    assert rows[0].meta is not None
     assert rows[0].meta["amount"] == "99.00"
+    assert rows[0].meta is not None
     assert rows[0].meta["reason"] == "Duplicate charge"
 
 
 @pytest.mark.parametrize("status", [PaymentStatus.PENDING, PaymentStatus.FAILED])
-async def test_a_payment_that_never_collected_cannot_be_refunded(db_session, status):
+async def test_a_payment_that_never_collected_cannot_be_refunded(
+    db_session: AsyncSession, status: PaymentStatus
+) -> None:
     """There is no money here to give back.
 
     Attempting it would ask Paymob to reverse a transaction that does not
@@ -292,7 +302,7 @@ async def test_a_payment_that_never_collected_cannot_be_refunded(db_session, sta
         )
 
 
-async def test_a_second_refund_request_is_refused(db_session):
+async def test_a_second_refund_request_is_refused(db_session: AsyncSession) -> None:
     """Reversing the same money twice is the failure this guards.
 
     The first request stored the reversal's reference; a second would ask
@@ -308,7 +318,9 @@ async def test_a_second_refund_request_is_refused(db_session):
         await service.refund(payment.id)
 
 
-async def test_a_payment_taken_by_hand_cannot_be_reversed_by_a_processor(db_session):
+async def test_a_payment_taken_by_hand_cannot_be_reversed_by_a_processor(
+    db_session: AsyncSession,
+) -> None:
     """A bank transfer somebody typed in has no transaction to reverse.
 
     Refunding it is a person moving money, not an API call, and pretending
@@ -325,7 +337,9 @@ async def test_a_payment_taken_by_hand_cannot_be_reversed_by_a_processor(db_sess
         )
 
 
-async def test_a_payment_from_another_provider_is_not_reversed_through_this_one(db_session):
+async def test_a_payment_from_another_provider_is_not_reversed_through_this_one(
+    db_session: AsyncSession,
+) -> None:
     """Sending one processor another's transaction id refunds nothing.
 
     Or, on a bad day, refunds a transaction that happens to share the number.
@@ -341,7 +355,7 @@ async def test_a_payment_from_another_provider_is_not_reversed_through_this_one(
         )
 
 
-async def test_another_workspaces_payment_cannot_be_refunded(db_session):
+async def test_another_workspaces_payment_cannot_be_refunded(db_session: AsyncSession) -> None:
     """The isolation boundary, on the operation that moves money out.
 
     Not-found rather than forbidden, so a caller cannot learn which payment ids
@@ -357,7 +371,7 @@ async def test_another_workspaces_payment_cannot_be_refunded(db_session):
         )
 
 
-async def test_a_provider_failure_leaves_the_refund_repeatable(db_session):
+async def test_a_provider_failure_leaves_the_refund_repeatable(db_session: AsyncSession) -> None:
     """Asked, not accepted - and therefore safe to ask again.
 
     The reference is what marks a refund as in flight, and it is written only
@@ -381,7 +395,9 @@ async def test_a_provider_failure_leaves_the_refund_repeatable(db_session):
     assert payment.refund_requested_at is not None
 
 
-async def test_a_refund_the_provider_declines_is_not_recorded_as_accepted(db_session):
+async def test_a_refund_the_provider_declines_is_not_recorded_as_accepted(
+    db_session: AsyncSession,
+) -> None:
     """A 200 saying `success: false` is a refusal wearing a success's clothes."""
     tenant = await _tenant(db_session)
     _, payment = await _paid(db_session, tenant)
@@ -402,7 +418,9 @@ async def test_a_refund_the_provider_declines_is_not_recorded_as_accepted(db_ses
 # ---------------------------------------------------- believing it happened
 
 
-async def test_a_reversal_callback_gives_the_money_back_and_reopens_the_invoice(db_session):
+async def test_a_reversal_callback_gives_the_money_back_and_reopens_the_invoice(
+    db_session: AsyncSession,
+) -> None:
     """`amount_paid` records money we hold, so giving it back uncovers the bill.
 
     An invoice whose payments no longer cover it is not paid, whatever it said
@@ -427,7 +445,9 @@ async def test_a_reversal_callback_gives_the_money_back_and_reopens_the_invoice(
     assert invoice.paid_at is None
 
 
-async def test_a_reversal_is_not_swallowed_as_a_duplicate_of_the_payment(db_session):
+async def test_a_reversal_is_not_swallowed_as_a_duplicate_of_the_payment(
+    db_session: AsyncSession,
+) -> None:
     """The defect the composite event id exists to prevent.
 
     Paymob sends the refund notification about the *parent* transaction, so its
@@ -458,7 +478,9 @@ async def test_a_reversal_is_not_swallowed_as_a_duplicate_of_the_payment(db_sess
     assert payment.status is PaymentStatus.REFUNDED
 
 
-async def test_a_reversal_is_matched_by_the_transaction_it_reverses(db_session):
+async def test_a_reversal_is_matched_by_the_transaction_it_reverses(
+    db_session: AsyncSession,
+) -> None:
     """The documented fallback, for a callback that does not carry our own id.
 
     Still an identifier this system wrote down itself - the transaction id
@@ -483,7 +505,7 @@ async def test_a_reversal_is_matched_by_the_transaction_it_reverses(db_session):
     assert invoice.status is InvoiceStatus.OPEN
 
 
-async def test_a_repeated_reversal_callback_changes_nothing(db_session):
+async def test_a_repeated_reversal_callback_changes_nothing(db_session: AsyncSession) -> None:
     """A provider retries anything it did not get a 2xx for."""
     tenant = await _tenant(db_session)
     _, payment = await _paid(db_session, tenant)
@@ -495,7 +517,7 @@ async def test_a_repeated_reversal_callback_changes_nothing(db_session):
     assert payment.refunded_amount == Decimal("99.00")
 
 
-async def test_a_partial_reversal_then_the_rest_adds_up_once(db_session):
+async def test_a_partial_reversal_then_the_rest_adds_up_once(db_session: AsyncSession) -> None:
     """The running total is cumulative, so the *difference* is what came back.
 
     Adding the reported figure each time would return 150 of a 99 payment.
@@ -520,7 +542,9 @@ async def test_a_partial_reversal_then_the_rest_adds_up_once(db_session):
     assert invoice.amount_paid == Decimal("0.00")
 
 
-async def test_a_partial_reversal_leaves_the_payment_partly_collected(db_session):
+async def test_a_partial_reversal_leaves_the_payment_partly_collected(
+    db_session: AsyncSession,
+) -> None:
     """Some of it came back, so the payment is not simply "refunded"."""
     tenant = await _tenant(db_session)
     invoice, payment = await _paid(db_session, tenant)
@@ -537,7 +561,7 @@ async def test_a_partial_reversal_leaves_the_payment_partly_collected(db_session
     assert invoice.status is InvoiceStatus.OPEN
 
 
-async def test_a_reversal_larger_than_the_payment_is_refused(db_session):
+async def test_a_reversal_larger_than_the_payment_is_refused(db_session: AsyncSession) -> None:
     """A provider cannot give back more than it took, so this is not believed.
 
     Applying it would drive `amount_paid` negative and hand somebody money the
@@ -557,7 +581,7 @@ async def test_a_reversal_larger_than_the_payment_is_refused(db_session):
     assert invoice.status is InvoiceStatus.PAID
 
 
-async def test_a_reversal_in_another_currency_is_refused(db_session):
+async def test_a_reversal_in_another_currency_is_refused(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     _, payment = await _paid(db_session, tenant, currency="EGP")
 
@@ -571,7 +595,9 @@ async def test_a_reversal_in_another_currency_is_refused(db_session):
     assert payment.refunded_amount == Decimal("0.00")
 
 
-async def test_a_reversal_naming_nothing_of_ours_is_recorded_and_ignored(db_session):
+async def test_a_reversal_naming_nothing_of_ours_is_recorded_and_ignored(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session)
     await _paid(db_session, tenant)
 
@@ -584,7 +610,9 @@ async def test_a_reversal_naming_nothing_of_ours_is_recorded_and_ignored(db_sess
     assert outcome == UNMATCHED
 
 
-async def test_a_reversal_repeated_at_the_same_total_reports_no_change(db_session):
+async def test_a_reversal_repeated_at_the_same_total_reports_no_change(
+    db_session: AsyncSession,
+) -> None:
     """A second, distinct notification saying the same thing as the first.
 
     Not a duplicate - it is a different event id - and not a change either.
@@ -608,7 +636,7 @@ async def test_a_reversal_repeated_at_the_same_total_reports_no_change(db_sessio
     assert payment.refunded_amount == Decimal("99.00")
 
 
-async def test_a_refunded_payment_cannot_be_collected_again(db_session):
+async def test_a_refunded_payment_cannot_be_collected_again(db_session: AsyncSession) -> None:
     """The attack, and the ordinary accident, that the transition table stops.
 
     A signed callback claiming success about a refunded payment would settle
@@ -636,7 +664,7 @@ async def test_a_refunded_payment_cannot_be_collected_again(db_session):
     assert invoice.amount_paid == Decimal("0.00")
 
 
-async def test_a_void_is_recorded_as_a_void_rather_than_a_refund(db_session):
+async def test_a_void_is_recorded_as_a_void_rather_than_a_refund(db_session: AsyncSession) -> None:
     """Both give the money back; only one of them had settled first.
 
     An operator reconciling against a bank statement needs to know which.

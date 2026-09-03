@@ -35,7 +35,7 @@ from collections.abc import AsyncIterator, Iterator
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -93,7 +93,7 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
         yield http
 
 
-async def _register(client, email: str, slug: str):
+async def _register(client: AsyncClient, email: str, slug: str) -> Response:
     return await client.post(
         f"{API}/auth/register",
         json={
@@ -109,8 +109,8 @@ async def _register(client, email: str, slug: str):
 
 
 async def test_login_answers_identically_for_known_and_unknown_addresses(
-    client,
-):
+    client: AsyncClient,
+) -> None:
     """Status, error code and message. Any of the three differing is the leak."""
     stamp = uuid.uuid4().hex[:10]
     known = f"known-{stamp}@example.com"
@@ -130,8 +130,8 @@ async def test_login_answers_identically_for_known_and_unknown_addresses(
 
 
 async def test_login_spends_the_same_work_whether_or_not_the_account_exists(
-    client,
-):
+    client: AsyncClient,
+) -> None:
     """Response time is a side channel like any other.
 
     A miss verifies against a dummy Argon2 hash so the expensive half happens
@@ -174,8 +174,8 @@ async def test_login_spends_the_same_work_whether_or_not_the_account_exists(
 
 
 async def test_invitation_acceptance_says_nothing_about_which_token_failed(
-    client,
-):
+    client: AsyncClient,
+) -> None:
     """Unknown, malformed and well-formed-but-wrong all answer the same, so the
     endpoint cannot be used to probe which tokens once existed."""
     answers = set()
@@ -192,8 +192,8 @@ async def test_invitation_acceptance_says_nothing_about_which_token_failed(
 
 
 async def test_registration_still_discloses_a_taken_address(
-    client,
-):
+    client: AsyncClient,
+) -> None:
     """The accepted leak, pinned so it cannot silently get *worse*.
 
     This is a documented deferral, not an oversight: closing it needs the
@@ -218,8 +218,8 @@ async def test_registration_still_discloses_a_taken_address(
 
 
 async def test_a_taken_workspace_slug_is_a_separate_answer(
-    client,
-):
+    client: AsyncClient,
+) -> None:
     """Deliberately not merged with the address conflict.
 
     Merging would not close the oracle - the attacker picks the slug, so a

@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import ActiveWorkspace, get_active_workspace, get_invitation_service
 from app.core.exceptions import AuthenticationError, ConflictError
@@ -52,24 +54,24 @@ class StubInvitationService:
     # matching a literal in two places.
     token = "raw-invitation-token"
 
-    def __init__(self, *, tenant_id):
+    def __init__(self, *, tenant_id: uuid.UUID) -> None:
         self.invitation = _invitation(tenant_id)
-        self.calls = []
+        self.calls: list[Any] = []
 
-    async def issue(self, **kwargs):
+    async def issue(self, **kwargs: Any) -> tuple[Any, ...]:
         self.calls.append(("issue", kwargs))
         return self.invitation, self.token
 
-    async def list_pending(self, **kwargs):
+    async def list_pending(self, **kwargs: Any) -> list[Any]:
         self.calls.append(("list_pending", kwargs))
         return [self.invitation]
 
-    async def revoke(self, **kwargs):
+    async def revoke(self, **kwargs: Any) -> TenantInvitation:
         self.calls.append(("revoke", kwargs))
         self.invitation.status = InvitationStatus.REVOKED
         return self.invitation
 
-    async def accept(self, **kwargs):
+    async def accept(self, **kwargs: Any) -> AcceptedInvitation:
         self.calls.append(("accept", kwargs))
         tenant = Tenant(
             id=self.invitation.tenant_id,
@@ -100,7 +102,9 @@ def service(app: FastAPI, owner: ActiveWorkspace) -> StubInvitationService:
     return stub
 
 
-async def test_issuing_never_returns_the_token(client, service, owner):
+async def test_issuing_never_returns_the_token(
+    client: AsyncClient, service: StubInvitationService, owner: ActiveWorkspace
+) -> None:
     """The raw invitation token does not cross the API boundary (ADR-057).
 
     It used to, because there was no way to deliver it. There is now: `issue`
@@ -124,7 +128,9 @@ async def test_issuing_never_returns_the_token(client, service, owner):
     assert service.calls[0][1]["tenant_id"] == owner.tenant.id
 
 
-async def test_listing_omits_the_token(client, service, owner):
+async def test_listing_omits_the_token(
+    client: AsyncClient, service: StubInvitationService, owner: ActiveWorkspace
+) -> None:
     response = await client.get("/api/v1/invitations")
 
     assert response.status_code == 200
@@ -133,14 +139,18 @@ async def test_listing_omits_the_token(client, service, owner):
     assert "token" not in entries[0]
 
 
-async def test_revoking_reports_the_new_status(client, service, owner):
+async def test_revoking_reports_the_new_status(
+    client: AsyncClient, service: StubInvitationService, owner: ActiveWorkspace
+) -> None:
     response = await client.delete(f"/api/v1/invitations/{service.invitation.id}")
 
     assert response.status_code == 200
     assert response.json()["status"] == "revoked"
 
 
-async def test_a_member_cannot_invite_anybody(client, app: FastAPI, service):
+async def test_a_member_cannot_invite_anybody(
+    client: AsyncClient, app: FastAPI, service: StubInvitationService
+) -> None:
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(TenantRole.MEMBER)
 
     response = await client.post(
@@ -152,7 +162,7 @@ async def test_a_member_cannot_invite_anybody(client, app: FastAPI, service):
     assert service.calls == []
 
 
-async def test_inviting_requires_authentication(client, app: FastAPI):
+async def test_inviting_requires_authentication(client: AsyncClient, app: FastAPI) -> None:
     # No workspace override here: the real dependency chain runs and finds no
     # credentials.
     response = await client.post(
@@ -163,9 +173,11 @@ async def test_inviting_requires_authentication(client, app: FastAPI):
     assert response.status_code == 401
 
 
-async def test_a_duplicate_invitation_conflicts(client, app: FastAPI, service, owner):
+async def test_a_duplicate_invitation_conflicts(
+    client: AsyncClient, app: FastAPI, service: StubInvitationService, owner: ActiveWorkspace
+) -> None:
     class Conflicting(StubInvitationService):
-        async def issue(self, **kwargs):
+        async def issue(self, **kwargs: Any) -> tuple[Any, ...]:
             raise ConflictError("That address already has a pending invitation.")
 
     app.dependency_overrides[get_invitation_service] = lambda: Conflicting(
@@ -180,7 +192,9 @@ async def test_a_duplicate_invitation_conflicts(client, app: FastAPI, service, o
     assert response.status_code == 409
 
 
-async def test_accepting_needs_no_credentials(client, service):
+async def test_accepting_needs_no_credentials(
+    client: AsyncClient, service: StubInvitationService
+) -> None:
     response = await client.post(
         "/api/v1/invitations/accept",
         json={"token": "raw-invitation-token", "password": "correct horse battery staple"},
@@ -194,9 +208,11 @@ async def test_accepting_needs_no_credentials(client, service):
     assert "access_token" not in body
 
 
-async def test_an_unusable_invitation_is_not_described(client, app: FastAPI, owner):
+async def test_an_unusable_invitation_is_not_described(
+    client: AsyncClient, app: FastAPI, owner: ActiveWorkspace
+) -> None:
     class Rejecting(StubInvitationService):
-        async def accept(self, **kwargs):
+        async def accept(self, **kwargs: Any) -> AcceptedInvitation:
             raise AuthenticationError("That invitation is not valid.")
 
     app.dependency_overrides[get_invitation_service] = lambda: Rejecting(tenant_id=owner.tenant.id)

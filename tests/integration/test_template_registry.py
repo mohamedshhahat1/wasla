@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.exceptions import TenantIsolationError, ValidationError
@@ -79,14 +80,14 @@ def _payload(
     return payload
 
 
-async def _tenant(session, *, slug: str) -> Tenant:
+async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _account(session, *, tenant: Tenant, suffix: str = "a") -> WhatsAppAccount:
+async def _account(session: AsyncSession, *, tenant: Tenant, suffix: str = "a") -> WhatsAppAccount:
     account = WhatsAppAccount(
         tenant_id=tenant.id,
         phone_number_id=f"phone-{tenant.slug}-{suffix}",
@@ -98,7 +99,9 @@ async def _account(session, *, tenant: Tenant, suffix: str = "a") -> WhatsAppAcc
     return account
 
 
-def _service(session, *, tenant: Tenant, meta: StubMeta | None = None) -> TemplateService:
+def _service(
+    session: AsyncSession, *, tenant: Tenant, meta: StubMeta | None = None
+) -> TemplateService:
     return TemplateService(
         session=session,
         tenant_id=tenant.id,
@@ -110,7 +113,7 @@ def _service(session, *, tenant: Tenant, meta: StubMeta | None = None) -> Templa
 # ------------------------------------------------------------------ syncing
 
 
-async def test_a_sync_writes_down_what_meta_says(db_session):
+async def test_a_sync_writes_down_what_meta_says(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="sync-writes")
     account = await _account(db_session, tenant=tenant)
     meta = StubMeta(_payload())
@@ -135,7 +138,7 @@ async def test_a_sync_writes_down_what_meta_says(db_session):
     assert stored.synced_at is not None
 
 
-async def test_syncing_twice_updates_the_same_row(db_session):
+async def test_syncing_twice_updates_the_same_row(db_session: AsyncSession) -> None:
     """Identity is name and language within an account, which is Meta's own."""
     tenant = await _tenant(db_session, slug="sync-twice")
     account = await _account(db_session, tenant=tenant)
@@ -158,7 +161,7 @@ async def test_syncing_twice_updates_the_same_row(db_session):
     assert rows[0].status is TemplateStatus.PAUSED
 
 
-async def test_the_same_name_in_two_languages_is_two_templates(db_session):
+async def test_the_same_name_in_two_languages_is_two_templates(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="two-languages")
     account = await _account(db_session, tenant=tenant)
     meta = StubMeta(_payload(language="ar_EG"), _payload(language="en_US"))
@@ -169,7 +172,9 @@ async def test_the_same_name_in_two_languages_is_two_templates(db_session):
     assert outcome.created == 2
 
 
-async def test_a_template_that_vanished_from_meta_is_disabled_not_deleted(db_session):
+async def test_a_template_that_vanished_from_meta_is_disabled_not_deleted(
+    db_session: AsyncSession,
+) -> None:
     """A campaign may reference it, and the reason it stopped working matters."""
     tenant = await _tenant(db_session, slug="withdrawn")
     account = await _account(db_session, tenant=tenant)
@@ -189,7 +194,9 @@ async def test_a_template_that_vanished_from_meta_is_disabled_not_deleted(db_ses
     assert rows[0].rejection_reason == WITHDRAWN_REASON
 
 
-async def test_a_template_with_no_name_is_skipped_rather_than_stored(db_session):
+async def test_a_template_with_no_name_is_skipped_rather_than_stored(
+    db_session: AsyncSession,
+) -> None:
     """Nothing addressable, so nothing a send could ever use."""
     tenant = await _tenant(db_session, slug="nameless")
     account = await _account(db_session, tenant=tenant)
@@ -201,7 +208,7 @@ async def test_a_template_with_no_name_is_skipped_rather_than_stored(db_session)
     assert outcome.created == 1
 
 
-async def test_a_status_meta_invents_later_lands_unsendable(db_session):
+async def test_a_status_meta_invents_later_lands_unsendable(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="new-status")
     account = await _account(db_session, tenant=tenant)
     meta = StubMeta(_payload(status="SOMETHING_NEW", category="ALSO_NEW"))
@@ -217,7 +224,7 @@ async def test_a_status_meta_invents_later_lands_unsendable(db_session):
     assert rows[0].is_sendable is False
 
 
-async def test_a_rejection_reason_is_kept_and_none_is_not(db_session):
+async def test_a_rejection_reason_is_kept_and_none_is_not(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="rejected")
     account = await _account(db_session, tenant=tenant)
     meta = StubMeta(
@@ -238,7 +245,7 @@ async def test_a_rejection_reason_is_kept_and_none_is_not(db_session):
     assert rows["fine"].rejection_reason is None
 
 
-async def test_a_quality_score_is_read_from_either_shape(db_session):
+async def test_a_quality_score_is_read_from_either_shape(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="quality")
     account = await _account(db_session, tenant=tenant)
     meta = StubMeta(
@@ -262,7 +269,7 @@ async def test_a_quality_score_is_read_from_either_shape(db_session):
 # ------------------------------------------------------------------ isolation
 
 
-async def test_one_workspace_cannot_sync_anothers_account(db_session):
+async def test_one_workspace_cannot_sync_anothers_account(db_session: AsyncSession) -> None:
     mine = await _tenant(db_session, slug="mine-templates")
     theirs = await _tenant(db_session, slug="theirs-templates")
     their_account = await _account(db_session, tenant=theirs)
@@ -271,7 +278,7 @@ async def test_one_workspace_cannot_sync_anothers_account(db_session):
         await _service(db_session, tenant=mine, meta=StubMeta(_payload())).sync(their_account.id)
 
 
-async def test_one_workspace_cannot_read_anothers_templates(db_session):
+async def test_one_workspace_cannot_read_anothers_templates(db_session: AsyncSession) -> None:
     mine = await _tenant(db_session, slug="reader-mine")
     theirs = await _tenant(db_session, slug="reader-theirs")
     their_account = await _account(db_session, tenant=theirs)
@@ -286,7 +293,7 @@ async def test_one_workspace_cannot_read_anothers_templates(db_session):
 # ------------------------------------------------------- what a follow-up sees
 
 
-async def _conversation(session, *, tenant: Tenant) -> Conversation:
+async def _conversation(session: AsyncSession, *, tenant: Tenant) -> Conversation:
     account = await _account(session, tenant=tenant, suffix="conv")
     contact = Contact(tenant_id=tenant.id, wa_id="201000000009")
     session.add(contact)
@@ -305,7 +312,9 @@ async def _conversation(session, *, tenant: Tenant) -> Conversation:
     return conversation
 
 
-async def test_a_follow_up_cannot_be_scheduled_on_a_paused_template(db_session):
+async def test_a_follow_up_cannot_be_scheduled_on_a_paused_template(
+    db_session: AsyncSession,
+) -> None:
     """Refused where a person is present to fix it, not hours later."""
     tenant = await _tenant(db_session, slug="follow-up-paused")
     conversation = await _conversation(db_session, tenant=tenant)
@@ -330,7 +339,7 @@ async def test_a_follow_up_cannot_be_scheduled_on_a_paused_template(db_session):
     assert "paused" in str(raised.value)
 
 
-async def test_a_follow_up_on_an_approved_template_is_scheduled(db_session):
+async def test_a_follow_up_on_an_approved_template_is_scheduled(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="follow-up-approved")
     conversation = await _conversation(db_session, tenant=tenant)
     account = await _account(db_session, tenant=tenant, suffix="tpl")
@@ -347,7 +356,7 @@ async def test_a_follow_up_on_an_approved_template_is_scheduled(db_session):
     assert follow_up.template_name == "nudge"
 
 
-async def test_a_template_nobody_has_synced_is_still_allowed(db_session):
+async def test_a_template_nobody_has_synced_is_still_allowed(db_session: AsyncSession) -> None:
     """The asymmetry that keeps an un-synced workspace working as it did."""
     tenant = await _tenant(db_session, slug="follow-up-unsynced")
     conversation = await _conversation(db_session, tenant=tenant)
@@ -365,11 +374,13 @@ async def test_a_template_nobody_has_synced_is_still_allowed(db_session):
 class StubMessaging:
     """Only the window question, which is all the refusal path needs."""
 
-    def window_open(self, conversation) -> bool:
+    def window_open(self, conversation: Conversation) -> bool:
         return False
 
 
-async def test_a_template_withdrawn_after_scheduling_is_skipped_not_sent(db_session):
+async def test_a_template_withdrawn_after_scheduling_is_skipped_not_sent(
+    db_session: AsyncSession,
+) -> None:
     """Meta pauses a template without warning, and hours pass before the send."""
     tenant = await _tenant(db_session, slug="withdrawn-mid-flight")
     conversation = await _conversation(db_session, tenant=tenant)

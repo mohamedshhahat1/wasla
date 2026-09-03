@@ -12,6 +12,8 @@ account-takeover path that no other test in the suite would notice.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from app.db.models.user import User
@@ -23,8 +25,8 @@ EMAIL = "person@example.com"
 PICTURE = "https://lh3.googleusercontent.com/a/abc123=s96-c"
 
 
-def _claims(**overrides) -> GoogleIdentityClaims:
-    values = {
+def _claims(**overrides: Any) -> GoogleIdentityClaims:
+    values: dict[str, Any] = {
         "subject": SUBJECT,
         "email": EMAIL,
         "email_verified": True,
@@ -35,7 +37,7 @@ def _claims(**overrides) -> GoogleIdentityClaims:
     return GoogleIdentityClaims(**values)
 
 
-def _user(**overrides) -> User:
+def _user(**overrides: Any) -> User:
     """A detached `User`, which is all this method touches.
 
     `_refresh_profile` is a static method over an ORM object and a frozen claims
@@ -43,7 +45,7 @@ def _user(**overrides) -> User:
     rather than a stand-in is what makes the column names in the assertions
     below real - a rename would fail here rather than pass against a mock.
     """
-    values = {"email": EMAIL, "full_name": None, "avatar_url": None}
+    values: dict[str, Any] = {"email": EMAIL, "full_name": None, "avatar_url": None}
     values.update(overrides)
     return User(**values)
 
@@ -52,14 +54,14 @@ def _refresh(user: User, claims: GoogleIdentityClaims) -> None:
     GoogleAuthService._refresh_profile(user=user, claims=claims)
 
 
-def test_a_first_refresh_fills_an_empty_profile():
+def test_a_first_refresh_fills_an_empty_profile() -> None:
     user = _user()
     _refresh(user, _claims())
     assert user.full_name == "A Person"
     assert user.avatar_url == PICTURE
 
 
-def test_a_changed_google_profile_is_followed():
+def test_a_changed_google_profile_is_followed() -> None:
     """The point of refreshing at all, rather than only writing at enrolment."""
     user = _user(full_name="An Old Name", avatar_url="https://example.com/old.png")
     _refresh(user, _claims(full_name="A New Name", picture="https://example.com/new.png"))
@@ -71,7 +73,11 @@ def test_a_changed_google_profile_is_followed():
     ("claim", "column", "kept"),
     [("full_name", "full_name", "Keep Me"), ("picture", "avatar_url", PICTURE)],
 )
-def test_an_absent_claim_leaves_the_stored_value_alone(claim, column, kept):
+def test_an_absent_claim_leaves_the_stored_value_alone(
+    claim: str,
+    column: str,
+    kept: str,
+) -> None:
     """Google omitting a field is not somebody clearing it.
 
     Treating the two alike would blank a perfectly good name or avatar every
@@ -84,7 +90,7 @@ def test_an_absent_claim_leaves_the_stored_value_alone(claim, column, kept):
     assert getattr(user, column) == kept
 
 
-def test_the_email_address_is_never_rewritten():
+def test_the_email_address_is_never_rewritten() -> None:
     """The security assertion this file exists for.
 
     `_resume` stops consulting the email claim once an identity row exists, so
@@ -99,7 +105,7 @@ def test_the_email_address_is_never_rewritten():
     assert user.email == "original@example.com"
 
 
-def test_nothing_but_the_two_display_fields_is_touched():
+def test_nothing_but_the_two_display_fields_is_touched() -> None:
     """A guard against the refresh quietly growing.
 
     Named fields rather than a loop, so that adding a column to `User` does not

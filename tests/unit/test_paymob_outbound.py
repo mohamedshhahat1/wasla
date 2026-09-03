@@ -109,7 +109,7 @@ class _Resolver:
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         real = socket.getaddrinfo
 
-        def scripted(host, port, *args: Any, **kwargs: Any):
+        def scripted(host: str, port: int, *args: Any, **kwargs: Any) -> Any:
             if host != self.host:
                 return real(host, port, *args, **kwargs)
             self.calls.append(host)
@@ -132,7 +132,7 @@ def _host_of(region: str) -> str:
 # --- the client itself -------------------------------------------------------
 
 
-async def test_the_provider_builds_the_shared_guarded_client():
+async def test_the_provider_builds_the_shared_guarded_client() -> None:
     """One shared HTTP security policy, not a second one written here.
 
     The guard is `build_guarded_client`'s transport - the same object OpenAI,
@@ -143,7 +143,7 @@ async def test_the_provider_builds_the_shared_guarded_client():
         assert isinstance(client._transport, GuardedTransport)
 
 
-async def test_the_client_does_not_follow_redirects_by_itself():
+async def test_the_client_does_not_follow_redirects_by_itself() -> None:
     """The guard judges one hop.
 
     Paymob's API endpoints are JSON POSTs and do not redirect. If that ever
@@ -155,7 +155,7 @@ async def test_the_client_does_not_follow_redirects_by_itself():
         assert client.follow_redirects is False
 
 
-async def test_the_timeout_covers_every_phase_of_the_request():
+async def test_the_timeout_covers_every_phase_of_the_request() -> None:
     """A provider that accepts a connection and then stalls is the failure that
     matters, so the read timeout has to be set and not only the connect one."""
     async with _provider(timeout_seconds=7.5)._client() as client:
@@ -167,7 +167,7 @@ async def test_the_timeout_covers_every_phase_of_the_request():
 
 
 @pytest.mark.parametrize("region", sorted(REGIONS))
-async def test_every_region_gets_the_same_guarded_client(region):
+async def test_every_region_gets_the_same_guarded_client(region: str) -> None:
     """Regional hosts are configuration, and the guard is not per-host.
 
     `PAYMOB_REGION` selects between four documented API hosts. None of them is
@@ -183,7 +183,10 @@ async def test_every_region_gets_the_same_guarded_client(region):
 
 
 @pytest.mark.parametrize("address", PRIVATE_ANSWERS)
-async def test_a_paymob_host_resolving_inward_is_refused(monkeypatch, address):
+async def test_a_paymob_host_resolving_inward_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    address: str,
+) -> None:
     """The inherited protection, exercised through the real provider.
 
     Paymob's own host, answered by a hostile or misconfigured resolver with an
@@ -208,7 +211,9 @@ async def test_a_paymob_host_resolving_inward_is_refused(monkeypatch, address):
     assert refused.value.retryable is False
 
 
-async def test_a_host_that_turns_private_after_validation_is_refused(monkeypatch):
+async def test_a_host_that_turns_private_after_validation_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """DNS rebinding, inherited.
 
     Public to the first lookup and loopback to every one after. The guard
@@ -223,7 +228,7 @@ async def test_a_host_that_turns_private_after_validation_is_refused(monkeypatch
         await _provider().create_checkout(_request())
 
 
-async def test_a_refusal_names_no_address(monkeypatch):
+async def test_a_refusal_names_no_address(monkeypatch: pytest.MonkeyPatch) -> None:
     """The refusal is the thing being probed for, so it must not describe itself.
 
     A message naming the address that was refused would turn the error into the
@@ -242,7 +247,9 @@ async def test_a_refusal_names_no_address(monkeypatch):
     assert SECRET_KEY not in message
 
 
-async def test_a_misconfigured_plaintext_base_url_is_refused(monkeypatch):
+async def test_a_misconfigured_plaintext_base_url_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Scheme is enforced at the transport, not only where a URL is built.
 
     `REGIONS` holds https constants, so this is reachable only by editing them -
@@ -258,7 +265,7 @@ async def test_a_misconfigured_plaintext_base_url_is_refused(monkeypatch):
 # --- what must not have changed ----------------------------------------------
 
 
-async def test_no_retry_was_added_along_with_the_guard(monkeypatch):
+async def test_no_retry_was_added_along_with_the_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """A guarded client and a retrying client are different concerns.
 
     `_post` creates payment intentions and charges saved cards. One request must
@@ -282,7 +289,9 @@ async def test_no_retry_was_added_along_with_the_guard(monkeypatch):
     assert failure.value.retryable is True
 
 
-async def test_a_timeout_still_becomes_the_provider_error_it_always_did(monkeypatch):
+async def test_a_timeout_still_becomes_the_provider_error_it_always_did(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """No raw httpx exception escapes to a route, guarded or not."""
 
     def stalling(request: httpx.Request) -> httpx.Response:
@@ -297,7 +306,7 @@ async def test_a_timeout_still_becomes_the_provider_error_it_always_did(monkeypa
     assert "Paymob" in str(failure.value)
 
 
-async def test_a_normal_request_still_works_through_the_guarded_construction():
+async def test_a_normal_request_still_works_through_the_guarded_construction() -> None:
     """The control. Every refusal above has to be the guard firing, not the
     provider being broken."""
     captured: list[httpx.Request] = []
@@ -318,7 +327,7 @@ async def test_a_normal_request_still_works_through_the_guarded_construction():
     assert captured[0].headers["Authorization"] == f"Token {SECRET_KEY}"
 
 
-async def test_a_redirect_toward_a_private_host_is_not_followed():
+async def test_a_redirect_toward_a_private_host_is_not_followed() -> None:
     """The escape a redirect would be, closed by not following one at all.
 
     `GuardedTransport` judges the request it is given. If the client followed

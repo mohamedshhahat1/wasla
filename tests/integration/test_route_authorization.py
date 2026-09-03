@@ -19,6 +19,9 @@ this path", and that is what is asked here.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
+from typing import Any
+
 import pytest
 from fastapi.routing import APIRoute, _IncludedRouter
 
@@ -94,7 +97,7 @@ ACCOUNT_OR_PLATFORM: frozenset[str] = frozenset(
 )
 
 
-def _routes(routes):
+def _routes(routes: Sequence[Any]) -> Iterator[APIRoute]:
     """Every `APIRoute`, descending through deferred inclusion.
 
     `_IncludedRouter` is how FastAPI defers `include_router`, and a naive pass
@@ -110,7 +113,7 @@ def _routes(routes):
             yield from _routes(route.routes)
 
 
-def _dependencies(dependant, seen: set[str] | None = None) -> set[str]:
+def _dependencies(dependant: Any, seen: set[str] | None = None) -> set[str]:
     seen = seen if seen is not None else set()
     for sub in dependant.dependencies:
         call = getattr(sub, "call", None)
@@ -127,16 +130,18 @@ def graph() -> dict[tuple[str, str], set[str]]:
     resolved: dict[tuple[str, str], set[str]] = {}
     for route in _routes(app.routes):
         names = _dependencies(route.dependant)
-        for method in route.methods - {"HEAD", "OPTIONS"}:
+        for method in (route.methods or set()) - {"HEAD", "OPTIONS"}:
             resolved[(method, route.path)] = names
     return resolved
 
 
-def _open(graph) -> set[tuple[str, str]]:
+def _open(graph: dict[tuple[str, str], set[str]]) -> set[tuple[str, str]]:
     return {key for key, names in graph.items() if not (names & AUTHENTICATING)}
 
 
-def test_the_open_routes_are_exactly_the_ones_we_meant(graph) -> None:
+def test_the_open_routes_are_exactly_the_ones_we_meant(
+    graph: dict[tuple[str, str], set[str]],
+) -> None:
     """The test this file exists for.
 
     A new route that forgets its guard is open to the internet, and nothing
@@ -150,7 +155,9 @@ def test_the_open_routes_are_exactly_the_ones_we_meant(graph) -> None:
     )
 
 
-def test_no_documented_open_route_has_quietly_been_closed(graph) -> None:
+def test_no_documented_open_route_has_quietly_been_closed(
+    graph: dict[tuple[str, str], set[str]],
+) -> None:
     """The other direction, which keeps the list honest rather than merely safe.
 
     A stale entry here would let a genuinely open route be added later under a
@@ -161,12 +168,14 @@ def test_no_documented_open_route_has_quietly_been_closed(graph) -> None:
     assert not stale, f"documented as open but now authenticated: {sorted(stale)}"
 
 
-def test_the_documented_count_matches_the_graph(graph) -> None:
+def test_the_documented_count_matches_the_graph(graph: dict[tuple[str, str], set[str]]) -> None:
     """`docs/AUTHORIZATION.md` states a number. This is that number."""
     assert len(_open(graph)) == 17
 
 
-def test_every_other_route_resolves_a_workspace_or_is_an_account_route(graph) -> None:
+def test_every_other_route_resolves_a_workspace_or_is_an_account_route(
+    graph: dict[tuple[str, str], set[str]],
+) -> None:
     """The structural guard against the commonest authorization mistake.
 
     A route that resolves `get_current_user` alone is authenticated but not
@@ -189,7 +198,9 @@ def test_every_other_route_resolves_a_workspace_or_is_an_account_route(graph) ->
     )
 
 
-def test_every_platform_route_is_guarded_by_a_platform_role(graph) -> None:
+def test_every_platform_route_is_guarded_by_a_platform_role(
+    graph: dict[tuple[str, str], set[str]],
+) -> None:
     """Platform authority is separate from workspace authority.
 
     A `/platform/` route resolving only `get_current_user` would be reachable
@@ -205,7 +216,7 @@ def test_every_platform_route_is_guarded_by_a_platform_role(graph) -> None:
     assert not unguarded, f"platform routes without a role guard: {unguarded}"
 
 
-def test_no_open_route_reaches_a_workspace_service(graph) -> None:
+def test_no_open_route_reaches_a_workspace_service(graph: dict[tuple[str, str], set[str]]) -> None:
     """An open route must not be able to act inside a tenant at all.
 
     The webhooks resolve a workspace *after* verifying a signature, from an

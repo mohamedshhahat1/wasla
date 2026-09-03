@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -70,7 +73,7 @@ def _conversation() -> Conversation:
     )
 
 
-def _message(**overrides) -> Message:
+def _message(**overrides: Any) -> Message:
     values = {
         "id": MESSAGE_ID,
         "tenant_id": TENANT_ID,
@@ -91,15 +94,23 @@ class StubInbox:
     """Records the paging arguments the route passed through."""
 
     def __init__(self) -> None:
-        self.conversation_calls: list[dict] = []
-        self.message_calls: list[dict] = []
+        self.conversation_calls: list[dict[str, Any]] = []
+        self.message_calls: list[dict[str, Any]] = []
         self.next_cursor: str | None = NEXT_CURSOR
 
-    async def list_conversations(self, *, limit=50, cursor=None, priority=None):
+    async def list_conversations(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        priority: ConversationPriority | None = None,
+    ) -> Page[Any]:
         self.conversation_calls.append({"limit": limit, "cursor": cursor, "priority": priority})
         return Page(items=[_conversation()], next_cursor=self.next_cursor)
 
-    async def list_messages(self, *, conversation_id, limit=50, cursor=None):
+    async def list_messages(
+        self, *, conversation_id: uuid.UUID, limit: int = 50, cursor: str | None = None
+    ) -> Page[Any]:
         self.message_calls.append(
             {"conversation_id": conversation_id, "limit": limit, "cursor": cursor}
         )
@@ -107,7 +118,7 @@ class StubInbox:
 
 
 class StubMessaging:
-    def window_open(self, conversation) -> bool:
+    def window_open(self, conversation: Conversation) -> bool:
         return True
 
 
@@ -115,9 +126,14 @@ class StubSentiment:
     """Records the priority a route asked for, and hands the row back."""
 
     def __init__(self) -> None:
-        self.calls: list[dict] = []
+        self.calls: list[dict[str, Any]] = []
 
-    async def set_priority(self, *, conversation_id, priority):
+    async def set_priority(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        priority: ConversationPriority,
+    ) -> Conversation:
         self.calls.append({"conversation_id": conversation_id, "priority": priority})
         conversation = _conversation()
         conversation.priority = priority
@@ -125,7 +141,7 @@ class StubSentiment:
 
 
 @pytest.fixture
-def inbox(app) -> StubInbox:
+def inbox(app: FastAPI) -> StubInbox:
     stub = StubInbox()
     app.dependency_overrides[get_inbox_service] = lambda: stub
     app.dependency_overrides[get_messaging_service] = lambda: StubMessaging()
@@ -148,13 +164,15 @@ def inbox(app) -> StubInbox:
 
 
 @pytest.fixture
-def sentiment(app, inbox) -> StubSentiment:
+def sentiment(app: FastAPI, inbox: StubInbox) -> StubSentiment:
     stub = StubSentiment()
     app.dependency_overrides[get_sentiment_service] = lambda: stub
     return stub
 
 
-async def test_the_conversation_list_answers_a_page_not_a_bare_array(client, inbox):
+async def test_the_conversation_list_answers_a_page_not_a_bare_array(
+    client: AsyncClient, inbox: StubInbox
+) -> None:
     response = await client.get(PATH)
 
     assert response.status_code == 200
@@ -164,13 +182,15 @@ async def test_the_conversation_list_answers_a_page_not_a_bare_array(client, inb
     assert body["next_cursor"] == NEXT_CURSOR
 
 
-async def test_the_cursor_reaches_the_service(client, inbox):
+async def test_the_cursor_reaches_the_service(client: AsyncClient, inbox: StubInbox) -> None:
     await client.get(PATH, params={"cursor": NEXT_CURSOR, "limit": 25})
 
     assert inbox.conversation_calls == [{"limit": 25, "cursor": NEXT_CURSOR, "priority": None}]
 
 
-async def test_an_exhausted_collection_reports_a_null_cursor(client, inbox):
+async def test_an_exhausted_collection_reports_a_null_cursor(
+    client: AsyncClient, inbox: StubInbox
+) -> None:
     inbox.next_cursor = None
 
     body = (await client.get(PATH)).json()
@@ -178,7 +198,7 @@ async def test_an_exhausted_collection_reports_a_null_cursor(client, inbox):
     assert body["next_cursor"] is None
 
 
-async def test_the_message_list_answers_a_page(client, inbox):
+async def test_the_message_list_answers_a_page(client: AsyncClient, inbox: StubInbox) -> None:
     response = await client.get(f"{PATH}/{CONVERSATION_ID}/messages")
 
     assert response.status_code == 200
@@ -187,7 +207,9 @@ async def test_the_message_list_answers_a_page(client, inbox):
     assert body["items"][0]["id"] == str(MESSAGE_ID)
 
 
-async def test_the_message_cursor_reaches_the_service(client, inbox):
+async def test_the_message_cursor_reaches_the_service(
+    client: AsyncClient, inbox: StubInbox
+) -> None:
     await client.get(
         f"{PATH}/{CONVERSATION_ID}/messages",
         params={"cursor": NEXT_CURSOR, "limit": 10},
@@ -198,19 +220,23 @@ async def test_the_message_cursor_reaches_the_service(client, inbox):
     assert inbox.message_calls[0]["conversation_id"] == CONVERSATION_ID
 
 
-async def test_an_over_long_cursor_is_refused_before_it_is_decoded(client, inbox):
+async def test_an_over_long_cursor_is_refused_before_it_is_decoded(
+    client: AsyncClient, inbox: StubInbox
+) -> None:
     response = await client.get(PATH, params={"cursor": "x" * (MAX_CURSOR_LENGTH + 1)})
 
     assert response.status_code == 422
     assert inbox.conversation_calls == []
 
 
-async def test_a_limit_beyond_the_bound_is_refused(client, inbox):
+async def test_a_limit_beyond_the_bound_is_refused(client: AsyncClient, inbox: StubInbox) -> None:
     assert (await client.get(PATH, params={"limit": 101})).status_code == 422
     assert (await client.get(PATH, params={"limit": 0})).status_code == 422
 
 
-async def test_a_template_message_reports_its_template_and_no_body(client, inbox, monkeypatch):
+async def test_a_template_message_reports_its_template_and_no_body(
+    client: AsyncClient, inbox: StubInbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
     templated = _message(
         kind=MessageKind.TEMPLATE,
         body=None,
@@ -218,7 +244,9 @@ async def test_a_template_message_reports_its_template_and_no_body(client, inbox
         template_language="ar_EG",
     )
 
-    async def list_messages(*, conversation_id, limit=50, cursor=None):
+    async def list_messages(
+        *, conversation_id: uuid.UUID, limit: int = 50, cursor: str | None = None
+    ) -> Page[Any]:
         return Page(items=[templated], next_cursor=None)
 
     monkeypatch.setattr(inbox, "list_messages", list_messages)
@@ -232,7 +260,7 @@ async def test_a_template_message_reports_its_template_and_no_body(client, inbox
     assert message["template_language"] == "ar_EG"
 
 
-async def test_a_text_message_reports_no_template(client, inbox):
+async def test_a_text_message_reports_no_template(client: AsyncClient, inbox: StubInbox) -> None:
     body = (await client.get(f"{PATH}/{CONVERSATION_ID}/messages")).json()
 
     message = body["items"][0]
@@ -240,7 +268,9 @@ async def test_a_text_message_reports_no_template(client, inbox):
     assert message["template_language"] is None
 
 
-async def test_a_conversation_reports_how_the_customer_sounds(client, inbox):
+async def test_a_conversation_reports_how_the_customer_sounds(
+    client: AsyncClient, inbox: StubInbox
+) -> None:
     body = (await client.get(PATH)).json()
 
     conversation = body["items"][0]
@@ -249,20 +279,24 @@ async def test_a_conversation_reports_how_the_customer_sounds(client, inbox):
     assert conversation["intent"] is None
 
 
-async def test_the_priority_filter_reaches_the_service(client, inbox):
+async def test_the_priority_filter_reaches_the_service(
+    client: AsyncClient, inbox: StubInbox
+) -> None:
     await client.get(PATH, params={"priority": "urgent"})
 
     assert inbox.conversation_calls[0]["priority"] is ConversationPriority.URGENT
 
 
-async def test_a_priority_that_is_not_one_of_ours_is_refused(client, inbox):
+async def test_a_priority_that_is_not_one_of_ours_is_refused(
+    client: AsyncClient, inbox: StubInbox
+) -> None:
     response = await client.get(PATH, params={"priority": "catastrophic"})
 
     assert response.status_code == 422
     assert inbox.conversation_calls == []
 
 
-async def test_priority_can_be_set_by_hand(client, sentiment):
+async def test_priority_can_be_set_by_hand(client: AsyncClient, sentiment: StubSentiment) -> None:
     response = await client.post(
         f"{PATH}/{CONVERSATION_ID}/priority",
         json={"priority": "normal"},
@@ -274,7 +308,9 @@ async def test_priority_can_be_set_by_hand(client, sentiment):
     assert sentiment.calls[0]["conversation_id"] == CONVERSATION_ID
 
 
-async def test_an_unknown_priority_is_refused_before_the_service(client, sentiment):
+async def test_an_unknown_priority_is_refused_before_the_service(
+    client: AsyncClient, sentiment: StubSentiment
+) -> None:
     response = await client.post(
         f"{PATH}/{CONVERSATION_ID}/priority",
         json={"priority": "on fire"},

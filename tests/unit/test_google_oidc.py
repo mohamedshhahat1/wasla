@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -69,7 +70,7 @@ def _jwks(*keys: tuple[str, rsa.RSAPrivateKey]) -> dict[str, Any]:
     return {"keys": entries}
 
 
-def _claims(**overrides):
+def _claims(**overrides: Any) -> dict[str, Any]:
     now = datetime.now(UTC)
     payload = {
         "iss": ISSUER,
@@ -94,11 +95,17 @@ class _Absent:
 _ABSENT = _Absent()
 
 
-def _sign(payload, *, key=_SIGNING_KEY, kid=KID, algorithm="RS256"):
+def _sign(
+    payload: dict[str, Any],
+    *,
+    key: rsa.RSAPrivateKey | str = _SIGNING_KEY,
+    kid: str = KID,
+    algorithm: str = "RS256",
+) -> str:
     return jwt.encode(payload, key, algorithm=algorithm, headers={"kid": kid})
 
 
-def _unsigned(payload):
+def _unsigned(payload: dict[str, Any]) -> str:
     """An `alg=none` token, assembled by hand.
 
     Built from base64 rather than through PyJWT on purpose: whether a given
@@ -106,7 +113,7 @@ def _unsigned(payload):
     under test. Whether this code refuses one is.
     """
 
-    def part(data):
+    def part(data: dict[str, Any]) -> str:
         return base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
 
     return f"{part({'alg': 'none', 'kid': KID})}.{part(payload)}."
@@ -119,25 +126,31 @@ class _FixedKeyRing(GoogleKeyRing):
     entry repeats, so a test can say "succeed once, then always fail".
     """
 
-    def __init__(self, *responses: Any):
+    def __init__(self, *responses: Any) -> None:
         super().__init__()
         self.responses = list(responses)
         self.fetches = 0
 
-    async def _fetch(self):
+    async def _fetch(self) -> dict[str, Any]:
         self.fetches += 1
         item = self.responses[min(self.fetches - 1, len(self.responses) - 1)]
         if isinstance(item, Exception):
             raise item
-        return item
+        document: dict[str, Any] = item
+        return document
 
 
-def _verifier(*responses: Any):
+def _verifier(*responses: Any) -> tuple[GoogleIdTokenVerifier, _FixedKeyRing]:
     ring = _FixedKeyRing(*(responses or (_jwks((KID, _SIGNING_KEY)),)))
     return GoogleIdTokenVerifier(client_id=CLIENT_ID, key_ring=ring), ring
 
 
-async def _reject(verifier, token, *, nonce=NONCE):
+async def _reject(
+    verifier: GoogleIdTokenVerifier,
+    token: str,
+    *,
+    nonce: str = NONCE,
+) -> str:
     with pytest.raises(GoogleTokenInvalidError) as caught:
         await verifier.verify(id_token=token, nonce=nonce)
     return caught.value.reason
@@ -146,7 +159,7 @@ async def _reject(verifier, token, *, nonce=NONCE):
 # --- the happy path, so the rejections below mean something -------------------
 
 
-async def test_a_genuine_token_is_accepted():
+async def test_a_genuine_token_is_accepted() -> None:
     verifier, _ = _verifier()
     claims = await verifier.verify(id_token=_sign(_claims()), nonce=NONCE)
     assert claims.subject == SUBJECT
@@ -155,7 +168,7 @@ async def test_a_genuine_token_is_accepted():
     assert claims.full_name == "A Person"
 
 
-async def test_the_second_google_issuer_spelling_is_accepted():
+async def test_the_second_google_issuer_spelling_is_accepted() -> None:
     # Google issues both. A verifier that delegated `iss` to PyJWT's single
     # `issuer=` parameter would refuse half of Google's real tokens.
     assert "accounts.google.com" in GOOGLE_ISSUERS
@@ -170,12 +183,12 @@ async def test_the_second_google_issuer_spelling_is_accepted():
 # --- cryptography -------------------------------------------------------------
 
 
-async def test_a_token_signed_by_another_key_is_refused():
+async def test_a_token_signed_by_another_key_is_refused() -> None:
     verifier, _ = _verifier()
     assert await _reject(verifier, _sign(_claims(), key=_ATTACKER_KEY)) == "bad_signature"
 
 
-async def test_a_forgery_with_its_own_key_document_is_refused():
+async def test_a_forgery_with_its_own_key_document_is_refused() -> None:
     """The attack in its real shape.
 
     Somebody who can serve a key document signs a token with their own key and
@@ -188,7 +201,7 @@ async def test_a_forgery_with_its_own_key_document_is_refused():
     assert await _reject(verifier, forged) == "bad_signature"
 
 
-async def test_an_unsigned_token_is_refused_without_fetching_keys():
+async def test_an_unsigned_token_is_refused_without_fetching_keys() -> None:
     verifier, ring = _verifier()
     assert await _reject(verifier, _unsigned(_claims())) == "unexpected_algorithm"
     # The algorithm is checked before a key is looked up, so `alg=none` cannot
@@ -196,19 +209,19 @@ async def test_an_unsigned_token_is_refused_without_fetching_keys():
     assert ring.fetches == 0
 
 
-async def test_an_hs256_token_pretending_to_be_google_is_refused():
+async def test_an_hs256_token_pretending_to_be_google_is_refused() -> None:
     verifier, ring = _verifier()
     confused = jwt.encode(_claims(), "a-shared-secret", algorithm="HS256", headers={"kid": KID})
     assert await _reject(verifier, confused) == "unexpected_algorithm"
     assert ring.fetches == 0
 
 
-async def test_a_malformed_token_is_refused():
+async def test_a_malformed_token_is_refused() -> None:
     verifier, _ = _verifier()
     assert await _reject(verifier, "not-a-jwt") == "malformed"
 
 
-async def test_a_token_without_a_key_id_is_refused():
+async def test_a_token_without_a_key_id_is_refused() -> None:
     verifier, _ = _verifier()
     token = jwt.encode(_claims(), _SIGNING_KEY, algorithm="RS256")
     assert await _reject(verifier, token) == "missing_key_id"
@@ -217,19 +230,19 @@ async def test_a_token_without_a_key_id_is_refused():
 # --- claims -------------------------------------------------------------------
 
 
-async def test_a_foreign_issuer_is_refused():
+async def test_a_foreign_issuer_is_refused() -> None:
     verifier, _ = _verifier()
     token = _sign(_claims(iss="https://accounts.google.com.evil.example"))
     assert await _reject(verifier, token) == "wrong_issuer"
 
 
-async def test_a_token_for_another_audience_is_refused():
+async def test_a_token_for_another_audience_is_refused() -> None:
     verifier, _ = _verifier()
     other = "9999-other.apps.googleusercontent.com"
     assert await _reject(verifier, _sign(_claims(aud=other))) == "wrong_audience"
 
 
-async def test_an_expired_token_is_refused():
+async def test_an_expired_token_is_refused() -> None:
     verifier, _ = _verifier()
     stale = datetime.now(UTC) - timedelta(hours=2)
     token = _sign(
@@ -242,27 +255,27 @@ async def test_an_expired_token_is_refused():
 
 
 @pytest.mark.parametrize("claim", ["iss", "aud", "exp", "iat", "sub"])
-async def test_a_required_claim_cannot_be_missing(claim):
+async def test_a_required_claim_cannot_be_missing(claim: str) -> None:
     verifier, _ = _verifier()
     assert await _reject(verifier, _sign(_claims(**{claim: _ABSENT}))) == "missing_claim"
 
 
-async def test_an_empty_subject_is_refused():
+async def test_an_empty_subject_is_refused() -> None:
     verifier, _ = _verifier()
     assert await _reject(verifier, _sign(_claims(sub="   "))) == "missing_subject"
 
 
-async def test_a_token_without_an_email_is_refused():
+async def test_a_token_without_an_email_is_refused() -> None:
     verifier, _ = _verifier()
     assert await _reject(verifier, _sign(_claims(email=_ABSENT))) == "missing_email"
 
 
-async def test_a_missing_nonce_is_refused():
+async def test_a_missing_nonce_is_refused() -> None:
     verifier, _ = _verifier()
     assert await _reject(verifier, _sign(_claims(nonce=_ABSENT))) == "missing_nonce"
 
 
-async def test_a_nonce_from_another_flow_is_refused():
+async def test_a_nonce_from_another_flow_is_refused() -> None:
     """Replay, in the only form that matters.
 
     A token genuinely issued by Google for this client, presented to a flow that
@@ -274,7 +287,7 @@ async def test_a_nonce_from_another_flow_is_refused():
     assert await _reject(verifier, token, nonce=NONCE) == "wrong_nonce"
 
 
-async def test_a_replayed_token_fails_against_a_fresh_flow():
+async def test_a_replayed_token_fails_against_a_fresh_flow() -> None:
     verifier, _ = _verifier()
     token = _sign(_claims())
     assert (await verifier.verify(id_token=token, nonce=NONCE)).subject == SUBJECT
@@ -283,14 +296,14 @@ async def test_a_replayed_token_fails_against_a_fresh_flow():
     assert await _reject(verifier, token, nonce="the-next-flows-nonce") == "wrong_nonce"
 
 
-async def test_a_string_email_verified_does_not_count_as_verified():
+async def test_a_string_email_verified_does_not_count_as_verified() -> None:
     """`"false"` is truthy in Python, which is the whole reason for `is True`."""
     verifier, _ = _verifier()
     claims = await verifier.verify(id_token=_sign(_claims(email_verified="false")), nonce=NONCE)
     assert claims.email_verified is False
 
 
-async def test_an_unverified_address_is_reported_as_unverified():
+async def test_an_unverified_address_is_reported_as_unverified() -> None:
     verifier, _ = _verifier()
     claims = await verifier.verify(id_token=_sign(_claims(email_verified=False)), nonce=NONCE)
     assert claims.email_verified is False
@@ -299,7 +312,7 @@ async def test_an_unverified_address_is_reported_as_unverified():
 # --- the key ring -------------------------------------------------------------
 
 
-async def test_an_unknown_key_id_triggers_one_refresh_then_refuses():
+async def test_an_unknown_key_id_triggers_one_refresh_then_refuses() -> None:
     verifier, ring = _verifier(_jwks((KID, _SIGNING_KEY)))
     token = _sign(_claims(), kid="a-key-google-never-published")
     assert await _reject(verifier, token) == "unknown_key_id"
@@ -314,7 +327,7 @@ def _rotating_ring() -> _FixedKeyRing:
     )
 
 
-async def test_an_unknown_key_id_does_not_refetch_within_the_refresh_window():
+async def test_an_unknown_key_id_does_not_refetch_within_the_refresh_window() -> None:
     """The documented cost of the refresh bound, asserted rather than assumed.
 
     `_refresh_allowed` exists to stop a stream of tokens carrying invented key
@@ -336,7 +349,7 @@ async def test_an_unknown_key_id_does_not_refetch_within_the_refresh_window():
     assert ring.fetches == 1
 
 
-async def test_a_rotated_key_is_picked_up_once_the_refresh_window_passes():
+async def test_a_rotated_key_is_picked_up_once_the_refresh_window_passes() -> None:
     """Google rotates without notice, and the bound above must not be a wall.
 
     The other half of the trade: once a fetch is permitted again, a key that
@@ -353,14 +366,14 @@ async def test_a_rotated_key_is_picked_up_once_the_refresh_window_passes():
     assert ring.fetches == 2
 
 
-async def test_a_known_key_is_served_from_cache():
+async def test_a_known_key_is_served_from_cache() -> None:
     verifier, ring = _verifier(_jwks((KID, _SIGNING_KEY)))
     for _ in range(3):
         await verifier.verify(id_token=_sign(_claims()), nonce=NONCE)
     assert ring.fetches == 1
 
 
-async def test_keys_are_refetched_once_they_are_no_longer_fresh():
+async def test_keys_are_refetched_once_they_are_no_longer_fresh() -> None:
     ring = _FixedKeyRing(_jwks((KID, _SIGNING_KEY)))
     verifier = GoogleIdTokenVerifier(client_id=CLIENT_ID, key_ring=ring)
     await verifier.verify(id_token=_sign(_claims()), nonce=NONCE)
@@ -371,7 +384,7 @@ async def test_keys_are_refetched_once_they_are_no_longer_fresh():
     assert ring.fetches == 2
 
 
-async def test_a_usable_cache_survives_google_being_unreachable():
+async def test_a_usable_cache_survives_google_being_unreachable() -> None:
     """The stale policy, first half: a blip must not take sign-in down."""
     ring = _FixedKeyRing(
         _jwks((KID, _SIGNING_KEY)),
@@ -387,7 +400,7 @@ async def test_a_usable_cache_survives_google_being_unreachable():
     assert ring.fetches == 2
 
 
-async def test_a_cache_past_the_stale_window_is_not_used():
+async def test_a_cache_past_the_stale_window_is_not_used() -> None:
     """The stale policy, second half - the part a TTL-only cache gets wrong.
 
     A key old enough that Google could have withdrawn it without this process
@@ -407,13 +420,13 @@ async def test_a_cache_past_the_stale_window_is_not_used():
         await verifier.verify(id_token=_sign(_claims()), nonce=NONCE)
 
 
-async def test_nothing_can_be_verified_when_the_keys_were_never_fetched():
+async def test_nothing_can_be_verified_when_the_keys_were_never_fetched() -> None:
     verifier, _ = _verifier(GoogleKeysUnavailableError("down"))
     with pytest.raises(GoogleKeysUnavailableError):
         await verifier.verify(id_token=_sign(_claims()), nonce=NONCE)
 
 
-async def test_refresh_attempts_are_bounded():
+async def test_refresh_attempts_are_bounded() -> None:
     """A stream of forged key ids must not become a load generator."""
     ring = _FixedKeyRing(_jwks((KID, _SIGNING_KEY)))
     verifier = GoogleIdTokenVerifier(client_id=CLIENT_ID, key_ring=ring)
@@ -432,7 +445,9 @@ async def test_refresh_attempts_are_bounded():
     ],
     ids=["empty", "no-keys", "incomplete-key", "unusable-key"],
 )
-async def test_a_malformed_key_document_verifies_nothing(document):
+async def test_a_malformed_key_document_verifies_nothing(
+    document: dict[str, Any],
+) -> None:
     verifier, _ = _verifier(document)
     with pytest.raises(GoogleKeysUnavailableError):
         await verifier.verify(id_token=_sign(_claims()), nonce=NONCE)
@@ -442,50 +457,56 @@ async def test_a_malformed_key_document_verifies_nothing(document):
 
 
 class _FakeStream:
-    def __init__(self, *, chunks=(), error=None, http_error=False):
+    def __init__(
+        self,
+        *,
+        chunks: Sequence[bytes] = (),
+        error: Exception | None = None,
+        http_error: bool = False,
+    ) -> None:
         self._chunks = list(chunks)
         self._error = error
         self._http_error = http_error
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> _FakeStream:
         if self._error is not None:
             raise self._error
         return self
 
-    async def __aexit__(self, *_: object):
+    async def __aexit__(self, *_: object) -> bool:
         return False
 
-    def raise_for_status(self):
+    def raise_for_status(self) -> None:
         if self._http_error:
             raise httpx.HTTPError("refused")
 
-    async def aiter_bytes(self):
+    async def aiter_bytes(self) -> AsyncIterator[bytes]:
         for chunk in self._chunks:
             yield chunk
 
 
 class _FakeHttpClient:
-    def __init__(self, stream):
+    def __init__(self, stream: _FakeStream) -> None:
         self._stream = stream
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> _FakeHttpClient:
         return self
 
-    async def __aexit__(self, *_: object):
+    async def __aexit__(self, *_: object) -> bool:
         return False
 
-    def stream(self, _method, _url):
+    def stream(self, _method: str, _url: str) -> _FakeStream:
         return self._stream
 
 
-def _install(monkeypatch, stream):
+def _install(monkeypatch: pytest.MonkeyPatch, stream: _FakeStream) -> None:
     monkeypatch.setattr(
         "app.integrations.google.oidc.build_guarded_client",
         lambda *, timeout: _FakeHttpClient(stream),
     )
 
 
-async def test_the_real_fetch_reads_a_key_document(monkeypatch):
+async def test_the_real_fetch_reads_a_key_document(monkeypatch: pytest.MonkeyPatch) -> None:
     document = json.dumps(_jwks((KID, _SIGNING_KEY))).encode()
     _install(monkeypatch, _FakeStream(chunks=[document]))
     verifier = GoogleIdTokenVerifier(client_id=CLIENT_ID, key_ring=GoogleKeyRing())
@@ -493,32 +514,36 @@ async def test_the_real_fetch_reads_a_key_document(monkeypatch):
     assert claims.subject == SUBJECT
 
 
-async def test_a_timeout_fetching_keys_is_not_a_rejected_login(monkeypatch):
+async def test_a_timeout_fetching_keys_is_not_a_rejected_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _install(monkeypatch, _FakeStream(error=httpx.TimeoutException("slow")))
     with pytest.raises(GoogleKeysUnavailableError):
         await GoogleKeyRing().key_for(KID)
 
 
-async def test_an_error_response_fetching_keys_is_handled(monkeypatch):
+async def test_an_error_response_fetching_keys_is_handled(monkeypatch: pytest.MonkeyPatch) -> None:
     _install(monkeypatch, _FakeStream(http_error=True))
     with pytest.raises(GoogleKeysUnavailableError):
         await GoogleKeyRing().key_for(KID)
 
 
-async def test_an_oversized_key_document_is_abandoned(monkeypatch):
+async def test_an_oversized_key_document_is_abandoned(monkeypatch: pytest.MonkeyPatch) -> None:
     """The read is bounded, not merely checked after the fact."""
     _install(monkeypatch, _FakeStream(chunks=[b"x" * (MAX_JWKS_BYTES + 1)]))
     with pytest.raises(GoogleKeysUnavailableError):
         await GoogleKeyRing().key_for(KID)
 
 
-async def test_a_key_document_that_is_not_json_is_handled(monkeypatch):
+async def test_a_key_document_that_is_not_json_is_handled(monkeypatch: pytest.MonkeyPatch) -> None:
     _install(monkeypatch, _FakeStream(chunks=[b"<html>an error page</html>"]))
     with pytest.raises(GoogleKeysUnavailableError):
         await GoogleKeyRing().key_for(KID)
 
 
-async def test_a_key_document_that_is_not_an_object_is_handled(monkeypatch):
+async def test_a_key_document_that_is_not_an_object_is_handled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _install(monkeypatch, _FakeStream(chunks=[b'["not", "an", "object"]']))
     with pytest.raises(GoogleKeysUnavailableError):
         await GoogleKeyRing().key_for(KID)
@@ -531,7 +556,7 @@ async def test_a_key_document_that_is_not_an_object_is_handled(monkeypatch):
 # what may reach `users.avatar_url`, because nothing downstream re-checks it.
 
 
-async def test_a_picture_is_carried_through():
+async def test_a_picture_is_carried_through() -> None:
     verifier, _ = _verifier()
     claims = await verifier.verify(id_token=_sign(_claims()), nonce=NONCE)
     assert claims.picture == PICTURE
@@ -549,7 +574,7 @@ async def test_a_picture_is_carried_through():
         {"url": "https://example.com/a.png"},
     ],
 )
-async def test_a_missing_or_untyped_picture_becomes_none(value):
+async def test_a_missing_or_untyped_picture_becomes_none(value: object) -> None:
     """Absent and unusable are the same answer: a person with no picture."""
     verifier, _ = _verifier()
     claims = await verifier.verify(id_token=_sign(_claims(picture=value)), nonce=NONCE)
@@ -570,7 +595,7 @@ async def test_a_missing_or_untyped_picture_becomes_none(value):
         "not a url at all",
     ],
 )
-async def test_a_hostile_picture_url_is_refused_rather_than_stored(hostile):
+async def test_a_hostile_picture_url_is_refused_rather_than_stored(hostile: str) -> None:
     """The case this validation exists for.
 
     Google signs what the account says; an ID token is not a promise that every
@@ -586,7 +611,7 @@ async def test_a_hostile_picture_url_is_refused_rather_than_stored(hostile):
     assert claims.subject == SUBJECT
 
 
-async def test_an_overlong_picture_url_is_refused():
+async def test_an_overlong_picture_url_is_refused() -> None:
     """Longer than the column, so refusing here is what stops a write error."""
     long_url = "https://lh3.googleusercontent.com/" + ("a" * MAX_PICTURE_URL_LENGTH)
     verifier, _ = _verifier()
@@ -594,7 +619,7 @@ async def test_an_overlong_picture_url_is_refused():
     assert claims.picture is None
 
 
-async def test_a_picture_at_the_length_limit_is_kept():
+async def test_a_picture_at_the_length_limit_is_kept() -> None:
     """The boundary, so the cap cannot quietly become off-by-one."""
     prefix = "https://lh3.googleusercontent.com/"
     exact = prefix + "a" * (MAX_PICTURE_URL_LENGTH - len(prefix))
@@ -617,7 +642,7 @@ async def test_a_picture_at_the_length_limit_is_kept():
 # would deny a login over a display name.
 
 
-def test_the_bounds_are_the_columns_and_not_a_second_copy_of_them():
+def test_the_bounds_are_the_columns_and_not_a_second_copy_of_them() -> None:
     """The check and the column must be one number.
 
     Two numbers that are meant to be equal and are written down separately are
@@ -632,7 +657,7 @@ def test_the_bounds_are_the_columns_and_not_a_second_copy_of_them():
     assert MAX_PICTURE_URL_LENGTH == MAX_AVATAR_URL_LENGTH
 
 
-async def test_an_oversized_subject_is_refused_rather_than_shortened():
+async def test_an_oversized_subject_is_refused_rather_than_shortened() -> None:
     """The one claim where truncation would be an authentication bypass.
 
     The subject is what every login looks an account up by. Two subjects
@@ -647,7 +672,7 @@ async def test_an_oversized_subject_is_refused_rather_than_shortened():
     assert reason == "subject_too_long"
 
 
-async def test_a_subject_at_the_limit_is_accepted_whole():
+async def test_a_subject_at_the_limit_is_accepted_whole() -> None:
     """The boundary, and that nothing was trimmed on the way through."""
     exact = "9" * MAX_SUBJECT_LENGTH
     verifier, _ = _verifier()
@@ -657,7 +682,7 @@ async def test_a_subject_at_the_limit_is_accepted_whole():
     assert claims.subject == exact
 
 
-async def test_two_oversized_subjects_cannot_be_shortened_onto_one_identity():
+async def test_two_oversized_subjects_cannot_be_shortened_onto_one_identity() -> None:
     """The collision the refusal exists to prevent, written as a test.
 
     Two distinct Google accounts sharing a long common prefix. Under truncation
@@ -673,7 +698,7 @@ async def test_two_oversized_subjects_cannot_be_shortened_onto_one_identity():
     assert first == second == "subject_too_long"
 
 
-async def test_an_oversized_email_is_refused_rather_than_shortened():
+async def test_an_oversized_email_is_refused_rather_than_shortened() -> None:
     """At enrolment the address *is* the account, and the collision check
     compares it - so a shortened one could be matched against somebody else's."""
     verifier, _ = _verifier()
@@ -683,7 +708,7 @@ async def test_an_oversized_email_is_refused_rather_than_shortened():
     assert await _reject(verifier, _sign(_claims(email=oversized))) == "email_too_long"
 
 
-async def test_an_email_is_measured_in_the_form_it_will_be_stored_in():
+async def test_an_email_is_measured_in_the_form_it_will_be_stored_in() -> None:
     """Lower-casing can lengthen a string, and the stored form is lower-cased.
 
     `str.lower()` maps U+0130 to two characters, so an address inside the bound
@@ -700,7 +725,7 @@ async def test_an_email_is_measured_in_the_form_it_will_be_stored_in():
     assert await _reject(verifier, _sign(_claims(email=address))) == "email_too_long"
 
 
-async def test_an_oversized_name_is_shortened_and_the_login_still_succeeds():
+async def test_an_oversized_name_is_shortened_and_the_login_still_succeeds() -> None:
     """The opposite call, for the reason `picture` degrades rather than raising.
 
     Nothing is authorized by a display name, no lookup compares one, and no
@@ -721,7 +746,7 @@ async def test_an_oversized_name_is_shortened_and_the_login_still_succeeds():
     assert claims.email == EMAIL
 
 
-async def test_a_name_at_the_limit_is_kept_whole():
+async def test_a_name_at_the_limit_is_kept_whole() -> None:
     """The boundary, so the cap cannot quietly become off-by-one."""
     exact = "N" * MAX_NAME_LENGTH
     verifier, _ = _verifier()
@@ -731,7 +756,7 @@ async def test_a_name_at_the_limit_is_kept_whole():
     assert claims.full_name == exact
 
 
-async def test_a_name_is_stripped_before_it_is_measured():
+async def test_a_name_is_stripped_before_it_is_measured() -> None:
     """Whitespace is not content, and counting it would shorten a name that fits."""
     verifier, _ = _verifier()
     padded = "   " + "N" * MAX_NAME_LENGTH + "   "
@@ -741,7 +766,7 @@ async def test_a_name_is_stripped_before_it_is_measured():
     assert claims.full_name == "N" * MAX_NAME_LENGTH
 
 
-async def test_a_refusal_over_a_length_carries_no_token_material():
+async def test_a_refusal_over_a_length_carries_no_token_material() -> None:
     """`reason` is a category. It must not become a way to read the claim back.
 
     The reason travels into logs and the audit trail, and a value echoed there

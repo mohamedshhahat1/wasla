@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_entitlement_service
@@ -175,20 +176,21 @@ async def http(app: FastAPI) -> AsyncIterator[AsyncClient]:
         yield client
 
 
-async def _login(http: AsyncClient, email: str, password: str = PASSWORD) -> dict:
+async def _login(http: AsyncClient, email: str, password: str = PASSWORD) -> dict[str, Any]:
     response = await http.post(
         f"{API}/auth/login",
         json={"email": email, "password": password},
     )
     assert response.status_code == 200, response.text
-    return response.json()
+    payload: dict[str, Any] = response.json()
+    return payload
 
 
-def _bearer(session: dict) -> dict[str, str]:
+def _bearer(session: dict[str, Any]) -> dict[str, str]:
     return {"Authorization": f"Bearer {session['access_token']}"}
 
 
-async def _refresh(http: AsyncClient, token: str):
+async def _refresh(http: AsyncClient, token: str) -> Response:
     return await http.post(f"{API}/auth/refresh", json={"refresh_token": token})
 
 

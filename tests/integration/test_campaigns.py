@@ -14,9 +14,13 @@ logic takes and what it writes down, not whether httpx works.
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
     DependencyUnavailableError,
@@ -54,6 +58,7 @@ from app.repositories.campaign_repository import (
 )
 from app.schemas.campaign import CampaignRead
 from app.services.campaign_service import CampaignService
+from tests.fakes import as_messaging
 
 pytestmark = pytest.mark.integration
 
@@ -61,7 +66,9 @@ pytestmark = pytest.mark.integration
 class StubMessaging:
     """Stands in for MessagingService, writing the message row a real send would."""
 
-    def __init__(self, session, *, tenant_id, outcome: str = "sent") -> None:
+    def __init__(
+        self, session: AsyncSession, *, tenant_id: uuid.UUID, outcome: str = "sent"
+    ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self.outcome = outcome
@@ -70,11 +77,11 @@ class StubMessaging:
     async def send_template(
         self,
         *,
-        conversation_id,
-        name,
-        language,
-        components=None,
-        sent_by_id=None,
+        conversation_id: uuid.UUID,
+        name: str,
+        language: str,
+        components: Sequence[Any] | None = None,
+        sent_by_id: uuid.UUID | None = None,
     ) -> Message:
         if self.outcome == "raise":
             raise ExternalServiceError("The network went away.")
@@ -94,14 +101,14 @@ class StubMessaging:
         return message
 
 
-async def _tenant(session, *, slug: str) -> Tenant:
+async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _account(session, *, tenant: Tenant, suffix: str = "a") -> WhatsAppAccount:
+async def _account(session: AsyncSession, *, tenant: Tenant, suffix: str = "a") -> WhatsAppAccount:
     account = WhatsAppAccount(
         tenant_id=tenant.id,
         phone_number_id=f"phone-{tenant.slug}-{suffix}",
@@ -114,7 +121,7 @@ async def _account(session, *, tenant: Tenant, suffix: str = "a") -> WhatsAppAcc
 
 
 async def _template(
-    session,
+    session: AsyncSession,
     *,
     tenant: Tenant,
     account: WhatsAppAccount,
@@ -138,7 +145,7 @@ async def _template(
 
 
 async def _customer(
-    session,
+    session: AsyncSession,
     *,
     tenant: Tenant,
     account: WhatsAppAccount,
@@ -172,16 +179,21 @@ async def _customer(
     return contact
 
 
-def _service(session, tenant, *, messaging: StubMessaging | None = None) -> CampaignService:
+def _service(
+    session: AsyncSession,
+    tenant: Tenant,
+    *,
+    messaging: StubMessaging | UnavailableMessaging | None = None,
+) -> CampaignService:
     return CampaignService(
         session=session,
         tenant_id=tenant.id,
-        messaging=messaging,  # type: ignore[arg-type]
+        messaging=as_messaging(messaging) if messaging is not None else None,
     )
 
 
 async def _campaign(
-    session,
+    session: AsyncSession,
     *,
     tenant: Tenant,
     account: WhatsAppAccount,
@@ -201,7 +213,7 @@ async def _campaign(
 # ------------------------------------------------------------------ composing
 
 
-async def test_a_campaign_needs_a_template_whatsapp_approved(db_session):
+async def test_a_campaign_needs_a_template_whatsapp_approved(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="unapproved")
     account = await _account(db_session, tenant=tenant)
     template = await _template(
@@ -216,7 +228,7 @@ async def test_a_campaign_needs_a_template_whatsapp_approved(db_session):
         )
 
 
-async def test_a_campaign_cannot_use_another_numbers_template(db_session):
+async def test_a_campaign_cannot_use_another_numbers_template(db_session: AsyncSession) -> None:
     """Meta renders a template from the account that owns it, and no other."""
     tenant = await _tenant(db_session, slug="wrong-number")
     sending = await _account(db_session, tenant=tenant, suffix="sending")
@@ -231,7 +243,7 @@ async def test_a_campaign_cannot_use_another_numbers_template(db_session):
         )
 
 
-async def test_a_campaign_cannot_send_from_a_disabled_number(db_session):
+async def test_a_campaign_cannot_send_from_a_disabled_number(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="disabled-number")
     account = await _account(db_session, tenant=tenant)
     account.status = WhatsAppAccountStatus.DISABLED
@@ -245,7 +257,7 @@ async def test_a_campaign_cannot_send_from_a_disabled_number(db_session):
         )
 
 
-async def test_the_variables_must_match_what_the_template_expects(db_session):
+async def test_the_variables_must_match_what_the_template_expects(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="variables")
     account = await _account(db_session, tenant=tenant)
     template = await _template(db_session, tenant=tenant, account=account, variables=2)
@@ -261,7 +273,7 @@ async def test_the_variables_must_match_what_the_template_expects(db_session):
     assert "2 variable" in str(raised.value)
 
 
-async def test_a_new_campaign_is_a_draft_with_nobody_in_it(db_session):
+async def test_a_new_campaign_is_a_draft_with_nobody_in_it(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="fresh-draft")
     account = await _account(db_session, tenant=tenant)
     template = await _template(db_session, tenant=tenant, account=account)
@@ -276,7 +288,7 @@ async def test_a_new_campaign_is_a_draft_with_nobody_in_it(db_session):
 # ------------------------------------------------------------------ audience
 
 
-async def test_the_audience_is_people_who_wrote_to_this_business(db_session):
+async def test_the_audience_is_people_who_wrote_to_this_business(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="audience-basic")
     account = await _account(db_session, tenant=tenant)
     template = await _template(db_session, tenant=tenant, account=account)
@@ -300,7 +312,7 @@ async def test_the_audience_is_people_who_wrote_to_this_business(db_session):
     assert updated.audience_size == 1
 
 
-async def test_somebody_who_opted_out_is_never_in_an_audience(db_session):
+async def test_somebody_who_opted_out_is_never_in_an_audience(db_session: AsyncSession) -> None:
     """Not a filter a caller can omit: it is part of the base population."""
     tenant = await _tenant(db_session, slug="audience-opt-out")
     account = await _account(db_session, tenant=tenant)
@@ -324,7 +336,7 @@ async def test_somebody_who_opted_out_is_never_in_an_audience(db_session):
     assert campaign.audience_size == 0
 
 
-async def test_the_recency_filter_narrows_by_when_they_last_wrote(db_session):
+async def test_the_recency_filter_narrows_by_when_they_last_wrote(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="audience-recency")
     account = await _account(db_session, tenant=tenant)
     template = await _template(db_session, tenant=tenant, account=account)
@@ -347,7 +359,7 @@ async def test_the_recency_filter_narrows_by_when_they_last_wrote(db_session):
     assert campaign.audience_size == 1
 
 
-async def test_the_lead_filter_narrows_to_an_opportunity_stage(db_session):
+async def test_the_lead_filter_narrows_to_an_opportunity_stage(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="audience-leads")
     account = await _account(db_session, tenant=tenant)
     template = await _template(db_session, tenant=tenant, account=account)
@@ -373,7 +385,9 @@ async def test_the_lead_filter_narrows_to_an_opportunity_stage(db_session):
     assert campaign.audience_size == 1
 
 
-async def test_setting_the_audience_twice_does_not_duplicate_anyone(db_session):
+async def test_setting_the_audience_twice_does_not_duplicate_anyone(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session, slug="audience-twice")
     account = await _account(db_session, tenant=tenant)
     template = await _template(db_session, tenant=tenant, account=account)
@@ -393,7 +407,7 @@ async def test_setting_the_audience_twice_does_not_duplicate_anyone(db_session):
     assert len(rows) == 1
 
 
-async def test_the_audience_cannot_be_changed_once_it_is_sending(db_session):
+async def test_the_audience_cannot_be_changed_once_it_is_sending(db_session: AsyncSession) -> None:
     """Rebuilding a part-sent list would duplicate some people and drop others."""
     tenant = await _tenant(db_session, slug="audience-locked")
     account = await _account(db_session, tenant=tenant)
@@ -411,7 +425,7 @@ async def test_the_audience_cannot_be_changed_once_it_is_sending(db_session):
         await service.set_audience(campaign_id=campaign.id, filters=AudienceFilter())
 
 
-async def test_a_preview_counts_without_writing_anything(db_session):
+async def test_a_preview_counts_without_writing_anything(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="audience-preview")
     account = await _account(db_session, tenant=tenant)
     await _customer(db_session, tenant=tenant, account=account, wa_id="201000000001")
@@ -428,7 +442,7 @@ async def test_a_preview_counts_without_writing_anything(db_session):
 # ------------------------------------------------------------------ lifecycle
 
 
-async def test_a_campaign_with_nobody_in_it_cannot_be_scheduled(db_session):
+async def test_a_campaign_with_nobody_in_it_cannot_be_scheduled(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="empty-schedule")
     account = await _account(db_session, tenant=tenant)
     template = await _template(db_session, tenant=tenant, account=account)
@@ -438,7 +452,9 @@ async def test_a_campaign_with_nobody_in_it_cannot_be_scheduled(db_session):
         await _service(db_session, tenant).schedule(campaign_id=campaign.id)
 
 
-async def _ready(session, *, slug: str, customers: int = 1, rate: int = 60):
+async def _ready(
+    session: AsyncSession, *, slug: str, customers: int = 1, rate: int = 60
+) -> tuple[Any, ...]:
     tenant = await _tenant(session, slug=slug)
     account = await _account(session, tenant=tenant)
     template = await _template(session, tenant=tenant, account=account)
@@ -456,7 +472,7 @@ async def _ready(session, *, slug: str, customers: int = 1, rate: int = 60):
     return tenant, account, template, campaign
 
 
-async def test_scheduling_hands_the_campaign_to_the_worker(db_session):
+async def test_scheduling_hands_the_campaign_to_the_worker(db_session: AsyncSession) -> None:
     tenant, _, _, campaign = await _ready(db_session, slug="schedule-now")
 
     await _service(db_session, tenant).schedule(campaign_id=campaign.id)
@@ -465,7 +481,7 @@ async def test_scheduling_hands_the_campaign_to_the_worker(db_session):
     assert campaign.scheduled_at is not None
 
 
-async def test_a_paused_campaign_can_be_scheduled_again(db_session):
+async def test_a_paused_campaign_can_be_scheduled_again(db_session: AsyncSession) -> None:
     """The way back a person hesitating over a half-sent broadcast needs."""
     tenant, _, _, campaign = await _ready(db_session, slug="pause-resume")
     service = _service(db_session, tenant)
@@ -475,10 +491,11 @@ async def test_a_paused_campaign_can_be_scheduled_again(db_session):
     assert campaign.status is CampaignStatus.PAUSED
 
     await service.schedule(campaign_id=campaign.id)
-    assert campaign.status is CampaignStatus.SCHEDULED
+    status: CampaignStatus = campaign.status
+    assert status is CampaignStatus.SCHEDULED
 
 
-async def test_a_cancelled_campaign_is_finished_for_good(db_session):
+async def test_a_cancelled_campaign_is_finished_for_good(db_session: AsyncSession) -> None:
     tenant, _, _, campaign = await _ready(db_session, slug="cancel-final")
     service = _service(db_session, tenant)
 
@@ -491,7 +508,7 @@ async def test_a_cancelled_campaign_is_finished_for_good(db_session):
         await service.schedule(campaign_id=campaign.id)
 
 
-async def test_cancelling_twice_changes_nothing(db_session):
+async def test_cancelling_twice_changes_nothing(db_session: AsyncSession) -> None:
     """Losing that race is not the caller's mistake."""
     tenant, _, _, campaign = await _ready(db_session, slug="cancel-twice")
     service = _service(db_session, tenant)
@@ -499,12 +516,13 @@ async def test_cancelling_twice_changes_nothing(db_session):
     await service.schedule(campaign_id=campaign.id)
     await service.cancel(campaign_id=campaign.id)
     first = campaign.cancelled_at
+    assert first is not None
     await service.cancel(campaign_id=campaign.id)
 
     assert campaign.cancelled_at == first
 
 
-async def test_a_draft_cannot_be_paused(db_session):
+async def test_a_draft_cannot_be_paused(db_session: AsyncSession) -> None:
     tenant, _, _, campaign = await _ready(db_session, slug="pause-draft")
 
     with pytest.raises(ValidationError):
@@ -514,7 +532,7 @@ async def test_a_draft_cannot_be_paused(db_session):
 # -------------------------------------------------------------------- sending
 
 
-async def test_a_batch_sends_the_template_to_everyone_pending(db_session):
+async def test_a_batch_sends_the_template_to_everyone_pending(db_session: AsyncSession) -> None:
     tenant, _, template, campaign = await _ready(db_session, slug="send-all", customers=3)
     messaging = StubMessaging(db_session, tenant_id=tenant.id)
     service = _service(db_session, tenant, messaging=messaging)
@@ -529,7 +547,7 @@ async def test_a_batch_sends_the_template_to_everyone_pending(db_session):
     assert campaign.completed_at is not None
 
 
-async def test_the_rate_limit_is_written_down_rather_than_slept(db_session):
+async def test_the_rate_limit_is_written_down_rather_than_slept(db_session: AsyncSession) -> None:
     """A sleep would hold the lock and would not survive a restart."""
     tenant, _, _, campaign = await _ready(db_session, slug="rate-limit", customers=4, rate=2)
     service = _service(db_session, tenant, messaging=StubMessaging(db_session, tenant_id=tenant.id))
@@ -545,7 +563,7 @@ async def test_the_rate_limit_is_written_down_rather_than_slept(db_session):
     assert campaign.next_send_at == moment + timedelta(minutes=1)
 
 
-async def test_the_next_batch_finishes_the_campaign(db_session):
+async def test_the_next_batch_finishes_the_campaign(db_session: AsyncSession) -> None:
     tenant, _, _, campaign = await _ready(db_session, slug="second-batch", customers=4, rate=2)
     service = _service(db_session, tenant, messaging=StubMessaging(db_session, tenant_id=tenant.id))
 
@@ -560,7 +578,7 @@ async def test_the_next_batch_finishes_the_campaign(db_session):
     assert (statistics.sent, statistics.pending) == (4, 0)
 
 
-async def test_somebody_who_opts_out_mid_campaign_is_skipped(db_session):
+async def test_somebody_who_opts_out_mid_campaign_is_skipped(db_session: AsyncSession) -> None:
     """Checked again at send time, not only when the audience was built."""
     tenant, account, _, campaign = await _ready(db_session, slug="opt-out-midway", customers=2)
     service = _service(db_session, tenant, messaging=StubMessaging(db_session, tenant_id=tenant.id))
@@ -582,7 +600,9 @@ async def test_somebody_who_opts_out_mid_campaign_is_skipped(db_session):
     assert statistics.skipped == 1
 
 
-async def test_a_rejected_send_is_retried_until_the_attempts_run_out(db_session):
+async def test_a_rejected_send_is_retried_until_the_attempts_run_out(
+    db_session: AsyncSession,
+) -> None:
     tenant, _, _, campaign = await _ready(db_session, slug="rejected", customers=1)
     service = _service(
         db_session,
@@ -600,7 +620,9 @@ async def test_a_rejected_send_is_retried_until_the_attempts_run_out(db_session)
     assert statistics.pending == 0
 
 
-async def test_a_campaign_whose_template_was_paused_stops_rather_than_grinding(db_session):
+async def test_a_campaign_whose_template_was_paused_stops_rather_than_grinding(
+    db_session: AsyncSession,
+) -> None:
     """The condition will not improve by trying the next person."""
     tenant, _, template, campaign = await _ready(db_session, slug="template-paused", customers=2)
     service = _service(db_session, tenant, messaging=StubMessaging(db_session, tenant_id=tenant.id))
@@ -617,7 +639,7 @@ async def test_a_campaign_whose_template_was_paused_stops_rather_than_grinding(d
     assert statistics.pending == 2
 
 
-async def test_a_campaign_whose_number_was_disabled_stops(db_session):
+async def test_a_campaign_whose_number_was_disabled_stops(db_session: AsyncSession) -> None:
     tenant, account, _, campaign = await _ready(db_session, slug="number-disabled")
     service = _service(db_session, tenant, messaging=StubMessaging(db_session, tenant_id=tenant.id))
     await service.schedule(campaign_id=campaign.id)
@@ -629,7 +651,7 @@ async def test_a_campaign_whose_number_was_disabled_stops(db_session):
     assert outcome.status is CampaignStatus.FAILED
 
 
-async def test_a_paused_campaign_sends_nothing(db_session):
+async def test_a_paused_campaign_sends_nothing(db_session: AsyncSession) -> None:
     tenant, _, _, campaign = await _ready(db_session, slug="paused-sends-nothing")
     messaging = StubMessaging(db_session, tenant_id=tenant.id)
     service = _service(db_session, tenant, messaging=messaging)
@@ -642,7 +664,9 @@ async def test_a_paused_campaign_sends_nothing(db_session):
     assert messaging.sends == []
 
 
-async def test_a_provider_failure_leaves_the_recipient_for_the_next_batch(db_session):
+async def test_a_provider_failure_leaves_the_recipient_for_the_next_batch(
+    db_session: AsyncSession,
+) -> None:
     tenant, _, _, campaign = await _ready(db_session, slug="provider-down")
     service = _service(
         db_session,
@@ -662,7 +686,7 @@ async def test_a_provider_failure_leaves_the_recipient_for_the_next_batch(db_ses
 # ------------------------------------------------------------------ statistics
 
 
-async def test_delivery_counts_come_from_the_message_rows(db_session):
+async def test_delivery_counts_come_from_the_message_rows(db_session: AsyncSession) -> None:
     """A message Meta accepted is sent; whether it arrived is Meta's news."""
     tenant, _, _, campaign = await _ready(db_session, slug="delivery-counts", customers=2)
     service = _service(db_session, tenant, messaging=StubMessaging(db_session, tenant_id=tenant.id))
@@ -674,6 +698,7 @@ async def test_delivery_counts_come_from_the_message_rows(db_session):
         db_session, tenant_id=tenant.id
     ).list_for_campaign(campaign.id)
     first = await db_session.get(Message, recipients[0].message_id)
+    assert first is not None
     first.status = MessageStatus.READ
     await db_session.flush()
 
@@ -687,7 +712,7 @@ async def test_delivery_counts_come_from_the_message_rows(db_session):
 # ------------------------------------------------------------------- isolation
 
 
-async def test_one_workspace_cannot_see_anothers_campaign(db_session):
+async def test_one_workspace_cannot_see_anothers_campaign(db_session: AsyncSession) -> None:
     mine = await _tenant(db_session, slug="campaign-mine")
     theirs = await _tenant(db_session, slug="campaign-theirs")
     account = await _account(db_session, tenant=theirs)
@@ -698,7 +723,7 @@ async def test_one_workspace_cannot_see_anothers_campaign(db_session):
         await _service(db_session, mine).get(campaign.id)
 
 
-async def test_an_audience_never_crosses_a_workspace_boundary(db_session):
+async def test_an_audience_never_crosses_a_workspace_boundary(db_session: AsyncSession) -> None:
     mine = await _tenant(db_session, slug="audience-mine")
     theirs = await _tenant(db_session, slug="audience-theirs")
     my_account = await _account(db_session, tenant=mine)
@@ -719,11 +744,13 @@ async def test_an_audience_never_crosses_a_workspace_boundary(db_session):
 class UnavailableMessaging:
     """Stands in for a deployment with no WhatsApp credential configured."""
 
-    async def send_template(self, **_):
+    async def send_template(self, **_: Any) -> None:
         raise DependencyUnavailableError("The WhatsApp access token is not configured.")
 
 
-async def test_a_missing_credential_stops_the_campaign_rather_than_looping(db_session):
+async def test_a_missing_credential_stops_the_campaign_rather_than_looping(
+    db_session: AsyncSession,
+) -> None:
     """Left per-recipient it would retry forever without exhausting anyone.
 
     The client refuses to be built at all without a token, so no attempt is
@@ -743,7 +770,9 @@ async def test_a_missing_credential_stops_the_campaign_rather_than_looping(db_se
     assert statistics.pending == 2
 
 
-async def test_a_failed_campaign_can_be_resumed_once_the_cause_is_fixed(db_session):
+async def test_a_failed_campaign_can_be_resumed_once_the_cause_is_fixed(
+    db_session: AsyncSession,
+) -> None:
     """Everything that fails a campaign is something a workspace then fixes."""
     tenant, account, _, campaign = await _ready(db_session, slug="resume-failed", customers=2)
     service = _service(db_session, tenant, messaging=StubMessaging(db_session, tenant_id=tenant.id))
@@ -762,10 +791,11 @@ async def test_a_failed_campaign_can_be_resumed_once_the_cause_is_fixed(db_sessi
     await db_session.flush()
 
     assert outcome.sent == 2
-    assert campaign.status is CampaignStatus.COMPLETED
+    status: CampaignStatus = campaign.status
+    assert status is CampaignStatus.COMPLETED
 
 
-async def test_resuming_sends_to_nobody_twice(db_session):
+async def test_resuming_sends_to_nobody_twice(db_session: AsyncSession) -> None:
     """The pending recipients are exactly the ones not yet written to."""
     tenant, _, template, campaign = await _ready(db_session, slug="resume-once", customers=3)
     messaging = StubMessaging(db_session, tenant_id=tenant.id)
@@ -787,7 +817,9 @@ async def test_resuming_sends_to_nobody_twice(db_session):
     assert (statistics.sent, statistics.pending) == (3, 0)
 
 
-async def test_a_new_campaign_can_be_serialised_without_a_further_flush(db_session):
+async def test_a_new_campaign_can_be_serialised_without_a_further_flush(
+    db_session: AsyncSession,
+) -> None:
     """The 500 a stubbed endpoint test cannot see.
 
     A route returns the row the service just staged and the request commits
@@ -811,7 +843,7 @@ async def test_a_new_campaign_can_be_serialised_without_a_further_flush(db_sessi
     assert read.updated_at is not None
 
 
-async def test_a_failed_campaign_can_be_closed_for_good(db_session):
+async def test_a_failed_campaign_can_be_closed_for_good(db_session: AsyncSession) -> None:
     """Failure is recoverable, so a workspace needs a way to say "not this one"."""
     tenant, account, _, campaign = await _ready(db_session, slug="close-failed")
     service = _service(db_session, tenant, messaging=StubMessaging(db_session, tenant_id=tenant.id))
@@ -824,13 +856,16 @@ async def test_a_failed_campaign_can_be_closed_for_good(db_session):
 
     await service.cancel(campaign_id=campaign.id)
 
-    assert campaign.status is CampaignStatus.CANCELLED
+    status: CampaignStatus = campaign.status
+    assert status is CampaignStatus.CANCELLED
     assert campaign.cancelled_at is not None
     with pytest.raises(ValidationError):
         await service.schedule(campaign_id=campaign.id)
 
 
-async def test_a_completed_campaign_cannot_be_cancelled_into_something_else(db_session):
+async def test_a_completed_campaign_cannot_be_cancelled_into_something_else(
+    db_session: AsyncSession,
+) -> None:
     tenant, _, _, campaign = await _ready(db_session, slug="close-completed")
     service = _service(db_session, tenant, messaging=StubMessaging(db_session, tenant_id=tenant.id))
     await service.schedule(campaign_id=campaign.id)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import secrets
+from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -16,13 +18,13 @@ from app.core.config import Settings, get_settings
 VALID_SECRET = "a" * 40
 
 
-def _settings(**overrides) -> Settings:
+def _settings(**overrides: Any) -> Settings:
     overrides.setdefault("jwt_secret", VALID_SECRET)
     return Settings(_env_file=None, **overrides)
 
 
 @pytest.fixture(autouse=True)
-def isolated_environment(monkeypatch):
+def isolated_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Run every test against a clean environment.
 
     ``_env_file=None`` only disables ``.env`` loading; real environment
@@ -37,8 +39,9 @@ def isolated_environment(monkeypatch):
     get_settings.cache_clear()
 
 
-def test_defaults_are_local():
+def test_defaults_are_local() -> None:
     settings = _settings()
+    assert settings is not None
 
     assert settings.app_name == "Wasla"
     assert settings.environment == "local"
@@ -52,7 +55,7 @@ def test_defaults_are_local():
 
 
 @pytest.mark.parametrize("environment", ["local", "staging", "production"])
-def test_the_placeholder_secret_is_refused_outside_the_test_suite(environment):
+def test_the_placeholder_secret_is_refused_outside_the_test_suite(environment: str) -> None:
     """The rule that used to apply only to `production`.
 
     Two ways the old shape let a real deployment through, and both are the sort
@@ -66,53 +69,56 @@ def test_the_placeholder_secret_is_refused_outside_the_test_suite(environment):
         Settings(_env_file=None, environment=environment)
 
 
-def test_a_short_secret_is_refused_even_when_it_is_not_the_placeholder():
+def test_a_short_secret_is_refused_even_when_it_is_not_the_placeholder() -> None:
     with pytest.raises(ValidationError, match="JWT_SECRET"):
         Settings(_env_file=None, environment="staging", jwt_secret="short")
 
 
-def test_the_test_environment_is_the_only_one_exempt():
+def test_the_test_environment_is_the_only_one_exempt() -> None:
     """Exempt so the suite can build settings without ceremony, and it is the
     one environment that never listens on a network."""
     settings = Settings(_env_file=None, environment="test")
+    assert settings is not None
 
     assert settings.jwt_secret == "change-me"
 
 
-def test_environment_variables_override_defaults(monkeypatch):
+def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ENVIRONMENT", "staging")
     monkeypatch.setenv("LOG_LEVEL", "debug")
     monkeypatch.setenv("CORS_ORIGINS", "https://app.wasla.test, https://admin.wasla.test")
 
     settings = _settings()
+    assert settings is not None
 
     assert settings.environment == "staging"
     assert settings.log_level == "DEBUG"
     assert settings.cors_origins == ["https://app.wasla.test", "https://admin.wasla.test"]
 
 
-def test_cors_origins_accepts_json_array():
+def test_cors_origins_accepts_json_array() -> None:
     settings = _settings(cors_origins='["https://app.wasla.test"]')
+    assert settings is not None
 
     assert settings.cors_origins == ["https://app.wasla.test"]
 
 
-def test_invalid_log_level_is_rejected():
+def test_invalid_log_level_is_rejected() -> None:
     with pytest.raises(ValidationError):
         _settings(log_level="chatty")
 
 
-def test_production_rejects_placeholder_secret():
+def test_production_rejects_placeholder_secret() -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, environment="production")
 
 
-def test_production_rejects_debug_mode():
+def test_production_rejects_debug_mode() -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, environment="production", jwt_secret="a" * 40, debug=True)
 
 
-def test_production_rejects_interactive_docs():
+def test_production_rejects_interactive_docs() -> None:
     """The reference publishes every route and schema, platform administration
     included. It is a map, and it was previously on by default."""
     with pytest.raises(ValidationError, match="DOCS_ENABLED"):
@@ -125,7 +131,7 @@ def test_production_rejects_interactive_docs():
         )
 
 
-def test_production_requires_a_meta_app_secret():
+def test_production_requires_a_meta_app_secret() -> None:
     """Without it the webhook cannot verify a signature and answers 503 to every
     delivery - a silent integration outage that reads as Meta's fault."""
     with pytest.raises(ValidationError, match="META_APP_SECRET"):
@@ -137,7 +143,7 @@ def test_production_requires_a_meta_app_secret():
         )
 
 
-def test_production_accepts_hardened_configuration():
+def test_production_accepts_hardened_configuration() -> None:
     settings = Settings(
         _env_file=None,
         environment="production",
@@ -145,13 +151,14 @@ def test_production_accepts_hardened_configuration():
         docs_enabled=False,
         meta_app_secret="an-app-secret",
     )
+    assert settings is not None
 
     assert settings.is_production
     assert not settings.debug
     assert not settings.docs_enabled
 
 
-def test_get_settings_is_cached(monkeypatch):
+def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     """About the cache, not about the configuration.
 
     `get_settings()` reads the real environment, which the autouse fixture above
@@ -166,7 +173,7 @@ def test_get_settings_is_cached(monkeypatch):
     assert get_settings() is get_settings()
 
 
-def test_a_comma_separated_list_survives_the_environment(monkeypatch):
+def test_a_comma_separated_list_survives_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Read from the environment, not passed to the constructor, because those
     are different code paths and only one of them is how a container starts.
 
@@ -181,18 +188,19 @@ def test_a_comma_separated_list_survives_the_environment(monkeypatch):
     monkeypatch.setenv("CORS_ORIGINS", "https://app.wasla.test,https://admin.wasla.test")
 
     settings = _settings()
+    assert settings is not None
 
     assert settings.credential_encryption_keys == ["first-key", "second-key"]
     assert settings.cors_origins == ["https://app.wasla.test", "https://admin.wasla.test"]
 
 
-def test_a_json_array_also_survives_the_environment(monkeypatch):
+def test_a_json_array_also_survives_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEYS", '["first-key"]')
 
     assert _settings().credential_encryption_keys == ["first-key"]
 
 
-def test_an_unset_list_is_empty_rather_than_an_error(monkeypatch):
+def test_an_unset_list_is_empty_rather_than_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CREDENTIAL_ENCRYPTION_KEYS", raising=False)
 
     assert _settings().credential_encryption_keys == []
@@ -202,7 +210,7 @@ def test_an_unset_list_is_empty_rather_than_an_error(monkeypatch):
 
 
 @pytest.mark.parametrize("algorithm", ["none", "None", "RS256", "ES256", "PS256", "HS255", ""])
-def test_an_algorithm_outside_the_hmac_family_is_refused(algorithm):
+def test_an_algorithm_outside_the_hmac_family_is_refused(algorithm: str) -> None:
     """Two failures, both configuration-only and both silent without this.
 
     `none` would be listed in the `algorithms=` allowlist that is otherwise the
@@ -217,16 +225,18 @@ def test_an_algorithm_outside_the_hmac_family_is_refused(algorithm):
 
 
 @pytest.mark.parametrize("algorithm", ["HS256", "HS384", "HS512"])
-def test_the_hmac_family_is_accepted(algorithm):
+def test_the_hmac_family_is_accepted(algorithm: str) -> None:
     """The control. A guard that refused everything would pass the test above."""
     settings = Settings(_env_file=None, environment="test", jwt_algorithm=algorithm)
+    assert settings is not None
 
     assert settings.jwt_algorithm == algorithm
 
 
-def test_the_algorithm_is_normalised_to_upper_case():
+def test_the_algorithm_is_normalised_to_upper_case() -> None:
     """`hs256` in an environment file is a typo, not a different algorithm."""
     settings = Settings(_env_file=None, environment="test", jwt_algorithm="hs512")
+    assert settings is not None
 
     assert settings.jwt_algorithm == "HS512"
 
@@ -238,9 +248,9 @@ def test_the_algorithm_is_normalised_to_upper_case():
 # a broken link, send from nobody, or record no bounces.
 
 
-def _email_production(**overrides):
+def _email_production(**overrides: Any) -> Settings:
     """A production configuration with email on, and one thing at a time wrong."""
-    fields = {
+    fields: dict[str, Any] = {
         "_env_file": None,
         "environment": "production",
         "jwt_secret": VALID_SECRET,
@@ -256,7 +266,7 @@ def _email_production(**overrides):
     return Settings(**fields)
 
 
-def test_email_off_needs_no_email_configuration():
+def test_email_off_needs_no_email_configuration() -> None:
     """A deployment that sends nothing must not be forced to configure sending."""
     settings = Settings(
         _env_file=None,
@@ -266,39 +276,41 @@ def test_email_off_needs_no_email_configuration():
         meta_app_secret="an-app-secret",
         email_enabled=False,
     )
+    assert settings is not None
 
     assert not settings.email_enabled
 
 
-def test_production_accepts_a_complete_email_configuration():
+def test_production_accepts_a_complete_email_configuration() -> None:
     settings = _email_production()
+    assert settings is not None
 
     assert settings.email_enabled
     assert settings.email_provider == "resend"
 
 
-def test_email_on_requires_a_sender():
+def test_email_on_requires_a_sender() -> None:
     with pytest.raises(ValidationError, match="EMAIL_FROM"):
         _email_production(email_from=None)
 
 
-def test_email_on_requires_a_sender_that_is_an_address():
+def test_email_on_requires_a_sender_that_is_an_address() -> None:
     """A sender the provider rejects fails *every* row, permanently."""
     with pytest.raises(ValidationError, match="EMAIL_FROM"):
         _email_production(email_from="not-an-address")
 
 
-def test_a_display_name_in_the_sender_is_refused():
+def test_a_display_name_in_the_sender_is_refused() -> None:
     with pytest.raises(ValidationError, match="EMAIL_FROM"):
         _email_production(email_from="Wasla <no-reply@example.com>")
 
 
-def test_email_on_requires_a_public_url():
+def test_email_on_requires_a_public_url() -> None:
     with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
         _email_production(app_public_url=None)
 
 
-def test_production_refuses_a_plaintext_public_url():
+def test_production_refuses_a_plaintext_public_url() -> None:
     """Reset and invitation tokens travel in these links."""
     with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
         _email_production(app_public_url="http://app.example.com")
@@ -313,30 +325,30 @@ def test_production_refuses_a_plaintext_public_url():
         "ftp://example.com",
     ],
 )
-def test_a_public_url_on_a_dangerous_scheme_is_refused(url):
+def test_a_public_url_on_a_dangerous_scheme_is_refused(url: str) -> None:
     """Whatever this holds is prefixed onto every link a recipient clicks."""
     with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
         _email_production(app_public_url=url)
 
 
-def test_a_public_url_without_a_host_is_refused():
+def test_a_public_url_without_a_host_is_refused() -> None:
     with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
         _email_production(app_public_url="https://")
 
 
-def test_a_public_url_carrying_a_query_is_refused():
+def test_a_public_url_carrying_a_query_is_refused() -> None:
     """Templates append their own path and query; a base with one is broken."""
     with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
         _email_production(app_public_url="https://app.example.com/?next=/x")
 
 
-def test_production_refuses_the_fake_provider():
+def test_production_refuses_the_fake_provider() -> None:
     """It delivers nothing and says it succeeded."""
     with pytest.raises(ValidationError, match="EMAIL_PROVIDER"):
         _email_production(email_provider="fake")
 
 
-def test_settings_alone_do_not_demand_the_webhook_secret():
+def test_settings_alone_do_not_demand_the_webhook_secret() -> None:
     """It is required of the API, not of every process that reads Settings.
 
     The requirement is real and is asserted next to the check that now owns it
@@ -346,12 +358,13 @@ def test_settings_alone_do_not_demand_the_webhook_secret():
     into the worker's container (ADR-063).
     """
     settings = _email_production(resend_webhook_secret=None)
+    assert settings is not None
 
     assert settings.resend_webhook_secret is None
     assert settings.email_enabled is True
 
 
-def test_a_non_production_environment_may_use_the_fake_over_plain_http():
+def test_a_non_production_environment_may_use_the_fake_over_plain_http() -> None:
     """Local development sends nothing and needs no certificate to do it."""
     settings = Settings(
         _env_file=None,
@@ -362,11 +375,12 @@ def test_a_non_production_environment_may_use_the_fake_over_plain_http():
         email_from="no-reply@example.com",
         app_public_url="http://localhost:3000",
     )
+    assert settings is not None
 
     assert settings.email_provider == "fake"
 
 
-def test_a_dangerous_public_url_is_refused_outside_production_too():
+def test_a_dangerous_public_url_is_refused_outside_production_too() -> None:
     """The scheme allowlist is not a production-only courtesy."""
     with pytest.raises(ValidationError, match="APP_PUBLIC_URL"):
         Settings(
@@ -382,7 +396,7 @@ def test_a_dangerous_public_url_is_refused_outside_production_too():
 
 # ----------------------------------------------------------- payment provider
 
-PAYMOB = {
+PAYMOB: dict[str, Any] = {
     "billing_provider": "paymob",
     "paymob_secret_key": "sk_test_notreal000000",
     "paymob_public_key": "pk_test_notreal000000",
@@ -392,14 +406,14 @@ PAYMOB = {
 }
 
 
-def _paymob(**overrides):
+def _paymob(**overrides: Any) -> Settings:
     """A staging deployment configured to take payments.
 
     Staging rather than test, because the test environment is exempt from the
     fail-closed rules on purpose - and it is precisely those rules being
     exercised here.
     """
-    values = {
+    values: dict[str, Any] = {
         "_env_file": None,
         "environment": "staging",
         "jwt_secret": secrets.token_urlsafe(32),
@@ -409,9 +423,10 @@ def _paymob(**overrides):
     return Settings(**values)
 
 
-def test_a_deployment_taking_payments_accepts_a_complete_configuration():
+def test_a_deployment_taking_payments_accepts_a_complete_configuration() -> None:
     """The other half of every refusal below: this is what right looks like."""
     settings = _paymob()
+    assert settings is not None
 
     assert settings.billing_provider == "paymob"
     assert settings.paymob_integration_ids == [4097558]
@@ -426,7 +441,7 @@ def test_a_deployment_taking_payments_accepts_a_complete_configuration():
         "app_public_url",
     ],
 )
-def test_a_half_configured_payment_provider_refuses_to_boot(missing):
+def test_a_half_configured_payment_provider_refuses_to_boot(missing: str) -> None:
     """Fail closed in every environment, not only production.
 
     A staging deployment taking real payments with no HMAC secret answers 503
@@ -438,7 +453,7 @@ def test_a_half_configured_payment_provider_refuses_to_boot(missing):
         _paymob(**{missing: None})
 
 
-def test_no_integration_id_is_refused():
+def test_no_integration_id_is_refused() -> None:
     """An intention with no payment method is refused by Paymob itself.
 
     Discovered at startup rather than at the first customer.
@@ -447,7 +462,7 @@ def test_no_integration_id_is_refused():
         _paymob(paymob_integration_ids=[])
 
 
-def test_a_repeated_integration_id_is_refused():
+def test_a_repeated_integration_id_is_refused() -> None:
     """The list is sent as the payment methods to offer on the page.
 
     A repeated id offers the same method twice, which is a checkout that looks
@@ -458,7 +473,7 @@ def test_a_repeated_integration_id_is_refused():
 
 
 @pytest.mark.parametrize("value", [[0], [-1], [4097558, 0]])
-def test_an_integration_id_that_cannot_be_real_is_refused(value):
+def test_an_integration_id_that_cannot_be_real_is_refused(value: list[Any]) -> None:
     """Refused rather than dropped: a payment method that silently stops being
     offered is a much harder thing to notice than a deployment that will not
     start."""
@@ -466,7 +481,7 @@ def test_an_integration_id_that_cannot_be_real_is_refused(value):
         _paymob(paymob_integration_ids=value)
 
 
-def test_mismatched_key_modes_are_refused():
+def test_mismatched_key_modes_are_refused() -> None:
     """The dangerous case, because both halves look valid on their own.
 
     A live secret key with a test public key creates a *real* intention and
@@ -480,7 +495,7 @@ def test_mismatched_key_modes_are_refused():
     assert "different Paymob modes" in str(caught.value)
 
 
-def test_matching_live_keys_are_accepted_in_production():
+def test_matching_live_keys_are_accepted_in_production() -> None:
     settings = Settings(
         _env_file=None,
         environment="production",
@@ -493,11 +508,12 @@ def test_matching_live_keys_are_accepted_in_production():
             "paymob_public_key": "pk_live_realone00000",
         },
     )
+    assert settings is not None
 
     assert settings.billing_provider == "paymob"
 
 
-def test_test_keys_are_refused_in_production():
+def test_test_keys_are_refused_in_production() -> None:
     """A deployment that believes it is live and is not.
 
     Every payment would be pretend and every customer would get the product
@@ -519,7 +535,7 @@ def test_test_keys_are_refused_in_production():
     assert "test keys" in str(caught.value)
 
 
-def test_a_regional_key_prefix_is_not_treated_as_a_mismatch():
+def test_a_regional_key_prefix_is_not_treated_as_a_mismatch() -> None:
     """Some regions prefix the whole key, and the mode is still readable.
 
     Refusing to boot over a shape this integration has not seen would be worse
@@ -530,11 +546,13 @@ def test_a_regional_key_prefix_is_not_treated_as_a_mismatch():
         paymob_secret_key="egy_sk_test_notreal000",
         paymob_public_key="egy_pk_test_notreal000",
     )
+    assert settings is not None
 
+    assert settings.paymob_secret_key is not None
     assert settings.paymob_secret_key.startswith("egy_")
 
 
-def test_a_callback_url_must_not_be_plain_http_in_production():
+def test_a_callback_url_must_not_be_plain_http_in_production() -> None:
     """Payment callbacks travel to it, and so does a signed transaction."""
     with pytest.raises(ValidationError) as caught:
         Settings(
@@ -554,7 +572,7 @@ def test_a_callback_url_must_not_be_plain_http_in_production():
     assert "https" in str(caught.value)
 
 
-def test_the_manual_provider_needs_no_credentials():
+def test_the_manual_provider_needs_no_credentials() -> None:
     """The default, and the state every local run and every test is in.
 
     A deployment that configures nothing bills exactly as it did before hosted
@@ -565,6 +583,7 @@ def test_the_manual_provider_needs_no_credentials():
         environment="staging",
         jwt_secret=secrets.token_urlsafe(32),
     )
+    assert settings is not None
 
     assert settings.billing_provider == "manual"
     assert settings.paymob_secret_key is None
@@ -572,7 +591,7 @@ def test_the_manual_provider_needs_no_credentials():
 
 # --------------------------------------------------------------- Google sign-in
 
-GOOGLE = {
+GOOGLE: dict[str, Any] = {
     "google_enabled": True,
     "google_client_id": "1234567890-testclient.apps.googleusercontent.com",
     "google_client_secret": "a-test-client-secret",
@@ -580,14 +599,14 @@ GOOGLE = {
 }
 
 
-def _google(**overrides):
+def _google(**overrides: Any) -> Settings:
     """A staging deployment with Google sign-in switched on.
 
     Staging rather than test for `_paymob`'s reason: the test environment is
     exempt from the fail-closed rules on purpose, and those rules are what
     these exercise.
     """
-    values = {
+    values: dict[str, Any] = {
         "_env_file": None,
         "environment": "staging",
         "jwt_secret": secrets.token_urlsafe(32),
@@ -597,7 +616,7 @@ def _google(**overrides):
     return Settings(**values)
 
 
-def test_google_off_needs_no_credentials():
+def test_google_off_needs_no_credentials() -> None:
     """A feature nobody enabled must not stop a deployment starting.
 
     This is the property the production Compose file relies on: every
@@ -609,16 +628,19 @@ def test_google_off_needs_no_credentials():
         environment="staging",
         jwt_secret=secrets.token_urlsafe(32),
     )
+    assert settings is not None
 
     assert settings.google_enabled is False
     assert settings.google_client_id is None
     assert settings.google_client_secret is None
 
 
-def test_google_on_accepts_a_complete_configuration():
+def test_google_on_accepts_a_complete_configuration() -> None:
     settings = _google()
+    assert settings is not None
 
     assert settings.google_enabled is True
+    assert settings.google_redirect_uri is not None
     assert settings.google_redirect_uri.endswith("/auth/google/callback")
 
 
@@ -626,7 +648,7 @@ def test_google_on_accepts_a_complete_configuration():
     "missing",
     ["google_client_id", "google_client_secret", "google_redirect_uri"],
 )
-def test_google_on_requires_every_credential(missing):
+def test_google_on_requires_every_credential(missing: str) -> None:
     """Half-configured Google sign-in is a button that always fails.
 
     And the only error message a user ever sees lives on Google's domain, which
@@ -638,7 +660,7 @@ def test_google_on_requires_every_credential(missing):
     assert missing.upper() in str(caught.value)
 
 
-def test_google_refuses_a_client_id_that_is_not_one():
+def test_google_refuses_a_client_id_that_is_not_one() -> None:
     """Catches the two paste errors that actually happen.
 
     The secret in the id field, or the bare project number. Both produce a
@@ -650,14 +672,14 @@ def test_google_refuses_a_client_id_that_is_not_one():
     assert "GOOGLE_CLIENT_ID" in str(caught.value)
 
 
-def test_google_refuses_the_client_id_pasted_as_the_secret():
+def test_google_refuses_the_client_id_pasted_as_the_secret() -> None:
     with pytest.raises(ValidationError) as caught:
         _google(google_client_secret=GOOGLE["google_client_id"])
 
     assert "GOOGLE_CLIENT_SECRET" in str(caught.value)
 
 
-def test_google_requires_https_in_production():
+def test_google_requires_https_in_production() -> None:
     """A single-use authorization code travels back to this address."""
     with pytest.raises(ValidationError) as caught:
         _google(
@@ -679,7 +701,7 @@ def test_google_requires_https_in_production():
         "https://app.example.com/callback#fragment",
     ],
 )
-def test_google_refuses_a_redirect_that_is_not_a_plain_url(redirect):
+def test_google_refuses_a_redirect_that_is_not_a_plain_url(redirect: str) -> None:
     """Scheme allowlist and no fragment, checked before Google ever sees it."""
     with pytest.raises(ValidationError):
         _google(google_redirect_uri=redirect)
@@ -688,7 +710,7 @@ def test_google_refuses_a_redirect_that_is_not_a_plain_url(redirect):
 # ------------------------------------------------------------------- dunning
 
 
-def test_the_suspension_threshold_must_be_later_than_the_past_due_one():
+def test_the_suspension_threshold_must_be_later_than_the_past_due_one() -> None:
     """Otherwise a workspace is cut off in the sweep that first chases it.
 
     Checked in every environment, `test` included, because this is an ordering
@@ -706,21 +728,23 @@ def test_the_suspension_threshold_must_be_later_than_the_past_due_one():
         assert "BILLING_SUSPEND_AFTER_DAYS" in str(caught.value)
 
 
-def test_the_dunning_defaults_are_a_week_then_a_month():
+def test_the_dunning_defaults_are_a_week_then_a_month() -> None:
     """The numbers a deployment inherits without configuring anything."""
     settings = Settings(_env_file=None, environment="test")
+    assert settings is not None
 
     assert settings.billing_past_due_days == 7
     assert settings.billing_suspend_after_days == 30
 
 
-def test_the_dunning_thresholds_are_configurable():
+def test_the_dunning_thresholds_are_configurable() -> None:
     settings = Settings(
         _env_file=None,
         environment="test",
         billing_past_due_days=3,
         billing_suspend_after_days=14,
     )
+    assert settings is not None
 
     assert settings.billing_past_due_days == 3
     assert settings.billing_suspend_after_days == 14

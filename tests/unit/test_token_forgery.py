@@ -36,13 +36,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import jwt
 import pytest
 
 from app.core.config import Settings
 from app.core.exceptions import AuthenticationError
-from app.core.security import ISSUER, TokenType, create_access_token, decode_token
+from app.core.security import ISSUER, TokenClaims, TokenType, create_access_token, decode_token
 
 SECRET = "a-signing-secret-long-enough-for-the-validator-to-accept-it"
 
@@ -52,7 +53,7 @@ def settings() -> Settings:
     return Settings(_env_file=None, environment="test", jwt_secret=SECRET)
 
 
-def _claims(**overrides) -> dict:
+def _claims(**overrides: Any) -> dict[str, Any]:
     """A payload shaped exactly like one this application would mint."""
     now = datetime.now(UTC)
     payload = {
@@ -69,7 +70,7 @@ def _claims(**overrides) -> dict:
     return {key: value for key, value in payload.items() if value is not None}
 
 
-def _decode(token: str, settings: Settings):
+def _decode(token: str, settings: Settings) -> TokenClaims:
     return decode_token(token, settings=settings, expected_type=TokenType.ACCESS)
 
 
@@ -119,7 +120,7 @@ def test_a_token_with_a_forged_none_header_is_refused(settings: Settings) -> Non
     import base64
     import json
 
-    def segment(data: dict) -> str:
+    def segment(data: dict[str, Any]) -> str:
         raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
         return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 

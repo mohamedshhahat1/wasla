@@ -23,11 +23,12 @@ workspace the request was actually scoped to.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI, Request
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_entitlement_service
@@ -38,6 +39,7 @@ from app.db.models import Membership, MembershipStatus, Tenant, TenantRole, User
 from app.db.models.enums import TenantStatus
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
+from tests.fakes import as_table
 
 pytestmark = pytest.mark.integration
 
@@ -156,7 +158,7 @@ async def _workspace(
     return tenant
 
 
-async def _login(http: AsyncClient) -> dict:
+async def _login(http: AsyncClient) -> dict[str, Any]:
     response = await http.post(
         f"{API}/auth/login",
         json={"email": EMAIL, "password": PASSWORD},
@@ -169,7 +171,7 @@ def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _switch(http: AsyncClient, access: str, slug: str):
+async def _switch(http: AsyncClient, access: str, slug: str) -> Response:
     return await http.post(
         f"{API}/auth/workspace",
         json={"workspace_slug": slug},
@@ -316,7 +318,8 @@ async def test_a_membership_revoked_after_switching_stops_the_token(
     ).first()
     assert membership is not None
     await db_session.execute(
-        Membership.__table__.update()
+        as_table(Membership.__table__)
+        .update()
         .where(Membership.tenant_id == beta.id)
         .values(status=MembershipStatus.REVOKED)
     )

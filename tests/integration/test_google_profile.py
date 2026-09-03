@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import replace
+from typing import Any
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.oauth_binding import hash_binding
@@ -29,6 +31,7 @@ from app.integrations.google.oidc import GoogleIdentityClaims
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService
 from app.services.google_auth_service import GoogleAuthService
+from tests.fakes import as_flow_store, as_google_client, as_id_token_verifier, as_redis_client
 
 pytestmark = pytest.mark.integration
 
@@ -40,7 +43,7 @@ MOVED_PICTURE = "https://lh3.googleusercontent.com/a/new=s96-c"
 PASSWORD_HASH = "not-a-real-hash"
 
 
-def _claims(**overrides) -> GoogleIdentityClaims:
+def _claims(**overrides: Any) -> GoogleIdentityClaims:
     base = GoogleIdentityClaims(
         subject=SUBJECT,
         email=EMAIL,
@@ -52,23 +55,29 @@ def _claims(**overrides) -> GoogleIdentityClaims:
 
 
 class _FakeCommands:
-    def __init__(self):
-        self.values = {}
+    def __init__(self) -> None:
+        self.values: dict[str, Any] = {}
 
-    async def set(self, key, value, ex=None, nx=False):
+    async def set(
+        self,
+        key: str,
+        value: str,
+        ex: int | None = None,
+        nx: bool = False,
+    ) -> bool | None:
         if nx and key in self.values:
             return None
         self.values[key] = value
         return True
 
-    async def exists(self, key):
+    async def exists(self, key: str) -> int:
         return 1 if key in self.values else 0
 
 
 class _FakeRedis:
     """Session revocation is not what these tests are about."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.client = _FakeCommands()
 
 
@@ -101,17 +110,19 @@ class _ScriptedVerifier:
         return self.claims
 
 
-def _service(db_session, settings: Settings, claims: GoogleIdentityClaims, *, flow: OAuthFlow):
+def _service(
+    db_session: AsyncSession, settings: Settings, claims: GoogleIdentityClaims, *, flow: OAuthFlow
+) -> GoogleAuthService:
     return GoogleAuthService(
         session=db_session,
         settings=settings,
-        flows=_ScriptedFlows(flow),
-        client=_ScriptedClient(),
-        verifier=_ScriptedVerifier(claims),
+        flows=as_flow_store(_ScriptedFlows(flow)),
+        client=as_google_client(_ScriptedClient()),
+        verifier=as_id_token_verifier(_ScriptedVerifier(claims)),
         auth=AuthService(
             session=db_session,
             settings=settings,
-            token_store=RefreshTokenStore(_FakeRedis()),
+            token_store=RefreshTokenStore(as_redis_client(_FakeRedis())),
         ),
     )
 
@@ -143,20 +154,24 @@ def _link_flow(user_id: uuid.UUID) -> OAuthFlow:
     )
 
 
-async def _login(db_session, settings, claims: GoogleIdentityClaims, *, state: str) -> None:
+async def _login(
+    db_session: AsyncSession, settings: Settings, claims: GoogleIdentityClaims, *, state: str
+) -> None:
     await _service(db_session, settings, claims, flow=_login_flow()).complete_login(
         code="a-code", state=state, binding=BROWSER_SECRET
     )
     await db_session.flush()
 
 
-async def _stored(db_session, email: str = EMAIL) -> User:
+async def _stored(db_session: AsyncSession, email: str = EMAIL) -> User:
     found = await db_session.scalar(select(User).where(User.email == email))
     assert found is not None
     return found
 
 
-async def test_a_first_login_stores_the_name_and_the_picture(db_session, settings):
+async def test_a_first_login_stores_the_name_and_the_picture(
+    db_session: AsyncSession, settings: Settings
+) -> None:
     """The account and its profile land in one transaction, or not at all."""
     await _login(db_session, settings, _claims(), state="s")
 
@@ -168,7 +183,9 @@ async def test_a_first_login_stores_the_name_and_the_picture(db_session, setting
     assert user.hashed_password is None
 
 
-async def test_a_later_login_follows_a_changed_google_profile(db_session, settings):
+async def test_a_later_login_follows_a_changed_google_profile(
+    db_session: AsyncSession, settings: Settings
+) -> None:
     """The reason the refresh runs on every login and not only the first."""
     await _login(db_session, settings, _claims(), state="s")
     await _login(
@@ -183,7 +200,9 @@ async def test_a_later_login_follows_a_changed_google_profile(db_session, settin
     assert user.avatar_url == MOVED_PICTURE
 
 
-async def test_a_later_login_never_moves_the_account_to_a_new_address(db_session, settings):
+async def test_a_later_login_never_moves_the_account_to_a_new_address(
+    db_session: AsyncSession, settings: Settings
+) -> None:
     """The security property, asserted against real rows.
 
     A Google account that later reports a different address must not drag the
@@ -217,7 +236,9 @@ async def test_a_later_login_never_moves_the_account_to_a_new_address(db_session
     assert moved is None
 
 
-async def test_only_one_account_exists_after_two_logins(db_session, settings):
+async def test_only_one_account_exists_after_two_logins(
+    db_session: AsyncSession, settings: Settings
+) -> None:
     """The identity is resolved by subject, so a second login is not a signup."""
     await _login(db_session, settings, _claims(), state="s")
     await _login(db_session, settings, _claims(), state="s2")
@@ -229,7 +250,9 @@ async def test_only_one_account_exists_after_two_logins(db_session, settings):
     assert identities[0].provider_subject == SUBJECT
 
 
-async def test_linking_gives_a_password_account_its_first_picture(db_session, settings):
+async def test_linking_gives_a_password_account_its_first_picture(
+    db_session: AsyncSession, settings: Settings
+) -> None:
     """Usually the first moment such an account can have had one at all."""
     user = await UserRepository(db_session).create(
         email="existing@example.com",
@@ -245,13 +268,17 @@ async def test_linking_gives_a_password_account_its_first_picture(db_session, se
     )
     await db_session.flush()
 
-    assert user.avatar_url == PICTURE
-    assert user.full_name == NAME
+    avatar: str | None = user.avatar_url
+    name: str | None = user.full_name
+    assert avatar == PICTURE
+    assert name == NAME
     # Linking must not cost the account its password.
     assert user.hashed_password == PASSWORD_HASH
 
 
-async def test_a_token_without_a_picture_leaves_a_stored_one_alone(db_session, settings):
+async def test_a_token_without_a_picture_leaves_a_stored_one_alone(
+    db_session: AsyncSession, settings: Settings
+) -> None:
     """Google omitting a field is not somebody clearing it."""
     await _login(db_session, settings, _claims(), state="s")
     await _login(db_session, settings, _claims(picture=None), state="s2")

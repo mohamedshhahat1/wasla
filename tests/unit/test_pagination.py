@@ -20,20 +20,20 @@ MOMENT = datetime(2026, 8, 21, 12, 30, 45, 123456, tzinfo=UTC)
 ROW_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
 
-def test_a_cursor_survives_a_round_trip():
+def test_a_cursor_survives_a_round_trip() -> None:
     cursor = Cursor(sort_value=MOMENT, id=ROW_ID)
 
     assert Cursor.decode(cursor.encode()) == cursor
 
 
-def test_microseconds_survive():
+def test_microseconds_survive() -> None:
     """Truncating here would make two rows in the same second inseparable."""
     cursor = Cursor(sort_value=MOMENT, id=ROW_ID)
 
     assert Cursor.decode(cursor.encode()).sort_value == MOMENT
 
 
-def test_a_null_sort_value_survives():
+def test_a_null_sort_value_survives() -> None:
     """Rows with no sort value order last, and paging through them still works."""
     cursor = Cursor(sort_value=None, id=ROW_ID)
 
@@ -42,7 +42,7 @@ def test_a_null_sort_value_survives():
     assert decoded.id == ROW_ID
 
 
-def test_a_cursor_is_url_safe_and_unpadded():
+def test_a_cursor_is_url_safe_and_unpadded() -> None:
     encoded = Cursor(sort_value=MOMENT, id=ROW_ID).encode()
 
     assert "=" not in encoded
@@ -58,7 +58,7 @@ def test_a_cursor_is_url_safe_and_unpadded():
         pytest.param("x" * (MAX_CURSOR_LENGTH + 1), id="too-long"),
     ],
 )
-def test_malformed_cursors_are_rejected(raw):
+def test_malformed_cursors_are_rejected(raw: str) -> None:
     with pytest.raises(ValidationError):
         Cursor.decode(raw)
 
@@ -76,13 +76,13 @@ def _encoded(payload: str) -> str:
         pytest.param("|", id="both-empty"),
     ],
 )
-def test_wellformed_base64_carrying_nonsense_is_rejected(payload):
+def test_wellformed_base64_carrying_nonsense_is_rejected(payload: str) -> None:
     """Decoding must not be the same as trusting."""
     with pytest.raises(ValidationError):
         Cursor.decode(_encoded(payload))
 
 
-def test_a_naive_timestamp_is_pinned_to_utc():
+def test_a_naive_timestamp_is_pinned_to_utc() -> None:
     """Every timestamp column is aware, so a naive value would compare wrongly."""
     decoded = Cursor.decode(_encoded(f"2026-08-21T12:30:45|{ROW_ID}"))
 
@@ -91,7 +91,7 @@ def test_a_naive_timestamp_is_pinned_to_utc():
     assert decoded.sort_value == datetime(2026, 8, 21, 12, 30, 45, tzinfo=UTC)
 
 
-def test_a_rejected_cursor_answers_422():
+def test_a_rejected_cursor_answers_422() -> None:
     with pytest.raises(ValidationError) as raised:
         Cursor.decode("!!!")
 
@@ -99,7 +99,7 @@ def test_a_rejected_cursor_answers_422():
 
 
 class Row:
-    def __init__(self, moment, row_id):
+    def __init__(self, moment: datetime, row_id: uuid.UUID) -> None:
         self.moment = moment
         self.id = row_id
 
@@ -112,7 +112,7 @@ def _rows(count: int) -> list[Row]:
     return [Row(MOMENT - timedelta(minutes=index), uuid.uuid4()) for index in range(count)]
 
 
-def test_a_full_page_offers_a_cursor():
+def test_a_full_page_offers_a_cursor() -> None:
     rows = _rows(3)
 
     page = paginate(rows, limit=3, key=_key)
@@ -121,21 +121,21 @@ def test_a_full_page_offers_a_cursor():
     assert Cursor.decode(page.next_cursor) == _key(rows[-1])
 
 
-def test_a_short_page_ends_the_collection():
+def test_a_short_page_ends_the_collection() -> None:
     """Issuing a cursor here would invite a request guaranteed to return nothing."""
     page = paginate(_rows(2), limit=3, key=_key)
 
     assert page.next_cursor is None
 
 
-def test_an_empty_page_ends_the_collection():
+def test_an_empty_page_ends_the_collection() -> None:
     page: Page[Row] = paginate([], limit=3, key=_key)
 
     assert page.items == []
     assert page.next_cursor is None
 
 
-def test_the_cursor_names_the_last_row_not_the_first():
+def test_the_cursor_names_the_last_row_not_the_first() -> None:
     """Naming the first would replay the page just handed out."""
     rows = _rows(3)
 

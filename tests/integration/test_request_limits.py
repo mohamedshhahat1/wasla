@@ -9,6 +9,8 @@ environment where nobody thinks to check.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -16,6 +18,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.core.config import Settings
 from app.main import create_app
+from tests.conftest import FakeDependency
 
 pytestmark = pytest.mark.integration
 
@@ -25,7 +28,7 @@ TIMEOUT_SECONDS = 2.0
 SLOW_SECONDS = 10.0
 
 
-def _settings(**overrides: object) -> Settings:
+def _settings(**overrides: Any) -> Settings:
     values: dict[str, object] = {
         "environment": "test",
         "log_format": "console",
@@ -67,7 +70,9 @@ def limited_settings() -> Settings:
 
 
 @pytest.fixture
-def app(limited_settings: Settings, fake_database, fake_redis) -> FastAPI:
+def app(
+    limited_settings: Settings, fake_database: FakeDependency, fake_redis: FakeDependency
+) -> FastAPI:
     application = create_app(limited_settings)
     application.state.database = fake_database
     application.state.redis = fake_redis
@@ -75,7 +80,7 @@ def app(limited_settings: Settings, fake_database, fake_redis) -> FastAPI:
 
 
 @pytest.fixture
-async def client(app: FastAPI):
+async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://wasla.test",
@@ -84,7 +89,7 @@ async def client(app: FastAPI):
 
 
 @pytest.fixture
-def timed_app(fake_database, fake_redis) -> FastAPI:
+def timed_app(fake_database: FakeDependency, fake_redis: FakeDependency) -> FastAPI:
     """The one application configured to time requests out.
 
     Only the two tests below need it, and the ratio is what keeps them honest:
@@ -99,7 +104,7 @@ def timed_app(fake_database, fake_redis) -> FastAPI:
 
 
 @pytest.fixture
-async def timed_client(timed_app: FastAPI):
+async def timed_client(timed_app: FastAPI) -> AsyncIterator[AsyncClient]:
     async with AsyncClient(
         transport=ASGITransport(app=timed_app),
         base_url="http://wasla.test",
@@ -110,21 +115,21 @@ async def timed_client(timed_app: FastAPI):
 # --------------------------------------------------------------- body size
 
 
-async def test_a_body_under_the_limit_is_accepted(client):
+async def test_a_body_under_the_limit_is_accepted(client: AsyncClient) -> None:
     response = await client.post("/test/echo", json={"body": "x" * 100})
 
     assert response.status_code == 200
     assert response.json()["size"] == 100
 
 
-async def test_an_oversized_body_is_refused(client):
+async def test_an_oversized_body_is_refused(client: AsyncClient) -> None:
     response = await client.post("/test/echo", json={"body": "x" * 4096})
 
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "payload_too_large"
 
 
-async def test_the_refusal_uses_the_projects_error_envelope(client):
+async def test_the_refusal_uses_the_projects_error_envelope(client: AsyncClient) -> None:
     """Middleware runs before the exception handlers, so the envelope is built
     by hand - a caller should not be able to tell which layer refused them."""
     response = await client.post("/test/echo", json={"body": "x" * 4096})
@@ -134,7 +139,9 @@ async def test_the_refusal_uses_the_projects_error_envelope(client):
     assert "message" in body["error"]
 
 
-async def test_an_oversized_body_is_refused_before_it_is_read(client, app):
+async def test_an_oversized_body_is_refused_before_it_is_read(
+    client: AsyncClient, app: FastAPI
+) -> None:
     """The whole point: a limit applied after buffering has already spent the
     memory it exists to protect."""
     seen: list[int] = []
@@ -151,11 +158,11 @@ async def test_an_oversized_body_is_refused_before_it_is_read(client, app):
     assert seen == []
 
 
-async def test_a_body_sent_without_a_declared_length_is_still_capped(client):
+async def test_a_body_sent_without_a_declared_length_is_still_capped(client: AsyncClient) -> None:
     """A request that lies about its length, or sends none at all, is counted
     as it streams."""
 
-    async def oversized():
+    async def oversized() -> AsyncIterator[bytes]:
         for _ in range(8):
             yield b"x" * 512
 
@@ -168,7 +175,7 @@ async def test_a_body_sent_without_a_declared_length_is_still_capped(client):
 # ---------------------------------------------------------------- timeout
 
 
-async def test_a_handler_that_takes_too_long_is_cut_off(timed_client):
+async def test_a_handler_that_takes_too_long_is_cut_off(timed_client: AsyncClient) -> None:
     """A handler waiting on something is holding a pooled database connection
     while it waits, which is the resource being protected."""
     response = await timed_client.get("/test/slow")
@@ -177,7 +184,7 @@ async def test_a_handler_that_takes_too_long_is_cut_off(timed_client):
     assert response.json()["error"]["code"] == "request_timeout"
 
 
-async def test_a_normal_request_is_not_affected(timed_client):
+async def test_a_normal_request_is_not_affected(timed_client: AsyncClient) -> None:
     """The control: the timeout refuses a slow handler, not every handler."""
     response = await timed_client.get("/health/live")
 
@@ -185,7 +192,7 @@ async def test_a_normal_request_is_not_affected(timed_client):
     assert response.json()["status"] == "alive"
 
 
-async def test_the_whatsapp_webhook_is_exempt_from_the_timeout(app):
+async def test_the_whatsapp_webhook_is_exempt_from_the_timeout(app: FastAPI) -> None:
     """A timed-out delivery is a non-2xx, Meta retries it, and a subscription
     that keeps failing is eventually disabled (ADR-032).
 
@@ -200,7 +207,7 @@ async def test_the_whatsapp_webhook_is_exempt_from_the_timeout(app):
     assert middleware._exempt("/api/v1/conversations") is False
 
 
-async def test_the_webhook_still_has_a_body_limit(client):
+async def test_the_webhook_still_has_a_body_limit(client: AsyncClient) -> None:
     """A body cap protects memory rather than shedding load, so the reason the
     webhook is exempt from the timeout does not apply to it."""
     response = await client.post(

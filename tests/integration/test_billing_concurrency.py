@@ -32,12 +32,13 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core.exceptions import ConflictError
@@ -46,7 +47,12 @@ from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.payment_event import PaymentEvent
 from app.db.models.tenant import Tenant
 from app.integrations.billing.paymob import PaymobProvider, hmac_signature
-from app.services.checkout_service import APPLIED, DUPLICATE, CheckoutService
+from app.services.checkout_service import (
+    APPLIED,
+    DUPLICATE,
+    CheckoutService,
+    StartedCheckout,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -78,7 +84,7 @@ def _provider() -> PaymobProvider:
 
 
 @pytest_asyncio.fixture
-async def committing(prepared_database: str) -> AsyncIterator[async_sessionmaker]:
+async def committing(prepared_database: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     """Sessions that really commit, over an engine of this test's own.
 
     `NullPool` so every session takes a fresh connection - the point of the
@@ -94,7 +100,9 @@ async def committing(prepared_database: str) -> AsyncIterator[async_sessionmaker
 
 
 @pytest_asyncio.fixture
-async def workspace(committing) -> AsyncIterator[tuple[uuid.UUID, uuid.UUID]]:
+async def workspace(
+    committing: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[tuple[uuid.UUID, uuid.UUID]]:
     """A committed tenant and plan, removed afterwards whatever happens.
 
     Returns their ids rather than the objects: every session below is separate,
@@ -127,7 +135,7 @@ async def workspace(committing) -> AsyncIterator[tuple[uuid.UUID, uuid.UUID]]:
 
 
 async def _committed_invoice(
-    committing,
+    committing: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     *,
     amount: str = "99.00",
@@ -162,7 +170,7 @@ async def _committed_invoice(
         return invoice.id, payment.id
 
 
-def _transaction(reference: str, *, amount_cents: int = 9900) -> dict:
+def _transaction(reference: str, *, amount_cents: int = 9900) -> dict[str, Any]:
     return {
         "id": 192036465,
         "pending": False,
@@ -185,7 +193,9 @@ def _transaction(reference: str, *, amount_cents: int = 9900) -> dict:
     }
 
 
-async def _apply_in_own_session(committing, tenant_id: uuid.UUID, transaction: dict) -> str:
+async def _apply_in_own_session(
+    committing: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, transaction: dict[str, Any]
+) -> str:
     """One callback, on a connection nobody else is using."""
     body = json.dumps({"type": "TRANSACTION", "obj": transaction}).encode("utf-8")
     signature = hmac_signature(transaction, secret=HMAC_SECRET)
@@ -201,7 +211,9 @@ async def _apply_in_own_session(committing, tenant_id: uuid.UUID, transaction: d
 # ------------------------------------------------------------- the callback
 
 
-async def test_four_simultaneous_deliveries_settle_the_invoice_once(committing, workspace):
+async def test_four_simultaneous_deliveries_settle_the_invoice_once(
+    committing: async_sessionmaker[AsyncSession], workspace: tuple[uuid.UUID, uuid.UUID]
+) -> None:
     """The retry storm, as it actually arrives.
 
     A provider that did not get a 2xx sends the same callback again, and
@@ -242,7 +254,9 @@ async def test_four_simultaneous_deliveries_settle_the_invoice_once(committing, 
         assert events == 1
 
 
-async def test_the_one_that_wins_is_the_one_that_records_the_work(committing, workspace):
+async def test_the_one_that_wins_is_the_one_that_records_the_work(
+    committing: async_sessionmaker[AsyncSession], workspace: tuple[uuid.UUID, uuid.UUID]
+) -> None:
     """A duplicate must not overwrite the outcome the winner wrote.
 
     The claim is inserted before the decision is made, so a second delivery
@@ -269,7 +283,9 @@ async def test_the_one_that_wins_is_the_one_that_records_the_work(committing, wo
 # -------------------------------------------------------------- the checkout
 
 
-async def test_two_checkouts_started_at_once_bill_the_period_once(committing, workspace):
+async def test_two_checkouts_started_at_once_bill_the_period_once(
+    committing: async_sessionmaker[AsyncSession], workspace: tuple[uuid.UUID, uuid.UUID]
+) -> None:
     """`UNIQUE(tenant_id, period_start)` decides it, and the loser recovers.
 
     Two owners clicking at the same moment, or one double-clicking. Both may
@@ -304,7 +320,9 @@ async def test_two_checkouts_started_at_once_bill_the_period_once(committing, wo
     assert payments == 2
 
 
-async def test_one_idempotency_key_opens_one_payment_page(committing, workspace):
+async def test_one_idempotency_key_opens_one_payment_page(
+    committing: async_sessionmaker[AsyncSession], workspace: tuple[uuid.UUID, uuid.UUID]
+) -> None:
     """A retried request is recognised rather than duplicated.
 
     Refused rather than replayed, because the first response carried a one-use
@@ -316,7 +334,7 @@ async def test_one_idempotency_key_opens_one_payment_page(committing, workspace)
     plan_code = await _plan_code(committing, workspace)
     key = f"req-{uuid.uuid4().hex[:12]}"
 
-    async def start():
+    async def start() -> StartedCheckout | Exception:
         async with committing() as session:
             service = CheckoutService(session, tenant_id=tenant_id, provider=_provider())
             try:
@@ -339,7 +357,9 @@ async def test_one_idempotency_key_opens_one_payment_page(committing, workspace)
     assert payments == 1
 
 
-async def test_different_keys_are_different_attempts(committing, workspace):
+async def test_different_keys_are_different_attempts(
+    committing: async_sessionmaker[AsyncSession], workspace: tuple[uuid.UUID, uuid.UUID]
+) -> None:
     """Somebody who abandoned a page and started again gets a new one.
 
     The key deduplicates a retry of one request, not a customer changing their
@@ -366,7 +386,11 @@ async def test_different_keys_are_different_attempts(committing, workspace):
     assert invoices == 1
 
 
-async def test_one_workspaces_key_does_not_block_anothers(committing, workspace, prepared_database):
+async def test_one_workspaces_key_does_not_block_anothers(
+    committing: async_sessionmaker[AsyncSession],
+    workspace: tuple[uuid.UUID, uuid.UUID],
+    prepared_database: str,
+) -> None:
     """The constraint is per workspace, and that is a security property.
 
     A globally unique key would let one customer stop another from starting a
@@ -401,7 +425,9 @@ async def test_one_workspaces_key_does_not_block_anothers(committing, workspace,
             await session.commit()
 
 
-async def _plan_code(committing, workspace) -> str:
+async def _plan_code(
+    committing: async_sessionmaker[AsyncSession], workspace: tuple[uuid.UUID, uuid.UUID]
+) -> str:
     _, plan_id = workspace
     async with committing() as session:
         plan = await session.get(Plan, plan_id)

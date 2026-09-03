@@ -7,10 +7,13 @@ not the sending — that is covered against the service in `test_follow_ups.py`.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.conversation import (
     Contact,
@@ -25,6 +28,7 @@ from app.db.models.conversation import (
 from app.db.models.follow_up import FollowUp, FollowUpStatus
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
+from app.services.follow_up_service import DispatchOutcome, FollowUpService
 from app.workers.follow_up_worker import FollowUpWorker
 
 pytestmark = pytest.mark.integration
@@ -38,17 +42,19 @@ class SessionHandle:
     rolled back with the test.
     """
 
-    def __init__(self, session) -> None:
+    def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self.opened = 0
 
     @asynccontextmanager
-    async def session(self):
+    async def session(self) -> AsyncIterator[AsyncSession]:
         self.opened += 1
         yield self._session
 
 
-async def _due_follow_up(session, *, slug: str, wa_id: str, minutes_late: int = 5) -> FollowUp:
+async def _due_follow_up(
+    session: AsyncSession, *, slug: str, wa_id: str, minutes_late: int = 5
+) -> FollowUp:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
@@ -94,14 +100,20 @@ class StubMessaging:
     WhatsApp account or a network call.
     """
 
-    def __init__(self, session, tenant_id) -> None:
+    def __init__(self, session: AsyncSession, tenant_id: uuid.UUID) -> None:
         self._session = session
         self._tenant_id = tenant_id
 
-    def window_open(self, conversation) -> bool:
+    def window_open(self, conversation: Conversation) -> bool:
         return True
 
-    async def send_text(self, *, conversation_id, body, **kwargs):
+    async def send_text(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        body: str,
+        **kwargs: Any,
+    ) -> Message:
         message = Message(
             tenant_id=self._tenant_id,
             conversation_id=conversation_id,
@@ -113,11 +125,11 @@ class StubMessaging:
         await self._session.flush()
         return message
 
-    async def send_template(self, **kwargs):
+    async def send_template(self, **kwargs: Any) -> None:
         raise AssertionError("These follow-ups are inside the window.")
 
 
-def _worker(session, **kwargs) -> FollowUpWorker:
+def _worker(session: AsyncSession, **kwargs: Any) -> FollowUpWorker:
     return FollowUpWorker(
         database=SessionHandle(session),  # type: ignore[arg-type]
         settings=object(),  # type: ignore[arg-type]
@@ -126,13 +138,13 @@ def _worker(session, **kwargs) -> FollowUpWorker:
     )
 
 
-async def test_a_sweep_with_nothing_due_does_no_work(db_session):
+async def test_a_sweep_with_nothing_due_does_no_work(db_session: AsyncSession) -> None:
     handled = await _worker(db_session).run_once()
 
     assert handled == 0
 
 
-async def test_a_sweep_handles_a_due_follow_up(db_session):
+async def test_a_sweep_handles_a_due_follow_up(db_session: AsyncSession) -> None:
     follow_up = await _due_follow_up(db_session, slug="acme", wa_id="201000000001")
 
     handled = await _worker(db_session).run_once()
@@ -143,7 +155,7 @@ async def test_a_sweep_handles_a_due_follow_up(db_session):
     assert follow_up.message_id is not None
 
 
-async def test_a_sweep_crosses_workspaces(db_session):
+async def test_a_sweep_crosses_workspaces(db_session: AsyncSession) -> None:
     """One worker serves the whole platform, unlike everything on the request path."""
     await _due_follow_up(db_session, slug="acme", wa_id="201000000002")
     await _due_follow_up(db_session, slug="rival", wa_id="201000000003")
@@ -153,7 +165,7 @@ async def test_a_sweep_crosses_workspaces(db_session):
     assert handled == 2
 
 
-async def test_a_sweep_is_bounded_by_its_claim_limit(db_session):
+async def test_a_sweep_is_bounded_by_its_claim_limit(db_session: AsyncSession) -> None:
     for index in range(4):
         await _due_follow_up(db_session, slug=f"tenant{index}", wa_id=f"20100000001{index}")
 
@@ -162,7 +174,7 @@ async def test_a_sweep_is_bounded_by_its_claim_limit(db_session):
     assert handled == 2
 
 
-async def test_a_follow_up_not_yet_due_is_left_alone(db_session):
+async def test_a_follow_up_not_yet_due_is_left_alone(db_session: AsyncSession) -> None:
     follow_up = await _due_follow_up(
         db_session,
         slug="acme",
@@ -176,7 +188,9 @@ async def test_a_follow_up_not_yet_due_is_left_alone(db_session):
     assert follow_up.status is FollowUpStatus.PENDING
 
 
-async def test_one_broken_follow_up_does_not_strand_the_others(db_session, monkeypatch):
+async def test_one_broken_follow_up_does_not_strand_the_others(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A single bad row must not block every other workspace's nudges."""
     await _due_follow_up(db_session, slug="acme", wa_id="201000000005")
     await _due_follow_up(db_session, slug="rival", wa_id="201000000006")
@@ -184,10 +198,9 @@ async def test_one_broken_follow_up_does_not_strand_the_others(db_session, monke
     import app.workers.follow_up_worker as module
 
     calls = {"count": 0}
-    original = module.FollowUpService
 
-    class Exploding(original):  # type: ignore[misc, valid-type]
-        async def dispatch(self, follow_up):
+    class Exploding(FollowUpService):
+        async def dispatch(self, follow_up: FollowUp) -> DispatchOutcome:
             calls["count"] += 1
             if calls["count"] == 1:
                 raise RuntimeError("Something unexpected.")
@@ -202,12 +215,14 @@ async def test_one_broken_follow_up_does_not_strand_the_others(db_session, monke
     assert handled == 1
 
 
-async def test_a_failing_sweep_does_not_kill_the_loop(db_session, monkeypatch):
+async def test_a_failing_sweep_does_not_kill_the_loop(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Otherwise every later follow-up goes unsent and nothing says why."""
     worker = _worker(db_session)
     sweeps = {"count": 0}
 
-    async def explode(**kwargs):
+    async def explode(**kwargs: Any) -> None:
         sweeps["count"] += 1
         worker.stop()
         raise RuntimeError("The database went away.")
@@ -221,7 +236,7 @@ async def test_a_failing_sweep_does_not_kill_the_loop(db_session, monkeypatch):
     assert sweeps["count"] == 1
 
 
-async def test_stopping_wakes_a_sleeping_worker_immediately(db_session):
+async def test_stopping_wakes_a_sleeping_worker_immediately(db_session: AsyncSession) -> None:
     """Shutdown must not wait out a full poll interval."""
     import asyncio
 
@@ -236,7 +251,7 @@ async def test_stopping_wakes_a_sleeping_worker_immediately(db_session):
     assert True
 
 
-async def test_the_worker_opens_one_session_per_sweep(db_session):
+async def test_the_worker_opens_one_session_per_sweep(db_session: AsyncSession) -> None:
     handle = SessionHandle(db_session)
     worker = FollowUpWorker(
         database=handle,  # type: ignore[arg-type]
@@ -250,7 +265,7 @@ async def test_the_worker_opens_one_session_per_sweep(db_session):
     assert handle.opened == 2
 
 
-async def test_a_claimed_follow_up_belongs_to_its_own_workspace(db_session):
+async def test_a_claimed_follow_up_belongs_to_its_own_workspace(db_session: AsyncSession) -> None:
     """The sweep crosses tenants; the service it hands each row to must not."""
     follow_up = await _due_follow_up(db_session, slug="acme", wa_id="201000000007")
     tenant_id = follow_up.tenant_id

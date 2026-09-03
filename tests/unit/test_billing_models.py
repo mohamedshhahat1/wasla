@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -23,34 +24,35 @@ from app.db.models.billing import (
     SubscriptionStatus,
 )
 from app.services.entitlement_service import PERIOD_METERS
+from tests.fakes import as_table
 
 MOMENT = datetime(2026, 8, 23, tzinfo=UTC)
 
 
-def _plan(**limits) -> Plan:
+def _plan(**limits: Any) -> Plan:
     return Plan(
         code="test",
         name="Test",
         price=Decimal("0.00"),
         currency="USD",
         interval=BillingInterval.MONTHLY,
-        limits={key.value: value for key, value in limits.items()},
+        limits=dict(limits),
     )
 
 
-def test_every_limit_is_either_a_resource_or_a_period():
+def test_every_limit_is_either_a_resource_or_a_period() -> None:
     """The two are checked by different queries, so a key belonging to neither
     would be silently unenforceable."""
     assert set(LimitKey) == RESOURCE_LIMITS | PERIOD_LIMITS
     assert not RESOURCE_LIMITS & PERIOD_LIMITS
 
 
-def test_every_period_limit_knows_which_meters_it_counts():
+def test_every_period_limit_knows_which_meters_it_counts() -> None:
     """A period limit without meters would read as zero used, forever."""
     assert set(PERIOD_METERS) == PERIOD_LIMITS
 
 
-def test_an_absent_limit_is_unlimited():
+def test_an_absent_limit_is_unlimited() -> None:
     """What "custom limits" means for Enterprise, and the reading that must not
     be inverted: the alternative is a magic number somebody compares against."""
     plan = _plan()
@@ -58,19 +60,21 @@ def test_an_absent_limit_is_unlimited():
     assert plan.limit_for(LimitKey.PERIOD_MESSAGES) is None
 
 
-def test_a_stored_limit_is_returned():
+def test_a_stored_limit_is_returned() -> None:
     plan = _plan(**{LimitKey.AGENTS: 5})
     assert plan.limit_for(LimitKey.AGENTS) == 5
 
 
-def test_zero_is_a_real_limit_of_none_at_all():
+def test_zero_is_a_real_limit_of_none_at_all() -> None:
     """Starter allows no campaign messages, and that has to be expressible."""
     plan = _plan(**{LimitKey.PERIOD_CAMPAIGN_MESSAGES: 0})
     assert plan.limit_for(LimitKey.PERIOD_CAMPAIGN_MESSAGES) == 0
 
 
 @pytest.mark.parametrize("value", ["5", 5.5, None, True, [5]])
-def test_a_malformed_limit_is_unlimited_rather_than_zero(value):
+def test_a_malformed_limit_is_unlimited_rather_than_zero(
+    value: bool | float | list[Any] | str | None,
+) -> None:
     """A plan edited badly must not lock a paying customer out of their own
     product. Zero is never what a broken row was trying to say."""
     plan = Plan(
@@ -84,10 +88,10 @@ def test_a_malformed_limit_is_unlimited_rather_than_zero(value):
     assert plan.limit_for(LimitKey.AGENTS) is None
 
 
-def test_a_price_is_exact():
+def test_a_price_is_exact() -> None:
     """Money is Numeric, never float: 19.99 is not representable in binary
     floating point, and the error reaches an invoice."""
-    assert Plan.__table__.columns["price"].type.python_type is Decimal
+    assert as_table(Plan.__table__).columns["price"].type.python_type is Decimal
 
 
 def _subscription(status: SubscriptionStatus) -> Subscription:
@@ -100,7 +104,7 @@ def _subscription(status: SubscriptionStatus) -> Subscription:
     )
 
 
-def test_a_workspace_being_chased_for_payment_is_still_served():
+def test_a_workspace_being_chased_for_payment_is_still_served() -> None:
     """A failed card is a conversation to have, not a reason to cut somebody
     off mid-sentence with their own customers."""
     assert _subscription(SubscriptionStatus.PAST_DUE).is_serving is True
@@ -108,12 +112,12 @@ def test_a_workspace_being_chased_for_payment_is_still_served():
     assert _subscription(SubscriptionStatus.ACTIVE).is_serving is True
 
 
-def test_a_finished_subscription_serves_nobody():
+def test_a_finished_subscription_serves_nobody() -> None:
     assert _subscription(SubscriptionStatus.CANCELLED).is_serving is False
     assert _subscription(SubscriptionStatus.EXPIRED).is_serving is False
 
 
-def test_a_suspended_subscription_serves_nobody():
+def test_a_suspended_subscription_serves_nobody() -> None:
     """The whole point of the status (ADR-061).
 
     `PAST_DUE` serves so a late payment does not cut anybody off; `SUSPENDED`
@@ -124,7 +128,7 @@ def test_a_suspended_subscription_serves_nobody():
     assert _subscription(SubscriptionStatus.SUSPENDED).is_terminal is True
 
 
-def test_only_a_suspension_is_recoverable_by_paying():
+def test_only_a_suspension_is_recoverable_by_paying() -> None:
     """Which non-serving state a payment may lift, and which it may not.
 
     `is_terminal` means the sweep advances the row no further - not that it can
@@ -138,11 +142,11 @@ def test_only_a_suspension_is_recoverable_by_paying():
     assert _subscription(SubscriptionStatus.PAST_DUE).is_suspended_for_non_payment is False
 
 
-def test_serving_and_terminal_do_not_overlap():
+def test_serving_and_terminal_do_not_overlap() -> None:
     assert not SERVING_STATUSES & TERMINAL_SUBSCRIPTION_STATUSES
     assert set(SubscriptionStatus) == SERVING_STATUSES | TERMINAL_SUBSCRIPTION_STATUSES
 
 
-def test_one_subscription_per_workspace_is_the_databases_job():
-    names = {constraint.name for constraint in Subscription.__table__.constraints}
+def test_one_subscription_per_workspace_is_the_databases_job() -> None:
+    names = {constraint.name for constraint in as_table(Subscription.__table__).constraints}
     assert "uq_subscriptions_tenant_id" in names

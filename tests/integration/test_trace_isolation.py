@@ -41,6 +41,7 @@ from app.core.tracing import (
 from app.workers.dispatch import job_span
 from app.workers.queue import AgentJob, AgentQueue, JobEnvelope
 from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import as_redis
 from tests.tracing_recorder import ExplodingExporter, Recording, install, recording_spans
 
 pytestmark = pytest.mark.integration
@@ -183,7 +184,7 @@ async def test_one_trace_spans_request_queue_worker_and_provider(
     somebody changes how a job is encoded.
     """
     redis = FakeQueueRedis()
-    queue = AgentQueue(redis)
+    queue = AgentQueue(as_redis(redis))
 
     with span("api.request", kind=SpanKind.SERVER) as request:
         await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION))

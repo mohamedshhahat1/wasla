@@ -22,6 +22,7 @@ from app.db.models import (
     WhatsAppEventKind,
     WhatsAppEventState,
 )
+from tests.fakes import as_table
 
 # Column names that would mean a *plaintext* credential had been persisted.
 # ADR-009 forbade any credential column at all; ADR-034 supersedes it with one
@@ -65,7 +66,7 @@ def _leads_with_tenant(table: Table) -> bool:
     )
 
 
-def test_every_table_with_a_tenant_column_indexes_it():
+def test_every_table_with_a_tenant_column_indexes_it() -> None:
     """The regression guard for the missing WhatsApp tenant indexes.
 
     Written against the whole metadata rather than the two tables that were
@@ -85,20 +86,20 @@ def test_every_table_with_a_tenant_column_indexes_it():
     assert missing == []
 
 
-def test_whatsapp_tables_declare_the_indexes_the_migrations_create():
-    assert _index_names(WhatsAppAccount.__table__) == {
+def test_whatsapp_tables_declare_the_indexes_the_migrations_create() -> None:
+    assert _index_names(as_table(WhatsAppAccount.__table__)) == {
         "ix_whatsapp_accounts_tenant_id",
         # Migration 0022. Unique, and partial: one *live* claim per number.
         "uq_whatsapp_accounts_live_phone_number_id",
     }
-    assert _index_names(WhatsAppEvent.__table__) == {
+    assert _index_names(as_table(WhatsAppEvent.__table__)) == {
         "ix_whatsapp_events_tenant_id",
         "ix_whatsapp_events_account_id",
         "ix_whatsapp_events_tenant_id_state",
     }
 
 
-def test_enum_values_match_the_migration_literals():
+def test_enum_values_match_the_migration_literals() -> None:
     assert [member.value for member in WhatsAppAccountStatus] == [
         "active",
         "disabled",
@@ -119,14 +120,14 @@ def test_enum_values_match_the_migration_literals():
     ]
 
 
-def test_one_live_claim_per_number_platform_wide():
+def test_one_live_claim_per_number_platform_wide() -> None:
     """Not (tenant_id, phone_number_id): tenant resolution depends on this.
 
     A partial unique index rather than a constraint, so that releasing a number
     frees it without deleting the row - and with it every conversation and
     message that cascades from the account (ADR-037).
     """
-    index = _index(WhatsAppAccount.__table__, "uq_whatsapp_accounts_live_phone_number_id")
+    index = _index(as_table(WhatsAppAccount.__table__), "uq_whatsapp_accounts_live_phone_number_id")
 
     assert index.unique is True
     assert [column.name for column in index.columns] == ["phone_number_id"]
@@ -136,7 +137,7 @@ def test_one_live_claim_per_number_platform_wide():
     assert "released_at IS NULL" in str(predicate)
 
 
-def test_a_released_row_no_longer_counts_as_active():
+def test_a_released_row_no_longer_counts_as_active() -> None:
     """`is_active` gates sending and inbound resolution, so it has to see the
     release rather than only the status."""
     account = WhatsAppAccount(
@@ -151,29 +152,31 @@ def test_a_released_row_no_longer_counts_as_active():
     account.status = WhatsAppAccountStatus.RELEASED
     account.released_at = datetime(2026, 8, 23, tzinfo=UTC)
 
-    assert account.is_active is False
-    assert account.is_released is True
+    active: bool = account.is_active
+    released: bool = account.is_released
+    assert active is False
+    assert released is True
 
 
-def test_ownership_proof_is_recorded_on_the_row():
+def test_ownership_proof_is_recorded_on_the_row() -> None:
     """A claim without a recorded proof is a claim an operator cannot audit,
     and the column is what makes the pre-ADR-037 rows findable."""
-    columns = WhatsAppAccount.__table__.columns
+    columns = as_table(WhatsAppAccount.__table__).columns
     assert "ownership_verified_at" in columns
     # Nullable, because rows claimed before proof existed genuinely have none
     # and back-dating them would erase exactly that list.
     assert columns["ownership_verified_at"].nullable is True
 
 
-def test_event_idempotency_is_scoped_to_one_workspace():
+def test_event_idempotency_is_scoped_to_one_workspace() -> None:
     columns = _unique_columns(
-        WhatsAppEvent.__table__,
+        as_table(WhatsAppEvent.__table__),
         "uq_whatsapp_events_tenant_id_event_id",
     )
     assert columns == ("tenant_id", "event_id")
 
 
-def test_the_account_row_stores_no_plaintext_credential():
+def test_the_account_row_stores_no_plaintext_credential() -> None:
     """ADR-009 refused a credential column until encryption existed; ADR-034
     adds one that holds ciphertext only.
 
@@ -183,26 +186,26 @@ def test_the_account_row_stores_no_plaintext_credential():
     """
     suspicious = [
         column.name
-        for column in WhatsAppAccount.__table__.columns
+        for column in as_table(WhatsAppAccount.__table__).columns
         if any(hint in column.name.lower() for hint in PLAINTEXT_HINTS)
     ]
     assert suspicious == [ENCRYPTED_COLUMN]
 
 
-def test_the_encrypted_credential_is_nullable():
+def test_the_encrypted_credential_is_nullable() -> None:
     """A workspace without its own token sends through the platform credential,
     which is how every workspace worked before the column existed."""
-    assert WhatsAppAccount.__table__.c[ENCRYPTED_COLUMN].nullable is True
+    assert as_table(WhatsAppAccount.__table__).c[ENCRYPTED_COLUMN].nullable is True
 
 
-def test_tenant_foreign_keys_cascade():
+def test_tenant_foreign_keys_cascade() -> None:
     for table in (WhatsAppAccount.__table__, WhatsAppEvent.__table__):
         (foreign_key,) = table.c.tenant_id.foreign_keys
         assert foreign_key.column.table.name == "tenants"
         assert foreign_key.ondelete == "CASCADE"
 
 
-def test_enum_defaults_are_application_side():
+def test_enum_defaults_are_application_side() -> None:
     """Migration 0003 declares no server default for the enum columns.
 
     A server_default here would put the metadata and the migration in
@@ -217,13 +220,13 @@ def test_enum_defaults_are_application_side():
         assert column.default is not None
 
 
-def test_audit_timestamps_have_server_defaults():
+def test_audit_timestamps_have_server_defaults() -> None:
     for table in (WhatsAppAccount.__table__, WhatsAppEvent.__table__):
         assert table.c.created_at.server_default is not None
         assert table.c.updated_at.server_default is not None
 
 
-def test_is_active_reflects_status():
+def test_is_active_reflects_status() -> None:
     account = WhatsAppAccount(status=WhatsAppAccountStatus.ACTIVE)
     assert account.is_active is True
 

@@ -9,6 +9,8 @@ can be aimed somewhere a caller chose.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from app.services.email_templates import (
@@ -52,14 +54,14 @@ CONTEXTS: dict[EmailTemplate, dict[str, str]] = {
 }
 
 
-def _render(template: EmailTemplate, **overrides) -> RenderedEmail:
+def _render(template: EmailTemplate, **overrides: Any) -> RenderedEmail:
     context = dict(CONTEXTS[template])
     context.update(overrides)
     return render(template, context, public_url=PUBLIC_URL)
 
 
 @pytest.mark.parametrize("template", list(EmailTemplate))
-def test_every_template_renders(template):
+def test_every_template_renders(template: EmailTemplate) -> None:
     """A template in the enum with no rendering branch is a permanent failure."""
     rendered = _render(template)
 
@@ -69,12 +71,12 @@ def test_every_template_renders(template):
 
 
 @pytest.mark.parametrize("template", list(EmailTemplate))
-def test_every_subject_is_the_constant_for_its_template(template):
+def test_every_subject_is_the_constant_for_its_template(template: EmailTemplate) -> None:
     assert _render(template).subject == subject_for(template)
 
 
 @pytest.mark.parametrize("template", list(EmailTemplate))
-def test_no_subject_carries_a_control_character(template):
+def test_no_subject_carries_a_control_character(template: EmailTemplate) -> None:
     """A subject travels in a header, so this is the header-injection floor."""
     subject = _render(template).subject
 
@@ -91,7 +93,7 @@ def test_no_subject_carries_a_control_character(template):
         EmailTemplate.SUBSCRIPTION_CANCELLED,
     ],
 )
-def test_a_workspace_name_is_escaped_into_the_html(template):
+def test_a_workspace_name_is_escaped_into_the_html(template: EmailTemplate) -> None:
     """The only caller-influenced value in any template, and it is escaped."""
     rendered = _render(template, workspace_name="<script>alert(1)</script>")
 
@@ -99,7 +101,7 @@ def test_a_workspace_name_is_escaped_into_the_html(template):
     assert "&lt;script&gt;" in rendered.html
 
 
-def test_a_workspace_name_cannot_break_out_of_an_attribute():
+def test_a_workspace_name_cannot_break_out_of_an_attribute() -> None:
     rendered = _render(
         EmailTemplate.WORKSPACE_INVITATION,
         workspace_name='" onmouseover="alert(1)',
@@ -108,26 +110,26 @@ def test_a_workspace_name_cannot_break_out_of_an_attribute():
     assert 'onmouseover="alert(1)' not in rendered.html
 
 
-def test_an_invoice_amount_is_escaped_into_the_html():
+def test_an_invoice_amount_is_escaped_into_the_html() -> None:
     rendered = _render(EmailTemplate.INVOICE_ISSUED, amount_due="<b>1</b>")
 
     assert "<b>1</b>" not in rendered.html
     assert "&lt;b&gt;" in rendered.html
 
 
-def test_an_invitation_link_is_built_on_the_configured_origin():
+def test_an_invitation_link_is_built_on_the_configured_origin() -> None:
     rendered = _render(EmailTemplate.WORKSPACE_INVITATION, token="abc123")
 
     assert f"{PUBLIC_URL}/invitations/accept?token=abc123" in rendered.text
 
 
-def test_a_reset_link_is_built_on_the_configured_origin():
+def test_a_reset_link_is_built_on_the_configured_origin() -> None:
     rendered = _render(EmailTemplate.PASSWORD_RESET, token="abc123")
 
     assert f"{PUBLIC_URL}/reset-password?token=abc123" in rendered.text
 
 
-def test_a_token_is_url_encoded_into_the_query():
+def test_a_token_is_url_encoded_into_the_query() -> None:
     """A token is opaque; a token containing a `&` must not become two params."""
     rendered = _render(EmailTemplate.PASSWORD_RESET, token="a&b=c d/e")
 
@@ -135,7 +137,7 @@ def test_a_token_is_url_encoded_into_the_query():
     assert "?token=a&b=c" not in rendered.text
 
 
-def test_a_token_cannot_redirect_the_link_elsewhere():
+def test_a_token_cannot_redirect_the_link_elsewhere() -> None:
     """No variable is ever a URL, so a token full of URL cannot become one."""
     rendered = _render(EmailTemplate.PASSWORD_RESET, token="https://evil.test/steal")
 
@@ -143,7 +145,7 @@ def test_a_token_cannot_redirect_the_link_elsewhere():
     assert rendered.text.count(PUBLIC_URL) >= 1
 
 
-def test_a_trailing_slash_on_the_origin_does_not_double():
+def test_a_trailing_slash_on_the_origin_does_not_double() -> None:
     rendered = render(
         EmailTemplate.PASSWORD_RESET,
         {"token": "t"},
@@ -166,7 +168,7 @@ def test_a_trailing_slash_on_the_origin_does_not_double():
         (EmailTemplate.EMAIL_VERIFICATION, "expires_minutes"),
     ],
 )
-def test_a_missing_context_key_refuses_to_render(template, missing):
+def test_a_missing_context_key_refuses_to_render(template: EmailTemplate, missing: str) -> None:
     """Better a permanent failure than an email with a hole where a link goes."""
     context = dict(CONTEXTS[template])
     del context[missing]
@@ -175,13 +177,13 @@ def test_a_missing_context_key_refuses_to_render(template, missing):
         render(template, context, public_url=PUBLIC_URL)
 
 
-def test_a_link_template_without_an_origin_refuses_to_render():
+def test_a_link_template_without_an_origin_refuses_to_render() -> None:
     with pytest.raises(ValueError, match="public_url"):
         render(EmailTemplate.PASSWORD_RESET, {"token": "t"}, public_url="")
 
 
 @pytest.mark.parametrize("template", list(EmailTemplate))
-def test_no_template_carries_an_unsubscribe_link(template):
+def test_no_template_carries_an_unsubscribe_link(template: EmailTemplate) -> None:
     """Transactional only: a security notice is not something to opt out of."""
     rendered = _render(template)
 
@@ -189,7 +191,7 @@ def test_no_template_carries_an_unsubscribe_link(template):
     assert "unsubscribe" not in rendered.html.lower()
 
 
-def test_the_invoice_template_carries_no_payment_link():
+def test_the_invoice_template_carries_no_payment_link() -> None:
     """A bill with a link in it is the shape every invoice-phishing mail takes."""
     rendered = _render(EmailTemplate.INVOICE_ISSUED)
 
@@ -206,7 +208,7 @@ def test_the_invoice_template_carries_no_payment_link():
         EmailTemplate.ACCOUNT_ENABLED,
     ],
 )
-def test_a_security_notice_takes_no_variables_at_all(template):
+def test_a_security_notice_takes_no_variables_at_all(template: EmailTemplate) -> None:
     """Nothing to interpolate is nothing to escape wrongly."""
     rendered = render(template, {}, public_url=PUBLIC_URL)
 
@@ -214,7 +216,7 @@ def test_a_security_notice_takes_no_variables_at_all(template):
     assert "href=" not in rendered.html
 
 
-def test_the_verification_code_is_not_in_the_subject():
+def test_the_verification_code_is_not_in_the_subject() -> None:
     """A subject shows on a lock screen and in a notification preview.
 
     Subjects are constants throughout this module, so this is really a test
@@ -227,7 +229,7 @@ def test_the_verification_code_is_not_in_the_subject():
     assert rendered.subject == subject_for(EmailTemplate.EMAIL_VERIFICATION)
 
 
-def test_the_verification_template_builds_no_link_at_all():
+def test_the_verification_template_builds_no_link_at_all() -> None:
     """The one secret-bearing template with no URL, deliberately (ADR-043).
 
     A code in a link is a code in browser history, in a `Referer` header and in
@@ -242,7 +244,7 @@ def test_the_verification_template_builds_no_link_at_all():
     assert "http" not in rendered.text
 
 
-def test_the_verification_code_reaches_both_bodies():
+def test_the_verification_code_reaches_both_bodies() -> None:
     """A verification email without its code is a broken promise, not a
     degraded one - the same reasoning the reset template's required key has."""
     rendered = _render(EmailTemplate.EMAIL_VERIFICATION)
@@ -251,7 +253,7 @@ def test_the_verification_code_reaches_both_bodies():
     assert "482731" in rendered.html
 
 
-def test_the_verification_template_is_escaped_like_every_other():
+def test_the_verification_template_is_escaped_like_every_other() -> None:
     """The code is generated, not caller-supplied, so this is defence against a
     future caller rather than against today's one. It costs nothing to keep."""
     rendered = _render(EmailTemplate.EMAIL_VERIFICATION, code="<script>x</script>")
@@ -260,7 +262,7 @@ def test_the_verification_template_is_escaped_like_every_other():
     assert "&lt;script&gt;" in rendered.html
 
 
-def test_the_verification_template_says_nothing_about_the_account():
+def test_the_verification_template_says_nothing_about_the_account() -> None:
     """Minimal context, asserted (ADR-043).
 
     A message proving control of an inbox does not need to tell that inbox

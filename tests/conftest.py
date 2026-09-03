@@ -18,7 +18,7 @@ import os
 # `setdefault` leaves an explicit override alone.
 os.environ.setdefault("ENVIRONMENT", "test")
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 import pytest
@@ -171,16 +171,16 @@ class AllowingEntitlements:
     proved in `test_plan_enforcement.py` by overriding this again.
     """
 
-    async def check(self, key, *, additional: int = 1) -> Entitlement:
+    async def check(self, key: LimitKey, *, additional: int = 1) -> Entitlement:
         return Entitlement(key=key, limit=None, used=0, allowed=True)
 
-    async def require(self, key, *, additional: int = 1) -> Entitlement:
+    async def require(self, key: LimitKey, *, additional: int = 1) -> Entitlement:
         return await self.check(key, additional=additional)
 
-    async def allows(self, key, *, additional: int = 1) -> bool:
+    async def allows(self, key: LimitKey, *, additional: int = 1) -> bool:
         return True
 
-    async def snapshot(self, keys=None) -> list[Entitlement]:
+    async def snapshot(self, keys: Sequence[LimitKey] | None = None) -> list[Entitlement]:
         return [await self.check(key, additional=0) for key in LimitKey]
 
 

@@ -28,6 +28,7 @@ import base64
 import json
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import jwt
@@ -83,7 +84,7 @@ def _jwks() -> dict[str, object]:
     return {"keys": [jwk]}
 
 
-def _id_token(*, nonce: str, **overrides: object) -> str:
+def _id_token(*, nonce: str, **overrides: Any) -> str:
     """A genuinely signed Google ID token, which the real verifier will check."""
     now = datetime.now(UTC)
     payload: dict[str, object] = {
@@ -155,33 +156,39 @@ class _FlowCommands:
         self.counters: dict[str, int] = {}
         self.expiries: dict[str, int] = {}
 
-    async def set(self, key, value, ex=None, nx=False):
+    async def set(
+        self,
+        key: str,
+        value: str,
+        ex: int | None = None,
+        nx: bool = False,
+    ) -> bool | None:
         if nx and key in self.values:
             return None
         self.values[key] = value
         return True
 
-    async def get(self, key):
+    async def get(self, key: str) -> str | None:
         return self.values.get(key)
 
-    async def delete(self, key):
+    async def delete(self, key: str) -> int:
         return 1 if self.values.pop(key, None) is not None else 0
 
-    async def exists(self, key):
+    async def exists(self, key: str) -> int:
         return 1 if key in self.values else 0
 
-    async def incr(self, key):
+    async def incr(self, key: str) -> int:
         self.counters[key] = self.counters.get(key, 0) + 1
         return self.counters[key]
 
-    async def expire(self, key, seconds):
+    async def expire(self, key: str, seconds: int) -> bool:
         self.expiries[key] = seconds
         return True
 
-    async def rpush(self, key, value):
+    async def rpush(self, key: str, value: str) -> int:
         return 1
 
-    def pipeline(self, transaction=True):
+    def pipeline(self, transaction: bool = True) -> _FlowPipeline:
         return _FlowPipeline(self)
 
 
@@ -190,25 +197,25 @@ class _FlowPipeline:
         self._store = store
         self._queued: list[tuple[str, str]] = []
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> _FlowPipeline:
         return self
 
-    async def __aexit__(self, *_: object):
+    async def __aexit__(self, *_: object) -> bool:
         return False
 
-    def get(self, key):
+    def get(self, key: str) -> None:
         self._queued.append(("get", key))
 
-    def delete(self, key):
+    def delete(self, key: str) -> None:
         self._queued.append(("delete", key))
 
-    async def execute(self):
+    async def execute(self) -> list[Any]:
         results = []
         for operation, key in self._queued:
             if operation == "get":
                 results.append(self._store.values.get(key))
             else:
-                results.append(1 if self._store.values.pop(key, None) is not None else 0)
+                results.append(str(1 if self._store.values.pop(key, None) is not None else 0))
         return results
 
 
@@ -340,7 +347,7 @@ async def _account(
     return user
 
 
-async def _start(http: AsyncClient, path: str, **kwargs) -> tuple[str, str]:
+async def _start(http: AsyncClient, path: str, **kwargs: Any) -> tuple[str, str]:
     """Run a real `authorize` request and return its `state` and `nonce`.
 
     Read out of the authorization URL the application built, not invented here:

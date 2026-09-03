@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -48,6 +49,7 @@ from app.db.models.media import MediaStatus, MessageMedia
 from app.db.models.whatsapp import WhatsAppAccount
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
+from tests.fake_queue_redis import FakeQueueRedis
 
 pytestmark = pytest.mark.integration
 
@@ -66,8 +68,8 @@ class _Infra:
         return None
 
     @property
-    def client(self):
-        return object()
+    def client(self) -> FakeQueueRedis:
+        return FakeQueueRedis()
 
 
 @pytest.fixture
@@ -83,7 +85,7 @@ def isolation_settings() -> Settings:
 
 
 @pytest.fixture(params=["local", "s3"])
-def storage(request, tmp_path) -> MediaStorage:
+def storage(request: pytest.FixtureRequest, tmp_path: Path) -> MediaStorage:
     if request.param == "local":
         return LocalMediaStorage(tmp_path)
     endpoint = os.environ.get("TEST_S3_ENDPOINT_URL")
@@ -217,7 +219,9 @@ async def _sign_in(http: AsyncClient, user: User) -> dict[str, str]:
 # ============================================================== the hard gate
 
 
-async def test_the_owner_can_read_their_own_attachment(http, db_session, storage) -> None:
+async def test_the_owner_can_read_their_own_attachment(
+    http: AsyncClient, db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """The control. Without it, every refusal below could be a broken fixture."""
     tenant, user = await _workspace(db_session, "acme")
     conversation, media, _ = await _attachment(db_session, tenant, storage)
@@ -231,7 +235,9 @@ async def test_the_owner_can_read_their_own_attachment(http, db_session, storage
     assert response.content == PNG
 
 
-async def test_another_workspace_cannot_read_the_attachment(http, db_session, storage) -> None:
+async def test_another_workspace_cannot_read_the_attachment(
+    http: AsyncClient, db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """Workspace B knows both identifiers and is still refused.
 
     404 rather than 403, following this codebase's convention throughout: a
@@ -251,7 +257,9 @@ async def test_another_workspace_cannot_read_the_attachment(http, db_session, st
     assert PNG not in response.content
 
 
-async def test_the_bytes_survive_the_refusal(http, db_session, storage) -> None:
+async def test_the_bytes_survive_the_refusal(
+    http: AsyncClient, db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """A refused read must not be a read that also broke something.
 
     The owner still gets the file afterwards, which is what separates
@@ -275,7 +283,7 @@ async def test_the_bytes_survive_the_refusal(http, db_session, storage) -> None:
 
 
 async def test_no_route_lets_another_workspace_delete_the_attachment(
-    http, db_session, storage
+    http: AsyncClient, db_session: AsyncSession, storage: MediaStorage
 ) -> None:
     """Deletion is not a route at all, and that is the answer to "can B delete it?".
 
@@ -297,7 +305,9 @@ async def test_no_route_lets_another_workspace_delete_the_attachment(
     assert await storage.get(key) == PNG
 
 
-async def test_knowing_the_object_key_is_worth_nothing(http, db_session, storage) -> None:
+async def test_knowing_the_object_key_is_worth_nothing(
+    http: AsyncClient, db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """The key prefix is a layout, not a boundary.
 
     A caller cannot supply a key anywhere in this API - the only way to a file is
@@ -320,7 +330,7 @@ async def test_knowing_the_object_key_is_worth_nothing(http, db_session, storage
 
 
 async def test_a_conversation_from_another_workspace_is_not_a_way_in(
-    http, db_session, storage
+    http: AsyncClient, db_session: AsyncSession, storage: MediaStorage
 ) -> None:
     """Pairing your own conversation id with their media id, and the reverse."""
     tenant_a, _ = await _workspace(db_session, "acme")
@@ -340,7 +350,9 @@ async def test_a_conversation_from_another_workspace_is_not_a_way_in(
     assert theirs_theirs.status_code == 404
 
 
-async def test_an_unauthenticated_caller_gets_nothing(http, db_session, storage) -> None:
+async def test_an_unauthenticated_caller_gets_nothing(
+    http: AsyncClient, db_session: AsyncSession, storage: MediaStorage
+) -> None:
     tenant, _ = await _workspace(db_session, "acme")
     conversation, media, _ = await _attachment(db_session, tenant, storage)
 
@@ -350,7 +362,9 @@ async def test_an_unauthenticated_caller_gets_nothing(http, db_session, storage)
     assert PNG not in response.content
 
 
-async def test_a_member_of_the_workspace_may_read_it(http, db_session, storage) -> None:
+async def test_a_member_of_the_workspace_may_read_it(
+    http: AsyncClient, db_session: AsyncSession, storage: MediaStorage
+) -> None:
     """Isolation is per workspace, not per person: an inbox is staffed by a team."""
     tenant, _ = await _workspace(db_session, "acme")
     conversation, media, _ = await _attachment(db_session, tenant, storage)

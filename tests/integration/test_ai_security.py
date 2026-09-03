@@ -25,9 +25,11 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from sqlalchemy import func, select, text
@@ -75,6 +77,8 @@ from app.services.agent_service import AgentService
 from app.services.entitlement_service import EntitlementService
 from app.services.retrieval_service import DEFAULT_TOP_K, MAX_TOP_K, RetrievalService
 from tests.fake_embeddings import FakeEmbeddings, embed_text
+from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import as_embeddings
 
 pytestmark = pytest.mark.integration
 
@@ -131,7 +135,7 @@ async def _audit(session: AsyncSession, action: AuditAction | None = None) -> li
     return list((await session.scalars(statement)).all())
 
 
-def _settings(**overrides: object) -> Settings:
+def _settings(**overrides: Any) -> Settings:
     base: dict[str, object] = {
         "_env_file": None,
         "environment": "test",
@@ -232,6 +236,7 @@ async def test_recording_a_lead_names_the_fields_but_never_their_values(
     assert "Ahmed Farouk" not in rendered
     assert "+201234567890" not in rendered
     assert "500000" not in rendered
+    assert entry.meta is not None
     assert set(entry.meta["fields"]) == {"name", "phone", "budget_amount"}
 
     lead = await db_session.scalar(select(Lead).where(Lead.tenant_id == tenant.id))
@@ -255,6 +260,7 @@ async def test_a_scheduled_follow_up_records_the_delay_not_the_message(
 
     rows = await _audit(db_session, AuditAction.AGENT_FOLLOW_UP_SCHEDULED)
     assert len(rows) == 1
+    assert rows[0].meta is not None
     assert rows[0].meta["delay_minutes"] == 1440
     assert body not in str(rows[0].meta)
     assert rows[0].actor_kind is AuditActorKind.AGENT
@@ -336,7 +342,9 @@ async def test_an_agent_audit_row_never_lands_in_another_workspace(
         {"reason": "ok", "target_id": str(uuid.uuid4())},
     ],
 )
-async def test_the_model_cannot_smuggle_identity_through_tool_arguments(forged) -> None:
+async def test_the_model_cannot_smuggle_identity_through_tool_arguments(
+    forged: dict[str, Any],
+) -> None:
     """The forged-identity attack, refused by the schema before any handler runs.
 
     `additionalProperties: false` is declared to the provider, but a compromised
@@ -590,7 +598,7 @@ async def test_a_model_supplied_result_count_is_always_clamped(
     service = RetrievalService(
         session=db_session,
         tenant_id=tenant.id,
-        embeddings=FakeEmbeddings(),
+        embeddings=as_embeddings(FakeEmbeddings()),
     )
 
     retrieval = await service.search(query=CHUNK_SUBJECT, top_k=requested)
@@ -615,7 +623,7 @@ async def test_the_clamp_actually_bites_on_a_full_knowledge_base(
     service = RetrievalService(
         session=db_session,
         tenant_id=tenant.id,
-        embeddings=FakeEmbeddings(),
+        embeddings=as_embeddings(FakeEmbeddings()),
     )
 
     retrieval = await service.search(query=CHUNK_SUBJECT, top_k=1_000_000)
@@ -661,14 +669,14 @@ class _SessionHandle:
         self._session = session
 
     @asynccontextmanager
-    async def session(self):
+    async def session(self) -> AsyncIterator[AsyncSession]:
         yield self._session
 
 
 class _NullRedis:
     @property
-    def client(self):
-        return object()
+    def client(self) -> FakeQueueRedis:
+        return FakeQueueRedis()
 
 
 async def _plan_with_ai_limit(session: AsyncSession, *, tenant: Tenant, limit: int) -> None:

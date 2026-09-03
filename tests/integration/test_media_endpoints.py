@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -30,6 +33,7 @@ from app.db.models import (
     User,
 )
 from app.db.models.conversation import (
+    Conversation,
     Message,
     MessageDirection,
     MessageKind,
@@ -49,7 +53,7 @@ PDF = b"%PDF-1.4 fake"
 NOW = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
 
 
-def _media(**overrides) -> MessageMedia:
+def _media(**overrides: Any) -> MessageMedia:
     fields = {
         "id": MEDIA_ID,
         "tenant_id": TENANT_ID,
@@ -69,7 +73,7 @@ def _media(**overrides) -> MessageMedia:
 class StubMediaService:
     """Answers `get` and `read` without a database or a store."""
 
-    def __init__(self, media: MessageMedia | None = None, content: bytes = PDF) -> None:
+    def __init__(self, media: MessageMedia | None = None, content: bytes | None = PDF) -> None:
         self._media = media if media is not None else _media()
         self._content = content
         self.missing = False
@@ -90,12 +94,12 @@ class StubMessaging:
     """Records what the route asked to send."""
 
     def __init__(self) -> None:
-        self.sent: list[dict] = []
+        self.sent: list[dict[str, Any]] = []
 
-    def window_open(self, conversation) -> bool:
+    def window_open(self, conversation: Conversation) -> bool:
         return True
 
-    async def send_media(self, **kwargs) -> Message:
+    async def send_media(self, **kwargs: Any) -> Message:
         self.sent.append(kwargs)
         return Message(
             id=MESSAGE_ID,
@@ -113,7 +117,7 @@ class StubMessaging:
 
 
 @pytest.fixture
-def media_service(app) -> StubMediaService:
+def media_service(app: FastAPI) -> StubMediaService:
     stub = StubMediaService()
     app.dependency_overrides[get_media_service] = lambda: stub
     app.dependency_overrides[get_active_workspace] = lambda: ActiveWorkspace(
@@ -130,13 +134,15 @@ def media_service(app) -> StubMediaService:
 
 
 @pytest.fixture
-def messaging(app, media_service) -> StubMessaging:
+def messaging(app: FastAPI, media_service: StubMediaService) -> StubMessaging:
     stub = StubMessaging()
     app.dependency_overrides[get_messaging_service] = lambda: stub
     return stub
 
 
-async def test_an_attachment_is_served_back(client, media_service):
+async def test_an_attachment_is_served_back(
+    client: AsyncClient, media_service: StubMediaService
+) -> None:
     response = await client.get(f"/api/v1/conversations/{CONVERSATION_ID}/media/{MEDIA_ID}")
 
     assert response.status_code == 200
@@ -144,7 +150,9 @@ async def test_an_attachment_is_served_back(client, media_service):
     assert response.headers["content-type"].startswith("application/pdf")
 
 
-async def test_an_attachment_is_never_served_inline(client, media_service):
+async def test_an_attachment_is_never_served_inline(
+    client: AsyncClient, media_service: StubMediaService
+) -> None:
     """A customer-supplied file rendered on this origin is a script.
 
     The disposition forces a download and `nosniff` stops the browser
@@ -156,7 +164,9 @@ async def test_an_attachment_is_never_served_inline(client, media_service):
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
-async def test_a_stored_type_outside_the_supported_set_is_not_served_back(client, media_service):
+async def test_a_stored_type_outside_the_supported_set_is_not_served_back(
+    client: AsyncClient, media_service: StubMediaService
+) -> None:
     """A row is input to whoever reads it, whatever wrote it.
 
     Every row written since SEC-09 was closed holds a type resolved from the
@@ -174,7 +184,9 @@ async def test_a_stored_type_outside_the_supported_set_is_not_served_back(client
     assert "svg" not in response.headers["content-type"]
 
 
-async def test_customer_content_is_not_left_in_a_cache(client, media_service):
+async def test_customer_content_is_not_left_in_a_cache(
+    client: AsyncClient, media_service: StubMediaService
+) -> None:
     """An attachment is one workspace's data served to one authenticated person.
 
     A shared cache holding it would serve it to the next person through the
@@ -188,7 +200,9 @@ async def test_customer_content_is_not_left_in_a_cache(client, media_service):
     assert "public" not in cache_control
 
 
-async def test_media_from_another_conversation_is_not_found(client, media_service):
+async def test_media_from_another_conversation_is_not_found(
+    client: AsyncClient, media_service: StubMediaService
+) -> None:
     """It exists in this workspace, but not on the conversation named.
 
     Answered as not-found rather than as a mismatch: a distinct error would
@@ -200,7 +214,9 @@ async def test_media_from_another_conversation_is_not_found(client, media_servic
     assert response.status_code == 404
 
 
-async def test_media_from_another_workspace_is_not_found(client, media_service):
+async def test_media_from_another_workspace_is_not_found(
+    client: AsyncClient, media_service: StubMediaService
+) -> None:
     media_service.missing = True
 
     response = await client.get(f"/api/v1/conversations/{CONVERSATION_ID}/media/{MEDIA_ID}")
@@ -208,7 +224,9 @@ async def test_media_from_another_workspace_is_not_found(client, media_service):
     assert response.status_code == 404
 
 
-async def test_a_file_removed_by_retention_says_so(client, media_service):
+async def test_a_file_removed_by_retention_says_so(
+    client: AsyncClient, media_service: StubMediaService
+) -> None:
     """ "Deleted on purpose" and "the store is broken" are different sentences.
 
     A colleague acts on them differently - one is a policy they can ask about,
@@ -224,7 +242,9 @@ async def test_a_file_removed_by_retention_says_so(client, media_service):
     assert "retention" in response.text.lower()
 
 
-async def test_a_file_missing_from_the_store_is_not_a_crash(client, media_service):
+async def test_a_file_missing_from_the_store_is_not_a_crash(
+    client: AsyncClient, media_service: StubMediaService
+) -> None:
     media_service._content = None
 
     response = await client.get(f"/api/v1/conversations/{CONVERSATION_ID}/media/{MEDIA_ID}")
@@ -233,7 +253,7 @@ async def test_a_file_missing_from_the_store_is_not_a_crash(client, media_servic
     assert "stack" not in response.text.lower()
 
 
-async def test_an_attachment_can_be_sent(client, messaging):
+async def test_an_attachment_can_be_sent(client: AsyncClient, messaging: StubMessaging) -> None:
     response = await client.post(
         f"/api/v1/conversations/{CONVERSATION_ID}/messages/media",
         files={"file": ("quote.pdf", PDF, "application/pdf")},
@@ -248,7 +268,7 @@ async def test_an_attachment_can_be_sent(client, messaging):
     assert messaging.sent[0]["sent_by_id"] == USER_ID
 
 
-async def test_a_caption_is_optional(client, messaging):
+async def test_a_caption_is_optional(client: AsyncClient, messaging: StubMessaging) -> None:
     response = await client.post(
         f"/api/v1/conversations/{CONVERSATION_ID}/messages/media",
         files={"file": ("photo.jpg", b"jpeg-bytes", "image/jpeg")},
@@ -258,7 +278,7 @@ async def test_a_caption_is_optional(client, messaging):
     assert messaging.sent[0]["caption"] is None
 
 
-async def test_an_empty_upload_is_refused(client, messaging):
+async def test_an_empty_upload_is_refused(client: AsyncClient, messaging: StubMessaging) -> None:
     response = await client.post(
         f"/api/v1/conversations/{CONVERSATION_ID}/messages/media",
         files={"file": ("empty.pdf", b"", "application/pdf")},
@@ -268,7 +288,9 @@ async def test_an_empty_upload_is_refused(client, messaging):
     assert messaging.sent == []
 
 
-async def test_an_over_long_caption_is_refused(client, messaging):
+async def test_an_over_long_caption_is_refused(
+    client: AsyncClient, messaging: StubMessaging
+) -> None:
     response = await client.post(
         f"/api/v1/conversations/{CONVERSATION_ID}/messages/media",
         files={"file": ("photo.jpg", b"jpeg-bytes", "image/jpeg")},
@@ -279,7 +301,7 @@ async def test_an_over_long_caption_is_refused(client, messaging):
     assert messaging.sent == []
 
 
-async def test_sending_an_attachment_requires_a_token(client):
+async def test_sending_an_attachment_requires_a_token(client: AsyncClient) -> None:
     """Takes neither fixture, so nothing is overridden and the real dependency runs.
 
     Overriding the workspace would bypass the very check being asserted, which
@@ -293,7 +315,7 @@ async def test_sending_an_attachment_requires_a_token(client):
     assert response.status_code == 401
 
 
-async def test_downloading_an_attachment_requires_a_token(client):
+async def test_downloading_an_attachment_requires_a_token(client: AsyncClient) -> None:
     response = await client.get(f"/api/v1/conversations/{CONVERSATION_ID}/media/{MEDIA_ID}")
 
     assert response.status_code == 401

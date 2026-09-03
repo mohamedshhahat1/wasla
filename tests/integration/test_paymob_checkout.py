@@ -22,10 +22,12 @@ import logging
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.db.models.billing import (
@@ -38,6 +40,7 @@ from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.payment_event import PaymentEvent
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
+from app.integrations.billing.checkout import CallbackEvent
 from app.integrations.billing.paymob import PaymobProvider, hmac_signature
 from app.repositories.billing_repository import SubscriptionRepository
 from app.repositories.invoice_repository import InvoiceRepository
@@ -49,7 +52,9 @@ from app.services.checkout_service import (
     REFUSED,
     UNMATCHED,
     CheckoutService,
+    StartedCheckout,
 )
+from tests.fakes import as_table
 
 pytestmark = pytest.mark.integration
 
@@ -58,7 +63,7 @@ CLIENT_SECRET = "egy_csk_test_0123456789abcdef"
 INTENTION_ID = "pi_test_0123456789abcdef"
 
 
-def _intention_transport(captured: list[dict] | None = None) -> httpx.MockTransport:
+def _intention_transport(captured: list[dict[str, Any]] | None = None) -> httpx.MockTransport:
     """A stand-in for Paymob's intention endpoint.
 
     Records the body we sent, which is how the amount tests assert on what was
@@ -90,14 +95,14 @@ def _provider(transport: httpx.MockTransport | None = None) -> PaymobProvider:
     )
 
 
-async def _tenant(session, slug: str = "acme") -> Tenant:
+async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _user(session, email: str = "owner@acme-example.com") -> User:
+async def _user(session: AsyncSession, email: str = "owner@acme-example.com") -> User:
     user = User(email=email, full_name="Owner Person", hashed_password="x", is_active=True)
     session.add(user)
     await session.flush()
@@ -105,7 +110,7 @@ async def _user(session, email: str = "owner@acme-example.com") -> User:
 
 
 async def _plan(
-    session,
+    session: AsyncSession,
     *,
     code: str = "pro",
     price: str = "99.00",
@@ -126,7 +131,12 @@ async def _plan(
     return plan
 
 
-def _service(session, tenant, *, transport=None) -> CheckoutService:
+def _service(
+    session: AsyncSession,
+    tenant: Tenant,
+    *,
+    transport: httpx.MockTransport | None = None,
+) -> CheckoutService:
     return CheckoutService(
         session,
         tenant_id=tenant.id,
@@ -134,7 +144,9 @@ def _service(session, tenant, *, transport=None) -> CheckoutService:
     )
 
 
-def _transaction(*, reference: str | None, amount_cents: int = 9900, **overrides) -> dict:
+def _transaction(
+    *, reference: str | None, amount_cents: int = 9900, **overrides: Any
+) -> dict[str, Any]:
     """A transaction shaped like the documented callback."""
     transaction = {
         "id": 192036465,
@@ -160,12 +172,12 @@ def _transaction(*, reference: str | None, amount_cents: int = 9900, **overrides
     return transaction
 
 
-def _callback(transaction: dict) -> tuple[bytes, str]:
+def _callback(transaction: dict[str, Any]) -> tuple[bytes, str]:
     body = json.dumps({"type": "TRANSACTION", "obj": transaction}).encode("utf-8")
     return body, hmac_signature(transaction, secret=HMAC_SECRET)
 
 
-async def _verified(transaction: dict):
+async def _verified(transaction: dict[str, Any]) -> CallbackEvent:
     body, signature = _callback(transaction)
     return _provider().verify_callback(payload=body, signature=signature)
 
@@ -173,12 +185,12 @@ async def _verified(transaction: dict):
 # ----------------------------------------------------------------- checkout
 
 
-async def test_a_checkout_prices_the_plan_from_the_database(db_session):
+async def test_a_checkout_prices_the_plan_from_the_database(db_session: AsyncSession) -> None:
     """The amount sent to the provider is ours, in cents, and nobody else's."""
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     await _plan(db_session, price="99.00")
-    captured: list[dict] = []
+    captured: list[dict[str, Any]] = []
 
     started = await _service(db_session, tenant, transport=_intention_transport(captured)).start(
         plan_code="pro", actor=user
@@ -190,7 +202,7 @@ async def test_a_checkout_prices_the_plan_from_the_database(db_session):
     assert captured[0]["currency"] == "EGP"
 
 
-async def test_the_redirect_url_is_the_documented_checkout_url(db_session):
+async def test_the_redirect_url_is_the_documented_checkout_url(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     await _plan(db_session)
@@ -202,7 +214,7 @@ async def test_the_redirect_url_is_the_documented_checkout_url(db_session):
     )
 
 
-async def test_the_reference_sent_is_our_own_payment_id(db_session):
+async def test_the_reference_sent_is_our_own_payment_id(db_session: AsyncSession) -> None:
     """The whole callback-to-row mapping, and it must be ours.
 
     A reference the provider or the browser chose would be a reference an
@@ -211,7 +223,7 @@ async def test_the_reference_sent_is_our_own_payment_id(db_session):
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     await _plan(db_session)
-    captured: list[dict] = []
+    captured: list[dict[str, Any]] = []
 
     started = await _service(db_session, tenant, transport=_intention_transport(captured)).start(
         plan_code="pro", actor=user
@@ -220,7 +232,7 @@ async def test_the_reference_sent_is_our_own_payment_id(db_session):
     assert captured[0]["special_reference"] == str(started.payment_id)
 
 
-async def test_a_checkout_leaves_an_invoice_and_a_pending_payment(db_session):
+async def test_a_checkout_leaves_an_invoice_and_a_pending_payment(db_session: AsyncSession) -> None:
     """Written before the provider is called, so a callback can never arrive
     for a payment this system has not heard of."""
     tenant = await _tenant(db_session)
@@ -244,7 +256,7 @@ async def test_a_checkout_leaves_an_invoice_and_a_pending_payment(db_session):
     assert payment.provider_intent_reference == INTENTION_ID
 
 
-async def test_a_private_plan_cannot_be_paid_for_either(db_session):
+async def test_a_private_plan_cannot_be_paid_for_either(db_session: AsyncSession) -> None:
     """Checkout is another door onto plan selection and gets the same lock."""
     tenant = await _tenant(db_session)
     user = await _user(db_session)
@@ -254,7 +266,7 @@ async def test_a_private_plan_cannot_be_paid_for_either(db_session):
         await _service(db_session, tenant).start(plan_code="enterprise", actor=user)
 
 
-async def test_a_free_plan_is_not_sent_to_a_payment_page(db_session):
+async def test_a_free_plan_is_not_sent_to_a_payment_page(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     await _plan(db_session, code="free", price="0.00")
@@ -263,7 +275,9 @@ async def test_a_free_plan_is_not_sent_to_a_payment_page(db_session):
         await _service(db_session, tenant).start(plan_code="free", actor=user)
 
 
-async def test_a_second_attempt_reuses_the_invoice_rather_than_billing_twice(db_session):
+async def test_a_second_attempt_reuses_the_invoice_rather_than_billing_twice(
+    db_session: AsyncSession,
+) -> None:
     """`UNIQUE(tenant_id, period_start)` decides this either way.
 
     Somebody who abandons a checkout and starts another gets a second payment
@@ -282,7 +296,7 @@ async def test_a_second_attempt_reuses_the_invoice_rather_than_billing_twice(db_
     assert first.payment_id != second.payment_id
 
 
-async def test_a_paid_period_is_not_charged_again(db_session):
+async def test_a_paid_period_is_not_charged_again(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     await _plan(db_session)
@@ -299,7 +313,7 @@ async def test_a_paid_period_is_not_charged_again(db_session):
         await service.start(plan_code="pro", actor=user)
 
 
-async def test_a_provider_failure_does_not_look_like_a_payment(db_session):
+async def test_a_provider_failure_does_not_look_like_a_payment(db_session: AsyncSession) -> None:
     """A 5xx from the processor raises. It must never become a settled invoice."""
     tenant = await _tenant(db_session)
     user = await _user(db_session)
@@ -312,7 +326,9 @@ async def test_a_provider_failure_does_not_look_like_a_payment(db_session):
         await _service(db_session, tenant, transport=broken).start(plan_code="pro", actor=user)
 
 
-async def test_a_response_without_a_client_secret_is_a_provider_failure(db_session):
+async def test_a_response_without_a_client_secret_is_a_provider_failure(
+    db_session: AsyncSession,
+) -> None:
     """A 2xx missing the one field the flow needs is not something to parse
     around: a checkout URL built from a missing secret is a broken page."""
     tenant = await _tenant(db_session)
@@ -329,14 +345,19 @@ async def test_a_response_without_a_client_secret_is_a_provider_failure(db_sessi
 # ---------------------------------------------------------------- callbacks
 
 
-async def _started(db_session, tenant, user, **plan_kwargs):
+async def _started(
+    db_session: AsyncSession,
+    tenant: Tenant,
+    user: User,
+    **plan_kwargs: Any,
+) -> StartedCheckout:
     await _plan(db_session, **plan_kwargs)
     return await _service(db_session, tenant).start(
         plan_code=plan_kwargs.get("code", "pro"), actor=user
     )
 
 
-async def test_a_verified_callback_settles_the_invoice(db_session):
+async def test_a_verified_callback_settles_the_invoice(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     started = await _started(db_session, tenant, user)
@@ -357,7 +378,7 @@ async def test_a_verified_callback_settles_the_invoice(db_session):
     assert invoice.amount_paid == Decimal("99.00")
 
 
-async def test_the_same_callback_twice_settles_once(db_session):
+async def test_the_same_callback_twice_settles_once(db_session: AsyncSession) -> None:
     """The constraint decides it, not a preceding read.
 
     A provider retries anything it did not get a 2xx for, and processing a
@@ -383,21 +404,23 @@ async def test_the_same_callback_twice_settles_once(db_session):
     assert len(events) == 1
 
 
-async def test_a_callback_naming_a_payment_we_never_issued_is_refused(db_session):
+async def test_a_callback_naming_a_payment_we_never_issued_is_refused(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session)
     event = await _verified(_transaction(reference=str(uuid.uuid4())))
 
     assert await _service(db_session, tenant).apply(event) == UNMATCHED
 
 
-async def test_a_callback_with_no_reference_is_refused(db_session):
+async def test_a_callback_with_no_reference_is_refused(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     event = await _verified(_transaction(reference=None))
 
     assert await _service(db_session, tenant).apply(event) == UNMATCHED
 
 
-async def test_a_callback_reporting_a_different_amount_is_refused(db_session):
+async def test_a_callback_reporting_a_different_amount_is_refused(db_session: AsyncSession) -> None:
     """The forgery this check exists for: a real order, a smaller payment.
 
     A provider that says it collected something other than what we asked for
@@ -421,7 +444,7 @@ async def test_a_callback_reporting_a_different_amount_is_refused(db_session):
     assert invoice.amount_paid == Decimal("0.00")
 
 
-async def test_a_callback_in_a_different_currency_is_refused(db_session):
+async def test_a_callback_in_a_different_currency_is_refused(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     started = await _started(db_session, tenant, user)
@@ -433,7 +456,7 @@ async def test_a_callback_in_a_different_currency_is_refused(db_session):
     assert await _service(db_session, tenant).apply(event) == MISMATCHED
 
 
-async def test_a_failed_payment_does_not_settle_anything(db_session):
+async def test_a_failed_payment_does_not_settle_anything(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     started = await _started(db_session, tenant, user)
@@ -459,7 +482,7 @@ async def test_a_failed_payment_does_not_settle_anything(db_session):
     assert invoice.status is InvoiceStatus.OPEN
 
 
-async def test_a_payment_still_in_flight_does_not_settle_anything(db_session):
+async def test_a_payment_still_in_flight_does_not_settle_anything(db_session: AsyncSession) -> None:
     """`success` true and `pending` true is money that has not moved."""
     tenant = await _tenant(db_session)
     user = await _user(db_session)
@@ -479,7 +502,7 @@ async def test_a_payment_still_in_flight_does_not_settle_anything(db_session):
 # ------------------------------------------------------- subscription effect
 
 
-async def test_a_payment_revives_a_past_due_subscription(db_session):
+async def test_a_payment_revives_a_past_due_subscription(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     plan = await _plan(db_session)
@@ -502,7 +525,7 @@ async def test_a_payment_revives_a_past_due_subscription(db_session):
     assert subscription.status is SubscriptionStatus.ACTIVE
 
 
-async def test_a_payment_does_not_revive_a_cancelled_subscription(db_session):
+async def test_a_payment_does_not_revive_a_cancelled_subscription(db_session: AsyncSession) -> None:
     """Paying an invoice is not a request to resubscribe.
 
     Reviving here would undo a decision somebody made deliberately, on the
@@ -533,7 +556,9 @@ async def test_a_payment_does_not_revive_a_cancelled_subscription(db_session):
 # ----------------------------------------------------------- tenant isolation
 
 
-async def test_a_callback_cannot_settle_another_workspaces_payment(db_session):
+async def test_a_callback_cannot_settle_another_workspaces_payment(
+    db_session: AsyncSession,
+) -> None:
     """The isolation boundary, exercised directly.
 
     Even holding a real payment reference from workspace A, a service scoped to
@@ -558,7 +583,9 @@ async def test_a_callback_cannot_settle_another_workspaces_payment(db_session):
     assert invoice.amount_paid == Decimal("0.00")
 
 
-async def test_one_workspaces_checkout_never_touches_anothers_invoice(db_session):
+async def test_one_workspaces_checkout_never_touches_anothers_invoice(
+    db_session: AsyncSession,
+) -> None:
     alpha = await _tenant(db_session, slug="alpha")
     beta = await _tenant(db_session, slug="beta")
     user = await _user(db_session)
@@ -575,7 +602,7 @@ async def test_one_workspaces_checkout_never_touches_anothers_invoice(db_session
 # -------------------------------------------------------------- card data
 
 
-async def test_no_card_number_is_ever_stored(db_session):
+async def test_no_card_number_is_ever_stored(db_session: AsyncSession) -> None:
     """Paymob sends the last four digits and nothing else, and even those are
     not persisted. A PAN column is a compliance problem this product does not
     want to have."""
@@ -604,12 +631,14 @@ async def test_no_card_number_is_ever_stored(db_session):
 # ------------------------------------------------------------- the ledger
 
 
-async def _events(session) -> list[PaymentEvent]:
+async def _events(session: AsyncSession) -> list[PaymentEvent]:
     rows = await session.execute(select(PaymentEvent).order_by(PaymentEvent.received_at))
     return list(rows.scalars().all())
 
 
-async def test_the_ledger_records_what_actually_happened_not_what_was_hoped(db_session):
+async def test_the_ledger_records_what_actually_happened_not_what_was_hoped(
+    db_session: AsyncSession,
+) -> None:
     """Every callback used to be filed as `applied`, whatever was decided.
 
     An event naming an unknown payment, or reporting an amount that disagreed
@@ -634,7 +663,7 @@ async def test_the_ledger_records_what_actually_happened_not_what_was_hoped(db_s
     assert outcomes == {UNMATCHED, MISMATCHED}
 
 
-async def test_an_applied_event_says_what_it_did(db_session):
+async def test_an_applied_event_says_what_it_did(db_session: AsyncSession) -> None:
     """`detail` is written by this application and never by the provider.
 
     The callback body carries a masked card number, the customer's billing
@@ -660,7 +689,7 @@ async def test_an_applied_event_says_what_it_did(db_session):
     assert event.processed_at is not None
 
 
-async def test_the_event_id_is_not_the_bare_transaction_id(db_session):
+async def test_the_event_id_is_not_the_bare_transaction_id(db_session: AsyncSession) -> None:
     """They are kept in separate columns because they answer separate questions.
 
     `provider_event_id` decides idempotency and pairs the transaction with the
@@ -682,7 +711,9 @@ async def test_the_event_id_is_not_the_bare_transaction_id(db_session):
     assert event.provider_transaction_id == "192036465"
 
 
-async def test_a_transaction_reporting_pending_then_success_settles_once(db_session):
+async def test_a_transaction_reporting_pending_then_success_settles_once(
+    db_session: AsyncSession,
+) -> None:
     """The 3-D Secure sequence, which is two callbacks about one transaction.
 
     Keying idempotency on the transaction id alone would file the success as a
@@ -715,7 +746,9 @@ async def test_a_transaction_reporting_pending_then_success_settles_once(db_sess
     assert invoice.amount_paid == Decimal("99.00")
 
 
-async def test_a_second_payment_against_a_settled_invoice_is_refused(db_session):
+async def test_a_second_payment_against_a_settled_invoice_is_refused(
+    db_session: AsyncSession,
+) -> None:
     """A customer who paid twice is a refund to issue, not a bigger balance.
 
     Without the invoice transition table this added `amount_paid` a second
@@ -745,7 +778,7 @@ async def test_a_second_payment_against_a_settled_invoice_is_refused(db_session)
 # ------------------------------------------------------- paying a renewal
 
 
-async def test_a_checkout_can_collect_an_invoice_the_sweep_issued(db_session):
+async def test_a_checkout_can_collect_an_invoice_the_sweep_issued(db_session: AsyncSession) -> None:
     """What makes the billing cycle collectible rather than merely recorded.
 
     A renewal invoice is produced by the worker at every period end, and until
@@ -774,7 +807,9 @@ async def test_a_checkout_can_collect_an_invoice_the_sweep_issued(db_session):
     assert started.amount == Decimal("99.00")
 
 
-async def test_a_checkout_collects_what_is_left_rather_than_the_whole_bill(db_session):
+async def test_a_checkout_collects_what_is_left_rather_than_the_whole_bill(
+    db_session: AsyncSession,
+) -> None:
     """Part-paid invoices are a real state, and charging the full amount again
     would take money the customer does not owe."""
     tenant = await _tenant(db_session)
@@ -799,7 +834,7 @@ async def test_a_checkout_collects_what_is_left_rather_than_the_whole_bill(db_se
     assert started.amount == Decimal("59.00")
 
 
-async def test_a_paid_invoice_cannot_be_collected_again(db_session):
+async def test_a_paid_invoice_cannot_be_collected_again(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
     invoice = InvoiceRepository(db_session, tenant_id=tenant.id).create(
@@ -818,7 +853,7 @@ async def test_a_paid_invoice_cannot_be_collected_again(db_session):
         await _service(db_session, tenant).start(invoice_id=invoice.id)
 
 
-async def test_a_withdrawn_invoice_cannot_be_collected(db_session):
+async def test_a_withdrawn_invoice_cannot_be_collected(db_session: AsyncSession) -> None:
     """A bill the customer was told to ignore must not become a payment page."""
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
@@ -838,7 +873,7 @@ async def test_a_withdrawn_invoice_cannot_be_collected(db_session):
         await _service(db_session, tenant).start(invoice_id=invoice.id)
 
 
-async def test_another_workspaces_invoice_is_not_found(db_session):
+async def test_another_workspaces_invoice_is_not_found(db_session: AsyncSession) -> None:
     """Paying somebody else's bill is not generosity, it is a way in.
 
     A settled invoice moves that workspace's subscription out of `past_due`.
@@ -862,7 +897,7 @@ async def test_another_workspaces_invoice_is_not_found(db_session):
         await _service(db_session, acme).start(invoice_id=invoice.id)
 
 
-async def test_naming_neither_a_plan_nor_an_invoice_is_refused(db_session):
+async def test_naming_neither_a_plan_nor_an_invoice_is_refused(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
 
     with pytest.raises(ValidationError):
@@ -872,7 +907,9 @@ async def test_naming_neither_a_plan_nor_an_invoice_is_refused(db_session):
 # ---------------------------------------------------- credentials in logs
 
 
-async def test_no_log_line_carries_the_client_secret(db_session, caplog):
+async def test_no_log_line_carries_the_client_secret(
+    db_session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
     """A canary, because this is the leak nothing else would catch.
 
     The client secret is a bearer value for one payment page. It has to reach
@@ -901,7 +938,9 @@ async def test_no_log_line_carries_the_client_secret(db_session, caplog):
         assert "eg.checkout.paymob.com" not in rendered
 
 
-async def test_no_log_line_carries_the_secret_key(db_session, caplog):
+async def test_no_log_line_carries_the_secret_key(
+    db_session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
     """The other half. This one authenticates *us* to Paymob.
 
     Anybody who read it out of a log could create charges against the merchant
@@ -935,5 +974,5 @@ def test_the_client_secret_is_not_a_field_on_anything_persisted() -> None:
     names = {field.name for field in fields(StartedCheckout)}
     assert not {name for name in names if "secret" in name}
 
-    columns = {column.name for column in Payment.__table__.columns}
+    columns = {column.name for column in as_table(Payment.__table__).columns}
     assert not {name for name in columns if "secret" in name}

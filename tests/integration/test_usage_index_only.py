@@ -17,9 +17,11 @@ isolation. This covers the mechanism underneath them.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEventType
@@ -35,14 +37,14 @@ DAYS = 8
 PER_DAY = 6
 
 
-async def _tenant(session, slug: str) -> Tenant:
+async def _tenant(session: AsyncSession, slug: str) -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _seed(session, *, tenant: Tenant, offset: int) -> int:
+async def _seed(session: AsyncSession, *, tenant: Tenant, offset: int) -> int:
     """Several days of two meters, and return what `ai_request` should total.
 
     `offset` makes each workspace's quantities different, so a query that lost
@@ -72,7 +74,7 @@ async def _seed(session, *, tenant: Tenant, offset: int) -> int:
     return expected
 
 
-async def _raw_total(session, *, tenant: Tenant) -> int:
+async def _raw_total(session: AsyncSession, *, tenant: Tenant) -> int:
     """The source of truth: the table, with every index refused."""
     async with session.begin_nested():
         await session.execute(text("SET LOCAL enable_indexscan = off"))
@@ -89,7 +91,7 @@ async def _raw_total(session, *, tenant: Tenant) -> int:
     return int(total or 0)
 
 
-async def _optimised_total(session, *, tenant: Tenant) -> int:
+async def _optimised_total(session: AsyncSession, *, tenant: Tenant) -> int:
     """What `EntitlementService._period_usage` asks for, through the repository."""
     totals = await UsageEventRepository(session, tenant_id=tenant.id).totals(
         since=SINCE,
@@ -99,7 +101,7 @@ async def _optimised_total(session, *, tenant: Tenant) -> int:
     return sum(total.quantity for total in totals)
 
 
-async def test_the_index_carries_the_columns_the_sum_needs(db_connection):
+async def test_the_index_carries_the_columns_the_sum_needs(db_connection: AsyncConnection) -> None:
     """A schema property: `quantity` and `unit` are INCLUDE columns.
 
     Read off `pg_index`, where the included columns are the attributes past
@@ -124,7 +126,7 @@ async def test_the_index_carries_the_columns_the_sum_needs(db_connection):
     assert set(row.included) == {"quantity", "unit"}
 
 
-async def test_the_period_sum_is_answered_from_the_index_alone(db_session):
+async def test_the_period_sum_is_answered_from_the_index_alone(db_session: AsyncSession) -> None:
     """The plan, not the timing.
 
     Every other index on the table is dropped and sequential scans refused,
@@ -188,7 +190,9 @@ async def test_the_period_sum_is_answered_from_the_index_alone(db_session):
     assert f"Index Only Scan using {INDEX}" in plan
 
 
-async def test_the_optimised_total_equals_the_raw_total_for_every_workspace(db_session):
+async def test_the_optimised_total_equals_the_raw_total_for_every_workspace(
+    db_session: AsyncSession,
+) -> None:
     """GATE: the index and the table agree, across workspaces and days."""
     tenants = [await _tenant(db_session, f"agree-{index}") for index in range(3)]
     expected = {
@@ -208,7 +212,7 @@ async def test_the_optimised_total_equals_the_raw_total_for_every_workspace(db_s
     assert len(set(expected.values())) == len(tenants)
 
 
-async def test_the_two_agree_on_the_boundary_rows(db_session):
+async def test_the_two_agree_on_the_boundary_rows(db_session: AsyncSession) -> None:
     """Half-open, and answered the same way whichever plan runs.
 
     One row on each boundary and one in between. `since` counts, `until` does
@@ -239,7 +243,9 @@ async def test_the_two_agree_on_the_boundary_rows(db_session):
     assert optimised == raw == 127
 
 
-async def test_an_event_recorded_late_lands_in_the_window_it_happened_in(db_session):
+async def test_an_event_recorded_late_lands_in_the_window_it_happened_in(
+    db_session: AsyncSession,
+) -> None:
     """A worker draining a backlog records when the thing happened.
 
     `usage_events` has no insertion timestamp - `occurred_at` is the only time
@@ -270,7 +276,9 @@ async def test_an_event_recorded_late_lands_in_the_window_it_happened_in(db_sess
     assert optimised == raw == before + 41
 
 
-async def test_the_index_does_not_leak_another_workspaces_quantities(db_session):
+async def test_the_index_does_not_leak_another_workspaces_quantities(
+    db_session: AsyncSession,
+) -> None:
     """The filter is still a filter.
 
     An index shared by every workspace is a scan that touches every workspace's
@@ -296,7 +304,9 @@ async def test_the_index_does_not_leak_another_workspaces_quantities(db_session)
         [UsageEventType.AI_REQUEST, UsageEventType.AI_INPUT_TOKEN],
     ],
 )
-async def test_narrowing_to_meters_agrees_with_the_table(db_session, meters):
+async def test_narrowing_to_meters_agrees_with_the_table(
+    db_session: AsyncSession, meters: list[Any]
+) -> None:
     """Every shape `PERIOD_METERS` can ask for, checked against a scan."""
     tenant = await _tenant(db_session, "meters")
     await _seed(db_session, tenant=tenant, offset=3)

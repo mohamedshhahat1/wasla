@@ -18,9 +18,11 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.billing import (
     BillingInterval,
@@ -36,6 +38,7 @@ from app.integrations.billing.paymob import PaymobProvider, hmac_signature, toke
 from app.services.checkout_service import APPLIED, DUPLICATE, NO_CHANGE, CheckoutService
 from app.services.entitlement_service import EntitlementService
 from app.services.payment_method_service import PaymentMethodService, remember_saved_method
+from tests.fakes import as_table
 
 pytestmark = pytest.mark.integration
 
@@ -52,7 +55,9 @@ def _provider() -> PaymobProvider:
     )
 
 
-def _transaction(*, reference: str | None, transaction: int = 800000001, **overrides) -> dict:
+def _transaction(
+    *, reference: str | None, transaction: int = 800000001, **overrides: Any
+) -> dict[str, Any]:
     body = {
         "id": transaction,
         "pending": False,
@@ -77,7 +82,7 @@ def _transaction(*, reference: str | None, transaction: int = 800000001, **overr
     return body
 
 
-async def _apply(session, tenant, transaction: dict) -> str:
+async def _apply(session: AsyncSession, tenant: Tenant, transaction: dict[str, Any]) -> str:
     payload = json.dumps({"type": "TRANSACTION", "obj": transaction}).encode("utf-8")
     event = _provider().verify_callback(
         payload=payload,
@@ -86,7 +91,12 @@ async def _apply(session, tenant, transaction: dict) -> str:
     return await CheckoutService(session, tenant_id=tenant.id, provider=_provider()).apply(event)
 
 
-async def _workspace(session, *, slug: str = "acme", status=SubscriptionStatus.PAST_DUE):
+async def _workspace(
+    session: AsyncSession,
+    *,
+    slug: str = "acme",
+    status: SubscriptionStatus = SubscriptionStatus.PAST_DUE,
+) -> tuple[Any, ...]:
     tenant = Tenant(name=slug.title(), slug=f"{slug}-{uuid.uuid4().hex[:8]}")
     plan = Plan(
         code=f"pro-{uuid.uuid4().hex[:6]}",
@@ -141,7 +151,7 @@ async def _workspace(session, *, slug: str = "acme", status=SubscriptionStatus.P
 # ----------------------------------------------------------------- declined
 
 
-async def test_a_declined_payment_changes_nothing_it_should_not(db_session):
+async def test_a_declined_payment_changes_nothing_it_should_not(db_session: AsyncSession) -> None:
     """The whole decline contract in one place.
 
     Asserting absences rather than an error, because the dangerous bug is not a
@@ -172,7 +182,7 @@ async def test_a_declined_payment_changes_nothing_it_should_not(db_session):
     assert subscription.status is SubscriptionStatus.PAST_DUE
 
 
-async def test_a_decline_does_not_grant_paid_entitlements(db_session):
+async def test_a_decline_does_not_grant_paid_entitlements(db_session: AsyncSession) -> None:
     """Read through the real entitlement service rather than inferred.
 
     A workspace whose payment failed keeps whatever its subscription already
@@ -193,7 +203,7 @@ async def test_a_decline_does_not_grant_paid_entitlements(db_session):
     assert agents.limit != 5
 
 
-async def test_a_decline_is_recorded_as_its_own_event(db_session):
+async def test_a_decline_is_recorded_as_its_own_event(db_session: AsyncSession) -> None:
     """`transaction.failed`, distinct from a success on the same transaction."""
     tenant, _, _, payment = await _workspace(db_session)
 
@@ -213,7 +223,7 @@ async def test_a_decline_is_recorded_as_its_own_event(db_session):
     assert event.provider_event_id.endswith(":failed")
 
 
-async def test_a_repeated_decline_is_idempotent(db_session):
+async def test_a_repeated_decline_is_idempotent(db_session: AsyncSession) -> None:
     tenant, _, invoice, payment = await _workspace(db_session)
     declined = _transaction(reference=str(payment.id), success=False, error_occured=True)
 
@@ -224,7 +234,7 @@ async def test_a_repeated_decline_is_idempotent(db_session):
     assert invoice.amount_paid == Decimal("0.00")
 
 
-async def test_a_declined_payment_cannot_later_succeed(db_session):
+async def test_a_declined_payment_cannot_later_succeed(db_session: AsyncSession) -> None:
     """`failed -> succeeded` is refused, so a late success cannot resurrect it.
 
     A customer retrying produces another attempt and another row; this row
@@ -252,7 +262,7 @@ async def test_a_declined_payment_cannot_later_succeed(db_session):
 # ------------------------------------------------------------------ pending
 
 
-async def test_a_pending_callback_settles_nothing(db_session):
+async def test_a_pending_callback_settles_nothing(db_session: AsyncSession) -> None:
     """In flight is not collected, however cheerful the flags look."""
     tenant, subscription, invoice, payment = await _workspace(db_session)
 
@@ -269,7 +279,9 @@ async def test_a_pending_callback_settles_nothing(db_session):
     assert subscription.status is SubscriptionStatus.PAST_DUE
 
 
-async def test_pending_then_success_are_two_events_and_settle_once(db_session):
+async def test_pending_then_success_are_two_events_and_settle_once(
+    db_session: AsyncSession,
+) -> None:
     """The 3-D Secure sequence, and the reason event ids are composite.
 
     Keying idempotency on the transaction id alone would file the success as a
@@ -316,7 +328,11 @@ async def test_pending_then_success_are_two_events_and_settle_once(db_session):
 # -------------------------------------------------------------- saved cards
 
 
-def _token(*, order: str, token: str = "tok-aaaa") -> dict:  # noqa: S107 - a fixture handle
+def _token(
+    *,
+    order: str,
+    token: str = "tok-aaaa",  # noqa: S107 - a fixture handle, not a credential
+) -> dict[str, Any]:
     return {
         "id": 15978654,
         "token": token,
@@ -329,7 +345,11 @@ def _token(*, order: str, token: str = "tok-aaaa") -> dict:  # noqa: S107 - a fi
     }
 
 
-async def _save(session, tenant, token: dict):
+async def _save(
+    session: AsyncSession,
+    tenant: Tenant,
+    token: dict[str, Any],
+) -> tuple[PaymentMethod, bool]:
     payload = json.dumps({"type": "TOKEN", "obj": token}).encode("utf-8")
     saved = _provider().verify_token_callback(
         payload=payload,
@@ -343,7 +363,7 @@ async def _save(session, tenant, token: dict):
     )
 
 
-async def test_a_saved_card_stores_a_token_and_no_card_number(db_session):
+async def test_a_saved_card_stores_a_token_and_no_card_number(db_session: AsyncSession) -> None:
     tenant, _, _, _ = await _workspace(db_session)
 
     method, created = await _save(db_session, tenant, _token(order="ord-1"))
@@ -354,11 +374,13 @@ async def test_a_saved_card_stores_a_token_and_no_card_number(db_session):
     assert method.brand == "MasterCard"
     # The first card a workspace saves becomes the one renewals use.
     assert method.is_default is True
-    columns = {column.name for column in PaymentMethod.__table__.columns}
+    columns = {column.name for column in as_table(PaymentMethod.__table__).columns}
     assert not (columns & {"pan", "card_number", "cvv", "expiry"})
 
 
-async def test_a_repeated_saved_card_notification_creates_one_card(db_session):
+async def test_a_repeated_saved_card_notification_creates_one_card(
+    db_session: AsyncSession,
+) -> None:
     """Providers retry these exactly as they retry payment callbacks."""
     tenant, _, _, _ = await _workspace(db_session)
     token = _token(order="ord-2")
@@ -370,7 +392,7 @@ async def test_a_repeated_saved_card_notification_creates_one_card(db_session):
     assert first.id == second.id
 
 
-async def test_a_second_card_does_not_silently_take_over_renewals(db_session):
+async def test_a_second_card_does_not_silently_take_over_renewals(db_session: AsyncSession) -> None:
     """Somebody paying once with another card has not changed their billing."""
     tenant, _, _, _ = await _workspace(db_session)
 
@@ -381,7 +403,7 @@ async def test_a_second_card_does_not_silently_take_over_renewals(db_session):
     assert second.is_default is False
 
 
-async def test_choosing_a_card_moves_the_default_exactly_once(db_session):
+async def test_choosing_a_card_moves_the_default_exactly_once(db_session: AsyncSession) -> None:
     tenant, _, _, _ = await _workspace(db_session)
     first, _ = await _save(db_session, tenant, _token(order="ord-5", token="tok-a"))
     second, _ = await _save(db_session, tenant, _token(order="ord-6", token="tok-b"))
@@ -391,10 +413,14 @@ async def test_choosing_a_card_moves_the_default_exactly_once(db_session):
 
     assert first.is_default is False
     assert second.is_default is True
-    assert (await service.default_method()).id == second.id
+    default = await service.default_method()
+    assert default is not None
+    assert default.id == second.id
 
 
-async def test_removing_a_card_stops_it_being_used_without_erasing_it(db_session):
+async def test_removing_a_card_stops_it_being_used_without_erasing_it(
+    db_session: AsyncSession,
+) -> None:
     """A payment collected with a card should still name that card afterwards."""
     tenant, _, _, _ = await _workspace(db_session)
     method, _ = await _save(db_session, tenant, _token(order="ord-7"))
@@ -408,7 +434,7 @@ async def test_removing_a_card_stops_it_being_used_without_erasing_it(db_session
     assert await db_session.get(PaymentMethod, method.id) is not None
 
 
-async def test_another_workspaces_card_cannot_be_touched(db_session):
+async def test_another_workspaces_card_cannot_be_touched(db_session: AsyncSession) -> None:
     """Not-found rather than forbidden, on an object that can be charged."""
     from app.core.exceptions import NotFoundError
 
@@ -423,7 +449,9 @@ async def test_another_workspaces_card_cannot_be_touched(db_session):
         await service.revoke(method.id)
 
 
-async def test_a_card_saved_by_one_workspace_is_invisible_to_another(db_session):
+async def test_a_card_saved_by_one_workspace_is_invisible_to_another(
+    db_session: AsyncSession,
+) -> None:
     acme, _, _, _ = await _workspace(db_session, slug="acme")
     globex, _, _, _ = await _workspace(db_session, slug="globex")
     await _save(db_session, globex, _token(order="ord-9"))

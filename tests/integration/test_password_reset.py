@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -101,11 +101,15 @@ async def user(db_session: AsyncSession) -> User:
     return row
 
 
-async def _request_reset(http: AsyncClient, email: str = EMAIL):
+async def _request_reset(http: AsyncClient, email: str = EMAIL) -> Response:
     return await http.post(f"{API}/auth/password-reset/request", json={"email": email})
 
 
-async def _confirm(http: AsyncClient, token: str, password: str = NEW_PASSWORD):
+async def _confirm(
+    http: AsyncClient,
+    token: str,
+    password: str = NEW_PASSWORD,
+) -> Response:
     return await http.post(
         f"{API}/auth/password-reset/confirm",
         json={"token": token, "new_password": password},
@@ -118,7 +122,8 @@ async def _queued_reset_token(session: AsyncSession) -> str:
         select(OutboundEmail).where(OutboundEmail.template == EmailTemplate.PASSWORD_RESET.value)
     )
     email = rows.scalars().one()
-    return email.context["token"]
+    value: str = email.context["token"]
+    return value
 
 
 async def _tokens(session: AsyncSession, user_id: uuid.UUID) -> list[PasswordResetToken]:
@@ -128,7 +133,9 @@ async def _tokens(session: AsyncSession, user_id: uuid.UUID) -> list[PasswordRes
     return list(rows.scalars())
 
 
-async def test_requesting_a_reset_queues_one_email(http, db_session, user):
+async def test_requesting_a_reset_queues_one_email(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     response = await _request_reset(http)
 
     assert response.status_code == 202
@@ -141,7 +148,9 @@ async def test_requesting_a_reset_queues_one_email(http, db_session, user):
     assert queued[0].user_id == user.id
 
 
-async def test_the_response_never_contains_the_token(http, db_session, user):
+async def test_the_response_never_contains_the_token(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     """A token in an API response is a reset anybody can perform."""
     response = await _request_reset(http)
     token = await _queued_reset_token(db_session)
@@ -149,7 +158,9 @@ async def test_the_response_never_contains_the_token(http, db_session, user):
     assert token not in response.text
 
 
-async def test_an_unknown_address_answers_exactly_the_same(http, db_session, user):
+async def test_an_unknown_address_answers_exactly_the_same(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     """No enumeration oracle: registered and unknown are indistinguishable."""
     known = await _request_reset(http, EMAIL)
     unknown = await _request_reset(http, "nobody@example.com")
@@ -158,14 +169,18 @@ async def test_an_unknown_address_answers_exactly_the_same(http, db_session, use
     assert known.json() == unknown.json()  # a constant body, no request id in it
 
 
-async def test_an_unknown_address_queues_nothing(http, db_session):
+async def test_an_unknown_address_queues_nothing(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
     await _request_reset(http, "nobody@example.com")
 
     rows = await db_session.execute(select(OutboundEmail))
     assert rows.scalars().all() == []
 
 
-async def test_a_suspended_account_answers_the_same_and_queues_nothing(http, db_session, user):
+async def test_a_suspended_account_answers_the_same_and_queues_nothing(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     user.is_active = False
     await db_session.flush()
 
@@ -176,7 +191,9 @@ async def test_a_suspended_account_answers_the_same_and_queues_nothing(http, db_
     assert rows.scalars().all() == []
 
 
-async def test_an_account_with_no_password_queues_nothing(http, db_session, user):
+async def test_an_account_with_no_password_queues_nothing(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     """An invitation-created account proves itself through its invitation."""
     user.hashed_password = None
     await db_session.flush()
@@ -187,7 +204,9 @@ async def test_an_account_with_no_password_queues_nothing(http, db_session, user
     assert rows.scalars().all() == []
 
 
-async def test_only_the_hash_of_the_token_is_stored(http, db_session, user):
+async def test_only_the_hash_of_the_token_is_stored(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     """A stolen database must not yield a usable reset link."""
     await _request_reset(http)
     raw = await _queued_reset_token(db_session)
@@ -198,13 +217,17 @@ async def test_only_the_hash_of_the_token_is_stored(http, db_session, user):
     assert tokens[0].token_hash == hash_reset_token(raw)
 
 
-async def test_the_token_is_long_enough_to_be_unguessable(http, db_session, user):
+async def test_the_token_is_long_enough_to_be_unguessable(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     await _request_reset(http)
 
     assert len(await _queued_reset_token(db_session)) >= 32
 
 
-async def test_two_requests_produce_two_different_tokens(http, db_session, user):
+async def test_two_requests_produce_two_different_tokens(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     await _request_reset(http)
     first = await _queued_reset_token(db_session)
     # The outbox key is per token row, so a second request queues a second row;
@@ -219,7 +242,9 @@ async def test_two_requests_produce_two_different_tokens(http, db_session, user)
     assert first != second
 
 
-async def test_confirming_sets_the_new_password(http, db_session, user):
+async def test_confirming_sets_the_new_password(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     await _request_reset(http)
     token = await _queued_reset_token(db_session)
     previous = user.hashed_password
@@ -231,7 +256,9 @@ async def test_confirming_sets_the_new_password(http, db_session, user):
     assert user.hashed_password != previous
 
 
-async def test_confirming_bumps_the_token_version(http, db_session, user):
+async def test_confirming_bumps_the_token_version(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     """Every access and refresh token dies with the old password (ADR-036)."""
     before = user.token_version
     await _request_reset(http)
@@ -243,7 +270,9 @@ async def test_confirming_bumps_the_token_version(http, db_session, user):
     assert user.token_version == before + 1
 
 
-async def test_the_new_password_actually_signs_in(http, db_session, user):
+async def test_the_new_password_actually_signs_in(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     await _request_reset(http)
     token = await _queued_reset_token(db_session)
     await _confirm(http, token)
@@ -256,7 +285,9 @@ async def test_the_new_password_actually_signs_in(http, db_session, user):
     assert response.status_code == 200
 
 
-async def test_the_old_password_stops_working(http, db_session, user):
+async def test_the_old_password_stops_working(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     await _request_reset(http)
     token = await _queued_reset_token(db_session)
     await _confirm(http, token)
@@ -269,7 +300,9 @@ async def test_the_old_password_stops_working(http, db_session, user):
     assert response.status_code == 401
 
 
-async def test_a_token_cannot_be_used_twice(http, db_session, user):
+async def test_a_token_cannot_be_used_twice(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     await _request_reset(http)
     token = await _queued_reset_token(db_session)
     await _confirm(http, token)
@@ -279,7 +312,9 @@ async def test_a_token_cannot_be_used_twice(http, db_session, user):
     assert second.status_code == 401
 
 
-async def test_an_expired_token_is_refused(http, db_session, user):
+async def test_an_expired_token_is_refused(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     await _request_reset(http)
     token = await _queued_reset_token(db_session)
     rows = await _tokens(db_session, user.id)
@@ -291,7 +326,9 @@ async def test_an_expired_token_is_refused(http, db_session, user):
     assert response.status_code == 401
 
 
-async def test_a_newer_request_supersedes_the_older_link(http, db_session, user):
+async def test_a_newer_request_supersedes_the_older_link(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     """Asking twice narrows the live surface rather than widening it."""
     await _request_reset(http)
     first = await _queued_reset_token(db_session)
@@ -306,13 +343,17 @@ async def test_a_newer_request_supersedes_the_older_link(http, db_session, user)
     assert response.status_code == 401
 
 
-async def test_an_unknown_token_is_refused(http, db_session, user):
+async def test_an_unknown_token_is_refused(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     response = await _confirm(http, "a" * 43)
 
     assert response.status_code == 401
 
 
-async def test_every_refusal_reads_the_same(http, db_session, user):
+async def test_every_refusal_reads_the_same(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     """Unknown, expired and spent tokens must not be distinguishable."""
     await _request_reset(http)
     token = await _queued_reset_token(db_session)
@@ -327,7 +368,9 @@ async def test_every_refusal_reads_the_same(http, db_session, user):
     assert spent.json()["error"]["message"] == unknown.json()["error"]["message"]
 
 
-async def test_a_weak_password_is_refused_without_spending_the_token(http, db_session, user):
+async def test_a_weak_password_is_refused_without_spending_the_token(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     """A typo must not cost the one usable link."""
     await _request_reset(http)
     token = await _queued_reset_token(db_session)
@@ -339,7 +382,9 @@ async def test_a_weak_password_is_refused_without_spending_the_token(http, db_se
     assert good.status_code == 200
 
 
-async def test_confirming_queues_a_password_changed_notice(http, db_session, user):
+async def test_confirming_queues_a_password_changed_notice(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     """The notice a compromised account depends on."""
     await _request_reset(http)
     token = await _queued_reset_token(db_session)
@@ -354,7 +399,9 @@ async def test_confirming_queues_a_password_changed_notice(http, db_session, use
     assert notices[0].recipient == EMAIL
 
 
-async def test_the_notice_goes_to_the_account_not_the_request(http, db_session, user):
+async def test_the_notice_goes_to_the_account_not_the_request(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     """Nothing in the request can redirect where a security notice lands."""
     await _request_reset(http)
     token = await _queued_reset_token(db_session)
@@ -373,7 +420,9 @@ async def test_the_notice_goes_to_the_account_not_the_request(http, db_session, 
     assert recipients == {EMAIL}
 
 
-async def test_no_reset_token_reaches_the_audit_trail(http, db_session, user):
+async def test_no_reset_token_reaches_the_audit_trail(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     from app.db.models.audit import AuditLog
 
     await _request_reset(http)
@@ -386,7 +435,9 @@ async def test_no_reset_token_reaches_the_audit_trail(http, db_session, user):
         assert token not in str(entry.target_label or "")
 
 
-async def test_the_address_is_matched_case_insensitively(http, db_session, user):
+async def test_the_address_is_matched_case_insensitively(
+    http: AsyncClient, db_session: AsyncSession, user: User
+) -> None:
     response = await _request_reset(http, "PERSON@EXAMPLE.COM")
 
     assert response.status_code == 202

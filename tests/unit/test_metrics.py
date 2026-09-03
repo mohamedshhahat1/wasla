@@ -26,7 +26,7 @@ from app.core.metrics import (
 
 
 @pytest.fixture
-def registry():
+def registry() -> MetricsRegistry:
     return MetricsRegistry()
 
 
@@ -45,7 +45,10 @@ def registry():
         pytest.param("", id="empty"),
     ],
 )
-def test_an_identifier_shaped_label_is_refused(registry, value):
+def test_an_identifier_shaped_label_is_refused(
+    registry: MetricsRegistry,
+    value: str,
+) -> None:
     counter = registry.counter("wasla_test_total", "help", ("subject",))
 
     with pytest.raises(MetricLabelError):
@@ -63,7 +66,7 @@ def test_an_identifier_shaped_label_is_refused(registry, value):
         pytest.param("starter", id="plan-code"),
     ],
 )
-def test_a_bounded_category_is_admitted(registry, value):
+def test_a_bounded_category_is_admitted(registry: MetricsRegistry, value: str) -> None:
     """The longest route template this application has must fit."""
     counter = registry.counter("wasla_test_total", "help", ("subject",))
 
@@ -72,7 +75,7 @@ def test_a_bounded_category_is_admitted(registry, value):
     assert counter.value(subject=value) == 1
 
 
-def test_a_label_the_metric_did_not_declare_is_refused(registry):
+def test_a_label_the_metric_did_not_declare_is_refused(registry: MetricsRegistry) -> None:
     """Stops a well-meaning `extra={"tenant_id": ...}` habit reaching a series."""
     counter = registry.counter("wasla_test_total", "help", ("queue",))
 
@@ -80,24 +83,24 @@ def test_a_label_the_metric_did_not_declare_is_refused(registry):
         counter.increment(queue="agent", tenant_id="acme")
 
 
-def test_a_missing_label_is_refused(registry):
+def test_a_missing_label_is_refused(registry: MetricsRegistry) -> None:
     counter = registry.counter("wasla_test_total", "help", ("queue", "outcome"))
 
     with pytest.raises(MetricLabelError):
         counter.increment(queue="agent")
 
 
-def test_a_metric_name_that_is_not_a_prometheus_name_is_refused(registry):
+def test_a_metric_name_that_is_not_a_prometheus_name_is_refused(registry: MetricsRegistry) -> None:
     with pytest.raises(MetricLabelError):
         registry.counter("wasla-test-total", "help")
 
 
-def test_a_label_name_that_is_not_a_prometheus_name_is_refused(registry):
+def test_a_label_name_that_is_not_a_prometheus_name_is_refused(registry: MetricsRegistry) -> None:
     with pytest.raises(MetricLabelError):
         registry.counter("wasla_test_total", "help", ("tenant-id",))
 
 
-def test_lines_rendered_outside_the_registry_face_the_same_guard():
+def test_lines_rendered_outside_the_registry_face_the_same_guard() -> None:
     """Redis-derived samples are held to the rule in-process ones are."""
     with pytest.raises(MetricLabelError):
         render_gauge_lines("wasla_test", "help", [({"queue": str(uuid.uuid4())}, 1.0)])
@@ -106,7 +109,7 @@ def test_lines_rendered_outside_the_registry_face_the_same_guard():
 # ------------------------------------------------------------- the metrics
 
 
-def test_a_counter_counts(registry):
+def test_a_counter_counts(registry: MetricsRegistry) -> None:
     counter = registry.counter("wasla_test_total", "help", ("queue",))
 
     counter.increment(queue="agent")
@@ -117,7 +120,7 @@ def test_a_counter_counts(registry):
     assert counter.value(queue="media") == 1
 
 
-def test_a_counter_counts_each_label_combination_separately(registry):
+def test_a_counter_counts_each_label_combination_separately(registry: MetricsRegistry) -> None:
     counter = registry.counter("wasla_test_total", "help", ("queue", "outcome"))
 
     counter.increment(queue="agent", outcome="succeeded")
@@ -127,14 +130,14 @@ def test_a_counter_counts_each_label_combination_separately(registry):
     assert counter.value(queue="agent", outcome="dead_lettered") == 1
 
 
-def test_a_counter_refuses_to_go_backwards(registry):
+def test_a_counter_refuses_to_go_backwards(registry: MetricsRegistry) -> None:
     counter = registry.counter("wasla_test_total", "help")
 
     with pytest.raises(ValueError, match="cannot decrease"):
         counter.increment(-1)
 
 
-def test_a_gauge_goes_both_ways(registry):
+def test_a_gauge_goes_both_ways(registry: MetricsRegistry) -> None:
     gauge = registry.gauge("wasla_test", "help")
 
     gauge.add(3)
@@ -143,7 +146,7 @@ def test_a_gauge_goes_both_ways(registry):
     assert gauge.value() == 2
 
 
-def test_a_histogram_buckets_cumulatively(registry):
+def test_a_histogram_buckets_cumulatively(registry: MetricsRegistry) -> None:
     histogram = registry.histogram("wasla_test_seconds", "help", buckets=(0.1, 1.0))
 
     histogram.observe(0.05)
@@ -158,7 +161,7 @@ def test_a_histogram_buckets_cumulatively(registry):
     assert histogram.count() == 3
 
 
-def test_the_default_buckets_are_a_bounded_set():
+def test_the_default_buckets_are_a_bounded_set() -> None:
     """A histogram is the most expensive metric here; the ceiling is deliberate."""
     assert len(DEFAULT_LATENCY_BUCKETS) <= 12
     assert list(DEFAULT_LATENCY_BUCKETS) == sorted(DEFAULT_LATENCY_BUCKETS)
@@ -167,7 +170,7 @@ def test_the_default_buckets_are_a_bounded_set():
 # --------------------------------------------------------- the exposition
 
 
-def test_the_exposition_carries_help_and_type(registry):
+def test_the_exposition_carries_help_and_type(registry: MetricsRegistry) -> None:
     registry.counter("wasla_test_total", "How many things happened.").increment()
 
     rendered = registry.render()
@@ -177,28 +180,28 @@ def test_the_exposition_carries_help_and_type(registry):
     assert "wasla_test_total 1" in rendered
 
 
-def test_the_exposition_ends_with_a_newline(registry):
+def test_the_exposition_ends_with_a_newline(registry: MetricsRegistry) -> None:
     """Scrapers are entitled to a trailing newline; some refuse without one."""
     registry.counter("wasla_test_total", "help").increment()
 
     assert registry.render().endswith("\n")
 
 
-def test_labels_are_rendered_sorted_and_quoted(registry):
+def test_labels_are_rendered_sorted_and_quoted(registry: MetricsRegistry) -> None:
     counter = registry.counter("wasla_test_total", "help", ("queue", "outcome"))
     counter.increment(queue="agent", outcome="succeeded")
 
     assert 'wasla_test_total{outcome="succeeded",queue="agent"} 1' in registry.render()
 
 
-def test_a_quotation_mark_in_a_label_is_escaped(registry):
+def test_a_quotation_mark_in_a_label_is_escaped(registry: MetricsRegistry) -> None:
     counter = registry.counter("wasla_test_total", "help", ("route",))
     counter.increment(route='/a"b')
 
     assert r'route="/a\"b"' in registry.render()
 
 
-def test_extra_lines_are_appended(registry):
+def test_extra_lines_are_appended(registry: MetricsRegistry) -> None:
     registry.counter("wasla_test_total", "help").increment()
 
     rendered = registry.render(extra=["# TYPE other gauge", "other 4"])
@@ -206,7 +209,7 @@ def test_extra_lines_are_appended(registry):
     assert rendered.endswith("# TYPE other gauge\nother 4\n")
 
 
-def test_declaring_the_same_metric_twice_returns_the_same_object(registry):
+def test_declaring_the_same_metric_twice_returns_the_same_object(registry: MetricsRegistry) -> None:
     first = registry.counter("wasla_test_total", "help", ("queue",))
     second = registry.counter("wasla_test_total", "help", ("queue",))
 
@@ -216,14 +219,14 @@ def test_declaring_the_same_metric_twice_returns_the_same_object(registry):
     assert second.value(queue="agent") == 1
 
 
-def test_redeclaring_a_metric_as_a_different_type_is_refused(registry):
+def test_redeclaring_a_metric_as_a_different_type_is_refused(registry: MetricsRegistry) -> None:
     registry.counter("wasla_test_total", "help")
 
     with pytest.raises(MetricLabelError):
         registry.gauge("wasla_test_total", "help")
 
 
-def test_a_registry_can_be_emptied(registry):
+def test_a_registry_can_be_emptied(registry: MetricsRegistry) -> None:
     registry.counter("wasla_test_total", "help").increment()
 
     registry.clear()
@@ -231,13 +234,13 @@ def test_a_registry_can_be_emptied(registry):
     assert "wasla_test_total" not in registry.render()
 
 
-def test_metric_types_are_what_they_claim(registry):
+def test_metric_types_are_what_they_claim(registry: MetricsRegistry) -> None:
     assert isinstance(registry.counter("a_total", "h"), Counter)
     assert isinstance(registry.gauge("b", "h"), Gauge)
     assert isinstance(registry.histogram("c_seconds", "h"), Histogram)
 
 
-def test_histogram_buckets_never_decrease_and_end_at_the_count(registry):
+def test_histogram_buckets_never_decrease_and_end_at_the_count(registry: MetricsRegistry) -> None:
     """The property, not an example, because the first render got this wrong.
 
     `observe` increments every bucket a value falls under, so the buckets are
@@ -260,7 +263,7 @@ def test_histogram_buckets_never_decrease_and_end_at_the_count(registry):
     assert counts[3] == 8  # plus 2.0 and 4.9
 
 
-def test_the_observed_sum_is_the_sum_of_the_observations(registry):
+def test_the_observed_sum_is_the_sum_of_the_observations(registry: MetricsRegistry) -> None:
     histogram = registry.histogram("wasla_sum_seconds", "help", buckets=(1.0,))
 
     for value in (0.25, 0.5, 2.0):

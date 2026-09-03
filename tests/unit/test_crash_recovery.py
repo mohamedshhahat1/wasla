@@ -19,7 +19,9 @@ turn engages the provider, so a crash cannot take that knowledge with it.
 import asyncio
 import json
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -43,6 +45,7 @@ from app.workers.retry import (
     classify,
 )
 from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import as_redis
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 CONVERSATION = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -57,25 +60,28 @@ POLICY = RetryPolicy(max_attempts=3, base_seconds=10.0, max_seconds=100.0, jitte
 
 
 @pytest.fixture
-def redis():
+def redis() -> FakeQueueRedis:
     return FakeQueueRedis()
 
 
-def agent_queue(redis, *, worker_id="worker-a"):
-    return AgentQueue(redis, worker_id=worker_id, visibility_timeout_seconds=TIMEOUT)
+def agent_queue(redis: FakeQueueRedis, *, worker_id: str = "worker-a") -> AgentQueue:
+    return AgentQueue(as_redis(redis), worker_id=worker_id, visibility_timeout_seconds=TIMEOUT)
 
 
-async def reserved_agent_job(redis, *, worker_id="worker-a", now=NOW):
+async def reserved_agent_job(
+    redis: FakeQueueRedis, *, worker_id: str = "worker-a", now: datetime = NOW
+) -> tuple[Any, ...]:
     queue = agent_queue(redis, worker_id=worker_id)
     await queue.enqueue(AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION), now=now)
     raw = await queue.reserve(wait_seconds=1, now=now)
+    assert raw is not None
     return queue, raw
 
 
 # ------------------------------------------------------- the reservation itself
 
 
-async def test_reserving_records_who_holds_the_job_and_until_when(redis):
+async def test_reserving_records_who_holds_the_job_and_until_when(redis: FakeQueueRedis) -> None:
     queue, raw = await reserved_agent_job(redis)
 
     reservation = await queue.reservation(raw, now=NOW)
@@ -87,7 +93,7 @@ async def test_reserving_records_who_holds_the_job_and_until_when(redis):
     assert reservation.stage is ReservationStage.RESERVED
 
 
-async def test_acknowledging_a_job_forgets_its_reservation(redis):
+async def test_acknowledging_a_job_forgets_its_reservation(redis: FakeQueueRedis) -> None:
     """A reservation that outlived its job would be recovered for ever."""
     queue, raw = await reserved_agent_job(redis)
 
@@ -97,7 +103,7 @@ async def test_acknowledging_a_job_forgets_its_reservation(redis):
     assert redis.strings.get("agent:jobs:reservations", {}) == {}
 
 
-async def test_a_retry_forgets_its_reservation_too(redis):
+async def test_a_retry_forgets_its_reservation_too(redis: FakeQueueRedis) -> None:
     queue, raw = await reserved_agent_job(redis)
 
     await queue.schedule_retry(
@@ -114,7 +120,7 @@ async def test_a_retry_forgets_its_reservation_too(redis):
 # --------------------------------------------------------------- the lease
 
 
-async def test_a_live_lease_is_not_reclaimed(redis):
+async def test_a_live_lease_is_not_reclaimed(redis: FakeQueueRedis) -> None:
     """The property that stops recovery stealing work from a living worker."""
     queue, _ = await reserved_agent_job(redis)
 
@@ -123,7 +129,7 @@ async def test_a_live_lease_is_not_reclaimed(redis):
     assert await queue.inflight_depth() == 1
 
 
-async def test_renewal_pushes_the_lease_out(redis):
+async def test_renewal_pushes_the_lease_out(redis: FakeQueueRedis) -> None:
     """A long job is safe because the process holding it keeps saying so."""
     queue, raw = await reserved_agent_job(redis)
 
@@ -137,7 +143,7 @@ async def test_renewal_pushes_the_lease_out(redis):
     assert reservation.lease_until == midway + timedelta(seconds=TIMEOUT)
 
 
-async def test_renewal_does_not_resurrect_a_reclaimed_job(redis):
+async def test_renewal_does_not_resurrect_a_reclaimed_job(redis: FakeQueueRedis) -> None:
     """The race the renewal loop must not lose.
 
     A reaper reclaims the job; the worker that lost it renews a moment later.
@@ -163,7 +169,7 @@ async def test_renewal_does_not_resurrect_a_reclaimed_job(redis):
     assert await worker.inflight_depth() == 0
 
 
-async def test_renewal_only_covers_what_this_process_holds(redis):
+async def test_renewal_only_covers_what_this_process_holds(redis: FakeQueueRedis) -> None:
     """A second queue object over the same Redis renews nothing."""
     await reserved_agent_job(redis, worker_id="worker-a")
     other = agent_queue(redis, worker_id="worker-b")
@@ -174,7 +180,7 @@ async def test_renewal_only_covers_what_this_process_holds(redis):
 # ------------------------------------------------------- safe job recovery
 
 
-async def test_a_crashed_safe_job_comes_back(redis):
+async def test_a_crashed_safe_job_comes_back(redis: FakeQueueRedis) -> None:
     """The gap this whole module closes."""
     queue, _ = await reserved_agent_job(redis)
 
@@ -186,7 +192,7 @@ async def test_a_crashed_safe_job_comes_back(redis):
     assert await queue.failed_depth() == 0
 
 
-async def test_recovery_preserves_the_attempt_history(redis):
+async def test_recovery_preserves_the_attempt_history(redis: FakeQueueRedis) -> None:
     """A crash is an execution attempt, not a fresh start."""
     queue, _ = await reserved_agent_job(redis)
 
@@ -200,7 +206,7 @@ async def test_recovery_preserves_the_attempt_history(redis):
     assert envelope.enqueued_at == NOW
 
 
-async def test_recovery_keeps_the_original_enqueue_time(redis):
+async def test_recovery_keeps_the_original_enqueue_time(redis: FakeQueueRedis) -> None:
     """Queue age must still measure how long the customer has waited."""
     queue, _ = await reserved_agent_job(redis)
 
@@ -215,7 +221,7 @@ async def test_recovery_keeps_the_original_enqueue_time(redis):
 # ------------------------------------------------------------ no duplication
 
 
-async def test_recovering_twice_recovers_once(redis):
+async def test_recovering_twice_recovers_once(redis: FakeQueueRedis) -> None:
     queue, _ = await reserved_agent_job(redis)
 
     first = await queue.recover_expired(policy=POLICY, now=EXPIRED, jitter=0.0)
@@ -226,7 +232,7 @@ async def test_recovering_twice_recovers_once(redis):
     assert await queue.delayed_depth() == 1
 
 
-async def test_two_reapers_that_both_saw_the_job_recover_it_once(redis):
+async def test_two_reapers_that_both_saw_the_job_recover_it_once(redis: FakeQueueRedis) -> None:
     """Two processes, one Redis, the same expired reservation.
 
     **Both must have enumerated before either claims**, or the test proves
@@ -249,7 +255,7 @@ async def test_two_reapers_that_both_saw_the_job_recover_it_once(redis):
     claimants = 0
 
     class Interleaving(FakeQueueRedis):
-        async def lrem(self, key, count, value):
+        async def lrem(self, key: str, count: int, value: str) -> int:
             nonlocal claimants
             if key.endswith(":inflight"):
                 claimants += 1
@@ -277,7 +283,7 @@ async def test_two_reapers_that_both_saw_the_job_recover_it_once(redis):
 # --------------------------------------------------------- attempt ceiling
 
 
-async def test_a_crash_on_the_last_attempt_does_not_buy_another(redis):
+async def test_a_crash_on_the_last_attempt_does_not_buy_another(redis: FakeQueueRedis) -> None:
     """The hidden-extra-attempt trap, closed.
 
     A job that crashes a worker every time would otherwise loop for ever:
@@ -301,7 +307,7 @@ async def test_a_crash_on_the_last_attempt_does_not_buy_another(redis):
     assert await queue.failed_depth() == 1
 
 
-async def test_a_job_can_never_crash_its_way_around_the_budget(redis):
+async def test_a_job_can_never_crash_its_way_around_the_budget(redis: FakeQueueRedis) -> None:
     """The property, over a loop of crashes rather than one example."""
     queue, _ = await reserved_agent_job(redis)
 
@@ -322,7 +328,9 @@ async def test_a_job_can_never_crash_its_way_around_the_budget(redis):
     assert await queue.failed_depth() == 1
 
 
-async def test_a_job_whose_last_failure_was_terminal_is_not_resurrected(redis):
+async def test_a_job_whose_last_failure_was_terminal_is_not_resurrected(
+    redis: FakeQueueRedis,
+) -> None:
     """No amount of crashing turns a permanent failure into a retryable one."""
     queue = agent_queue(redis)
     doomed = JobEnvelope(
@@ -343,7 +351,7 @@ async def test_a_job_whose_last_failure_was_terminal_is_not_resurrected(redis):
 # ------------------------------------------------------- agent crash safety
 
 
-async def test_an_agent_crash_before_engagement_is_recovered(redis):
+async def test_an_agent_crash_before_engagement_is_recovered(redis: FakeQueueRedis) -> None:
     """Nothing had left the process, so nobody outside saw anything."""
     queue, raw = await reserved_agent_job(redis)
     reservation = await queue.reservation(raw, now=NOW)
@@ -354,7 +362,7 @@ async def test_an_agent_crash_before_engagement_is_recovered(redis):
     assert [outcome.action for outcome in outcomes] == ["requeued"]
 
 
-async def test_an_agent_crash_after_engagement_is_never_resent(redis):
+async def test_an_agent_crash_after_engagement_is_never_resent(redis: FakeQueueRedis) -> None:
     """The invariant this whole design exists to protect.
 
     The turn had begun talking to Meta. Whether the message landed is
@@ -373,7 +381,7 @@ async def test_an_agent_crash_after_engagement_is_never_resent(redis):
     assert await queue.failed_depth() == 1
 
 
-async def test_the_engaged_stage_survives_the_process_that_set_it(redis):
+async def test_the_engaged_stage_survives_the_process_that_set_it(redis: FakeQueueRedis) -> None:
     """Which is the entire reason it is written to Redis rather than memory."""
     queue, raw = await reserved_agent_job(redis, worker_id="dying-worker")
     await queue.mark_engaged(raw, now=NOW)
@@ -386,7 +394,7 @@ async def test_the_engaged_stage_survives_the_process_that_set_it(redis):
     assert reservation.stage is ReservationStage.ENGAGED
 
 
-async def test_marking_a_reclaimed_job_engaged_reports_failure(redis):
+async def test_marking_a_reclaimed_job_engaged_reports_failure(redis: FakeQueueRedis) -> None:
     """The worker cannot fix it, but it belongs in a log line."""
     queue, raw = await reserved_agent_job(redis)
     await queue.recover_expired(policy=POLICY, now=EXPIRED)
@@ -414,11 +422,17 @@ async def test_marking_a_reclaimed_job_engaged_reports_failure(redis):
         ),
     ],
 )
-async def test_an_idempotent_queue_recovers_even_an_engaged_job(redis, build, job, namespace):
+async def test_an_idempotent_queue_recovers_even_an_engaged_job(
+    redis: FakeQueueRedis,
+    build: Callable[..., Any],
+    job: IngestionJob | MediaJob,
+    namespace: str,
+) -> None:
     """Re-running one of these changes nothing anybody can see."""
     queue = build(redis, visibility_timeout_seconds=TIMEOUT)
     await queue.enqueue(job, now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
     await queue.mark_engaged(raw, now=NOW)
 
     outcomes = await queue.recover_expired(policy=IDEMPOTENT_RETRY, now=EXPIRED, jitter=0.0)
@@ -427,17 +441,17 @@ async def test_an_idempotent_queue_recovers_even_an_engaged_job(redis, build, jo
     assert await queue.delayed_depth() == 1
 
 
-def test_only_the_agent_queue_declares_itself_unsafe_to_repeat(redis):
+def test_only_the_agent_queue_declares_itself_unsafe_to_repeat(redis: FakeQueueRedis) -> None:
     """One flag, read by recovery, rather than a list recovery has to be told."""
-    assert AgentQueue(redis).idempotent is False
-    assert IngestionQueue(redis).idempotent is True
-    assert MediaQueue(redis).idempotent is True
+    assert AgentQueue(as_redis(redis)).idempotent is False
+    assert IngestionQueue(as_redis(redis)).idempotent is True
+    assert MediaQueue(as_redis(redis)).idempotent is True
 
 
 # ------------------------------------------------------------ adoption
 
 
-async def test_an_inflight_entry_with_no_reservation_is_adopted(redis):
+async def test_an_inflight_entry_with_no_reservation_is_adopted(redis: FakeQueueRedis) -> None:
     """A crash in the microseconds between claiming a job and recording it.
 
     It is not recovered on the spot: adopting it starts the clock, so the next
@@ -460,7 +474,9 @@ async def test_an_inflight_entry_with_no_reservation_is_adopted(redis):
     assert len(outcomes) == 1
 
 
-async def test_an_adopted_agent_job_is_quarantined_rather_than_guessed_at(redis):
+async def test_an_adopted_agent_job_is_quarantined_rather_than_guessed_at(
+    redis: FakeQueueRedis,
+) -> None:
     """A stage nobody recorded is the case where guessing costs a customer."""
     queue = agent_queue(redis)
     orphan = JobEnvelope.wrap(
@@ -475,7 +491,7 @@ async def test_an_adopted_agent_job_is_quarantined_rather_than_guessed_at(redis)
     assert [outcome.action for outcome in outcomes] == ["quarantined"]
 
 
-async def test_an_unreadable_reservation_is_treated_as_expired(redis):
+async def test_an_unreadable_reservation_is_treated_as_expired(redis: FakeQueueRedis) -> None:
     """A record that cannot be parsed must not pin a job in flight for ever."""
     queue, raw = await reserved_agent_job(redis)
     redis.strings["agent:jobs:reservations"][raw] = "not json at all"
@@ -488,7 +504,9 @@ async def test_an_unreadable_reservation_is_treated_as_expired(redis):
 # ------------------------------------------------------------- observability
 
 
-async def test_expired_reservations_are_countable_without_reclaiming_them(redis):
+async def test_expired_reservations_are_countable_without_reclaiming_them(
+    redis: FakeQueueRedis,
+) -> None:
     """A scrape must not change what it measures."""
     queue, _ = await reserved_agent_job(redis)
 
@@ -498,7 +516,7 @@ async def test_expired_reservations_are_countable_without_reclaiming_them(redis)
     assert await queue.inflight_depth() == 1
 
 
-async def test_an_unleased_inflight_entry_counts_as_expired(redis):
+async def test_an_unleased_inflight_entry_counts_as_expired(redis: FakeQueueRedis) -> None:
     """It is every bit as stuck as one whose lease ran out."""
     queue = agent_queue(redis)
     redis.lists["agent:jobs:inflight"] = ["{}"]
@@ -509,12 +527,12 @@ async def test_an_unleased_inflight_entry_counts_as_expired(redis):
 # ---------------------------------------------------------------- policy
 
 
-def test_the_default_visibility_timeout_is_bounded_and_sane():
+def test_the_default_visibility_timeout_is_bounded_and_sane() -> None:
     """Long enough to outlast a renewal interval, short enough to notice a death."""
     assert 30.0 <= DEFAULT_VISIBILITY_TIMEOUT_SECONDS <= 900.0
 
 
-def test_a_crash_is_retryable_but_still_spends_a_attempt():
+def test_a_crash_is_retryable_but_still_spends_a_attempt() -> None:
     """Both halves of the crash category, stated together.
 
     It is in `RETRYABLE`, so a crashed job is worth another go; and it goes
@@ -527,13 +545,13 @@ def test_a_crash_is_retryable_but_still_spends_a_attempt():
     assert not NO_RETRY.should_retry(FailureCategory.WORKER_CRASHED, attempt=1)
 
 
-def test_an_uncertain_delivery_is_never_retryable():
+def test_an_uncertain_delivery_is_never_retryable() -> None:
     """The category exists to be terminal; if it were retryable it would resend."""
     assert FailureCategory.UNCERTAIN_DELIVERY not in RETRYABLE
     assert FailureCategory.UNCERTAIN_DELIVERY in NEEDS_OPERATOR
 
 
-def test_a_reservation_round_trips(redis):
+def test_a_reservation_round_trips(redis: FakeQueueRedis) -> None:
     reservation = Reservation(
         worker="w1",
         reserved_at=NOW,
@@ -546,7 +564,7 @@ def test_a_reservation_round_trips(redis):
     assert decoded == reservation
 
 
-async def test_a_quarantine_record_names_the_conversation_to_open(redis):
+async def test_a_quarantine_record_names_the_conversation_to_open(redis: FakeQueueRedis) -> None:
     """The runbook step for an uncertain delivery is "open the conversation".
 
     An operator should not have to parse a nested JSON string to find out
@@ -564,11 +582,14 @@ async def test_a_quarantine_record_names_the_conversation_to_open(redis):
     assert record["category"] == "uncertain_delivery"
 
 
-async def test_a_recovered_job_that_will_not_decode_is_still_recorded(redis):
+async def test_a_recovered_job_that_will_not_decode_is_still_recorded(
+    redis: FakeQueueRedis,
+) -> None:
     """Identifying must never be the reason a failure goes unwritten."""
     queue = agent_queue(redis)
     await queue.enqueue_body("not a job at all", now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
     await queue.mark_engaged(raw, now=NOW)
 
     outcomes = await queue.recover_expired(policy=POLICY, now=EXPIRED, jitter=0.0)
@@ -591,7 +612,12 @@ async def test_a_recovered_job_that_will_not_decode_is_still_recorded(redis):
         pytest.param(MediaQueue, MediaJob(tenant_id=TENANT, media_id=MEDIA), MEDIA, id="media"),
     ],
 )
-def test_every_queue_can_name_its_own_subject(redis, build, job, subject):
+def test_every_queue_can_name_its_own_subject(
+    redis: FakeQueueRedis,
+    build: Callable[..., Any],
+    job: IngestionJob | MediaJob,
+    subject: uuid.UUID,
+) -> None:
     queue = build(redis)
 
     assert queue.identify(job.encode()) == (TENANT, subject)

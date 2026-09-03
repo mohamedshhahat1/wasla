@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
@@ -40,6 +41,7 @@ from app.workers.dispatch import job_span
 from app.workers.queue import AgentJob, AgentQueue, JobEnvelope, ReliableQueue
 from app.workers.retry import FailureCategory
 from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import as_redis
 from tests.tracing_recorder import Recording, recording_spans
 
 TENANT = "11111111-1111-1111-1111-111111111111"
@@ -47,7 +49,7 @@ CONVERSATION = "22222222-2222-2222-2222-222222222222"
 
 
 @pytest.fixture
-def record():
+def record() -> Iterator[Recording]:
     yield from recording_spans()
 
 
@@ -58,7 +60,7 @@ def redis() -> FakeQueueRedis:
 
 @pytest.fixture
 def queue(redis: FakeQueueRedis) -> AgentQueue:
-    return AgentQueue(redis)
+    return AgentQueue(as_redis(redis))
 
 
 def _job() -> AgentJob:

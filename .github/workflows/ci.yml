@@ -49,7 +49,11 @@ jobs:
         run: black --check .
 
       - name: MyPy
-        run: mypy app
+        # `app tests`, not `app`. The suite is where a call to an application
+        # API lives, so a signature that changed under it is drift the tests
+        # would otherwise keep passing over - which is exactly what a stub
+        # service is for and exactly how one goes quietly out of date.
+        run: mypy app tests
 
   tests:
     name: Tests and migrations

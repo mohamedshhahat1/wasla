@@ -23,6 +23,7 @@ from __future__ import annotations
 import uuid
 from collections import Counter
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -50,7 +51,7 @@ TTL_SECONDS = 600
 ADDRESS = "owner@acme-example.com"
 
 
-def _settings(**overrides: object) -> Settings:
+def _settings(**overrides: Any) -> Settings:
     return Settings(
         _env_file=None,
         environment="test",

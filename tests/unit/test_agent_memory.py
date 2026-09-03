@@ -17,12 +17,12 @@ ARABIC_LETTER = "\u0645"
 
 def _message(
     *,
-    direction=MessageDirection.INBOUND,
-    body="hello",
-    minutes=0,
-    status=MessageStatus.RECEIVED,
-    kind=MessageKind.TEXT,
-):
+    direction: MessageDirection = MessageDirection.INBOUND,
+    body: str | None = "hello",
+    minutes: int = 0,
+    status: MessageStatus = MessageStatus.RECEIVED,
+    kind: MessageKind = MessageKind.TEXT,
+) -> Message:
     return Message(
         id=uuid.uuid4(),
         direction=direction,
@@ -33,7 +33,14 @@ def _message(
     )
 
 
-def _attachment(message, *, transcript=None, status=MediaStatus.READY, is_voice=False, error=None):
+def _attachment(
+    message: Message,
+    *,
+    transcript: str | None = None,
+    status: MediaStatus = MediaStatus.READY,
+    is_voice: bool = False,
+    error: str | None = None,
+) -> dict[uuid.UUID, MessageMedia]:
     """A media row for `message`, and the map `build_window` takes."""
     media = MessageMedia(
         id=uuid.uuid4(),
@@ -50,15 +57,15 @@ def _attachment(message, *, transcript=None, status=MediaStatus.READY, is_voice=
     return {message.id: media}
 
 
-def test_empty_text_costs_nothing():
+def test_empty_text_costs_nothing() -> None:
     assert estimate_tokens("") == 0
 
 
-def test_any_text_costs_at_least_one_token():
+def test_any_text_costs_at_least_one_token() -> None:
     assert estimate_tokens("a") == 1
 
 
-def test_non_ascii_text_costs_more_than_ascii_of_the_same_length():
+def test_non_ascii_text_costs_more_than_ascii_of_the_same_length() -> None:
     """Arabic is roughly twice as expensive per character as English.
 
     A single divisor would under-count the budget for this product's main
@@ -70,7 +77,7 @@ def test_non_ascii_text_costs_more_than_ascii_of_the_same_length():
     assert arabic_estimate > ascii_estimate
 
 
-def test_turns_are_chronological_whatever_order_they_arrive_in():
+def test_turns_are_chronological_whatever_order_they_arrive_in() -> None:
     newest = _message(body="second", minutes=5)
     oldest = _message(body="first", minutes=0)
 
@@ -79,7 +86,7 @@ def test_turns_are_chronological_whatever_order_they_arrive_in():
     assert [turn.text for turn in window.turns] == ["first", "second"]
 
 
-def test_direction_decides_the_role():
+def test_direction_decides_the_role() -> None:
     window = build_window(
         [
             _message(body="customer", minutes=0),
@@ -97,7 +104,7 @@ def test_direction_decides_the_role():
     assert [turn.role for turn in window.turns] == ["user", "assistant"]
 
 
-def test_message_limit_keeps_the_newest_and_reports_the_rest():
+def test_message_limit_keeps_the_newest_and_reports_the_rest() -> None:
     messages = [_message(body=str(index), minutes=index) for index in range(5)]
 
     window = build_window(messages, message_limit=2, token_budget=1000)
@@ -106,7 +113,7 @@ def test_message_limit_keeps_the_newest_and_reports_the_rest():
     assert window.dropped == 3
 
 
-def test_history_stays_contiguous_when_the_budget_runs_out():
+def test_history_stays_contiguous_when_the_budget_runs_out() -> None:
     """Older messages are dropped together, not selectively.
 
     A gap in the middle would read to the model as the customer changing
@@ -125,7 +132,7 @@ def test_history_stays_contiguous_when_the_budget_runs_out():
     assert window.dropped == 2
 
 
-def test_the_newest_message_survives_a_budget_too_small_to_hold_it():
+def test_the_newest_message_survives_a_budget_too_small_to_hold_it() -> None:
     window = build_window(
         [_message(body="a" * 4000, minutes=0)],
         message_limit=10,
@@ -135,7 +142,7 @@ def test_the_newest_message_survives_a_budget_too_small_to_hold_it():
     assert len(window.turns) == 1
 
 
-def test_failed_outbound_messages_are_not_shown_to_the_model():
+def test_failed_outbound_messages_are_not_shown_to_the_model() -> None:
     """The customer never saw them, so the agent must not think it replied."""
     window = build_window(
         [
@@ -154,7 +161,7 @@ def test_failed_outbound_messages_are_not_shown_to_the_model():
     assert [turn.text for turn in window.turns] == ["question"]
 
 
-def test_media_without_text_becomes_a_readable_placeholder():
+def test_media_without_text_becomes_a_readable_placeholder() -> None:
     window = build_window(
         [_message(body=None, kind=MessageKind.IMAGE)],
         message_limit=10,
@@ -164,14 +171,14 @@ def test_media_without_text_becomes_a_readable_placeholder():
     assert window.turns[0].text == "[image]"
 
 
-def test_a_window_with_nothing_usable_is_empty():
+def test_a_window_with_nothing_usable_is_empty() -> None:
     window = build_window([], message_limit=10, token_budget=1000)
 
     assert window.is_empty
     assert window.estimated_tokens == 0
 
 
-def test_an_image_reads_as_its_description_not_as_a_placeholder():
+def test_an_image_reads_as_its_description_not_as_a_placeholder() -> None:
     """The whole point of the phase: an agent must not be shown "[image]"."""
     message = _message(body=None, kind=MessageKind.IMAGE)
     window = build_window(
@@ -184,7 +191,7 @@ def test_an_image_reads_as_its_description_not_as_a_placeholder():
     assert window.turns[0].text == "[image] A blue sofa, price tag 4,500 EGP."
 
 
-def test_a_caption_and_a_description_stay_distinguishable():
+def test_a_caption_and_a_description_stay_distinguishable() -> None:
     """The customer's words are theirs; the description is a machine's.
 
     They are rendered on separate lines with the machine half labelled, so the
@@ -204,7 +211,7 @@ def test_a_caption_and_a_description_stay_distinguishable():
     assert "[image] A blue sofa." in text
 
 
-def test_a_voice_note_says_it_was_transcribed():
+def test_a_voice_note_says_it_was_transcribed() -> None:
     message = _message(body=None, kind=MessageKind.AUDIO)
     window = build_window(
         [message],
@@ -216,7 +223,7 @@ def test_a_voice_note_says_it_was_transcribed():
     assert window.turns[0].text == "[voice note, transcribed] ممكن اعرف السعر؟"
 
 
-def test_an_unreadable_file_still_produces_a_turn():
+def test_an_unreadable_file_still_produces_a_turn() -> None:
     """Silence would let the agent answer as though nothing had been sent.
 
     "The customer sent something I could not open" is a far better turn than
@@ -238,7 +245,7 @@ def test_an_unreadable_file_still_produces_a_turn():
     assert "25 MB" in window.turns[0].text
 
 
-def test_a_file_still_being_read_says_so():
+def test_a_file_still_being_read_says_so() -> None:
     message = _message(body=None, kind=MessageKind.IMAGE)
     window = build_window(
         [message],
@@ -250,7 +257,7 @@ def test_a_file_still_being_read_says_so():
     assert window.turns[0].text == "[image, not yet read]"
 
 
-def test_a_message_with_no_attachment_is_unaffected():
+def test_a_message_with_no_attachment_is_unaffected() -> None:
     """Every existing text message must render exactly as it did before."""
     message = _message(body="hello")
     window = build_window([message], message_limit=10, token_budget=1000, media={})
@@ -258,13 +265,13 @@ def test_a_message_with_no_attachment_is_unaffected():
     assert window.turns[0].text == "hello"
 
 
-def test_media_is_optional():
+def test_media_is_optional() -> None:
     """Callers that never had attachments do not have to pass an empty map."""
     message = _message(body="hello")
     assert build_window([message], message_limit=10, token_budget=1000).turns[0].text == "hello"
 
 
-def test_a_description_counts_against_the_token_budget():
+def test_a_description_counts_against_the_token_budget() -> None:
     """Otherwise a long transcript would silently blow the context window."""
     message = _message(body=None, kind=MessageKind.IMAGE)
     window = build_window(

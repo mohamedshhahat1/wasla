@@ -56,29 +56,29 @@ def _subscription(
 # ------------------------------------------------------------------ intervals
 
 
-def test_a_monthly_period_is_the_same_date_next_month():
+def test_a_monthly_period_is_the_same_date_next_month() -> None:
     """Not 30 days: a fixed count drifts a renewal backwards through the year
     until it lands in the wrong month entirely."""
     assert add_interval(NOW, BillingInterval.MONTHLY) == datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 
 
-def test_the_thirty_first_renews_on_the_last_day_of_a_shorter_month():
+def test_the_thirty_first_renews_on_the_last_day_of_a_shorter_month() -> None:
     """February has no 31st, and a renewal has to happen anyway."""
     assert add_interval(JANUARY_31, BillingInterval.MONTHLY) == datetime(
         2026, 2, 28, 9, 0, tzinfo=UTC
     )
 
 
-def test_december_rolls_into_the_next_year():
+def test_december_rolls_into_the_next_year() -> None:
     december = datetime(2026, 12, 15, tzinfo=UTC)
     assert add_interval(december, BillingInterval.MONTHLY) == datetime(2027, 1, 15, tzinfo=UTC)
 
 
-def test_a_yearly_period_is_the_same_date_next_year():
+def test_a_yearly_period_is_the_same_date_next_year() -> None:
     assert add_interval(NOW, BillingInterval.YEARLY) == datetime(2027, 8, 23, 12, 0, tzinfo=UTC)
 
 
-def test_the_twenty_ninth_of_february_renews_on_the_twenty_eighth():
+def test_the_twenty_ninth_of_february_renews_on_the_twenty_eighth() -> None:
     leap_day = datetime(2028, 2, 29, tzinfo=UTC)
     assert add_interval(leap_day, BillingInterval.YEARLY) == datetime(2029, 2, 28, tzinfo=UTC)
 
@@ -87,7 +87,7 @@ def test_the_twenty_ninth_of_february_renews_on_the_twenty_eighth():
 
 
 @pytest.mark.asyncio
-async def test_a_pending_cancellation_takes_effect_when_the_period_ends():
+async def test_a_pending_cancellation_takes_effect_when_the_period_ends() -> None:
     subscription = _subscription(cancel_at_period_end=True)
 
     await roll_over(subscription, plan=_plan(), now=NOW)
@@ -97,7 +97,7 @@ async def test_a_pending_cancellation_takes_effect_when_the_period_ends():
 
 
 @pytest.mark.asyncio
-async def test_a_trial_nobody_acted_on_expires_rather_than_cancels():
+async def test_a_trial_nobody_acted_on_expires_rather_than_cancels() -> None:
     """Nobody chose this, and the two want different emails."""
     subscription = _subscription(SubscriptionStatus.TRIALING)
 
@@ -107,7 +107,7 @@ async def test_a_trial_nobody_acted_on_expires_rather_than_cancels():
 
 
 @pytest.mark.asyncio
-async def test_an_active_subscription_opens_the_next_period():
+async def test_an_active_subscription_opens_the_next_period() -> None:
     subscription = _subscription(
         start=datetime(2026, 7, 23, tzinfo=UTC),
         end=datetime(2026, 8, 23, tzinfo=UTC),
@@ -123,7 +123,7 @@ async def test_an_active_subscription_opens_the_next_period():
 
 
 @pytest.mark.asyncio
-async def test_an_unpaid_subscription_keeps_its_state_into_the_next_period():
+async def test_an_unpaid_subscription_keeps_its_state_into_the_next_period() -> None:
     """A new period does not settle an old debt, and quietly marking it active
     would lose the fact that somebody still owes money."""
     subscription = _subscription(SubscriptionStatus.PAST_DUE)
@@ -135,7 +135,7 @@ async def test_an_unpaid_subscription_keeps_its_state_into_the_next_period():
 
 
 @pytest.mark.asyncio
-async def test_a_cancellation_wins_over_a_trial_ending():
+async def test_a_cancellation_wins_over_a_trial_ending() -> None:
     """Somebody asked to leave. That is a decision, and it outranks a deadline."""
     subscription = _subscription(SubscriptionStatus.TRIALING, cancel_at_period_end=True)
 

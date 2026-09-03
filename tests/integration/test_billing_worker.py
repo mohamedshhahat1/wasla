@@ -11,13 +11,16 @@ one transaction that either all happens or none of it does.
 from __future__ import annotations
 
 import secrets
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.token_store import RefreshTokenStore
@@ -25,9 +28,10 @@ from app.db.models.audit import AuditAction, AuditLog
 from app.db.models.billing import (
     BillingInterval,
     Plan,
+    Subscription,
     SubscriptionStatus,
 )
-from app.db.models.invoice import InvoiceStatus
+from app.db.models.invoice import Invoice, InvoiceStatus
 from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
 from app.db.models.tenant import Tenant
 from app.integrations.billing.paymob import PaymobProvider
@@ -39,6 +43,7 @@ from app.repositories.invoice_repository import InvoiceRepository
 from app.services.auth_service import AuthService
 from app.services.subscription_service import SubscriptionService
 from app.workers.billing_worker import BillingWorker
+from tests.fakes import as_database, as_redis_client
 
 pytestmark = pytest.mark.integration
 
@@ -49,11 +54,11 @@ ENDED = NOW - timedelta(hours=1)
 class SessionHandle:
     """Hands the worker the test's own session, so its writes roll back."""
 
-    def __init__(self, session) -> None:
+    def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     @asynccontextmanager
-    async def session(self):
+    async def session(self) -> AsyncIterator[AsyncSession]:
         yield self._session
 
 
@@ -70,8 +75,8 @@ class FakeTokenStore:
         return False
 
 
-def _settings(**overrides) -> Settings:
-    values = {
+def _settings(**overrides: Any) -> Settings:
+    values: dict[str, Any] = {
         "_env_file": None,
         "environment": "test",
         "log_format": "console",
@@ -86,14 +91,14 @@ def _settings(**overrides) -> Settings:
     return Settings(**values)
 
 
-async def _tenant(session, slug: str = "acme") -> Tenant:
+async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _plan(session, *, code: str = "pro", trial_days: int = 0) -> Plan:
+async def _plan(session: AsyncSession, *, code: str = "pro", trial_days: int = 0) -> Plan:
     plan = Plan(
         code=code,
         name=code.title(),
@@ -108,7 +113,15 @@ async def _plan(session, *, code: str = "pro", trial_days: int = 0) -> Plan:
     return plan
 
 
-async def _subscription(session, tenant, plan, *, status, end=ENDED, cancel=False):
+async def _subscription(
+    session: AsyncSession,
+    tenant: Tenant,
+    plan: Plan,
+    *,
+    status: SubscriptionStatus,
+    end: datetime = ENDED,
+    cancel: bool = False,
+) -> Subscription:
     subscription = SubscriptionRepository(session, tenant_id=tenant.id).create(
         plan_id=plan.id,
         status=status,
@@ -120,14 +133,14 @@ async def _subscription(session, tenant, plan, *, status, end=ENDED, cancel=Fals
     return subscription
 
 
-def _worker(db_session) -> BillingWorker:
-    return BillingWorker(database=SessionHandle(db_session), settings=_settings())
+def _worker(db_session: AsyncSession) -> BillingWorker:
+    return BillingWorker(database=as_database(SessionHandle(db_session)), settings=_settings())
 
 
 # --------------------------------------------------------------- the sweep
 
 
-async def test_a_finished_trial_expires(db_session):
+async def test_a_finished_trial_expires(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     plan = await _plan(db_session, trial_days=14)
     subscription = await _subscription(
@@ -144,7 +157,7 @@ async def test_a_finished_trial_expires(db_session):
     assert subscription.is_serving is False
 
 
-async def test_an_active_subscription_opens_its_next_period(db_session):
+async def test_an_active_subscription_opens_its_next_period(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
     subscription = await _subscription(db_session, tenant, plan, status=SubscriptionStatus.ACTIVE)
@@ -158,7 +171,7 @@ async def test_an_active_subscription_opens_its_next_period(db_session):
     assert subscription.current_period_end == ENDED + timedelta(days=31)
 
 
-async def test_a_pending_cancellation_takes_effect(db_session):
+async def test_a_pending_cancellation_takes_effect(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
     subscription = await _subscription(
@@ -175,7 +188,7 @@ async def test_a_pending_cancellation_takes_effect(db_session):
     assert subscription.ended_at == NOW
 
 
-async def test_a_period_still_running_is_left_alone(db_session):
+async def test_a_period_still_running_is_left_alone(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
     await _subscription(
@@ -189,7 +202,9 @@ async def test_a_period_still_running_is_left_alone(db_session):
     assert await _worker(db_session).run_once(now=NOW) == 0
 
 
-async def test_a_subscription_that_already_ended_is_never_picked_up_again(db_session):
+async def test_a_subscription_that_already_ended_is_never_picked_up_again(
+    db_session: AsyncSession,
+) -> None:
     """Its period ending is the past, not an event. Sweeping it forever would
     rewrite `ended_at` on every pass."""
     tenant = await _tenant(db_session)
@@ -205,7 +220,7 @@ async def test_a_subscription_that_already_ended_is_never_picked_up_again(db_ses
     assert await _worker(db_session).run_once(now=NOW) == 0
 
 
-async def test_an_unpaid_subscription_rolls_over_still_unpaid(db_session):
+async def test_an_unpaid_subscription_rolls_over_still_unpaid(db_session: AsyncSession) -> None:
     """A new period does not settle an old debt."""
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
@@ -222,7 +237,7 @@ async def test_an_unpaid_subscription_rolls_over_still_unpaid(db_session):
     assert subscription.current_period_end > NOW
 
 
-async def test_the_sweep_crosses_workspaces(db_session):
+async def test_the_sweep_crosses_workspaces(db_session: AsyncSession) -> None:
     """The one query in this module that is supposed to: a platform sweep sees
     every workspace, which is why it uses the platform repository."""
     acme = await _tenant(db_session, "acme")
@@ -234,7 +249,9 @@ async def test_the_sweep_crosses_workspaces(db_session):
     assert await _worker(db_session).run_once(now=NOW) == 2
 
 
-async def test_a_cohort_larger_than_the_claim_limit_finishes_in_one_pass(db_session):
+async def test_a_cohort_larger_than_the_claim_limit_finishes_in_one_pass(
+    db_session: AsyncSession,
+) -> None:
     """The claim limit is a batch size, not a ceiling on a sweep (ADR-082).
 
     It used to be both, which is what made a first-of-the-month cohort take
@@ -247,7 +264,7 @@ async def test_a_cohort_larger_than_the_claim_limit_finishes_in_one_pass(db_sess
         await _subscription(db_session, tenant, plan, status=SubscriptionStatus.ACTIVE)
 
     worker = BillingWorker(
-        database=SessionHandle(db_session),
+        database=as_database(SessionHandle(db_session)),
         settings=_settings(),
         claim_limit=2,
     )
@@ -257,7 +274,7 @@ async def test_a_cohort_larger_than_the_claim_limit_finishes_in_one_pass(db_sess
     assert await worker.run_once(now=NOW) == 0
 
 
-async def test_the_due_query_ignores_what_is_not_due(db_session):
+async def test_the_due_query_ignores_what_is_not_due(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
     await _subscription(
@@ -275,15 +292,15 @@ async def test_the_due_query_ignores_what_is_not_due(db_session):
 # ------------------------------------------------------------- registration
 
 
-def _auth(session, settings) -> AuthService:
+def _auth(session: AsyncSession, settings: Settings) -> AuthService:
     return AuthService(
         session=session,
         settings=settings,
-        token_store=RefreshTokenStore(FakeTokenStore()),
+        token_store=RefreshTokenStore(as_redis_client(FakeTokenStore())),
     )
 
 
-async def test_registering_puts_the_workspace_on_the_default_plan(db_session):
+async def test_registering_puts_the_workspace_on_the_default_plan(db_session: AsyncSession) -> None:
     await _plan(db_session, code="starter", trial_days=14)
     settings = _settings(default_plan_code="starter")
 
@@ -293,15 +310,19 @@ async def test_registering_puts_the_workspace_on_the_default_plan(db_session):
         workspace_name="Acme",
         workspace_slug="acme",
     )
+    assert session_result is not None
     await db_session.flush()
 
+    assert session_result.workspace is not None
     tenant_id = session_result.workspace.tenant.id
     subscription = await SubscriptionRepository(db_session, tenant_id=tenant_id).get()
     assert subscription is not None
     assert subscription.status is SubscriptionStatus.TRIALING
 
 
-async def test_registration_survives_a_catalogue_that_has_no_such_plan(db_session):
+async def test_registration_survives_a_catalogue_that_has_no_such_plan(
+    db_session: AsyncSession,
+) -> None:
     """A signup that 500s over billing configuration is the least forgivable
     failure in the product. The workspace is still entitled to the default plan
     by code, so the worst case is a missing row."""
@@ -313,13 +334,15 @@ async def test_registration_survives_a_catalogue_that_has_no_such_plan(db_sessio
         workspace_name="Acme",
         workspace_slug="acme",
     )
+    assert session_result is not None
     await db_session.flush()
 
+    assert session_result.workspace is not None
     tenant_id = session_result.workspace.tenant.id
     assert await SubscriptionRepository(db_session, tenant_id=tenant_id).get() is None
 
 
-async def test_a_second_workspace_gets_its_own_subscription(db_session):
+async def test_a_second_workspace_gets_its_own_subscription(db_session: AsyncSession) -> None:
     """One per workspace, not one per person: the same owner registering twice
     is two companies with two arrangements."""
     await _plan(db_session, code="starter")
@@ -341,11 +364,14 @@ async def test_a_second_workspace_gets_its_own_subscription(db_session):
     await db_session.flush()
 
     for result in (first, second):
+        assert result.workspace is not None
         tenant_id = result.workspace.tenant.id
         assert await SubscriptionRepository(db_session, tenant_id=tenant_id).get() is not None
 
 
-async def test_a_workspace_created_before_billing_can_still_subscribe(db_session):
+async def test_a_workspace_created_before_billing_can_still_subscribe(
+    db_session: AsyncSession,
+) -> None:
     """The upgrade path for every workspace that predates this phase."""
     tenant = await _tenant(db_session)
     await _plan(db_session, code="pro")
@@ -365,7 +391,7 @@ async def test_a_workspace_created_before_billing_can_still_subscribe(db_session
 # ------------------------------------------------------------- invoicing
 
 
-async def test_the_sweep_invoices_the_period_it_closes(db_session):
+async def test_the_sweep_invoices_the_period_it_closes(db_session: AsyncSession) -> None:
     """Billed before the roll-over, not after: afterwards the row describes the
     next month and the invoice would cover the wrong window."""
     from app.repositories.invoice_repository import InvoiceRepository
@@ -390,7 +416,7 @@ async def test_the_sweep_invoices_the_period_it_closes(db_session):
     assert invoices[0].plan_code == "pro"
 
 
-async def test_a_trial_is_never_invoiced(db_session):
+async def test_a_trial_is_never_invoiced(db_session: AsyncSession) -> None:
     """Nobody agreed to pay for it, and a bill saying "Pro plan" for a period
     the customer was told was free is a bill for something nobody sold."""
     from app.repositories.invoice_repository import InvoiceRepository
@@ -405,7 +431,7 @@ async def test_a_trial_is_never_invoiced(db_session):
     assert await InvoiceRepository(db_session, tenant_id=tenant.id).list_invoices() == []
 
 
-async def test_two_sweeps_bill_the_period_once(db_session):
+async def test_two_sweeps_bill_the_period_once(db_session: AsyncSession) -> None:
     """The constraint makes it impossible; the service check makes the second
     sweep a no-op rather than an integrity error."""
     from app.repositories.invoice_repository import InvoiceRepository
@@ -426,9 +452,9 @@ async def test_two_sweeps_bill_the_period_once(db_session):
 
 
 async def test_an_invoice_that_cannot_be_issued_does_not_stop_the_roll_over(
-    db_session,
-    monkeypatch,
-):
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A billing problem must not become a customer whose plan never renews."""
     from app.workers import billing_worker as worker_module
 
@@ -445,7 +471,7 @@ async def test_an_invoice_that_cannot_be_issued_does_not_stop_the_roll_over(
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        async def issue_for_period(self, **kwargs: object):
+        async def issue_for_period(self, **kwargs: object) -> None:
             raise RuntimeError("the invoice service is having a day")
 
     monkeypatch.setattr(worker_module, "InvoiceService", BrokenInvoices)
@@ -459,7 +485,14 @@ async def test_an_invoice_that_cannot_be_issued_does_not_stop_the_roll_over(
 # --------------------------------------------------------------- the chasing
 
 
-async def _overdue_invoice(session, tenant, subscription, *, issued: datetime, amount="99.00"):
+async def _overdue_invoice(
+    session: AsyncSession,
+    tenant: Tenant,
+    subscription: Subscription,
+    *,
+    issued: datetime,
+    amount: str = "99.00",
+) -> Invoice:
     """A renewal invoice, as the sweep leaves one when it bills a period."""
     return InvoiceRepository(session, tenant_id=tenant.id).create(
         subscription_id=subscription.id,
@@ -473,14 +506,20 @@ async def _overdue_invoice(session, tenant, subscription, *, issued: datetime, a
     )
 
 
-async def _issued(session, invoice, *, at: datetime):
+async def _issued(session: AsyncSession, invoice: Invoice, *, at: datetime) -> Invoice:
     """Mark the invoice as actually sent, which is when the grace starts."""
     invoice.issued_at = at
     await session.flush()
     return invoice
 
 
-async def _renewing(session, tenant, plan, *, status=SubscriptionStatus.ACTIVE):
+async def _renewing(
+    session: AsyncSession,
+    tenant: Tenant,
+    plan: Plan,
+    *,
+    status: SubscriptionStatus = SubscriptionStatus.ACTIVE,
+) -> Subscription:
     """A subscription mid-period, so the roll-over half of the sweep ignores it."""
     return await _subscription(
         session,
@@ -491,14 +530,16 @@ async def _renewing(session, tenant, plan, *, status=SubscriptionStatus.ACTIVE):
     )
 
 
-async def _past_due_audits(session):
+async def _past_due_audits(session: AsyncSession) -> Sequence[AuditLog]:
     rows = await session.execute(
         select(AuditLog).where(AuditLog.action == AuditAction.SUBSCRIPTION_PAST_DUE)
     )
     return rows.scalars().all()
 
 
-async def test_a_renewal_left_unpaid_past_the_grace_marks_the_workspace_behind(db_session):
+async def test_a_renewal_left_unpaid_past_the_grace_marks_the_workspace_behind(
+    db_session: AsyncSession,
+) -> None:
     """The half of recurring billing that was missing entirely.
 
     Invoices were already being issued at every period end and nothing ever
@@ -521,7 +562,7 @@ async def test_a_renewal_left_unpaid_past_the_grace_marks_the_workspace_behind(d
     assert subscription.is_serving is True
 
 
-async def test_a_renewal_inside_the_grace_is_left_alone(db_session):
+async def test_a_renewal_inside_the_grace_is_left_alone(db_session: AsyncSession) -> None:
     """Cards expire and finance departments pay on Fridays.
 
     A customer one working day late has not stopped paying, and marking them
@@ -540,7 +581,7 @@ async def test_a_renewal_inside_the_grace_is_left_alone(db_session):
     assert subscription.status is SubscriptionStatus.ACTIVE
 
 
-async def test_the_grace_runs_from_when_the_customer_was_asked(db_session):
+async def test_the_grace_runs_from_when_the_customer_was_asked(db_session: AsyncSession) -> None:
     """Not from the period boundary, which the customer never saw.
 
     An invoice for a period that ended weeks ago is not weeks overdue if it was
@@ -564,7 +605,7 @@ async def test_the_grace_runs_from_when_the_customer_was_asked(db_session):
     assert subscription.status is SubscriptionStatus.ACTIVE
 
 
-async def test_an_invoice_nobody_was_ever_sent_is_not_chased(db_session):
+async def test_an_invoice_nobody_was_ever_sent_is_not_chased(db_session: AsyncSession) -> None:
     """An abandoned checkout leaves an open invoice with no `issued_at`.
 
     Chasing somebody for a bill they were never sent is worse than not chasing,
@@ -581,7 +622,7 @@ async def test_an_invoice_nobody_was_ever_sent_is_not_chased(db_session):
     assert subscription.status is SubscriptionStatus.ACTIVE
 
 
-async def test_a_trial_is_not_marked_behind(db_session):
+async def test_a_trial_is_not_marked_behind(db_session: AsyncSession) -> None:
     """Nobody agreed to pay for it, so nobody can be late paying for it."""
     tenant = await _tenant(db_session)
     plan = await _plan(db_session, trial_days=14)
@@ -594,7 +635,9 @@ async def test_a_trial_is_not_marked_behind(db_session):
     assert subscription.status is SubscriptionStatus.TRIALING
 
 
-async def test_a_cancelled_workspace_is_not_chased_for_an_old_bill(db_session):
+async def test_a_cancelled_workspace_is_not_chased_for_an_old_bill(
+    db_session: AsyncSession,
+) -> None:
     """It is already not being served, and chasing it would serve it again.
 
     `PAST_DUE` is a serving status, so moving a cancelled subscription into it
@@ -613,7 +656,7 @@ async def test_a_cancelled_workspace_is_not_chased_for_an_old_bill(db_session):
     assert subscription.is_serving is False
 
 
-async def test_a_paid_renewal_is_never_chased(db_session):
+async def test_a_paid_renewal_is_never_chased(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
     subscription = await _renewing(db_session, tenant, plan)
@@ -627,7 +670,9 @@ async def test_a_paid_renewal_is_never_chased(db_session):
     assert subscription.status is SubscriptionStatus.ACTIVE
 
 
-async def test_a_workspace_already_behind_is_not_marked_behind_again(db_session):
+async def test_a_workspace_already_behind_is_not_marked_behind_again(
+    db_session: AsyncSession,
+) -> None:
     """The sweep runs every ten minutes; it must not audit every ten minutes."""
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
@@ -644,7 +689,7 @@ async def test_a_workspace_already_behind_is_not_marked_behind_again(db_session)
     assert len(await _past_due_audits(db_session)) == 1
 
 
-async def test_being_marked_behind_is_audited_with_what_is_owed(db_session):
+async def test_being_marked_behind_is_audited_with_what_is_owed(db_session: AsyncSession) -> None:
     """ "Why did this workspace stop being active" has to have an answer."""
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
@@ -657,16 +702,18 @@ async def test_being_marked_behind_is_audited_with_what_is_owed(db_session):
     rows = await _past_due_audits(db_session)
     assert len(rows) == 1
     assert rows[0].tenant_id == tenant.id
+    assert rows[0].meta is not None
     assert rows[0].meta["outstanding"] == "99.00"
+    assert rows[0].meta is not None
     assert rows[0].meta["invoice_id"] == str(invoice.id)
 
 
 # ------------------------------------------------------- automatic renewal
 
 
-def _paymob_settings(moto: int | None):
+def _paymob_settings(moto: int | None) -> Settings:
     """A worker configured to take renewals from saved cards, or not."""
-    values = {
+    values: dict[str, Any] = {
         "billing_provider": "paymob",
         "paymob_secret_key": "sk_test_notreal000000",
         "paymob_public_key": "pk_test_notreal000000",
@@ -679,7 +726,12 @@ def _paymob_settings(moto: int | None):
     return _settings(**values)
 
 
-async def _card(session, tenant, *, token: str = "tok-worker"):  # noqa: S107 - a fixture handle
+async def _card(
+    session: AsyncSession,
+    tenant: Tenant,
+    *,
+    token: str = "tok-worker",  # noqa: S107 - a fixture handle, not a credential
+) -> PaymentMethod:
     method = PaymentMethod(
         tenant_id=tenant.id,
         provider="paymob",
@@ -695,10 +747,16 @@ async def _card(session, tenant, *, token: str = "tok-worker"):  # noqa: S107 - 
     return method
 
 
-def _charging_worker(db_session, monkeypatch, *, moto: int | None = 9900001, seen=None):
+def _charging_worker(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    moto: int | None = 9900001,
+    seen: list[str] | None = None,
+) -> BillingWorker:
     """A worker whose provider answers the two-step charge without a socket."""
 
-    def handler(request):
+    def handler(request: httpx.Request) -> httpx.Response:
         if seen is not None:
             seen.append(str(request.url))
         if "intention" in str(request.url):
@@ -710,18 +768,20 @@ def _charging_worker(db_session, monkeypatch, *, moto: int | None = 9900001, see
 
     original = PaymobProvider.__init__
 
-    def patched(self, **kwargs):
+    def patched(self: Any, **kwargs: Any) -> None:
         kwargs.setdefault("transport", httpx.MockTransport(handler))
         original(self, **kwargs)
 
     monkeypatch.setattr(PaymobProvider, "__init__", patched)
     return BillingWorker(
-        database=SessionHandle(db_session),
+        database=as_database(SessionHandle(db_session)),
         settings=_paymob_settings(moto),
     )
 
 
-async def test_the_sweep_charges_a_saved_card_for_a_due_renewal(db_session, monkeypatch):
+async def test_the_sweep_charges_a_saved_card_for_a_due_renewal(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The whole automatic path, driven by the worker rather than the service."""
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
@@ -742,9 +802,9 @@ async def test_the_sweep_charges_a_saved_card_for_a_due_renewal(db_session, monk
 
 
 async def test_the_sweep_does_not_charge_without_the_merchant_capability(
-    db_session,
-    monkeypatch,
-):
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """No Moto integration, so the automatic path is silently skipped.
 
     This is the state of the account this was built against, and renewals fall
@@ -765,7 +825,9 @@ async def test_the_sweep_does_not_charge_without_the_merchant_capability(
     assert invoice.collection_attempts == 0
 
 
-async def test_the_sweep_never_charges_a_cancelled_workspace(db_session, monkeypatch):
+async def test_the_sweep_never_charges_a_cancelled_workspace(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Belt and braces at the worker level too, because this is the one."""
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
@@ -783,9 +845,9 @@ async def test_the_sweep_never_charges_a_cancelled_workspace(db_session, monkeyp
 
 
 async def test_a_provider_outage_does_not_stop_the_rest_of_the_sweep(
-    db_session,
-    monkeypatch,
-):
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """One workspace's trouble must not strand every other renewal behind it."""
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
@@ -794,18 +856,18 @@ async def test_a_provider_outage_does_not_stop_the_rest_of_the_sweep(
     await _issued(db_session, invoice, at=NOW - timedelta(days=30))
     await _card(db_session, tenant, token="tok-outage")
 
-    def exploding(request):
+    def exploding(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("provider down", request=request)
 
     original = PaymobProvider.__init__
 
-    def patched(self, **kwargs):
+    def patched(self: Any, **kwargs: Any) -> None:
         kwargs.setdefault("transport", httpx.MockTransport(exploding))
         original(self, **kwargs)
 
     monkeypatch.setattr(PaymobProvider, "__init__", patched)
     worker = BillingWorker(
-        database=SessionHandle(db_session),
+        database=as_database(SessionHandle(db_session)),
         settings=_paymob_settings(9900001),
     )
 

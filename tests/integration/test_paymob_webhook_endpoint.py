@@ -17,6 +17,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from decimal import Decimal
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -49,7 +50,7 @@ class _Infra:
         self.commands = self
 
     @property
-    def client(self):
+    def client(self) -> _Infra:
         return self.commands
 
     async def incr(self, key: str) -> int:
@@ -68,7 +69,7 @@ class _Infra:
         return None
 
 
-def _settings(**overrides: object) -> Settings:
+def _settings(**overrides: Any) -> Settings:
     values: dict[str, object] = {
         "environment": "test",
         "log_format": "console",
@@ -163,7 +164,9 @@ async def _paid_checkout(session: AsyncSession) -> tuple[Invoice, Payment]:
     return invoice, payment
 
 
-def _transaction(*, reference: str | None, amount_cents: int = 9900, **overrides) -> dict:
+def _transaction(
+    *, reference: str | None, amount_cents: int = 9900, **overrides: Any
+) -> dict[str, Any]:
     transaction = {
         "id": 900000000 + uuid.uuid4().int % 10_000_000,
         "pending": False,
@@ -188,7 +191,7 @@ def _transaction(*, reference: str | None, amount_cents: int = 9900, **overrides
     return transaction
 
 
-def _body(transaction: dict) -> tuple[dict, str]:
+def _body(transaction: dict[str, Any]) -> tuple[dict[str, Any], str]:
     return (
         {"type": "TRANSACTION", "obj": transaction},
         hmac_signature(transaction, secret=HMAC_SECRET),

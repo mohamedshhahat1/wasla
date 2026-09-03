@@ -10,20 +10,23 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import ClassVar
+from pathlib import Path
+from typing import Any, ClassVar
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.storage import LocalMediaStorage
+from app.core.storage import LocalMediaStorage, MediaStorage
 from app.services.media_retention_service import RetentionOutcome
 from app.workers import runner
 from app.workers.retention_worker import RetentionWorker
+from tests.fakes import as_session
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 
 
-def _settings(**overrides) -> Settings:
+def _settings(**overrides: Any) -> Settings:
     return Settings(
         _env_file=None,
         environment="test",
@@ -39,7 +42,7 @@ class RecordingService:
 
     calls: ClassVar[list[str]] = []
 
-    def __init__(self, *, session, storage) -> None:
+    def __init__(self, *, session: AsyncSession, storage: MediaStorage) -> None:
         self.session = session
         self.storage = storage
 
@@ -47,7 +50,9 @@ class RecordingService:
         RecordingService.calls.append(f"reconcile:{limit}")
         return 1
 
-    async def sweep(self, *, now, retention_days: int, limit: int) -> RetentionOutcome:
+    async def sweep(
+        self, *, now: datetime | None, retention_days: int, limit: int
+    ) -> RetentionOutcome:
         RecordingService.calls.append(f"sweep:{retention_days}:{limit}")
         return RetentionOutcome(claimed=2, purged=2)
 
@@ -57,8 +62,8 @@ class RecordingService:
 
 
 class FakeSession:
-    async def __aenter__(self):
-        return self
+    async def __aenter__(self) -> AsyncSession:
+        return as_session(self)
 
     async def __aexit__(self, *exc: object) -> bool:
         return False
@@ -74,7 +79,7 @@ class FakeDatabase:
 
 
 @pytest.fixture(autouse=True)
-def recording(monkeypatch):
+def recording(monkeypatch: pytest.MonkeyPatch) -> type[RecordingService]:
     RecordingService.calls = []
     monkeypatch.setattr(
         "app.workers.retention_worker.MediaRetentionService",
@@ -83,7 +88,7 @@ def recording(monkeypatch):
     return RecordingService
 
 
-def _worker(tmp_path, **overrides) -> RetentionWorker:
+def _worker(tmp_path: Path, **overrides: Any) -> RetentionWorker:
     return RetentionWorker(
         database=FakeDatabase(),  # type: ignore[arg-type]
         settings=_settings(**overrides),
@@ -92,7 +97,9 @@ def _worker(tmp_path, **overrides) -> RetentionWorker:
     )
 
 
-async def test_reconciliation_runs_before_new_claims(tmp_path, recording) -> None:
+async def test_reconciliation_runs_before_new_claims(
+    tmp_path: Path, recording: type[RecordingService]
+) -> None:
     """Work already decided is finished before more is taken on.
 
     A store refusing deletions would otherwise accumulate an ever-growing set of
@@ -104,7 +111,9 @@ async def test_reconciliation_runs_before_new_claims(tmp_path, recording) -> Non
     assert recording.calls[1].startswith("sweep")
 
 
-async def test_the_configured_period_and_batch_reach_the_sweep(tmp_path, recording) -> None:
+async def test_the_configured_period_and_batch_reach_the_sweep(
+    tmp_path: Path, recording: type[RecordingService]
+) -> None:
     await _worker(tmp_path, media_retention_days=45, media_retention_batch_size=17).run_once(
         now=NOW
     )
@@ -113,7 +122,9 @@ async def test_the_configured_period_and_batch_reach_the_sweep(tmp_path, recordi
     assert "reconcile:17" in recording.calls
 
 
-async def test_a_deployment_with_no_retention_still_runs_the_loop(tmp_path, recording) -> None:
+async def test_a_deployment_with_no_retention_still_runs_the_loop(
+    tmp_path: Path, recording: type[RecordingService]
+) -> None:
     """Zero disables deleting, not the loop.
 
     The reconciliation pass still has to run: a deployment that turns retention
@@ -126,7 +137,9 @@ async def test_a_deployment_with_no_retention_still_runs_the_loop(tmp_path, reco
     assert "sweep:0:200" in recording.calls
 
 
-async def test_a_failing_sweep_does_not_kill_the_loop(tmp_path, monkeypatch) -> None:
+async def test_a_failing_sweep_does_not_kill_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A store unavailable for a day is not a reason to stop trying.
 
     The third failure is **waited for**, not slept past. How many iterations fit
@@ -138,7 +151,7 @@ async def test_a_failing_sweep_does_not_kill_the_loop(tmp_path, monkeypatch) -> 
     attempts = 0
     kept_going = asyncio.Event()
 
-    async def explode(self, **kwargs):
+    async def explode(self: object, **kwargs: Any) -> None:
         nonlocal attempts
         attempts += 1
         if attempts >= 3:
@@ -160,7 +173,7 @@ async def test_a_failing_sweep_does_not_kill_the_loop(tmp_path, monkeypatch) -> 
     assert attempts >= 3, "the loop stopped after the first failure"
 
 
-async def test_stopping_does_not_wait_out_the_interval(tmp_path) -> None:
+async def test_stopping_does_not_wait_out_the_interval(tmp_path: Path) -> None:
     """A container is killed ten seconds after SIGTERM, and this polls daily."""
     worker = RetentionWorker(
         database=FakeDatabase(),  # type: ignore[arg-type]
@@ -196,7 +209,7 @@ def test_the_loop_can_be_run_apart_from_the_others() -> None:
     assert runner.selected_kinds("retention") == ("retention",)
 
 
-def test_building_the_retention_worker_needs_no_redis(tmp_path) -> None:
+def test_building_the_retention_worker_needs_no_redis(tmp_path: Path) -> None:
     """It polls PostgreSQL, like the other time-triggered loops (ADR-022).
 
     Worth asserting because a queue-driven retention would put the deletion of

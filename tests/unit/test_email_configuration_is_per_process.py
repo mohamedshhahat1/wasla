@@ -21,6 +21,8 @@ noticed the difference that matters.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from app.core.config import Settings
@@ -30,7 +32,7 @@ from app.main import create_app
 VALID_SECRET = "a" * 64
 
 
-def _production(**overrides: object) -> Settings:
+def _production(**overrides: Any) -> Settings:
     """A production deployment with email on, and one thing at a time missing."""
     fields: dict[str, object] = {
         "_env_file": None,

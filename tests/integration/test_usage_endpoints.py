@@ -14,9 +14,13 @@ in.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -28,6 +32,7 @@ from app.api.dependencies import (
 from app.core.exceptions import TenantIsolationError, ValidationError
 from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.db.models.analytics import AnalyticsEvent, AnalyticsEventType, AnalyticsSource
+from app.db.models.conversation import Conversation
 from app.db.models.usage import UsageEventType, UsageUnit
 from app.repositories.analytics_repository import EventCount
 from app.repositories.metrics_repository import (
@@ -57,10 +62,12 @@ class StubUsage:
     """Remembers the window it was asked for."""
 
     def __init__(self) -> None:
-        self.asked: list[dict] = []
+        self.asked: list[dict[str, Any]] = []
         self.invalid = False
 
-    async def summary(self, *, since=None, until=None):
+    async def summary(
+        self, *, since: datetime | None = None, until: datetime | None = None
+    ) -> UsageSummary:
         if self.invalid:
             raise ValidationError("The start of the window must be before its end.")
         self.asked.append({"since": since, "until": until})
@@ -81,7 +88,13 @@ class StubUsage:
             ),
         )
 
-    async def series(self, *, since=None, until=None, event_types=None):
+    async def series(
+        self,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        event_types: Iterable[UsageEventType] | None = None,
+    ) -> tuple[Any, ...]:
         self.asked.append({"since": since, "until": until, "event_types": event_types})
         return WINDOW, [
             UsagePoint(
@@ -96,9 +109,11 @@ class StubAnalytics:
     """Returns a fixed report and a fixed history."""
 
     def __init__(self) -> None:
-        self.asked: list[dict] = []
+        self.asked: list[dict[str, Any]] = []
 
-    async def report(self, *, since=None, until=None):
+    async def report(
+        self, *, since: datetime | None = None, until: datetime | None = None
+    ) -> TenantAnalytics:
         self.asked.append({"since": since, "until": until})
         return TenantAnalytics(
             window=WINDOW,
@@ -122,7 +137,9 @@ class StubAnalytics:
             ),
         )
 
-    async def conversation_history(self, conversation_id, *, limit=50):
+    async def conversation_history(
+        self, conversation_id: uuid.UUID, *, limit: int = 50
+    ) -> list[Any]:
         return [
             AnalyticsEvent(
                 id=uuid.uuid4(),
@@ -144,11 +161,11 @@ class StubInbox:
         self.missing = False
         self.resolved: list[uuid.UUID] = []
 
-    async def get_conversation(self, conversation_id):
+    async def get_conversation(self, conversation_id: uuid.UUID) -> Conversation:
         if self.missing:
             raise TenantIsolationError()
         self.resolved.append(conversation_id)
-        return object()
+        return Conversation(id=conversation_id, tenant_id=uuid.uuid4())
 
 
 def _workspace(role: TenantRole) -> ActiveWorkspace:
@@ -164,26 +181,26 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
     )
 
 
-def _as(app, role: TenantRole) -> None:
+def _as(app: FastAPI, role: TenantRole) -> None:
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(role)
 
 
 @pytest.fixture
-def usage(app) -> StubUsage:
+def usage(app: FastAPI) -> StubUsage:
     stub = StubUsage()
     app.dependency_overrides[get_usage_service] = lambda: stub
     return stub
 
 
 @pytest.fixture
-def analytics(app) -> StubAnalytics:
+def analytics(app: FastAPI) -> StubAnalytics:
     stub = StubAnalytics()
     app.dependency_overrides[get_analytics_service] = lambda: stub
     return stub
 
 
 @pytest.fixture
-def inbox(app) -> StubInbox:
+def inbox(app: FastAPI) -> StubInbox:
     stub = StubInbox()
     app.dependency_overrides[get_inbox_service] = lambda: stub
     return stub
@@ -192,7 +209,9 @@ def inbox(app) -> StubInbox:
 # ----------------------------------------------------------------------- usage
 
 
-async def test_an_administrator_can_read_usage(client, app, usage):
+async def test_an_administrator_can_read_usage(
+    client: AsyncClient, app: FastAPI, usage: StubUsage
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.get(USAGE_PATH)
@@ -206,7 +225,9 @@ async def test_an_administrator_can_read_usage(client, app, usage):
     assert body["totals"][0]["unit"] == "token"
 
 
-async def test_the_response_says_which_window_it_covers(client, app, usage):
+async def test_the_response_says_which_window_it_covers(
+    client: AsyncClient, app: FastAPI, usage: StubUsage
+) -> None:
     """A figure without its period is not quotable."""
     _as(app, TenantRole.TENANT_ADMIN)
 
@@ -217,7 +238,9 @@ async def test_the_response_says_which_window_it_covers(client, app, usage):
     assert window["until"].startswith("2026-09-01")
 
 
-async def test_a_member_cannot_read_usage(client, app, usage):
+async def test_a_member_cannot_read_usage(
+    client: AsyncClient, app: FastAPI, usage: StubUsage
+) -> None:
     """Usage is what the workspace is spending, which is the owner's business."""
     _as(app, TenantRole.MEMBER)
 
@@ -227,7 +250,9 @@ async def test_a_member_cannot_read_usage(client, app, usage):
     assert usage.asked == []
 
 
-async def test_a_window_is_passed_through_to_the_service(client, app, usage):
+async def test_a_window_is_passed_through_to_the_service(
+    client: AsyncClient, app: FastAPI, usage: StubUsage
+) -> None:
     _as(app, TenantRole.TENANT_OWNER)
 
     response = await client.get(
@@ -240,7 +265,9 @@ async def test_a_window_is_passed_through_to_the_service(client, app, usage):
     assert usage.asked[0]["until"] == UNTIL
 
 
-async def test_a_backwards_window_is_refused_with_the_usual_envelope(client, app, usage):
+async def test_a_backwards_window_is_refused_with_the_usual_envelope(
+    client: AsyncClient, app: FastAPI, usage: StubUsage
+) -> None:
     _as(app, TenantRole.TENANT_OWNER)
     usage.invalid = True
 
@@ -251,7 +278,9 @@ async def test_a_backwards_window_is_refused_with_the_usual_envelope(client, app
     assert response.json()["error"]["code"] == "validation_error"
 
 
-async def test_the_daily_series_can_be_narrowed_to_one_meter(client, app, usage):
+async def test_the_daily_series_can_be_narrowed_to_one_meter(
+    client: AsyncClient, app: FastAPI, usage: StubUsage
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.get(
@@ -264,7 +293,9 @@ async def test_the_daily_series_can_be_narrowed_to_one_meter(client, app, usage)
     assert response.json()["points"][0]["quantity"] == 4
 
 
-async def test_a_meter_that_does_not_exist_is_rejected(client, app, usage):
+async def test_a_meter_that_does_not_exist_is_rejected(
+    client: AsyncClient, app: FastAPI, usage: StubUsage
+) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
 
     response = await client.get(f"{USAGE_PATH}/daily", params={"event_type": "free_lunches"})
@@ -275,7 +306,9 @@ async def test_a_meter_that_does_not_exist_is_rejected(client, app, usage):
 # ------------------------------------------------------------------- analytics
 
 
-async def test_any_member_can_read_the_workspace_numbers(client, app, analytics):
+async def test_any_member_can_read_the_workspace_numbers(
+    client: AsyncClient, app: FastAPI, analytics: StubAnalytics
+) -> None:
     """These are how the inbox is doing, and the people staffing it are the
     people who need them."""
     _as(app, TenantRole.MEMBER)
@@ -289,7 +322,9 @@ async def test_any_member_can_read_the_workspace_numbers(client, app, analytics)
     assert body["campaigns"]["delivered"] == 88
 
 
-async def test_a_rate_arrives_beside_the_counts_it_came_from(client, app, analytics):
+async def test_a_rate_arrives_beside_the_counts_it_came_from(
+    client: AsyncClient, app: FastAPI, analytics: StubAnalytics
+) -> None:
     """A rate on its own cannot be checked and hides the difference between
     nine of ten and nine hundred of a thousand."""
     _as(app, TenantRole.MEMBER)
@@ -303,7 +338,9 @@ async def test_a_rate_arrives_beside_the_counts_it_came_from(client, app, analyt
     assert body["leads"]["won"] == 2
 
 
-async def test_every_status_and_label_is_named_even_at_zero(client, app, analytics):
+async def test_every_status_and_label_is_named_even_at_zero(
+    client: AsyncClient, app: FastAPI, analytics: StubAnalytics
+) -> None:
     """So a dashboard renders an empty column without knowing the vocabulary."""
     _as(app, TenantRole.MEMBER)
 
@@ -313,7 +350,9 @@ async def test_every_status_and_label_is_named_even_at_zero(client, app, analyti
     assert body["sentiment"]["by_label"]["angry"] == 0
 
 
-async def test_handoffs_come_back_split_by_who_decided(client, app, analytics):
+async def test_handoffs_come_back_split_by_who_decided(
+    client: AsyncClient, app: FastAPI, analytics: StubAnalytics
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     body = (await client.get(ANALYTICS_PATH)).json()
@@ -321,7 +360,9 @@ async def test_handoffs_come_back_split_by_who_decided(client, app, analytics):
     assert body["handoffs_by_source"] == [{"source": "agent", "count": 2}]
 
 
-async def test_a_conversations_history_explains_itself(client, app, analytics, inbox):
+async def test_a_conversations_history_explains_itself(
+    client: AsyncClient, app: FastAPI, analytics: StubAnalytics, inbox: StubInbox
+) -> None:
     _as(app, TenantRole.MEMBER)
 
     response = await client.get(f"{ANALYTICS_PATH}/conversations/{CONVERSATION_ID}/events")
@@ -333,7 +374,9 @@ async def test_a_conversations_history_explains_itself(client, app, analytics, i
     assert inbox.resolved == [CONVERSATION_ID]
 
 
-async def test_another_workspaces_conversation_is_not_found(client, app, analytics, inbox):
+async def test_another_workspaces_conversation_is_not_found(
+    client: AsyncClient, app: FastAPI, analytics: StubAnalytics, inbox: StubInbox
+) -> None:
     """Resolved through the inbox first: an empty list would confirm the id
     exists somewhere else."""
     _as(app, TenantRole.MEMBER)
@@ -344,7 +387,9 @@ async def test_another_workspaces_conversation_is_not_found(client, app, analyti
     assert response.status_code == 404
 
 
-async def test_analytics_require_a_workspace(client, app, analytics):
+async def test_analytics_require_a_workspace(
+    client: AsyncClient, app: FastAPI, analytics: StubAnalytics
+) -> None:
     """No override: the real dependency runs and finds no credentials."""
     response = await client.get(ANALYTICS_PATH)
     assert response.status_code == 401

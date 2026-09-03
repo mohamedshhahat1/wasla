@@ -96,14 +96,14 @@ class Resolver:
         real_socket = socket.getaddrinfo
         real_anyio = anyio_sockets.getaddrinfo
 
-        def validating(host, port, *args: Any, **kwargs: Any):
+        def validating(host: str, port: int, *args: Any, **kwargs: Any) -> Any:
             if host != HOSTNAME:
                 return real_socket(host, port, *args, **kwargs)
             self.validating_calls.append(host)
             return self._entry(self._next(), port or 443)
 
-        async def connecting(host, port, **kwargs):
-            name = host.decode() if isinstance(host, bytes) else host
+        async def connecting(host: str, port: int, **kwargs: Any) -> Any:
+            name = host
             if name != HOSTNAME:
                 return await real_anyio(host, port, **kwargs)
             self.connecting_calls.append(name)
@@ -116,7 +116,9 @@ class Resolver:
 # --------------------------------------------------------------- the pin
 
 
-async def test_a_guarded_request_resolves_exactly_once_and_never_again(monkeypatch):
+async def test_a_guarded_request_resolves_exactly_once_and_never_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The property that makes rebinding impossible rather than merely refused.
 
     One resolution happens, in the transport, and it is judged. The connection
@@ -140,7 +142,9 @@ async def test_a_guarded_request_resolves_exactly_once_and_never_again(monkeypat
     ), "the connection layer resolved the name again, so the pin is not holding"
 
 
-async def test_a_name_that_turns_private_after_validation_is_refused(monkeypatch):
+async def test_a_name_that_turns_private_after_validation_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The reproduction, kept as a regression.
 
     Public to the first lookup, loopback to every one after. Before the
@@ -159,7 +163,10 @@ async def test_a_name_that_turns_private_after_validation_is_refused(monkeypatch
 
 
 @pytest.mark.parametrize("address", PRIVATE_ANSWERS)
-async def test_a_name_resolving_inward_is_refused_by_the_transport(monkeypatch, address):
+async def test_a_name_resolving_inward_is_refused_by_the_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    address: str,
+) -> None:
     """Every family and every private range, judged at the transport."""
     resolver = Resolver(address)
     resolver.install(monkeypatch)
@@ -169,7 +176,9 @@ async def test_a_name_resolving_inward_is_refused_by_the_transport(monkeypatch, 
             await client.get(f"https://{HOSTNAME}/x")
 
 
-async def test_one_private_answer_among_public_ones_refuses_the_lot(monkeypatch):
+async def test_one_private_answer_among_public_ones_refuses_the_lot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A name with a mixed answer set is refused, not sampled.
 
     Judging only the address that happens to be picked would let a name with one
@@ -178,7 +187,7 @@ async def test_one_private_answer_among_public_ones_refuses_the_lot(monkeypatch)
     """
     real = socket.getaddrinfo
 
-    def mixed(host, port, *args: Any, **kwargs: Any):
+    def mixed(host: str, port: int, *args: Any, **kwargs: Any) -> Any:
         if host != HOSTNAME:
             return real(host, port, *args, **kwargs)
         return [
@@ -195,7 +204,9 @@ async def test_one_private_answer_among_public_ones_refuses_the_lot(monkeypatch)
 # ------------------------------------------------------- identity is kept
 
 
-async def test_the_pin_keeps_the_hostname_for_routing_and_for_tls(monkeypatch):
+async def test_the_pin_keeps_the_hostname_for_routing_and_for_tls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Connecting to an address must not mean trusting a certificate for it.
 
     The request that leaves carries the pinned address in the URL, the original
@@ -207,7 +218,7 @@ async def test_the_pin_keeps_the_hostname_for_routing_and_for_tls(monkeypatch):
     seen: list[httpx.Request] = []
 
     class Capturing(GuardedTransport):
-        async def handle_async_request(self, request):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             # Let the guard rewrite, then stop before the socket.
             with contextlib.suppress(httpx.HTTPError):
                 await super().handle_async_request(request)
@@ -223,13 +234,15 @@ async def test_the_pin_keeps_the_hostname_for_routing_and_for_tls(monkeypatch):
     assert request.extensions["sni_hostname"] == HOSTNAME
 
 
-async def test_a_non_default_port_survives_in_the_host_header(monkeypatch):
+async def test_a_non_default_port_survives_in_the_host_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     resolver = Resolver(PUBLIC_V4)
     resolver.install(monkeypatch)
     seen: list[httpx.Request] = []
 
     class Capturing(GuardedTransport):
-        async def handle_async_request(self, request):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             with contextlib.suppress(httpx.HTTPError):
                 await super().handle_async_request(request)
             seen.append(request)
@@ -245,7 +258,10 @@ async def test_a_non_default_port_survives_in_the_host_header(monkeypatch):
 
 
 @pytest.mark.parametrize("address", PRIVATE_ANSWERS)
-def test_an_address_literal_is_judged_without_being_resolved(address, monkeypatch):
+def test_an_address_literal_is_judged_without_being_resolved(
+    address: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A redirect to `https://169.254.169.254/` has no name to look up.
 
     Handing it to a resolver would be asking a question with an obvious answer,
@@ -255,7 +271,7 @@ def test_an_address_literal_is_judged_without_being_resolved(address, monkeypatc
     called: list[str] = []
     real = socket.getaddrinfo
 
-    def counting(host, port, *args: Any, **kwargs: Any):
+    def counting(host: str, port: int, *args: Any, **kwargs: Any) -> Any:
         called.append(host)
         return real(host, port, *args, **kwargs)
 
@@ -268,7 +284,7 @@ def test_an_address_literal_is_judged_without_being_resolved(address, monkeypatc
     assert called == [], "a literal address was sent to a resolver"
 
 
-def test_a_public_address_literal_is_allowed_and_returned():
+def test_a_public_address_literal_is_allowed_and_returned() -> None:
     """The control. A guard that refused every literal would break a provider
     that redirects to one."""
     assert resolve_public_host(PUBLIC_V4, 443) == [PUBLIC_V4]
@@ -283,7 +299,10 @@ def test_a_public_address_literal_is_allowed_and_returned():
         pytest.param("127.1", id="short-form-loopback"),
     ],
 )
-def test_an_obfuscated_loopback_spelling_does_not_slip_through(spelling, monkeypatch):
+def test_an_obfuscated_loopback_spelling_does_not_slip_through(
+    spelling: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """These are not IP literals to `ipaddress`, so they take the resolver path.
 
     Whatever the platform resolver makes of them, the *resolved* address is what
@@ -294,7 +313,7 @@ def test_an_obfuscated_loopback_spelling_does_not_slip_through(spelling, monkeyp
         validate_outbound_url(f"https://{spelling}/x")
 
 
-async def test_an_ipv6_pin_is_bracketed_in_the_url(monkeypatch):
+async def test_an_ipv6_pin_is_bracketed_in_the_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """An unbracketed IPv6 authority is a malformed URL, and getting this wrong
     would turn a security control into a connection error nobody understands."""
     resolver = Resolver(PUBLIC_V6)
@@ -302,7 +321,7 @@ async def test_an_ipv6_pin_is_bracketed_in_the_url(monkeypatch):
     seen: list[httpx.Request] = []
 
     class Capturing(GuardedTransport):
-        async def handle_async_request(self, request):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             with contextlib.suppress(httpx.HTTPError):
                 await super().handle_async_request(request)
             seen.append(request)
@@ -319,7 +338,7 @@ async def test_an_ipv6_pin_is_bracketed_in_the_url(monkeypatch):
 
 
 @pytest.mark.parametrize("scheme", ["http", "ftp"])
-async def test_the_transport_refuses_a_non_https_scheme(scheme):
+async def test_the_transport_refuses_a_non_https_scheme(scheme: str) -> None:
     """The scheme rule is enforced at the transport too, not only in the
     validator a caller might not have called."""
     async with httpx.AsyncClient(
@@ -329,7 +348,9 @@ async def test_the_transport_refuses_a_non_https_scheme(scheme):
             await client.get(f"{scheme}://example.com/x")
 
 
-async def test_every_hop_of_a_redirect_chain_is_resolved_and_judged(monkeypatch):
+async def test_every_hop_of_a_redirect_chain_is_resolved_and_judged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Redirects are followed by hand by the clients that need them, so each hop
     is a separate request through the transport - and therefore a separate
     resolution, judgement and pin.
@@ -342,7 +363,7 @@ async def test_every_hop_of_a_redirect_chain_is_resolved_and_judged(monkeypatch)
     validated: list[str] = []
     real = socket.getaddrinfo
 
-    def scripted(host, port, *args: Any, **kwargs: Any):
+    def scripted(host: str, port: int, *args: Any, **kwargs: Any) -> Any:
         if host not in answers:
             return real(host, port, *args, **kwargs)
         validated.append(host)
@@ -392,7 +413,7 @@ def _integration_clients() -> dict[str, httpx.AsyncClient]:
 
 
 @pytest.mark.parametrize("name", sorted(_integration_clients()))
-async def test_every_integration_client_is_guarded(name):
+async def test_every_integration_client_is_guarded(name: str) -> None:
     """The invariant `openai/client.py` states in prose, asserted.
 
     "The guard is used here although the URL is a constant, so that the answer
@@ -408,7 +429,7 @@ async def test_every_integration_client_is_guarded(name):
             await client.aclose()
 
 
-async def test_no_integration_client_follows_redirects_by_itself():
+async def test_no_integration_client_follows_redirects_by_itself() -> None:
     """`GuardedTransport` judges one hop, so a client must not follow the next.
 
     A client with `follow_redirects=True` would take the second hop inside httpx,
@@ -428,7 +449,7 @@ async def test_no_integration_client_follows_redirects_by_itself():
 # ------------------------------------------- the one client that is not guarded
 
 
-def test_the_object_store_is_deliberately_not_an_integration_client():
+def test_the_object_store_is_deliberately_not_an_integration_client() -> None:
     """The media store is infrastructure, and the guard would break it.
 
     `build_guarded_client` refuses private addresses because the clients it

@@ -9,7 +9,7 @@ from app.core.exceptions import DependencyUnavailableError
 from app.core.redis import RedisClient
 
 
-async def test_client_is_built_from_settings():
+async def test_client_is_built_from_settings() -> None:
     client = RedisClient(Settings(_env_file=None, redis_url="redis://cache:6379/3"))
 
     try:
@@ -21,7 +21,7 @@ async def test_client_is_built_from_settings():
         await client.close()
 
 
-async def test_check_raises_dependency_unavailable_when_unreachable():
+async def test_check_raises_dependency_unavailable_when_unreachable() -> None:
     client = RedisClient(
         Settings(
             _env_file=None,

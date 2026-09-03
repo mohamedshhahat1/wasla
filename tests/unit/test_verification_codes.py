@@ -139,7 +139,9 @@ def test_an_unreadable_stored_value_is_a_failed_attempt_not_a_crash(stored: str)
 
 def test_spending_time_on_a_hopeless_check_neither_raises_nor_succeeds() -> None:
     """The timing equaliser used when there is no challenge to check against."""
-    assert spend_code_verification_time(CANARY) is None
+    # Returns nothing; what it is for is taking the same time as a real
+    # verification, which is a timing property rather than a value.
+    spend_code_verification_time(CANARY)
 
 
 # ------------------------------------------------------------------- parsing

@@ -16,6 +16,7 @@ from app.workers.queue import DeadLetterRecord, JobEnvelope, ReliableQueue
 from app.workers.queues import IDEMPOTENT_QUEUES, build_parser, dead_letters, replay, status
 from app.workers.retry import FailureCategory
 from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import as_redis, as_redis_client
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -34,19 +35,20 @@ class RedisWrapper:
 
 
 @pytest.fixture
-def redis():
+def redis() -> FakeQueueRedis:
     return FakeQueueRedis()
 
 
 @pytest.fixture
-def wrapper(redis):
+def wrapper(redis: FakeQueueRedis) -> RedisWrapper:
     return RedisWrapper(redis)
 
 
-async def dead_letter_one(redis, *, namespace: str, body: str) -> None:
-    queue = ReliableQueue(redis, namespace=namespace)
+async def dead_letter_one(redis: FakeQueueRedis, *, namespace: str, body: str) -> None:
+    queue = ReliableQueue(as_redis(redis), namespace=namespace)
     await queue.enqueue_body(body, now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
     await queue.dead_letter(
         raw,
         DeadLetterRecord(
@@ -68,10 +70,14 @@ async def dead_letter_one(redis, *, namespace: str, body: str) -> None:
 # ------------------------------------------------------------------ status
 
 
-async def test_status_reports_every_queue(wrapper, capsys):
-    await ReliableQueue(wrapper.client, namespace="agent:jobs").enqueue_body("{}", now=NOW)
+async def test_status_reports_every_queue(
+    wrapper: RedisWrapper, capsys: pytest.CaptureFixture[str]
+) -> None:
+    await ReliableQueue(as_redis(wrapper.client), namespace="agent:jobs").enqueue_body(
+        "{}", now=NOW
+    )
 
-    assert await status(wrapper) == 0
+    assert await status(as_redis_client(wrapper)) == 0
 
     out = capsys.readouterr().out
     for name in ("agent", "ingestion", "media"):
@@ -81,10 +87,12 @@ async def test_status_reports_every_queue(wrapper, capsys):
 # ------------------------------------------------------------ dead-letters
 
 
-async def test_dead_letters_prints_the_record(wrapper, redis, capsys):
+async def test_dead_letters_prints_the_record(
+    wrapper: RedisWrapper, redis: FakeQueueRedis, capsys: pytest.CaptureFixture[str]
+) -> None:
     await dead_letter_one(redis, namespace="knowledge:ingestion", body='{"document_id":"x"}')
 
-    assert await dead_letters(wrapper, queue_name="ingestion", limit=10) == 0
+    assert await dead_letters(as_redis_client(wrapper), queue_name="ingestion", limit=10) == 0
 
     printed = json.loads(capsys.readouterr().out)
     assert printed["attempts"] == 5
@@ -92,87 +100,107 @@ async def test_dead_letters_prints_the_record(wrapper, redis, capsys):
     assert printed["tenant_id"] == str(TENANT)
 
 
-async def test_an_empty_dead_letter_list_says_so(wrapper, capsys):
-    assert await dead_letters(wrapper, queue_name="agent", limit=10) == 0
+async def test_an_empty_dead_letter_list_says_so(
+    wrapper: RedisWrapper, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert await dead_letters(as_redis_client(wrapper), queue_name="agent", limit=10) == 0
 
     assert "no dead-lettered jobs" in capsys.readouterr().out
 
 
-async def test_an_unknown_queue_is_refused(wrapper):
-    assert await dead_letters(wrapper, queue_name="nonsense", limit=10) == 2
+async def test_an_unknown_queue_is_refused(wrapper: RedisWrapper) -> None:
+    assert await dead_letters(as_redis_client(wrapper), queue_name="nonsense", limit=10) == 2
 
 
 # ----------------------------------------------------------------- replay
 
 
-async def test_replaying_an_idempotent_queue_requeues_the_job(wrapper, redis):
+async def test_replaying_an_idempotent_queue_requeues_the_job(
+    wrapper: RedisWrapper, redis: FakeQueueRedis
+) -> None:
     await dead_letter_one(redis, namespace="knowledge:ingestion", body='{"document_id":"x"}')
-    queue = ReliableQueue(redis, namespace="knowledge:ingestion")
+    queue = ReliableQueue(as_redis(redis), namespace="knowledge:ingestion")
 
-    assert await replay(wrapper, queue_name="ingestion", limit=10, force=False) == 0
+    assert (
+        await replay(as_redis_client(wrapper), queue_name="ingestion", limit=10, force=False) == 0
+    )
 
     assert await queue.depth() == 1
     (queued,) = redis.lists["knowledge:ingestion:pending"]
     assert JobEnvelope.decode(queued).body == '{"document_id":"x"}'
 
 
-async def test_a_replayed_job_starts_its_attempt_count_again(wrapper, redis):
+async def test_a_replayed_job_starts_its_attempt_count_again(
+    wrapper: RedisWrapper, redis: FakeQueueRedis
+) -> None:
     """The budget was what said it was finished; an operator has overruled that."""
     await dead_letter_one(redis, namespace="media:understanding", body='{"media_id":"x"}')
 
-    await replay(wrapper, queue_name="media", limit=10, force=False)
+    await replay(as_redis_client(wrapper), queue_name="media", limit=10, force=False)
 
     (queued,) = redis.lists["media:understanding:pending"]
     assert JobEnvelope.decode(queued).attempt == 1
 
 
-async def test_the_agent_queue_is_refused_without_force(wrapper, redis, capsys):
+async def test_the_agent_queue_is_refused_without_force(
+    wrapper: RedisWrapper, redis: FakeQueueRedis, capsys: pytest.CaptureFixture[str]
+) -> None:
     """An agent turn ends in a message; a replay could send a second one."""
     await dead_letter_one(redis, namespace="agent:jobs", body='{"conversation_id":"x"}')
 
-    assert await replay(wrapper, queue_name="agent", limit=10, force=False) == 3
+    assert await replay(as_redis_client(wrapper), queue_name="agent", limit=10, force=False) == 3
 
-    assert await ReliableQueue(redis, namespace="agent:jobs").depth() == 0
+    assert await ReliableQueue(as_redis(redis), namespace="agent:jobs").depth() == 0
     assert "not idempotent" in capsys.readouterr().err
 
 
-async def test_the_agent_queue_can_be_replayed_deliberately(wrapper, redis):
+async def test_the_agent_queue_can_be_replayed_deliberately(
+    wrapper: RedisWrapper, redis: FakeQueueRedis
+) -> None:
     await dead_letter_one(redis, namespace="agent:jobs", body='{"conversation_id":"x"}')
 
-    assert await replay(wrapper, queue_name="agent", limit=10, force=True) == 0
+    assert await replay(as_redis_client(wrapper), queue_name="agent", limit=10, force=True) == 0
 
-    assert await ReliableQueue(redis, namespace="agent:jobs").depth() == 1
+    assert await ReliableQueue(as_redis(redis), namespace="agent:jobs").depth() == 1
 
 
-async def test_the_record_survives_the_replay(wrapper, redis):
+async def test_the_record_survives_the_replay(wrapper: RedisWrapper, redis: FakeQueueRedis) -> None:
     """Comparing the original with a second failure is how an operator learns."""
     await dead_letter_one(redis, namespace="knowledge:ingestion", body='{"document_id":"x"}')
-    queue = ReliableQueue(redis, namespace="knowledge:ingestion")
+    queue = ReliableQueue(as_redis(redis), namespace="knowledge:ingestion")
 
-    await replay(wrapper, queue_name="ingestion", limit=10, force=False)
+    await replay(as_redis_client(wrapper), queue_name="ingestion", limit=10, force=False)
 
     assert await queue.failed_depth() == 1
 
 
-async def test_replaying_nothing_is_not_an_error(wrapper, capsys):
-    assert await replay(wrapper, queue_name="ingestion", limit=10, force=False) == 0
+async def test_replaying_nothing_is_not_an_error(
+    wrapper: RedisWrapper, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        await replay(as_redis_client(wrapper), queue_name="ingestion", limit=10, force=False) == 0
+    )
 
     assert "nothing to replay" in capsys.readouterr().out
 
 
-async def test_an_unreadable_record_is_skipped_rather_than_fatal(wrapper, redis, capsys):
+async def test_an_unreadable_record_is_skipped_rather_than_fatal(
+    wrapper: RedisWrapper, redis: FakeQueueRedis, capsys: pytest.CaptureFixture[str]
+) -> None:
     redis.lists["knowledge:ingestion:failed"] = ["not json", '{"no":"body"}']
 
-    assert await replay(wrapper, queue_name="ingestion", limit=10, force=False) == 0
+    assert (
+        await replay(as_redis_client(wrapper), queue_name="ingestion", limit=10, force=False) == 0
+    )
 
-    assert await ReliableQueue(redis, namespace="knowledge:ingestion").depth() == 0
+    assert await ReliableQueue(as_redis(redis), namespace="knowledge:ingestion").depth() == 0
     assert "skipping" in capsys.readouterr().out
 
 
 # ------------------------------------------------------------------ the CLI
 
 
-def test_the_idempotent_queues_are_the_ones_their_workers_retry():
+def test_the_idempotent_queues_are_the_ones_their_workers_retry() -> None:
     """Stated here so the two lists cannot drift apart silently."""
     assert {"ingestion", "media"} == IDEMPOTENT_QUEUES
     assert "agent" not in IDEMPOTENT_QUEUES
@@ -186,10 +214,10 @@ def test_the_idempotent_queues_are_the_ones_their_workers_retry():
         pytest.param(["replay", "ingestion", "--force"], id="replay"),
     ],
 )
-def test_the_parser_accepts_the_documented_invocations(argv):
+def test_the_parser_accepts_the_documented_invocations(argv: list[str]) -> None:
     build_parser().parse_args(argv)
 
 
-def test_the_parser_refuses_a_queue_that_does_not_exist():
+def test_the_parser_refuses_a_queue_that_does_not_exist() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["replay", "nonsense"])

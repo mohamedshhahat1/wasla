@@ -10,8 +10,11 @@ different facts that land in the same column.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
+from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.analytics import AnalyticsEventType, AnalyticsSource
 from app.db.models.conversation import (
@@ -23,6 +26,7 @@ from app.db.models.conversation import (
     MessageKind,
     MessageStatus,
 )
+from app.db.models.sentiment import SentimentLabel
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount
@@ -31,6 +35,7 @@ from app.repositories.analytics_repository import AnalyticsEventRepository
 from app.services.inbox_service import InboxService
 from app.services.sentiment_reader import SentimentReading
 from app.services.sentiment_service import SentimentService
+from tests.fakes import as_analyzer
 
 pytestmark = pytest.mark.integration
 
@@ -38,7 +43,7 @@ pytestmark = pytest.mark.integration
 class StubAnalyzer:
     """Reads every message as furious, without a provider."""
 
-    def __init__(self, label) -> None:
+    def __init__(self, label: SentimentLabel) -> None:
         self._label = label
 
     async def read(self, text: str) -> SentimentReading:
@@ -52,7 +57,7 @@ class StubAnalyzer:
         )
 
 
-async def _conversation(session, *, slug="acme"):
+async def _conversation(session: AsyncSession, *, slug: str = "acme") -> tuple[Any, ...]:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
@@ -78,11 +83,13 @@ async def _conversation(session, *, slug="acme"):
     return tenant, conversation
 
 
-async def _events(session, tenant):
+async def _events(session: AsyncSession, tenant: Tenant) -> Sequence[Any]:
     return await AnalyticsEventRepository(session, tenant_id=tenant.id).counts()
 
 
-async def test_a_colleague_taking_over_is_recorded_with_their_name(db_session):
+async def test_a_colleague_taking_over_is_recorded_with_their_name(
+    db_session: AsyncSession,
+) -> None:
     tenant, conversation = await _conversation(db_session)
     user = User(email="rep@acme.test", hashed_password="x", full_name="Rep")
     db_session.add(user)
@@ -107,7 +114,7 @@ async def test_a_colleague_taking_over_is_recorded_with_their_name(db_session):
     assert events[0].meta == {"reason": "Customer asked for a person."}
 
 
-async def test_an_agent_giving_up_is_a_different_source(db_session):
+async def test_an_agent_giving_up_is_a_different_source(db_session: AsyncSession) -> None:
     tenant, conversation = await _conversation(db_session)
     inbox = InboxService(session=db_session, tenant_id=tenant.id)
 
@@ -125,10 +132,10 @@ async def test_an_agent_giving_up_is_a_different_source(db_session):
     ]
 
 
-async def test_an_escalation_is_recorded_as_the_classifier_deciding(db_session):
+async def test_an_escalation_is_recorded_as_the_classifier_deciding(
+    db_session: AsyncSession,
+) -> None:
     """The count that says how often the product judged a customer angry."""
-    from app.db.models.sentiment import SentimentLabel
-
     tenant, conversation = await _conversation(db_session)
     message = Message(
         tenant_id=tenant.id,
@@ -144,7 +151,7 @@ async def test_an_escalation_is_recorded_as_the_classifier_deciding(db_session):
     service = SentimentService(
         session=db_session,
         tenant_id=tenant.id,
-        analyzer=StubAnalyzer(SentimentLabel.ANGRY),
+        analyzer=as_analyzer(StubAnalyzer(SentimentLabel.ANGRY)),
     )
     outcome = await service.assess(
         conversation_id=conversation.id,
@@ -159,7 +166,9 @@ async def test_an_escalation_is_recorded_as_the_classifier_deciding(db_session):
     ]
 
 
-async def test_setting_a_mode_it_already_has_is_not_a_second_handoff(db_session):
+async def test_setting_a_mode_it_already_has_is_not_a_second_handoff(
+    db_session: AsyncSession,
+) -> None:
     """Editing the reason on a conversation a colleague already owns is not a
     handoff, and counting it would inflate the one number this table reports."""
     tenant, conversation = await _conversation(db_session)
@@ -177,7 +186,7 @@ async def test_setting_a_mode_it_already_has_is_not_a_second_handoff(db_session)
     assert [row.count for row in counts] == [1]
 
 
-async def test_giving_a_conversation_back_is_its_own_event(db_session):
+async def test_giving_a_conversation_back_is_its_own_event(db_session: AsyncSession) -> None:
     tenant, conversation = await _conversation(db_session)
     inbox = InboxService(session=db_session, tenant_id=tenant.id)
 
@@ -192,7 +201,9 @@ async def test_giving_a_conversation_back_is_its_own_event(db_session):
     }
 
 
-async def test_a_conversation_handed_over_twice_is_one_conversation(db_session):
+async def test_a_conversation_handed_over_twice_is_one_conversation(
+    db_session: AsyncSession,
+) -> None:
     """Events and conversations are different counts, and both are wanted: a
     resolution rate built on events would punish the same conversation twice."""
     tenant, conversation = await _conversation(db_session)
@@ -210,7 +221,7 @@ async def test_a_conversation_handed_over_twice_is_one_conversation(db_session):
     assert counts[AnalyticsEventType.HANDOFF] == 2
 
 
-async def test_one_workspace_cannot_see_anothers_handoffs(db_session):
+async def test_one_workspace_cannot_see_anothers_handoffs(db_session: AsyncSession) -> None:
     acme, acme_conversation = await _conversation(db_session, slug="acme")
     rival, _ = await _conversation(db_session, slug="rival")
 
@@ -224,7 +235,9 @@ async def test_one_workspace_cannot_see_anothers_handoffs(db_session):
     assert [row.count for row in await _events(db_session, acme)] == [1]
 
 
-async def test_another_workspaces_conversation_cannot_be_handed_over(db_session):
+async def test_another_workspaces_conversation_cannot_be_handed_over(
+    db_session: AsyncSession,
+) -> None:
     """The isolation that matters most here: the id arrives in a request."""
     from app.core.exceptions import TenantIsolationError
 
@@ -238,7 +251,7 @@ async def test_another_workspaces_conversation_cannot_be_handed_over(db_session)
         )
 
 
-async def test_an_event_belongs_to_the_transaction_that_caused_it(db_session):
+async def test_an_event_belongs_to_the_transaction_that_caused_it(db_session: AsyncSession) -> None:
     """A handoff that rolled back did not happen."""
     tenant, conversation = await _conversation(db_session)
     # Held as values: a rollback expires the instances, and reading an
@@ -256,7 +269,7 @@ async def test_an_event_belongs_to_the_transaction_that_caused_it(db_session):
     assert await AnalyticsEventRepository(db_session, tenant_id=tenant_id).counts() == []
 
 
-async def test_an_unknown_conversation_records_nothing(db_session):
+async def test_an_unknown_conversation_records_nothing(db_session: AsyncSession) -> None:
     tenant, _ = await _conversation(db_session)
     from app.core.exceptions import TenantIsolationError
 

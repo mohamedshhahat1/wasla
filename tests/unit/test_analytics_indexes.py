@@ -42,7 +42,7 @@ def _covers_window(table: Table, timestamp: str) -> bool:
 
 
 @pytest.mark.parametrize("name", WINDOWED_TABLES)
-def test_a_windowed_table_indexes_its_window(name: str):
+def test_a_windowed_table_indexes_its_window(name: str) -> None:
     table = Base.metadata.tables[name]
     # `usage_events` and `analytics_events` time their rows with `occurred_at`;
     # everything else uses the row's creation.
@@ -52,14 +52,14 @@ def test_a_windowed_table_indexes_its_window(name: str):
     ), f"{name} is read by tenant and {timestamp} and has no index leading with both"
 
 
-def test_usage_events_index_their_own_window():
+def test_usage_events_index_their_own_window() -> None:
     """Phase 12 got this one right, and it is the reason the others were noticed:
     the usage figures were fast while the analytics figures were not."""
     table = Base.metadata.tables["usage_events"]
     assert _covers_window(table, "occurred_at")
 
 
-def test_the_platform_window_is_indexed_without_a_tenant():
+def test_the_platform_window_is_indexed_without_a_tenant() -> None:
     """A platform total spans every workspace, so no tenant-leading index can
     serve it - it needs one on the timestamp alone."""
     table = Base.metadata.tables["usage_events"]

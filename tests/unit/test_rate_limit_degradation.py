@@ -46,6 +46,7 @@ from app.core.rate_limit import (
     _LocalWindows,
 )
 from app.core.token_store import RefreshTokenStore
+from tests.fakes import as_redis_client
 
 FAILURES = [
     pytest.param(RedisConnectionError("refused"), id="connection-refused"),
@@ -82,7 +83,7 @@ class BrokenRedis:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_windows(monkeypatch):
+def _isolated_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     """A fresh process-local counter per test.
 
     The real one is module-level on purpose - a limiter is constructed per
@@ -106,10 +107,10 @@ def _availability_policy(limit: int = 3) -> RateLimitPolicy:
 
 
 @pytest.mark.parametrize("error", FAILURES)
-async def test_a_capacity_limit_allows_when_redis_is_gone(error):
+async def test_a_capacity_limit_allows_when_redis_is_gone(error: Exception) -> None:
     """Shedding a signed-in colleague's request to protect uncontended capacity
     is the outage, not the defence."""
-    limiter = RateLimiter(BrokenRedis(error))
+    limiter = RateLimiter(as_redis_client(BrokenRedis(error)))
     policy = _availability_policy(limit=1)
 
     for _ in range(20):
@@ -121,7 +122,9 @@ async def test_a_capacity_limit_allows_when_redis_is_gone(error):
 
 
 @pytest.mark.parametrize("error", FAILURES)
-async def test_a_credential_limit_still_bounds_attempts_when_redis_is_gone(error):
+async def test_a_credential_limit_still_bounds_attempts_when_redis_is_gone(
+    error: Exception,
+) -> None:
     """The gap this closes: before the fallback, every one of these was allowed.
 
     A limiter is constructed per request in production, so the counter has to
@@ -130,16 +133,20 @@ async def test_a_credential_limit_still_bounds_attempts_when_redis_is_gone(error
     """
     policy = _security_policy(limit=3)
     outcomes = [
-        (await RateLimiter(BrokenRedis(error)).check(policy, "victim@example.com")).allowed
+        (
+            await RateLimiter(as_redis_client(BrokenRedis(error))).check(
+                policy, "victim@example.com"
+            )
+        ).allowed
         for _ in range(6)
     ]
 
     assert outcomes == [True, True, True, False, False, False]
 
 
-async def test_the_local_fallback_does_not_leak_between_identities():
+async def test_the_local_fallback_does_not_leak_between_identities() -> None:
     """One attacker exhausting their own budget must not lock anybody else out."""
-    limiter = RateLimiter(BrokenRedis(RedisConnectionError("down")))
+    limiter = RateLimiter(as_redis_client(BrokenRedis(RedisConnectionError("down"))))
     policy = _security_policy(limit=2)
 
     for _ in range(4):
@@ -149,10 +156,10 @@ async def test_the_local_fallback_does_not_leak_between_identities():
     assert for_victim.allowed is True
 
 
-async def test_the_local_fallback_does_not_leak_between_policies():
+async def test_the_local_fallback_does_not_leak_between_policies() -> None:
     """The policy name is part of the key, so a spent login budget must not
     also refuse a refresh."""
-    limiter = RateLimiter(BrokenRedis(RedisConnectionError("down")))
+    limiter = RateLimiter(as_redis_client(BrokenRedis(RedisConnectionError("down"))))
     login = RateLimitPolicy(name="auth", limit=1, window_seconds=60, local_fallback=True)
     account = _security_policy(limit=1)
 
@@ -162,10 +169,10 @@ async def test_the_local_fallback_does_not_leak_between_policies():
     assert (await limiter.check(account, "1.2.3.4")).allowed is True
 
 
-async def test_a_refusal_tells_the_caller_when_to_come_back():
+async def test_a_refusal_tells_the_caller_when_to_come_back() -> None:
     """A client refused without a `Retry-After` simply retries immediately,
     which is the traffic the limit exists to stop."""
-    limiter = RateLimiter(BrokenRedis(RedisConnectionError("down")))
+    limiter = RateLimiter(as_redis_client(BrokenRedis(RedisConnectionError("down"))))
     policy = _security_policy(limit=1)
 
     await limiter.check(policy, "someone")
@@ -178,7 +185,7 @@ async def test_a_refusal_tells_the_caller_when_to_come_back():
 # ------------------------------------------------------------ the window itself
 
 
-def test_the_window_resets_once_it_has_elapsed():
+def test_the_window_resets_once_it_has_elapsed() -> None:
     """A fixed window, so a caller refused now is served again later. Without
     this the fallback would be a permanent lockout after a burst."""
     windows = _LocalWindows()
@@ -188,7 +195,7 @@ def test_the_window_resets_once_it_has_elapsed():
     assert windows.hit("k", 60, now=1061.0) == 1
 
 
-def test_the_window_store_stays_bounded():
+def test_the_window_store_stays_bounded() -> None:
     """Unbounded, this would be a memory exhaustion primitive: an attacker
     rotating source addresses during an outage decides how much it holds."""
     windows = _LocalWindows(capacity=50)
@@ -199,7 +206,7 @@ def test_the_window_store_stays_bounded():
     assert len(windows._windows) <= 50
 
 
-def test_pruning_prefers_expired_windows_over_live_ones():
+def test_pruning_prefers_expired_windows_over_live_ones() -> None:
     """Evicting a live window hands somebody a fresh budget. Expired entries are
     dead weight and go first."""
     windows = _LocalWindows(capacity=2)
@@ -215,7 +222,7 @@ def test_pruning_prefers_expired_windows_over_live_ones():
 
 
 @pytest.mark.parametrize("error", FAILURES)
-async def test_spending_a_refresh_token_fails_closed(error):
+async def test_spending_a_refresh_token_fails_closed(error: Exception) -> None:
     """The control that must never degrade.
 
     Reuse detection *is* the atomic write. If Redis cannot answer, whether this
@@ -232,7 +239,7 @@ async def test_spending_a_refresh_token_fails_closed(error):
     still "does not return", and a future refactor that restored a raw escape
     would satisfy a test written only against the message.
     """
-    store = RefreshTokenStore(BrokenRedis(error))
+    store = RefreshTokenStore(as_redis_client(BrokenRedis(error)))
 
     with pytest.raises(DependencyUnavailableError) as refusal:
         await store.spend(uuid.uuid4(), ttl_seconds=60)
@@ -246,14 +253,14 @@ async def test_spending_a_refresh_token_fails_closed(error):
 
 
 @pytest.mark.parametrize("error", FAILURES)
-async def test_revoking_a_refresh_token_fails_closed_too(error):
+async def test_revoking_a_refresh_token_fails_closed_too(error: Exception) -> None:
     """Logout is a security mutation, so it may not be answered optimistically.
 
     `spend` and `revoke` differ in what they detect and not in what they may
     assume: a revocation that was never written is a token that is still live,
     and a 204 saying otherwise is worse than a 503 the caller can retry.
     """
-    store = RefreshTokenStore(BrokenRedis(error))
+    store = RefreshTokenStore(as_redis_client(BrokenRedis(error)))
 
     with pytest.raises(DependencyUnavailableError):
         await store.revoke(uuid.uuid4(), ttl_seconds=60)

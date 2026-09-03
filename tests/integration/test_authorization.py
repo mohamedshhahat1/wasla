@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.exceptions import (
@@ -29,6 +31,7 @@ from app.db.models import (
     TenantInvitation,
     TenantRole,
 )
+from app.db.models.tenant import Tenant
 from app.repositories import (
     InvitationRepository,
     MembershipRepository,
@@ -38,6 +41,7 @@ from app.repositories import (
 )
 from app.services.auth_service import AuthService
 from app.services.invitation_service import InvitationService
+from tests.fakes import as_redis_client
 
 pytestmark = pytest.mark.integration
 
@@ -45,10 +49,16 @@ PASSWORD = "correct horse battery staple"
 
 
 class FakeCommands:
-    def __init__(self):
-        self.values = {}
+    def __init__(self) -> None:
+        self.values: dict[str, Any] = {}
 
-    async def set(self, key, value, ex=None, nx=False):
+    async def set(
+        self,
+        key: str,
+        value: str,
+        ex: int | None = None,
+        nx: bool = False,
+    ) -> bool | None:
         # `nx` returns None without writing when the key is already there,
         # exactly as Redis does. `RefreshTokenStore.spend` reads that to tell a
         # first use from a replay.
@@ -57,38 +67,40 @@ class FakeCommands:
         self.values[key] = value
         return True
 
-    async def exists(self, key):
+    async def exists(self, key: str) -> int:
         return 1 if key in self.values else 0
 
 
 class FakeRedis:
     """Revocation is Redis' job, and Redis is not what these tests are about."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.client = FakeCommands()
 
 
 @pytest.fixture
-def auth(db_session, settings: Settings) -> AuthService:
+def auth(db_session: AsyncSession, settings: Settings) -> AuthService:
     return AuthService(
         session=db_session,
         settings=settings,
-        token_store=RefreshTokenStore(FakeRedis()),
+        token_store=RefreshTokenStore(as_redis_client(FakeRedis())),
     )
 
 
 @pytest.fixture
-def invitations(db_session) -> InvitationService:
+def invitations(db_session: AsyncSession) -> InvitationService:
     return InvitationService(session=db_session)
 
 
-async def _tenant(db_session, *, name: str, slug: str):
+async def _tenant(db_session: AsyncSession, *, name: str, slug: str) -> Tenant:
     tenant = await TenantRepository(db_session).create(name=name, slug=slug)
     await db_session.flush()
     return tenant
 
 
-async def _invitation(db_session, *, tenant_id: uuid.UUID, email: str) -> TenantInvitation:
+async def _invitation(
+    db_session: AsyncSession, *, tenant_id: uuid.UUID, email: str
+) -> TenantInvitation:
     repository = InvitationRepository(db_session, tenant_id=tenant_id)
     invitation = await repository.create(
         email=email,
@@ -100,7 +112,9 @@ async def _invitation(db_session, *, tenant_id: uuid.UUID, email: str) -> Tenant
     return invitation
 
 
-async def test_a_scoped_read_never_returns_another_workspaces_rows(db_session):
+async def test_a_scoped_read_never_returns_another_workspaces_rows(
+    db_session: AsyncSession,
+) -> None:
     first = await _tenant(db_session, name="First", slug="first")
     second = await _tenant(db_session, name="Second", slug="second")
     await _invitation(db_session, tenant_id=first.id, email="a@example.com")
@@ -111,7 +125,9 @@ async def test_a_scoped_read_never_returns_another_workspaces_rows(db_session):
     assert [entry.email for entry in visible] == ["a@example.com"]
 
 
-async def test_reaching_for_another_workspaces_row_answers_not_found(db_session):
+async def test_reaching_for_another_workspaces_row_answers_not_found(
+    db_session: AsyncSession,
+) -> None:
     first = await _tenant(db_session, name="First", slug="first")
     second = await _tenant(db_session, name="Second", slug="second")
     theirs = await _invitation(db_session, tenant_id=second.id, email="b@example.com")
@@ -125,7 +141,9 @@ async def test_reaching_for_another_workspaces_row_answers_not_found(db_session)
     assert raised.value.status_code == 404
 
 
-async def test_the_database_enforces_one_membership_per_user_and_workspace(db_session):
+async def test_the_database_enforces_one_membership_per_user_and_workspace(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session, name="First", slug="first")
     user = await UserRepository(db_session).create(
         email="owner@example.com",
@@ -143,7 +161,7 @@ async def test_the_database_enforces_one_membership_per_user_and_workspace(db_se
         await db_session.flush()
 
 
-async def test_one_identity_can_belong_to_two_workspaces(db_session):
+async def test_one_identity_can_belong_to_two_workspaces(db_session: AsyncSession) -> None:
     first = await _tenant(db_session, name="First", slug="first")
     second = await _tenant(db_session, name="Second", slug="second")
     user = await UserRepository(db_session).create(email="owner@example.com")
@@ -161,7 +179,7 @@ async def test_one_identity_can_belong_to_two_workspaces(db_session):
     assert {entry.tenant_id for entry in memberships} == {first.id, second.id}
 
 
-async def test_a_platform_role_grants_nothing_inside_a_workspace(db_session):
+async def test_a_platform_role_grants_nothing_inside_a_workspace(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, name="First", slug="first")
     staff = await UserRepository(db_session).create(email="staff@example.com")
     staff.platform_role = PlatformRole.PLATFORM_ADMIN
@@ -175,7 +193,9 @@ async def test_a_platform_role_grants_nothing_inside_a_workspace(db_session):
         await memberships.require_for_user(staff.id)
 
 
-async def test_registration_creates_an_owner_membership(auth, db_session):
+async def test_registration_creates_an_owner_membership(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     session = await auth.register(
         email="Owner@Example.com",
         password=PASSWORD,
@@ -194,7 +214,9 @@ async def test_registration_creates_an_owner_membership(auth, db_session):
     assert stored.hashed_password != PASSWORD
 
 
-async def test_a_registered_account_can_log_in_and_a_wrong_password_cannot(auth):
+async def test_a_registered_account_can_log_in_and_a_wrong_password_cannot(
+    auth: AuthService,
+) -> None:
     await auth.register(
         email="owner@example.com",
         password=PASSWORD,
@@ -210,7 +232,7 @@ async def test_a_registered_account_can_log_in_and_a_wrong_password_cannot(auth)
         await auth.login(email="owner@example.com", password="not the password")
 
 
-async def test_a_second_registration_with_the_same_address_conflicts(auth):
+async def test_a_second_registration_with_the_same_address_conflicts(auth: AuthService) -> None:
     await auth.register(
         email="owner@example.com",
         password=PASSWORD,
@@ -227,7 +249,7 @@ async def test_a_second_registration_with_the_same_address_conflicts(auth):
         )
 
 
-async def test_a_refresh_token_works_once_and_then_never_again(auth):
+async def test_a_refresh_token_works_once_and_then_never_again(auth: AuthService) -> None:
     registered = await auth.register(
         email="owner@example.com",
         password=PASSWORD,
@@ -243,7 +265,9 @@ async def test_a_refresh_token_works_once_and_then_never_again(auth):
         await auth.refresh(refresh_token=registered.refresh_token)
 
 
-async def test_a_workspace_the_caller_does_not_belong_to_looks_missing(auth, db_session):
+async def test_a_workspace_the_caller_does_not_belong_to_looks_missing(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     await auth.register(
         email="owner@example.com",
         password=PASSWORD,
@@ -260,7 +284,9 @@ async def test_a_workspace_the_caller_does_not_belong_to_looks_missing(auth, db_
         )
 
 
-async def test_a_disabled_account_cannot_log_in(auth, db_session):
+async def test_a_disabled_account_cannot_log_in(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
     await auth.register(
         email="owner@example.com",
         password=PASSWORD,
@@ -276,7 +302,9 @@ async def test_a_disabled_account_cannot_log_in(auth, db_session):
         await auth.login(email="owner@example.com", password=PASSWORD)
 
 
-async def test_an_invitation_grants_membership_exactly_once(auth, invitations, db_session):
+async def test_an_invitation_grants_membership_exactly_once(
+    auth: AuthService, invitations: InvitationService, db_session: AsyncSession
+) -> None:
     owner_session = await auth.register(
         email="owner@example.com",
         password=PASSWORD,
@@ -309,7 +337,9 @@ async def test_an_invitation_grants_membership_exactly_once(auth, invitations, d
         await invitations.accept(raw_token=raw_token, password=PASSWORD)
 
 
-async def test_an_invited_member_lands_in_the_inviting_workspace_only(auth, invitations):
+async def test_an_invited_member_lands_in_the_inviting_workspace_only(
+    auth: AuthService, invitations: InvitationService
+) -> None:
     owner_session = await auth.register(
         email="owner@example.com",
         password=PASSWORD,
@@ -348,7 +378,9 @@ async def test_an_invited_member_lands_in_the_inviting_workspace_only(auth, invi
         )
 
 
-async def test_an_administrator_cannot_invite_an_owner(auth, invitations, db_session):
+async def test_an_administrator_cannot_invite_an_owner(
+    auth: AuthService, invitations: InvitationService, db_session: AsyncSession
+) -> None:
     owner_session = await auth.register(
         email="owner@example.com",
         password=PASSWORD,
@@ -367,7 +399,9 @@ async def test_an_administrator_cannot_invite_an_owner(auth, invitations, db_ses
         )
 
 
-async def test_an_expired_invitation_is_refused(invitations, db_session):
+async def test_an_expired_invitation_is_refused(
+    invitations: InvitationService, db_session: AsyncSession
+) -> None:
     tenant = await _tenant(db_session, name="Acme", slug="acme")
     raw_token = uuid.uuid4().hex
     repository = InvitationRepository(db_session, tenant_id=tenant.id)

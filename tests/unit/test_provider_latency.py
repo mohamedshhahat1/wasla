@@ -23,6 +23,8 @@ shape, because the exposition is the contract.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 
 from app.core.metrics import PROVIDER_LATENCY_BUCKETS, MetricsRegistry
@@ -36,6 +38,7 @@ from app.core.telemetry import (
 )
 from app.services.metrics_service import MetricsService
 from tests.fake_queue_redis import FailingRedis, FakeQueueRedis
+from tests.fakes import as_redis
 
 METRIC = "wasla_provider_request_duration_seconds"
 
@@ -46,15 +49,16 @@ def redis() -> FakeQueueRedis:
 
 
 @pytest.fixture
-def sink(redis: FakeQueueRedis) -> object:
-    set_counter_sink(redis)
+def sink(redis: FakeQueueRedis) -> Iterator[FakeQueueRedis]:
+    """Point the cross-process counters at this test's fake, then unhook it."""
+    set_counter_sink(as_redis(redis))
     yield redis
     set_counter_sink(None)
 
 
 @pytest.fixture
 def service(redis: FakeQueueRedis) -> MetricsService:
-    return MetricsService(redis, registry=MetricsRegistry())
+    return MetricsService(as_redis(redis), registry=MetricsRegistry())
 
 
 def sample(rendered: str, name: str, labels: str = "") -> float:
@@ -77,7 +81,9 @@ async def observe(provider: Provider, operation: str, seconds: float) -> None:
 # ------------------------------------------------------------- the shape
 
 
-async def test_a_provider_call_lands_in_the_bucket_above_it(sink, service) -> None:
+async def test_a_provider_call_lands_in_the_bucket_above_it(
+    sink: FakeQueueRedis, service: MetricsService
+) -> None:
     await observe(Provider.OPENAI, "respond", 0.3)
 
     rendered = await service.render()
@@ -89,7 +95,9 @@ async def test_a_provider_call_lands_in_the_bucket_above_it(sink, service) -> No
     assert sample(rendered, f"{METRIC}_bucket", f'le="+Inf",{labels}') == 1
 
 
-async def test_buckets_are_cumulative_in_the_exposition(sink, service) -> None:
+async def test_buckets_are_cumulative_in_the_exposition(
+    sink: FakeQueueRedis, service: MetricsService
+) -> None:
     """The property a scraper depends on, held on the rendered document.
 
     Three observations at increasing latencies. Every bucket must include
@@ -109,7 +117,9 @@ async def test_buckets_are_cumulative_in_the_exposition(sink, service) -> None:
     assert sample(rendered, f"{METRIC}_count", labels) == 3
 
 
-async def test_the_sum_is_the_total_time_waited(sink, service) -> None:
+async def test_the_sum_is_the_total_time_waited(
+    sink: FakeQueueRedis, service: MetricsService
+) -> None:
     for seconds in (0.5, 1.5, 2.0):
         await observe(Provider.PAYMOB, "checkout", seconds)
 
@@ -119,8 +129,8 @@ async def test_the_sum_is_the_total_time_waited(sink, service) -> None:
 
 
 async def test_a_call_slower_than_every_bucket_reaches_only_the_overflow(
-    sink,
-    service,
+    sink: FakeQueueRedis,
+    service: MetricsService,
 ) -> None:
     """An inference that ran past its own timeout, plus the retries above it."""
     await observe(Provider.OPENAI, "respond", 95.0)
@@ -132,13 +142,17 @@ async def test_a_call_slower_than_every_bucket_reaches_only_the_overflow(
     assert sample(rendered, f"{METRIC}_count", labels) == 1
 
 
-async def test_the_metric_is_typed_as_a_histogram(sink, service) -> None:
+async def test_the_metric_is_typed_as_a_histogram(
+    sink: FakeQueueRedis, service: MetricsService
+) -> None:
     await observe(Provider.EMAIL, "deliver", 0.1)
 
     assert f"# TYPE {METRIC} histogram" in await service.render()
 
 
-async def test_the_help_text_is_published_before_anything_is_observed(service) -> None:
+async def test_the_help_text_is_published_before_anything_is_observed(
+    service: MetricsService,
+) -> None:
     """So a dashboard finds the series on a deployment that has taken no calls."""
     rendered = await service.render()
 
@@ -149,7 +163,7 @@ async def test_the_help_text_is_published_before_anything_is_observed(service) -
 # ------------------------------------------------------- failures count too
 
 
-async def test_a_failed_call_is_still_timed(sink, service) -> None:
+async def test_a_failed_call_is_still_timed(sink: FakeQueueRedis, service: MetricsService) -> None:
     """The property that makes this metric honest under an incident."""
     await record_provider_call(
         provider=Provider.OPENAI,
@@ -164,7 +178,9 @@ async def test_a_failed_call_is_still_timed(sink, service) -> None:
     assert sample(rendered, f"{METRIC}_sum", labels) == pytest.approx(45.0)
 
 
-async def test_the_outcome_is_not_a_label_on_the_distribution(sink, service) -> None:
+async def test_the_outcome_is_not_a_label_on_the_distribution(
+    sink: FakeQueueRedis, service: MetricsService
+) -> None:
     """Successes and failures share one series, deliberately.
 
     Splitting by outcome would quadruple the series to answer a question
@@ -197,8 +213,8 @@ def _lines_for(rendered: str, name: str) -> str:
 
 
 async def test_the_timer_records_a_duration_the_call_site_never_computes(
-    sink,
-    service,
+    sink: FakeQueueRedis,
+    service: MetricsService,
 ) -> None:
     """`ProviderCall` exists so no exit can forget to time itself."""
     call = ProviderCall(provider=Provider.PAYMOB, operation="refund")
@@ -212,7 +228,9 @@ async def test_the_timer_records_a_duration_the_call_site_never_computes(
     assert 0.0 <= sample(rendered, f"{METRIC}_sum", labels) < 0.05
 
 
-async def test_the_timer_also_counts_the_outcome(sink, service) -> None:
+async def test_the_timer_also_counts_the_outcome(
+    sink: FakeQueueRedis, service: MetricsService
+) -> None:
     """One call site, both signals, so the two can never disagree about a call."""
     call = ProviderCall(provider=Provider.OPENAI, operation="respond")
     await call.record(CallOutcome.RATE_LIMITED)
@@ -232,7 +250,9 @@ async def test_the_timer_also_counts_the_outcome(sink, service) -> None:
 # ------------------------------------------------ what is deliberately absent
 
 
-async def test_an_inbound_delivery_is_counted_but_not_timed(sink, service) -> None:
+async def test_an_inbound_delivery_is_counted_but_not_timed(
+    sink: FakeQueueRedis, service: MetricsService
+) -> None:
     """Meta calling us has no duration this process could honestly measure."""
     await record_provider_call(
         provider=Provider.WHATSAPP,
@@ -251,7 +271,7 @@ async def test_an_inbound_delivery_is_counted_but_not_timed(sink, service) -> No
 async def test_a_histogram_write_failure_loses_a_sample_and_nothing_else() -> None:
     """Telemetry is never a participant in the work it observes."""
     redis = FailingRedis(failing=frozenset({"hincrby", "hincrbyfloat"}))
-    set_counter_sink(redis)
+    set_counter_sink(as_redis(redis))
     try:
         await observe(Provider.OPENAI, "respond", 1.0)
     finally:
@@ -263,7 +283,7 @@ async def test_a_histogram_write_failure_loses_a_sample_and_nothing_else() -> No
 async def test_redis_being_unreadable_does_not_empty_the_exposition() -> None:
     """A scrape during the outage an operator is investigating still answers."""
     redis = FailingRedis(failing=frozenset({"hgetall"}))
-    service = MetricsService(redis, registry=MetricsRegistry())
+    service = MetricsService(as_redis(redis), registry=MetricsRegistry())
 
     rendered = await service.render()
 
@@ -273,7 +293,9 @@ async def test_redis_being_unreadable_does_not_empty_the_exposition() -> None:
     assert "wasla_worker_heartbeat_alive" in rendered
 
 
-async def test_a_bucket_this_release_no_longer_declares_is_dropped(service, redis) -> None:
+async def test_a_bucket_this_release_no_longer_declares_is_dropped(
+    service: MetricsService, redis: FakeQueueRedis
+) -> None:
     """A bound left behind by an older release must not join a new one's series.
 
     Folding it into a neighbour would move observations between buckets, and a
@@ -294,7 +316,9 @@ async def test_a_bucket_this_release_no_longer_declares_is_dropped(service, redi
     assert "0.0001" not in rendered
 
 
-async def test_a_field_that_does_not_parse_costs_only_itself(service, redis) -> None:
+async def test_a_field_that_does_not_parse_costs_only_itself(
+    service: MetricsService, redis: FakeQueueRedis
+) -> None:
     key = f"{HISTOGRAM_PREFIX}:{METRIC}"
     redis.hashes[key] = {
         "nonsense": 1,
@@ -318,7 +342,9 @@ async def test_no_sink_makes_an_observation_a_no_op() -> None:
 # ---------------------------------------------------------------- cardinality
 
 
-async def test_the_buckets_are_the_ones_this_release_declares(sink, service) -> None:
+async def test_the_buckets_are_the_ones_this_release_declares(
+    sink: FakeQueueRedis, service: MetricsService
+) -> None:
     """Pinned, because changing them silently splits a dashboard's history."""
     await observe(Provider.OPENAI, "respond", 0.3)
 
@@ -332,7 +358,9 @@ async def test_the_buckets_are_the_ones_this_release_declares(sink, service) -> 
     assert len(published) == len(PROVIDER_LATENCY_BUCKETS) + 1
 
 
-async def test_no_identifier_can_become_a_latency_label(sink, service) -> None:
+async def test_no_identifier_can_become_a_latency_label(
+    sink: FakeQueueRedis, service: MetricsService
+) -> None:
     """The label guard runs on this metric too, on the way in and on the way out."""
     await record_provider_call(
         provider=Provider.OPENAI,

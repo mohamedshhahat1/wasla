@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import uuid
-from typing import cast
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -43,26 +43,26 @@ REDIRECT_URI = "https://app.wasla.test/auth/google/callback"
 class _FakePipeline:
     """Enough of a redis-py pipeline to be MULTI/EXEC for these tests."""
 
-    def __init__(self, store):
+    def __init__(self, store: _FakeRedisCommands) -> None:
         self._store = store
-        self._queued = []
+        self._queued: list[tuple[str, str]] = []
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> _FakePipeline:
         return self
 
-    async def __aexit__(self, *_: object):
+    async def __aexit__(self, *_: object) -> bool:
         return False
 
-    def get(self, key):
+    def get(self, key: str) -> None:
         self._queued.append(("get", key))
 
-    def delete(self, key):
+    def delete(self, key: str) -> None:
         self._queued.append(("delete", key))
 
-    async def execute(self):
+    async def execute(self) -> list[Any]:
         if self._store.broken:
             raise RedisConnectionError("redis is down")
-        results = []
+        results: list[Any] = []
         for operation, key in self._queued:
             if operation == "get":
                 results.append(self._store.values.get(key))
@@ -72,12 +72,19 @@ class _FakePipeline:
 
 
 class _FakeRedisCommands:
-    def __init__(self):
-        self.values = {}
-        self.expiries = {}
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+        self.expiries: dict[str, int | None] = {}
         self.broken = False
 
-    async def set(self, key, value, *, ex=None, nx=False):
+    async def set(
+        self,
+        key: str,
+        value: str,
+        *,
+        ex: int | None = None,
+        nx: bool = False,
+    ) -> bool | None:
         if self.broken:
             raise RedisConnectionError("redis is down")
         if nx and key in self.values:
@@ -86,16 +93,16 @@ class _FakeRedisCommands:
         self.expiries[key] = ex
         return True
 
-    def pipeline(self, transaction=True):
+    def pipeline(self, transaction: bool = True) -> _FakePipeline:
         return _FakePipeline(self)
 
 
 class _FakeRedis:
-    def __init__(self):
+    def __init__(self) -> None:
         self.commands = _FakeRedisCommands()
 
     @property
-    def client(self):
+    def client(self) -> _FakeRedisCommands:
         return self.commands
 
 
@@ -105,7 +112,7 @@ class _FakeRedis:
 BINDING = hash_binding("a-browser-binding-secret")
 
 
-def _store():
+def _store() -> tuple[OAuthFlowStore, _FakeRedis]:
     fake = _FakeRedis()
     return OAuthFlowStore(cast("RedisClient", fake)), fake
 
@@ -113,7 +120,7 @@ def _store():
 # --- state --------------------------------------------------------------------
 
 
-async def test_a_flow_can_be_started_and_spent_once():
+async def test_a_flow_can_be_started_and_spent_once() -> None:
     store, _ = _store()
     started = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
 
@@ -127,7 +134,7 @@ async def test_a_flow_can_be_started_and_spent_once():
     assert await store.spend(state=started.state) is None
 
 
-async def test_state_and_nonce_are_unpredictable():
+async def test_state_and_nonce_are_unpredictable() -> None:
     store, _ = _store()
     states = set()
     nonces = set()
@@ -141,13 +148,13 @@ async def test_state_and_nonce_are_unpredictable():
     assert all(len(state) >= 43 for state in states)
 
 
-async def test_a_flow_is_stored_with_a_bounded_lifetime():
+async def test_a_flow_is_stored_with_a_bounded_lifetime() -> None:
     store, fake = _store()
     started = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
     assert fake.commands.expiries[f"{KEY_PREFIX}{started.state}"] == FLOW_TTL_SECONDS
 
 
-async def test_an_expired_or_unknown_state_is_refused():
+async def test_an_expired_or_unknown_state_is_refused() -> None:
     store, _ = _store()
     # Nothing was stored, which is what an expired key looks like from here.
     assert await store.spend(state="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") is None
@@ -158,7 +165,7 @@ async def test_an_expired_or_unknown_state_is_refused():
     ["", "short", "has spaces in it and is long enough", "x" * 200, "../../etc/passwd"],
     ids=["empty", "too-short", "spaces", "too-long", "traversal"],
 )
-async def test_a_misshapen_state_never_becomes_a_lookup(state):
+async def test_a_misshapen_state_never_becomes_a_lookup(state: str) -> None:
     store, fake = _store()
     fake.commands.broken = True
     # Refused on shape alone, so Redis is never touched - which is also why a
@@ -166,16 +173,20 @@ async def test_a_misshapen_state_never_becomes_a_lookup(state):
     assert await store.spend(state=state) is None
 
 
-async def test_a_flow_records_which_kind_it_is():
+async def test_a_flow_records_which_kind_it_is() -> None:
     store, _ = _store()
     login = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
     link = await store.start(kind=FlowKind.LINK, binding=BINDING, user_id=uuid.uuid4())
 
-    assert (await store.spend(state=login.state)).kind is FlowKind.LOGIN
-    assert (await store.spend(state=link.state)).kind is FlowKind.LINK
+    spent_login = await store.spend(state=login.state)
+    spent_link = await store.spend(state=link.state)
+    assert spent_login is not None
+    assert spent_link is not None
+    assert spent_login.kind is FlowKind.LOGIN
+    assert spent_link.kind is FlowKind.LINK
 
 
-async def test_a_link_flow_remembers_the_account_that_started_it():
+async def test_a_link_flow_remembers_the_account_that_started_it() -> None:
     store, _ = _store()
     user_id = uuid.uuid4()
     started = await store.start(kind=FlowKind.LINK, binding=BINDING, user_id=user_id)
@@ -184,13 +195,15 @@ async def test_a_link_flow_remembers_the_account_that_started_it():
     assert spent.user_id == user_id
 
 
-async def test_a_login_flow_carries_no_account():
+async def test_a_login_flow_carries_no_account() -> None:
     store, _ = _store()
     started = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
-    assert (await store.spend(state=started.state)).user_id is None
+    spent = await store.spend(state=started.state)
+    assert spent is not None
+    assert spent.user_id is None
 
 
-async def test_a_corrupt_record_is_treated_as_absent():
+async def test_a_corrupt_record_is_treated_as_absent() -> None:
     store, fake = _store()
     started = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
     fake.commands.values[f"{KEY_PREFIX}{started.state}"] = "{not json"
@@ -200,14 +213,14 @@ async def test_a_corrupt_record_is_treated_as_absent():
 # --- degradation --------------------------------------------------------------
 
 
-async def test_starting_a_flow_fails_closed_when_redis_is_down():
+async def test_starting_a_flow_fails_closed_when_redis_is_down() -> None:
     store, fake = _store()
     fake.commands.broken = True
     with pytest.raises(DependencyUnavailableError):
         await store.start(kind=FlowKind.LOGIN, binding=BINDING)
 
 
-async def test_spending_a_flow_fails_closed_when_redis_is_down():
+async def test_spending_a_flow_fails_closed_when_redis_is_down() -> None:
     """ADR-051. A replay control that answers "not found" during an outage is a
     replay control that has been switched off, so this raises instead."""
     store, fake = _store()
@@ -220,7 +233,7 @@ async def test_spending_a_flow_fails_closed_when_redis_is_down():
 # --- PKCE ---------------------------------------------------------------------
 
 
-def test_the_pkce_challenge_is_s256_of_the_verifier():
+def test_the_pkce_challenge_is_s256_of_the_verifier() -> None:
     verifier = "a-verifier-value"
     expected = (
         base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
@@ -229,12 +242,12 @@ def test_the_pkce_challenge_is_s256_of_the_verifier():
     assert "=" not in code_challenge(verifier)
 
 
-def test_the_challenge_never_contains_the_verifier():
+def test_the_challenge_never_contains_the_verifier() -> None:
     verifier = "a-verifier-value"
     assert verifier not in code_challenge(verifier)
 
 
-async def test_the_verifier_meets_the_rfc_length_floor():
+async def test_the_verifier_meets_the_rfc_length_floor() -> None:
     store, _ = _store()
     started = await store.start(kind=FlowKind.LOGIN, binding=BINDING)
     assert 43 <= len(started.flow.code_verifier) <= 128
@@ -243,7 +256,7 @@ async def test_the_verifier_meets_the_rfc_length_floor():
 # --- the authorization request ------------------------------------------------
 
 
-def _client():
+def _client() -> GoogleOAuthClient:
     return GoogleOAuthClient(
         client_id=CLIENT_ID,
         client_secret="a-client-secret",
@@ -251,16 +264,17 @@ def _client():
     )
 
 
-def _params(url):
+def _params(url: str) -> dict[str, str]:
+    """The query, with each parameter as the single value it actually has."""
     return {key: value[0] for key, value in parse_qs(urlparse(url).query).items()}
 
 
-def test_the_authorization_url_points_at_google():
+def test_the_authorization_url_points_at_google() -> None:
     url = _client().authorization_url(state="s", nonce="n", challenge="c")
     assert url.startswith(GOOGLE_AUTHORIZATION_URL + "?")
 
 
-def test_the_authorization_url_carries_the_flow_values():
+def test_the_authorization_url_carries_the_flow_values() -> None:
     params = _params(
         _client().authorization_url(state="the-state", nonce="the-nonce", challenge="c")
     )
@@ -272,13 +286,13 @@ def test_the_authorization_url_carries_the_flow_values():
     assert params["scope"] == " ".join(SCOPES)
 
 
-def test_the_redirect_uri_comes_from_configuration():
+def test_the_redirect_uri_comes_from_configuration() -> None:
     """There is no argument to this method that could carry a redirect target."""
     params = _params(_client().authorization_url(state="s", nonce="n", challenge="c"))
     assert params["redirect_uri"] == REDIRECT_URI
 
 
-def test_the_authorization_request_never_asks_for_offline_access():
+def test_the_authorization_request_never_asks_for_offline_access() -> None:
     """A regression guard on a promise.
 
     `access_type=online` is why no Google refresh token can be stored: none is
@@ -289,7 +303,7 @@ def test_the_authorization_request_never_asks_for_offline_access():
     assert params["access_type"] == "online"
 
 
-def test_the_client_secret_is_never_in_the_authorization_url():
+def test_the_client_secret_is_never_in_the_authorization_url() -> None:
     url = _client().authorization_url(state="s", nonce="n", challenge="c")
     assert "a-client-secret" not in url
 
@@ -300,19 +314,21 @@ def test_the_client_secret_is_never_in_the_authorization_url():
 class _ScriptedClient(GoogleOAuthClient):
     """A client whose token request is scripted rather than networked."""
 
-    def __init__(self, outcome, **kwargs):
+    def __init__(self, outcome: object, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.outcome = outcome
-        self.form = None
+        self.form: dict[str, str] | None = None
 
-    async def _post_token_request(self, form):
+    async def _post_token_request(self, form: dict[str, str]) -> dict[str, Any]:
         self.form = form
         if isinstance(self.outcome, Exception):
             raise self.outcome
-        return self.outcome
+        assert isinstance(self.outcome, dict)
+        answer: dict[str, Any] = self.outcome
+        return answer
 
 
-def _scripted(outcome):
+def _scripted(outcome: object) -> _ScriptedClient:
     return _ScriptedClient(
         outcome,
         client_id=CLIENT_ID,
@@ -321,33 +337,34 @@ def _scripted(outcome):
     )
 
 
-async def test_an_exchange_returns_only_the_id_token():
+async def test_an_exchange_returns_only_the_id_token() -> None:
     client = _scripted({"id_token": "the.id.token", "access_token": "an-access-token"})
     assert await client.exchange(code="a-code", code_verifier="a-verifier") == "the.id.token"
 
 
-async def test_the_exchange_sends_the_verifier_and_the_configured_redirect():
+async def test_the_exchange_sends_the_verifier_and_the_configured_redirect() -> None:
     client = _scripted({"id_token": "t"})
     await client.exchange(code="a-code", code_verifier="a-verifier")
+    assert client.form is not None
     assert client.form["code_verifier"] == "a-verifier"
     assert client.form["redirect_uri"] == REDIRECT_URI
     assert client.form["grant_type"] == "authorization_code"
 
 
-async def test_a_response_without_an_id_token_is_a_failure():
+async def test_a_response_without_an_id_token_is_a_failure() -> None:
     client = _scripted({"access_token": "an-access-token"})
     with pytest.raises(GoogleExchangeError):
         await client.exchange(code="a-code", code_verifier="a-verifier")
 
 
-async def test_a_refused_exchange_is_a_failure():
+async def test_a_refused_exchange_is_a_failure() -> None:
     client = _scripted(GoogleExchangeError("refused"))
     with pytest.raises(GoogleExchangeError):
         await client.exchange(code="a-code", code_verifier="a-verifier")
 
 
 @pytest.mark.parametrize("code", ["", "x" * (MAX_CODE_LENGTH + 1)], ids=["empty", "oversized"])
-async def test_an_unusable_code_is_never_relayed_to_google(code):
+async def test_an_unusable_code_is_never_relayed_to_google(code: str) -> None:
     client = _scripted({"id_token": "t"})
     with pytest.raises(GoogleExchangeError):
         await client.exchange(code=code, code_verifier="a-verifier")

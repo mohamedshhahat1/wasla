@@ -30,6 +30,7 @@ import hashlib
 import hmac as hmac_module
 import json
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -80,7 +81,7 @@ EXPECTED_MESSAGE = (
 SECRET = "a-test-hmac-secret"
 
 
-def _provider(**overrides) -> PaymobProvider:
+def _provider(**overrides: Any) -> PaymobProvider:
     settings = {
         "secret_key": "sk_test_notreal",
         "public_key": "pk_test_notreal",
@@ -91,12 +92,12 @@ def _provider(**overrides) -> PaymobProvider:
     return PaymobProvider(**settings)  # type: ignore[arg-type]
 
 
-def _signed(transaction: dict, *, secret: str = SECRET) -> tuple[bytes, str]:
+def _signed(transaction: dict[str, Any], *, secret: str = SECRET) -> tuple[bytes, str]:
     body = json.dumps({"type": "TRANSACTION", "obj": transaction}).encode("utf-8")
     return body, hmac_signature(transaction, secret=secret)
 
 
-def _verified(transaction: dict) -> CallbackEvent:
+def _verified(transaction: dict[str, Any]) -> CallbackEvent:
     """Sign a transaction and read the event back out of it."""
     body, signature = _signed(transaction)
     return _provider().verify_callback(payload=body, signature=signature)

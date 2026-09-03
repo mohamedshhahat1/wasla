@@ -28,7 +28,7 @@ from app.core.proxy import (
 # ------------------------------------------------------------------ parsing
 
 
-def test_a_bare_address_becomes_a_single_host_network():
+def test_a_bare_address_becomes_a_single_host_network() -> None:
     """What an operator naming one proxy expects to be able to write."""
     networks = parse_trusted_proxies(["10.89.0.10"])
 
@@ -37,7 +37,7 @@ def test_a_bare_address_becomes_a_single_host_network():
     assert not is_trusted_peer("10.89.0.11", networks)
 
 
-def test_a_cidr_network_covers_its_hosts():
+def test_a_cidr_network_covers_its_hosts() -> None:
     networks = parse_trusted_proxies(["10.89.0.0/24"])
 
     assert is_trusted_peer("10.89.0.1", networks)
@@ -45,7 +45,7 @@ def test_a_cidr_network_covers_its_hosts():
     assert not is_trusted_peer("10.89.1.1", networks)
 
 
-def test_ipv6_addresses_and_networks_are_supported():
+def test_ipv6_addresses_and_networks_are_supported() -> None:
     networks = parse_trusted_proxies(["2001:db8::1", "fd00::/8"])
 
     assert is_trusted_peer("2001:db8::1", networks)
@@ -53,7 +53,7 @@ def test_ipv6_addresses_and_networks_are_supported():
     assert not is_trusted_peer("2001:db8::2", networks)
 
 
-def test_a_hostname_is_refused_rather_than_resolved():
+def test_a_hostname_is_refused_rather_than_resolved() -> None:
     """The exact value the shipped compose file used to carry.
 
     Refused rather than resolved on purpose: a name that resolves puts the
@@ -69,17 +69,17 @@ def test_a_hostname_is_refused_rather_than_resolved():
     "entry",
     ["nginx", "localhost", "10.0.0.256", "10.0.0.0/33", "not an address", "10.0.0.1:8080"],
 )
-def test_anything_that_is_not_an_address_or_network_is_refused(entry: str):
+def test_anything_that_is_not_an_address_or_network_is_refused(entry: str) -> None:
     with pytest.raises(ValueError):
         parse_trusted_proxies([entry])
 
 
-def test_blank_entries_are_skipped_rather_than_refused():
+def test_blank_entries_are_skipped_rather_than_refused() -> None:
     """A trailing comma in an environment variable is a typo, not a threat."""
     assert parse_trusted_proxies(["10.89.0.10", "", "  "]) == parse_trusted_proxies(["10.89.0.10"])
 
 
-def test_nothing_configured_trusts_nobody():
+def test_nothing_configured_trusts_nobody() -> None:
     """The safe default: no proxy, so no forwarding header is believed."""
     networks = trusted_networks([])
 
@@ -88,7 +88,7 @@ def test_nothing_configured_trusts_nobody():
     assert not is_trusted_peer("127.0.0.1", networks)
 
 
-def test_a_peer_that_is_not_an_address_is_never_trusted():
+def test_a_peer_that_is_not_an_address_is_never_trusted() -> None:
     """A unix socket, or a transport that reports something else entirely."""
     networks = parse_trusted_proxies(["10.89.0.0/24"])
 
@@ -100,13 +100,13 @@ def test_a_peer_that_is_not_an_address_is_never_trusted():
 # ------------------------------------------------------- header normalisation
 
 
-def test_an_address_is_returned_in_canonical_form():
+def test_an_address_is_returned_in_canonical_form() -> None:
     """Otherwise one client written two ways is two rate-limit buckets."""
     assert normalised_address(" 198.51.100.4 ") == "198.51.100.4"
     assert normalised_address("2001:0db8:0000::0001") == "2001:db8::1"
 
 
-def test_a_value_that_is_not_an_address_is_not_one():
+def test_a_value_that_is_not_an_address_is_not_one() -> None:
     for value in (None, "", "unknown", "198.51.100.4:443", "example.com"):
         assert normalised_address(value) is None
 
@@ -114,7 +114,7 @@ def test_a_value_that_is_not_an_address_is_not_one():
 # --------------------------------------------------------------- the setting
 
 
-def test_settings_refuse_to_build_with_a_hostname():
+def test_settings_refuse_to_build_with_a_hostname() -> None:
     """Fail-fast, so a misconfiguration is a container that says why.
 
     The failure being prevented produced no error at all: the deployment came
@@ -125,7 +125,7 @@ def test_settings_refuse_to_build_with_a_hostname():
         Settings(_env_file=None, environment="test", trusted_proxy_ips=["nginx"])
 
 
-def test_settings_accept_addresses_and_networks():
+def test_settings_accept_addresses_and_networks() -> None:
     settings = Settings(
         _env_file=None,
         environment="test",
@@ -135,7 +135,7 @@ def test_settings_accept_addresses_and_networks():
     assert settings.trusted_proxy_ips == ["10.89.0.10", "172.16.0.0/12", "::1"]
 
 
-def test_a_comma_separated_environment_value_is_parsed():
+def test_a_comma_separated_environment_value_is_parsed() -> None:
     """The only shape a container environment expresses comfortably."""
     settings = Settings(
         _env_file=None,
@@ -146,7 +146,7 @@ def test_a_comma_separated_environment_value_is_parsed():
     assert settings.trusted_proxy_ips == ["10.89.0.10", "10.89.0.11"]
 
 
-def test_the_shipped_production_default_is_a_real_address():
+def test_the_shipped_production_default_is_a_real_address() -> None:
     """The compose file and the parser have to agree, or nothing is trusted.
 
     Pinned as a value rather than read from the file: what matters is that the

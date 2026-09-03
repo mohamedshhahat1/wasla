@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 import pytest
@@ -30,7 +32,7 @@ PIXEL = base64.b64decode(
 )
 
 
-def _responses(handler) -> ResponsesClient:
+def _responses(handler: Callable[[httpx.Request], httpx.Response]) -> ResponsesClient:
     transport = httpx.MockTransport(handler)
     return ResponsesClient(
         http=httpx.AsyncClient(transport=transport),
@@ -39,7 +41,11 @@ def _responses(handler) -> ResponsesClient:
     )
 
 
-def _transcription(handler, *, model: str = "gpt-4o-mini-transcribe") -> TranscriptionClient:
+def _transcription(
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    model: str = "gpt-4o-mini-transcribe",
+) -> TranscriptionClient:
     transport = httpx.MockTransport(handler)
     return TranscriptionClient(
         http=httpx.AsyncClient(transport=transport),
@@ -49,7 +55,7 @@ def _transcription(handler, *, model: str = "gpt-4o-mini-transcribe") -> Transcr
     )
 
 
-def _reply(text: str) -> dict:
+def _reply(text: str) -> dict[str, Any]:
     return {
         "id": "resp_1",
         "output": [
@@ -63,7 +69,7 @@ def _reply(text: str) -> dict:
     }
 
 
-async def test_an_image_is_described():
+async def test_an_image_is_described() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_reply("A blue sofa with a price tag reading 4,500 EGP."))
 
@@ -74,13 +80,13 @@ async def test_an_image_is_described():
     assert result.method == "vision"
 
 
-async def test_an_image_is_sent_as_a_data_url_not_a_link():
+async def test_an_image_is_sent_as_a_data_url_not_a_link() -> None:
     """The alternative would put every customer's attachment behind a URL.
 
     That is a far wider exposure than handing the bytes to one request, so the
     image travels inline and nothing has to be publicly reachable.
     """
-    captured: list[dict] = []
+    captured: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(json.loads(request.read()))
@@ -96,7 +102,7 @@ async def test_an_image_is_sent_as_a_data_url_not_a_link():
     assert image["image_url"].startswith("data:image/png;base64,")
 
 
-async def test_a_model_that_says_nothing_is_an_error_not_an_empty_description():
+async def test_a_model_that_says_nothing_is_an_error_not_an_empty_description() -> None:
     """Inventing a description would be worse than reporting the failure."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -106,7 +112,7 @@ async def test_a_model_that_says_nothing_is_an_error_not_an_empty_description():
         await MediaReader(responses=_responses(handler)).read(content=PIXEL, mime_type="image/jpeg")
 
 
-async def test_a_voice_note_is_transcribed():
+async def test_a_voice_note_is_transcribed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"text": "ممكن اعرف السعر؟", "language": "arabic"})
 
@@ -119,7 +125,7 @@ async def test_a_voice_note_is_transcribed():
     assert result.method == "transcription"
 
 
-async def test_the_upload_filename_comes_from_the_type_not_the_customer():
+async def test_the_upload_filename_comes_from_the_type_not_the_customer() -> None:
     """The provider needs a filename to infer the container format.
 
     Reusing the one the customer's phone sent would let an attacker choose it,
@@ -139,7 +145,7 @@ async def test_the_upload_filename_comes_from_the_type_not_the_customer():
     assert b'filename="audio.mp3"' in captured[0]
 
 
-async def test_no_language_is_forced_on_the_transcription():
+async def test_no_language_is_forced_on_the_transcription() -> None:
     """Customers switch between Arabic and English inside one sentence.
 
     Pinning a language makes the other half come back as nonsense rather than
@@ -158,7 +164,7 @@ async def test_no_language_is_forced_on_the_transcription():
     assert b'name="language"' not in captured[0]
 
 
-async def test_silence_is_a_decision_not_a_failure():
+async def test_silence_is_a_decision_not_a_failure() -> None:
     """The file was opened and there was nothing in it. Retrying finds the same."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -170,7 +176,7 @@ async def test_silence_is_a_decision_not_a_failure():
         )
 
 
-async def test_a_plain_text_document_is_read_without_a_provider():
+async def test_a_plain_text_document_is_read_without_a_provider() -> None:
     result = await MediaReader().read(
         content=b"the warranty lasts two years", mime_type="text/plain"
     )
@@ -179,19 +185,19 @@ async def test_a_plain_text_document_is_read_without_a_provider():
     assert result.method == "extraction"
 
 
-async def test_a_document_with_no_text_layer_is_a_decision():
+async def test_a_document_with_no_text_layer_is_a_decision() -> None:
     from tests.unit.test_extraction import _blank_pdf
 
     with pytest.raises(ScannedDocumentError):
         await MediaReader().read(content=_blank_pdf(), mime_type="application/pdf")
 
 
-async def test_an_unsupported_type_is_refused():
+async def test_an_unsupported_type_is_refused() -> None:
     with pytest.raises(UnreadableDocumentError):
         await MediaReader().read(content=b"...", mime_type="application/zip")
 
 
-async def test_reading_an_image_without_a_client_configured_fails_clearly():
+async def test_reading_an_image_without_a_client_configured_fails_clearly() -> None:
     """A worker running documents alone should not need an API key.
 
     It should also not silently return nothing when handed an image.
@@ -200,9 +206,10 @@ async def test_reading_an_image_without_a_client_configured_fails_clearly():
         await MediaReader().read(content=PIXEL, mime_type="image/png")
 
 
-def test_can_read_matches_what_read_accepts():
+def test_can_read_matches_what_read_accepts() -> None:
     reader = MediaReader()
     for mime_type in ("image/jpeg", "audio/ogg", "application/pdf", "text/plain"):
         assert reader.can_read(mime_type)
-    for mime_type in ("application/zip", "video/mp4", None, ""):
-        assert not reader.can_read(mime_type)
+    for absent in ("application/zip", "video/mp4", ""):
+        assert not reader.can_read(absent)
+    assert not reader.can_read(None)

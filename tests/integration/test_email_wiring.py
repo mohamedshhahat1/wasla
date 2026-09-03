@@ -12,12 +12,15 @@ owners - and never from the request that triggered the notice.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.security import hash_password
@@ -40,6 +43,7 @@ from app.services.account_service import AccountService
 from app.services.email_templates import EmailTemplate
 from app.services.invitation_service import InvitationService
 from app.services.subscription_service import SubscriptionService
+from tests.fakes import as_database
 
 pytestmark = pytest.mark.integration
 
@@ -66,21 +70,23 @@ def _disabled_settings() -> Settings:
     return settings.model_copy(update={"email_enabled": False})
 
 
-async def _queued(session, template: EmailTemplate | None = None) -> list[OutboundEmail]:
+async def _queued(
+    session: AsyncSession, template: EmailTemplate | None = None
+) -> list[OutboundEmail]:
     statement = select(OutboundEmail)
     if template is not None:
         statement = statement.where(OutboundEmail.template == template.value)
     return list((await session.execute(statement)).scalars())
 
 
-async def _user(session, email: str, *, active: bool = True) -> User:
+async def _user(session: AsyncSession, email: str, *, active: bool = True) -> User:
     row = User(email=email, hashed_password=hash_password(PASSWORD), is_active=active)
     session.add(row)
     await session.flush()
     return row
 
 
-async def _workspace(session, *, slug: str, owner: User) -> Tenant:
+async def _workspace(session: AsyncSession, *, slug: str, owner: User) -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
     session.add(tenant)
     await session.flush()
@@ -99,7 +105,7 @@ async def _workspace(session, *, slug: str, owner: User) -> Tenant:
 # --- Invitations ---------------------------------------------------------
 
 
-async def test_issuing_an_invitation_queues_its_email(db_session):
+async def test_issuing_an_invitation_queues_its_email(db_session: AsyncSession) -> None:
     inviter = await _user(db_session, "owner@example.com")
     tenant = await _workspace(db_session, slug="acme-invite", owner=inviter)
 
@@ -117,7 +123,9 @@ async def test_issuing_an_invitation_queues_its_email(db_session):
     assert queued[0].tenant_id == tenant.id
 
 
-async def test_the_invitation_email_carries_the_token_and_the_workspace_name(db_session):
+async def test_the_invitation_email_carries_the_token_and_the_workspace_name(
+    db_session: AsyncSession,
+) -> None:
     inviter = await _user(db_session, "owner2@example.com")
     tenant = await _workspace(db_session, slug="acme-token", owner=inviter)
 
@@ -135,7 +143,9 @@ async def test_the_invitation_email_carries_the_token_and_the_workspace_name(db_
     assert queued[0].context["workspace_name"] == tenant.name
 
 
-async def test_the_invitation_email_is_keyed_to_its_invitation_row(db_session):
+async def test_the_invitation_email_is_keyed_to_its_invitation_row(
+    db_session: AsyncSession,
+) -> None:
     inviter = await _user(db_session, "owner3@example.com")
     tenant = await _workspace(db_session, slug="acme-key", owner=inviter)
 
@@ -151,7 +161,9 @@ async def test_the_invitation_email_is_keyed_to_its_invitation_row(db_session):
     assert queued[0].idempotency_key == f"invitation:{invitation.id}"
 
 
-async def test_no_invitation_email_is_queued_when_email_is_disabled(db_session):
+async def test_no_invitation_email_is_queued_when_email_is_disabled(
+    db_session: AsyncSession,
+) -> None:
     """A disabled deployment is a no-op, not a row that waits forever."""
     inviter = await _user(db_session, "owner4@example.com")
     tenant = await _workspace(db_session, slug="acme-off", owner=inviter)
@@ -167,7 +179,7 @@ async def test_no_invitation_email_is_queued_when_email_is_disabled(db_session):
     assert await _queued(db_session) == []
 
 
-async def test_a_rolled_back_invitation_leaves_no_email(db_session):
+async def test_a_rolled_back_invitation_leaves_no_email(db_session: AsyncSession) -> None:
     """The whole point of the outbox: the two share a fate."""
     inviter = await _user(db_session, "owner5@example.com")
     tenant = await _workspace(db_session, slug="acme-rollback", owner=inviter)
@@ -188,7 +200,7 @@ async def test_a_rolled_back_invitation_leaves_no_email(db_session):
 # --- Security notices ----------------------------------------------------
 
 
-async def test_changing_a_password_notifies_the_account(db_session):
+async def test_changing_a_password_notifies_the_account(db_session: AsyncSession) -> None:
     person = await _user(db_session, "person@example.com")
 
     await AccountService(db_session, settings=_settings()).change_password(
@@ -203,7 +215,7 @@ async def test_changing_a_password_notifies_the_account(db_session):
     assert queued[0].user_id == person.id
 
 
-async def test_revoking_sessions_notifies_the_account(db_session):
+async def test_revoking_sessions_notifies_the_account(db_session: AsyncSession) -> None:
     person = await _user(db_session, "revoked@example.com")
 
     await AccountService(db_session, settings=_settings()).revoke_sessions(user=person)
@@ -213,7 +225,7 @@ async def test_revoking_sessions_notifies_the_account(db_session):
     assert queued[0].recipient == "revoked@example.com"
 
 
-async def test_disabling_an_account_notifies_it(db_session):
+async def test_disabling_an_account_notifies_it(db_session: AsyncSession) -> None:
     person = await _user(db_session, "suspended@example.com")
     staff = await _user(db_session, "staff@example.com")
 
@@ -228,7 +240,7 @@ async def test_disabling_an_account_notifies_it(db_session):
     assert queued[0].recipient == "suspended@example.com"
 
 
-async def test_enabling_an_account_notifies_it(db_session):
+async def test_enabling_an_account_notifies_it(db_session: AsyncSession) -> None:
     person = await _user(db_session, "restored@example.com", active=False)
     staff = await _user(db_session, "staff2@example.com")
 
@@ -242,7 +254,9 @@ async def test_enabling_an_account_notifies_it(db_session):
     assert queued[0].recipient == "restored@example.com"
 
 
-async def test_a_security_notice_is_keyed_to_the_version_it_announces(db_session):
+async def test_a_security_notice_is_keyed_to_the_version_it_announces(
+    db_session: AsyncSession,
+) -> None:
     """One notice per act, however many times the request is retried."""
     person = await _user(db_session, "keyed@example.com")
     service = AccountService(db_session, settings=_settings())
@@ -254,7 +268,7 @@ async def test_a_security_notice_is_keyed_to_the_version_it_announces(db_session
     assert queued[0].idempotency_key == f"security-sessions_revoked:{person.id}:{version}"
 
 
-async def test_two_acts_on_one_account_queue_two_notices(db_session):
+async def test_two_acts_on_one_account_queue_two_notices(db_session: AsyncSession) -> None:
     person = await _user(db_session, "twice@example.com")
     service = AccountService(db_session, settings=_settings())
 
@@ -264,7 +278,7 @@ async def test_two_acts_on_one_account_queue_two_notices(db_session):
     assert len(await _queued(db_session, EmailTemplate.SESSIONS_REVOKED)) == 2
 
 
-async def test_a_rolled_back_revocation_leaves_no_notice(db_session):
+async def test_a_rolled_back_revocation_leaves_no_notice(db_session: AsyncSession) -> None:
     """An email announcing something that did not happen cannot be taken back."""
     person = await _user(db_session, "rollback@example.com")
     savepoint = await db_session.begin_nested()
@@ -278,7 +292,9 @@ async def test_a_rolled_back_revocation_leaves_no_notice(db_session):
 # --- Billing -------------------------------------------------------------
 
 
-async def _subscription(db_session, *, owner_email: str, slug: str) -> tuple:
+async def _subscription(
+    db_session: AsyncSession, *, owner_email: str, slug: str
+) -> tuple[Any, ...]:
     owner = await _user(db_session, owner_email)
     tenant = await _workspace(db_session, slug=slug, owner=owner)
     plan = Plan(
@@ -303,7 +319,7 @@ async def _subscription(db_session, *, owner_email: str, slug: str) -> tuple:
     return tenant, owner, plan, subscription
 
 
-async def test_cancelling_a_subscription_notifies_the_owners(db_session):
+async def test_cancelling_a_subscription_notifies_the_owners(db_session: AsyncSession) -> None:
     tenant, owner, _, _ = await _subscription(
         db_session, owner_email="billing@example.com", slug="acme-cancel"
     )
@@ -319,7 +335,9 @@ async def test_cancelling_a_subscription_notifies_the_owners(db_session):
     assert queued[0].context["workspace_name"] == tenant.name
 
 
-async def test_a_cancellation_notice_names_the_workspace_from_its_row(db_session):
+async def test_a_cancellation_notice_names_the_workspace_from_its_row(
+    db_session: AsyncSession,
+) -> None:
     """The only variable in a billing template, and it is never caller-supplied."""
     tenant, owner, _, _ = await _subscription(
         db_session, owner_email="billing2@example.com", slug="acme-name"
@@ -333,7 +351,7 @@ async def test_a_cancellation_notice_names_the_workspace_from_its_row(db_session
     assert queued[0].context["workspace_name"] == "Acme-Name".title()
 
 
-async def test_only_active_owners_are_notified(db_session):
+async def test_only_active_owners_are_notified(db_session: AsyncSession) -> None:
     """Billing notices go to the people who can act on them."""
     tenant, owner, _, _ = await _subscription(
         db_session, owner_email="owner-a@example.com", slug="acme-owners"
@@ -366,7 +384,7 @@ async def test_only_active_owners_are_notified(db_session):
     assert {row.recipient for row in queued} == {"owner-a@example.com"}
 
 
-async def test_another_workspaces_owners_are_never_notified(db_session):
+async def test_another_workspaces_owners_are_never_notified(db_session: AsyncSession) -> None:
     """Tenant isolation, on the one path that fans out to several people."""
     tenant, owner, _, _ = await _subscription(
         db_session, owner_email="ours@example.com", slug="acme-ours"
@@ -386,7 +404,7 @@ async def test_another_workspaces_owners_are_never_notified(db_session):
 # --- Secret containment --------------------------------------------------
 
 
-async def test_no_reset_token_survives_a_completed_send(db_session):
+async def test_no_reset_token_survives_a_completed_send(db_session: AsyncSession) -> None:
     """The context carries the link, and the send is where its life ends."""
     from app.integrations.email.fake import FakeEmailProvider
     from app.repositories.email_repository import EmailOutboxRepository
@@ -405,15 +423,15 @@ async def test_no_reset_token_survives_a_completed_send(db_session):
     )
 
     class _Handle:
-        def __init__(self, session):
+        def __init__(self, session: AsyncSession) -> None:
             self._session = session
 
         @asynccontextmanager
-        async def session(self):
+        async def session(self) -> AsyncIterator[AsyncSession]:
             yield self._session
 
     worker = EmailWorker(
-        database=_Handle(db_session),
+        database=as_database(_Handle(db_session)),
         settings=settings,
         provider=FakeEmailProvider(),
     )

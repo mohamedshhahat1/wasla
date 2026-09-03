@@ -8,6 +8,7 @@ wall-clock wait.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -54,11 +55,12 @@ class Recorder:
     def attempts(self) -> int:
         return len(self.requests)
 
-    def body(self, index: int = 0):
-        return json.loads(self.requests[index].content)
+    def body(self, index: int = 0) -> dict[str, Any]:
+        payload: dict[str, Any] = json.loads(self.requests[index].content)
+        return payload
 
 
-def _client(recorder: Recorder, **overrides) -> WhatsAppClient:
+def _client(recorder: Recorder, **overrides: Any) -> WhatsAppClient:
     return WhatsAppClient(
         http=httpx.AsyncClient(transport=httpx.MockTransport(recorder.handler)),
         access_token=ACCESS_TOKEN,
@@ -72,7 +74,7 @@ def _ok() -> httpx.Response:
     return httpx.Response(200, json=ACCEPTED)
 
 
-async def test_a_text_message_is_posted_where_meta_expects_it():
+async def test_a_text_message_is_posted_where_meta_expects_it() -> None:
     recorder = Recorder(_ok())
 
     sent = await _client(recorder).send_text(
@@ -90,7 +92,7 @@ async def test_a_text_message_is_posted_where_meta_expects_it():
     assert request.headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
 
 
-async def test_the_text_body_matches_the_cloud_api_contract():
+async def test_the_text_body_matches_the_cloud_api_contract() -> None:
     recorder = Recorder(_ok())
 
     await _client(recorder).send_text(phone_number_id=PHONE_NUMBER_ID, to=RECIPIENT, body="hi")
@@ -104,7 +106,7 @@ async def test_the_text_body_matches_the_cloud_api_contract():
     }
 
 
-async def test_rate_limiting_is_retried_and_then_succeeds():
+async def test_rate_limiting_is_retried_and_then_succeeds() -> None:
     recorder = Recorder(httpx.Response(429), _ok())
 
     sent = await _client(recorder).send_text(
@@ -118,7 +120,7 @@ async def test_rate_limiting_is_retried_and_then_succeeds():
     assert recorder.sleeps == [0.1]
 
 
-async def test_persistent_rate_limiting_raises_after_the_attempt_budget():
+async def test_persistent_rate_limiting_raises_after_the_attempt_budget() -> None:
     recorder = Recorder(httpx.Response(429))
 
     with pytest.raises(RateLimitedError):
@@ -131,7 +133,7 @@ async def test_persistent_rate_limiting_raises_after_the_attempt_budget():
     assert recorder.attempts == 3
 
 
-async def test_a_server_error_is_not_retried():
+async def test_a_server_error_is_not_retried() -> None:
     recorder = Recorder(httpx.Response(500, json={"error": {"code": 1, "type": "OAuthException"}}))
 
     with pytest.raises(ExternalServiceError):
@@ -146,7 +148,7 @@ async def test_a_server_error_is_not_retried():
     assert recorder.sleeps == []
 
 
-async def test_a_rejected_request_never_leaks_the_token_or_meta_text():
+async def test_a_rejected_request_never_leaks_the_token_or_meta_text() -> None:
     recorder = Recorder(
         httpx.Response(
             400,
@@ -166,7 +168,7 @@ async def test_a_rejected_request_never_leaks_the_token_or_meta_text():
     assert "secret-ish" not in message
 
 
-async def test_a_connection_error_is_retried():
+async def test_a_connection_error_is_retried() -> None:
     attempts = {"count": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -190,7 +192,7 @@ async def test_a_connection_error_is_retried():
     assert recorder.sleeps == [0.1]
 
 
-async def test_a_timeout_is_not_retried():
+async def test_a_timeout_is_not_retried() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("slow", request=request)
 
@@ -207,7 +209,7 @@ async def test_a_timeout_is_not_retried():
     assert recorder.sleeps == []
 
 
-async def test_an_acceptance_without_a_message_id_is_an_error():
+async def test_an_acceptance_without_a_message_id_is_an_error() -> None:
     recorder = Recorder(httpx.Response(200, json={"messaging_product": "whatsapp"}))
 
     # Delivery statuses arrive keyed on the id, so a message we cannot identify
@@ -220,7 +222,7 @@ async def test_an_acceptance_without_a_message_id_is_an_error():
         )
 
 
-async def test_media_needs_exactly_one_source():
+async def test_media_needs_exactly_one_source() -> None:
     recorder = Recorder(_ok())
     client = _client(recorder)
 
@@ -239,7 +241,7 @@ async def test_media_needs_exactly_one_source():
     assert recorder.attempts == 0
 
 
-async def test_a_caption_is_dropped_for_audio_and_kept_for_images():
+async def test_a_caption_is_dropped_for_audio_and_kept_for_images() -> None:
     recorder = Recorder(_ok())
     client = _client(recorder)
 
@@ -263,7 +265,7 @@ async def test_a_caption_is_dropped_for_audio_and_kept_for_images():
     assert recorder.body(1)["image"]["caption"] == "kept"
 
 
-async def test_a_document_keeps_its_filename():
+async def test_a_document_keeps_its_filename() -> None:
     recorder = Recorder(_ok())
 
     await _client(recorder).send_media(
@@ -277,7 +279,7 @@ async def test_a_document_keeps_its_filename():
     assert recorder.body()["document"] == {"id": "media-9", "filename": "invoice.pdf"}
 
 
-async def test_a_template_carries_its_language_and_components():
+async def test_a_template_carries_its_language_and_components() -> None:
     recorder = Recorder(_ok())
 
     await _client(recorder).send_template(
@@ -295,7 +297,7 @@ async def test_a_template_carries_its_language_and_components():
     assert payload["template"]["components"][0]["type"] == "body"
 
 
-async def test_buttons_are_limited_to_three():
+async def test_buttons_are_limited_to_three() -> None:
     recorder = Recorder(_ok())
     client = _client(recorder)
 
@@ -318,7 +320,7 @@ async def test_buttons_are_limited_to_three():
     assert recorder.attempts == 0
 
 
-async def test_reply_buttons_are_shaped_as_meta_expects():
+async def test_reply_buttons_are_shaped_as_meta_expects() -> None:
     recorder = Recorder(_ok())
 
     await _client(recorder).send_buttons(
@@ -336,7 +338,7 @@ async def test_reply_buttons_are_shaped_as_meta_expects():
     }
 
 
-async def test_marking_a_message_read_posts_a_status():
+async def test_marking_a_message_read_posts_a_status() -> None:
     recorder = Recorder(httpx.Response(200, json={"success": True}))
 
     await _client(recorder).mark_read(
@@ -351,7 +353,7 @@ async def test_marking_a_message_read_posts_a_status():
     }
 
 
-async def test_a_client_without_a_token_refuses_to_exist():
+async def test_a_client_without_a_token_refuses_to_exist() -> None:
     recorder = Recorder(_ok())
 
     # A missing platform credential is a misconfiguration, not a caller error.
@@ -372,7 +374,7 @@ CDN_URL = "https://lookaside.fbsbx.com/whatsapp/1234"
 MEDIA_CAP = 25 * 1024 * 1024
 
 
-def _descriptor(**overrides) -> httpx.Response:
+def _descriptor(**overrides: Any) -> httpx.Response:
     body = {
         "url": CDN_URL,
         "mime_type": "image/jpeg",
@@ -384,7 +386,7 @@ def _descriptor(**overrides) -> httpx.Response:
     return httpx.Response(200, json=body)
 
 
-async def test_a_file_is_fetched_in_two_steps():
+async def test_a_file_is_fetched_in_two_steps() -> None:
     """The webhook carries a handle, not a file.
 
     Resolving it returns a short-lived CDN URL, and that URL is fetched
@@ -403,7 +405,7 @@ async def test_a_file_is_fetched_in_two_steps():
     assert str(recorder.requests[1].url) == CDN_URL
 
 
-async def test_the_cdn_url_is_still_fetched_with_the_token():
+async def test_the_cdn_url_is_still_fetched_with_the_token() -> None:
     """It looks public and is not. Without the header Meta answers 401."""
     recorder = Recorder(_descriptor(), httpx.Response(200, content=b"bytes"))
 
@@ -412,7 +414,7 @@ async def test_the_cdn_url_is_still_fetched_with_the_token():
     assert recorder.requests[1].headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
 
 
-async def test_codec_parameters_are_stripped_from_a_fetched_type():
+async def test_codec_parameters_are_stripped_from_a_fetched_type() -> None:
     recorder = Recorder(
         _descriptor(mime_type="audio/ogg; codecs=opus"),
         httpx.Response(200, content=b"ogg"),
@@ -423,14 +425,14 @@ async def test_codec_parameters_are_stripped_from_a_fetched_type():
     assert downloaded.mime_type == "audio/ogg"
 
 
-async def test_a_descriptor_without_a_location_is_refused():
+async def test_a_descriptor_without_a_location_is_refused() -> None:
     recorder = Recorder(_descriptor(url=None))
 
     with pytest.raises(ExternalServiceError):
         await _client(recorder).fetch_media(MEDIA_ID, max_bytes=MEDIA_CAP)
 
 
-async def test_a_read_is_retried_where_a_send_would_not_be():
+async def test_a_read_is_retried_where_a_send_would_not_be() -> None:
     """The opposite policy to sending, deliberately.
 
     A repeated read costs a request and changes nothing anyone can see, so a
@@ -448,7 +450,7 @@ async def test_a_read_is_retried_where_a_send_would_not_be():
     assert recorder.attempts == 3
 
 
-async def test_a_body_that_passes_the_cap_is_abandoned_mid_read():
+async def test_a_body_that_passes_the_cap_is_abandoned_mid_read() -> None:
     """The cap has to bite during the read, not after it.
 
     A buffered fetch learns a file was too big only once the process is holding
@@ -462,7 +464,7 @@ async def test_a_body_that_passes_the_cap_is_abandoned_mid_read():
         await _client(recorder).fetch_media(MEDIA_ID, max_bytes=1024)
 
 
-async def test_an_oversized_body_is_not_retried():
+async def test_an_oversized_body_is_not_retried() -> None:
     """It is a decision, not a transient failure. Retrying re-reads the same file."""
     recorder = Recorder(_descriptor(), httpx.Response(200, content=b"y" * 4096))
 
@@ -474,7 +476,7 @@ async def test_an_oversized_body_is_not_retried():
     assert recorder.sleeps == []
 
 
-async def test_a_body_exactly_at_the_cap_is_accepted():
+async def test_a_body_exactly_at_the_cap_is_accepted() -> None:
     """A cap is a limit, not a limit minus one."""
     body = b"z" * 1024
     recorder = Recorder(_descriptor(), httpx.Response(200, content=body))
@@ -484,7 +486,7 @@ async def test_a_body_exactly_at_the_cap_is_accepted():
     assert downloaded.content == body
 
 
-async def test_a_read_gives_up_after_the_attempt_budget():
+async def test_a_read_gives_up_after_the_attempt_budget() -> None:
     recorder = Recorder(httpx.Response(500))
 
     with pytest.raises(ExternalServiceError):
@@ -493,14 +495,14 @@ async def test_a_read_gives_up_after_the_attempt_budget():
     assert recorder.attempts == 3
 
 
-async def test_a_rate_limited_read_reports_itself_as_such():
+async def test_a_rate_limited_read_reports_itself_as_such() -> None:
     recorder = Recorder(httpx.Response(429))
 
     with pytest.raises(RateLimitedError):
         await _client(recorder).probe_media(MEDIA_ID)
 
 
-async def test_a_size_can_be_asked_for_without_moving_the_file():
+async def test_a_size_can_be_asked_for_without_moving_the_file() -> None:
     """The point of the cap: not paying to fetch what will be thrown away."""
     recorder = Recorder(_descriptor(file_size=90_000_000))
 
@@ -511,7 +513,7 @@ async def test_a_size_can_be_asked_for_without_moving_the_file():
     assert recorder.attempts == 1
 
 
-async def test_an_upload_returns_the_id_it_can_be_sent_with():
+async def test_an_upload_returns_the_id_it_can_be_sent_with() -> None:
     recorder = Recorder(httpx.Response(200, json={"id": "uploaded-1"}))
 
     media_id = await _client(recorder).upload_media(
@@ -527,7 +529,7 @@ async def test_an_upload_returns_the_id_it_can_be_sent_with():
     assert b"whatsapp" in recorder.requests[0].content
 
 
-async def test_an_upload_meta_will_not_identify_is_refused():
+async def test_an_upload_meta_will_not_identify_is_refused() -> None:
     """Accepted but unidentifiable is unusable: the send needs the id."""
     recorder = Recorder(httpx.Response(200, json={}))
 
@@ -540,7 +542,7 @@ async def test_an_upload_meta_will_not_identify_is_refused():
         )
 
 
-async def test_a_rejected_upload_does_not_leak_metas_error_text():
+async def test_a_rejected_upload_does_not_leak_metas_error_text() -> None:
     """This client holds a live platform credential.
 
     Provider error text can echo fragments of the request, so only the status
@@ -568,7 +570,7 @@ TEMPLATES_URL = "https://graph.facebook.com/v21.0/" + WABA_ID + "/message_templa
 
 
 def _template_page(*names: str, next_url: str | None = None) -> httpx.Response:
-    body: dict = {
+    body: dict[str, Any] = {
         "data": [
             {
                 "id": f"id-{name}",
@@ -586,7 +588,7 @@ def _template_page(*names: str, next_url: str | None = None) -> httpx.Response:
     return httpx.Response(200, json=body)
 
 
-async def test_the_template_list_is_asked_for_where_meta_keeps_it():
+async def test_the_template_list_is_asked_for_where_meta_keeps_it() -> None:
     recorder = Recorder(_template_page("welcome"))
 
     templates = await _client(recorder).list_templates(waba_id=WABA_ID)
@@ -598,7 +600,7 @@ async def test_the_template_list_is_asked_for_where_meta_keeps_it():
     assert request.headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
 
 
-async def test_every_page_meta_offers_is_followed():
+async def test_every_page_meta_offers_is_followed() -> None:
     second = TEMPLATES_URL + "?after=cursor"
     recorder = Recorder(
         _template_page("welcome", next_url=second),
@@ -611,7 +613,7 @@ async def test_every_page_meta_offers_is_followed():
     assert str(recorder.requests[1].url) == second
 
 
-async def test_a_cyclic_next_link_cannot_loop_forever():
+async def test_a_cyclic_next_link_cannot_loop_forever() -> None:
     """Meta's `next` is followed, so a broken one must still terminate."""
     recorder = Recorder(_template_page("welcome", next_url=TEMPLATES_URL + "?after=same"))
 
@@ -621,14 +623,14 @@ async def test_a_cyclic_next_link_cannot_loop_forever():
     assert recorder.attempts == 3
 
 
-async def test_a_template_list_without_data_is_refused():
+async def test_a_template_list_without_data_is_refused() -> None:
     recorder = Recorder(httpx.Response(200, json={"paging": {}}))
 
     with pytest.raises(ExternalServiceError):
         await _client(recorder).list_templates(waba_id=WABA_ID)
 
 
-async def test_a_transient_failure_on_the_template_read_is_retried():
+async def test_a_transient_failure_on_the_template_read_is_retried() -> None:
     """Reads take the wide retry policy: asking twice changes nothing."""
     recorder = Recorder(httpx.Response(500), _template_page("welcome"))
 

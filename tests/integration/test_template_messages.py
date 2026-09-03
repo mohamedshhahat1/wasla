@@ -12,9 +12,11 @@ parses the request, so a change to the Cloud API payload still fails here.
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.exceptions import ValidationError
@@ -75,7 +77,7 @@ class Recorder:
 
 
 @pytest.fixture
-def meta(monkeypatch) -> Recorder:
+def meta(monkeypatch: pytest.MonkeyPatch) -> Recorder:
     recorder = Recorder()
     monkeypatch.setattr(
         messaging_module,
@@ -85,7 +87,11 @@ def meta(monkeypatch) -> Recorder:
     return recorder
 
 
-async def _conversation(session, *, last_inbound_at):
+async def _conversation(
+    session: AsyncSession,
+    *,
+    last_inbound_at: datetime | None,
+) -> tuple[Any, ...]:
     tenant = Tenant(name="Acme", slug="acme")
     session.add(tenant)
     await session.flush()
@@ -111,7 +117,9 @@ async def _conversation(session, *, last_inbound_at):
     return tenant, conversation
 
 
-async def test_a_template_send_is_recorded_as_a_template(db_session, settings, meta):
+async def test_a_template_send_is_recorded_as_a_template(
+    db_session: AsyncSession, settings: Settings, meta: Recorder
+) -> None:
     # Deliberately stale: a template must not need an open window.
     tenant, conversation = await _conversation(
         db_session,
@@ -133,7 +141,9 @@ async def test_a_template_send_is_recorded_as_a_template(db_session, settings, m
     assert message.wa_message_id == WAMID
 
 
-async def test_the_body_stays_empty_because_meta_renders_the_text(db_session, settings, meta):
+async def test_the_body_stays_empty_because_meta_renders_the_text(
+    db_session: AsyncSession, settings: Settings, meta: Recorder
+) -> None:
     tenant, conversation = await _conversation(
         db_session,
         last_inbound_at=datetime.now(UTC) - timedelta(days=3),
@@ -151,7 +161,9 @@ async def test_the_body_stays_empty_because_meta_renders_the_text(db_session, se
     assert message.body is None
 
 
-async def test_the_template_reaches_meta_in_the_cloud_api_shape(db_session, settings, meta):
+async def test_the_template_reaches_meta_in_the_cloud_api_shape(
+    db_session: AsyncSession, settings: Settings, meta: Recorder
+) -> None:
     tenant, conversation = await _conversation(
         db_session,
         last_inbound_at=datetime.now(UTC) - timedelta(days=3),
@@ -173,10 +185,10 @@ async def test_the_template_reaches_meta_in_the_cloud_api_shape(db_session, sett
 
 
 async def test_free_text_outside_the_window_is_refused_where_a_template_is_not(
-    db_session,
-    settings,
-    meta,
-):
+    db_session: AsyncSession,
+    settings: Settings,
+    meta: Recorder,
+) -> None:
     tenant, conversation = await _conversation(
         db_session,
         last_inbound_at=datetime.now(UTC) - timedelta(days=3),
@@ -195,7 +207,9 @@ async def test_free_text_outside_the_window_is_refused_where_a_template_is_not(
     assert message.status is MessageStatus.SENT
 
 
-async def test_a_text_send_leaves_the_template_columns_empty(db_session, settings, meta):
+async def test_a_text_send_leaves_the_template_columns_empty(
+    db_session: AsyncSession, settings: Settings, meta: Recorder
+) -> None:
     tenant, conversation = await _conversation(db_session, last_inbound_at=datetime.now(UTC))
     service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
 

@@ -6,8 +6,10 @@ and that two workspaces talking to the same customer stay separate.
 """
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.conversation import (
     ConversationStatus,
@@ -39,14 +41,19 @@ SENT_AT = "1786000000"
 STATUS_AT = "1786000100"
 
 
-async def _tenant(session, *, slug):
+async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def _account(session, *, tenant, phone_number_id):
+async def _account(
+    session: AsyncSession,
+    *,
+    tenant: Tenant,
+    phone_number_id: str,
+) -> WhatsAppAccount:
     account = WhatsAppAccount(
         tenant_id=tenant.id,
         phone_number_id=phone_number_id,
@@ -60,13 +67,13 @@ async def _account(session, *, tenant, phone_number_id):
 
 def _inbound(
     *,
-    phone_number_id=PHONE_NUMBER_ID,
-    message_id=WAMID_IN,
-    text="Hello",
-    message_type="text",
-    profile_name=PROFILE_NAME,
-):
-    message = {
+    phone_number_id: str = PHONE_NUMBER_ID,
+    message_id: str = WAMID_IN,
+    text: str = "Hello",
+    message_type: str = "text",
+    profile_name: str = PROFILE_NAME,
+) -> dict[str, Any]:
+    message: dict[str, Any] = {
         "id": message_id,
         "from": CUSTOMER,
         "type": message_type,
@@ -94,7 +101,9 @@ def _inbound(
     }
 
 
-def _status(*, state, message_id=WAMID_OUT, phone_number_id=PHONE_NUMBER_ID):
+def _status(
+    *, state: str, message_id: str = WAMID_OUT, phone_number_id: str = PHONE_NUMBER_ID
+) -> dict[str, Any]:
     return {
         "entry": [
             {
@@ -118,7 +127,7 @@ def _status(*, state, message_id=WAMID_OUT, phone_number_id=PHONE_NUMBER_ID):
     }
 
 
-async def test_inbound_message_creates_the_whole_aggregate(db_session):
+async def test_inbound_message_creates_the_whole_aggregate(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     account = await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
 
@@ -153,7 +162,7 @@ async def test_inbound_message_creates_the_whole_aggregate(db_session):
     assert message.conversation_id == conversation.id
 
 
-async def test_replaying_a_delivery_changes_nothing(db_session):
+async def test_replaying_a_delivery_changes_nothing(db_session: AsyncSession) -> None:
     """Meta retries until it gets a 200, so replay is the normal case."""
     tenant = await _tenant(db_session, slug="acme")
     account = await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
@@ -166,18 +175,20 @@ async def test_replaying_a_delivery_changes_nothing(db_session):
     assert replay.duplicates == 1
 
     contact = await ContactRepository(db_session, tenant_id=tenant.id).get_by_wa_id(CUSTOMER)
+    assert contact is not None
     conversations = ConversationRepository(db_session, tenant_id=tenant.id)
     conversation = await conversations.get_for_contact(
         contact_id=contact.id,
         account_id=account.id,
     )
+    assert conversation is not None
     messages = await MessageRepository(db_session, tenant_id=tenant.id).list_for_conversation(
         conversation_id=conversation.id
     )
     assert len(messages) == 1
 
 
-async def test_a_second_message_reuses_the_conversation(db_session):
+async def test_a_second_message_reuses_the_conversation(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, slug="acme")
     account = await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
     service = WhatsAppIngestionService(session=db_session)
@@ -188,11 +199,13 @@ async def test_a_second_message_reuses_the_conversation(db_session):
     )
 
     contact = await ContactRepository(db_session, tenant_id=tenant.id).get_by_wa_id(CUSTOMER)
+    assert contact is not None
     conversations = ConversationRepository(db_session, tenant_id=tenant.id)
     conversation = await conversations.get_for_contact(
         contact_id=contact.id,
         account_id=account.id,
     )
+    assert conversation is not None
     messages = await MessageRepository(db_session, tenant_id=tenant.id).list_for_conversation(
         conversation_id=conversation.id
     )
@@ -200,7 +213,7 @@ async def test_a_second_message_reuses_the_conversation(db_session):
     assert len(await conversations.list_open()) == 1
 
 
-async def test_an_unrecognised_type_is_stored_as_unsupported(db_session):
+async def test_an_unrecognised_type_is_stored_as_unsupported(db_session: AsyncSession) -> None:
     """A new Meta message type must not drop the message.
 
     "reaction" rather than "sticker": stickers became a recognised type in
@@ -220,18 +233,20 @@ async def test_an_unrecognised_type_is_stored_as_unsupported(db_session):
     assert message.body is None
 
 
-async def test_a_late_status_never_moves_a_message_backwards(db_session):
+async def test_a_late_status_never_moves_a_message_backwards(db_session: AsyncSession) -> None:
     """Meta does not guarantee ordering; delivered after read must not undo it."""
     tenant = await _tenant(db_session, slug="acme")
     account = await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
     await WhatsAppIngestionService(session=db_session).ingest(_inbound())
 
     contact = await ContactRepository(db_session, tenant_id=tenant.id).get_by_wa_id(CUSTOMER)
+    assert contact is not None
     conversations = ConversationRepository(db_session, tenant_id=tenant.id)
     conversation = await conversations.get_for_contact(
         contact_id=contact.id,
         account_id=account.id,
     )
+    assert conversation is not None
 
     messages = MessageRepository(db_session, tenant_id=tenant.id)
     outbound = await messages.stage_outbound(
@@ -247,13 +262,14 @@ async def test_a_late_status_never_moves_a_message_backwards(db_session):
     await WhatsAppIngestionService(session=db_session).ingest(_status(state="delivered"))
 
     projected = await messages.get_by_wa_message_id(WAMID_OUT)
+    assert projected is not None
     assert projected.status is MessageStatus.READ
     assert projected.read_at is not None
     # The timestamp is still recorded even though the status did not move.
     assert projected.delivered_at is not None
 
 
-async def test_a_status_for_an_unknown_message_is_not_an_error(db_session):
+async def test_a_status_for_an_unknown_message_is_not_an_error(db_session: AsyncSession) -> None:
     """Normal for traffic sent outside Wasla, so the event still stores."""
     tenant = await _tenant(db_session, slug="acme")
     await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
@@ -267,7 +283,7 @@ async def test_a_status_for_an_unknown_message_is_not_an_error(db_session):
     assert await messages.get_by_wa_message_id("wamid.never-seen") is None
 
 
-async def test_the_same_customer_is_separate_in_each_workspace(db_session):
+async def test_the_same_customer_is_separate_in_each_workspace(db_session: AsyncSession) -> None:
     """One person may be a customer of two businesses on the platform."""
     first = await _tenant(db_session, slug="acme")
     second = await _tenant(db_session, slug="globex")
@@ -290,7 +306,7 @@ async def test_the_same_customer_is_separate_in_each_workspace(db_session):
     assert len(await ConversationRepository(db_session, tenant_id=second.id).list_open()) == 1
 
 
-async def test_an_event_for_an_unknown_number_is_ignored(db_session):
+async def test_an_event_for_an_unknown_number_is_ignored(db_session: AsyncSession) -> None:
     """Someone else's number, or one that was disconnected."""
     await _tenant(db_session, slug="acme")
 

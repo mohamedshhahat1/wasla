@@ -8,7 +8,10 @@ declarations promise are actually enforced.
 
 from __future__ import annotations
 
-from sqlalchemy import Table, UniqueConstraint
+from typing import Any
+
+from sqlalchemy import Column, Table, UniqueConstraint
+from sqlalchemy.sql.schema import ScalarElementColumnDefault
 
 from app.db.models.agent import (
     DEFAULT_MEMORY_MESSAGE_LIMIT,
@@ -18,6 +21,7 @@ from app.db.models.agent import (
     AgentStatus,
     AgentTool,
 )
+from tests.fakes import as_table
 
 
 def _index_names(table: Table) -> set[str]:
@@ -31,67 +35,81 @@ def _unique_columns(table: Table, name: str) -> tuple[str, ...]:
     raise AssertionError(f"{table.name} has no unique constraint named {name}")
 
 
-def test_agent_tables_declare_the_indexes_migration_0005_creates():
-    assert _index_names(Agent.__table__) == {
+def _default(column: Column[Any]) -> Any:
+    """The value a column defaults to.
+
+    `Column.default` is declared as `DefaultGenerator | None` because a
+    default can be a callable, a sequence or a server-side expression. Every
+    default asserted here is a scalar, and `ScalarElementColumnDefault` is
+    the one that carries `arg` - so the narrowing is what makes the read
+    legitimate rather than a hope.
+    """
+    default = column.default
+    assert isinstance(default, ScalarElementColumnDefault)
+    return default.arg
+
+
+def test_agent_tables_declare_the_indexes_migration_0005_creates() -> None:
+    assert _index_names(as_table(Agent.__table__)) == {
         "ix_agents_tenant_id",
         "ix_agents_tenant_id_status",
     }
-    assert _index_names(AgentTool.__table__) == {
+    assert _index_names(as_table(AgentTool.__table__)) == {
         "ix_agent_tools_tenant_id",
         "ix_agent_tools_agent_id",
     }
 
 
-def test_enum_values_match_the_migration_literals():
+def test_enum_values_match_the_migration_literals() -> None:
     assert [member.value for member in AgentStatus] == ["draft", "active", "disabled"]
 
 
-def test_agent_names_are_unique_per_workspace_not_globally():
+def test_agent_names_are_unique_per_workspace_not_globally() -> None:
     """Two businesses may both call their assistant "Sales"."""
-    assert _unique_columns(Agent.__table__, "uq_agents_tenant_id_name") == (
+    assert _unique_columns(as_table(Agent.__table__), "uq_agents_tenant_id_name") == (
         "tenant_id",
         "name",
     )
 
 
-def test_a_tool_is_granted_once_per_agent():
+def test_a_tool_is_granted_once_per_agent() -> None:
     assert _unique_columns(
-        AgentTool.__table__,
+        as_table(AgentTool.__table__),
         "uq_agent_tools_tenant_id_agent_id_name",
     ) == ("tenant_id", "agent_id", "name")
 
 
-def test_tenant_foreign_keys_cascade():
+def test_tenant_foreign_keys_cascade() -> None:
     for table in (Agent.__table__, AgentTool.__table__):
         (foreign_key,) = table.c.tenant_id.foreign_keys
         assert foreign_key.column.table.name == "tenants"
         assert foreign_key.ondelete == "CASCADE"
 
 
-def test_a_grant_dies_with_its_agent():
-    (foreign_key,) = AgentTool.__table__.c.agent_id.foreign_keys
+def test_a_grant_dies_with_its_agent() -> None:
+    (foreign_key,) = as_table(AgentTool.__table__).c.agent_id.foreign_keys
     assert foreign_key.column.table.name == "agents"
     assert foreign_key.ondelete == "CASCADE"
 
 
-def test_enum_defaults_are_application_side():
+def test_enum_defaults_are_application_side() -> None:
     """Migration 0005 declares no server default for the status column.
 
     A server_default here would put the metadata and the migration in
     disagreement, and env.py compares server defaults.
     """
-    column = Agent.__table__.c.status
+    column = as_table(Agent.__table__).c.status
     assert column.server_default is None
     assert column.default is not None
 
 
-def test_audit_timestamps_have_server_defaults():
+def test_audit_timestamps_have_server_defaults() -> None:
     for table in (Agent.__table__, AgentTool.__table__):
         assert table.c.created_at.server_default is not None
         assert table.c.updated_at.server_default is not None
 
 
-def test_the_agent_row_holds_no_provider_credential():
+def test_the_agent_row_holds_no_provider_credential() -> None:
     """A model id is configuration; an API key is not (ADR-007).
 
     Matched on whole column names rather than substrings: `max_output_tokens`
@@ -107,27 +125,29 @@ def test_the_agent_row_holds_no_provider_credential():
         "secret",
         "token",
     }
-    assert forbidden.isdisjoint(Agent.__table__.columns.keys())
+    assert forbidden.isdisjoint(as_table(Agent.__table__).columns.keys())
 
 
-def test_configuration_defaults_are_declared_once():
+def test_configuration_defaults_are_declared_once() -> None:
     """The column default and the repository signature read the same constant."""
-    assert Agent.__table__.c.temperature.default.arg == DEFAULT_TEMPERATURE
-    assert Agent.__table__.c.memory_message_limit.default.arg == DEFAULT_MEMORY_MESSAGE_LIMIT
-    assert Agent.__table__.c.memory_token_budget.default.arg == DEFAULT_MEMORY_TOKEN_BUDGET
+    assert _default(as_table(Agent.__table__).c.temperature) == DEFAULT_TEMPERATURE
+    assert (
+        _default(as_table(Agent.__table__).c.memory_message_limit) == DEFAULT_MEMORY_MESSAGE_LIMIT
+    )
+    assert _default(as_table(Agent.__table__).c.memory_token_budget) == DEFAULT_MEMORY_TOKEN_BUDGET
 
 
-def test_a_new_agent_is_a_draft_and_answers_nobody():
+def test_a_new_agent_is_a_draft_and_answers_nobody() -> None:
     """DRAFT exists so an agent can be reviewed before it faces a customer."""
-    assert Agent.__table__.c.status.default.arg is AgentStatus.DRAFT
+    assert _default(as_table(Agent.__table__).c.status) is AgentStatus.DRAFT
     assert Agent(status=AgentStatus.DRAFT).is_answering is False
 
 
-def test_only_an_active_agent_answers():
+def test_only_an_active_agent_answers() -> None:
     assert Agent(status=AgentStatus.ACTIVE).is_answering is True
     assert Agent(status=AgentStatus.DISABLED).is_answering is False
 
 
-def test_agents_are_retired_rather_than_deleted():
+def test_agents_are_retired_rather_than_deleted() -> None:
     """Status is the retirement mechanism, so there is no soft-delete column."""
-    assert "deleted_at" not in Agent.__table__.columns
+    assert "deleted_at" not in as_table(Agent.__table__).columns

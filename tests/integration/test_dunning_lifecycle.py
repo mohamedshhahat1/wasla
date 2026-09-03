@@ -26,16 +26,17 @@ from __future__ import annotations
 import json
 import secrets
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI, Request
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -102,7 +103,7 @@ class _Infra:
         self.commands = self
 
     @property
-    def client(self):
+    def client(self) -> _Infra:
         return self.commands
 
     async def incr(self, key: str) -> int:
@@ -121,7 +122,7 @@ class _Infra:
         return None
 
 
-def _settings(**overrides: object) -> Settings:
+def _settings(**overrides: Any) -> Settings:
     values: dict[str, object] = {
         "_env_file": None,
         "environment": "test",
@@ -317,7 +318,7 @@ async def _unpaid_invoice(
     return invoice
 
 
-def _worker(session: AsyncSession, **overrides: object) -> BillingWorker:
+def _worker(session: AsyncSession, **overrides: Any) -> BillingWorker:
     return BillingWorker(
         database=SessionHandle(session),  # type: ignore[arg-type]
         settings=_settings(**overrides),
@@ -344,8 +345,8 @@ async def _notices(session: AsyncSession, template: str) -> list[OutboundEmail]:
     return list(rows.scalars().all())
 
 
-def _transaction(*, reference: str, amount_cents: int = 9900, **overrides: object) -> dict:
-    transaction: dict = {
+def _transaction(*, reference: str, amount_cents: int = 9900, **overrides: Any) -> dict[str, Any]:
+    transaction: dict[str, Any] = {
         "id": 700000000 + int(reference.replace("-", "")[:6], 16) % 1_000_000,
         "pending": False,
         "amount_cents": amount_cents,
@@ -369,7 +370,12 @@ def _transaction(*, reference: str, amount_cents: int = 9900, **overrides: objec
     return transaction
 
 
-async def _pay_reference(http: AsyncClient, reference: str, *, amount_cents: int = 9900):
+async def _pay_reference(
+    http: AsyncClient,
+    reference: str,
+    *,
+    amount_cents: int = 9900,
+) -> Response:
     """A callback exactly as Paymob sends one, signed with the real scheme."""
     transaction = _transaction(reference=reference, amount_cents=amount_cents)
     signature = hmac_signature(transaction, secret=HMAC_SECRET)
@@ -380,7 +386,7 @@ async def _pay_reference(http: AsyncClient, reference: str, *, amount_cents: int
     )
 
 
-async def _pay(http: AsyncClient, payment: Payment):
+async def _pay(http: AsyncClient, payment: Payment) -> Response:
     return await _pay_reference(http, str(payment.id))
 
 
@@ -841,11 +847,12 @@ async def test_a_suspended_workspace_cannot_change_its_way_out_of_the_bill(
     await _subscription(db_session, tenant, paid, status=SubscriptionStatus.SUSPENDED)
     service = SubscriptionService(db_session, tenant_id=tenant.id, settings=_settings())
 
-    for call in (
+    refusals: tuple[Callable[[], Awaitable[object]], ...] = (
         lambda: service.change_plan(plan_code=free.code, now=NOW),
         lambda: service.cancel(now=NOW),
         lambda: service.resume(),
-    ):
+    )
+    for call in refusals:
         with pytest.raises(ConflictError) as caught:
             await call()
         assert "suspended" in str(caught.value).lower()
@@ -891,7 +898,8 @@ async def _suspended_workspace(
     assert subscription.status is SubscriptionStatus.PAST_DUE
 
     await _worker(session).run_once(now=NOW)
-    assert subscription.status is SubscriptionStatus.SUSPENDED
+    status: SubscriptionStatus = subscription.status
+    assert status is SubscriptionStatus.SUSPENDED
 
     await _act_as_owner(app, session, tenant, user)
     return tenant, user, subscription, invoice

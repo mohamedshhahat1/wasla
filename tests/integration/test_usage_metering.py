@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEvent, UsageEventType, UsageUnit
@@ -26,14 +27,14 @@ UNTIL = datetime(2026, 9, 1, tzinfo=UTC)
 INSIDE = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
 
 
-async def _tenant(session, slug: str) -> Tenant:
+async def _tenant(session: AsyncSession, slug: str) -> Tenant:
     tenant = Tenant(name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
 
 
-async def test_a_recorded_meter_lands_with_its_own_unit(db_session):
+async def test_a_recorded_meter_lands_with_its_own_unit(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, "acme")
     recorder = UsageRecorder(db_session, tenant_id=tenant.id)
 
@@ -48,7 +49,7 @@ async def test_a_recorded_meter_lands_with_its_own_unit(db_session):
     assert stored[0].occurred_at == INSIDE
 
 
-async def test_nothing_is_stored_for_nothing_consumed(db_session):
+async def test_nothing_is_stored_for_nothing_consumed(db_session: AsyncSession) -> None:
     """A model that reported no output tokens is not a row; it is an absence.
 
     Storing it would mean scanning rows that can never change a sum.
@@ -64,7 +65,9 @@ async def test_nothing_is_stored_for_nothing_consumed(db_session):
     assert count == 0
 
 
-async def test_one_agent_turn_meters_the_request_and_both_token_counts(db_session):
+async def test_one_agent_turn_meters_the_request_and_both_token_counts(
+    db_session: AsyncSession,
+) -> None:
     tenant = await _tenant(db_session, "acme")
     recorder = UsageRecorder(db_session, tenant_id=tenant.id)
 
@@ -85,10 +88,11 @@ async def test_one_agent_turn_meters_the_request_and_both_token_counts(db_sessio
     stored = (await db_session.execute(select(UsageEvent))).scalars().all()
     # The model is on every line, because a token from one model is not a token
     # from another and a bill that cannot say which was used cannot be checked.
-    assert {row.meta["model"] for row in stored} == {"gpt-5.1"}
+    assert all(row.meta is not None for row in stored)
+    assert {row.meta["model"] for row in stored if row.meta} == {"gpt-5.1"}
 
 
-async def test_a_turn_that_rolls_back_is_not_billed(db_session):
+async def test_a_turn_that_rolls_back_is_not_billed(db_session: AsyncSession) -> None:
     """The whole reason metering shares the caller's transaction."""
     tenant = await _tenant(db_session, "acme")
     await db_session.commit()
@@ -102,7 +106,7 @@ async def test_a_turn_that_rolls_back_is_not_billed(db_session):
     assert count == 0
 
 
-async def test_the_window_is_half_open(db_session):
+async def test_the_window_is_half_open(db_session: AsyncSession) -> None:
     """Two adjacent windows must sum to the pair, which a closed upper bound
     would break by counting a midnight row in both."""
     tenant = await _tenant(db_session, "acme")
@@ -120,7 +124,7 @@ async def test_the_window_is_half_open(db_session):
     assert [total.quantity for total in totals] == [2]
 
 
-async def test_a_meter_can_be_asked_for_on_its_own(db_session):
+async def test_a_meter_can_be_asked_for_on_its_own(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, "acme")
     recorder = UsageRecorder(db_session, tenant_id=tenant.id)
     recorder.record(UsageEventType.RAG_QUERY, occurred_at=INSIDE)
@@ -135,7 +139,7 @@ async def test_a_meter_can_be_asked_for_on_its_own(db_session):
     ]
 
 
-async def test_a_series_has_one_point_per_day_per_meter(db_session):
+async def test_a_series_has_one_point_per_day_per_meter(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session, "acme")
     recorder = UsageRecorder(db_session, tenant_id=tenant.id)
     recorder.record(UsageEventType.WHATSAPP_MESSAGE_RECEIVED, occurred_at=INSIDE)
@@ -159,7 +163,7 @@ async def test_a_series_has_one_point_per_day_per_meter(db_session):
     ]
 
 
-async def test_a_summary_names_the_counters_a_dashboard_asks_for(db_session):
+async def test_a_summary_names_the_counters_a_dashboard_asks_for(db_session: AsyncSession) -> None:
     # A minute ago, not "now", and the minute is load-bearing. The default
     # window ends at `datetime.now(UTC)` read inside `summary()`, the window is
     # half-open, and `datetime.now` on some hosts has a granularity of a few
@@ -183,7 +187,7 @@ async def test_a_summary_names_the_counters_a_dashboard_asks_for(db_session):
     assert summary.total_tokens == 345
 
 
-async def test_one_workspace_cannot_see_anothers_consumption(db_session):
+async def test_one_workspace_cannot_see_anothers_consumption(db_session: AsyncSession) -> None:
     """The aggregate reads are where a tenant filter is easiest to forget: the
     query is about summing, not about ownership."""
     acme = await _tenant(db_session, "acme")
@@ -207,7 +211,7 @@ async def test_one_workspace_cannot_see_anothers_consumption(db_session):
     assert [point.quantity for point in points] == [1]
 
 
-async def test_the_platform_reader_sums_across_workspaces(db_session):
+async def test_the_platform_reader_sums_across_workspaces(db_session: AsyncSession) -> None:
     acme = await _tenant(db_session, "acme")
     rival = await _tenant(db_session, "rival")
     UsageRecorder(db_session, tenant_id=acme.id).record(
@@ -231,7 +235,9 @@ async def test_the_platform_reader_sums_across_workspaces(db_session):
     assert {row.tenant_id: row.quantity for row in per_tenant} == {acme.id: 1, rival.id: 4}
 
 
-async def test_the_platform_reader_can_be_narrowed_to_a_page_of_workspaces(db_session):
+async def test_the_platform_reader_can_be_narrowed_to_a_page_of_workspaces(
+    db_session: AsyncSession,
+) -> None:
     acme = await _tenant(db_session, "acme")
     rival = await _tenant(db_session, "rival")
     for tenant in (acme, rival):

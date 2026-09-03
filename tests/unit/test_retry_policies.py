@@ -32,7 +32,7 @@ EXTERNAL_CLIENTS = (
 
 
 @pytest.mark.parametrize(("name", "module"), EXTERNAL_CLIENTS)
-def test_every_external_client_bounds_its_attempts(name: str, module: object):
+def test_every_external_client_bounds_its_attempts(name: str, module: object) -> None:
     """An unbounded retry against a provider having an outage is a way of
     turning their bad day into a queue that never drains."""
     attempts = getattr(module, "MAX_ATTEMPTS", None)
@@ -41,7 +41,7 @@ def test_every_external_client_bounds_its_attempts(name: str, module: object):
 
 
 @pytest.mark.parametrize(("name", "module"), EXTERNAL_CLIENTS)
-def test_every_external_client_waits_between_attempts(name: str, module: object):
+def test_every_external_client_waits_between_attempts(name: str, module: object) -> None:
     """Retrying immediately is not a retry policy, it is the same failure
     three times in a row and three times the load on something struggling."""
     backoff = getattr(module, "BACKOFF_SECONDS", None)
@@ -60,7 +60,7 @@ CLIENT_FACTORIES = (
 
 
 @pytest.mark.parametrize(("name", "module"), CLIENT_FACTORIES)
-def test_every_client_factory_bounds_its_timeout(name: str, module: object):
+def test_every_client_factory_bounds_its_timeout(name: str, module: object) -> None:
     """A request with no timeout can hold a worker forever, which is the same
     outage as a crash and much harder to see."""
     timeout = getattr(module, "REQUEST_TIMEOUT_SECONDS", None) or getattr(
