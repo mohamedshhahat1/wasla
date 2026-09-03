@@ -24,11 +24,18 @@ import asyncio
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
+from app.core.tracing import JOB_OUTCOME
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.db.session import Database
 from app.integrations.openai.embeddings import EmbeddingsClient, build_http_client
 from app.services.knowledge_service import KnowledgeService
-from app.workers.dispatch import JobIdentity, handle_failure, record_success
+from app.workers.dispatch import (
+    SUCCEEDED,
+    JobIdentity,
+    handle_failure,
+    job_span,
+    record_success,
+)
 from app.workers.ingestion_queue import (
     BLOCK_SECONDS,
     IngestionJob,
@@ -102,12 +109,27 @@ class IngestionWorker:
             return False
 
         envelope = JobEnvelope.decode(raw)
+        # One span per attempt, rooted in the trace the job was queued
+        # from. A carrier the envelope could not carry starts a new trace
+        # and the attempt runs identically - see `job_span`.
+        with job_span(job_type=JOB_TYPE, envelope=envelope) as attempt:
+            attempt.set_attribute(JOB_OUTCOME, await self._attempt(raw, envelope))
+        return True
+
+    async def _attempt(self, raw: str, envelope: JobEnvelope) -> str:
+        """Run one reserved job, and report how the attempt ended.
+
+        Split out of `run_once` so the whole attempt - decoding, handling,
+        and whatever is written down when it fails - happens inside one
+        span, and the value it returns is that span's outcome. The four
+        strings it can answer are the domain of `wasla.job_outcome`.
+        """
         try:
             job = IngestionJob.decode(envelope.body)
         except MalformedJobError:
             # Retrying would fail identically forever.
             logger.warning("knowledge.job_malformed")
-            await handle_failure(
+            outcome = await handle_failure(
                 self._queue,
                 raw,
                 envelope,
@@ -116,7 +138,7 @@ class IngestionWorker:
                 category=FailureCategory.MALFORMED,
                 policy=NO_RETRY,
             )
-            return True
+            return outcome.action
 
         try:
             await self._handle(job)
@@ -125,7 +147,7 @@ class IngestionWorker:
                 "knowledge.job_failed",
                 extra={"document_id": str(job.document_id)},
             )
-            await handle_failure(
+            outcome = await handle_failure(
                 self._queue,
                 raw,
                 envelope,
@@ -134,11 +156,11 @@ class IngestionWorker:
                 error=error,
                 policy=IDEMPOTENT_RETRY,
             )
-            return True
+            return outcome.action
 
         await self._queue.release(raw)
         await record_success(job_type=JOB_TYPE)
-        return True
+        return SUCCEEDED
 
     async def _handle(self, job: IngestionJob) -> None:
         async with self._database.session() as session:

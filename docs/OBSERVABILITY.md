@@ -17,11 +17,22 @@ This page is what changed, what it costs, and what it still does not cover.
 | **Structured logs** | *Why* did this one thing fail? | JSON on stdout, correlated by `request_id` |
 | **Health probes** | Should this container be restarted, or taken out of the load balancer? | `/health/live`, `/health/ready`, `worker-health` |
 | **Metrics** | Is something wrong *right now*, and has it been wrong for long? | `/metrics` |
+| **Traces** | *Where* did this piece of work spend its time, across processes? | OTLP to a collector, off by default |
 
 They are not substitutes. A metric says the agent queue is 4,000 deep; the log
 line with the `tenant_id` says whose messages they are. A readiness probe says
 this replica cannot serve; the `wasla_dependency_up` gauge says every replica
-cannot serve, which is a different incident.
+cannot serve, which is a different incident. A trace says the four minutes a
+customer waited were three retries and one slow inference, which no single log
+line in either process can say.
+
+The division of labour between logs and traces is deliberate and is a privacy
+decision, not an accident of implementation. **Logs carry identifiers and stay
+on your infrastructure. Traces carry structure and go to a third party.** A log
+line names the workspace, the user and the conversation because an operator
+with database access is already inside the trust boundary. A span names a route
+template, a queue and a provider, and never a workspace — because whoever runs
+the trace backend is not.
 
 ---
 
@@ -86,6 +97,35 @@ scraper handles that natively — it notices the value fell.
 the requested path. A request matching no route is counted as `__unmatched__`,
 so a scanner cannot name a time series. `status` is a class (`2xx`…`5xx`), not
 a code. `method` collapses anything outside the seven real verbs to `OTHER`.
+
+### The database pool (in-process, read at scrape time)
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `wasla_db_pool_checked_out` | gauge | `process_role` |
+| `wasla_db_pool_checked_in` | gauge | `process_role` |
+| `wasla_db_pool_size` | gauge | `process_role` |
+| `wasla_db_pool_max_overflow` | gauge | `process_role` |
+
+Saturation is `checked_out / (size + max_overflow)`, which is why all four are
+published rather than only the first.
+
+**`process_role` is `api`, and only `api`.** `/metrics` is served by the API,
+and a connection pool is a process-local object: the API can see its own and
+has no way at all to see the worker's. Without the label this metric would read
+as "the deployment's database pool", which is the one thing it is not. The
+label makes the worker's absence visible rather than implied, and leaves room
+to add it later without renaming anything.
+
+`pool.overflow()` is deliberately **not** published. SQLAlchemy defines it as
+`open_connections - pool_size`, so it reads `-5` on a cold pool of five, and an
+operator alerting on "overflow above zero" would be alerting on warmth.
+
+This metric is the visible half of [ADR-080](../DECISIONS.md): an agent turn
+releases its connection before calling the provider, and
+`tests/integration/test_provider_session_lifetime.py` now scrapes the
+exposition while two turns are parked inside a provider call and asserts the
+published gauge is the number `checkedout()` reports at that instant.
 
 ### Dependencies (in-process, written by the readiness probe)
 
@@ -170,6 +210,7 @@ a fragment of the request that produced it.
 | Metric | Type | Labels |
 | --- | --- | --- |
 | `wasla_provider_requests_total` | counter | `provider`, `operation`, `outcome` |
+| `wasla_provider_request_duration_seconds` | histogram | `provider`, `operation` |
 
 | Provider | Operations | Recorded at |
 | --- | --- | --- |
@@ -191,6 +232,44 @@ message counts are metered into `usage_events` and read through the platform
 analytics API, which is the number a bill is computed from. Publishing a second
 tally would be a second number to reconcile, and the first one to be wrong
 during an argument about an invoice.
+
+#### How long the call took
+
+**The histogram has no `outcome` label, and it records failures.** Those two
+facts belong together. A call that timed out after twenty seconds is the most
+important latency this metric holds, and a histogram of successes alone would
+report a system getting *faster* as it broke. Splitting the distribution by
+outcome would then quadruple the series to answer a question the counter above
+already answers — so "how slow is this provider" and "how often does it fail"
+each come from the metric shaped for it.
+
+Buckets are `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60` seconds, chosen from
+the timeouts actually configured: JWKS 5 s, WhatsApp and Google token 10 s,
+Resend 15 s, Paymob 20 s, OpenAI 60 s. `+Inf` collects an inference that ran
+past its timeout with retries above it. The HTTP set is not reused because it
+starts at 5 ms and no call across the internet lands there — three of its ten
+buckets would be permanently empty.
+
+The duration covers the **whole operation**, including any retries the client
+made inside it, because that is what the work actually waited on: a send that
+succeeded on its third attempt was slow for the customer however fast the third
+attempt was.
+
+Two calls are counted and deliberately *not* timed. `whatsapp`/`inbound_webhook`
+is Meta calling us, and has no duration this process could honestly measure.
+The email worker's `suppress` outcome, and its permanent failure on a template
+that will not render, are counted because that is how an operator reads them —
+but neither made a call, and timing a decision not to send would put a
+microsecond in the same distribution as a fifteen-second timeout.
+
+**Written non-cumulatively.** A Prometheus histogram wants buckets that each
+include everything below them; written straight to Redis that would be one
+command per bucket beside every provider call. Instead the bucket an
+observation lands in is incremented and the scrape accumulates — two Redis
+commands per call instead of eleven, and an identical exposition. A bucket
+bound that this release no longer declares is dropped at scrape time rather
+than folded into a neighbour, because quietly moving observations between
+buckets makes a quantile computed across a bucket change look like an answer.
 
 ---
 
@@ -369,6 +448,149 @@ unit status says whether anything even tried.
 
 ---
 
+## Tracing
+
+Off by default, and the opposite default from metrics for a concrete reason:
+metrics are served from the process on request and cost nothing when nobody
+scrapes, whereas tracing needs somewhere to send spans and most deployments
+have nowhere.
+
+```
+TRACING_ENABLED=true
+OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318
+OTEL_SERVICE_NAME=            # blank: wasla-api / wasla-worker
+OTEL_TRACES_SAMPLER_ARG=1.0   # fraction of traces kept
+```
+
+Both processes must get the same values. The whole point is one trace across
+both, and a deployment that traced the API but not the worker — or sampled them
+differently — would produce traces with their middle missing.
+`tests/integration/test_deployment_configuration.py` fails if either compose
+service is missing any of the four.
+
+`TRACING_ENABLED=true` with no endpoint **refuses to start**. Exporting into a
+void is the failure a deployment discovers during the incident the traces were
+for.
+
+### What a trace looks like
+
+```
+HTTP POST /webhooks/whatsapp          SERVER   wasla-api
+├── db.session                        INTERNAL
+└── queue.publish agent               PRODUCER      ── traceparent into the job
+                                                       envelope, in Redis
+worker.agent                          CONSUMER wasla-worker   attempt 1
+├── db.session                        INTERNAL   ← ends before the provider
+├── provider.openai.respond           CLIENT       starts. That is ADR-080,
+├── db.session                        INTERNAL     visible rather than trusted.
+└── provider.whatsapp.send_message    CLIENT
+```
+
+A retry is a **new span in the same trace**, carrying `wasla.job_attempt=2`.
+Reusing one span across attempts would overwrite the history of the first;
+starting a new trace per attempt would lose the connection to the request that
+queued the work. Neither is what "why did this customer wait four minutes"
+needs.
+
+The trace context travels in the job envelope as W3C `traceparent` and
+`tracestate`, and nothing else — not a header bag, not baggage, not an
+application field. It survives retry, delay, crash recovery and the dead-letter
+list, because it rides on the envelope those all preserve.
+
+### It is never load-bearing
+
+The trace context is **not** the job's identity, its retry budget or its
+deduplication key. Those are the payload, `attempt`, and a unique constraint in
+PostgreSQL, and none of them consults the carrier. A missing, truncated,
+hostile, or older-release carrier means the attempt starts its own trace and
+runs exactly as it would have.
+
+Likewise the exporter. A collector that is down, slow or refusing loses spans
+and logs about it, and cannot fail a request, fail a job, or alter a payment —
+`BatchSpanProcessor` exports on its own thread and contains its own failures.
+`tests/integration/test_trace_isolation.py` asserts this with an exporter that
+*raises*, which is the harsher case.
+
+### What a trace backend can see, and what it cannot
+
+Whoever operates the collector reads span names, timings and attributes for
+every request, indefinitely, in a system with none of Wasla's tenant isolation.
+So the attribute set is an allowlist, and it is short:
+
+| Attribute | Domain |
+| --- | --- |
+| `http.request.method` | seven verbs, or `OTHER` |
+| `http.route` | a route template, or `__unmatched__` |
+| `http.response.status_code` | an integer |
+| `wasla.queue` | `agent`, `ingestion`, `media` |
+| `wasla.job_attempt` | a small integer |
+| `wasla.job_outcome` | `succeeded`, `retried`, `dead_lettered`, `lost` |
+| `wasla.provider` | `openai`, `whatsapp`, `paymob`, `email` |
+| `wasla.provider_operation` | a call-site constant |
+| `wasla.provider_outcome` | the four `CallOutcome` values |
+| `db.system` | `postgresql` |
+
+**Never exported, anywhere:** a JWT or any bearer token; an `Authorization` or
+`Cookie` header; any header at all; a query string; a request or response body;
+a prompt, a model's answer or tool arguments; an email address; a phone number;
+a message body; an OAuth code or state; Paymob or S3 credentials; a media
+storage key or filename; a workspace, user, conversation, contact, lead,
+invoice, payment or media identifier; a SQL statement or its parameters; an
+exception message or stack trace.
+
+Three things enforce that rather than three people remembering it:
+
+1. **No auto-instrumentation.** Not `opentelemetry-instrumentation-fastapi`,
+   `-httpx` or `-sqlalchemy`. FastAPI's exports the requested path and query
+   string, httpx's exports full request URLs, SQLAlchemy's exports statement
+   text. In each case the privacy control would be a setting in a package this
+   repository does not own. The four span kinds are written by hand instead.
+2. **`record_exception=False` and `set_status_on_exception=False`** on every
+   span. Both default to *true* and both put `str(exception)` into the exported
+   span. What is recorded instead is the exception's class name, which is a
+   code-defined identifier. A failing span is `ERROR` with a description of
+   `RuntimeError` and no events.
+3. **`tests/unit/test_trace_privacy.py`** checks every attribute a realistic
+   flow produces against the allowlist — so a new attribute fails whatever it
+   is called — and separately pushes distinctive canary values through the
+   parts of the system that handle secrets and customer content and searches
+   the exported spans for them verbatim.
+
+**No inbound trace context is honoured.** Every API request starts a new trace.
+Wasla's HTTP callers are a browser frontend and Meta, Paymob and Resend
+webhooks; none participates in Wasla's traces and all are outside the trust
+boundary. Accepting a `traceparent` from the internet would let a stranger
+choose trace identifiers, merge unrelated requests into one trace, and write up
+to 512 bytes of `tracestate` into every span they produced.
+
+### What the resource says about your machines
+
+`Resource.create` attaches `service.name`, a per-process `service.instance.id`
+(a random UUID, so replicas are distinguishable without being named), and the
+SDK's own name, language and version. **No hostname, no IP address, no process
+id, no command line** — OpenTelemetry's host, process and container detectors
+are opt-in and are deliberately not opted into.
+
+That is worth knowing rather than assuming, because a trace backend is usually
+somebody else's, and a deployment's topology is not something to hand a third
+party by default. If a deployment *wants* host attributes, `OTEL_RESOURCE_ATTRIBUTES`
+is read by the SDK and is the place to add them deliberately.
+
+### Sampling
+
+`ParentBased(TraceIdRatioBased(OTEL_TRACES_SAMPLER_ARG))`. The decision is made
+once per trace and inherited downstream, so the API and the worker never
+disagree about whether a trace is being kept — without that, one could sample a
+request in and the other sample the same trace out, producing a trace missing
+its middle.
+
+One number for the whole deployment. Sampling that varied by workspace, route
+or payment would put two populations in one dataset with no way to tell which
+one you were looking at, and would make traces a per-tenant signal, which is
+the same cardinality mistake the metrics rule exists to prevent.
+
+---
+
 ## Error monitoring
 
 **No external provider has been added.** Structured logs and metrics are the
@@ -406,12 +628,13 @@ through one function.
 
 ## What this still does not give you
 
-- **No tracing.** A request that crosses API → Redis → worker → OpenAI → Meta
-  is correlatable by `request_id` only as far as the enqueue; the worker leg
-  does not carry it. OpenTelemetry is P2.
-- **No provider latency histograms.** Provider calls are counted by outcome,
-  not timed. The time is in the log line for the call and, for AI, in
-  `usage_events`.
+- **No worker database-pool metric.** The worker holds its own pool and
+  publishes no HTTP; `process_role="api"` is the whole of what is exported. A
+  worker running out of connections is visible as queue depth and job latency
+  rather than directly.
+- **No trace backend is shipped or verified here.** The spans are produced and
+  proved against an in-memory exporter; whether a particular collector accepts
+  them is a deployment question this repository has not answered.
 - **No per-workspace metrics, and there will not be any.** That is the
   cardinality rule, not an oversight. Per-workspace usage is a database
   question and the platform analytics API answers it.

@@ -51,6 +51,17 @@ dependencies = [
     # 0.0.18 carry a denial-of-service advisory in the parser, which is exactly
     # the code path an uploaded file reaches (ADR-017).
     "python-multipart>=0.0.18,<0.1",
+    # Distributed tracing (ADR-083). Three packages and no auto-instrumentation:
+    # the API for the span vocabulary, the SDK for the provider, sampler and
+    # batching processor, and the OTLP/HTTP exporter, which is the protocol
+    # every collector speaks and the one that needs no gRPC stack. The
+    # `-instrumentation-*` packages are deliberately absent - see the argument
+    # in `app/core/tracing.py`: each of them exports request paths, full URLs
+    # or SQL text by default, and the privacy control would then be a setting
+    # in a package this repository does not own.
+    "opentelemetry-api>=1.44,<2",
+    "opentelemetry-sdk>=1.44,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.44,<2",
 ]
 
 [project.optional-dependencies]

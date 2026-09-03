@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
@@ -23,8 +23,14 @@ from sqlalchemy.ext.asyncio import (
 from app.core.config import Settings
 from app.core.exceptions import DependencyUnavailableError
 from app.core.logging import get_logger
+from app.core.tracing import DB_SYSTEM, DB_SYSTEM_VALUE, span
 
 logger = get_logger(__name__)
+
+#: One name for every unit of work, because a span name has to be bounded and
+#: what varies between two of these is the statements inside, which are
+#: deliberately not exported.
+DB_SESSION_SPAN: Final = "db.session"
 
 
 class Database:
@@ -88,16 +94,24 @@ class Database:
         already been sent (see `app.core.dependencies.get_session`). The commit
         below is then a no-op for them - the transaction is already closed - and
         the rollback still does its job on the way out of an exception.
+
+        The span around it is what makes ADR-080 visible rather than merely
+        true: in a traced agent turn the database spans *end* before the
+        provider span begins, so a reader can see the connection went back to
+        the pool instead of having to trust that it did. It carries
+        `db.system` and nothing else - no statement, no parameters, no row
+        counts, none of which could be bounded or safe.
         """
-        session = self._session_factory()
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
-        finally:
-            await session.close()
+        with span(DB_SESSION_SPAN, attributes={DB_SYSTEM: DB_SYSTEM_VALUE}):
+            session = self._session_factory()
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            finally:
+                await session.close()
 
     async def check(self, timeout_seconds: float | None = None) -> None:
         """Verify connectivity. Raises DependencyUnavailableError on failure."""

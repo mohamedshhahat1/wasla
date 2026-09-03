@@ -30,6 +30,7 @@ from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.redis import RedisClient
 from app.core.telemetry import set_counter_sink
+from app.core.tracing import WORKER_SERVICE_NAME, configure_tracing, shutdown_tracing
 from app.db.session import Database
 from app.workers.ai_worker import AgentWorker
 from app.workers.billing_worker import BillingWorker
@@ -295,6 +296,11 @@ async def main() -> None:
     """Entry point for the worker container."""
     settings = get_settings()
     configure_logging(settings)
+    # Before the infrastructure, so a worker that was asked to trace and cannot
+    # refuses to start rather than working untraced. One service name for the
+    # whole process, not one per loop: nine loops run here, and which one a
+    # span belongs to is `wasla.queue` on the span itself.
+    configure_tracing(settings, service_name=WORKER_SERVICE_NAME)
 
     database = Database(settings)
     redis = RedisClient(settings)
@@ -348,6 +354,8 @@ async def main() -> None:
                 await task
         await redis.close()
         await database.dispose()
+        # Last, so the batch processor gets to flush what the loops produced.
+        shutdown_tracing()
         logger.info("worker.shutdown", extra={"event": "worker.shutdown"})
 
 

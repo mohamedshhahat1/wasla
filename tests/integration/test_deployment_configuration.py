@@ -69,6 +69,13 @@ FEATURE_SETTINGS: dict[str, tuple[str, ...]] = {
     # (ADR-069). A deployment that set it on one would silently publish half
     # the signals - which is the failure this whole guard exists to stop.
     "metrics_enabled": ("api", "worker"),
+    # Both, and this one is not merely symmetric - it is the join. The trace a
+    # worker continues is the one the API started, so a deployment that traced
+    # one process and not the other, or sampled them differently, or pointed
+    # them at different collectors, would produce traces with their middle
+    # missing (ADR-083).
+    "tracing_enabled": ("api", "worker"),
+    "otel_": ("api", "worker"),
     # The worker holds reservations and renews them; the API publishes how
     # many have expired. A deployment where the two disagree would have one
     # process reporting a queue stuck while the other believed it fine

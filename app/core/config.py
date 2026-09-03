@@ -115,6 +115,32 @@ def _object_store_endpoint_problems(value: str) -> list[str]:
     return problems
 
 
+def _otlp_endpoint_problems(value: str) -> list[str]:
+    """Whether the collector address is one the exporter could actually use.
+
+    Shape only. Whether anything answers there is a runtime question, and one
+    the exporter is required to survive - a collector that is down loses spans
+    and changes nothing else. What is checked here is the kind of mistake that
+    silently exports nothing for ever: a bare hostname, a path already
+    including `/v1/traces` (the exporter appends its own), or a scheme the HTTP
+    exporter does not speak.
+    """
+    problems: list[str] = []
+    candidate = value.strip()
+    if not candidate.startswith(("http://", "https://")):
+        problems.append(
+            "OTEL_EXPORTER_OTLP_ENDPOINT must be an http:// or https:// URL "
+            "such as http://collector:4318"
+        )
+        return problems
+    if candidate.rstrip("/").endswith("/v1/traces"):
+        problems.append(
+            "OTEL_EXPORTER_OTLP_ENDPOINT must be the collector's base address; "
+            "the signal path (/v1/traces) is appended automatically"
+        )
+    return problems
+
+
 def _public_url_problems(value: str) -> list[str]:
     """Whether APP_PUBLIC_URL can safely be the base of an emailed link."""
     parsed = urlparse(value.strip())
@@ -255,6 +281,26 @@ class Settings(BaseSettings):
     # the backup series are simply absent - which is itself alertable, and
     # honest, rather than a zero that looks like a fresh backup (ADR-075).
     backup_status_path: str | None = None
+    # Whether this process exports distributed traces. Off by default, which is
+    # the opposite of `metrics_enabled` above and deliberately so: metrics are
+    # served from this process on request and cost nothing when nobody scrapes,
+    # whereas tracing needs somewhere to send spans and a deployment without a
+    # collector has nowhere. Off, the SDK is never built and the exporter is
+    # never imported.
+    tracing_enabled: bool = False
+    # The rest of tracing is configured through OpenTelemetry's own standard
+    # variable names rather than Wasla-specific ones, so a deployment configures
+    # this the way it configures every other OTLP producer it runs. They are
+    # declared as settings all the same, because `TRACING_ENABLED` has to be
+    # able to refuse a half-configured deployment at start-up rather than
+    # discover it during an incident.
+    otel_service_name: str | None = None
+    otel_exporter_otlp_endpoint: str | None = None
+    # The fraction of traces kept, applied once per trace and inherited by
+    # everything downstream (`ParentBased`). Deliberately one number for the
+    # whole deployment: sampling that varied by tenant, route or payment would
+    # put two populations in one dataset with no way to tell them apart.
+    otel_traces_sampler_arg: float = Field(default=1.0, ge=0.0, le=1.0)
 
     # HTTP
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
@@ -851,6 +897,19 @@ class Settings(BaseSettings):
                     "CORS_ORIGINS must name each allowed origin explicitly; "
                     "'*' is not permitted with credentialed requests"
                 )
+
+        if self.tracing_enabled and not self.otel_exporter_otlp_endpoint:
+            # Checked in every environment including `test`, because it is not
+            # a credential to be waved through locally - it is the difference
+            # between tracing and the appearance of tracing. A deployment that
+            # asked for spans and silently got none discovers that during the
+            # incident they were for.
+            problems.append(
+                "OTEL_EXPORTER_OTLP_ENDPOINT must be set when TRACING_ENABLED is true; "
+                "tracing has nowhere to export to"
+            )
+        elif self.tracing_enabled:
+            problems.extend(_otlp_endpoint_problems(self.otel_exporter_otlp_endpoint or ""))
 
         if self.email_enabled and not self.is_testing:
             # Fail closed where email is *required*: a deployment that turned

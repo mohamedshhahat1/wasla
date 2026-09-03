@@ -3437,3 +3437,135 @@ Removing `SKIP LOCKED` makes the skip test hang. Unlocking the per-invoice
 re-claim makes one worker do everything while the other does nothing, and
 unlocking it *and* bypassing the payment idempotency key produces the duplicate
 charge both layers exist to prevent.
+
+---
+
+## ADR-083 — A Trace Says Where the Time Went, and Nothing About Whose Time It Was
+
+**Context.** A customer's message arrives at `/webhooks/whatsapp`, is stored,
+is enqueued, and is answered some minutes later by a *different process*
+reading a Redis list — which reserves an allowance, calls OpenAI, writes rows,
+and sends a reply through Meta. Structured logs correlate the first leg by
+`request_id` and stop dead at the queue: the worker is a different process and
+carries none of it. So "why did this customer wait four minutes" had no answer
+that was not four separate log searches joined by a timestamp and a guess.
+
+The audit's recommendation was OpenTelemetry across API → queue → worker →
+provider. The interesting decisions are not in the SDK.
+
+**Decision.**
+
+**Four span kinds, written by hand, and no auto-instrumentation.** Not
+`opentelemetry-instrumentation-fastapi`, not `-httpx`, not `-sqlalchemy`. Each
+is one configuration flag away from exporting exactly what the rest of this
+codebase spends its effort keeping out of logs: FastAPI's records the requested
+path and query string — which carry conversation, lead and media identifiers —
+httpx's records full request URLs (Paymob, S3, Google's token endpoint), and
+SQLAlchemy's records statement text. In every case the privacy control would be
+a setting, changeable by anybody, in a package this repository does not own.
+Written by hand, the attribute set is an allowlist by construction, and
+`ALLOWED_ATTRIBUTES` is a frozen set a test compares every produced attribute
+against.
+
+That is the same argument ADR-013 makes about the OpenAI client and ADR-072
+about the metrics registry, applied to the case where the cost of the
+dependency's defaults is disclosure rather than weight.
+
+**The queue carries W3C trace context, and it is never identity.** The job
+envelope gained one field holding at most `traceparent` and `tracestate`,
+sanitised on the way in and again on the way out. The envelope is what a retry,
+a delay, a crash recovery and a dead-letter record all preserve, so the context
+survives all four for free.
+
+What it is deliberately *not*: the job's identity, its retry budget, or its
+deduplication key. Those are the payload, `attempt`, and a unique constraint in
+PostgreSQL. A missing, truncated, hostile or older-release carrier means the
+attempt starts its own trace and runs exactly as it would have — which is the
+whole reason extraction lives in `job_span` and not in `reserve`. Tracing has
+to be able to fail without work failing with it.
+
+A retry gets a **new span in the same trace**, tagged `wasla.job_attempt`.
+Reusing one span across attempts would overwrite the history of the first;
+starting a new trace per attempt would sever the link to the request that
+queued the work. Neither answers the question the trace exists for.
+
+**No inbound trace context from HTTP.** Every API request starts a new trace.
+Wasla's callers are a browser frontend and Meta, Paymob and Resend webhooks:
+none participates in Wasla's traces, and all are outside the trust boundary.
+Honouring a `traceparent` from the internet would let a stranger choose trace
+identifiers, merge unrelated requests into one trace, and write up to 512 bytes
+of `tracestate` into every span they produced. The propagation that matters is
+internal. Gating on `trusted_proxy_ips` was considered and rejected as
+worthless here: nginx forwards the client's header, so the peer address says
+nothing about who wrote it.
+
+**Span names are route templates, for the metrics reason and one more.**
+`POST /leads/{lead_id}` rather than `POST /leads/8f3c…`. A backend indexes,
+groups and displays by span name, so an identifier there is both a cardinality
+problem and a disclosure — the second is new, and it is why this rule is worth
+restating rather than inheriting. The middleware opens the span before routing
+under the same `__unmatched__` placeholder the metrics middleware uses, and
+renames it on the way out.
+
+**No exception text, anywhere.** `record_exception` and
+`set_status_on_exception` both default to *true* in the SDK and both put
+`str(exception)` into the exported span — a provider's error body, a database
+error quoting a parameter, a validation message quoting the rejected value.
+Both are off on every span this application opens; a failing span carries the
+exception's *class name* as its status description and no events at all.
+
+**A provider span is recorded after the fact.** `ProviderCall` starts a clock
+at the top of a client method and the outcome is decided at one of a dozen
+exits inside a retry loop. A span opened at the top would have to be closed on
+all of them, and "the exit that forgot" is exactly the omission that shows up
+as a silently missing span. `record_span` creates and ends the span in one
+statement with the recorded start time, so no path can leave one open. Nothing
+in this application runs *inside* a provider call, so nothing is lost by the
+span not being current while the call is in flight.
+
+**Off by default, and refusing to start half-configured.** The opposite default
+from `METRICS_ENABLED`, because metrics are served on request and cost nothing
+unscraped, whereas tracing needs a destination and most deployments have none.
+Disabled, no SDK is built, no exporter is imported, no thread is started, and
+every span is a no-op. Enabled without `OTEL_EXPORTER_OTLP_ENDPOINT`, the
+process refuses to boot — exporting into a void is the failure a deployment
+discovers during the incident the traces were for.
+
+The switch is Wasla's (`TRACING_ENABLED`) and everything else uses
+OpenTelemetry's own standard variable names, so a deployment configures this
+the way it configures every other OTLP producer it runs. They are declared as
+`Settings` fields all the same, because the refusal above has to be able to see
+them.
+
+**Sampling is one number, `ParentBased`, and never a function of the tenant.**
+Decided once per trace and inherited downstream, so the API and the worker
+cannot disagree and produce a trace missing its middle. One number for the
+deployment: sampling that varied by workspace, route or payment would put two
+populations in one dataset with no way to tell them apart, and would make
+traces a per-tenant signal — the same mistake the metrics cardinality rule
+exists to prevent.
+
+**Consequences.**
+
+The pool metric and the database span between them make ADR-080 *visible*: in a
+traced agent turn the `db.session` spans end before `provider.openai.respond`
+begins, and `wasla_db_pool_checked_out` reads zero while two turns are parked
+inside a provider call. A property that was previously true and only assertable
+by a test is now readable by an operator.
+
+What a trace backend's operator can see is span names, timings and ten
+attributes. What they cannot see is written down in `docs/OBSERVABILITY.md` and
+held by two tests that fail from opposite directions — an allowlist check that
+catches any new attribute whatever it is named, and a canary scan that catches
+a leak nobody predicted the field for.
+
+The job envelope grew a nested object, and `release` removes an in-flight entry
+by *exact value*. `encode` sorts nested keys along with the rest and a test
+asserts an envelope re-encodes byte for byte after a round trip, because the
+cost of getting that wrong is a job that can never be released.
+
+Three packages added: `opentelemetry-api`, `-sdk`, and the OTLP/HTTP exporter.
+No collector is shipped or verified here — the spans are produced and proved
+against an in-memory exporter, and whether a particular backend accepts them is
+a deployment question this repository has not answered.
+

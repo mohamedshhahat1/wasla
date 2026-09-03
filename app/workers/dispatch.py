@@ -17,18 +17,53 @@ from __future__ import annotations
 
 import random
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Final, Literal
+
+from opentelemetry.trace import Span
 
 from app.core.logging import get_logger
 from app.core.telemetry import JobOutcome, record_job_outcome
+from app.core.tracing import JOB_ATTEMPT, QUEUE, SpanKind, context_from, span
 from app.workers.queue import DeadLetterRecord, JobEnvelope, ReliableQueue
 from app.workers.retry import FailureCategory, RetryPolicy, classify
 
 logger = get_logger(__name__)
 
 Action = Literal["retried", "dead_lettered", "lost"]
+
+#: What a queue span reports for an attempt that finished the job. The other
+#: three values are `Action` above, so the attribute's whole domain is four
+#: strings chosen here.
+SUCCEEDED: Final = "succeeded"
+
+
+@contextmanager
+def job_span(*, job_type: str, envelope: JobEnvelope) -> Iterator[Span]:
+    """The span for one attempt at a queued job.
+
+    Rooted in the trace the job was *enqueued* from, so an operator following a
+    customer's message from the webhook that received it reaches the worker
+    that answered it minutes later in a different process. A retry is a new
+    span under the same trace: attempt three is part of the story that began
+    with the request, and `wasla.job_attempt` is which chapter.
+
+    **A carrier this cannot read is not an error.** `context_from` answers
+    `None` for a missing, truncated, hostile or older-release carrier, and the
+    attempt then starts its own trace and runs exactly as it would have. That
+    is the whole reason the extraction lives here rather than in the queue's
+    reserve: tracing must be able to fail without a job failing with it.
+    """
+    with span(
+        f"worker.{job_type}",
+        kind=SpanKind.CONSUMER,
+        context=context_from(envelope.trace),
+        attributes={QUEUE: job_type, JOB_ATTEMPT: envelope.attempt},
+    ) as attempt:
+        yield attempt
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,4 +197,11 @@ def _context(identity: JobIdentity) -> dict[str, str]:
     return context
 
 
-__all__ = ["FailureOutcome", "JobIdentity", "handle_failure", "record_success"]
+__all__ = [
+    "SUCCEEDED",
+    "FailureOutcome",
+    "JobIdentity",
+    "handle_failure",
+    "job_span",
+    "record_success",
+]

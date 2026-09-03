@@ -31,13 +31,20 @@ import contextlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from time import perf_counter
+from time import perf_counter, time_ns
 from typing import Any, Final, cast
 
 from redis.asyncio import Redis
 
 from app.core.logging import get_logger
 from app.core.metrics import PROVIDER_LATENCY_BUCKETS, REGISTRY, HistogramSample, bucket_for
+from app.core.tracing import (
+    PROVIDER,
+    PROVIDER_OPERATION,
+    PROVIDER_OUTCOME,
+    SpanKind,
+    record_span,
+)
 
 logger = get_logger(__name__)
 
@@ -394,13 +401,44 @@ class ProviderCall:
     provider: Provider
     operation: str
     _started: float = field(default_factory=perf_counter, init=False)
+    # Wall-clock beside the monotonic one, because a span is placed on a
+    # timeline shared with other processes and `perf_counter` has no epoch.
+    # The duration still comes from `perf_counter`, which is the clock that
+    # cannot go backwards when somebody adjusts the system time mid-call.
+    _started_ns: int = field(default_factory=time_ns, init=False)
 
     async def record(self, outcome: CallOutcome) -> None:
+        """Close the call: one counter, one latency sample, one span.
+
+        The span is written *after the fact*, with the start time this object
+        recorded and the end time now. That is deliberate rather than a
+        shortcut around a context manager: every provider client here is a
+        retry loop with a dozen exits, and a span opened at the top would have
+        to be closed on all of them. Created and ended in one statement, there
+        is no path on which one is left open.
+
+        Nothing runs inside a provider call, so nothing is lost by the span not
+        being the current one while the call is in flight.
+        """
         await record_provider_call(
             provider=self.provider,
             operation=self.operation,
             outcome=outcome,
             duration_seconds=perf_counter() - self._started,
+        )
+        record_span(
+            f"provider.{self.provider}.{self.operation}",
+            kind=SpanKind.CLIENT,
+            started_at_ns=self._started_ns,
+            attributes={
+                PROVIDER: str(self.provider),
+                PROVIDER_OPERATION: self.operation,
+                PROVIDER_OUTCOME: str(outcome),
+            },
+            # The outcome enum, never the provider's own reason: their error
+            # catalogue is unbounded, changes without notice, and its text can
+            # echo the request.
+            error=None if outcome is CallOutcome.SUCCESS else str(outcome),
         )
 
 

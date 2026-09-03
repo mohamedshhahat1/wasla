@@ -56,8 +56,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Awaitable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Mapping
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Final, Literal, Self, cast
@@ -65,6 +65,7 @@ from typing import Any, Final, Literal, Self, cast
 from redis.asyncio import Redis
 
 from app.core.redis import MAX_BLOCKING_SECONDS
+from app.core.tracing import QUEUE, SpanKind, carrier, sanitise_carrier, span
 from app.workers.retry import RETRYABLE, FailureCategory, RetryPolicy
 
 QUEUE_NAMESPACE: Final = "agent:jobs"
@@ -162,6 +163,15 @@ class JobEnvelope:
     `attempt` is the number of the attempt *being made* — a freshly enqueued
     job is attempt 1, not attempt 0 — so "attempt 3 of 5" reads the way an
     operator says it.
+
+    `trace` is W3C trace context and nothing else: at most `traceparent` and
+    `tracestate`, sanitised on the way in and again on the way out. It is
+    carried so that the worker's attempt is causally connected to the request
+    that queued the job, and it is **never** used as identity. The job's
+    identity is its payload, its retry budget is `attempt`, and its
+    deduplication is a unique constraint in PostgreSQL - none of which consults
+    this field. A missing, truncated or hostile carrier costs the attempt its
+    place in a trace and nothing else.
     """
 
     body: str
@@ -169,6 +179,7 @@ class JobEnvelope:
     enqueued_at: datetime
     first_attempted_at: datetime | None = None
     last_failure: FailureCategory | None = None
+    trace: Mapping[str, str] | None = None
 
     @classmethod
     def wrap(cls, body: str, *, now: datetime | None = None) -> Self:
@@ -184,7 +195,18 @@ class JobEnvelope:
             payload["first_attempted_at"] = _isoformat(self.first_attempted_at)
         if self.last_failure is not None:
             payload["last_failure"] = str(self.last_failure)
+        if self.trace:
+            # Sorted with the rest, because `release` removes an in-flight
+            # entry by exact value: an envelope that re-serialised differently
+            # would never match and the job would stay in flight for ever.
+            # `json.dumps(sort_keys=True)` sorts nested keys too, and there are
+            # only ever two of them.
+            payload["trace"] = dict(self.trace)
         return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+    def with_trace(self, context: Mapping[str, str]) -> Self:
+        """The same envelope, carrying trace context."""
+        return replace(self, trace=dict(context) or None)
 
     @classmethod
     def decode(cls, raw: str) -> Self:
@@ -211,22 +233,35 @@ class JobEnvelope:
             last_failure = FailureCategory(failure) if isinstance(failure, str) else None
         except ValueError:
             last_failure = None
+        # Sanitised rather than trusted: this is the one field in the envelope
+        # that did not come from a job encoder, and it is read back from a
+        # store an older release also wrote to. Anything that is not a short
+        # W3C value under one of the two W3C keys is dropped.
+        trace = sanitise_carrier(payload.get("trace"))
         return cls(
             body=body,
             attempt=max(1, attempt),
             enqueued_at=enqueued_at,
             first_attempted_at=_parse_moment(payload.get("first_attempted_at")),
             last_failure=last_failure,
+            trace=trace or None,
         )
 
     def next_attempt(self, *, category: FailureCategory, now: datetime) -> Self:
-        """The envelope the retry is queued under."""
+        """The envelope the retry is queued under.
+
+        The trace context travels with it, so attempt three is still part of
+        the story that began with the request that queued the job. Each attempt
+        gets its own span; what is preserved is the thread between them, not
+        the span.
+        """
         return type(self)(
             body=self.body,
             attempt=self.attempt + 1,
             enqueued_at=self.enqueued_at,
             first_attempted_at=self.first_attempted_at or now,
             last_failure=category,
+            trace=self.trace,
         )
 
 
@@ -458,7 +493,21 @@ class ReliableQueue:
         return frozenset(self._held)
 
     async def enqueue_body(self, body: str, *, now: datetime | None = None) -> None:
-        await _command(self._redis.rpush(self._pending, JobEnvelope.wrap(body, now=now).encode()))
+        """Put one job on the queue, carrying the trace it was queued from.
+
+        The span is opened *around* the push so that the context injected into
+        the envelope names this span - a worker's attempt is then a child of
+        "the moment the job was queued", which is the causal link a reader
+        follows backwards to the request. With tracing off, `carrier()` answers
+        empty and the envelope carries no trace field at all.
+        """
+        with span(
+            f"queue.publish {self.label}",
+            kind=SpanKind.PRODUCER,
+            attributes={QUEUE: self.label},
+        ):
+            envelope = JobEnvelope.wrap(body, now=now).with_trace(carrier())
+            await _command(self._redis.rpush(self._pending, envelope.encode()))
 
     async def reserve(
         self,

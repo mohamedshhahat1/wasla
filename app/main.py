@@ -22,7 +22,9 @@ from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestContextMiddleware, SecurityHeadersMiddleware
 from app.core.redis import RedisClient
 from app.core.request_metrics import RequestMetricsMiddleware
+from app.core.request_tracing import RequestTracingMiddleware
 from app.core.telemetry import set_counter_sink
+from app.core.tracing import API_SERVICE_NAME, configure_tracing, shutdown_tracing
 from app.db.session import Database
 from app.integrations.email import require_delivery_verification
 
@@ -33,6 +35,10 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Own the lifecycle of shared infrastructure."""
     settings: Settings = app.state.settings
+    # Before anything else in the lifespan, so a start-up that needs tracing
+    # and cannot have it fails here rather than serving untraced traffic. With
+    # `TRACING_ENABLED` off - the default - this builds nothing and returns.
+    configure_tracing(settings, service_name=API_SERVICE_NAME)
     app.state.database = Database(settings)
     app.state.redis = RedisClient(settings)
     # Cross-process counters go to the same Redis everything else uses. Set
@@ -55,6 +61,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         set_counter_sink(None)
         await app.state.redis.close()
         await app.state.database.dispose()
+        # Last, so spans covering the teardown above still have somewhere to go.
+        shutdown_tracing()
         logger.info("app.shutdown", extra={"event": "app.shutdown"})
 
 
@@ -97,6 +105,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # scraper counting its own scrapes is a closed loop.
             exclude_paths=frozenset({"/metrics", "/health/live"}),
         )
+    # Outside the metrics middleware, so everything it measures happens inside
+    # the server span, and a request rejected before routing still produces
+    # one. Added after it for that reason: middleware added later runs earlier.
+    app.add_middleware(
+        RequestTracingMiddleware,
+        exclude_paths=frozenset({"/metrics", "/health/live"}),
+    )
     # Innermost of the three below, so every response leaves with these headers -
     # including the ones an exception handler produces, which is where a
     # stack trace would otherwise be served without them.

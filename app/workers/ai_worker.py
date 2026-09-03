@@ -44,6 +44,7 @@ from app.agents.registry import ToolRegistry
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
+from app.core.tracing import JOB_OUTCOME
 from app.db.models.agent import Agent
 from app.db.models.billing import LimitKey
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
@@ -57,7 +58,13 @@ from app.services.messaging_service import MessagingService
 from app.services.sentiment_reader import SentimentAnalyzer
 from app.services.sentiment_service import SentimentService
 from app.services.usage_service import UsageRecorder
-from app.workers.dispatch import JobIdentity, handle_failure, record_success
+from app.workers.dispatch import (
+    SUCCEEDED,
+    JobIdentity,
+    handle_failure,
+    job_span,
+    record_success,
+)
 from app.workers.queue import (
     BLOCK_SECONDS,
     AgentJob,
@@ -170,12 +177,27 @@ class AgentWorker:
             return False
 
         envelope = JobEnvelope.decode(raw)
+        # One span per attempt, rooted in the trace the job was queued
+        # from. A carrier the envelope could not carry starts a new trace
+        # and the attempt runs identically - see `job_span`.
+        with job_span(job_type=JOB_TYPE, envelope=envelope) as attempt:
+            attempt.set_attribute(JOB_OUTCOME, await self._attempt(raw, envelope))
+        return True
+
+    async def _attempt(self, raw: str, envelope: JobEnvelope) -> str:
+        """Run one reserved job, and report how the attempt ended.
+
+        Split out of `run_once` so the whole attempt - decoding, handling,
+        and whatever is written down when it fails - happens inside one
+        span, and the value it returns is that span's outcome. The four
+        strings it can answer are the domain of `wasla.job_outcome`.
+        """
         try:
             job = AgentJob.decode(envelope.body)
         except MalformedJobError:
             # Retrying would fail identically forever.
             logger.warning("agent.job_malformed")
-            await handle_failure(
+            outcome = await handle_failure(
                 self._queue,
                 raw,
                 envelope,
@@ -184,7 +206,7 @@ class AgentWorker:
                 category=FailureCategory.MALFORMED,
                 policy=NO_RETRY,
             )
-            return True
+            return outcome.action
 
         progress = _TurnProgress(lambda: self._queue.mark_engaged(raw))
         try:
@@ -194,7 +216,7 @@ class AgentWorker:
                 "agent.job_failed",
                 extra={"conversation_id": str(job.conversation_id)},
             )
-            await handle_failure(
+            outcome = await handle_failure(
                 self._queue,
                 raw,
                 envelope,
@@ -207,11 +229,11 @@ class AgentWorker:
                 # reply, so it stops offering another attempt.
                 policy=NO_RETRY if progress.engaged else AGENT_RETRY,
             )
-            return True
+            return outcome.action
 
         await self._queue.release(raw)
         await record_success(job_type=JOB_TYPE)
-        return True
+        return SUCCEEDED
 
     def _reservation(self, tenant_id: uuid.UUID) -> Callable[[], Awaitable[bool]]:
         """One AI request, taken atomically, in a transaction of its own.

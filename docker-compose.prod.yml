@@ -136,6 +136,15 @@ services:
       # exposition is reachable from a scraper on `internal` and from nowhere
       # else (ADR-070).
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      # Distributed tracing (ADR-083). Off unless a deployment has a collector,
+      # and refusing to start if it says otherwise without naming one. Both
+      # processes get the same values: a trace that the API sampled in and the
+      # worker sampled out is a trace missing its middle, which is the least
+      # useful possible outcome of sampling.
+      TRACING_ENABLED: ${TRACING_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-}
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
       # Read-only, and only so `/metrics` can say how long it has been since a
       # backup last reached its destination. The API takes no backups and
       # holds no object-store credential (ADR-075).
@@ -328,6 +337,15 @@ services:
       # job outcomes and provider calls into Redis and the API renders them
       # (ADR-069). Off here means those counters are simply not written.
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      # The same tracing configuration as the API, and it has to be: the whole
+      # point is one trace across both processes, and a worker that sampled
+      # differently or exported elsewhere would break the join it exists to
+      # make. `OTEL_SERVICE_NAME` is what tells the two apart in the backend -
+      # blank, this process reports `wasla-worker`.
+      TRACING_ENABLED: ${TRACING_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-}
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
       # How long this process's claim on a job is good for. It renews every
       # third of this while it lives, so a crash is noticed in about that time
       # and a long job is never stolen from a worker still running it
