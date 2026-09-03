@@ -18,17 +18,24 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.exceptions import ExternalServiceError, RateLimitedError
 from app.core.logging import get_logger
-from app.core.media_types import SNIFF_BYTES, MediaTypeError
+from app.core.media_types import SNIFF_BYTES, DetectedMedia, MediaTypeError
 from app.core.media_types import resolve as resolve_media_type
-from app.core.storage import MediaStorage, StorageError
-from app.db.models.media import MAX_TRANSCRIPT_LENGTH, MediaStatus, MessageMedia
+from app.core.storage import MediaStorage, StorageError, build_key
+from app.db.models.media import (
+    MAX_TRANSCRIPT_LENGTH,
+    MediaStatus,
+    MediaStorageState,
+    MessageMedia,
+)
 from app.db.models.usage import UsageEventType
+from app.db.session import released
 from app.integrations.whatsapp.client import MediaTooLargeError, WhatsAppClient
 from app.repositories.media_repository import MediaRepository
 from app.services.extraction import UnreadableDocumentError
@@ -42,6 +49,11 @@ from app.services.media_reader import (
 from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
+
+# Storage states this path must leave alone. Each is owned by something else -
+# retention, or an operator looking at a quarantined object - and restarting a
+# download from one of them would be this service overruling that owner.
+_NOT_OURS_TO_WRITE: Final = frozenset({MediaStorageState.PURGING, MediaStorageState.MISMATCHED})
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,19 +101,43 @@ class MediaService:
         return await self._media.require_by_id(media_id)
 
     async def read(self, media: MessageMedia) -> bytes:
-        """The stored bytes of a file that has one."""
-        if media.storage_key is None:
+        """The stored bytes of a file that has one.
+
+        `is_stored`, not `storage_key is not None`. A row carrying a key is a
+        row that has *claimed* one, and between the intent commit and the
+        finalisation there may be nothing at it yet - reading from there would
+        answer a colleague with a storage error for a file the system is in the
+        middle of writing correctly (ADR-087).
+        """
+        if not media.is_stored or media.storage_key is None:
             raise StorageError()
         return await self._storage.get(media.storage_key)
 
     async def download(self, media: MessageMedia) -> MediaOutcome:
         """Fetch one file from Meta and put it in the store.
 
+        Three phases, and the boundaries between them are the point (ADR-087):
+
+            TX1   allocate the object key, record what is about to be written,
+                  state PENDING                                    -> COMMIT
+            --    write the object. No transaction, no connection held.
+            TX2   re-read under a row lock, confirm it is still ours,
+                  state STORED                                     -> COMMIT
+
+        The commit in the middle is what makes an interrupted write
+        recoverable. Anything that goes wrong after it leaves a row that names
+        the exact object, so reconciliation can find it without knowing
+        anything about the bucket's contents.
+
         Already-stored files return without doing anything. The job that brings
         us here can be retried, and re-downloading would spend a request and a
         write to arrive at bytes we already hold.
         """
-        if media.storage_key is not None:
+        if media.is_stored:
+            return MediaOutcome(media_id=media.id, status=media.status)
+        if media.storage_state in _NOT_OURS_TO_WRITE:
+            # Being purged, already quarantined: each has an owner, and it is
+            # not this. Reported as it stands rather than restarted.
             return MediaOutcome(media_id=media.id, status=media.status)
         if media.is_purged:
             # Retention removed this file (ADR-078). A null `storage_key` used
@@ -188,43 +224,146 @@ class MediaService:
                 "so it was not stored.",
             )
 
-        try:
-            key = await self._storage.put(
-                tenant_id=self._tenant_id,
-                data=downloaded.content,
-                mime_type=detected.mime_type,
+        # TX1. The object does not exist yet and the database already knows its
+        # name, its size and the hash of what belongs in it.
+        key = await self.intend(
+            media,
+            mime_type=detected.mime_type,
+            data=downloaded.content,
+        )
+        if key is None:
+            return await self._fail(
+                media,
+                "This file no longer matches the upload already recorded for it.",
             )
-        except StorageError as error:
-            return await self._fail(media, str(error))
 
-        media.storage_key = key
+        # No transaction, no pooled connection, no row lock across the write.
+        # `released` commits what is staged, which is exactly the intent above
+        # and is why it is safe here (ADR-080).
+        async with released(self._session):
+            written = await self._write(key=key, data=downloaded.content, mime_type=detected)
+
+        if not written:
+            # The intent stays. A row that names an object nobody managed to
+            # write is the recoverable state, and reconciliation decides
+            # afterwards whether it is there.
+            return await self._fail(media, "The file store refused the write.")
+
+        # TX2.
+        return await self.finalize(media, key=key)
+
+    async def intend(
+        self,
+        media: MessageMedia,
+        *,
+        mime_type: str,
+        data: bytes,
+    ) -> str | None:
+        """Record which object is about to be written, and what will be in it.
+
+        Returns the key to write at, or None if this file must not be written -
+        which happens when a row already carries an intent describing different
+        bytes. Overwriting there would replace an object somebody may already
+        be recovering with contents its own row does not describe.
+
+        Allocated under a row lock, so two attempts at one file agree on one
+        key rather than writing two objects of which only one can be recorded
+        (ADR-087). The lock covers a `SELECT` and an `UPDATE` and nothing else;
+        the caller commits immediately afterwards.
+        """
+        digest = content_hash(data)
+        byte_size = len(data)
+        row = await self._media.lock_for_upload(media.id)
+
+        if row.storage_state is MediaStorageState.PENDING:
+            # An earlier attempt got this far and did not finish. Reuse its
+            # key, so a retry cannot leak the object the first one wrote.
+            if row.content_hash != digest or row.byte_size != byte_size:
+                logger.warning(
+                    "media.upload_intent_conflict",
+                    extra={
+                        "event": "media.upload_intent_conflict",
+                        "tenant_id": str(self._tenant_id),
+                        "media_id": str(media.id),
+                    },
+                )
+                return None
+            return row.storage_key
+        if row.storage_state is not MediaStorageState.ABSENT:
+            return None
+
+        row.storage_key = build_key(tenant_id=self._tenant_id, mime_type=mime_type)
+        row.storage_state = MediaStorageState.PENDING
+        row.upload_started_at = datetime.now(UTC)
         # The canonical type, so everything downstream - the reader that picks
         # a route, the download handler that sets a Content-Type - works from
         # what the file is rather than from what it was announced as.
-        media.mime_type = detected.mime_type
-        media.byte_size = downloaded.byte_size
-        media.content_hash = content_hash(downloaded.content)
-        media.status = MediaStatus.STORED
-        media.last_error = None
+        row.mime_type = mime_type
+        row.byte_size = byte_size
+        row.content_hash = digest
+        await self._session.flush()
+
+        logger.info(
+            "media.upload_intent_created",
+            extra={
+                "event": "media.upload_intent_created",
+                "tenant_id": str(self._tenant_id),
+                "media_id": str(media.id),
+                "byte_size": byte_size,
+            },
+        )
+        return row.storage_key
+
+    async def finalize(self, media: MessageMedia, *, key: str) -> MediaOutcome:
+        """Record that the object this row claimed is now really there.
+
+        Re-read under the same lock the intent took, and refused if the row has
+        moved on: a duplicate attempt that got here first, or a reconciler that
+        decided while this one was writing. Finalising anyway would meter the
+        same bytes twice and could resurrect a state somebody else settled.
+        """
+        row = await self._media.lock_for_upload(media.id)
+        if row.storage_state is not MediaStorageState.PENDING or row.storage_key != key:
+            return MediaOutcome(media_id=row.id, status=row.status)
+
+        row.storage_state = MediaStorageState.STORED
+        row.status = MediaStatus.STORED
+        row.last_error = None
         # Storage is metered when bytes are written, not by sweeping the store.
         # A sweep would report a level rather than a consumption, and a level
-        # cannot be billed for a period that has already closed.
+        # cannot be billed for a period that has already closed. Metered by
+        # whoever finalises - this path or reconciliation - because the
+        # transition happens exactly once, under this lock.
         self._usage.record(
             UsageEventType.STORAGE_USED,
-            quantity=downloaded.byte_size,
-            meta={"media_id": str(media.id)},
+            quantity=row.byte_size,
+            meta={"media_id": str(row.id)},
         )
         await self._session.flush()
 
         logger.info(
             "media.stored",
             extra={
+                "event": "media.upload_finalized",
                 "tenant_id": str(self._tenant_id),
-                "media_id": str(media.id),
-                "byte_size": media.byte_size,
+                "media_id": str(row.id),
+                "byte_size": row.byte_size,
             },
         )
-        return MediaOutcome(media_id=media.id, status=MediaStatus.STORED)
+        return MediaOutcome(media_id=row.id, status=MediaStatus.STORED)
+
+    async def _write(self, *, key: str, data: bytes, mime_type: DetectedMedia) -> bool:
+        """Put the bytes at the key the intent named. Never raises.
+
+        A refusal is a `False` rather than an exception because the caller is
+        inside `released`, where nothing may touch the session - and the row
+        that has to record the failure is on the other side of that block.
+        """
+        try:
+            await self._storage.put_at(key=key, data=data, mime_type=mime_type.mime_type)
+        except StorageError:
+            return False
+        return True
 
     async def understand(self, media: MessageMedia, *, reader: MediaReader) -> MediaOutcome:
         """Work out what a stored file says, and record it.
@@ -245,7 +384,11 @@ class MediaService:
             # Read already, and the file since removed. The transcript on the
             # row is the answer, and re-deriving it is not possible anyway.
             return MediaOutcome(media_id=media.id, status=media.status)
-        if media.storage_key is None:
+        if not media.is_stored or media.storage_key is None:
+            # A row mid-upload has a key and no proven object. Reading from it
+            # would be this job consuming a write that has not been finalised,
+            # and calling the resulting storage error "nothing to read" would
+            # skip a file that is about to be perfectly readable (ADR-087).
             return await self._skip(media, "There is nothing stored to read.")
         if media.status is MediaStatus.READY:
             # Already read. The job can be retried, and paying a provider again

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from app.core.storage import EXTENSIONS, LocalMediaStorage, StorageError, build_key
+from tests.fakes import store_object
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
@@ -56,24 +57,24 @@ def test_every_declared_extension_is_lowercase_and_dotted() -> None:
 
 
 async def test_what_is_put_can_be_read_back(storage: LocalMediaStorage) -> None:
-    key = await storage.put(tenant_id=TENANT, data=b"hello", mime_type="text/plain")
+    key = await store_object(storage, tenant_id=TENANT, data=b"hello", mime_type="text/plain")
     assert await storage.get(key) == b"hello"
 
 
 async def test_a_file_lands_under_the_root(storage: LocalMediaStorage) -> None:
-    key = await storage.put(tenant_id=TENANT, data=b"hello")
+    key = await store_object(storage, tenant_id=TENANT, data=b"hello")
     assert (storage.root / key).is_file()
 
 
 async def test_no_partial_file_is_left_behind(storage: LocalMediaStorage) -> None:
     """Writes are staged and renamed, so a reader never sees a half-written file."""
-    await storage.put(tenant_id=TENANT, data=b"hello", mime_type="image/png")
+    await store_object(storage, tenant_id=TENANT, data=b"hello", mime_type="image/png")
     leftovers = [path for path in storage.root.rglob("*") if path.name.startswith(".")]
     assert leftovers == []
 
 
 async def test_deleting_is_idempotent(storage: LocalMediaStorage) -> None:
-    key = await storage.put(tenant_id=TENANT, data=b"hello")
+    key = await store_object(storage, tenant_id=TENANT, data=b"hello")
     await storage.delete(key)
     # Deleting again is not an error: a caller cleaning up after a failure
     # should not have to know how far the failure got.
@@ -122,8 +123,8 @@ async def test_an_escaping_key_cannot_be_deleted_either(storage: LocalMediaStora
 
 async def test_two_workspaces_files_do_not_share_a_prefix(storage: LocalMediaStorage) -> None:
     other = uuid.UUID("22222222-2222-2222-2222-222222222222")
-    mine = await storage.put(tenant_id=TENANT, data=b"mine")
-    theirs = await storage.put(tenant_id=other, data=b"theirs")
+    mine = await store_object(storage, tenant_id=TENANT, data=b"mine")
+    theirs = await store_object(storage, tenant_id=other, data=b"theirs")
 
     assert mine.split("/")[0] != theirs.split("/")[0]
     assert await storage.get(mine) == b"mine"

@@ -20,6 +20,7 @@ from app.db.models.conversation import Conversation
 from app.db.models.media import (
     UNRESOLVED_MEDIA_STATUSES,
     MediaStatus,
+    MediaStorageState,
     MessageMedia,
 )
 from app.repositories.base import BaseRepository, TenantScopedRepository
@@ -41,6 +42,36 @@ class MediaRepository(TenantScopedRepository[MessageMedia]):
 
     async def get_for_message(self, message_id: uuid.UUID) -> MessageMedia | None:
         return await self._first(self._select().where(MessageMedia.message_id == message_id))
+
+    async def lock_for_upload(self, media_id: uuid.UUID) -> MessageMedia:
+        """Re-read this row under a row lock, so one object key is allocated once.
+
+        The queue can deliver the same media job twice - a lease that expired
+        while the worker was still holding it, a replay after a crash - and two
+        attempts each allocating a key would each write an object, of which
+        only one could end up on the row. The other would be an object with no
+        owner, which is the exact failure ADR-087 exists to make impossible.
+
+        Serialising the allocation is enough to prevent it: the second attempt
+        waits, re-reads, finds the key the first one committed, and writes its
+        bytes to that same key rather than to a new one.
+
+        Tenant-scoped like every other read here, so the lock cannot be taken
+        on a row belonging to somebody else. Held for the length of the intent
+        transaction only, which makes no network call.
+
+        `populate_existing` is not optional. Without it SQLAlchemy takes the
+        lock, returns the instance already in the identity map, and leaves its
+        attributes exactly as this session last saw them - so the caller would
+        hold the lock and still be reading the values it was trying to
+        re-check, which is the whole point of taking it.
+        """
+        return await self._require(
+            self._select()
+            .where(MessageMedia.id == media_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
 
     async def list_for_conversation(self, conversation_id: uuid.UUID) -> list[MessageMedia]:
         return await self._all(
@@ -164,22 +195,29 @@ class PlatformMediaRepository(BaseRepository[MessageMedia]):
         super().__init__(session)
 
     async def due_for_purge(self, *, cutoff: datetime, limit: int) -> list[MessageMedia]:
-        """Files older than `cutoff` that still have an object, oldest first.
+        """Fully stored files older than `cutoff`, plus anything mid-purge, oldest first.
 
-        Includes rows a previous pass already claimed, because a claim that was
-        not finished is exactly what the next pass has to pick up. `storage_key
-        IS NOT NULL` is the whole condition for "there is something to delete" -
-        a row whose key is cleared is done, and a message that never carried a
-        file never had one.
+        `STORED` and nothing looser. It used to be `storage_key IS NOT NULL`,
+        which was the same set while a key could only exist once its object
+        did; it is not the same set now that a key is committed before the
+        write. An upload still in flight carries a key, is old enough the
+        moment its message is, and deleting its object would be retention
+        destroying a file nobody has finished writing - so `PENDING` is not
+        here, and reconciliation owns those instead (ADR-087).
+
+        `PURGING` is included for the same reason it always was: a claim that
+        was not finished is exactly what the next pass has to pick up.
 
         Ordered oldest first so a backlog drains in the order it accumulated,
-        and bounded so a deployment with a large one takes several passes rather
-        than one enormous transaction.
+        and bounded so a deployment with a large one takes several passes
+        rather than one enormous transaction.
         """
         statement = (
             select(MessageMedia)
             .where(
-                MessageMedia.storage_key.is_not(None),
+                MessageMedia.storage_state.in_(
+                    (MediaStorageState.STORED, MediaStorageState.PURGING)
+                ),
                 MessageMedia.created_at < cutoff,
             )
             .order_by(MessageMedia.created_at)
@@ -198,10 +236,7 @@ class PlatformMediaRepository(BaseRepository[MessageMedia]):
         """
         statement = (
             select(MessageMedia)
-            .where(
-                MessageMedia.storage_key.is_not(None),
-                MessageMedia.purge_started_at.is_not(None),
-            )
+            .where(MessageMedia.storage_state == MediaStorageState.PURGING)
             .order_by(MessageMedia.purge_started_at)
             .limit(limit)
         )
@@ -218,9 +253,6 @@ class PlatformMediaRepository(BaseRepository[MessageMedia]):
         statement = (
             select(func.count())
             .select_from(MessageMedia)
-            .where(
-                MessageMedia.storage_key.is_not(None),
-                MessageMedia.purge_started_at.is_not(None),
-            )
+            .where(MessageMedia.storage_state == MediaStorageState.PURGING)
         )
         return int((await self._session.execute(statement)).scalar_one())

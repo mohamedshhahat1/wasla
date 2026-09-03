@@ -36,10 +36,11 @@ from app.db.models.conversation import (
     MessageKind,
     MessageStatus,
 )
-from app.db.models.media import MediaStatus, MessageMedia
+from app.db.models.media import MediaStatus, MediaStorageState, MessageMedia
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.services.media_retention_service import MediaRetentionService, purge_reason
+from tests.fakes import store_object
 
 pytestmark = pytest.mark.integration
 
@@ -72,11 +73,14 @@ class RefusingStore:
         self._inner = inner
         self.delete_attempts = 0
 
-    async def put(self, *, tenant_id: uuid.UUID, data: bytes, mime_type: str | None = None) -> str:
-        return await self._inner.put(tenant_id=tenant_id, data=data, mime_type=mime_type)
+    async def put_at(self, *, key: str, data: bytes, mime_type: str | None = None) -> None:
+        await self._inner.put_at(key=key, data=data, mime_type=mime_type)
 
     async def get(self, key: str) -> bytes:
         return await self._inner.get(key)
+
+    async def exists(self, key: str) -> bool:
+        return await self._inner.exists(key)
 
     async def delete(self, key: str) -> None:
         self.delete_attempts += 1
@@ -90,11 +94,14 @@ class CountingStore:
         self._inner = inner
         self.deleted: list[str] = []
 
-    async def put(self, *, tenant_id: uuid.UUID, data: bytes, mime_type: str | None = None) -> str:
-        return await self._inner.put(tenant_id=tenant_id, data=data, mime_type=mime_type)
+    async def put_at(self, *, key: str, data: bytes, mime_type: str | None = None) -> None:
+        await self._inner.put_at(key=key, data=data, mime_type=mime_type)
 
     async def get(self, key: str) -> bytes:
         return await self._inner.get(key)
+
+    async def exists(self, key: str) -> bool:
+        return await self._inner.exists(key)
 
     async def delete(self, key: str) -> None:
         self.deleted.append(key)
@@ -147,7 +154,7 @@ async def _stored_file(
     session.add(message)
     await session.flush()
 
-    key = await storage.put(tenant_id=tenant.id, data=PNG, mime_type="image/png")
+    key = await store_object(storage, tenant_id=tenant.id, data=PNG, mime_type="image/png")
     assert key is not None
     media = MessageMedia(
         tenant_id=tenant.id,
@@ -156,6 +163,7 @@ async def _stored_file(
         mime_type="image/png",
         status=MediaStatus.READY,
         storage_key=key,
+        storage_state=MediaStorageState.STORED,
         byte_size=len(PNG),
         transcript=transcript,
     )

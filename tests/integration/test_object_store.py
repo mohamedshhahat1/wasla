@@ -38,8 +38,10 @@ from app.core.storage import (
     LocalMediaStorage,
     MediaStorage,
     StorageError,
+    build_key,
     build_media_storage,
 )
+from tests.fakes import store_object
 
 pytestmark = pytest.mark.integration
 
@@ -78,7 +80,7 @@ def storage(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[MediaSto
 
 
 async def test_what_is_put_comes_back_byte_for_byte(storage: MediaStorage) -> None:
-    key = await storage.put(tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
+    key = await store_object(storage, tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
 
     assert await storage.get(key) == PNG
 
@@ -93,7 +95,7 @@ async def test_a_key_is_tenant_prefixed_and_matches_the_shared_pattern(
     rewriting every row that points at one.
     """
     tenant = uuid.uuid4()
-    key = await storage.put(tenant_id=tenant, data=PNG, mime_type="image/png")
+    key = await store_object(storage, tenant_id=tenant, data=PNG, mime_type="image/png")
 
     assert key.startswith(f"{tenant}/")
     assert SAFE_KEY.match(key)
@@ -101,7 +103,9 @@ async def test_a_key_is_tenant_prefixed_and_matches_the_shared_pattern(
 
 async def test_a_key_is_never_built_from_the_content_or_a_filename(storage: MediaStorage) -> None:
     """A customer's filename arrives from a stranger's phone. It builds nothing."""
-    key = await storage.put(tenant_id=uuid.uuid4(), data=b"invoice.pdf %PDF-1.7", mime_type=None)
+    key = await store_object(
+        storage, tenant_id=uuid.uuid4(), data=b"invoice.pdf %PDF-1.7", mime_type=None
+    )
 
     assert "invoice" not in key
     assert "pdf" not in key.rsplit("/", 1)[-1].split(".")[0]
@@ -110,8 +114,8 @@ async def test_a_key_is_never_built_from_the_content_or_a_filename(storage: Medi
 async def test_two_workspaces_never_share_a_prefix(storage: MediaStorage) -> None:
     first, second = uuid.uuid4(), uuid.uuid4()
 
-    one = await storage.put(tenant_id=first, data=PNG, mime_type="image/png")
-    two = await storage.put(tenant_id=second, data=PDF, mime_type="application/pdf")
+    one = await store_object(storage, tenant_id=first, data=PNG, mime_type="image/png")
+    two = await store_object(storage, tenant_id=second, data=PDF, mime_type="application/pdf")
 
     assert not two.startswith(f"{first}/")
     assert not one.startswith(f"{second}/")
@@ -119,8 +123,8 @@ async def test_two_workspaces_never_share_a_prefix(storage: MediaStorage) -> Non
 
 async def test_one_workspaces_key_never_returns_anothers_bytes(storage: MediaStorage) -> None:
     """Key separation is not authorization, and it is still worth asserting."""
-    one = await storage.put(tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
-    two = await storage.put(tenant_id=uuid.uuid4(), data=PDF, mime_type="application/pdf")
+    one = await store_object(storage, tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
+    two = await store_object(storage, tenant_id=uuid.uuid4(), data=PDF, mime_type="application/pdf")
 
     assert await storage.get(one) == PNG
     assert await storage.get(two) == PDF
@@ -146,13 +150,45 @@ async def test_reading_a_key_that_was_never_stored_fails_cleanly(storage: MediaS
 async def test_a_key_that_is_not_one_we_produced_is_refused(
     storage: MediaStorage, key: str
 ) -> None:
-    """A key read back from a database row is input, whatever wrote it."""
+    """A key read back from a database row is input, whatever wrote it.
+
+    Asserted on the write as well as the read since ADR-087. `put_at` takes a
+    key from a caller rather than minting one, so it is the first method here
+    that could be pointed at an arbitrary path - and the row it came from is
+    still input however trustworthy the code that wrote it looked.
+    """
     with pytest.raises(StorageError):
         await storage.get(key)
 
+    with pytest.raises(StorageError):
+        await storage.put_at(key=key, data=PNG, mime_type="image/png")
+
+
+async def test_a_key_is_allocated_before_anything_is_written(storage: MediaStorage) -> None:
+    """The property the whole write protocol rests on (ADR-087).
+
+    `build_key` is a pure function of a tenant and a type. It touches no store,
+    so the key can be committed to PostgreSQL first and the object written at
+    it afterwards - which is what makes an interrupted write something a query
+    can find rather than something only a bucket listing could.
+    """
+    tenant = uuid.uuid4()
+    key = build_key(tenant_id=tenant, mime_type="image/png")
+
+    assert key.startswith(f"{tenant}/")
+    assert SAFE_KEY.match(key)
+    # Nothing is there yet: allocating a name did not create anything.
+    assert await storage.exists(key) is False
+
+    await storage.put_at(key=key, data=PNG, mime_type="image/png")
+
+    assert await storage.exists(key) is True
+    assert await storage.get(key) == PNG
+    await storage.delete(key)
+
 
 async def test_deleting_removes_the_object(storage: MediaStorage) -> None:
-    key = await storage.put(tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
+    key = await store_object(storage, tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
 
     await storage.delete(key)
 
@@ -167,7 +203,7 @@ async def test_deleting_is_idempotent(storage: MediaStorage) -> None:
     objects it did remove would raise on the retry and stop it reaching the
     ones it did not.
     """
-    key = await storage.put(tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
+    key = await store_object(storage, tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
 
     await storage.delete(key)
     await storage.delete(key)
@@ -181,7 +217,7 @@ async def test_a_key_that_escapes_cannot_be_deleted_either(storage: MediaStorage
 
 async def test_an_empty_file_round_trips(storage: MediaStorage) -> None:
     """Nothing upstream stores one, and a store that could not would be surprising."""
-    key = await storage.put(tenant_id=uuid.uuid4(), data=b"", mime_type="text/plain")
+    key = await store_object(storage, tenant_id=uuid.uuid4(), data=b"", mime_type="text/plain")
 
     assert await storage.get(key) == b""
 
@@ -189,7 +225,7 @@ async def test_an_empty_file_round_trips(storage: MediaStorage) -> None:
 async def test_a_large_file_round_trips(storage: MediaStorage) -> None:
     """A megabyte, which is an ordinary voice note and not an ordinary test string."""
     payload = bytes(range(256)) * 4096
-    key = await storage.put(tenant_id=uuid.uuid4(), data=payload, mime_type="audio/ogg")
+    key = await store_object(storage, tenant_id=uuid.uuid4(), data=payload, mime_type="audio/ogg")
 
     assert await storage.get(key) == payload
 
@@ -205,7 +241,7 @@ async def test_a_fresh_client_reads_what_another_wrote() -> None:
     what a replacement container does after the original host is gone.
     """
     writer = _s3_or_skip()
-    key = await writer.put(tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
+    key = await store_object(writer, tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
 
     reader = _s3_or_skip()
     assert await reader.get(key) == PNG
@@ -221,7 +257,7 @@ async def test_exists_distinguishes_absent_from_unreachable() -> None:
     rows pointing at every object in the bucket.
     """
     store = _s3_or_skip()
-    key = await store.put(tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
+    key = await store_object(store, tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
 
     assert await store.exists(key) is True
     await store.delete(key)
@@ -256,7 +292,7 @@ async def test_a_rejected_request_says_nothing_about_the_deployment() -> None:
     )
 
     with pytest.raises(StorageError) as raised:
-        await wrong.put(tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
+        await store_object(wrong, tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
 
     message = str(raised.value)
     for secret in (
@@ -269,7 +305,7 @@ async def test_a_rejected_request_says_nothing_about_the_deployment() -> None:
 
     # The working store still works: the failure above was the credential and
     # not something this test left behind.
-    key = await store.put(tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
+    key = await store_object(store, tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
     await store.delete(key)
 
 
@@ -285,7 +321,7 @@ async def test_an_unreachable_store_is_a_storage_error_not_an_httpx_error() -> N
     )
 
     with pytest.raises(StorageError):
-        await unreachable.put(tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
+        await store_object(unreachable, tenant_id=uuid.uuid4(), data=PNG, mime_type="image/png")
 
 
 # ================================================================ the factory

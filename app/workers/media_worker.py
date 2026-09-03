@@ -196,12 +196,6 @@ class MediaWorker:
                 logger.warning("media.row_missing", extra={"media_id": str(job.media_id)})
                 return
 
-            # Taken before anything else in this transaction. Everything below
-            # decides whether an agent may now answer, and that decision has to
-            # be serialised against the sibling job that is deciding the same
-            # thing about the same conversation.
-            await ConversationMediaGate(session).lock(media.conversation_id)
-
             async with (
                 build_whatsapp_client() as whatsapp_http,
                 build_openai_client() as openai_http,
@@ -298,13 +292,32 @@ class MediaWorker:
     ) -> None:
         """Ask an agent to answer, if nothing else on this conversation is unread.
 
-        The count runs while the conversation row is still locked, so a sibling
-        job cannot be between its own write and this question.
+        The lock is taken **here**, and it used to be taken at the top of
+        `_handle`. Two reasons, and the first is a correctness requirement
+        rather than a preference: the download now commits its object intent
+        part-way through (ADR-087), and a commit ends the transaction the lock
+        lives in - so a lock taken before it would be gone by the time this
+        question is asked, and the race it exists to stop would be back.
+
+        Taking it here is equally correct and strictly cheaper. What has to be
+        serialised is *this* pair - the media row's final state and the count
+        that reads every sibling's - and both are in this transaction, which
+        commits while the lock is still held. A sibling worker therefore waits
+        here, then counts, then sees the truth. The intermediate states are
+        safe to leave unlocked because every one of them - PENDING,
+        DOWNLOADING, STORED - is unresolved, so a sibling counting mid-download
+        sees work outstanding and correctly declines to release the reply.
+
+        What it stops holding is the whole of a Meta fetch, an object write and
+        an inference - a row lock across three network calls, which is the
+        thing ADR-080 exists to keep out of this codebase.
 
         A queue failure is logged rather than raised. The file is read and the
         row is committed either way, and losing the reply to a Redis outage is
         better than losing the transcript as well.
         """
+        await ConversationMediaGate(session).lock(media.conversation_id)
+
         remaining = await MediaRepository(session, tenant_id=job.tenant_id).count_unresolved(
             media.conversation_id
         )

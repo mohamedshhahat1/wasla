@@ -45,11 +45,12 @@ from app.db.models.conversation import (
     MessageKind,
     MessageStatus,
 )
-from app.db.models.media import MediaStatus, MessageMedia
+from app.db.models.media import MediaStatus, MediaStorageState, MessageMedia
 from app.db.models.whatsapp import WhatsAppAccount
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
 from tests.fake_queue_redis import FakeQueueRedis
+from tests.fakes import store_object
 
 pytestmark = pytest.mark.integration
 
@@ -192,7 +193,7 @@ async def _attachment(
     session.add(message)
     await session.flush()
 
-    key = await storage.put(tenant_id=tenant.id, data=PNG, mime_type="image/png")
+    key = await store_object(storage, tenant_id=tenant.id, data=PNG, mime_type="image/png")
     media = MessageMedia(
         tenant_id=tenant.id,
         message_id=message.id,
@@ -200,6 +201,7 @@ async def _attachment(
         mime_type="image/png",
         status=MediaStatus.READY,
         storage_key=key,
+        storage_state=MediaStorageState.STORED,
         byte_size=len(PNG),
     )
     session.add(media)

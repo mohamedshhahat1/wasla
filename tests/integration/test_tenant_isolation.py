@@ -77,7 +77,7 @@ from app.db.models.knowledge import (
     KnowledgeBase,
 )
 from app.db.models.lead import Lead, LeadNote, LeadSource, LeadStatus
-from app.db.models.media import MediaStatus, MessageMedia
+from app.db.models.media import MediaStatus, MediaStorageState, MessageMedia
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.db.models.whatsapp_template import (
     TemplateCategory,
@@ -227,6 +227,7 @@ async def _seed(session: AsyncSession, settings: Settings, *, slug: str) -> Work
         mime_type="image/jpeg",
         byte_size=12,
         storage_key=f"{tenant.id}/{slug}.jpg",
+        storage_state=MediaStorageState.STORED,
     )
     note = LeadNote(tenant_id=tenant.id, lead_id=lead.id, body=f"SECRET-{slug.upper()}")
     campaign = Campaign(

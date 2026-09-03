@@ -26,7 +26,7 @@ from app.db.models.conversation import (
     MessageKind,
     MessageStatus,
 )
-from app.db.models.media import MediaStatus, MessageMedia
+from app.db.models.media import MediaStatus, MediaStorageState, MessageMedia
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.integrations.whatsapp.client import DownloadedMedia, MediaDescriptor, SentMessage
@@ -35,7 +35,7 @@ from app.workers.media_queue import MediaJob
 from app.workers.media_worker import MediaWorker
 from app.workers.queue import AgentJob
 from tests.fake_queue_redis import FakeQueueRedis
-from tests.fakes import as_media_reader, as_whatsapp
+from tests.fakes import as_media_reader, as_whatsapp, store_object
 
 pytestmark = pytest.mark.integration
 
@@ -500,13 +500,15 @@ async def test_a_stored_file_is_read_without_a_whatsapp_token(
     media = await _attachment(db_session, tenant=tenant, conversation=conversation)
 
     storage = LocalMediaStorage(tmp_path)
-    media.storage_key = await storage.put(
+    media.storage_key = await store_object(
+        storage,
         tenant_id=tenant.id,
         data=b"the warranty lasts two years",
         mime_type="text/plain",
     )
     media.mime_type = "text/plain"
     media.status = MediaStatus.STORED
+    media.storage_state = MediaStorageState.STORED
     await db_session.flush()
 
     worker = MediaWorker(
@@ -536,13 +538,15 @@ async def test_a_document_is_read_with_no_provider_configured(
     media = await _attachment(db_session, tenant=tenant, conversation=conversation)
 
     storage = LocalMediaStorage(tmp_path)
-    media.storage_key = await storage.put(
+    media.storage_key = await store_object(
+        storage,
         tenant_id=tenant.id,
         data=b"delivery takes three working days",
         mime_type="text/plain",
     )
     media.mime_type = "text/plain"
     media.status = MediaStatus.STORED
+    media.storage_state = MediaStorageState.STORED
     await db_session.flush()
 
     worker = MediaWorker(

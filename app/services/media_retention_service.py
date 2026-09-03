@@ -29,10 +29,14 @@ differently:
                                        orphan that no query can find.
 
 So the claim is committed *first*, and it is what makes the middle recoverable:
-`purge_started_at` set with `storage_key` still present means "this file is
-being removed, and may or may not still be there". A pass that dies anywhere
-leaves that state, and the next pass deletes again - which is a no-op on an
-object already gone, in both backends - and finishes the job.
+`storage_state = PURGING` means "this file is being removed, and may or may not
+still be there". A pass that dies anywhere leaves that state, and the next pass
+deletes again - which is a no-op on an object already gone, in both backends -
+and finishes the job.
+
+The states this touches are `STORED -> PURGING -> PURGED` and no others. In
+particular it never sees `PENDING`: an upload whose object has not been proved
+to exist is not a file this may expire, however old its message is (ADR-087).
 
 The cost is a window in which a row says a file is going and the file is still
 readable. That is the right way round: a colleague briefly seeing an attachment
@@ -49,7 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.core.storage import MediaStorage, StorageError
-from app.db.models.media import MessageMedia
+from app.db.models.media import MediaStorageState, MessageMedia
 from app.repositories.media_repository import PlatformMediaRepository
 
 logger = get_logger(__name__)
@@ -106,6 +110,13 @@ class MediaRetentionService:
         sent it is not a decision this code can make - any number here would be
         invented, and an invented number that deletes customer data is worse
         than no sweep at all.
+
+        Only fully stored files are eligible. An upload still in flight carries
+        a key and is as old as its message, so an age query over keys would
+        select it - and deleting the object of a write nobody has finished is
+        retention destroying a file rather than expiring one. Those belong to
+        reconciliation, and `due_for_purge` is where that line is drawn
+        (ADR-087).
         """
         if retention_days <= 0:
             return []
@@ -117,6 +128,7 @@ class MediaRetentionService:
         for media in rows:
             if media.purge_started_at is None:
                 media.purge_started_at = moment
+                media.storage_state = MediaStorageState.PURGING
         await self._session.commit()
         return rows
 
@@ -154,6 +166,7 @@ class MediaRetentionService:
         # that makes the row terminal, and doing it first would be the second
         # of the two failure orders in this module's docstring.
         media.storage_key = None
+        media.storage_state = MediaStorageState.PURGED
         logger.info(
             "media.purged",
             extra={

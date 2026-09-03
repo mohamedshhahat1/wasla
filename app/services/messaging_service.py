@@ -27,11 +27,12 @@ from app.core.exceptions import ExternalServiceError, RateLimitedError, Validati
 from app.core.logging import get_logger
 from app.core.media_types import SNIFF_BYTES, MediaClass
 from app.core.media_types import resolve as resolve_media_type
-from app.core.storage import EXTENSIONS, MediaStorage, StorageError
+from app.core.storage import EXTENSIONS, MediaStorage, StorageError, build_key
 from app.db.models.conversation import Conversation, Message, MessageKind, MessageStatus
-from app.db.models.media import MediaStatus
+from app.db.models.media import MediaStatus, MediaStorageState
 from app.db.models.usage import UsageEventType
 from app.db.models.whatsapp import WhatsAppAccount
+from app.db.session import released
 from app.integrations.whatsapp.client import (
     SentMessage,
     WhatsAppClient,
@@ -303,6 +304,18 @@ class MessagingService:
 
         A storage failure is swallowed. The customer has the file; losing our
         own copy of it is not worth failing a request that already succeeded.
+
+        **The transaction commits here, mid-request**, which is the same
+        protocol the inbound path follows (ADR-087): the object's key and
+        contents are recorded before the object can exist, so a request that
+        dies during the write leaves something that names it. The commit lands
+        *after* the send, so it cannot produce a second one - what it does
+        produce is a durable record of the send that already happened, which
+        today is lost along with everything else if the request fails from
+        here on.
+
+        The order of the two external effects is unchanged. Meta first, store
+        second, and only for a send that succeeded.
         """
         if message.status is MessageStatus.FAILED:
             # Nothing was transmitted. Recording an attachment here would claim
@@ -323,19 +336,54 @@ class MessagingService:
         row.status = MediaStatus.READY
 
         if storage is None:
+            await self._session.flush()
             return
 
-        try:
-            row.storage_key = await storage.put(
-                tenant_id=row.tenant_id,
-                data=content,
-                mime_type=mime_type,
-            )
-        except StorageError:
+        # TX1: which object, and what will be in it.
+        key = build_key(tenant_id=row.tenant_id, mime_type=mime_type)
+        row.storage_key = key
+        row.storage_state = MediaStorageState.PENDING
+        row.upload_started_at = datetime.now(UTC)
+
+        async with released(self._session):
+            written = await self._store(storage, key=key, content=content, mime_type=mime_type)
+
+        if not written:
             logger.warning(
                 "media.outbound_not_stored",
                 extra={"conversation_id": str(message.conversation_id)},
             )
+            # The intent stands. Reconciliation asks the store whether the
+            # object arrived anyway - a write can fail on the way back - and
+            # settles the row either way. There are no bytes left to retry
+            # with: they arrived in a request body that is gone.
+            return
+
+        # TX2. The flush matters as much as the assignment: the request's
+        # commit boundary only commits a session that is in a transaction, and
+        # after `released` above this one is not until something touches it.
+        row.storage_state = MediaStorageState.STORED
+        await self._session.flush()
+
+    @staticmethod
+    async def _store(
+        storage: MediaStorage,
+        *,
+        key: str,
+        content: bytes,
+        mime_type: str,
+    ) -> bool:
+        """Write the object, reporting refusal rather than raising.
+
+        A `bool` because the caller is inside `released`, where touching the
+        session is forbidden - and the row that records what happened is on the
+        other side of that block.
+        """
+        try:
+            await storage.put_at(key=key, data=content, mime_type=mime_type)
+        except StorageError:
+            return False
+        return True
 
     async def _dispatch(
         self,

@@ -49,7 +49,6 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import hmac
-import uuid
 from typing import Final, NoReturn
 from urllib.parse import quote
 
@@ -57,7 +56,7 @@ import httpx
 
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.core.storage import SAFE_KEY, StorageError, build_key
+from app.core.storage import SAFE_KEY, StorageError
 
 logger = get_logger(__name__)
 
@@ -67,9 +66,19 @@ ALGORITHM: Final = "AWS4-HMAC-SHA256"
 # signed request, including the ones that carry nothing.
 EMPTY_PAYLOAD_HASH: Final = hashlib.sha256(b"").hexdigest()
 
-# Statuses that mean the object is not there, as opposed to a store that is
-# unwell. Both are refusals to a caller, but only the second is worth an alarm.
-_NOT_FOUND: Final = frozenset({403, 404})
+# The one status that means the object is not there, as opposed to a store that
+# is unwell or that will not answer. Both are refusals to a caller, but only the
+# second is worth an alarm.
+#
+# 403 is deliberately **not** here, and it used to be. S3 answers 403 rather
+# than 404 for a missing key when the caller lacks `s3:ListBucket` - but it
+# also answers 403 for a wrong secret, an expired credential and a policy that
+# has been tightened, and those are indistinguishable in the response. Wasla's
+# own bucket credential can always read its own bucket, so a 403 here is far
+# more likely to be the credential than the key. Reading it as "the object is
+# gone" would let a rotated secret abandon every upload in flight (ADR-087),
+# so it raises and the work is retried when the store is answering again.
+_NOT_FOUND: Final = frozenset({404})
 _OK: Final = frozenset({200, 201, 204})
 
 
@@ -152,23 +161,38 @@ class S3MediaStorage:
 
     # ------------------------------------------------------------- the protocol
 
-    async def put(
+    async def put_at(
         self,
         *,
-        tenant_id: uuid.UUID,
+        key: str,
         data: bytes,
         mime_type: str | None = None,
-    ) -> str:
-        """Store `data` under a fresh key and return it."""
-        key = build_key(tenant_id=tenant_id, mime_type=mime_type)
+    ) -> None:
+        """Store `data` at exactly `key`, which the caller already owns.
+
+        Unconditional, and that is a decision rather than an omission.
+        `If-None-Match: *` would refuse a write over an existing object, and
+        the S3-compatible stores this reaches do not agree on it: AWS added it
+        in late 2024, recent MinIO honours it, and R2, Wasabi, B2 and Ceph
+        each answer differently or ignore it. Depending on a header that
+        silently does nothing on half the providers would make the guarantee a
+        deployment gets depend on which bucket it bought.
+
+        What replaces it is the same thing that catches every other way an
+        object can disagree with its row: the key comes from a committed
+        intent that names the exact bytes, and reconciliation verifies the
+        object against that hash before anything treats it as stored. An
+        overwrite by different bytes is therefore detected rather than
+        prevented - and the only writer that can reach a given key is the one
+        media row that owns it (ADR-087).
+        """
         headers = {"Content-Type": mime_type} if mime_type else {}
         if self._encryption:
             headers["x-amz-server-side-encryption"] = self._encryption
 
         response = await self._request("PUT", key, body=data, headers=headers)
         if response.status_code not in _OK:
-            self._refuse("store", response.status_code, tenant_id=tenant_id)
-        return key
+            self._refuse("store", response.status_code)
 
     async def get(self, key: str) -> bytes:
         """Read back what `put` stored. Raises `StorageError` if it is gone."""
@@ -194,9 +218,10 @@ class S3MediaStorage:
     async def exists(self, key: str) -> bool:
         """Whether an object is in the store.
 
-        Used by the orphan sweep, which must never delete a row whose object it
-        merely failed to reach - so a store that answers with anything other
-        than a clear yes or no raises rather than returning False.
+        Used by upload reconciliation, which must never abandon an intent whose
+        object it merely failed to reach - so a store that answers with
+        anything other than a clear yes or no raises rather than returning
+        False (ADR-087).
         """
         response = await self._request("HEAD", key)
         if response.status_code in _OK:

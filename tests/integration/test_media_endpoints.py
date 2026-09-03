@@ -39,7 +39,7 @@ from app.db.models.conversation import (
     MessageKind,
     MessageStatus,
 )
-from app.db.models.media import MediaStatus, MessageMedia
+from app.db.models.media import MediaStatus, MediaStorageState, MessageMedia
 
 pytestmark = pytest.mark.integration
 
@@ -235,6 +235,7 @@ async def test_a_file_removed_by_retention_says_so(
     """
     media_service._media.purge_started_at = NOW
     media_service._media.storage_key = None
+    media_service._media.storage_state = MediaStorageState.PURGED
 
     response = await client.get(f"/api/v1/conversations/{CONVERSATION_ID}/media/{MEDIA_ID}")
 

@@ -27,6 +27,7 @@ from typing import Final
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -71,6 +72,47 @@ class MediaStatus(StrEnum):
 
 MEDIA_STATUS_TYPE = _enum_type(MediaStatus, name="media_status")
 
+
+class MediaStorageState(StrEnum):
+    """Where the object is, which is a different question from how far the file got.
+
+    `MediaStatus` above answers "has anybody read this yet?". This answers "do
+    the bytes exist, and does Wasla own them?" - and the two have different
+    owners. The media queue drives the first, with its own bounded retries; the
+    upload seam drives this one, and reconciliation finishes it when a process
+    dies mid-write (ADR-087).
+
+    They were one column, in effect, and the encoding was the pair
+    `(storage_key, purge_started_at)`:
+
+        key NULL,  purge NULL    never downloaded
+        key set,   purge NULL    stored
+        key set,   purge set     being purged
+        key NULL,  purge set     purged
+
+    That worked while an object could only appear at the same instant its key
+    was committed. It cannot survive writing the key *before* the object, which
+    is what closes the orphan: "key set, purge NULL" would then mean either
+    "stored" or "an object we have not yet proved is there", and every consumer
+    would be guessing which.
+
+    `MISMATCHED` is the state nothing recovers from automatically. An object is
+    at our key and it is not what we wrote - different hash, different size -
+    and the two safe things to do with it are both refusals: do not serve it,
+    and do not delete it. Deleting would destroy the only evidence of how it got
+    there.
+    """
+
+    ABSENT = "absent"
+    PENDING = "pending"
+    STORED = "stored"
+    PURGING = "purging"
+    PURGED = "purged"
+    MISMATCHED = "mismatched"
+
+
+MEDIA_STORAGE_STATE_TYPE = _enum_type(MediaStorageState, name="media_storage_state")
+
 # The statuses that still owe the conversation an answer. A conversation with
 # any media in one of these is not ready for the agent to reply to, which is
 # what the worker checks before it enqueues.
@@ -87,27 +129,66 @@ class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
     what makes the download job idempotent - a retry finds the existing row
     rather than queueing another copy of the same file.
 
-    `storage_key` is null until the bytes are actually somewhere. It is produced
-    by the storage layer from a generated identifier and never from
-    `filename`, which arrives from a stranger's phone.
+    `storage_key` is the object this row owns, and it is committed **before**
+    the object is written - that is the whole of ADR-087. So a key present does
+    not mean bytes present; `storage_state` says which. The key is produced from
+    a generated identifier and never from `filename`, which arrives from a
+    stranger's phone.
     """
 
     __tablename__ = "message_media"
     # Restated, not inherited: see TenantScopedMixin.
     __table_args__ = (
         UniqueConstraint("message_id", name="uq_message_media_message_id"),
+        # One media row owns one object key, asserted by the database rather
+        # than by the odds. A generated UUID makes a collision impossible in
+        # practice, but the property that matters here is not collision: it is
+        # that a *second* row cannot come to reference an object the first one
+        # is responsible for, because reconciliation would then have two owners
+        # for one object and no way to choose (ADR-087). NULL repeats freely,
+        # which is what every row that never had a file, and every purged row,
+        # needs.
+        UniqueConstraint("storage_key", name="uq_message_media_storage_key"),
         Index("ix_message_media_tenant_id", "tenant_id"),
         Index("ix_message_media_tenant_id_status", "tenant_id", "status"),
         Index("ix_message_media_conversation_id", "conversation_id"),
-        # The retention sweep's only query: files that still have an object,
-        # oldest first. Partial, because the rows it must never look at - every
-        # file already purged, and every message that carried none - are the
-        # overwhelming majority once a deployment has been running a while
-        # (ADR-078).
+        # The retention sweep's only query: fully stored files, oldest first.
+        # Partial, because the rows it must never look at - every file already
+        # purged, every message that carried none, and now every upload still
+        # in flight - are the overwhelming majority once a deployment has been
+        # running a while (ADR-078).
         Index(
             "ix_message_media_retention",
             "created_at",
-            postgresql_where=text("storage_key IS NOT NULL"),
+            postgresql_where=text("storage_state = 'stored'"),
+        ),
+        # Reconciliation's only query: intents whose upload never finished,
+        # oldest first. Partial for the same reason and more sharply - a
+        # healthy deployment has none of these at all (ADR-087).
+        Index(
+            "ix_message_media_pending_upload",
+            "upload_started_at",
+            postgresql_where=text("storage_state = 'pending'"),
+        ),
+        # What each state is allowed to look like. These are not belt and
+        # braces over the services: they are the reason a consumer can trust
+        # `storage_state` alone and never re-derive the lifecycle from which
+        # columns happen to be null.
+        CheckConstraint(
+            "(storage_state = 'absent' AND storage_key IS NULL) "
+            "OR (storage_state = 'pending' AND storage_key IS NOT NULL "
+            "AND upload_started_at IS NOT NULL AND purge_started_at IS NULL) "
+            "OR (storage_state = 'stored' AND storage_key IS NOT NULL "
+            "AND purge_started_at IS NULL) "
+            "OR (storage_state = 'purging' AND storage_key IS NOT NULL "
+            "AND purge_started_at IS NOT NULL) "
+            "OR (storage_state = 'purged' AND storage_key IS NULL "
+            "AND purge_started_at IS NOT NULL) "
+            "OR (storage_state = 'mismatched' AND storage_key IS NOT NULL)",
+            # Bare, because the metadata's `ck` convention interpolates it into
+            # `ck_%(table_name)s_%(constraint_name)s`. Spelling the prefix here
+            # too would produce `ck_message_media_ck_message_media_...`.
+            name="storage_state",
         ),
     )
 
@@ -139,8 +220,31 @@ class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
     byte_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # SHA-256 of the bytes that actually arrived, hex encoded - computed here
     # rather than taken from the descriptor Meta sent.
+    #
+    # Written *before* the object, alongside the key, and it is what makes an
+    # interrupted upload recoverable: reconciliation reads the object back and
+    # compares this, so an object at our key that is not what we meant to write
+    # is refused rather than adopted (ADR-087). Once the upload is finalised the
+    # same value describes what is in the store, so there is one hash column
+    # rather than an expectation and a truth that always agree.
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     storage_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Which of the six states above this row is in. The column consumers read;
+    # `storage_key IS NULL` answers a different question and answers it wrongly
+    # for two of them.
+    storage_state: Mapped[MediaStorageState] = mapped_column(
+        MEDIA_STORAGE_STATE_TYPE,
+        nullable=False,
+        default=MediaStorageState.ABSENT,
+        server_default=MediaStorageState.ABSENT.value,
+    )
+    # When the intent to write this object was committed. Reconciliation
+    # measures its grace period from here rather than from `updated_at`, which
+    # any later write to the row would move - and a transcript arriving would
+    # then make a stuck upload look fresh for ever.
+    upload_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # A recorded voice note, as opposed to an attached audio file. Both are
     # transcribed; only one is somebody speaking to the business.
     is_voice: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -153,21 +257,15 @@ class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # When the retention sweep decided this file should go (ADR-078).
     #
-    # One column rather than two, and it carries the whole state machine because
-    # it is read alongside `storage_key`:
-    #
-    #   purge_started_at IS NULL                   the ordinary state
-    #   set,   storage_key set                     claimed; the object may or
-    #                                              may not still be there
-    #   set,   storage_key NULL                     done
-    #
-    # The middle state is the point. Deleting an object and clearing the column
-    # that points at it are two writes to two systems and cannot be one
-    # transaction, so the claim is committed *first*: a sweep that dies after
-    # removing the object leaves a row that says so, the next pass deletes again
-    # (which is a no-op) and finishes the job. The alternative order - delete
-    # then record - leaves a row pointing confidently at a file that is gone,
-    # and nothing anywhere to distinguish that from a broken store.
+    # The timestamp, no longer the state: `storage_state` carries `PURGING` and
+    # `PURGED` now, and this says *when* the claim was made. The mechanism it
+    # exists for is unchanged. Deleting an object and clearing the column that
+    # points at it are two writes to two systems and cannot be one transaction,
+    # so the claim is committed *first*: a sweep that dies after removing the
+    # object leaves a row that says so, the next pass deletes again (which is a
+    # no-op) and finishes the job. The alternative order - delete then record -
+    # leaves a row pointing confidently at a file that is gone, and nothing
+    # anywhere to distinguish that from a broken store.
     purge_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -194,4 +292,17 @@ class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         that it was removed, which is a different sentence from the store being
         unavailable - and only this row can tell them apart.
         """
-        return self.purge_started_at is not None and self.storage_key is None
+        return self.storage_state is MediaStorageState.PURGED
+
+    @property
+    def is_stored(self) -> bool:
+        """Whether there are bytes at this row's key that Wasla has verified.
+
+        The one question every consumer of a file must ask, and the reason the
+        state column exists. A key is not a file: between the intent commit and
+        the finalisation there is a row carrying a perfectly well-formed
+        `storage_key` and an object that may not be there at all, and serving
+        from it would answer a colleague with a storage error for something the
+        system is in the middle of doing correctly.
+        """
+        return self.storage_state is MediaStorageState.STORED

@@ -67,24 +67,43 @@ class StorageError(WaslaError):
 
 
 class MediaStorage(Protocol):
-    """Somewhere bytes can be put and fetched back by key."""
+    """Somewhere bytes can be put and fetched back by key.
 
-    async def put(
+    There is deliberately no method that allocates a key and writes in one
+    step. A store that minted its own key would be deciding, inside a network
+    call, the name of an object PostgreSQL has not yet heard of - and an object
+    whose key was never committed cannot be found again after a crash without
+    listing the bucket, which is the thing this system will not do (ADR-087).
+    The caller allocates with `build_key`, commits that, and then writes here.
+    """
+
+    async def put_at(
         self,
         *,
-        tenant_id: uuid.UUID,
+        key: str,
         data: bytes,
         mime_type: str | None = None,
-    ) -> str:
-        """Store `data` and return the key it can be read back with."""
+    ) -> None:
+        """Store `data` at exactly `key`, which the caller already owns."""
         ...
 
     async def get(self, key: str) -> bytes:
-        """Read back what `put` stored. Raises `StorageError` if it is gone."""
+        """Read back what `put_at` stored. Raises `StorageError` if it is gone."""
         ...
 
     async def delete(self, key: str) -> None:
         """Remove a stored file. Removing one that is already gone is not an error."""
+        ...
+
+    async def exists(self, key: str) -> bool:
+        """Whether an object is there.
+
+        Three answers, not two. True and False are what the store said; a store
+        that could not be reached, or that refused the question, raises
+        `StorageError` instead of answering False. Reconciliation turns on this
+        distinction: an outage read as "the object is gone" would abandon every
+        upload in flight during it (ADR-087).
+        """
         ...
 
 
@@ -128,14 +147,13 @@ class LocalMediaStorage:
     def root(self) -> Path:
         return self._root
 
-    async def put(
+    async def put_at(
         self,
         *,
-        tenant_id: uuid.UUID,
+        key: str,
         data: bytes,
         mime_type: str | None = None,
-    ) -> str:
-        key = build_key(tenant_id=tenant_id, mime_type=mime_type)
+    ) -> None:
         destination = self._path(key)
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -143,9 +161,29 @@ class LocalMediaStorage:
             staging.write_bytes(data)
             staging.replace(destination)
         except OSError as error:
-            logger.exception("media.store_failed", extra={"tenant_id": str(tenant_id)})
+            logger.exception("media.store_failed")
             raise StorageError() from error
-        return key
+
+    async def exists(self, key: str) -> bool:
+        """Whether the file is there, distinguishing absent from unreadable.
+
+        `stat` rather than `Path.exists`, which answers False for a permission
+        error and for a mount that has gone away - both of which are a store
+        this process cannot see rather than a file that is not there, and
+        reconciliation acts on them completely differently.
+        """
+        path = self._path(key)
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return False
+        except NotADirectoryError:
+            # A parent component is a file, so nothing can be at this key.
+            return False
+        except OSError as error:
+            logger.warning("media.head_failed")
+            raise StorageError() from error
+        return True
 
     async def get(self, key: str) -> bytes:
         try:

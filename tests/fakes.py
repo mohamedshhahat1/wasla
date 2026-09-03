@@ -38,6 +38,7 @@ claiming it.
 
 from __future__ import annotations
 
+import uuid
 from typing import cast
 
 from fastapi.security import HTTPAuthorizationCredentials
@@ -51,6 +52,7 @@ from starlette.requests import Request
 from app.core.config import Settings
 from app.core.oauth_flow import OAuthFlowStore
 from app.core.redis import RedisClient
+from app.core.storage import MediaStorage, build_key
 from app.db.session import Database
 from app.integrations.google.client import GoogleOAuthClient
 from app.integrations.google.oidc import GoogleIdTokenVerifier
@@ -221,6 +223,31 @@ def as_table(clause: FromClause) -> Table:
     return clause
 
 
+async def store_object(
+    storage: MediaStorage,
+    *,
+    tenant_id: uuid.UUID,
+    data: bytes,
+    mime_type: str | None = None,
+) -> str:
+    """Put one object somewhere a test can read it back, and say where.
+
+    `MediaStorage` deliberately has no method that allocates a key and writes
+    in one step: production callers commit the key first, so that an object can
+    never exist without a row naming it (ADR-087). A test setting up "there is
+    already a file here" is not a production write path and has no row to
+    commit, so it does the two halves itself - here, once, rather than in
+    twenty test bodies.
+
+    Anything asserting the *protocol* - that an intent precedes a write, that a
+    retry reuses a key - must not use this. It exists to arrange a fixture, not
+    to stand in for the thing under test.
+    """
+    key = build_key(tenant_id=tenant_id, mime_type=mime_type)
+    await storage.put_at(key=key, data=data, mime_type=mime_type)
+    return key
+
+
 __all__ = [
     "as_agent_queue",
     "as_analyzer",
@@ -243,4 +270,5 @@ __all__ = [
     "as_settings",
     "as_table",
     "as_whatsapp",
+    "store_object",
 ]

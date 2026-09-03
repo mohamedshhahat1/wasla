@@ -29,7 +29,7 @@ from app.core.config import Settings
 from app.core.media_types import MediaTypeError
 from app.core.storage import LocalMediaStorage
 from app.db.models.conversation import Contact, Conversation, MessageKind, MessageStatus
-from app.db.models.media import MediaStatus, MessageMedia
+from app.db.models.media import MediaStatus, MediaStorageState, MessageMedia
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.integrations.whatsapp.client import DownloadedMedia, MediaDescriptor
@@ -298,6 +298,79 @@ async def test_the_stored_row_carries_the_detected_type(
     assert row is not None
     assert row.mime_type == "image/png"
     assert row.storage_key is not None
+    assert row.storage_state is MediaStorageState.STORED
+
+
+async def test_an_outbound_attachment_names_its_object_before_writing_it(
+    db_session: AsyncSession, settings: Settings, meta: Recorder, tmp_path: Path
+) -> None:
+    """The colleague-upload path follows the write protocol too (ADR-087).
+
+    The order of the two external effects is unchanged - Meta first, store
+    second, and only for a send that succeeded - so this cannot produce a
+    duplicate message. What moved is the transaction boundary: the key and the
+    hash are committed before the object exists, and the finalisation says the
+    object arrived.
+    """
+    tenant, conversation = await _conversation(db_session)
+    service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
+    storage = LocalMediaStorage(tmp_path)
+
+    message = await service.send_media(
+        conversation_id=conversation.id,
+        content=png(),
+        mime_type="image/png",
+        filename="sofa.png",
+        storage=storage,
+    )
+    await db_session.flush()
+
+    row = await db_session.get(MessageMedia, (await _media_id(db_session, message.id)))
+    assert row is not None
+    assert row.storage_state is MediaStorageState.STORED
+    assert row.upload_started_at is not None
+    assert row.content_hash is not None
+    assert row.storage_key is not None
+    assert await storage.get(row.storage_key) == png()
+
+
+async def test_an_outbound_write_the_store_refused_stays_recoverable(
+    db_session: AsyncSession, settings: Settings, meta: Recorder, tmp_path: Path
+) -> None:
+    """A failed write leaves the intent, not a silent nothing.
+
+    The customer has the file either way - the send already happened - so the
+    request still succeeds. What is different since ADR-087 is that the row
+    names the object it meant to write, so reconciliation can ask the store
+    whether it arrived after all. A write can fail on the way back.
+    """
+    from app.core.storage import StorageError
+
+    class Refusing(LocalMediaStorage):
+        async def put_at(self, *, key: str, data: bytes, mime_type: str | None = None) -> None:
+            raise StorageError()
+
+    tenant, conversation = await _conversation(db_session)
+    service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
+
+    message = await service.send_media(
+        conversation_id=conversation.id,
+        content=png(),
+        mime_type="image/png",
+        filename="sofa.png",
+        storage=Refusing(tmp_path),
+    )
+    await db_session.flush()
+
+    # The send stands.
+    assert message.status is MessageStatus.SENT
+
+    row = await db_session.get(MessageMedia, (await _media_id(db_session, message.id)))
+    assert row is not None
+    assert row.storage_state is MediaStorageState.PENDING
+    assert row.storage_key is not None
+    # Not readable, because nothing has proved anything is there.
+    assert row.is_stored is False
 
 
 async def _media_id(session: AsyncSession, message_id: uuid.UUID) -> uuid.UUID:
