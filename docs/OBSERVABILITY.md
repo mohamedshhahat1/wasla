@@ -273,6 +273,56 @@ buckets makes a quantile computed across a bucket change look like an answer.
 
 ---
 
+## The data inventory
+
+The three signals leave the process by three different routes, to three
+different audiences, under three different contracts. Reviewing them one at a
+time is how a field ends up in the one that was not looking.
+
+| Signal | Destination | Read by | Carries | Customer data | Secrets | Bounded |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Metrics** | `GET /metrics`, Prometheus text 0.0.4 | anything that can reach the port | `route` (template), `method`, `status`, `queue`, `kind`, `provider`, `operation`, `outcome`, `dependency`, `worker` | no | no | yes — closed enumerations, guarded at record time |
+| **Logs** | stdout, JSON, shipped by the platform | whoever operates the log store | `event`, `request_id`, `method`, `path`, `status_code`, `duration_ms`, and per-event ids | **yes, deliberately** — `path`, and the ids an event names | no | no — a log is a stream, not a series |
+| **Traces** | OTLP/HTTP to a collector | a trace backend, usually a third party | the ten attributes in `ALLOWED_ATTRIBUTES`, span names, and W3C context | no | no | yes — allowlisted, and names come from route templates |
+
+**Metrics and traces have the same contract; logs deliberately do not.** A log
+answers "what happened to *this* request", which is a question that cannot be
+answered without an identifier. `app/core/middleware.py` records
+`request.url.path` for that reason, and a path segment is usually a lead id or
+a conversation id. That is the log store's job and the reason it is a different
+system with different access control.
+
+What is *not* in a log, and the distinction that matters: no query string
+(`request.url.path`, never `request.url`), no header, no request or response
+body, no credential. `tests/integration/test_telemetry_privacy.py` asserts both
+halves of this — that the path arrives and the query string does not — so a
+change from `.path` to the full URL fails rather than ships.
+
+### The canaries
+
+Five strings, each standing for a category that must not be exported, driven
+through the paths that would carry them and then looked for in all three
+destinations at once:
+
+| Canary | Stands for | Enters through |
+| --- | --- | --- |
+| `SECRET-JWT-CANARY` | a bearer token, the signing secret | `Authorization`, `Cookie` |
+| `SECRET-PAYMOB-CANARY` | a payment provider API key | a header, and a provider exception's message |
+| `CUSTOMER-EMAIL-CANARY@example.test` | an end user's email | a query string, a provider exception |
+| `CUSTOMER-PHONE-CANARY` | an end user's phone number | a path segment, a job payload |
+| `PROMPT-CANARY` | model input or output | a query string, a job payload |
+
+The exception cases are the ones worth having. A payment gateway's error
+message is where a merchant reference, a masked card and occasionally a key
+actually live, and the SDK's default is to export `str(exception)` as a span
+status description and the whole traceback as a span event. `app/core/tracing.py`
+passes `record_exception=False` and `set_status_on_exception=False` on every
+span it opens and sets the status to `type(error).__name__` — a class name
+chosen at the raise site — which is the whole reason that function exists
+rather than call sites using the SDK directly.
+
+---
+
 ## Cardinality and privacy
 
 The rule is enforced in code, not by convention. `app/core/metrics.py` refuses
