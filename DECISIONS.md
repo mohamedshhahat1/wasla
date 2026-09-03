@@ -3039,15 +3039,17 @@ apart.
 **What is deliberately not built: a bucket-listing orphan sweep.** The
 reverse direction — an object with no row referencing it — cannot be found
 without listing the store and deciding from age, and a sweep on that rule
-eventually deletes a live file whose row it failed to read. One narrow orphan
-remains open and is stated rather than papered over: `MediaService.download`
-writes the object and then commits the row, so a transaction that fails after
-the write leaves an object nothing references. It is invisible to every query
-here, it is bounded by how often a commit fails after a successful store, and
-closing it properly needs a durable intent record written *before* the object —
-which is a table and a second state machine for a failure nobody has yet
-observed. The metered `STORAGE_USED` event is written in the same transaction,
-so a leaked object is not billed for.
+eventually deletes a live file whose row it failed to read. That remains true
+and is now structural rather than a resolution (ADR-087).
+
+One narrow orphan was left open here and is **closed by ADR-087**:
+`MediaService.download` wrote the object and then committed the row, so a
+transaction that failed after the write left an object nothing referenced. It
+was invisible to every query in this module, and closing it needed a durable
+intent written *before* the object. That intent turned out to be four columns on
+the row that already exists rather than the second table this paragraph
+anticipated, and the failure was reproduced against a real store before it was
+fixed rather than remaining one nobody had observed.
 
 `wasla_media_retention_total` carries one label with three fixed values —
 `purged`, `failed`, `pending` — and no tenant, media id, filename or key
@@ -3784,3 +3786,206 @@ narrowing.
 The cost is real: annotating 175 files is a large diff, and future test code
 must be annotated to land. That is the intended trade. A test suite is a claim
 about how the application is called, and an unchecked claim is a comment.
+
+---
+
+## ADR-087 — The Object's Key Is Committed Before the Object Exists
+
+**Context.** ADR-078 built media retention and stated, in the same breath, the
+one failure it could not close:
+
+> One narrow orphan remains open and is stated rather than papered over:
+> `MediaService.download` writes the object and then commits the row, so a
+> transaction that fails after the write leaves an object nothing references.
+
+That is the whole of P2-D. It was reproduced against a real PostgreSQL and a
+real MinIO before anything was changed:
+
+```
+PUT succeeded, transaction rolled back.
+EVIDENCE 1: the object is readable from MinIO after the rollback.
+EVIDENCE 2: the media row is status='pending' storage_key=None
+            - it never heard of the object.
+EVIDENCE 3: retention's two queries return 0 due / 0 unfinished rows,
+            none of them this object. Nothing in PostgreSQL will ever
+            delete it.
+```
+
+The object is real, the bucket bills for it, and no query in the system can find
+it — because every query starts from a row carrying a key, and the transaction
+that would have written that key rolled back.
+
+**Decision.**
+
+**Write the reference, then create the object.** Three phases, and the commit in
+the middle is the whole design:
+
+```
+TX1   allocate the object key, record what is about to be written,
+      state PENDING                                            -> COMMIT
+--    write the object. No transaction, no connection held, no row lock.
+TX2   re-read under a row lock, confirm it is still ours,
+      state STORED                                             -> COMMIT
+```
+
+Both orders of the pair fail. Only one of them fails recoverably:
+
+- object then commit → nothing anywhere remembers the object. Unfindable.
+- commit then object → a row names an object that may not be there. Askable.
+
+Retention already made the same choice in the other direction (ADR-078): claim
+the purge, commit, *then* delete. This is that argument applied to the write.
+
+**No bucket-listing orphan sweep, now or later.** The tempting alternative is to
+enumerate the store, subtract the keys the database knows, and delete the
+remainder. It is unsafe in a way that does not surface until it has destroyed
+something: a PostgreSQL failure, a lagging replica, a query that timed out, a
+row a process could not read for any reason — each makes a live attachment look
+like an orphan, and the rule says delete it. Deletion by *absence of evidence*
+cannot be made safe. `tests/unit/test_no_bucket_listing.py` makes this
+structural rather than a promise: the storage protocol has four operations, each
+taking one `key: str`, neither implementation has a method returning more than
+one object, and no module under `app/` mentions the S3 listing API in code. A
+sweep of that shape cannot be written without first changing that file, which is
+where somebody has to argue for it.
+
+**`storage_state`, because the old encoding cannot express the new state.**
+`(storage_key, purge_started_at)` described the lifecycle completely while a key
+could only exist at the instant its object did:
+
+```
+key NULL,  purge NULL    never downloaded
+key set,   purge NULL    stored
+key set,   purge set     being purged
+key NULL,  purge set     purged
+```
+
+Writing the key first adds a fifth possibility — key set, object not yet proved
+to exist — which is indistinguishable from "stored" in that encoding, and every
+consumer would be guessing. So the state becomes a column with six values
+(`absent`, `pending`, `stored`, `purging`, `purged`, `mismatched`) and a check
+constraint saying what each is allowed to look like, which is what lets a
+consumer trust `storage_state` instead of re-deriving the lifecycle from which
+columns happen to be null.
+
+**The existing row owns the intent; there is no second table.** A
+`media_storage_intents` table would be a second row per file with its own
+lifecycle, its own foreign key, its own orphans, and a join on every read — to
+carry four columns that belong to the file and have no meaning apart from it.
+`MessageMedia` is already one row per message, already tenant-scoped, and
+already the thing every consumer loads. `content_hash` and `byte_size` already
+existed and now describe what *will* be written rather than only what was, so
+there is one hash column rather than an expectation and a truth that always
+agree.
+
+**`UNIQUE(storage_key)`.** Not against collision — a UUID settles that — but
+against two rows coming to reference one object, which would leave
+reconciliation with two owners and no way to choose. NULL repeats freely, which
+is what every row that never had a file and every purged row needs.
+
+**Allocation happens under a row lock.** The queue can deliver the same media
+job twice. Two attempts each allocating a key would each write an object, of
+which only one could end up on the row — recreating the orphan through the front
+door. `SELECT ... FOR UPDATE` on the media row serialises the allocation: the
+second attempt waits, re-reads, finds the committed key, and writes its bytes
+there. The lock covers a `SELECT` and an `UPDATE` and no network call.
+
+**Verification is a recomputed SHA-256, never a validator the store supplies.**
+S3 defines the ETag as opaque; it is the MD5 of the body only for a single-part
+unencrypted upload, and SSE-KMS or a different provider makes every object look
+wrong. `x-amz-meta-sha256` would be a claim travelling with the object rather
+than a fact about it. So reconciliation HEADs the key — which is what
+distinguishes absent from unreachable — and then reads the object back and
+hashes it. That costs one GET bounded by `MEDIA_MAX_BYTES`, on a path that runs
+only for interrupted writes, which on a healthy deployment is never.
+
+**Four answers from the store, not two.**
+
+```
+present + contents match    -> finalise
+present + contents differ   -> quarantine. Do not serve it, do not delete it:
+                               deleting destroys the only evidence of how a
+                               foreign object reached our key.
+absent                      -> abandon. Nothing is there, the row owns no
+                               object, and a later attempt may allocate afresh.
+unreachable                 -> decide nothing. Not "absent".
+```
+
+The fourth is why `MediaStorage.exists` raises rather than returning False, and
+why **403 was removed from the not-found set**. S3 answers 403 for a missing key
+when the caller lacks `s3:ListBucket` — and also for a wrong secret, an expired
+credential and a tightened policy, indistinguishably. Wasla's own bucket
+credential can always read its own bucket, so a 403 is far more likely to be the
+credential; reading it as "the object is gone" would let a rotated secret
+abandon every upload in flight.
+
+**Unconditional PUT.** `If-None-Match: *` would refuse a write over an existing
+object, and the S3-compatible stores this reaches do not agree on it: AWS added
+it in late 2024, recent MinIO honours it, and R2, Wasabi, B2 and Ceph each
+answer differently or ignore it. A guarantee that silently does nothing on half
+the providers is worse than none, so replacement is *detected* — by the same
+hash check — rather than prevented.
+
+**A separate loop, not the retention sweep.** They are neighbours and were
+nearly one. Two things kept them apart. Their periods differ by two orders of
+magnitude: retention is a date and sweeps daily, while an unfinished upload is
+an attachment a colleague cannot open, measured in minutes. And they move in
+opposite directions — retention removes objects that exist, this adopts objects
+that may — so sharing a pass would put "delete the file" and "the file is fine"
+behind one decision, which is the kind of ambiguity that eventually deletes
+something.
+
+**It owns `storage_state` and nothing else.** `MediaStatus` is the media queue's
+column, with its own bounded retries and dead-letter list. Two states, two
+owners; a reconciler that also moved `MediaStatus` would be racing the worker
+for it. The queue remains the primary recovery for an inbound file — a
+redelivered job resumes the same intent and writes to the same key — and this
+loop is the backstop for when the queue has given up, and the *only* recovery
+for an outbound attachment, whose bytes arrived in a request body that no longer
+exists.
+
+**Retention's eligibility narrows to `STORED`.** It used to select every row
+with a key, which now includes uploads in flight — rows that are as old as their
+message the moment they exist. Deleting one of those would be retention
+destroying a file nobody had finished writing.
+
+**The conversation gate lock moved.** `MediaWorker` took it before the download
+and held it across a Meta fetch, an object write and an inference. The intent
+commit ends that transaction, so the lock had to move anyway — and it moved to
+where it is both correct and cheap: immediately before the count it exists to
+serialise, in the transaction that commits the row's final state. The
+intermediate states are safe to leave unlocked because every one of them
+(`PENDING`, `DOWNLOADING`, `STORED`) is unresolved, so a sibling counting
+mid-download sees work outstanding and correctly declines to release the reply.
+This is ADR-080's principle applied where it had been missed.
+
+**Consequences.** One migration (0041): a column, a timestamp, a unique
+constraint, a check constraint, one new partial index and one re-cut. The
+backfill is a total mapping from the pair every existing row already carries;
+**no existing row can be `pending`**, because the state did not exist and a row
+with a key got it from a transaction that committed after its object was
+written. A purged row maps to `purged` and never to `absent`, which is the P2-A
+distinction this must not undo.
+
+The outbound path now commits mid-request. That is a change in transaction
+boundary and not in ordering: Meta is still called first, the store second, and
+only for a send that succeeded — so it cannot produce a second message. What it
+does produce is a durable record of a send that has already happened, which
+today is lost along with everything else if the request fails from that point
+on.
+
+Storage is metered by whoever finalises, including reconciliation, because the
+transition out of `PENDING` happens exactly once under a row lock. A recovered
+object is therefore billed once rather than not at all.
+
+`wasla_media_upload_reconciliation_total` carries one label with six fixed
+values — `finalized`, `missing`, `mismatched`, `unreachable`, `pending`,
+`quarantined` — and no tenant, media id, object key, filename, hash or bucket
+anywhere near it. `quarantined` is expected to be zero always rather than
+usually: anything above it is an object in the bucket that Wasla wrote a key for
+and did not write the contents of, and it needs a person.
+
+What is proved rather than argued: a real child process is killed with
+`SIGKILL`/`TerminateProcess` between its object write and its finalisation
+(`tests/integration/test_media_crash_recovery.py`), and the replacement pass
+recovers the exact object and writes no second one.

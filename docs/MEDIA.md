@@ -127,7 +127,9 @@ Keys are identical across both backends, so a key written by one is a key the ot
 
 **These are not the backup credentials.** `MEDIA_S3_*`, never the `AWS_*` pair the backup container holds ([ADR-075](../DECISIONS.md)). Media and backups are different buckets under different credentials, so an application container that is taken over still cannot delete the copies of the database — and the backup container, whose job is deleting old files, holds no media credential. The deployment guard asserts both directions.
 
-Object storage is **not** an authorization boundary. A key prefix is a layout; tenant isolation is the scoped repository, and the isolation tests run against both backends for exactly that reason.
+Object storage is **not** an authorization boundary. A key prefix is a layout; tenant isolation is the scoped repository, and the isolation tests run against both backends for exactly that reason. Recovery follows the same rule: an object is settled because a row carrying a `tenant_id` says it was intended, never because a key begins with a workspace's identifier.
+
+**A key is allocated by the caller, not by the store.** `build_key` is a pure function of a workspace and a type, so the key can be committed to PostgreSQL before anything is written at it — which is what makes an interrupted write something a query can find. `MediaStorage` therefore has no operation that allocates and writes in one step.
 
 ## Retention
 
@@ -153,7 +155,58 @@ A poll rather than a queue: enqueueing one job per file would put the deletion o
 
 **On a versioned bucket, deleted does not mean gone.** A delete leaves a delete marker and previous versions stay until the bucket's own lifecycle rule expires them. What retention guarantees is that the object is no longer retrievable through Wasla; making it unrecoverable is a rule configured on the bucket.
 
-**No bucket-listing orphan sweep exists**, deliberately. Finding an object with no row means listing the store and deciding from age, and a sweep on that rule eventually deletes a live file whose row it failed to read. One narrow orphan is left open and stated rather than papered over: the download path writes the object and then commits the row, so a transaction failing in between leaves an object nothing references.
+**Retention only claims fully stored files.** An upload still in flight carries a key and is as old as its message the moment it exists, so an age query over keys would select it — and deleting the object of a write nobody has finished is retention destroying a file rather than expiring one. Those belong to the recovery pass below.
+
+## The write protocol
+
+An object and the row that owns it live in two systems, and no transaction spans them. Retention deals with one direction — remove the object, then clear the reference. The write is the other, and it used to run the wrong way round: the object was created and the row committed afterwards, so a transaction that failed in between left an object nothing referenced, invisible to every query in the system ([ADR-087](../DECISIONS.md)).
+
+So the key is committed **before** the object can exist:
+
+```
+TX1   allocate the object key, record its size and the hash of what
+      belongs in it, state = pending                        ← COMMIT
+      ↓
+--    write the object. No transaction, no connection held,
+      no row lock across the store.
+      ↓
+TX2   re-read under a row lock, confirm it is still ours,
+      state = stored                                        ← COMMIT
+```
+
+Anything that goes wrong after the first commit leaves a row that names the exact object, so recovery starts from PostgreSQL and never from the bucket. Both directions of the pair fail; only this one fails recoverably.
+
+`message_media.storage_state` carries the whole lifecycle, because `storage_key IS NULL` no longer answers the question:
+
+| State | Means | Object |
+| --- | --- | --- |
+| `absent` | No object, and none intended | — |
+| `pending` | A key is committed; the write may or may not have landed | Unknown |
+| `stored` | Verified. The only state anything is served from | Present |
+| `purging` | Retention claimed it; the delete may or may not have run | Unknown |
+| `purged` | Retention finished. Not "never downloaded" | Gone |
+| `mismatched` | An object is at our key and it is not what we wrote | Foreign |
+
+A check constraint says what each state is allowed to look like, so a consumer can trust the column instead of re-deriving the lifecycle from which columns happen to be null. `UNIQUE(storage_key)` gives every object exactly one owning row, so recovery never has two candidates and no way to choose.
+
+**A retry reuses the committed key.** The allocation happens under a row lock, so a redelivered media job finds the key the first attempt committed and writes its bytes there. Two attempts each minting a fresh key would each write an object, of which only one could end up on the row — which is the orphan again, through the front door.
+
+## Recovering an interrupted write
+
+The `uploads` worker polls for intents that have sat in `pending` past `MEDIA_UPLOAD_GRACE_SECONDS`, claims them with `FOR UPDATE SKIP LOCKED`, and asks the store about each one by its exact key. Four answers, not two:
+
+| The store says | Verdict | What happens |
+| --- | --- | --- |
+| The object is there and hashes to what the row expects | `finalized` | `stored`. The attachment becomes readable |
+| The object is there and does not | `mismatched` | Quarantined. Not served, and **not deleted** — it is the only evidence of how it got there |
+| The object is not there | `missing` | The row goes back to owning nothing, so a later attempt can allocate afresh |
+| Nothing, or a refusal | `unreachable` | Nothing is written. The next pass asks again |
+
+The fourth is the one that matters. A store that is down, read as "the object is gone", would abandon every upload in flight during the outage — and for an outbound attachment, whose bytes arrived in a request body that no longer exists, abandoning is final. So `exists()` raises rather than answering `False`, and a `403` is treated as a refusal rather than as a missing key: S3 returns it both for a key you cannot list and for a credential that has been rotated, indistinguishably.
+
+**Verification is a recomputed SHA-256 over the bytes read back.** Not the ETag, which S3 defines as opaque and which is the MD5 of the body only for a single-part unencrypted upload; not a header travelling with the object, which is a claim rather than a fact. The cost is one GET bounded by `MEDIA_MAX_BYTES`, on a path that runs only for writes that were interrupted.
+
+**No bucket-listing orphan sweep exists, and none can be added by accident.** Finding an object with no row would mean listing the store and deciding from age, and a sweep on that rule eventually deletes a live file whose row it failed to read — a PostgreSQL failure, a lagging replica, a query that timed out, each one making a live attachment look like an orphan. `tests/unit/test_no_bucket_listing.py` makes that structural: the storage protocol has four operations, each takes one key, and no module under `app/` speaks the S3 listing API. A sweep of that shape cannot be written without first changing that file.
 
 ## Durability
 
@@ -211,6 +264,9 @@ The PDF parser added here also settles a note `KnowledgeService` had carried sin
 | `MEDIA_RETENTION_DAYS` | `0` | Zero keeps everything, and is the default |
 | `MEDIA_RETENTION_BATCH_SIZE` | `200` | Rows per sweep |
 | `MEDIA_RETENTION_POLL_SECONDS` | `86400` | Daily |
+| `MEDIA_UPLOAD_GRACE_SECONDS` | `900` | How long an intent must sit before recovery treats it as abandoned rather than in progress |
+| `MEDIA_UPLOAD_RECOVERY_POLL_SECONDS` | `300` | Minutes, not days: what it finds is a file somebody is waiting for |
+| `MEDIA_UPLOAD_RECOVERY_BATCH_SIZE` | `100` | Intents per pass |
 | `OPENAI_VISION_MODEL` | `gpt-4.1-mini` | Separate budget from the answering model |
 | `OPENAI_TRANSCRIPTION_MODEL` | `gpt-4o-mini-transcribe` | |
 
@@ -221,4 +277,4 @@ Without an OpenAI key, documents are still read — extraction needs no provider
 - **No OCR.** A scanned document is reported as unreadable rather than being read. Recorded honestly on the row, so nobody is left wondering.
 - **Video is downloaded and stored but not understood.** There is no route from a video to a transcript; it is skipped as an unreadable type.
 - **Nothing streams.** A file is read into memory whole, bounded by the download cap and by a smaller cap on the upload endpoint.
-- **Stored files are never swept.** They accumulate for the life of the deployment; retention belongs with the object-store implementation.
+- **A quarantined object is never cleaned up automatically.** `mismatched` is deliberately terminal: the object stays where it is and an operator decides. It should be zero always, and `wasla_media_upload_reconciliation_total{outcome="quarantined"}` above zero is the alert.

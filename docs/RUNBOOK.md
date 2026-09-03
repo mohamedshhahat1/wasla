@@ -303,7 +303,7 @@ Nothing automatically rewrites credentials onto a new encryption key. `Credentia
 
 ### Add or remove worker capacity
 
-`WORKER_KINDS` selects which loops a container runs — empty means all six (`media`, `agent`, `ingestion`, `follow_up`, `campaign`, `billing`).
+`WORKER_KINDS` selects which loops a container runs — empty means all of them (`media`, `agent`, `ingestion`, `follow_up`, `campaign`, `billing`, `email`, `recovery`, `retention`, `uploads`).
 
 ```yaml
 worker-campaign:
@@ -627,6 +627,8 @@ Stated plainly, because a runbook that pretends to cover everything is one that 
 - **Media durability depends on `MEDIA_STORAGE_BACKEND`** ([ADR-077](../DECISIONS.md)). On `local` the volume is the only copy and losing the host loses every attachment. On `s3` the bytes outlive the host, and their durability, versioning and lifecycle are the bucket's - the PostgreSQL backup carries the rows and the keys, never the files, and is not meant to ([BACKUP.md](BACKUP.md)).
 - **`usage_events` and `audit_logs` grow without bound.** Neither is swept, deliberately — retention for billing records and audit trails is a legal question, not a disk-space one.
 - **The media store grows until a retention period is set.** `MEDIA_RETENTION_DAYS` defaults to zero, which keeps everything ([ADR-078](../DECISIONS.md)). Watch `wasla_media_retention_total{outcome="pending"}`: a number that stays above zero across sweeps is a store refusing deletions, which is otherwise invisible — the rows are claimed, the sweep reports itself as having run, and the volume does not shrink.
+- **An attachment that is in the bucket and invisible.** An object's key is committed before the object exists, so a worker killed between the two leaves a row in `pending` naming exactly what it was writing ([ADR-087](../DECISIONS.md)). The `uploads` worker settles those every five minutes. If `wasla_media_upload_reconciliation_total{outcome="pending"}` keeps rising while `finalized` stays flat, that loop is not running — check `WORKER_KINDS` — or the store is not answering, which shows up as `unreachable`.
+- **`mismatched` needs a person, and nothing else will do.** An object is at a key Wasla owns and its contents are not what Wasla wrote. It is left in place deliberately: serving it would hand a colleague a file the row does not describe, and deleting it would destroy the only evidence of how it got there. Find the row by media id in the `media.upload_mismatch` log line, and look at the object by hand before deciding. Nothing in the system will clear this state on its own.
 
 ### A refund was issued and the customer says it never arrived
 

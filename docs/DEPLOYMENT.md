@@ -10,7 +10,7 @@ Scope: containers, reverse proxy, CI/CD, and production operations. Runtime inst
 
 `docker compose up worker` locally; `command: ["worker"]` in production. One process runs the media, agent, ingestion, follow-up and campaign loops concurrently — all are I/O-bound, so they interleave rather than compete.
 
-`WORKER_KINDS` selects which run: empty (the default) runs all six, or a comma-separated subset such as `campaign` or `ingestion,follow_up` to scale them apart across replicas — moving bytes is bandwidth-bound where inference is not, and a workspace mid-broadcast is the case that most often wants a replica of its own. An unrecognised name fails at startup rather than being ignored, because a process that silently does nothing shows its symptom — work piling up in a queue — far from its cause.
+`WORKER_KINDS` selects which run: empty (the default) runs all of them, or a comma-separated subset such as `campaign` or `ingestion,follow_up` to scale them apart across replicas — moving bytes is bandwidth-bound where inference is not, and a workspace mid-broadcast is the case that most often wants a replica of its own. An unrecognised name fails at startup rather than being ignored, because a process that silently does nothing shows its symptom — work piling up in a queue — far from its cause.
 
 **A kind no running container covers is a queue that grows silently.** The health check below asserts only the loops *that container* was told to run, so splitting them apart means checking that every kind is still covered somewhere.
 

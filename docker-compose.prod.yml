@@ -192,6 +192,9 @@ services:
       MEDIA_RETENTION_DAYS: ${MEDIA_RETENTION_DAYS:-0}
       MEDIA_RETENTION_BATCH_SIZE: ${MEDIA_RETENTION_BATCH_SIZE:-200}
       MEDIA_RETENTION_POLL_SECONDS: ${MEDIA_RETENTION_POLL_SECONDS:-86400}
+      MEDIA_UPLOAD_GRACE_SECONDS: ${MEDIA_UPLOAD_GRACE_SECONDS:-900}
+      MEDIA_UPLOAD_RECOVERY_POLL_SECONDS: ${MEDIA_UPLOAD_RECOVERY_POLL_SECONDS:-300}
+      MEDIA_UPLOAD_RECOVERY_BATCH_SIZE: ${MEDIA_UPLOAD_RECOVERY_BATCH_SIZE:-100}
       # A key ring for workspace credentials at rest (ADR-034). Optional, and
       # the consequence of leaving it empty is specific rather than vague: every
       # workspace sends through META_ACCESS_TOKEN, and a workspace trying to
@@ -391,6 +394,9 @@ services:
       MEDIA_RETENTION_DAYS: ${MEDIA_RETENTION_DAYS:-0}
       MEDIA_RETENTION_BATCH_SIZE: ${MEDIA_RETENTION_BATCH_SIZE:-200}
       MEDIA_RETENTION_POLL_SECONDS: ${MEDIA_RETENTION_POLL_SECONDS:-86400}
+      MEDIA_UPLOAD_GRACE_SECONDS: ${MEDIA_UPLOAD_GRACE_SECONDS:-900}
+      MEDIA_UPLOAD_RECOVERY_POLL_SECONDS: ${MEDIA_UPLOAD_RECOVERY_POLL_SECONDS:-300}
+      MEDIA_UPLOAD_RECOVERY_BATCH_SIZE: ${MEDIA_UPLOAD_RECOVERY_BATCH_SIZE:-100}
       # The same key ring the API has, and it must be the same value: the worker
       # decrypts a workspace's credential to send with it, so a worker missing a
       # key the API used cannot send for that workspace at all.

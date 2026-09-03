@@ -177,6 +177,7 @@ and age gauges are for, and needing both is why both exist.
 | `wasla_jobs_total` | counter | `queue`, `outcome` (`succeeded`, `retried`, `dead_lettered`, `recovered`, `quarantined`) |
 | `wasla_job_failures_total` | counter | `queue`, `category` |
 | `wasla_media_retention_total` | counter | `outcome` (`purged`, `failed`, `pending`) |
+| `wasla_media_upload_reconciliation_total` | counter | `outcome` (`finalized`, `missing`, `mismatched`, `unreachable`, `pending`, `quarantined`) |
 
 `wasla_media_retention_total` carries one label with three fixed values, so its
 cardinality is three for ever - no tenant, media id, filename, MIME type or
@@ -188,6 +189,31 @@ for cross-process gauges.
 **`pending` is the one worth an alert.** A store that has stopped accepting
 deletions is otherwise invisible - the rows are claimed, the sweep reports
 itself as having run, and the media store simply does not shrink.
+
+`wasla_media_upload_reconciliation_total` is the same shape for the *write* seam
+(ADR-087): one label, six fixed values, no tenant, media id, object key,
+filename, hash or bucket. An object's key is committed before the object can
+exist, so a process that dies between the two leaves a row naming exactly what
+it was writing, and this counter is what that recovery reports.
+
+| Outcome | Means |
+| --- | --- |
+| `finalized` | An interrupted write was verified and adopted. The attachment is readable |
+| `missing` | The object never arrived. The row now owns nothing |
+| `mismatched` | An object is at a key Wasla owns and is not what Wasla wrote |
+| `unreachable` | The store would not answer. Nothing was decided |
+| `pending` | Intents still outstanding, after this pass. A level |
+| `quarantined` | Rows still in `mismatched`, after this pass. A level |
+
+**`mismatched` should be zero always, not usually.** It is the one outcome that
+cannot be resolved automatically: the object stays where it is, because deleting
+it destroys the only evidence of how a foreign object reached that key, and it
+is not served, because it is not what the row describes.
+
+`unreachable` is deliberately not the same as `missing`. A store that is down,
+read as "the object is gone", would abandon every upload in flight during the
+outage - and an outbound attachment's bytes arrived in a request body that no
+longer exists, so abandoning is final.
 
 The last two outcomes are the crash-recovery pair, and they are separate
 because an operator reads them differently. `recovered` is the system healing
@@ -482,6 +508,11 @@ against the metrics that actually exist, for whatever an operator points at
 | Dead letters accumulating | `wasla_queue_dead_letter_jobs > 20` | **page** | A systemic failure, not a bad job. |
 | Retry storm | `sum(rate(wasla_jobs_total{outcome="retried"}[10m])) > sum(rate(wasla_jobs_total{outcome="succeeded"}[10m]))` for 15m | warn | More work is being retried than finished. |
 | Media retention stuck | `increase(wasla_media_retention_total{outcome="pending"}[3d]) > 0 and increase(wasla_media_retention_total{outcome="purged"}[3d]) == 0` | warn | The sweep is claiming files and removing none. The store is refusing deletions and the volume is not shrinking. |
+| **A foreign object at our key** | `increase(wasla_media_upload_reconciliation_total{outcome="mismatched"}[1h]) > 0` | **page** | An object exists at a key Wasla owns whose contents are not what Wasla wrote. It is quarantined rather than served or deleted, and only a person can decide what it is. |
+| Quarantine not clearing | `wasla_media_upload_reconciliation_total{outcome="quarantined"} > 0` for 24h | warn | A mismatch nobody has looked at. The attachment is unavailable until somebody does. |
+| Upload intents growing | `increase(wasla_media_upload_reconciliation_total{outcome="pending"}[1h]) > 0 and increase(wasla_media_upload_reconciliation_total{outcome="finalized"}[1h]) == 0` | warn | Writes are starting and not finishing, and recovery is settling none of them. Usually the object store. |
+| Recovery cannot reach the store | `increase(wasla_media_upload_reconciliation_total{outcome="unreachable"}[30m]) > 0` | warn | The pass stopped rather than guessing. Correct behaviour; the store still needs looking at. |
+| Objects that never arrived | `increase(wasla_media_upload_reconciliation_total{outcome="missing"}[1h]) > 3` | warn | Writes are being accepted by the application and not landing. Attachments are being lost. |
 | **Reservations expiring** | `sum(wasla_queue_expired_reservations) > 0` for 10m | warn | Workers are dying while holding jobs, faster than recovery reclaims them. |
 | Jobs being recovered | `increase(wasla_jobs_total{outcome="recovered"}[1h]) > 0` | warn | Something is killing workers. The work is not lost; find out why. |
 | **Uncertain deliveries** | `increase(wasla_jobs_total{outcome="quarantined"}[1h]) > 0` | **page** | A worker died mid-send. A customer may or may not have been answered, and only a person can decide. |
