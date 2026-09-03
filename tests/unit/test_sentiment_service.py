@@ -160,6 +160,23 @@ def _returns(instance):
     return build
 
 
+class FakeSession:
+    """The one thing this service asks its session directly.
+
+    Everything else goes through a repository, and those are monkeypatched
+    below. `released` commits the session to hand its connection back before
+    the classification call, which is the whole reason the assessment does not
+    hold a connection for the length of an inference (ADR-080) - so a stand-in
+    that cannot be committed is a stand-in that hides the release.
+    """
+
+    def __init__(self) -> None:
+        self.commits = 0
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
 def _build(
     monkeypatch,
     *,
@@ -171,6 +188,7 @@ def _build(
     readings=None,
     usage=None,
     analytics=None,
+    session=None,
 ) -> SentimentService:
     fakes = {
         "UsageRecorder": usage if usage is not None else FakeUsage(),
@@ -187,7 +205,11 @@ def _build(
     for name, fake in fakes.items():
         monkeypatch.setattr(service_module, name, _returns(fake))
 
-    return SentimentService(session=None, tenant_id=TENANT, analyzer=analyzer)
+    return SentimentService(
+        session=session if session is not None else FakeSession(),
+        tenant_id=TENANT,
+        analyzer=analyzer,
+    )
 
 
 async def test_an_angry_customer_is_handed_to_a_person(monkeypatch):
@@ -591,3 +613,49 @@ async def test_a_reading_that_does_not_escalate_records_no_handoff(monkeypatch):
 
     assert outcome.escalated is False
     assert analytics.handoffs == []
+
+
+async def test_the_connection_is_handed_back_before_the_classifier_is_called(monkeypatch):
+    """A release, and it happens before the call rather than after it (ADR-080).
+
+    An assessment is a provider round trip like any other, so it should not
+    hold a pooled connection for its length. A commit recorded *after* the
+    classifier ran would satisfy a count and prove nothing - the connection
+    would have been checked out for the whole wait - so the assertion is on
+    the order.
+    """
+    session = FakeSession()
+    analyzer = StubAnalyzer()
+    seen_at_call: list[int] = []
+    original = analyzer.read
+
+    async def read(text):
+        seen_at_call.append(session.commits)
+        return await original(text)
+
+    analyzer.read = read  # type: ignore[method-assign]
+    service = _build(monkeypatch, analyzer=analyzer, session=session)
+
+    await service.assess(conversation_id=CONVERSATION, escalation_sentiment=None)
+
+    assert seen_at_call == [1], "the session was not committed before the classifier ran"
+
+
+async def test_a_classifier_failure_still_leaves_the_connection_released(monkeypatch):
+    """The release is not undone by the thing it was released for failing.
+
+    A reading is an enhancement and its failure is contained, so the turn
+    carries on - on a session whose transaction has ended and which will open
+    a new one at its next statement, which is exactly what should happen.
+    """
+    session = FakeSession()
+    service = _build(
+        monkeypatch,
+        analyzer=StubAnalyzer(raises=ExternalServiceError("the classifier is down")),
+        session=session,
+    )
+
+    outcome = await service.assess(conversation_id=CONVERSATION, escalation_sentiment=None)
+
+    assert outcome.escalated is False
+    assert session.commits == 1
