@@ -184,7 +184,16 @@ async def plan(committing) -> AsyncIterator[uuid.UUID]:
 
 @pytest_asyncio.fixture
 async def tenants(committing) -> AsyncIterator[list[uuid.UUID]]:
-    """A committed cohort, removed afterwards - the delete cascades."""
+    """A committed cohort, and a teardown that really removes it.
+
+    Deleting the tenant cascades to subscriptions, invoices, payments, saved
+    cards, memberships and queued mail. It does **not** cascade to
+    `audit_logs`: that foreign key is `ON DELETE SET NULL`, deliberately, so a
+    privileged action survives the workspace it was performed on. Which means
+    a test that commits audit rows and deletes only its tenants leaves them
+    behind for the next test to count - and the dunning suite counts audit
+    rows. They go first, while `tenant_id` still says whose they are.
+    """
     created: list[uuid.UUID] = []
     async with committing() as session:
         for index in range(COHORT):
@@ -197,7 +206,42 @@ async def tenants(committing) -> AsyncIterator[list[uuid.UUID]]:
         yield created
     finally:
         async with committing() as session:
+            await session.execute(delete(AuditLog).where(AuditLog.tenant_id.in_(created)))
             await session.execute(delete(Tenant).where(Tenant.id.in_(created)))
+            await session.commit()
+
+
+@pytest_asyncio.fixture
+async def owner(committing):
+    """A factory for workspace owners, removed afterwards.
+
+    A `User` is a global identity with no `tenant_id` (claude.md section 7), so
+    deleting a workspace does not delete the people in it. This file commits
+    for real, so an owner it leaves behind is an account the identity suites
+    find when they assert how many exist.
+    """
+    created: list[uuid.UUID] = []
+
+    async def make(tenant_id: uuid.UUID) -> None:
+        async with committing() as session:
+            user = User(
+                email=f"sweep-owner-{uuid.uuid4().hex[:10]}@example.com",
+                hashed_password="not-a-real-hash",
+                is_active=True,
+            )
+            session.add(user)
+            await session.flush()
+            session.add(
+                Membership(tenant_id=tenant_id, user_id=user.id, role=TenantRole.TENANT_OWNER)
+            )
+            await session.commit()
+            created.append(user.id)
+
+    try:
+        yield make
+    finally:
+        async with committing() as session:
+            await session.execute(delete(User).where(User.id.in_(created)))
             await session.commit()
 
 
@@ -247,25 +291,6 @@ async def _open_invoice(
         session.add(invoice)
         await session.commit()
         return invoice.id
-
-
-async def _owner(committing, tenant_id: uuid.UUID) -> None:
-    """Somebody for a notice to be addressed to.
-
-    `EmailOutbox.enqueue_for_tenant_owners` writes one row per *active owner*,
-    so a workspace with no membership produces no mail however correct the
-    transition is - and a test counting notices would then assert nothing.
-    """
-    async with committing() as session:
-        user = User(
-            email=f"owner-{uuid.uuid4().hex[:10]}@example.com",
-            hashed_password="not-a-real-hash",
-            is_active=True,
-        )
-        session.add(user)
-        await session.flush()
-        session.add(Membership(tenant_id=tenant_id, user_id=user.id, role=TenantRole.TENANT_OWNER))
-        await session.commit()
 
 
 async def _card(committing, tenant_id: uuid.UUID) -> None:
@@ -564,6 +589,7 @@ async def test_two_overdue_invoices_of_one_workspace_produce_one_transition(
     committing,
     plan,
     tenants,
+    owner,
 ):
     """GATE: dunning does not duplicate under concurrency.
 
@@ -574,7 +600,10 @@ async def test_two_overdue_invoices_of_one_workspace_produce_one_transition(
     the audit row and the notice.
     """
     tenant_id = tenants[0]
-    await _owner(committing, tenant_id)
+    # `enqueue_for_tenant_owners` writes one row per *active owner*, so a
+    # workspace with nobody in it produces no mail however correct the
+    # transition is - and the notice is what could double here.
+    await owner(tenant_id)
     subscription_id = await _subscribe(
         committing,
         tenant_id,

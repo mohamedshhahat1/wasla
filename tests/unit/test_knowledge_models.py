@@ -29,7 +29,7 @@ def _unique_columns(table: Table, name: str) -> tuple[str, ...]:
     raise AssertionError(f"{table.name} has no unique constraint named {name}")
 
 
-def test_knowledge_tables_declare_the_indexes_migration_0007_creates():
+def test_knowledge_tables_declare_the_indexes_the_migrations_create():
     assert _index_names(KnowledgeBase.__table__) == {"ix_knowledge_bases_tenant_id"}
     assert _index_names(Document.__table__) == {
         "ix_documents_tenant_id",
@@ -40,6 +40,11 @@ def test_knowledge_tables_declare_the_indexes_migration_0007_creates():
         "ix_document_chunks_tenant_id",
         "ix_document_chunks_document_id",
         "ix_document_chunks_tenant_id_knowledge_base_id",
+        # Migration 0039, and declared here as well so autogenerate compares
+        # against it. `tests/integration/test_vector_index.py` checks the part
+        # this cannot see: that it is HNSW over `vector_cosine_ops`, which is
+        # the half that decides whether the planner will ever use it.
+        "ix_document_chunks_embedding_hnsw",
     }
 
 

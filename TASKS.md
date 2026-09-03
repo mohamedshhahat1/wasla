@@ -150,7 +150,7 @@ The four unchecked items below are **deferred by decision, not unfinished**. Two
 - [x] Cross-tenant retrieval tests (PostgreSQL + pgvector)
 - [x] Grounding tests: the agent invokes the tool, the passages reach its context, and an empty result is stated rather than silent
 - [ ] *Deferred:* PDF extraction. Refused explicitly today with a message telling the uploader to submit the text instead, rather than accepted and silently indexing nothing. Needs a parser dependency, which was not added to a supply chain that had just been cleaned of advisories (ADR-017).
-- [ ] *Deferred:* approximate vector index (ivfflat or hnsw). These have to be built against representative data to be worth anything — ivfflat wants its list count chosen from the row count, and one built on an empty table produces a bad plan that survives until someone reindexes. Exact search is correct at every size and fast at the sizes a new workspace has. Belongs to the Phase 14 performance pass.
+- [x] Approximate vector index. **Done in Phase 27** against a 77,000-chunk corpus, which is what the deferral was waiting for. HNSW rather than ivfflat, because ivfflat trains its lists against the rows present when it is built and a knowledge base is empty when a workspace signs up. The index was the easy third of it: without `hnsw.iterative_scan` a workspace holding a small share of the corpus got **zero passages out of five** and the agent said the knowledge base had no answer, and without `plan_cache_mode` the connection settled on a generic plan after five searches and gave back 250ms instead of 8ms (ADR-079).
 - [ ] *Deferred to Phase 8:* sweeper for documents stranded `PENDING` by a queue outage. `DocumentRepository.list_pending` exists for it; it belongs with the worker service.
 - [ ] *Deferred to Phase 12:* RAG usage metering, with the rest of the usage subsystem.
 
@@ -334,10 +334,10 @@ Deferred by decision, not unfinished:
 - [x] Dependency advisories cleared and a floor put under them (Starlette declared directly — ADR-017)
 - [x] Per-workspace credential encryption at rest (migration `0020`, ADR-034, superseding ADR-009). AES-256-GCM under a key ring, the workspace id bound in as authenticated data so a ciphertext cannot be moved between rows, write-only over the API, and no fallback to the platform token when a stored credential cannot be read
 - [x] A real liveness probe for the worker. Each configured loop publishes a heartbeat to Redis with a short expiry, refreshed on a timer, and `scripts/entrypoint.sh worker-health` exits non-zero unless **every** loop this container runs has beaten recently. Verified in a container: all six keys present, `docker ps` reports **healthy** for the first time in the project's life, deleting one key makes the probe exit 1, and the next beat restores it. What it proves is the process is up and its event loop is scheduling; what it does not prove is that a loop is making progress — that is the in-flight reaper, which reads the same keys
-- [~] Performance review and indexing pass. The analytics windows are done (migration `0019`): every tenant figure is "this workspace, this window", and four tables had a tenant index carrying no time, so PostgreSQL found the workspace's rows and discarded most of them by filter — waste proportional to how long a workspace had existed, which made the dashboard slowest for the longest-paying customers. Measured on 50 workspaces and 50,000 messages: **772 buffers and 850 rows discarded → 6 buffers, no heap fetches, an index-only scan**. `tests/unit/test_analytics_indexes.py` is the guard against adding the next windowed query the same way. Still open: the approximate vector index deferred from phase 6, and a review of the campaign and follow-up sweeps under load
+- [~] Performance review and indexing pass. The analytics windows are done (migration `0019`): every tenant figure is "this workspace, this window", and four tables had a tenant index carrying no time, so PostgreSQL found the workspace's rows and discarded most of them by filter — waste proportional to how long a workspace had existed, which made the dashboard slowest for the longest-paying customers. Measured on 50 workspaces and 50,000 messages: **772 buffers and 850 rows discarded → 6 buffers, no heap fetches, an index-only scan**. `tests/unit/test_analytics_indexes.py` is the guard against adding the next windowed query the same way. The vector index deferred from phase 6 is now done (Phase 27, ADR-079). Still open: a review of the campaign and follow-up sweeps under load
 - [x] Speed up the PostgreSQL-backed suite. The schema is now built once per session and each test runs in a transaction that is rolled back. Measured on the same machine and the same 451 tests: **2507s → 94s**, a 27x reduction. Isolation is unchanged and is now itself covered by `tests/integration/test_fixture_isolation.py`.
 
-**COMPLETE**, with one item left deliberately in progress: the indexing pass closed the analytics gap it was opened for, and the vector index it also mentions was always Phase 6's deferral (it needs representative data to be built against, so it belongs with a real corpus rather than with a hardening sweep).
+**COMPLETE.** The indexing pass closed the analytics gap it was opened for; the vector index it also mentions was always Phase 6's deferral, needing a real corpus to be built against, and Phase 27 built one and closed it.
 
 Verified 2026-08-23 against PostgreSQL 16 and in containers: migrations `0018`, `0019` and `0020` apply from an empty database, `alembic check` reports no drift, and the schema downgrades to base and reapplies clean; the image builds; the API answers; and the worker container reports **healthy** for the first time since it existed, with all six heartbeat keys in Redis, the probe exiting 1 when one is deleted and recovering on the next beat.
 
@@ -346,7 +346,7 @@ Deferred by decision, not unfinished:
 - [ ] Keys in a secret manager rather than in configuration. `CREDENTIAL_ENCRYPTION_KEYS` sits in the environment of every API and worker container, which is the exposure `JWT_SECRET` already has — a real limit, and not a new class of one
 - [ ] Automated key rotation. Prepending a key works and old credentials keep decrypting; `needs_rotation` finds the stragglers and nothing rewrites them yet
 - [ ] The in-flight reaper. It wants the heartbeat that now exists, and needs a visibility timeout to tell a slow job from a dead one — guessing wrong sends a customer two replies
-- [ ] Dunning, retention sweeps and the approximate vector index, each recorded in the phase that deferred it
+- [x] Dunning, retention sweeps and the approximate vector index, each recorded in the phase that deferred it and each now closed
 
 ## Phase 15 — Delivery
 
@@ -869,7 +869,7 @@ Still open, and deliberately untouched here:
       commercial decisions rather than missing code (ADR-061)
 - [ ] Observability: metrics, tracing, error tracking, alerting
 - [ ] Queue retry with backoff, attempt counts and dead-letter monitoring
-- [ ] Object storage and a media retention sweep; an ANN vector index
+- [x] Object storage and a media retention sweep; an ANN vector index
 
 ## Phase 24 — Verifying Phase 23 rather than trusting it
 
@@ -1179,3 +1179,83 @@ Deliberately not done here:
       measuring a restore at production scale
 - [ ] **Media is still not backed up.** It needs object storage first, which
       is P2
+
+## Phase 27 — The hottest database paths, measured before they were changed
+
+Four scaling items the audit ranked, each measured against a synthetic corpus
+before anything was edited. Two of them turned out not to be the problem they
+were filed as, and saying so is most of what this phase produced.
+
+- [x] **An ANN index on `document_chunks.embedding`** (ADR-079, migration
+      `0039`). HNSW with `vector_cosine_ops`, built `CONCURRENTLY`. Measured on
+      77,000 chunks: a 45,000-chunk workspace went from 236ms to 7.9ms with
+      recall 1.000 against the exact answer. The index alone would have made
+      things *worse* — see the two settings below, both found by measuring
+      rather than by reasoning.
+- [x] **`hnsw.iterative_scan = strict_order` on the retrieval query.** The
+      tenant, knowledge-base and READY filters are post-filters on an
+      approximate scan, so a workspace holding 2% of the corpus got zero
+      passages out of five and the agent truthfully reported an empty knowledge
+      base. This is the regression test that matters most in the phase.
+- [x] **`plan_cache_mode = force_custom_plan` on the retrieval query.** The
+      statement is prepared per pooled connection, and after five executions
+      PostgreSQL kept a generic plan that cannot know which workspace is
+      asking. Measured through the repository: searches one to five took 7ms
+      and every search after that took 250ms.
+- [x] **The provider call left the database session** (ADR-080).
+      `AgentOrchestrator` commits and returns the connection before every
+      inference and every per-round reservation, so agent-turn concurrency is
+      the queue depth rather than `pool_size + max_overflow`. Proved with two
+      turns inside the provider call at once through a pool of exactly one
+      connection.
+- [x] **The conversation mode is re-read before a reply is offered.** A commit
+      ends a snapshot, so a colleague who took the conversation over while the
+      model was composing now gets silence instead of an AI answer arriving
+      underneath them.
+- [x] **A covering index for the entitlement check** (ADR-081, migration
+      `0040`). `quantity` and `unit` as INCLUDE columns, making the sum an
+      index-only scan: 9.4ms to 7.1ms on 3.9M events, and — the part that
+      matters more — indifferent to the table growing around it, where the same
+      check on a 1.3GB table with evicted heap pages measured 50ms.
+- [x] **`shm_size: 1gb` on PostgreSQL in both Compose files** (ADR-081). Docker
+      gives a container 64MB of `/dev/shm` and PostgreSQL puts a parallel
+      query's tuple store there; running the platform usage roll-up over four
+      million rows crashed the server into recovery. Found by doing it.
+- [x] **The billing sweep claims its work** (ADR-082). Every phase uses
+      `FOR UPDATE ... SKIP LOCKED` and commits per claim, so two workers divide
+      a cohort instead of racing to bill it twice. `CLAIM_LIMIT` became a batch
+      size rather than a ceiling, so a first-of-the-month cohort finishes in one
+      pass.
+- [x] **Two starvation bugs in the sweep, both pre-existing and neither about
+      concurrency.** A chased invoice stayed eligible for ever and held the
+      front of every later batch; so did an invoice whose collection attempts
+      were spent. Both eligibility rules moved into the claim query.
+
+**Measured and deliberately not built.**
+
+- [ ] *Not needed yet:* a `usage_events` rollup. The one query that grows
+      without bound is the platform `by_tenant` aggregate — 64ms to 172ms for a
+      3× table, linear in total rows — and it is a SaaS-owner dashboard nobody
+      is waiting on. The trigger is written down rather than guessed at: at
+      roughly 50 million rows in the window, or a dashboard past a second, add a
+      daily rollup keyed `(tenant_id, day, event_type)` with
+      `INSERT ... ON CONFLICT DO UPDATE`, serve dashboards from it, and leave
+      entitlements reading raw rows. Money should not come to depend on an
+      aggregation that can drift (ADR-081).
+- [ ] *Not needed yet:* time partitioning for `usage_events`. It would prune
+      the platform query and make retention a `DROP TABLE`, and it would also
+      mean converting the highest-write table in the system in place for a
+      benefit a rollup gives more cheaply. Nothing measured argues for it
+      (ADR-081).
+- [ ] *Not built on purpose:* a corpus-size threshold in the repository
+      choosing between exact and approximate retrieval. PostgreSQL's own
+      crossover is around 26,000 chunks in one workspace and is right at both
+      ends of the range; forcing the approximate path everywhere costs a
+      200-chunk workspace 54ms against 1.5ms. A wrong threshold in application
+      code is a silent retrieval-quality regression rather than a slow query
+      somebody notices (ADR-079).
+- [ ] *Still open:* the band between roughly 3,000 and 26,000 chunks in one
+      workspace, where the planner keeps the exact scan and the approximate one
+      would have been faster (2.4ms against 42ms, forced, at 12,000). Left
+      alone deliberately, and recorded in `docs/RAG.md` so the next person
+      measuring finds the number rather than the impression.

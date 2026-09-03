@@ -364,6 +364,7 @@ async def test_the_allowance_is_resolved_again_for_every_round(one_connection, w
         )
         session.add_all([paid, free])
         await session.flush()
+        plan_ids = [paid.id, free.id]
         subscription = SubscriptionRepository(session, tenant_id=tenant_id).create(
             plan_id=paid.id,
             status=SubscriptionStatus.ACTIVE,
@@ -400,6 +401,18 @@ async def test_the_allowance_is_resolved_again_for_every_round(one_connection, w
         await elsewhere.commit()
 
     assert await reserve() is False
+
+    # Plans have no `tenant_id`, so the workspace fixture's delete does not
+    # reach them. Left behind, they are rows the plan-catalogue suites count.
+    #
+    # The subscription goes first, and by hand: the foreign key from a
+    # subscription to its plan is `RESTRICT`, deliberately, so a plan somebody
+    # is paying for cannot be deleted out from under them. The workspace
+    # fixture would cascade it away, but that teardown runs after this line.
+    async with factory() as session:
+        await session.execute(delete(Subscription).where(Subscription.id == subscription_id))
+        await session.execute(delete(Plan).where(Plan.id.in_(plan_ids)))
+        await session.commit()
 
 
 async def test_a_reservation_can_be_taken_while_a_provider_call_is_in_flight(

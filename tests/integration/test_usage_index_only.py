@@ -148,6 +148,14 @@ async def test_the_period_sum_is_answered_from_the_index_alone(db_session):
     async with db_session.begin_nested():
         await db_session.execute(text("DROP INDEX ix_usage_events_tenant_id_occurred_at"))
         await db_session.execute(text("DROP INDEX ix_usage_events_tenant_id"))
+        # The primary key too, and it is not paranoia: a full scan of the
+        # narrow `id` index and a filter is a plan PostgreSQL will choose over
+        # a wider index on a few hundred rows, and whether it does depends on
+        # statistics this fixture does not control - so the same assertion
+        # passed alone and failed in a full run.
+        await db_session.execute(
+            text("ALTER TABLE usage_events DROP CONSTRAINT pk_usage_events CASCADE")
+        )
         await db_session.execute(text("SET LOCAL enable_seqscan = off"))
         plan = "\n".join(
             row[0]
