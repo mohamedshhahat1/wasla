@@ -268,3 +268,48 @@ async def test_a_job_span_does_not_export_the_job_s_payload(
 
     _assert_absent(_spans(record), CANARIES, where="an exported span")
     _assert_absent(_logs(caplog), CANARIES, where="a log record")
+
+
+# ------------------------------------------------------- the exception field
+
+
+def test_a_logged_traceback_carries_no_frame_locals(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`logger.exception` writes a whole traceback into the log's `error` field.
+
+    That is deliberate — `app/core/logging.py` funnels every `exc_info`
+    through `formatException`, and a traceback is what makes an incident
+    answerable. It is also the field most likely to carry something it should
+    not, and the assumption worth pinning down is *which* something.
+
+    `traceback.format_exception` renders the exception's message and each
+    frame's source line. It does not render frame locals. That is what keeps a
+    credential held in a local variable out of the log store, and it is not a
+    property of logging in general: `rich`, `better_exceptions` and several
+    error-reporting SDKs all render locals by default, and swapping the
+    formatter for one of them would quietly start shipping them. This fails if
+    that happens.
+
+    The exception's *message* is a different matter, and it is not this test's
+    to guarantee — a message is chosen at the raise site. What this fixes is
+    that a raise site is the only way a value gets there.
+    """
+    logger = logging.getLogger("app.test.telemetry_privacy")
+
+    def authenticate() -> None:
+        token = f"Bearer {JWT_CANARY}"  # noqa: F841 — the point is that it is a local
+        api_key = PAYMOB_CANARY  # noqa: F841
+        raise TimeoutError("the provider did not answer")
+
+    with caplog.at_level(logging.DEBUG):
+        try:
+            authenticate()
+        except TimeoutError:
+            logger.exception("provider.call_failed")
+
+    document = _logs(caplog)
+    _assert_absent(document, CANARIES, where="a logged traceback")
+    # The traceback did arrive — this is not passing because nothing was logged.
+    assert "TimeoutError" in document
+    assert "the provider did not answer" in document

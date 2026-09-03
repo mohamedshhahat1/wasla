@@ -282,7 +282,7 @@ time is how a field ends up in the one that was not looking.
 | Signal | Destination | Read by | Carries | Customer data | Secrets | Bounded |
 | --- | --- | --- | --- | --- | --- | --- |
 | **Metrics** | `GET /metrics`, Prometheus text 0.0.4 | anything that can reach the port | `route` (template), `method`, `status`, `queue`, `kind`, `provider`, `operation`, `outcome`, `dependency`, `worker` | no | no | yes — closed enumerations, guarded at record time |
-| **Logs** | stdout, JSON, shipped by the platform | whoever operates the log store | `event`, `request_id`, `method`, `path`, `status_code`, `duration_ms`, and per-event ids | **yes, deliberately** — `path`, and the ids an event names | no | no — a log is a stream, not a series |
+| **Logs** | stdout, JSON, shipped by the platform | whoever operates the log store | `event`, `request_id`, `method`, `path`, `status_code`, `duration_ms`, per-event ids, and `error` — a full traceback on any `logger.exception` | **yes, deliberately** — `path`, and the ids an event names | no | no — a log is a stream, not a series |
 | **Traces** | OTLP/HTTP to a collector | a trace backend, usually a third party | the ten attributes in `ALLOWED_ATTRIBUTES`, span names, and W3C context | no | no | yes — allowlisted, and names come from route templates |
 
 **Metrics and traces have the same contract; logs deliberately do not.** A log
@@ -297,6 +297,20 @@ What is *not* in a log, and the distinction that matters: no query string
 body, no credential. `tests/integration/test_telemetry_privacy.py` asserts both
 halves of this — that the path arrives and the query string does not — so a
 change from `.path` to the full URL fails rather than ships.
+
+The `error` field deserves naming on its own, because it is the one that grows
+without anybody deciding to add a field. `app/core/logging.py` funnels every
+`exc_info` through `formatException`, so any `logger.exception` writes a whole
+traceback into the log store — fifteen call sites do. That is the right default
+for a signal whose job is to make an incident answerable, and it is safe for a
+specific reason worth writing down: `traceback.format_exception` renders each
+frame's *source line*, never its locals. A credential held in a local variable
+does not reach the log. This is not a property of logging in general — `rich`,
+`better_exceptions` and several error-reporting SDKs render locals by default —
+so it is pinned by a test rather than left to hold by accident. What a
+traceback does carry is the exception's own message, and that is chosen at the
+raise site; the guarantee is that a raise site is the only way a value gets
+there.
 
 ### The canaries
 
