@@ -29,13 +29,15 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
+from time import perf_counter
 from typing import Any, Final, cast
 
 from redis.asyncio import Redis
 
 from app.core.logging import get_logger
-from app.core.metrics import REGISTRY
+from app.core.metrics import PROVIDER_LATENCY_BUCKETS, REGISTRY, HistogramSample, bucket_for
 
 logger = get_logger(__name__)
 
@@ -43,6 +45,16 @@ logger = get_logger(__name__)
 # key per series keeps the keyspace at one entry per metric no matter how the
 # labels multiply, and makes a scrape one `HGETALL` instead of a scan.
 COUNTER_PREFIX: Final = "metrics:counter"
+# The same arrangement for a distribution: one hash per metric, and one field
+# per (label combination, bucket). See `_observe` for why an observation
+# touches two fields rather than eleven.
+HISTOGRAM_PREFIX: Final = "metrics:histogram"
+# What separates a label combination from the part of the field that says which
+# bucket. Chosen because no label value in this application contains it: every
+# one is an enum member, a short operation constant or a process role.
+BUCKET_SEPARATOR: Final = "|"
+# The field holding the sum of every observation for one label combination.
+SUM_FIELD: Final = "sum"
 
 
 class Provider(StrEnum):
@@ -185,6 +197,24 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
     ),
 }
 
+# Distributions written across processes, by metric name: help text, the labels
+# a sample must carry, and the bucket bounds this release declares.
+#
+# One entry, and the labels are deliberately the *pair* the counter beside it
+# already uses minus the outcome. A duration is recorded whether the call
+# succeeded or failed - a provider timing out after twenty seconds is the most
+# important latency this metric can hold - and splitting the distribution by
+# outcome would quadruple the series to answer a question `..._requests_total`
+# already answers. An operator asks "how slow is OpenAI" and "how often does it
+# fail" separately, and gets each from the metric shaped for it.
+REDIS_HISTOGRAMS: Final[dict[str, tuple[str, tuple[str, ...], tuple[float, ...]]]] = {
+    "wasla_provider_request_duration_seconds": (
+        "How long a call to an external provider took, whether or not it succeeded.",
+        ("provider", "operation"),
+        PROVIDER_LATENCY_BUCKETS,
+    ),
+}
+
 
 def _field(labels: Mapping[str, str]) -> str:
     """The hash field one label combination occupies.
@@ -249,6 +279,48 @@ async def _increment_by(metric: str, labels: Mapping[str, str], amount: int) -> 
         )
 
 
+async def _observe(
+    metric: str,
+    labels: Mapping[str, str],
+    value: float,
+    bounds: tuple[float, ...],
+) -> None:
+    """Add one observation to a cross-process distribution.
+
+    **Two commands, not eleven.** A Prometheus histogram is cumulative, so the
+    obvious implementation increments every bucket at or above the observed
+    value. Written to Redis that would be one command per bucket on a path that
+    runs beside every provider call. Instead the bucket the value *lands in* is
+    incremented, and `render_histogram_lines` accumulates at scrape time -
+    which produces exactly the same exposition, and moves the cost from the
+    thousands of calls to the handful of scrapes.
+
+    Pipelined without a transaction: the two fields are independent, and a
+    crash between them loses the tail of one sample rather than corrupting
+    anything. Not worth a `MULTI` on the request path.
+    """
+    redis = _sink
+    if redis is None:
+        return
+    bound = bucket_for(value, bounds)
+    suffix = "le=+Inf" if bound is None else f"le={bound!r}"
+    prefix = _field(labels)
+    try:
+        pipeline = redis.pipeline(transaction=False)
+        pipeline.hincrby(f"{HISTOGRAM_PREFIX}:{metric}", f"{prefix}{BUCKET_SEPARATOR}{suffix}", 1)
+        pipeline.hincrbyfloat(
+            f"{HISTOGRAM_PREFIX}:{metric}",
+            f"{prefix}{BUCKET_SEPARATOR}{SUM_FIELD}",
+            value,
+        )
+        await cast("Any", pipeline.execute())
+    except Exception:
+        logger.warning(
+            "metrics.record_failed",
+            extra={"event": "metrics.record_failed", "metric": metric},
+        )
+
+
 async def record_job_outcome(
     *,
     queue: str,
@@ -272,17 +344,64 @@ async def record_provider_call(
     provider: Provider,
     operation: str,
     outcome: CallOutcome,
+    duration_seconds: float | None = None,
 ) -> None:
     """One call to somebody else's API.
 
     `operation` is a short constant chosen at the call site — `send_message`,
     `respond`, `create_intention` — and never anything derived from the
     request. A handful per provider is the intended domain.
+
+    `duration_seconds` is how long the whole operation took, including any
+    retries the client made inside it, because that is the number the work
+    waited on. It is optional for the one call that is not an outbound request
+    at all: an inbound WhatsApp delivery is counted here so an operator can see
+    Meta has stopped calling, and it has no duration this process could
+    measure.
     """
     await _increment(
         "wasla_provider_requests_total",
         {"provider": str(provider), "operation": operation, "outcome": str(outcome)},
     )
+    if duration_seconds is not None:
+        metric = "wasla_provider_request_duration_seconds"
+        await _observe(
+            metric,
+            {"provider": str(provider), "operation": operation},
+            duration_seconds,
+            REDIS_HISTOGRAMS[metric][2],
+        )
+
+
+@dataclass(slots=True)
+class ProviderCall:
+    """One call to somebody else, timed from the moment it was started.
+
+    The alternative was a `duration_seconds=` argument at every exit of every
+    provider client, computed from a `perf_counter()` the call site had to
+    remember to take. There are four clients and sixteen exits between them,
+    each recording a different outcome, and "the one that forgot to time
+    itself" is exactly the kind of omission that shows up as a metric quietly
+    missing a provider rather than as a failure.
+
+    So the clock starts when the object is made, which is the first statement
+    of the operation, and every exit says only how it ended.
+
+    `record` swallows, because everything in this module does: a call to
+    somebody else's API must not fail because the observation of it did.
+    """
+
+    provider: Provider
+    operation: str
+    _started: float = field(default_factory=perf_counter, init=False)
+
+    async def record(self, outcome: CallOutcome) -> None:
+        await record_provider_call(
+            provider=self.provider,
+            operation=self.operation,
+            outcome=outcome,
+            duration_seconds=perf_counter() - self._started,
+        )
 
 
 async def record_retention_pass(*, purged: int, failed: int, pending: int) -> None:
@@ -322,8 +441,8 @@ async def read_redis_counters(redis: Redis) -> dict[str, list[tuple[dict[str, st
             )
             continue
         samples: list[tuple[dict[str, str], float]] = []
-        for field, value in (raw or {}).items():
-            labels = _parse_field(field)
+        for raw_field, value in (raw or {}).items():
+            labels = _parse_field(raw_field)
             if labels is None or set(labels) != set(expected):
                 continue
             try:
@@ -334,23 +453,109 @@ async def read_redis_counters(redis: Redis) -> dict[str, list[tuple[dict[str, st
     return collected
 
 
+async def read_redis_histograms(redis: Redis) -> dict[str, list[HistogramSample]]:
+    """Every cross-process distribution, ready to render.
+
+    Reads whatever is in Redis, including whatever an older release wrote, and
+    drops what it cannot make sense of rather than raising: a field whose
+    labels no longer match the declaration, a bound this release does not
+    declare, a value that will not parse. One unreadable field must not cost
+    the scrape every other sample.
+
+    A label combination with observations but no `sum` field still renders -
+    the sum reads as zero, the buckets are right, and a scrape mid-write is the
+    only way to reach that state. The reverse (a sum with no buckets) renders
+    as an empty distribution, which is what it is.
+    """
+    collected: dict[str, list[HistogramSample]] = {}
+    for metric, (_, expected, bounds) in REDIS_HISTOGRAMS.items():
+        try:
+            raw = await cast("Any", redis.hgetall(f"{HISTOGRAM_PREFIX}:{metric}"))
+        except Exception:
+            logger.warning(
+                "metrics.read_failed",
+                extra={"event": "metrics.read_failed", "metric": metric},
+            )
+            continue
+        collected[metric] = _histogram_samples(raw or {}, expected=expected, bounds=bounds)
+    return collected
+
+
+def _histogram_samples(
+    raw: Mapping[str, str],
+    *,
+    expected: tuple[str, ...],
+    bounds: tuple[float, ...],
+) -> list[HistogramSample]:
+    """Group `<labels>|<bucket>` fields back into one sample per combination."""
+    buckets: dict[tuple[tuple[str, str], ...], dict[float, float]] = {}
+    overflow: dict[tuple[tuple[str, str], ...], float] = {}
+    totals: dict[tuple[tuple[str, str], ...], float] = {}
+    seen: dict[tuple[tuple[str, str], ...], dict[str, str]] = {}
+
+    for raw_field, raw_value in raw.items():
+        prefix, separator, suffix = raw_field.rpartition(BUCKET_SEPARATOR)
+        if not separator:
+            continue
+        labels = _parse_field(prefix)
+        if labels is None or set(labels) != set(expected):
+            continue
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        key = tuple(sorted(labels.items()))
+        seen[key] = labels
+        if suffix == SUM_FIELD:
+            totals[key] = value
+        elif suffix == "le=+Inf":
+            overflow[key] = value
+        elif suffix.startswith("le="):
+            try:
+                bound = float(suffix[3:])
+            except ValueError:
+                continue
+            if bound not in bounds:
+                # A bound this release no longer declares. Dropped rather than
+                # folded into a neighbour: quietly moving observations between
+                # buckets would make a quantile computed across a bucket change
+                # look like an answer.
+                continue
+            buckets.setdefault(key, {})[bound] = value
+
+    return [
+        HistogramSample(
+            labels=labels,
+            buckets=buckets.get(key, {}),
+            overflow=overflow.get(key, 0.0),
+            total=totals.get(key, 0.0),
+        )
+        for key, labels in sorted(seen.items())
+    ]
+
+
 __all__ = [
+    "BUCKET_SEPARATOR",
     "COUNTER_PREFIX",
     "DEPENDENCY_FAILURES",
     "DEPENDENCY_UP",
+    "HISTOGRAM_PREFIX",
     "HTTP_IN_FLIGHT",
     "HTTP_LATENCY",
     "HTTP_REQUESTS",
     "REDIS_COUNTERS",
+    "REDIS_HISTOGRAMS",
     "UNHANDLED_ERRORS",
     "CallOutcome",
     "JobOutcome",
     "Provider",
+    "ProviderCall",
     "counter_sink",
     "observe_dependency",
     "observe_http",
     "observe_unhandled_error",
     "read_redis_counters",
+    "read_redis_histograms",
     "record_job_outcome",
     "record_provider_call",
     "record_retention_pass",

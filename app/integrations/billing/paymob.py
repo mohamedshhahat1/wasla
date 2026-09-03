@@ -48,7 +48,7 @@ import httpx
 
 from app.core.logging import get_logger
 from app.core.net import UnsafeUrlError, build_guarded_client
-from app.core.telemetry import CallOutcome, Provider, record_provider_call
+from app.core.telemetry import CallOutcome, Provider, ProviderCall
 from app.db.models.invoice import PaymentStatus
 from app.integrations.billing.base import ProviderError
 from app.integrations.billing.checkout import (
@@ -580,6 +580,18 @@ class PaymobProvider:
         line.
         """
         url = f"{self._api_base}{path}"
+        # Observed here because this is where the outcome is already
+        # distinguished: a timeout, a refused destination, a 429 and a 4xx are
+        # four different operational problems and only this method can tell
+        # them apart. Nothing about the *money* is a label - not the amount,
+        # not the currency, not the reference - because a payment's value is
+        # what a metric label domain must never be keyed on.
+        #
+        # Timed from here, before the client is built, so the duration includes
+        # connecting: that is where a payment provider which has become
+        # unreachable spends its time, and it is the failure whose shape an
+        # operator most needs to see.
+        call = ProviderCall(provider=Provider.PAYMOB, operation=operation)
         try:
             async with self._client() as client:
                 response = await client.post(
@@ -595,7 +607,7 @@ class PaymobProvider:
             # Retryable, and safe to retry: an intention is keyed on our own
             # unique reference, and a refund is guarded by the reference stored
             # before one is believed to have happened.
-            await _count(operation, CallOutcome.UNAVAILABLE)
+            await call.record(CallOutcome.UNAVAILABLE)
             raise ProviderError("Paymob did not respond in time.", retryable=True) from error
         except UnsafeUrlError as error:
             # The guarded transport refused the destination: a Paymob host that
@@ -613,12 +625,12 @@ class PaymobProvider:
                     "reason": type(error).__name__,
                 },
             )
-            await _count(operation, CallOutcome.FAILURE)
+            await call.record(CallOutcome.FAILURE)
             raise ProviderError("Paymob could not be reached.") from error
         except httpx.HTTPError as error:
             # Deliberately not interpolating the error: httpx puts the request
             # URL in it, and a future signed URL would end up in a log.
-            await _count(operation, CallOutcome.UNAVAILABLE)
+            await call.record(CallOutcome.UNAVAILABLE)
             raise ProviderError("Paymob could not be reached.", retryable=True) from error
 
         if response.status_code >= 400:
@@ -636,13 +648,10 @@ class PaymobProvider:
                     "retryable": retryable,
                 },
             )
-            await _count(
-                operation,
-                (
-                    CallOutcome.RATE_LIMITED
-                    if response.status_code == RATE_LIMITED_STATUS
-                    else CallOutcome.FAILURE
-                ),
+            await call.record(
+                CallOutcome.RATE_LIMITED
+                if response.status_code == RATE_LIMITED_STATUS
+                else CallOutcome.FAILURE
             )
             raise ProviderError(
                 f"Paymob refused the request ({response.status_code}): {detail}",
@@ -654,11 +663,11 @@ class PaymobProvider:
         except ValueError as error:
             # A 2xx we cannot read. Not retryable: the same request produces
             # the same unreadable answer.
-            await _count(operation, CallOutcome.FAILURE)
+            await call.record(CallOutcome.FAILURE)
             raise ProviderError("Paymob returned a response that was not JSON.") from error
         if not isinstance(payload, dict):
             raise ProviderError("Paymob returned a response of an unexpected shape.")
-        await _count(operation, CallOutcome.SUCCESS)
+        await call.record(CallOutcome.SUCCESS)
         return payload
 
     def verify_callback(
@@ -940,16 +949,3 @@ class PaymobProvider:
             amount=request.amount,
             pending=bool(payload.get("pending")),
         )
-
-
-async def _count(operation: str, outcome: CallOutcome) -> None:
-    """Record one provider call's outcome. Best-effort by construction.
-
-    Counted here because this is where the outcome is already distinguished:
-    a timeout, a refused destination, a 429 and a 4xx are four different
-    operational problems and only this method can tell them apart. Nothing
-    about the *money* is a label - not the amount, not the currency, not the
-    reference - because a payment's value is what a metric label domain must
-    never be keyed on.
-    """
-    await record_provider_call(provider=Provider.PAYMOB, operation=operation, outcome=outcome)

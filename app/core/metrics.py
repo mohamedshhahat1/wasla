@@ -30,6 +30,7 @@ import re
 import threading
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Final
 
 # Prometheus' own rule for a metric or label name.
@@ -64,6 +65,31 @@ DEFAULT_LATENCY_BUCKETS: Final[tuple[float, ...]] = (
     2.5,
     5.0,
     10.0,
+)
+
+
+# Seconds, for a call that crosses the internet to somebody else's API.
+# Deliberately not `DEFAULT_LATENCY_BUCKETS`: those start at 5 ms because an
+# in-process handler can finish in one, and no provider call ever will, so the
+# first three would be permanently zero - ten buckets is the ceiling this
+# module sets and three of them would carry no information.
+#
+# The range is chosen from the timeouts actually configured: JWKS 5 s,
+# WhatsApp and Google token 10 s, Resend 15 s, Paymob 20 s, OpenAI 60 s. So the
+# top bound is 60 and `+Inf` collects an inference that ran to its timeout plus
+# the retries above it. The middle - 0.25 to 2.5 - is where a healthy call to
+# any of them lands, and 5 to 30 is where an incident does.
+PROVIDER_LATENCY_BUCKETS: Final[tuple[float, ...]] = (
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
 )
 
 
@@ -395,14 +421,93 @@ def render_gauge_lines(
     return lines
 
 
+@dataclass(frozen=True, slots=True)
+class HistogramSample:
+    """One label combination's observations, as they come back from Redis.
+
+    `buckets` is **not** cumulative — it holds the count of observations that
+    landed in each bound, and `render_histogram_lines` accumulates. That is a
+    property of how the sample was written rather than a rendering choice: a
+    cross-process histogram increments one bucket per observation instead of
+    every bucket at or above it, which turns an observation from eleven Redis
+    commands into two. Prometheus wants cumulative buckets, so the accumulation
+    happens once at scrape time rather than on every provider call.
+    """
+
+    labels: Mapping[str, str]
+    buckets: Mapping[float, float]
+    #: Observations above the largest bound, which become `le="+Inf"` alone.
+    overflow: float
+    #: The sum of every observed value, for `_sum`.
+    total: float
+
+
+def render_histogram_lines(
+    name: str,
+    help_text: str,
+    bounds: Sequence[float],
+    samples: Iterable[HistogramSample],
+) -> list[str]:
+    """Render histogram samples that were counted in another process.
+
+    `render_gauge_lines`' counterpart, and it exists for the same reason: the
+    process that made the provider call serves no HTTP, so the numbers reach a
+    scrape through Redis and are shaped here. The label guard runs over every
+    sample, so a series collected outside the registry is held to the same rule
+    as one recorded inside it.
+
+    A bound Redis holds that this deployment no longer declares is dropped
+    rather than rendered. Buckets are a property of the code, not of the store,
+    and a release that changes them would otherwise publish a histogram whose
+    buckets are half of one shape and half of another - which is worse than a
+    gap, because a quantile computed across it looks like an answer.
+    """
+    _check_name(name, what="metric name")
+    ordered = tuple(sorted(bounds))
+    lines = [f"# HELP {name} {_escape_help(help_text)}", f"# TYPE {name} histogram"]
+    for sample in samples:
+        for label, value in sample.labels.items():
+            _check_name(label, what="label name")
+            _reject_unbounded(label, value)
+        running = 0.0
+        for bound in ordered:
+            running += sample.buckets.get(bound, 0.0)
+            lines.append(
+                _series(f"{name}_bucket", {**sample.labels, "le": _render_value(bound)}, running)
+            )
+        running += sample.overflow
+        lines.append(_series(f"{name}_bucket", {**sample.labels, "le": "+Inf"}, running))
+        lines.append(_series(f"{name}_sum", dict(sample.labels), sample.total))
+        lines.append(_series(f"{name}_count", dict(sample.labels), running))
+    return lines
+
+
+def bucket_for(value: float, bounds: Sequence[float]) -> float | None:
+    """The bound this observation belongs under, or `None` for the overflow.
+
+    The half of a histogram that runs on the hot path, kept here beside the
+    rendering half so the two cannot come to disagree about which side of a
+    bound an observation falls on. Prometheus buckets are `le` — inclusive of
+    the bound — and that is the one detail worth getting right in one place.
+    """
+    for bound in sorted(bounds):
+        if value <= bound:
+            return bound
+    return None
+
+
 __all__ = [
     "DEFAULT_LATENCY_BUCKETS",
     "MAX_LABEL_VALUE_LENGTH",
+    "PROVIDER_LATENCY_BUCKETS",
     "REGISTRY",
     "Counter",
     "Gauge",
     "Histogram",
+    "HistogramSample",
     "MetricLabelError",
     "MetricsRegistry",
+    "bucket_for",
     "render_gauge_lines",
+    "render_histogram_lines",
 ]

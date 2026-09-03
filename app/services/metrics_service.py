@@ -26,12 +26,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Final
 
 from redis.asyncio import Redis
+from sqlalchemy.pool import QueuePool
 
 from app.core.logging import get_logger
-from app.core.metrics import REGISTRY, MetricsRegistry, render_gauge_lines
-from app.core.telemetry import REDIS_COUNTERS, read_redis_counters
+from app.core.metrics import (
+    REGISTRY,
+    MetricsRegistry,
+    render_gauge_lines,
+    render_histogram_lines,
+)
+from app.core.telemetry import (
+    REDIS_COUNTERS,
+    REDIS_HISTOGRAMS,
+    read_redis_counters,
+    read_redis_histograms,
+)
+from app.db.session import Database
 from app.services.backup_status import read_backup_status
 from app.workers.heartbeat import heartbeat_key
 from app.workers.queue import QUEUES, ReliableQueue
@@ -63,6 +76,44 @@ DEPTH_GAUGES: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# Which process's pool a sample describes. Two values, ever.
+#
+# The label exists because this metric would otherwise lie by omission. `/metrics`
+# is served by the API, and `AsyncEngine.pool` is a *process-local* object: the
+# API can see its own pool and has no way at all to see the worker's. A series
+# named `wasla_db_pool_checked_out` with no label reads as "the deployment's
+# database pool", which is the one thing it is not. With the role on it, the
+# absence of `process_role="worker"` is visible rather than implied, and the
+# worker's samples can be added later without renaming anything (ADR-069 puts
+# the worker's numbers in Redis, but a pool is a level rather than a total and
+# a stale level is worse than a missing one).
+API_ROLE: Final = "api"
+
+# `pool.overflow()` is deliberately not published. Its value is
+# `open_connections - pool_size`, so it reads `-5` on a cold pool of five and
+# an operator alerting on "overflow above zero" would be alerting on warmth.
+# What saturation actually needs is `checked_out` against `size + max_overflow`,
+# and all three of those are published below.
+POOL_GAUGES: Final[tuple[tuple[str, str], ...]] = (
+    (
+        "wasla_db_pool_checked_out",
+        "Pooled database connections currently held by application code.",
+    ),
+    (
+        "wasla_db_pool_checked_in",
+        "Pooled database connections open and idle.",
+    ),
+    (
+        "wasla_db_pool_size",
+        "Connections this process's pool keeps before it overflows.",
+    ),
+    (
+        "wasla_db_pool_max_overflow",
+        "Connections this process may open beyond the pool size.",
+    ),
+)
+
+
 @dataclass(frozen=True, slots=True)
 class QueueSnapshot:
     """What one queue looks like at this instant."""
@@ -85,15 +136,60 @@ class MetricsService:
         *,
         registry: MetricsRegistry = REGISTRY,
         backup_status_path: str | None = None,
+        database: Database | None = None,
     ) -> None:
         self._redis = redis
         self._registry = registry
         self._backup_status_path = backup_status_path
+        self._database = database
 
     async def render(self, *, now: datetime | None = None) -> str:
         lines = await self._external(now=now)
+        lines.extend(self._pool_lines())
         lines.extend(self._backup_lines(now=now))
         return self._registry.render(extra=lines)
+
+    def _pool_lines(self) -> list[str]:
+        """This process's connection pool, read at the moment of the scrape.
+
+        A level rather than a total, so it is read live like the queue depths
+        above rather than published on a timer. The numbers come from
+        `QueuePool`'s documented methods - `checkedout`, `checkedin`, `size` -
+        and nothing here reaches into the pool's internals; a pool class that
+        does not offer them (a `NullPool` under a test, a `StaticPool`) simply
+        publishes nothing, which is the honest answer to "how full is a pool
+        that does not queue".
+
+        `max_overflow` comes from the application's own settings rather than
+        from the pool, because `QueuePool` keeps it private and the deployment
+        is where the number was decided anyway.
+        """
+        database = self._database
+        if database is None:
+            return []
+        try:
+            pool = database.engine.pool
+            if not isinstance(pool, QueuePool):
+                return []
+            values = {
+                "wasla_db_pool_checked_out": float(pool.checkedout()),
+                "wasla_db_pool_checked_in": float(pool.checkedin()),
+                "wasla_db_pool_size": float(pool.size()),
+                "wasla_db_pool_max_overflow": float(database.max_overflow),
+            }
+        except Exception:
+            logger.warning(
+                "metrics.pool_read_failed",
+                extra={"event": "metrics.pool_read_failed"},
+            )
+            return []
+
+        lines: list[str] = []
+        for name, help_text in POOL_GAUGES:
+            lines.extend(
+                render_gauge_lines(name, help_text, [({"process_role": API_ROLE}, values[name])])
+            )
+        return lines
 
     def _backup_lines(self, *, now: datetime | None) -> list[str]:
         """What the backup process last wrote down, if this deployment mounts it.
@@ -168,6 +264,7 @@ class MetricsService:
         lines: list[str] = []
         try:
             lines.extend(await self._counter_lines(redis))
+            lines.extend(await self._histogram_lines(redis))
             lines.extend(await self._queue_lines(now=now))
             lines.extend(await self._heartbeat_lines(redis))
         except Exception:
@@ -185,6 +282,22 @@ class MetricsService:
         lines: list[str] = []
         for metric, (help_text, _) in REDIS_COUNTERS.items():
             lines.extend(_counter(metric, help_text, collected.get(metric, [])))
+        return lines
+
+    async def _histogram_lines(self, redis: Redis) -> list[str]:
+        """Provider latency, counted by whichever process made the call.
+
+        Rendered even when empty, so the exposition carries the `# HELP` and
+        `# TYPE` for a distribution this process may never have observed - a
+        deployment whose API has taken no payment still publishes the metric
+        the worker fills in.
+        """
+        collected = await read_redis_histograms(redis)
+        lines: list[str] = []
+        for metric, (help_text, _, bounds) in REDIS_HISTOGRAMS.items():
+            lines.extend(
+                render_histogram_lines(metric, help_text, bounds, collected.get(metric, []))
+            )
         return lines
 
     async def _queue_lines(self, *, now: datetime | None) -> list[str]:
@@ -249,4 +362,4 @@ def _counter(
     return lines
 
 
-__all__ = ["DEPTH_GAUGES", "MetricsService", "QueueSnapshot"]
+__all__ = ["API_ROLE", "DEPTH_GAUGES", "POOL_GAUGES", "MetricsService", "QueueSnapshot"]

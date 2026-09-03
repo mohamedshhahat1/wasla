@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from app.api.dependencies import get_entitlement_service
 from app.core.config import Settings
@@ -79,6 +79,13 @@ class FakeDependency:
         self.healthy = healthy
         self.calls = 0
         self.commands = FakeRedisCommands()
+        # A real engine, deliberately, over a URL nothing ever dials. Creating
+        # one builds the connection pool without connecting, so the pool gauges
+        # the scrape reads are read off the same `QueuePool` a deployment has -
+        # all zero, because nothing has been checked out, which is exactly what
+        # is true. Faking the numbers instead would let the exposition claim a
+        # metric the real code path could not produce.
+        self._engine = create_async_engine("postgresql+asyncpg://unused/unused")
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
@@ -97,6 +104,16 @@ class FakeDependency:
     def client(self) -> FakeRedisCommands:
         """Mirrors RedisClient.client, which routes that queue work reach for."""
         return self.commands
+
+    @property
+    def engine(self) -> AsyncEngine:
+        """Mirrors Database.engine, which the scrape reads pool depth from."""
+        return self._engine
+
+    @property
+    def max_overflow(self) -> int:
+        """Mirrors Database.max_overflow, the other half of pool saturation."""
+        return 10
 
     async def check(self, timeout_seconds: float | None = None) -> None:
         self.calls += 1

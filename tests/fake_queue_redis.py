@@ -26,7 +26,7 @@ class FakeQueueRedis:
         # Counter hashes (HINCRBY) and string hashes (HSET) are kept apart,
         # because real Redis would refuse to mix them on one key and a fake
         # that allowed it could hide that.
-        self.hashes: dict[str, dict[str, int]] = {}
+        self.hashes: dict[str, dict[str, float]] = {}
         self.strings: dict[str, dict[str, str]] = {}
         # Every command issued, for the few assertions that care about the
         # shape of the conversation rather than its result.
@@ -154,10 +154,32 @@ class FakeQueueRedis:
     async def hincrby(self, key: str, field: str, amount: int = 1) -> int:
         fields = self.hashes.setdefault(key, {})
         fields[field] = fields.get(field, 0) + amount
-        return fields[field]
+        return int(fields[field])
 
-    async def hgetall(self, key: str) -> dict[str, int]:
+    async def hincrbyfloat(self, key: str, field: str, amount: float = 1.0) -> float:
+        """The same hash, a fractional amount.
+
+        On the same store as `hincrby`, because Redis keeps one hash per key
+        however its fields were incremented - a histogram's bucket counts and
+        its sum live side by side, and a fake that split them would hide a
+        collision the real store would suffer.
+        """
+        fields = self.hashes.setdefault(key, {})
+        fields[field] = fields.get(field, 0) + amount
+        return float(fields[field])
+
+    async def hgetall(self, key: str) -> dict[str, float]:
         return dict(self.hashes.get(key) or {})
+
+    def pipeline(self, transaction: bool = True) -> FakePipeline:
+        """Buffered commands, applied on `execute`.
+
+        redis-py's pipeline queues *synchronously* and awaits only the
+        `execute`, which is why the methods below are not coroutines. Getting
+        that backwards in a fake would let production code compile against a
+        shape the real client does not have.
+        """
+        return FakePipeline(self)
 
     # ------------------------------------------------------------- misc
 
@@ -205,10 +227,44 @@ class FailingRedis(FakeQueueRedis):
             raise RuntimeError("Redis said no")
         return await super().hincrby(key, field, amount)
 
-    async def hgetall(self, key: str) -> dict[str, int]:
+    async def hincrbyfloat(self, key: str, field: str, amount: float = 1.0) -> float:
+        if "hincrbyfloat" in self.failing:
+            raise RuntimeError("Redis said no")
+        return await super().hincrbyfloat(key, field, amount)
+
+    async def hgetall(self, key: str) -> dict[str, float]:
         if "hgetall" in self.failing:
             raise RuntimeError("Redis said no")
         return await super().hgetall(key)
 
 
-__all__ = ["FailingRedis", "FakeQueueRedis"]
+class FakePipeline:
+    """What `FakeQueueRedis.pipeline` hands back.
+
+    Applies on `execute` rather than as each command is queued, so a test that
+    inspects the store mid-pipeline sees what Redis would show: nothing yet.
+    A failing member raises out of `execute`, which is where redis-py surfaces
+    one too.
+    """
+
+    def __init__(self, redis: FakeQueueRedis) -> None:
+        self._redis = redis
+        self._queued: list[tuple[str, tuple[Any, ...]]] = []
+
+    def hincrby(self, key: str, field: str, amount: int = 1) -> FakePipeline:
+        self._queued.append(("hincrby", (key, field, amount)))
+        return self
+
+    def hincrbyfloat(self, key: str, field: str, amount: float = 1.0) -> FakePipeline:
+        self._queued.append(("hincrbyfloat", (key, field, amount)))
+        return self
+
+    async def execute(self) -> list[Any]:
+        results: list[Any] = []
+        for name, arguments in self._queued:
+            results.append(await getattr(self._redis, name)(*arguments))
+        self._queued.clear()
+        return results
+
+
+__all__ = ["FailingRedis", "FakePipeline", "FakeQueueRedis"]

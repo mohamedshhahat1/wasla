@@ -34,10 +34,11 @@ from decimal import Decimal
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.agents.orchestrator import AgentOrchestrator
 from app.agents.registry import ToolRegistry
+from app.core.config import Settings
+from app.core.metrics import MetricsRegistry
 from app.db.models.agent import Agent, AgentStatus
 from app.db.models.billing import (
     BillingInterval,
@@ -59,9 +60,11 @@ from app.db.models.conversation import (
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEventType
 from app.db.models.whatsapp import WhatsAppAccount
+from app.db.session import Database
 from app.integrations.openai.types import AgentReply, TokenUsage
 from app.repositories.billing_repository import SubscriptionRepository
 from app.services.entitlement_service import EntitlementService
+from app.services.metrics_service import API_ROLE, MetricsService
 
 pytestmark = pytest.mark.integration
 
@@ -114,23 +117,32 @@ class BlockingProvider:
 
 @pytest_asyncio.fixture
 async def one_connection(prepared_database: str):
-    """An engine whose pool holds exactly one connection, and a session maker.
+    """A `Database` whose pool holds exactly one connection.
 
     `pool_timeout` is short on purpose: on the broken code the second turn asks
     for a connection nobody will give back, and failing in seconds reads as the
     bug it is rather than as a hung suite.
+
+    Built through `Database` rather than as a bare engine so that the pool
+    these tests reason about is the same object a deployment has - which is
+    what lets `test_the_pool_metric_agrees_with_the_pool` below scrape it the
+    way `/metrics` does, instead of asserting against a pool assembled only for
+    a test.
     """
-    engine = create_async_engine(
-        prepared_database,
-        pool_size=1,
-        max_overflow=0,
-        pool_timeout=5,
+    database = Database(
+        Settings(
+            _env_file=None,
+            environment="test",
+            database_url=prepared_database,
+            database_pool_size=1,
+            database_max_overflow=0,
+            database_pool_timeout=5,
+        )
     )
-    factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
     try:
-        yield engine, factory
+        yield database
     finally:
-        await engine.dispose()
+        await database.dispose()
 
 
 @pytest_asyncio.fixture
@@ -141,7 +153,7 @@ async def workspace(one_connection) -> AsyncIterator[dict[str, uuid.UUID]]:
     staged row would vanish underneath it. Cleanup is a delete of the tenant,
     which cascades.
     """
-    _, factory = one_connection
+    factory = one_connection.session_factory
     suffix = uuid.uuid4().hex[:8]
     async with factory() as session:
         tenant = Tenant(name="Pool Pressure", slug=f"pool-{suffix}")
@@ -224,7 +236,7 @@ async def test_two_turns_wait_on_the_provider_at_once_through_a_pool_of_one(
     impossible unless the first released. The pool's own checkout count,
     sampled while both are parked, says the same thing from the other side.
     """
-    engine, factory = one_connection
+    engine, factory = one_connection.engine, one_connection.session_factory
     provider = BlockingProvider()
 
     turns = [
@@ -262,6 +274,96 @@ async def test_two_turns_wait_on_the_provider_at_once_through_a_pool_of_one(
     assert [outcome.reply for outcome in outcomes] == ["answered"] * TURNS
 
 
+async def test_the_pool_metric_agrees_with_the_pool(one_connection, workspace):
+    """What `/metrics` publishes is what `checkedout()` says, at the same instant.
+
+    The gate above proves the connection is released while the provider is
+    thinking. This proves an operator can *see* that: the exported gauge is
+    sampled from the same pool at the same moment, and the two numbers have to
+    match or the metric is describing something other than the pool it names.
+
+    Deliberately sampled while the turns are parked. A gauge read after
+    everything finished would read zero on the broken code too, and prove
+    nothing at all.
+    """
+    database = one_connection
+    factory = database.session_factory
+    provider = BlockingProvider()
+    service = MetricsService(None, registry=MetricsRegistry(), database=database)
+
+    turns = [
+        asyncio.create_task(
+            _turn(
+                factory,
+                tenant_id=workspace["tenant_id"],
+                conversation_id=conversation_id,
+                provider=provider,
+            )
+        )
+        for conversation_id in workspace["conversations"]
+    ]
+    try:
+        async with asyncio.timeout(BARRIER_TIMEOUT):
+            for _ in range(TURNS):
+                await provider.arrived.acquire()
+
+        checked_out = database.engine.pool.checkedout()
+        exposition = await service.render()
+        provider.resume.set()
+        await asyncio.gather(*turns)
+    finally:
+        for task in turns:
+            task.cancel()
+
+    published = _gauge(exposition, "wasla_db_pool_checked_out")
+    assert checked_out == 0
+    assert published == float(checked_out)
+    # The other half of saturation, so an alert can divide by something.
+    assert _gauge(exposition, "wasla_db_pool_size") == 1.0
+    assert _gauge(exposition, "wasla_db_pool_max_overflow") == 0.0
+
+
+async def test_the_pool_metric_sees_a_connection_that_is_held(one_connection):
+    """The control for the test above.
+
+    A gauge that answered zero unconditionally would satisfy it. This holds a
+    connection open and asserts the exported number moves, which is what says
+    the metric is reading the pool rather than reporting a constant.
+    """
+    database = one_connection
+    service = MetricsService(None, registry=MetricsRegistry(), database=database)
+
+    async with database.session_factory() as session:
+        await session.execute(text("SELECT 1"))
+        while_held = await service.render()
+    released = await service.render()
+
+    assert _gauge(while_held, "wasla_db_pool_checked_out") == 1.0
+    assert _gauge(released, "wasla_db_pool_checked_out") == 0.0
+
+
+async def test_the_pool_metric_names_the_process_it_describes(one_connection):
+    """The API can only see its own pool, and the series has to say so.
+
+    Without the label this reads as "the deployment's database pool", which it
+    is not: the worker holds a separate pool in a separate process and
+    publishes none.
+    """
+    service = MetricsService(None, registry=MetricsRegistry(), database=one_connection)
+
+    exposition = await service.render()
+
+    assert 'wasla_db_pool_checked_out{process_role="api"}' in exposition
+
+
+def _gauge(exposition: str, name: str) -> float:
+    prefix = f'{name}{{process_role="{API_ROLE}"}} '
+    for line in exposition.splitlines():
+        if line.startswith(prefix):
+            return float(line.rsplit(" ", 1)[1])
+    raise AssertionError(f"{name} is not in the exposition:\n{exposition}")
+
+
 async def test_the_pool_is_genuinely_one_connection(one_connection, workspace):
     """The control.
 
@@ -269,7 +371,7 @@ async def test_the_pool_is_genuinely_one_connection(one_connection, workspace):
     the broken code and mean nothing, so this asserts the constraint it relies
     on: a second connection, asked for while the first is held, is refused.
     """
-    engine, factory = one_connection
+    engine, factory = one_connection.engine, one_connection.session_factory
 
     async with factory() as held:
         await held.execute(text("SELECT 1"))
@@ -292,7 +394,7 @@ async def test_a_release_makes_the_turns_work_committed_rather_than_pending(
     not be if the turn were holding an uncommitted transaction over the only
     connection in the pool.
     """
-    engine, factory = one_connection
+    engine, factory = one_connection.engine, one_connection.session_factory
     provider = BlockingProvider()
     conversation_id = workspace["conversations"][0]
 
@@ -342,7 +444,7 @@ async def test_the_allowance_is_resolved_again_for_every_round(one_connection, w
     Here the fallback plan permits nothing, which is what makes the change
     observable at all.
     """
-    _, factory = one_connection
+    factory = one_connection.session_factory
     tenant_id = workspace["tenant_id"]
 
     async with factory() as session:
@@ -428,7 +530,7 @@ async def test_a_reservation_can_be_taken_while_a_provider_call_is_in_flight(
     which is why the reservation sits inside the released block rather than
     before it.
     """
-    _, factory = one_connection
+    factory = one_connection.session_factory
     provider = BlockingProvider()
     reserved: list[bool] = []
 

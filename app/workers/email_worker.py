@@ -30,7 +30,7 @@ from typing import Final
 
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.core.telemetry import CallOutcome, Provider, record_provider_call
+from app.core.telemetry import CallOutcome, Provider, ProviderCall, record_provider_call
 from app.db.models.email import OutboundEmail
 from app.db.session import Database
 from app.integrations.email import build_email_provider
@@ -233,6 +233,8 @@ class EmailWorker:
                 error_code="render_error",
                 error_message=str(error),
             )
+            # Counted, and deliberately not timed: nothing was sent. See the
+            # note beside the send below.
             await record_provider_call(
                 provider=Provider.EMAIL, operation=DELIVER, outcome=CallOutcome.FAILURE
             )
@@ -246,6 +248,14 @@ class EmailWorker:
             )
             return
 
+        # The one statement in this method that leaves the process, and so the
+        # only one whose duration belongs in a latency histogram. The two exits
+        # above - a suppressed recipient, a template that will not render - are
+        # counted as provider outcomes because that is what an operator reads
+        # them as, but neither made a call, and timing a decision not to send
+        # would put a microsecond in the same distribution as a fifteen-second
+        # timeout.
+        call = ProviderCall(provider=Provider.EMAIL, operation=DELIVER)
         try:
             result = await self._provider.send(message, idempotency_key=email.idempotency_key)
         except Exception:
@@ -269,9 +279,7 @@ class EmailWorker:
                 provider=result.provider,
                 provider_message_id=result.provider_message_id,
             )
-            await record_provider_call(
-                provider=Provider.EMAIL, operation=DELIVER, outcome=CallOutcome.SUCCESS
-            )
+            await call.record(CallOutcome.SUCCESS)
             logger.info(
                 "email.sent",
                 extra={
@@ -293,9 +301,7 @@ class EmailWorker:
                 error_code=result.error_code,
                 error_message=result.error_message,
             )
-            await record_provider_call(
-                provider=Provider.EMAIL, operation=DELIVER, outcome=CallOutcome.FAILURE
-            )
+            await call.record(CallOutcome.FAILURE)
             logger.error(
                 "email.failed_permanently",
                 extra={
@@ -320,9 +326,7 @@ class EmailWorker:
             error_code=result.error_code,
             error_message=result.error_message,
         )
-        await record_provider_call(
-            provider=Provider.EMAIL, operation=DELIVER, outcome=CallOutcome.UNAVAILABLE
-        )
+        await call.record(CallOutcome.UNAVAILABLE)
         logger.warning(
             "email.retry_scheduled",
             extra={

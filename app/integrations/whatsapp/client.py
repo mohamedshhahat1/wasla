@@ -33,7 +33,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.net import MAX_REDIRECTS, UnsafeUrlError, build_guarded_client, validate_outbound_url
-from app.core.telemetry import CallOutcome, Provider, record_provider_call
+from app.core.telemetry import CallOutcome, Provider, ProviderCall
 
 logger = get_logger(__name__)
 
@@ -488,7 +488,12 @@ class WhatsAppClient:
         The backoff happens after the response context has closed - `continue`
         leaves the `async with` first - so a retry never holds the connection it
         is retrying.
+
+        Observed per hop rather than per file, which is what the counter beside
+        it has always done: a redirect chain is several requests to Meta and an
+        operator reading a media-fetch failure rate wants each of them.
         """
+        call = ProviderCall(provider=Provider.WHATSAPP, operation=FETCH_MEDIA)
         attempt = 1
         while True:
             try:
@@ -511,7 +516,7 @@ class WhatsAppClient:
                     )
                     if not (retryable and attempt < self._max_attempts):
                         if response.status_code == TOO_MANY_REQUESTS:
-                            await self._count(FETCH_MEDIA, CallOutcome.RATE_LIMITED)
+                            await call.record(CallOutcome.RATE_LIMITED)
                             raise RateLimitedError("WhatsApp is rate limiting this account.")
                         if response.status_code >= CLIENT_ERROR_FLOOR:
                             # Read before logging: the failure log wants the
@@ -521,16 +526,16 @@ class WhatsAppClient:
                             # hostile file.
                             await response.aread()
                             self._log_failure(response)
-                            await self._count(FETCH_MEDIA, CallOutcome.FAILURE)
+                            await call.record(CallOutcome.FAILURE)
                             raise ExternalServiceError("WhatsApp could not return this file.")
 
                         body = await self._read_capped(response, max_bytes=max_bytes)
-                        await self._count(FETCH_MEDIA, CallOutcome.SUCCESS)
+                        await call.record(CallOutcome.SUCCESS)
                         return _Hop(body=body, redirect_to=None)
             except httpx.HTTPError as error:
                 if attempt >= self._max_attempts:
                     logger.warning("whatsapp.media_unreachable", extra={"attempts": attempt})
-                    await self._count(FETCH_MEDIA, CallOutcome.UNAVAILABLE)
+                    await call.record(CallOutcome.UNAVAILABLE)
                     raise ExternalServiceError("WhatsApp could not be reached.") from error
 
             await self._backoff(attempt)
@@ -600,6 +605,7 @@ class WhatsAppClient:
 
     async def _get_once(self, url: str) -> httpx.Response:
         """One hop, with the retry policy above and no redirect following."""
+        call = ProviderCall(provider=Provider.WHATSAPP, operation=FETCH_MEDIA)
         attempt = 1
         while True:
             try:
@@ -611,7 +617,7 @@ class WhatsAppClient:
             except httpx.HTTPError as error:
                 if attempt >= self._max_attempts:
                     logger.warning("whatsapp.media_unreachable", extra={"attempts": attempt})
-                    await self._count(FETCH_MEDIA, CallOutcome.UNAVAILABLE)
+                    await call.record(CallOutcome.UNAVAILABLE)
                     raise ExternalServiceError("WhatsApp could not be reached.") from error
                 await self._backoff(attempt)
                 attempt += 1
@@ -627,13 +633,13 @@ class WhatsAppClient:
                 continue
 
             if response.status_code == TOO_MANY_REQUESTS:
-                await self._count(FETCH_MEDIA, CallOutcome.RATE_LIMITED)
+                await call.record(CallOutcome.RATE_LIMITED)
                 raise RateLimitedError("WhatsApp is rate limiting this account.")
             if response.status_code >= CLIENT_ERROR_FLOOR:
                 self._log_failure(response)
-                await self._count(FETCH_MEDIA, CallOutcome.FAILURE)
+                await call.record(CallOutcome.FAILURE)
                 raise ExternalServiceError("WhatsApp could not return this file.")
-            await self._count(FETCH_MEDIA, CallOutcome.SUCCESS)
+            await call.record(CallOutcome.SUCCESS)
             return response
 
     async def mark_read(self, *, phone_number_id: str, message_id: str) -> None:
@@ -673,9 +679,14 @@ class WhatsAppClient:
         The outcome is recorded on every exit, including the ones that raise,
         because the ratio an operator alerts on is failures over attempts and a
         failure that left no trace makes that ratio a lie. Counting is
-        best-effort - `record_provider_call` swallows - so it can never turn a
+        best-effort - `ProviderCall.record` swallows - so it can never turn a
         successful send into a failed one.
+
+        The same call carries the duration, and its clock starts before the
+        retry loop: a send that took three attempts took the customer three
+        attempts' worth of time, whatever the last one cost.
         """
+        call = ProviderCall(provider=Provider.WHATSAPP, operation=SEND)
         url = f"{GRAPH_BASE_URL}/{self._api_version}/{phone_number_id}/messages"
         headers = {
             "Authorization": f"Bearer {self._access_token}",
@@ -690,7 +701,7 @@ class WhatsAppClient:
                 # Nothing reached Meta, so a retry cannot duplicate anything.
                 if attempt >= self._max_attempts:
                     logger.warning("whatsapp.send_unreachable", extra={"attempts": attempt})
-                    await self._count(SEND, CallOutcome.UNAVAILABLE)
+                    await call.record(CallOutcome.UNAVAILABLE)
                     raise ExternalServiceError("WhatsApp could not be reached.") from error
                 await self._backoff(attempt)
                 attempt += 1
@@ -698,13 +709,13 @@ class WhatsAppClient:
             except httpx.TimeoutException as error:
                 # The request may have landed. Retrying risks a second message.
                 logger.warning("whatsapp.send_timed_out", extra={"attempts": attempt})
-                await self._count(SEND, CallOutcome.UNAVAILABLE)
+                await call.record(CallOutcome.UNAVAILABLE)
                 raise ExternalServiceError("WhatsApp did not respond in time.") from error
 
             if response.status_code == TOO_MANY_REQUESTS:
                 if attempt >= self._max_attempts:
                     logger.warning("whatsapp.send_rate_limited", extra={"attempts": attempt})
-                    await self._count(SEND, CallOutcome.RATE_LIMITED)
+                    await call.record(CallOutcome.RATE_LIMITED)
                     raise RateLimitedError("WhatsApp is rate limiting this account.")
                 await self._backoff(attempt)
                 attempt += 1
@@ -714,16 +725,11 @@ class WhatsAppClient:
                 # 5xx is deliberately not retried either: the message may have
                 # been accepted, and a duplicate reply is worse than a failure.
                 self._log_failure(response)
-                await self._count(SEND, CallOutcome.FAILURE)
+                await call.record(CallOutcome.FAILURE)
                 raise ExternalServiceError("WhatsApp rejected the message.")
 
-            await self._count(SEND, CallOutcome.SUCCESS)
+            await call.record(CallOutcome.SUCCESS)
             return self._decode(response)
-
-    @staticmethod
-    async def _count(operation: str, outcome: CallOutcome) -> None:
-        """Record one outbound call. Best-effort by construction."""
-        await record_provider_call(provider=Provider.WHATSAPP, operation=operation, outcome=outcome)
 
     async def _backoff(self, attempt: int) -> None:
         await self._sleep(self._backoff_seconds * attempt)

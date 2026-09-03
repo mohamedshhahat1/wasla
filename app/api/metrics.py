@@ -25,7 +25,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Response, status
 
 from app.api.route import CommittingRoute
-from app.core.dependencies import RedisDep, SettingsDep
+from app.core.dependencies import DatabaseDep, RedisDep, SettingsDep
 from app.services.metrics_service import MetricsService
 
 router = APIRouter(route_class=CommittingRoute, tags=["health"])
@@ -45,7 +45,7 @@ CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
     },
     include_in_schema=False,
 )
-async def metrics(redis: RedisDep, settings: SettingsDep) -> Response:
+async def metrics(redis: RedisDep, database: DatabaseDep, settings: SettingsDep) -> Response:
     """Render every signal this deployment publishes.
 
     404 rather than 403 when disabled, because "this deployment does not serve
@@ -57,6 +57,11 @@ async def metrics(redis: RedisDep, settings: SettingsDep) -> Response:
         return Response(status_code=status.HTTP_404_NOT_FOUND)
 
     body = await MetricsService(
-        redis.client, backup_status_path=settings.backup_status_path
+        redis.client,
+        backup_status_path=settings.backup_status_path,
+        # This process's pool, and only this process's. The worker holds its
+        # own and publishes none; the `process_role` label on the series says
+        # so rather than leaving a reader to assume otherwise.
+        database=database,
     ).render()
     return Response(content=body, media_type=CONTENT_TYPE)

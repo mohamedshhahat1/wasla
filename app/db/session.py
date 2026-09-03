@@ -63,6 +63,18 @@ class Database:
         return self._engine
 
     @property
+    def max_overflow(self) -> int:
+        """How many connections this pool may open beyond its size.
+
+        Read from settings rather than from the pool, because `QueuePool` keeps
+        the number private and this object is where it was decided. Published
+        as a metric so an operator can compute pool saturation - the useful
+        denominator is `pool_size + max_overflow`, and half of it is otherwise
+        invisible to a scraper.
+        """
+        return self._settings.database_max_overflow
+
+    @property
     def session_factory(self) -> async_sessionmaker[AsyncSession]:
         return self._session_factory
 
