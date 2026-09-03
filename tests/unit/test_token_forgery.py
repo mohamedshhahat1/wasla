@@ -57,6 +57,7 @@ def _claims(**overrides) -> dict:
     now = datetime.now(UTC)
     payload = {
         "iss": ISSUER,
+        "aud": TokenType.ACCESS.audience,
         "sub": str(uuid.uuid4()),
         "typ": TokenType.ACCESS.value,
         "jti": str(uuid.uuid4()),
@@ -172,14 +173,18 @@ def test_a_token_signed_with_the_secret_as_an_asymmetric_key_is_refused(
 # ------------------------------------------------------- missing claims
 
 
-@pytest.mark.parametrize("claim", ["iss", "sub", "typ", "jti", "iat", "exp"])
+@pytest.mark.parametrize("claim", ["iss", "aud", "sub", "typ", "jti", "iat", "exp"])
 def test_a_token_missing_a_required_claim_is_refused(settings: Settings, claim: str) -> None:
-    """One at a time, because a genuine token always carries all six.
+    """One at a time, because a genuine token always carries all seven.
 
     Each of these is refused twice over - by the `require` list and again by
     the code that reads the claim - so this holds the outcome rather than
     either mechanism. Verified by gutting the `require` list and watching these
     still pass, which is why the docstring does not claim more than it can.
+    `aud` is the one exception and the reason it was added to this list: a
+    missing audience is caught by PyJWT's `audience=` argument, and by the
+    equality check beside it, but by nothing that reads a claim out of the
+    payload - so `require` is doing real work for exactly one of these seven.
     """
     payload = _claims()
     payload.pop(claim)

@@ -46,6 +46,35 @@ class TokenType(StrEnum):
     ACCESS = "access"
     REFRESH = "refresh"
 
+    @property
+    def audience(self) -> str:
+        """Who this kind of token is for.
+
+        The `aud` claim names the verifier a token was minted for, and
+        `decode_token` asks PyJWT to check it during decode rather than reading
+        it afterwards. Two audiences rather than one, because the two kinds of
+        token have genuinely different consumers: an access token is presented
+        to the API's authenticated routes, a refresh token only ever to
+        `/auth/refresh` and `/auth/logout`. `typ` already separates them, and
+        this separates them a second time inside the library - so a regression
+        in the `typ` comparison below cannot turn a fortnight-long credential
+        into an API session.
+        """
+        return _AUDIENCES[self]
+
+
+# Constants rather than settings, and for `ISSUER`'s reason. Nothing outside
+# this process verifies a Wasla token, so an audience is a property of the
+# protocol rather than of a deployment: making it configurable would create a
+# way for two replicas of the same service to mint tokens the other refuses,
+# in exchange for flexibility nobody can use. If a second verifier ever exists,
+# it will need this value written down somewhere both can read - and a constant
+# in the module that mints the token is that place.
+_AUDIENCES: Final[dict[TokenType, str]] = {
+    TokenType.ACCESS: "wasla-api",
+    TokenType.REFRESH: "wasla-auth",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class TokenClaims:
@@ -156,6 +185,10 @@ def _create_token(
 
     payload: dict[str, Any] = {
         "iss": ISSUER,
+        # Set here, in the one function every token in this application passes
+        # through, so no issuance path can forget it (SEC-14). The two public
+        # minting functions below differ only in their arguments to this one.
+        "aud": token_type.audience,
         "sub": str(subject),
         "typ": token_type.value,
         "jti": str(token_id),
@@ -230,23 +263,46 @@ def decode_token(token: str, *, settings: Settings, expected_type: TokenType) ->
 
     Every failure looks the same to the caller: the credentials are not valid.
     Which check failed stays out of the response.
+
+    The audience is checked by PyJWT during decode rather than read off the
+    payload afterwards (SEC-14). That ordering is the point: a token for
+    another audience is refused before any of its claims are parsed, by the
+    same call that checks the signature, so there is no window in which an
+    unintended token has been decoded and merely not yet rejected. A token with
+    no `aud` at all is refused too - `audience=` makes the claim required, and
+    the `require` list says so a second time.
     """
+    expected_audience = expected_type.audience
     try:
         payload = jwt.decode(
             token,
             settings.jwt_secret,
             algorithms=[settings.jwt_algorithm],
             issuer=ISSUER,
-            options={"require": ["iss", "sub", "typ", "jti", "iat", "exp"]},
+            audience=expected_audience,
+            options={"require": ["iss", "aud", "sub", "typ", "jti", "iat", "exp"]},
         )
     except jwt.ExpiredSignatureError as error:
         raise AuthenticationError("The session has expired.") from error
     except jwt.InvalidTokenError as error:
         raise AuthenticationError("The credentials are not valid.") from error
 
+    if payload.get("aud") != expected_audience:
+        # Strictness the library does not impose: PyJWT accepts an `aud` array
+        # containing the expected value, and this application has never minted
+        # one. The only party that can produce a token this verifier accepts is
+        # Wasla itself, so an array can only come from a second issuer holding
+        # the signing key - which is exactly the situation the claim was added
+        # ahead of. Refusing it costs nothing while that situation does not
+        # exist, and is the whole value of the claim once it does.
+        raise AuthenticationError("The credentials are not valid.")
+
     if payload.get("typ") != expected_type.value:
         # An access token must never be accepted where a refresh token belongs,
-        # or its short lifetime stops meaning anything.
+        # or its short lifetime stops meaning anything. Redundant with the
+        # audience check above now that the two kinds carry different
+        # audiences, and kept for that reason: two independent refusals, one in
+        # the library and one here.
         raise AuthenticationError("The credentials are not valid.")
 
     try:
