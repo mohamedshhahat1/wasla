@@ -67,7 +67,7 @@ class TokenType(StrEnum):
 # this process verifies a Wasla token, so an audience is a property of the
 # protocol rather than of a deployment: making it configurable would create a
 # way for two replicas of the same service to mint tokens the other refuses,
-# in exchange for flexibility nobody can use. If a second verifier ever exists,
+# in exchange for flexibility nobody can use (ADR-084). If a second verifier ever exists,
 # it will need this value written down somewhere both can read - and a constant
 # in the module that mints the token is that place.
 _AUDIENCES: Final[dict[TokenType, str]] = {

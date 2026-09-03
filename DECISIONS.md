@@ -3569,3 +3569,154 @@ No collector is shipped or verified here — the spans are produced and proved
 against an in-memory exporter, and whether a particular backend accepts them is
 a deployment question this repository has not answered.
 
+---
+
+## ADR-084 — Two Audiences, and Every Old Session Ends at Deploy
+
+**Context.** SEC-14. A Wasla JWT carried `iss`, `sub`, `typ`, `jti`, `iat`,
+`exp`, and — where relevant — `tid` and `ver`. It never said who was meant to
+*accept* it. That is safe for exactly as long as one verifier exists, and the
+audit's recommendation was to add the claim before a second one does rather
+than after.
+
+Reproducing the current behaviour turned up something the audit wording does
+not imply. The verifier passed no `audience=` to PyJWT, and PyJWT's rule when
+no audience is expected is that a token *carrying* `aud` is invalid. So the old
+behaviour was exactly inverted from the desired one: a token with no audience
+was accepted, and a token correctly addressed to this API was refused.
+
+**Decision.**
+
+**Two audiences, not one.** `wasla-api` for access tokens, `wasla-auth` for
+refresh tokens. The two kinds have genuinely different consumers — an access
+token is presented to the API's authenticated routes, a refresh token only to
+`/auth/refresh` and `/auth/logout` — so one vague `wasla` for every
+cryptographic purpose would add a claim without adding a separation. `typ`
+already separated them; this separates them a second time *inside the library*,
+on the same call that checks the signature, so a regression in the `typ`
+comparison cannot turn a fortnight-long credential into an API session.
+
+**Code constants, not settings.** Nothing outside this process verifies a Wasla
+token, so an audience is a property of the protocol rather than of a
+deployment. Making it configurable would create a way for two replicas of one
+service to mint tokens the other refuses, in exchange for flexibility nobody
+can use. `ISSUER` is a constant for the same reason and sits three lines above.
+
+**Set in `_create_token`.** Every token this application issues passes through
+one function, and the claim goes there rather than in the two public minting
+functions — which differ only in their arguments to it. ADR-058 is the reason
+that matters: workspace switching once had its own issuance path and quietly
+dropped `ver`, and every switched session was refused as revoked. The tests
+drive login, registration, refresh and workspace switching over HTTP and assert
+the claim on all of them at once, rather than one caller at a time.
+
+**Checked by PyJWT during decode, plus one strictness the library does not
+impose.** `audience=` refuses a wrong or absent claim before any claim is
+parsed. Beside it, `aud` must be the exact string: PyJWT accepts an array
+containing the expected value, and this application has never minted one — so
+an array can only come from a second issuer holding the signing key, which is
+precisely the situation the claim was added ahead of.
+
+**Every rejection still answers "The credentials are not valid."** A wrong
+audience is indistinguishable from a wrong signature or a missing `jti`, so the
+verifier does not become an oracle that tells somebody probing which part of a
+forgery to fix next.
+
+**Consequences.**
+
+**This is a hard cutover.** Every access and refresh token minted by the
+previous release stops working the moment this one starts, and everybody signs
+in again. There is no compatibility window and deliberately none: accepting an
+absent `aud` for a period would mean the verifier still cannot tell a Wasla
+token from one minted for something else, which is the whole thing being fixed.
+Access tokens live fifteen minutes and refresh tokens a fortnight, so the cost
+is one extra sign-in per person, once. It is recorded as a test
+(`test_a_token_in_the_old_format_no_longer_opens_the_api`) rather than as a
+changelog line, because a changelog line is not re-read.
+
+Google's ID tokens are unaffected: they are verified in
+`app/integrations/google/oidc.py` against Google's published keys with
+`audience` set to the configured client id, and share no key material with
+this.
+
+---
+
+## ADR-085 — A Latency Histogram With No Outcome Label, and a Pool Metric That Says Whose Pool
+
+**Context.** P1 gave every provider call a counter keyed by outcome, which says
+whether OpenAI is up and nothing about whether an agent turn takes forty
+seconds. P2-B made database connection lifetime the scaling boundary for agent
+turns and left pool occupancy unobservable. Both gaps are one metric each; both
+metrics have a shape that is easy to get subtly wrong.
+
+**Decision.**
+
+**`wasla_provider_request_duration_seconds` has no `outcome` label, and records
+failures.** Those two facts are one decision. A provider that timed out after
+twenty seconds is the most important latency this metric can hold, and a
+histogram of successes alone reports a system getting *faster* as it breaks.
+Once failures are included, splitting by outcome would quadruple the series to
+answer a question `wasla_provider_requests_total` already answers — so "how
+slow" and "how often does it fail" come from the metric shaped for each.
+
+**Buckets from the configured timeouts, not from the HTTP set.** 50 ms to 60 s.
+The request histogram starts at 5 ms because an in-process handler can finish
+in one; no call across the internet will, so three of its ten buckets would be
+permanently empty. Ten buckets is this module's ceiling and spending three of
+them on nothing is a real cost.
+
+**The duration is the whole operation, retries included**, because that is what
+the work waited on. `ProviderCall` starts its clock at the top of each client's
+request method so no exit can forget to time itself — there are sixteen exits
+across four clients, and "the one that forgot" is invisible until a dashboard
+has a hole in it.
+
+Two calls are counted and deliberately not timed. `whatsapp`/`inbound_webhook`
+is Meta calling us. The email worker's suppressed-recipient and
+unrenderable-template exits are counted because an operator reads them as
+provider outcomes, but neither made a call, and timing a decision not to send
+would put a microsecond in the same distribution as a fifteen-second timeout.
+
+**Written to Redis non-cumulatively.** A Prometheus histogram wants buckets
+that each include everything below them; written directly that is eleven
+`HINCRBY`s beside every provider call. The bucket an observation lands in is
+incremented instead — two commands — and the scrape accumulates. Identical
+exposition, one fifth the write cost, on the path a provider call runs on. A
+bound Redis holds that this release no longer declares is *dropped* at scrape
+time rather than folded into a neighbour: silently moving observations between
+buckets makes a quantile computed across a bucket change look like an answer.
+
+**`wasla_db_pool_*` carries `process_role`, and the only value is `api`.**
+`/metrics` is served by the API and `AsyncEngine.pool` is a process-local
+object: the API can see its own pool and has no way at all to see the worker's.
+Unlabelled, `wasla_db_pool_checked_out` reads as "the deployment's pool", which
+is the one thing it is not. The label makes the worker's absence visible rather
+than implied, and leaves room to publish it later without renaming a metric a
+dashboard depends on.
+
+Publishing the worker's pool through Redis was considered and rejected: a pool
+is a *level*, and ADR-069's counter channel carries totals. A stale level is
+worse than a missing one, because it looks current.
+
+**`pool.overflow()` is not published.** SQLAlchemy defines it as
+`open_connections - pool_size`, so it reads `-5` on a cold pool of five, and an
+operator alerting on "overflow above zero" would be alerting on warmth. What
+saturation needs is `checked_out` against `size + max_overflow`, and all three
+of those are published. `max_overflow` comes from `Settings` rather than the
+pool, because `QueuePool` keeps it private and the deployment is where the
+number was decided.
+
+**Consequences.**
+
+The pool gauge is proved against the pool it names rather than against itself:
+`tests/integration/test_provider_session_lifetime.py` now renders the
+exposition while two agent turns are parked inside a provider call and asserts
+the published number is what `checkedout()` reports at that instant — which is
+also the executed proof that ADR-080 still holds. A second test holds a
+connection open and watches the gauge move, so a value hard-coded to zero
+cannot satisfy the first.
+
+Only the API's pool is observable. A worker running out of connections shows up
+as queue depth and job latency rather than directly, and that is written down
+in `docs/OBSERVABILITY.md` rather than left for somebody to infer from an
+absent series.

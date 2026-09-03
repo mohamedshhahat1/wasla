@@ -86,7 +86,7 @@ DEPTH_GAUGES: tuple[tuple[str, str, str], ...] = (
 # absence of `process_role="worker"` is visible rather than implied, and the
 # worker's samples can be added later without renaming anything (ADR-069 puts
 # the worker's numbers in Redis, but a pool is a level rather than a total and
-# a stale level is worse than a missing one).
+# a stale level is worse than a missing one). See ADR-085.
 API_ROLE: Final = "api"
 
 # `pool.overflow()` is deliberately not published. Its value is
