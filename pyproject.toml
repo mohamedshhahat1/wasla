@@ -119,6 +119,11 @@ known-third-party = ["alembic"]
     "ANN202",
     "ANN204",
 ]
+# The one file in the suite that is a *process* rather than a test. It is
+# launched by `test_media_crash_recovery.py` and killed from outside mid-write,
+# and stdout is the only channel it has back to the parent - so `print` here is
+# the interface, not a leftover debug statement (ADR-087).
+"tests/integration/interrupted_upload_child.py" = ["T201"]
 "alembic/**" = ["ANN", "INP001", "E501"]
 
 [tool.mypy]
