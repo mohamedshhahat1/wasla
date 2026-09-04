@@ -435,6 +435,71 @@ async def test_a_reference_still_unknown_a_day_later_hands_the_attempt_back(
     assert invoice.next_collection_at is None, "and the invoice is due again"
 
 
+async def test_a_claimed_attempt_is_closed_without_waiting_out_the_window(
+    committing: async_sessionmaker[AsyncSession],
+    attempt: tuple[uuid.UUID, uuid.UUID, uuid.UUID],
+) -> None:
+    """GATE: a worker that died before building the request strands nothing.
+
+    This is F2, and it is the one case where "no record" needs no waiting. The
+    move to `requested` commits *before* the charge is constructed, so an
+    attempt still in `claimed` provably predates any request whatever Paymob
+    would say about it - and the day-long window that protects a `requested`
+    attempt from a provider still indexing its events buys nothing here.
+
+    Closing it at once is what keeps a crash in that window from costing the
+    customer a renewal cycle: the attempt returns to the budget and the next
+    ordinary sweep collects.
+    """
+    _, invoice_id, payment_id = attempt
+    async with committing() as session:
+        row = await session.get(Payment, payment_id, populate_existing=True)
+        assert row is not None
+        row.collection_state = CollectionState.CLAIMED
+        await session.commit()
+
+    paymob = Paymob()
+    paymob.answer = httpx.Response(404, json={"detail": "Not found."})
+
+    # `NOW`, not a day later: the abandon window has not begun to elapse.
+    outcome = await _run(committing, paymob)
+
+    assert outcome.abandoned == 1
+    assert outcome.not_found == 0, "a claimed attempt does not wait"
+
+    payment = await _payment(committing, payment_id)
+    assert payment.status is PaymentStatus.FAILED
+    assert payment.collection_state is CollectionState.ABANDONED
+
+    invoice = await _invoice(committing, invoice_id)
+    assert invoice.collection_attempts == 0, "the attempt was never made, so it is given back"
+    assert invoice.next_collection_at is None
+
+
+async def test_a_requested_attempt_does_wait_out_the_window(
+    committing: async_sessionmaker[AsyncSession],
+    attempt: tuple[uuid.UUID, uuid.UUID, uuid.UUID],
+) -> None:
+    """The other side of that distinction, so neither can drift into the other.
+
+    Same provider answer, same moment, one column different - and the attempt
+    is left alone, because a `requested` one may have taken money.
+    """
+    _, invoice_id, payment_id = attempt
+    paymob = Paymob()
+    paymob.answer = httpx.Response(404, json={"detail": "Not found."})
+
+    outcome = await _run(committing, paymob)
+
+    assert outcome.not_found == 1
+    assert outcome.abandoned == 0
+
+    payment = await _payment(committing, payment_id)
+    assert payment.collection_state is CollectionState.REQUESTED
+    invoice = await _invoice(committing, invoice_id)
+    assert invoice.collection_attempts == 1
+
+
 # --------------------------------------------------------------- the races
 
 
