@@ -16,6 +16,13 @@ from app.db.models import PlatformRole, TenantRole
 SLUG_PATTERN: Final = r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$"
 MAXIMUM_NAME_LENGTH: Final = 200
 MAXIMUM_SLUG_LENGTH: Final = 100
+# A refresh token this system issues is a compact HS256 JWT of a few hundred
+# bytes. Four kilobytes is the size everything else in the HTTP world treats as
+# a generous token, and the reason to bound it at all is that `/auth/refresh`
+# and `/auth/logout` are reachable without a session: an unbounded field there
+# means an anonymous caller can hand PyJWT a multi-megabyte string to decode,
+# once per request, for free.
+MAXIMUM_TOKEN_LENGTH: Final = 4096
 
 
 class _Payload(BaseModel):
@@ -52,12 +59,12 @@ class LoginRequest(_Payload):
 
 
 class RefreshRequest(_Payload):
-    refresh_token: str = Field(min_length=1)
+    refresh_token: str = Field(min_length=1, max_length=MAXIMUM_TOKEN_LENGTH)
     workspace_slug: str | None = Field(default=None, max_length=MAXIMUM_SLUG_LENGTH)
 
 
 class LogoutRequest(_Payload):
-    refresh_token: str = Field(min_length=1)
+    refresh_token: str = Field(min_length=1, max_length=MAXIMUM_TOKEN_LENGTH)
 
 
 class WorkspaceSwitchRequest(_Payload):

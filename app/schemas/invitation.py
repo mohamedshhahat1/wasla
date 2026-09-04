@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from app.core.security import MAXIMUM_PASSWORD_LENGTH, MINIMUM_PASSWORD_LENGTH
 from app.db.models import InvitationStatus, TenantRole
-from app.schemas.auth import WorkspaceSummary
+from app.schemas.auth import MAXIMUM_TOKEN_LENGTH, WorkspaceSummary
 
 MAXIMUM_NAME_LENGTH: Final = 200
 
@@ -27,7 +27,12 @@ class InvitationCreateRequest(_Payload):
 
 
 class InvitationAcceptRequest(_Payload):
-    token: str = Field(min_length=1)
+    # `generate_invitation_token` produces 32 URL-safe bytes - 43 characters.
+    # The bound is generous rather than exact so a future token format is not a
+    # breaking change, and it exists because this route is reachable without a
+    # session: an unbounded field means an anonymous caller can hand SHA-256 a
+    # multi-megabyte string to hash, once per request.
+    token: str = Field(min_length=1, max_length=MAXIMUM_TOKEN_LENGTH)
     # Only needed when the invited address has no account yet.
     password: str | None = Field(
         default=None,

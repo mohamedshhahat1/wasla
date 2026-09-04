@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.db.models.conversation import (
     Conversation,
@@ -26,6 +26,7 @@ from app.db.models.conversation import (
     MessageStatus,
 )
 from app.db.models.sentiment import ConversationPriority, SentimentLabel
+from app.schemas.bounds import TEMPLATE_COMPONENTS, check_json
 
 # Meta's own limit for a text body.
 MAX_TEXT_LENGTH = 4096
@@ -43,7 +44,17 @@ class SendTemplateRequest(BaseModel):
 
     name: str = Field(min_length=1, max_length=512)
     language: str = Field(min_length=2, max_length=16)
+    # Forwarded to Meta, whose shape this deliberately does not model. Bounded
+    # so an oversized structure is refused here rather than after a database
+    # write and a Graph API round trip - see `app.schemas.bounds`.
     components: list[dict[str, Any]] | None = None
+
+    @field_validator("components")
+    @classmethod
+    def _bounded_components(cls, value: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+        if value is not None:
+            check_json(value, TEMPLATE_COMPONENTS, field="components")
+        return value
 
 
 class ModeUpdateRequest(BaseModel):

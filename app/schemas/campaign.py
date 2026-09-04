@@ -38,6 +38,11 @@ from app.services.campaign_service import MAX_AUDIENCE_SIZE
 # this is a bound on a request body, not a statement about templates.
 MAX_TEMPLATE_VARIABLES = 20
 MAX_VARIABLE_LENGTH = 1024
+# A campaign description is a note to whoever runs the campaign next, and the
+# column is `Text` - so nothing but this decides how long it may be. Two
+# thousand characters is several paragraphs, which is more than anybody writes
+# about a broadcast and far short of a document.
+MAX_CAMPAIGN_DESCRIPTION_LENGTH = 2000
 # Enough for a full year of "customers who wrote to us recently", and short
 # enough that a stray number cannot mean "everyone who ever wrote to us".
 MAX_RECENCY_DAYS = 365
@@ -55,7 +60,7 @@ class CampaignCreateRequest(_Payload):
     account_id: uuid.UUID
     template_id: uuid.UUID
     name: str = Field(min_length=1, max_length=MAX_CAMPAIGN_NAME_LENGTH)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=MAX_CAMPAIGN_DESCRIPTION_LENGTH)
     # In the order the template's placeholders appear. Validated against the
     # template's own variable count in the service, which is the only place that
     # knows what the template says.

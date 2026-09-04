@@ -14,9 +14,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Self
+from typing import Annotated, Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.db.models.lead import (
     MAX_SCORE,
@@ -30,6 +30,7 @@ from app.db.models.lead import (
     LeadStatus,
 )
 from app.repositories.lead_repository import LeadStatistics
+from app.schemas.bounds import LEAD_CUSTOM_FIELDS, check_json
 from app.services.lead_service import (
     MAX_INTEREST_LENGTH,
     MAX_NOTE_LENGTH,
@@ -49,12 +50,26 @@ class LeadCreateRequest(BaseModel):
     phone: str | None = Field(default=None, max_length=32)
     email: str | None = Field(default=None, max_length=320)
     interest: str | None = Field(default=None, max_length=MAX_INTEREST_LENGTH)
-    budget_amount: Decimal | None = Field(default=None, ge=0)
+    # `max_digits` matches `leads.budget_amount`, which is `Numeric(14, 2)`.
+    # Without it a caller could post a million-digit number, which pydantic
+    # parses before PostgreSQL rejects it.
+    budget_amount: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
     budget_currency: str | None = Field(default=None, min_length=3, max_length=3)
     source: LeadSource = LeadSource.MANUAL
     assigned_to_id: uuid.UUID | None = None
-    tags: list[str] | None = Field(default=None, max_length=MAX_TAGS)
+    # The per-tag bound restates what the service already enforces, so a caller
+    # gets a 422 naming the field rather than a 400 naming the rule.
+    tags: list[Annotated[str, Field(max_length=MAX_TAG_LENGTH)]] | None = Field(
+        default=None, max_length=MAX_TAGS
+    )
     custom_fields: dict[str, Any] | None = None
+
+    @field_validator("custom_fields")
+    @classmethod
+    def _bounded_custom_fields(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None:
+            check_json(value, LEAD_CUSTOM_FIELDS, field="custom_fields")
+        return value
 
 
 class LeadUpdateRequest(BaseModel):
@@ -71,10 +86,19 @@ class LeadUpdateRequest(BaseModel):
     phone: str | None = Field(default=None, max_length=32)
     email: str | None = Field(default=None, max_length=320)
     interest: str | None = Field(default=None, max_length=MAX_INTEREST_LENGTH)
-    budget_amount: Decimal | None = Field(default=None, ge=0)
+    budget_amount: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
     budget_currency: str | None = Field(default=None, min_length=3, max_length=3)
-    tags: list[str] | None = Field(default=None, max_length=MAX_TAGS)
+    tags: list[Annotated[str, Field(max_length=MAX_TAG_LENGTH)]] | None = Field(
+        default=None, max_length=MAX_TAGS
+    )
     custom_fields: dict[str, Any] | None = None
+
+    @field_validator("custom_fields")
+    @classmethod
+    def _bounded_custom_fields(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None:
+            check_json(value, LEAD_CUSTOM_FIELDS, field="custom_fields")
+        return value
 
     def to_update(self) -> LeadUpdate:
         """Convert omitted fields to the sentinel the service expects."""

@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.db.models.follow_up import (
     MAX_BODY_LENGTH,
@@ -21,6 +21,7 @@ from app.db.models.follow_up import (
     FollowUpStatus,
 )
 from app.db.models.lead import ActorKind
+from app.schemas.bounds import TEMPLATE_COMPONENTS, check_json
 from app.services.follow_up_service import MAX_DELAY, MIN_DELAY
 
 MIN_DELAY_MINUTES = int(MIN_DELAY.total_seconds() // 60)
@@ -41,7 +42,16 @@ class FollowUpCreateRequest(BaseModel):
     body: str | None = Field(default=None, max_length=MAX_BODY_LENGTH)
     template_name: str | None = Field(default=None, max_length=512)
     template_language: str | None = Field(default=None, min_length=2, max_length=16)
+    # Forwarded to Meta when the follow-up fires, so it is bounded on the way
+    # in rather than on the way out - see `app.schemas.bounds`.
     template_components: list[dict[str, Any]] | None = None
+
+    @field_validator("template_components")
+    @classmethod
+    def _bounded_components(cls, value: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+        if value is not None:
+            check_json(value, TEMPLATE_COMPONENTS, field="template_components")
+        return value
 
     reason: str | None = Field(default=None, max_length=MAX_REASON_LENGTH)
     lead_id: uuid.UUID | None = None

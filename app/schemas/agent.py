@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import MAX_AGENT_OUTPUT_TOKENS
 from app.db.models.agent import (
@@ -22,6 +22,7 @@ from app.db.models.agent import (
     AgentStatus,
 )
 from app.db.models.sentiment import SentimentLabel
+from app.schemas.bounds import TOOL_CONFIG, check_json
 
 MAX_NAME_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 500
@@ -119,7 +120,17 @@ class ToolGrantRequest(BaseModel):
 
     name: ToolName
     enabled: bool = True
+    # Shape belongs to the tool, so it is stored rather than modelled - but a
+    # value nobody models is a value nobody bounds unless somebody does it
+    # here. See `app.schemas.bounds`.
     config: dict[str, Any] | None = None
+
+    @field_validator("config")
+    @classmethod
+    def _bounded_config(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None:
+            check_json(value, TOOL_CONFIG, field="config")
+        return value
 
 
 class ToolGrantRead(BaseModel):
