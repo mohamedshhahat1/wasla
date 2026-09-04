@@ -78,7 +78,19 @@ Four properties, each chosen against a specific failure:
 - **Staged in the same transaction as the act.** An entry cannot survive the rollback of the thing it describes, and an act cannot succeed while its entry fails.
 - **The platform is not exempt.** A payment recorded or an invoice voided by platform staff is written to *that workspace's* trail, attributed to the staff member. The customer is entitled to see who marked their invoice paid.
 
-Reads are deliberately not audited: they would bury the entries that matter, and they are the wrong tool for that question.
+**Ordinary reads are deliberately not audited**: they would bury the entries that matter, and they are the wrong tool for that question.
+
+**Platform staff reading across workspaces are the one exception** (ADR-095). What makes those different is not that they are reads, it is whose data they are — a workspace administrator reading their own inbox is looking at their own business, and a platform administrator reading the estate is looking at somebody else's. There are a handful of such people making a handful of requests a day, so the volume argument does not reach them, and "who looked at our workspace" is a question a customer is entitled to have answered.
+
+| Route | Action | Target workspace | What the entry stores |
+| --- | --- | --- | --- |
+| `GET /api/v1/platform/overview` | `platform_overview_read` | none — the figures are aggregates | resource class, whether a window was given |
+| `GET /api/v1/platform/tenants` | `platform_workspaces_read` | none | resource class, count returned, whether searched, whether filtered |
+| `GET /api/v1/platform/audit-logs` | `platform_audit_log_read` | recorded when narrowed to one | resource class, count returned |
+
+The entry names the *class* of data reached and never the data. **No search term** — somebody looking for one business types an address as readily as a company name, so recording it would make the trail a copy of the thing it exists to police. No workspace name, no filter values, no customer content. A workspace id is recorded where the read was narrowed to one, because that is the subject of the entry rather than its payload.
+
+The entry is written **after** the read rather than in a dependency, so a request the guard refused leaves nothing: a trail that cannot tell "somebody read this" from "somebody tried" is one nobody can act on. And it fails closed for free — the entry is staged in the request's own transaction, which `CommittingRoute` commits before the response is emitted, so a failure to record the access is a failure to serve it.
 
 ## Sessions and revocation
 

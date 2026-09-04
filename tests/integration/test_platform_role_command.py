@@ -191,14 +191,21 @@ def test_the_command_is_not_exposed_as_an_http_route() -> None:
     platform's own escalation path on the internet for an operation performed a
     handful of times in a deployment's life.
     """
-    paths = {getattr(route, "path", "") for route in create_app().routes}
-    forbidden = [
+    # From the OpenAPI document rather than `app.routes`, which on this
+    # application yields router wrappers carrying no path - so a comprehension
+    # over it is empty and the assertion below would pass whatever shipped.
+    paths = set(create_app().openapi()["paths"])
+    assert paths, "the route inventory is empty, so this proves nothing"
+
+    forbidden = sorted(
         path
         for path in paths
-        if "platform-role" in path or "platform_role" in path or path.endswith("/bootstrap")
-    ]
+        if "platform-role" in path
+        or "platform_role" in path
+        or path.endswith("/bootstrap")
+        or (path.startswith("/api/v1/platform/users/") and "role" in path)
+    )
     assert forbidden == []
-    assert not any(path.startswith("/api/v1/platform/users/") and "role" in path for path in paths)
 
 
 async def test_a_role_change_needs_no_token_invalidation(

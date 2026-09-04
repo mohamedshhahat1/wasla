@@ -74,6 +74,12 @@ class AuditAction(StrEnum):
     Reading a page is not audited - it would bury the entries that matter under
     a million that do not, and it is the wrong tool for that question anyway.
 
+    The exception is at the bottom of this list and is argued there: platform
+    staff reading *across* workspaces. What makes those different is not that
+    they are reads, it is whose data they are - and there are a handful of such
+    people making a handful of requests a day, so the volume argument above
+    does not apply to them (ADR-095).
+
     Where a family of outcomes shares one question - "did this verification
     fail, and why" - the family gets one action and the outcome travels in
     `meta`. Splitting it into a member per reason would grow this enum without
@@ -227,6 +233,23 @@ class AuditAction(StrEnum):
     # Writing to many customers at once
     CAMPAIGN_SCHEDULED = "campaign_scheduled"
     CAMPAIGN_CANCELLED = "campaign_cancelled"
+
+    # Platform staff reading across workspaces (ADR-095). The one place this
+    # vocabulary records a *read*, and the exception is argued rather than
+    # assumed: ordinary reads are not audited because a row per page view would
+    # bury the acts that matter, but these are a different act. A workspace
+    # administrator reading their own inbox is looking at their own business; a
+    # platform administrator reading the estate is looking at somebody else's,
+    # and "who looked at our workspace, and when" is a question a customer is
+    # entitled to have answered.
+    #
+    # Three values rather than one, because they are three different amounts of
+    # access and an investigation filters on which. The entries name the class
+    # of data reached and never the data - no search string, no workspace name,
+    # no address, no customer content. See `PlatformAccessAudit`.
+    PLATFORM_OVERVIEW_READ = "platform_overview_read"
+    PLATFORM_WORKSPACES_READ = "platform_workspaces_read"
+    PLATFORM_AUDIT_LOG_READ = "platform_audit_log_read"
 
 
 AUDIT_ACTOR_KIND_TYPE = _enum_type(AuditActorKind, name="audit_actor_kind")

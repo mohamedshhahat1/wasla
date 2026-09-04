@@ -11,6 +11,7 @@ rather than a mock of it.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -23,6 +24,7 @@ from app.api.dependencies import (
     get_current_user,
     get_platform_analytics_service,
 )
+from app.core.dependencies import get_session
 from app.db.models import PlatformRole, Tenant, TenantStatus, User
 from app.db.models.usage import UsageEventType, UsageUnit
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
@@ -245,6 +247,23 @@ def _as_user(app: FastAPI, role: PlatformRole | None) -> None:
         tenant_id=None,
     )
     app.dependency_overrides[get_current_user] = lambda: CurrentUser(user=user, claims=claims)
+
+
+@pytest.fixture
+def app(app: FastAPI, db_session: AsyncSession) -> FastAPI:
+    """The shared application, with a session the routes can actually write to.
+
+    These routes read across workspaces, and a platform read now records that it
+    happened (ADR-095) - so the request touches the database even when the
+    analytics service is stubbed. Binding the test's own session here keeps
+    that write real rather than mocking away the thing the trail exists for.
+    """
+
+    async def _session() -> AsyncIterator[AsyncSession]:
+        yield db_session
+
+    app.dependency_overrides[get_session] = _session
+    return app
 
 
 @pytest.fixture

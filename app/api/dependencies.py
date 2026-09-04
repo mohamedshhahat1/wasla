@@ -24,6 +24,7 @@ from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.db.models.billing import LimitKey
 from app.integrations.billing import build_checkout_provider
 from app.integrations.whatsapp.ownership import MetaOwnershipVerifier
+from app.platform.access_audit import PlatformAccessAudit
 from app.platform.platform_analytics import PlatformAnalyticsService
 from app.platform.platform_billing import PlatformBillingService
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
@@ -492,6 +493,19 @@ PlatformAuditLogRepositoryDep = Annotated[
     PlatformAuditLogRepository,
     Depends(get_platform_audit_log_repository),
 ]
+
+
+def get_platform_access_audit(session: SessionDep) -> PlatformAccessAudit:
+    """The trail platform staff leave when they read across workspaces.
+
+    Staged in the request's own session, so `CommittingRoute` commits it before
+    the response is emitted and a failure to record the access is a failure to
+    serve it (ADR-095).
+    """
+    return PlatformAccessAudit(session)
+
+
+PlatformAccessAuditDep = Annotated[PlatformAccessAudit, Depends(get_platform_access_audit)]
 
 
 def get_plan_repository(session: SessionDep) -> PlanRepository:

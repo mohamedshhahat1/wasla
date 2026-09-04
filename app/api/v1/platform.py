@@ -13,6 +13,13 @@ are destructive, and the product has no answer yet for what happens to a
 suspended workspace's in-flight conversations. The audit trail that would make
 them safe to add now exists, and is readable here.
 
+**The reads on this router are audited, and no other read in the API is.** Every
+platform *write* was already recorded and no platform read was, which was
+defensible while the reads were aggregates and stops being defensible the moment
+a customer asks who looked at their workspace. The entries name the actor, the
+class of data reached and the workspace when one was named - never a search
+term, a workspace name or anything a customer wrote (ADR-095).
+
 What is absent is as considered as what is here. There are no revenue figures,
 because revenue is a question about subscriptions and there are none until Phase
 13. A plausible zero on a dashboard is worse than an absent field.
@@ -28,6 +35,7 @@ from fastapi import APIRouter, Query
 
 from app.api.dependencies import (
     AccountServiceDep,
+    PlatformAccessAuditDep,
     PlatformAnalyticsServiceDep,
     PlatformAuditLogRepositoryDep,
     PlatformInvoiceServiceDep,
@@ -60,11 +68,13 @@ OffsetQuery = Annotated[int, Query(ge=0)]
 async def platform_overview(
     staff: PlatformStaffDep,
     analytics: PlatformAnalyticsServiceDep,
+    access: PlatformAccessAuditDep,
     since: SinceQuery = None,
     until: UntilQuery = None,
 ) -> PlatformOverviewRead:
     """Workspaces, connected numbers and platform-wide consumption for a window."""
     overview = await analytics.overview(since=since, until=until)
+    access.overview_read(actor=staff.user, windowed=since is not None or until is not None)
     return PlatformOverviewRead.from_overview(overview)
 
 
@@ -72,6 +82,7 @@ async def platform_overview(
 async def platform_tenants(
     staff: PlatformStaffDep,
     analytics: PlatformAnalyticsServiceDep,
+    access: PlatformAccessAuditDep,
     since: SinceQuery = None,
     until: UntilQuery = None,
     search: SearchQuery = None,
@@ -93,6 +104,17 @@ async def platform_tenants(
         status=status,
         limit=limit,
         offset=offset,
+    )
+    # After the read, and recorded whatever it found. An empty page is still an
+    # operator having looked, and the trail answers "who looked" rather than
+    # "who found something".
+    access.workspaces_read(
+        actor=staff.user,
+        returned=len(page.rows),
+        # The term itself is never recorded: somebody searching for one business
+        # types an address as readily as a name (ADR-095).
+        searched=search is not None,
+        filtered=status is not None,
     )
     return WorkspacePageRead.from_page(page)
 
@@ -145,6 +167,7 @@ async def void_invoice(
 async def platform_audit_logs(
     staff: PlatformStaffDep,
     entries: PlatformAuditLogRepositoryDep,
+    access: PlatformAccessAuditDep,
     tenant_id: uuid.UUID | None = None,
     action: Annotated[list[AuditAction] | None, Query()] = None,
     actor_id: uuid.UUID | None = None,
@@ -167,6 +190,10 @@ async def platform_audit_logs(
         until=until,
         limit=limit,
     )
+    # The deepest read on this surface, and the one whose own entry an
+    # investigation is most likely to want: reading a workspace's trail is
+    # reading everything its people have done.
+    access.audit_log_read(actor=staff.user, tenant_id=tenant_id, returned=len(rows))
     return [AuditEntryRead.from_model(row) for row in rows]
 
 
