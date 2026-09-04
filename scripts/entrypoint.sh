@@ -45,6 +45,18 @@ case "${command}" in
     shift || true
     exec python -m app.workers.queues "$@"
     ;;
+  platform-role)
+    # The only supported way to create the first platform administrator
+    # (ADR-094). A command rather than an HTTP route because the audience for
+    # granting authority over every workspace is whoever can already exec into
+    # a container, and a route would have needed a caller who already held the
+    # role - which does not answer the question it exists for.
+    #
+    #   entrypoint.sh platform-role list
+    #   entrypoint.sh platform-role grant ops@example.com platform_owner
+    shift || true
+    exec python -m app.platform.roles "$@"
+    ;;
   *)
     exec "$@"
     ;;

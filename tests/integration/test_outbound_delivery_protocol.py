@@ -101,7 +101,9 @@ class Provider:
             await self._may_return.wait()
         if self._outcome is not None:
             raise self._outcome
-        return SentMessage(message_id=f"wamid.{uuid.uuid4().hex[:12]}", recipient=None, raw={})
+        return SentMessage(
+            message_id=f"wamid.{uuid.uuid4().hex[:12]}", recipient="201000000000", raw={}
+        )
 
     async def send_text(self, **keywords: Any) -> SentMessage:
         return await self._answer()

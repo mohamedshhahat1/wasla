@@ -132,16 +132,12 @@ class StubMessaging:
             status=(
                 MessageStatus.PENDING
                 if uncertain
-                else MessageStatus.FAILED
-                if rejected
-                else MessageStatus.SENT
+                else MessageStatus.FAILED if rejected else MessageStatus.SENT
             ),
             delivery_state=(
                 MessageDeliveryState.REQUESTED
                 if uncertain
-                else MessageDeliveryState.UNDELIVERED
-                if rejected
-                else MessageDeliveryState.SENT
+                else MessageDeliveryState.UNDELIVERED if rejected else MessageDeliveryState.SENT
             ),
             failure_reason="Meta said no." if rejected else None,
         )

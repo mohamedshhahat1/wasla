@@ -98,6 +98,13 @@ class AuditAction(StrEnum):
     # tenant, which is what makes them visible in the platform trail.
     USER_DISABLED = "user_disabled"
     USER_ENABLED = "user_enabled"
+    # Somebody was given, or lost, authority over the whole platform (ADR-094).
+    # The most consequential grant in the system - it reaches every workspace -
+    # and it is made by an operator with database access rather than through
+    # any HTTP route, which is exactly why it has to leave a trail. `meta`
+    # carries the role and the role it replaced.
+    PLATFORM_ROLE_GRANTED = "platform_role_granted"
+    PLATFORM_ROLE_REVOKED = "platform_role_revoked"
     USER_SESSIONS_REVOKED = "user_sessions_revoked"
     # The name of an event, not a credential. Nothing here ever holds one.
     PASSWORD_CHANGED = "password_changed"  # noqa: S105

@@ -4904,3 +4904,83 @@ a provider double and asserts, from a *different* transaction, that the intent
 is committed and the pool is empty; kills a session after Meta accepted and
 asserts the send is still findable; and drives a timeout, a rejection, a rate
 limit, a template, a file and a failed upload through the same protocol.
+
+---
+
+## ADR-094 — Platform Authority Is Granted by a Command, and the Command Is Audited
+
+**Context.** `users.platform_role` was nullable, defaulted to null, and **no
+code path anywhere wrote it** — not a route, not a service, not a migration, not
+a script. The seven `/platform/*` routes were therefore unreachable in every
+deployment that has ever existed, and the only way past that was an `UPDATE`
+somebody typed at a psql prompt.
+
+Read charitably, the absence of a route that grants platform authority is a
+genuine security property: there is no privilege-escalation path because there
+is no path. That part is worth keeping. What is not worth keeping is the rest of
+it — an undocumented manual `UPDATE` is a step somebody gets wrong at two in the
+morning, it validates nothing, and it leaves no record of who took authority
+over every workspace on the platform.
+
+**Decision. A command, not an endpoint.**
+
+```
+docker compose exec api entrypoint.sh platform-role list
+docker compose exec api entrypoint.sh platform-role grant ops@example.com platform_owner
+docker compose exec api entrypoint.sh platform-role revoke ops@example.com
+```
+
+The audience for granting authority over every workspace is whoever can already
+exec into a container, and that is exactly the audience a command has. A route
+would have needed a caller who already held the role — which answers the
+bootstrap question with itself — and would have put the platform's own
+escalation path on the internet for an operation performed a handful of times in
+a deployment's life. `app.workers.queues` made the same argument for replay
+(ADR-071) and this is the same shape: argparse, an exit code, output that is the
+point.
+
+**A general grant/revoke tool rather than a one-shot bootstrap.** "Only when no
+owner exists" was considered and rejected: an operator adding a second
+administrator, or removing somebody who has left, would be back at the psql
+prompt, which is the thing being fixed. A general tool is acceptable precisely
+because every action it takes is audited, and platform authorization is
+unchanged by it.
+
+**Nothing here creates an account.** A role can only be given to a user who
+already exists and signed up in the ordinary way, so the worst this command can
+do is change what an existing identity is allowed to do. That is bad enough to
+audit and not bad enough to need two people.
+
+**The actor is `SYSTEM`, and that is honest rather than lazy.** The person
+running this is at a shell; there is no authenticated user to attribute the act
+to. Recording the *target* as the actor would say somebody granted themselves
+the platform, which is worse than saying nothing. What the entry does name is
+the account, the role, and the role it replaced — and `tenant_id` is null,
+because a platform act belongs to no workspace and that is what makes it visible
+in the platform trail.
+
+**Matching is exact.** An email address or a full user id, no prefixes and no
+"did you mean". A fuzzy match here grants platform authority to somebody who was
+not named.
+
+**Granting is idempotent, and revoking refuses the last owner.** Re-running after
+a failed deploy changes nothing and writes no entry, so the trail does not fill
+with acts that did not happen. And an installation with no platform owner has no
+supported way back except this same command; refusing to remove the last one
+stops an operator locking themselves out of the dashboard at the moment they
+most need it. Revoking anyone else, once a second owner exists, is allowed.
+
+**No token is invalidated, because none carries the role.**
+`require_platform_roles` reads `user.platform_role` off the account row that
+authentication already loads — the same mechanism that makes membership
+revocation immediate (ADR-036). A grant takes effect on the next request and a
+revocation takes effect at once, and neither needs `token_version` moved, which
+would sign somebody out of every workspace to change something about the
+platform.
+
+**What is proved rather than argued.**
+`tests/integration/test_platform_role_command.py` grants the first owner against
+a real database and reads back the entry; drives both refusals; asserts a
+partial address matches nothing; asserts the vocabulary is held by argparse so a
+typo never reaches the database; and asserts that no route on the application
+exposes any of it.
