@@ -12,12 +12,37 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, func, select, update
 
 from app.core.pagination import Cursor
 from app.db.models.billing import Subscription, SubscriptionStatus
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import (
+    UNRESOLVED_COLLECTION_STATES,
+    Invoice,
+    InvoiceStatus,
+    Payment,
+    PaymentStatus,
+)
 from app.repositories.base import BaseRepository, TenantScopedRepository
+
+
+def _has_unresolved_attempt() -> ColumnElement[bool]:
+    """Whether this invoice already has a collection attempt nobody has resolved.
+
+    The eligibility half of what closes WSL-01. `uq_payments_unresolved_collection`
+    makes a second unresolved attempt impossible; this makes the sweep stop
+    before it tries, so an invoice whose outcome is unknown is passed over
+    quietly instead of producing an integrity error on every pass.
+
+    Correlated rather than joined, because an invoice with no payments must
+    still be claimable and a join would drop it.
+    """
+    return (
+        select(Payment.id)
+        .where(Payment.invoice_id == Invoice.id)
+        .where(Payment.collection_state.in_(UNRESOLVED_COLLECTION_STATES))
+        .exists()
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,12 +289,18 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
         settled by a callback or attempted by another worker, and either makes
         a charge here wrong. Re-asking under the lock is what makes "one
         attempt reaches the provider" a property of the row (ADR-082).
+
+        That now includes "and nobody is waiting to hear what the last attempt
+        did". An invoice with an unresolved attempt is not collectible at any
+        price - a second charge while the first outcome is unknown is the
+        duplicate debit this whole protocol exists to prevent (ADR-088).
         """
         return await self._first(
             self._select()
             .where(Invoice.id == invoice_id)
             .where(Invoice.status == InvoiceStatus.OPEN)
             .where(Invoice.collection_attempts < max_attempts)
+            .where(~_has_unresolved_attempt())
             .with_for_update(skip_locked=True, of=Invoice)
         )
 
@@ -325,6 +356,13 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
         of an invoice nobody has tried yet, which is exactly the one a first
         attempt is for.
 
+        **An invoice with an unresolved attempt is excluded**, and that is the
+        eligibility half of ADR-088. `next_collection_at` alone cannot express
+        it: an attempt whose answer never arrived leaves a schedule that comes
+        due on time while the question of whether a card was already debited is
+        still open, and charging on schedule is exactly the wrong move. The
+        state of the last attempt decides, not the clock.
+
         **`max_attempts` is passed in, not decided here** (ADR-082). It is the
         service's `MAX_COLLECTION_ATTEMPTS`, and the filter exists because
         without it a spent invoice stays eligible for ever - `next_collection_at`
@@ -342,6 +380,7 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
             .where(Invoice.status == InvoiceStatus.OPEN)
             .where(Invoice.subscription_id.is_not(None))
             .where(Invoice.collection_attempts < max_attempts)
+            .where(~_has_unresolved_attempt())
             .where((Invoice.next_collection_at.is_(None)) | (Invoice.next_collection_at <= before))
             .order_by(Invoice.period_start)
             .limit(limit)
@@ -410,4 +449,127 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
             .where(Invoice.period_start == period_start)
             .order_by(Invoice.period_start)
             .limit(limit)
+        )
+
+
+class PlatformPaymentRepository(BaseRepository[Payment]):
+    """Collection attempts across every workspace, for reconciliation.
+
+    Deliberately unscoped and deliberately its own class, in the same shape as
+    `PlatformInvoiceRepository` and `PlatformMediaRepository` and for the same
+    reason: this is a platform sweep over every workspace and nothing reachable
+    from a request constructs it.
+
+    The authorization question does not arise; the *ownership* question still
+    does, and it is answered by the row. An attempt is reconciled because a row
+    carrying its `tenant_id` says a charge may have been made, and every
+    settlement that follows goes through a tenant-scoped service built from
+    that value.
+    """
+
+    model = Payment
+
+    async def claim_for_reconciliation(
+        self,
+        *,
+        provider: str,
+        older_than: datetime,
+        lease_before: datetime,
+        now: datetime,
+    ) -> Payment | None:
+        """Take the oldest attempt nobody knows the outcome of, and lease it.
+
+        One row rather than a batch, because there is a provider round trip
+        between claiming and deciding, and a batch would hold every claimed
+        row for the sum of every lookup in it.
+
+        **The lease is the claim, and it is committed by the caller before the
+        lookup happens.** `FOR UPDATE SKIP LOCKED` alone would mean holding a
+        row lock across a call to somebody else's API, which is exactly the
+        thing the collection path was changed to stop doing; and a lock is held
+        by a process, so it says nothing once that process is gone. Writing
+        `reconciled_at` before asking gives both properties at once: a second
+        worker skips a row someone is already asking about, and a worker that
+        dies mid-lookup leaves one that becomes claimable again when the lease
+        elapses - with no reaper needed to notice.
+
+        `older_than` keeps this away from attempts a live worker is still
+        finishing; `lease_before` is what a previous claim has to be older
+        than. Both are computed by the caller from one clock, so a test can
+        pin them.
+        """
+        statement = (
+            select(Payment)
+            .where(Payment.provider == provider)
+            .where(Payment.collection_state.in_(UNRESOLVED_COLLECTION_STATES))
+            .where(Payment.created_at < older_than)
+            .where((Payment.reconciled_at.is_(None)) | (Payment.reconciled_at < lease_before))
+            .order_by(Payment.created_at)
+            .limit(1)
+            .with_for_update(skip_locked=True, of=Payment)
+        )
+        payment = await self._first(statement)
+        if payment is None:
+            return None
+        payment.reconciled_at = now
+        await self.session.flush()
+        return payment
+
+    async def get_by_id(self, payment_id: uuid.UUID) -> Payment | None:
+        """One attempt by id, across workspaces.
+
+        Used only to re-read a row the reconciler already claimed, after the
+        transaction that claimed it has ended. The tenant is read off the row,
+        never supplied.
+        """
+        return await self._first(select(Payment).where(Payment.id == payment_id))
+
+    async def unresolved_count(self, *, provider: str) -> int:
+        """How many attempts are waiting for an answer, platform-wide.
+
+        A level rather than an event, and the number an operator watches: it is
+        normally zero, and a value that stays above zero means callbacks are
+        not arriving or the provider cannot be asked.
+        """
+        statement = (
+            select(func.count())
+            .select_from(Payment)
+            .where(Payment.provider == provider)
+            .where(Payment.collection_state.in_(UNRESOLVED_COLLECTION_STATES))
+        )
+        return int(await self.session.scalar(statement) or 0)
+
+    async def oldest_unresolved_at(self, *, provider: str) -> datetime | None:
+        """When the oldest unanswered attempt was made, or None if there is none.
+
+        Age is what makes the backlog alertable. One attempt outstanding for a
+        minute is a callback in flight; one outstanding for a day is an invoice
+        nobody can collect and possibly a customer who has already paid.
+        """
+        statement = (
+            select(func.min(Payment.created_at))
+            .where(Payment.provider == provider)
+            .where(Payment.collection_state.in_(UNRESOLVED_COLLECTION_STATES))
+        )
+        oldest = await self.session.scalar(statement)
+        return oldest if isinstance(oldest, datetime) else None
+
+    async def release_attempt(self, *, invoice_id: uuid.UUID) -> None:
+        """Hand an attempt back to an invoice whose charge was never sent.
+
+        Only reachable where the provider has said it has no record of the
+        reference, which is the one conclusion that means no money moved. The
+        counter goes down and the schedule is cleared, so the ordinary sweep
+        picks the invoice up again and makes a *new* attempt with a new number
+        and a new reference - rather than resuming one whose reference the
+        provider may yet decide it knows about.
+
+        Guarded rather than blind: an attempt count that has already been
+        adjusted must not go negative.
+        """
+        await self.session.execute(
+            update(Invoice)
+            .where(Invoice.id == invoice_id)
+            .where(Invoice.collection_attempts > 0)
+            .values(collection_attempts=Invoice.collection_attempts - 1, next_collection_at=None)
         )

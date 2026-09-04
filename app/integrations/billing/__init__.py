@@ -71,6 +71,7 @@ def build_checkout_provider(settings: Settings) -> CheckoutProvider | None:
         hmac_secret=hmac_secret,
         integration_ids=list(settings.paymob_integration_ids),
         moto_integration_id=settings.paymob_moto_integration_id,
+        api_key=settings.paymob_api_key,
         region=settings.paymob_region,
         # Built from configuration and a literal path, never from a request
         # Host header - a callback URL an attacker can aim is a callback that

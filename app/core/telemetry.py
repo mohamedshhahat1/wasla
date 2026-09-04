@@ -228,11 +228,32 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
 # outcome would quadruple the series to answer a question `..._requests_total`
 # already answers. An operator asks "how slow is OpenAI" and "how often does it
 # fail" separately, and gets each from the metric shaped for it.
+# How old the oldest unanswered collection attempt is when a reconciliation
+# pass runs (ADR-088). Spread over minutes to days rather than the sub-second
+# spacing latency wants: everything under five minutes is inside the grace
+# period and uninteresting, and the buckets an operator actually alerts on are
+# the last two - an attempt outstanding for an hour means callbacks are not
+# arriving, and one outstanding for a day means an invoice nobody can collect
+# and possibly a customer who has already paid.
+PENDING_PAYMENT_AGE_BUCKETS: Final[tuple[float, ...]] = (
+    300.0,
+    900.0,
+    3_600.0,
+    21_600.0,
+    86_400.0,
+    259_200.0,
+)
+
 REDIS_HISTOGRAMS: Final[dict[str, tuple[str, tuple[str, ...], tuple[float, ...]]]] = {
     "wasla_provider_request_duration_seconds": (
         "How long a call to an external provider took, whether or not it succeeded.",
         ("provider", "operation"),
         PROVIDER_LATENCY_BUCKETS,
+    ),
+    "wasla_oldest_pending_payment_age_seconds": (
+        "Age of the oldest collection attempt whose provider outcome is unknown.",
+        (),
+        PENDING_PAYMENT_AGE_BUCKETS,
     ),
 }
 
@@ -515,6 +536,53 @@ async def record_upload_reconciliation(
             )
 
 
+async def record_payment_reconciliation(
+    *,
+    settled: int,
+    failed: int,
+    abandoned: int,
+    still_pending: int,
+    not_found: int,
+    unreachable: int,
+    pending: int,
+    oldest_pending_seconds: float,
+) -> None:
+    """One reconciliation pass's result (ADR-088).
+
+    One label with seven fixed values, and no identifier among them: no
+    workspace, no invoice, no payment, no provider reference, no amount. A
+    payment's value is exactly what a metric label domain must never be keyed
+    on, and a reference is unbounded.
+
+    `pending` is a level written to a counter, for the reason
+    `record_upload_reconciliation` sets out: what an operator asks of it is "is
+    it going up", and a monotonic sum answers that as well as a gauge would
+    without a fourth mechanism for cross-process gauges.
+
+    `oldest_pending_seconds` is the one figure that is not a count, and it is
+    the one an alert should fire on. A backlog of one is a callback in flight;
+    a backlog of one that is a day old is an invoice nobody can collect and
+    possibly a customer who has already paid. It is written as its own metric
+    rather than squeezed into the counter, because adding ages together is
+    meaningless.
+    """
+    counts = {
+        "settled": settled,
+        "failed": failed,
+        "abandoned": abandoned,
+        "still_pending": still_pending,
+        "not_found": not_found,
+        "unreachable": unreachable,
+        "pending": pending,
+    }
+    for label, amount in counts.items():
+        if amount:
+            await _increment_by("wasla_payment_reconciliation_total", {"outcome": label}, amount)
+    if oldest_pending_seconds > 0:
+        metric = "wasla_oldest_pending_payment_age_seconds"
+        await _observe(metric, {}, oldest_pending_seconds, REDIS_HISTOGRAMS[metric][2])
+
+
 async def read_redis_counters(redis: Redis) -> dict[str, list[tuple[dict[str, str], float]]]:
     """Every cross-process counter, ready to render.
 
@@ -650,6 +718,7 @@ __all__ = [
     "read_redis_counters",
     "read_redis_histograms",
     "record_job_outcome",
+    "record_payment_reconciliation",
     "record_provider_call",
     "record_retention_pass",
     "record_upload_reconciliation",

@@ -44,6 +44,7 @@ from app.core.logging import get_logger
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import Plan, Subscription, SubscriptionStatus
 from app.db.models.invoice import (
+    CollectionState,
     Invoice,
     InvoiceStatus,
     Payment,
@@ -572,6 +573,18 @@ class CheckoutService:
         payment.provider_reference = event.provider_transaction_id
         payment.failure_reason = event.failure_reason
         payment.processed_at = now
+        if payment.is_unresolved_collection:
+            # An automatic attempt has just learned its outcome, so the invoice
+            # behind it stops being blocked. Written here rather than by the
+            # collection path because *this* is where the answer arrives - the
+            # charge request only ever asked (ADR-088).
+            #
+            # A callback that reaches a still-`claimed` attempt is unusual and
+            # not impossible: the worker committed its claim, was killed before
+            # marking it requested, and Paymob answered a request it had
+            # already received. Closing it is right in both cases, and the
+            # attempt count stays spent because a charge demonstrably happened.
+            payment.collection_state = CollectionState.SETTLED
 
         if not event.succeeded:
             return APPLIED, f"Payment {event.status.value}."

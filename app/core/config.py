@@ -533,6 +533,36 @@ class Settings(BaseSettings):
     # workspaces that were never given a chance to notice.
     billing_suspend_after_days: int = Field(default=30, ge=2)
 
+    # Reconciling collection attempts whose outcome nobody knows (ADR-088).
+    #
+    # How long an attempt must have been outstanding before reconciliation
+    # touches it. This is the whole of the concurrency story with the worker
+    # that made it: an attempt started thirty seconds ago belongs to a job
+    # that is very probably between its request and its finalisation, and
+    # asking Paymob about it there races a settlement that is about to happen
+    # anyway. Five minutes is far longer than the two calls a charge takes
+    # against a twenty-second timeout, and short enough that a callback that
+    # never arrives is chased within the hour.
+    billing_reconciliation_grace_seconds: float = Field(default=300.0, gt=0)
+    # How long one reconciler's claim on an attempt lasts. Written before the
+    # lookup, so it is a lease rather than a record: a second worker skips a
+    # row somebody is already asking about, and a worker that dies mid-lookup
+    # leaves one that becomes claimable again when this elapses - which is why
+    # there is no reaper for it.
+    billing_reconciliation_lease_seconds: float = Field(default=900.0, gt=0)
+    # How long Paymob must keep answering "no such reference" before that is
+    # believed. **This is a money decision, not a timeout.** A provider that
+    # has not finished indexing an event answers exactly as one that never
+    # received the request, and only elapsed time separates them - so an
+    # attempt is closed as never-sent, and its budget returned, after a full
+    # day of the same answer rather than on the first one. The invoice waits;
+    # it is not charged twice.
+    billing_reconciliation_abandon_after_seconds: float = Field(default=86_400.0, gt=0)
+    # How many attempts one pass resolves. Each costs a provider round trip,
+    # so this bounds how long a pass can run - and on a healthy deployment
+    # there is nothing here to find at all.
+    billing_reconciliation_batch_size: int = Field(default=50, gt=0, le=1_000)
+
     # Which processor collects money, if any (ADR-044). `manual` is the
     # existing behaviour and stays the default: it records what is owed and
     # waits for a human to confirm a bank transfer, which is how this product
@@ -576,6 +606,18 @@ class Settings(BaseSettings):
     # which is how this product billed before saved cards existed. With it,
     # `RecurringService` can debit a saved card when a renewal falls due.
     paymob_moto_integration_id: int | None = None
+    # The legacy API key, and a fourth Paymob credential rather than a spelling
+    # of one of the other three. Paymob's transaction-inquiry API authenticates
+    # with a bearer token minted from *this* key, not with the secret key that
+    # creates intentions - so a deployment can charge cards perfectly well and
+    # still be unable to ask what became of a charge.
+    #
+    # None is a supported state and not a misconfiguration: reconciliation
+    # then has no way to resolve an attempt whose callback never arrived, so
+    # the attempt stays unresolved, the invoice is never charged again, and
+    # the backlog is visible as `wasla_payment_reconciliation_total`. Slow is
+    # the safe direction; guessing is not (ADR-088).
+    paymob_api_key: str | None = None
     # Chooses the API host *and* the checkout host, which are different hosts.
     # There is deliberately no sandbox setting: Paymob's documentation states
     # that test and live share a regional base URL and the keys decide the

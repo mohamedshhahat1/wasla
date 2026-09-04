@@ -266,6 +266,10 @@ services:
       PAYMOB_HMAC_SECRET: ${PAYMOB_HMAC_SECRET:-}
       PAYMOB_INTEGRATION_IDS: ${PAYMOB_INTEGRATION_IDS:-}
       PAYMOB_MOTO_INTEGRATION_ID: ${PAYMOB_MOTO_INTEGRATION_ID:-}
+      # The credential the transaction-inquiry API takes, which is not the
+      # secret key. Without it a collection attempt whose callback never
+      # arrived cannot be resolved (ADR-088).
+      PAYMOB_API_KEY: ${PAYMOB_API_KEY:-}
       PAYMOB_REGION: ${PAYMOB_REGION:-egypt}
 
       # Dunning (ADR-061). Only the billing worker acts on these, and they are
@@ -448,6 +452,10 @@ services:
       PAYMOB_HMAC_SECRET: ${PAYMOB_HMAC_SECRET:-}
       PAYMOB_INTEGRATION_IDS: ${PAYMOB_INTEGRATION_IDS:-}
       PAYMOB_MOTO_INTEGRATION_ID: ${PAYMOB_MOTO_INTEGRATION_ID:-}
+      # The credential the transaction-inquiry API takes, which is not the
+      # secret key. Without it a collection attempt whose callback never
+      # arrived cannot be resolved (ADR-088).
+      PAYMOB_API_KEY: ${PAYMOB_API_KEY:-}
       PAYMOB_REGION: ${PAYMOB_REGION:-egypt}
 
       # Dunning (ADR-061). This is the process that acts on them.

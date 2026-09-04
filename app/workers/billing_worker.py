@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.core.telemetry import record_payment_reconciliation
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import Plan, Subscription, SubscriptionStatus
 from app.db.session import Database
@@ -42,6 +43,7 @@ from app.services.audit_service import AuditTrail
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
 from app.services.invoice_service import InvoiceService
+from app.services.payment_reconciliation_service import PaymentReconciler
 from app.services.recurring_service import MAX_COLLECTION_ATTEMPTS, RecurringService
 from app.services.subscription_service import roll_over
 
@@ -152,6 +154,12 @@ class BillingWorker:
         moment = now or datetime.now(UTC)
 
         handled = await self._advance_due(now=moment)
+        # Reconcile before collecting, and the order is the point. An attempt
+        # whose answer never arrived makes its invoice uncollectible, so
+        # resolving it first is what lets the same pass go on to charge - and
+        # resolving it *after* would mean an invoice waits a full period for a
+        # question that was answered ten milliseconds ago (ADR-088).
+        handled += await self._reconcile(now=moment)
         # Collect before chasing. An invoice a saved card settles this sweep
         # should never also produce a past-due notice in the same pass;
         # charging first means the callback has a chance to arrive and the
@@ -271,6 +279,71 @@ class BillingWorker:
                 },
             )
             return 1
+
+    async def _reconcile(self, *, now: datetime) -> int:
+        """Ask the provider about attempts whose answer never came back.
+
+        A phase rather than a loop of its own, and deliberately: an unresolved
+        attempt is a *billing* fact - it is the thing that makes an invoice
+        uncollectible - so the sweep that decides what to collect is the sweep
+        that should resolve it first. Splitting it out would mean the two ran
+        on unrelated schedules and an invoice sat blocked for the difference.
+
+        Not a queue job either, for the sharper reason the upload reconciler
+        gives (ADR-087): a job naming an attempt to reconcile would be lost by
+        exactly the failure it exists to recover from, because the process that
+        would have enqueued it is the one that died. The committed row is the
+        only record that survives, so a query over it is the only honest
+        recovery.
+
+        Silent and free when the deployment cannot ask - no provider, no
+        inquiry credential, or a provider that has no such API. The attempts
+        stay unresolved and visible rather than being guessed at.
+        """
+        provider = build_checkout_provider(self._settings)
+        if provider is None:
+            return 0
+
+        async with self._database.session() as session:
+            reconciler = PaymentReconciler(session=session, provider=provider)
+            if not reconciler.available:
+                return 0
+            outcome = await reconciler.run(
+                now=now,
+                grace_seconds=self._settings.billing_reconciliation_grace_seconds,
+                lease_seconds=self._settings.billing_reconciliation_lease_seconds,
+                abandon_after_seconds=(self._settings.billing_reconciliation_abandon_after_seconds),
+                limit=self._settings.billing_reconciliation_batch_size,
+            )
+            pending = await reconciler.unresolved_count()
+            oldest = await reconciler.oldest_unresolved_seconds(now=now)
+
+        await record_payment_reconciliation(
+            settled=outcome.settled,
+            failed=outcome.failed,
+            abandoned=outcome.abandoned,
+            still_pending=outcome.still_pending,
+            not_found=outcome.not_found,
+            unreachable=outcome.unreachable,
+            pending=pending,
+            oldest_pending_seconds=oldest,
+        )
+
+        if outcome.examined:
+            logger.info(
+                "billing.reconciliation_completed",
+                extra={
+                    "event": "billing.reconciliation_completed",
+                    "settled": outcome.settled,
+                    "failed": outcome.failed,
+                    "abandoned": outcome.abandoned,
+                    "still_pending": outcome.still_pending,
+                    "not_found": outcome.not_found,
+                    "unreachable": outcome.unreachable,
+                    "pending": pending,
+                },
+            )
+        return outcome.examined
 
     async def _collect_batch(self, *, now: datetime) -> int:
         """Take due renewals from saved cards, where that is possible at all.

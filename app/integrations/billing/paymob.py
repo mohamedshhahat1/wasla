@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import time
 from decimal import Decimal
 from typing import Any, Final
 
@@ -54,9 +55,12 @@ from app.integrations.billing.base import ProviderError
 from app.integrations.billing.checkout import (
     CallbackEvent,
     CallbackVerificationError,
+    ChargeInquiry,
+    ChargeNotSentError,
     CheckoutRequest,
     CheckoutSession,
     EventKind,
+    InquiryVerdict,
     RecurringUnavailableError,
     RefundOutcome,
     RefundRequest,
@@ -120,6 +124,32 @@ REFUND_PATH: Final = "/api/acceptance/void_refund/refund"
 # `payment_keys[0].key` from the response, then POST the card token and that
 # payment token here.
 PAY_PATH: Final = "/api/acceptance/payments/pay"
+# Asking what became of a reference we sent. Paymob's own published Postman
+# collection (github.com/PaymobAccept/API-Postman-Collections, "Transaction
+# Inquiry API", read 2026-09-04) documents exactly two steps and this
+# integration performs both:
+#
+#   POST /api/auth/tokens                       {"api_key": ...}   -> token
+#   POST /api/ecommerce/orders/transaction_inquiry
+#        Authorization: Bearer <token>          {"merchant_order_id": ...}
+#
+# `merchant_order_id` is the `special_reference` sent when the intention was
+# created, which is the payment id - so the question asked is keyed on an
+# identifier this system generated and committed before any money could move.
+#
+# **The credential is a different one.** This lookup takes the legacy API key
+# and a bearer token minted from it, not the `Token <secret_key>` header every
+# other call here uses. That is Paymob's design rather than a choice made
+# here, and it is why `can_inquire` is a separate question from
+# `can_charge_saved_methods`.
+INQUIRY_AUTH_PATH: Final = "/api/auth/tokens"
+INQUIRY_PATH: Final = "/api/ecommerce/orders/transaction_inquiry"
+INQUIRY: Final = "transaction_inquiry"
+INQUIRY_AUTH: Final = "inquiry_auth"
+# Paymob's auth token is documented as lasting an hour. Re-minted well inside
+# that, because a reconciliation pass that starts at fifty-nine minutes and
+# runs for two would otherwise fail on a token that expired mid-pass.
+AUTH_TOKEN_LIFETIME_SECONDS: Final = 45 * 60
 
 # The fields a *card token* callback is signed over, in the documented order.
 # A different set and therefore a different string from a transaction
@@ -360,6 +390,7 @@ class PaymobProvider:
         hmac_secret: str,
         integration_ids: list[int | str],
         moto_integration_id: int | None = None,
+        api_key: str | None = None,
         region: str = "egypt",
         notification_url: str | None = None,
         redirection_url: str | None = None,
@@ -382,6 +413,15 @@ class PaymobProvider:
         # - it exists solely so a renewal can be taken from a saved card, and
         # Paymob issues it as a distinct integration type.
         self._moto_integration_id = moto_integration_id
+        # The legacy API key, which is what the transaction-inquiry API takes -
+        # not the secret key, and not interchangeable with it. Optional,
+        # because a deployment can collect money perfectly well without being
+        # able to ask afterwards what became of a charge; what it cannot then
+        # do is reconcile one whose callback never arrived.
+        self._api_key = api_key
+        # The bearer token minted from it, with the moment it stops being
+        # usable. In memory only, and never logged.
+        self._auth: tuple[str, float] | None = None
         self._api_base, self._checkout_base = REGIONS[region]
         self._notification_url = notification_url
         self._redirection_url = redirection_url
@@ -520,7 +560,7 @@ class PaymobProvider:
         would be guessing. Both are checked because an error about the wrong
         key is exactly the error most likely to quote it.
         """
-        for secret in (self._secret_key, self._hmac_secret):
+        for secret in (self._secret_key, self._hmac_secret, self._api_key):
             if secret and secret in text:
                 text = text.replace(secret, "[redacted]")
         return text
@@ -561,8 +601,20 @@ class PaymobProvider:
             return httpx.AsyncClient(timeout=timeout, transport=self._transport)
         return build_guarded_client(timeout=timeout)
 
-    async def _post(self, path: str, body: dict[str, Any], *, operation: str) -> dict[str, Any]:
+    async def _post(
+        self,
+        path: str,
+        body: dict[str, Any],
+        *,
+        operation: str,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """One JSON POST, with the credential in exactly one place.
+
+        `headers` replaces the default `Token <secret_key>` authorization
+        rather than adding to it, and only the inquiry path passes it: that
+        API takes a bearer token minted from a different credential, and
+        sending both would put two secrets on one request.
 
         Every failure leaves as a `ProviderError` with the body truncated:
         Paymob quotes the request back in its errors, and this request carries
@@ -598,7 +650,11 @@ class PaymobProvider:
                     url,
                     json=body,
                     headers={
-                        "Authorization": f"Token {self._secret_key}",
+                        **(
+                            {"Authorization": f"Token {self._secret_key}"}
+                            if headers is None
+                            else headers
+                        ),
                         "Content-Type": "application/json",
                     },
                 )
@@ -842,6 +898,13 @@ class PaymobProvider:
         The *outcome* is not here: it arrives at the callback endpoint like any
         other payment, which is why this returns the provider's reference and
         nothing about success.
+
+        **Only the second request can move money**, and a failure in the first
+        leaves as `ChargeNotSentError` so a caller can tell the two apart.
+        Without that distinction every failed intention would have to be
+        treated as a card that may have been debited, and the invoice behind it
+        would wait for a lookup about a request that provably never left
+        (ADR-088).
         """
         if self._moto_integration_id is None:
             raise RecurringUnavailableError(
@@ -849,34 +912,45 @@ class PaymobProvider:
                 "merchant-initiated charges require."
             )
 
-        intention = await self._post(
-            INTENTION_PATH,
-            {
-                "amount": _to_cents(request.amount),
-                "currency": request.currency,
-                "payment_methods": [self._moto_integration_id],
-                "special_reference": request.reference,
-                "items": [
-                    {
-                        "name": request.description,
-                        "amount": _to_cents(request.amount),
-                        "quantity": 1,
-                    }
-                ],
-                "billing_data": {
-                    "email": UNKNOWN_BILLING_FIELD,
-                    "first_name": UNKNOWN_BILLING_FIELD,
-                    "last_name": UNKNOWN_BILLING_FIELD,
-                    "phone_number": UNKNOWN_BILLING_FIELD,
+        try:
+            intention = await self._post(
+                INTENTION_PATH,
+                {
+                    "amount": _to_cents(request.amount),
+                    "currency": request.currency,
+                    "payment_methods": [self._moto_integration_id],
+                    "special_reference": request.reference,
+                    "items": [
+                        {
+                            "name": request.description,
+                            "amount": _to_cents(request.amount),
+                            "quantity": 1,
+                        }
+                    ],
+                    "billing_data": {
+                        "email": UNKNOWN_BILLING_FIELD,
+                        "first_name": UNKNOWN_BILLING_FIELD,
+                        "last_name": UNKNOWN_BILLING_FIELD,
+                        "phone_number": UNKNOWN_BILLING_FIELD,
+                    },
+                    **(
+                        {"notification_url": self._notification_url}
+                        if self._notification_url
+                        else {}
+                    ),
                 },
-                **({"notification_url": self._notification_url} if self._notification_url else {}),
-            },
-            operation=MOTO_INTENTION,
-        )
+                operation=MOTO_INTENTION,
+            )
+        except ProviderError as error:
+            # Nothing financial has happened yet: creating an intention
+            # describes a payment, it does not take one. Re-raised with the
+            # same message and the same retryability so only the *class*
+            # changes, which is the one thing the caller needs.
+            raise ChargeNotSentError(str(error), retryable=error.retryable) from error
 
         payment_token = _first_payment_key(intention)
         if payment_token is None:
-            raise ProviderError("Paymob did not return a payment token for the saved card.")
+            raise ChargeNotSentError("Paymob did not return a payment token for the saved card.")
 
         paid = await self._post(
             PAY_PATH,
@@ -902,6 +976,133 @@ class PaymobProvider:
             },
         )
         return str(reference)
+
+    @property
+    def can_inquire(self) -> bool:
+        """Whether this deployment holds what the transaction lookup needs.
+
+        A different credential from every other call here: Paymob's inquiry
+        API takes the legacy API key and a bearer token minted from it, not
+        the secret key. So a perfectly working checkout integration may be
+        unable to ask what became of a charge, and that is a configuration
+        fact rather than a fault.
+
+        False is a supported state. An attempt whose outcome is unknown stays
+        unknown, no card is charged again, and the backlog is a metric an
+        operator can see - see `PaymentReconciler`.
+        """
+        return self._api_key is not None
+
+    async def inquire_charge(self, reference: str) -> ChargeInquiry:
+        """Ask Paymob what became of the charge sent under our own reference.
+
+        Two documented requests: a bearer token minted from the API key, then
+        the inquiry keyed on `merchant_order_id` - which is the
+        `special_reference` this system sent, which is the payment id. The
+        question is therefore asked about an identifier we generated and
+        committed before Paymob could move anything.
+
+        **Nothing here raises for an unreachable provider or an unknown
+        reference.** Both are answers, and they are opposite ones: a provider
+        that is down must never be read as a provider that never received the
+        request, because that reading re-charges every card in flight during
+        an outage. An exception would flatten them at the first `except`, so
+        they leave as verdicts instead.
+
+        A transaction that is found is translated by `_event` - the same
+        function that reads a callback - so that what Paymob says on a lookup
+        and what Paymob says on a webhook cannot come to mean different
+        things, and so both go through one settlement path.
+        """
+        if self._api_key is None:
+            return ChargeInquiry(verdict=InquiryVerdict.UNSUPPORTED)
+
+        try:
+            token = await self._auth_token()
+            payload = await self._post(
+                INQUIRY_PATH,
+                {"merchant_order_id": reference},
+                operation=INQUIRY,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        except ProviderError as error:
+            if error.retryable:
+                # No answer. Explicitly not "no transaction".
+                return ChargeInquiry(verdict=InquiryVerdict.UNREACHABLE)
+            if self._is_absent(error):
+                return ChargeInquiry(verdict=InquiryVerdict.NOT_FOUND)
+            # A refusal that is neither. Wrong credential, an API this
+            # merchant does not have - operationally a thing to fix, and never
+            # a licence to charge again, so it reads as "learned nothing".
+            logger.warning(
+                "billing.paymob_inquiry_refused",
+                extra={"event": "billing.paymob_inquiry_refused"},
+            )
+            return ChargeInquiry(verdict=InquiryVerdict.UNREACHABLE)
+
+        transaction = self._inquiry_transaction(payload)
+        if transaction is None:
+            # A 200 describing no transaction: the order exists, or does not,
+            # and either way nothing has been charged under it yet.
+            return ChargeInquiry(verdict=InquiryVerdict.NOT_FOUND)
+
+        event = self._event(transaction)
+        if event.kind is EventKind.PENDING:
+            return ChargeInquiry(verdict=InquiryVerdict.PENDING, event=event)
+        return ChargeInquiry(verdict=InquiryVerdict.ANSWERED, event=event)
+
+    async def _auth_token(self) -> str:
+        """A bearer token for the inquiry API, minted from the API key.
+
+        Cached for less than its documented hour, because a pass that starts
+        near the end of one would otherwise fail halfway through on an expiry
+        it could have avoided. Held in memory only: it is a bearer credential
+        with a short life, and a database is a worse place for it than a
+        process that will be restarted anyway.
+        """
+        now = time.monotonic()
+        cached = self._auth
+        if cached is not None and cached[1] > now:
+            return cached[0]
+
+        # No `Authorization` header: this request *is* the authentication, and
+        # sending the secret key with it would put a second credential on a
+        # call that does not need one.
+        payload = await self._post(
+            INQUIRY_AUTH_PATH,
+            {"api_key": self._api_key},
+            operation=INQUIRY_AUTH,
+            headers={},
+        )
+        token = payload.get("token")
+        if not isinstance(token, str) or not token:
+            raise ProviderError("Paymob did not return an inquiry token.")
+        self._auth = (token, now + AUTH_TOKEN_LIFETIME_SECONDS)
+        return token
+
+    @staticmethod
+    def _inquiry_transaction(payload: dict[str, Any]) -> dict[str, Any] | None:
+        """The transaction object out of an inquiry response, if there is one.
+
+        Paymob answers with the transaction itself. Read defensively and
+        through one field that must be present - a body with no `id` is not a
+        transaction whatever else it contains, and reading a shapeless
+        response as "found" would settle an invoice on nothing.
+        """
+        if payload.get("id") is None:
+            return None
+        return payload
+
+    @staticmethod
+    def _is_absent(error: ProviderError) -> bool:
+        """Whether a refusal means "no such reference" rather than something else.
+
+        Paymob answers 404 for an order it has no record of. Matched on the
+        status this integration writes into the message itself rather than on
+        provider prose, so a reworded error body cannot silently turn "we have
+        never heard of this" into "we could not tell", or the reverse.
+        """
+        return "(404)" in str(error)
 
     async def refund(self, request: RefundRequest) -> RefundOutcome:
         """Reverse a collected payment through the documented refund endpoint.

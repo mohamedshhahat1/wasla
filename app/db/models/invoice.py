@@ -32,6 +32,7 @@ from typing import Any, Final
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -40,6 +41,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -83,6 +85,61 @@ class PaymentStatus(StrEnum):
     REFUNDED = "refunded"
 
 
+class CollectionState(StrEnum):
+    """How far an *automatic* collection attempt got, which is not its status.
+
+    `PaymentStatus` answers "did money move", and for a renewal being debited
+    from a saved card that question has one answer for a long time: nobody
+    knows, because a provider decides it and says so on a callback. This
+    column answers the different question the collection protocol has to ask
+    before it may act - **may another charge be sent for this invoice** - and
+    the two are not the same. A payment can sit in `PENDING` for either of two
+    reasons that must never be confused: nothing has been sent yet, or
+    something has been sent and the answer is missing.
+
+    NULL for every payment that is not an automatic collection attempt. A
+    hosted checkout is somebody at a payment page, and nothing here applies to
+    it (ADR-088).
+
+    ``CLAIMED``
+        The attempt is durable and the provider has not been asked. Money
+        cannot have moved, because the move to `REQUESTED` commits before the
+        request is built. Safe to abandon and give the attempt back.
+
+    ``REQUESTED``
+        The provider was asked, or may have been. **Money may have moved.**
+        The only things that may resolve this are a signed callback and a
+        lookup by reference; nothing may send a second charge while an invoice
+        has one of these, which is enforced by a partial unique index rather
+        than by remembering to check.
+
+    ``SETTLED``
+        The outcome is known and recorded on the payment. Terminal.
+
+    ``ABANDONED``
+        The provider was shown to have never received the request, so this
+        attempt moved no money and closes without one. Terminal, and the only
+        state that returns an attempt to the budget.
+    """
+
+    CLAIMED = "claimed"
+    REQUESTED = "requested"
+    SETTLED = "settled"
+    ABANDONED = "abandoned"
+
+
+# The states in which nobody knows what an attempt did, and therefore the ones
+# that forbid another charge against the same invoice. Named once because the
+# claim query, the partial unique index and the reconciler all mean this set
+# and must not drift apart.
+UNRESOLVED_COLLECTION_STATES: Final[frozenset[CollectionState]] = frozenset(
+    {CollectionState.CLAIMED, CollectionState.REQUESTED}
+)
+
+# The same set as a SQL fragment, for the partial indexes that enforce it.
+_UNRESOLVED_SQL: Final = "collection_state IN ('claimed', 'requested')"
+
+
 # Statuses in which an invoice is finished and will not change again.
 TERMINAL_INVOICE_STATUSES: Final[frozenset[InvoiceStatus]] = frozenset(
     {
@@ -94,6 +151,7 @@ TERMINAL_INVOICE_STATUSES: Final[frozenset[InvoiceStatus]] = frozenset(
 
 INVOICE_STATUS_TYPE = _enum_type(InvoiceStatus, name="invoice_status")
 PAYMENT_STATUS_TYPE = _enum_type(PaymentStatus, name="payment_status")
+COLLECTION_STATE_TYPE = _enum_type(CollectionState, name="payment_collection_state")
 
 
 # Where one payment attempt may go from where it is. Written down because the
@@ -279,6 +337,39 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "idempotency_key",
             name="uq_payments_tenant_id_idempotency_key",
         ),
+        # **One invoice, at most one unresolved automatic attempt.** The
+        # constraint that closes WSL-01, and the reason it is an index rather
+        # than a check in a service: a second charge must be impossible while
+        # nobody knows what the first one did, and "impossible" is a property
+        # of the table. `SKIP LOCKED` cannot supply it - a lock belongs to a
+        # process, and the process this protects against is one that has
+        # stopped existing (ADR-088).
+        #
+        # Partial, so it constrains nothing once an attempt is settled or
+        # abandoned: an invoice may be tried three times, one at a time.
+        Index(
+            "uq_payments_unresolved_collection",
+            "invoice_id",
+            unique=True,
+            postgresql_where=text(_UNRESOLVED_SQL),
+        ),
+        # Reconciliation's only query: the oldest attempt nobody has resolved.
+        # Partial for the same reason retention's is - on a healthy deployment
+        # this index is empty, and a full one would be paid for on every
+        # payment written.
+        Index(
+            "ix_payments_unresolved_collection",
+            "created_at",
+            postgresql_where=text(_UNRESOLVED_SQL),
+        ),
+        # `collection_state` belongs to the automatic path and to nothing else.
+        # Stated as a constraint because the alternative is every reader
+        # deciding for itself whether a NULL means "not automatic" or "an
+        # automatic attempt written before this column existed".
+        CheckConstraint(
+            "(collection_state IS NULL) = (is_automatic IS FALSE)",
+            name="collection_state",
+        ),
         Index("ix_payments_tenant_id", "tenant_id"),
         Index("ix_payments_invoice_id", "invoice_id"),
         Index("ix_payments_status", "status"),
@@ -368,6 +459,23 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         ForeignKey("payment_methods.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # How far the automatic collection protocol got, which is a different
+    # question from `status` - see `CollectionState`. NULL for a hosted
+    # checkout, where somebody was at a payment page and none of this applies.
+    collection_state: Mapped[CollectionState | None] = mapped_column(
+        COLLECTION_STATE_TYPE,
+        nullable=True,
+    )
+    # When the provider was last asked what became of this attempt. Written
+    # before the lookup rather than after it, which makes it the lease as well
+    # as the record: a second reconciler skips a row somebody is already
+    # asking about, and a reconciler that dies mid-lookup leaves a row that
+    # becomes claimable again once the lease is older than the interval,
+    # without a reaper existing to notice.
+    reconciled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     @property
     def is_refundable(self) -> bool:
@@ -379,6 +487,18 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         disagree.
         """
         return self.status is PaymentStatus.SUCCEEDED and self.refunded_amount < self.amount
+
+    @property
+    def is_unresolved_collection(self) -> bool:
+        """Whether this attempt is one nobody yet knows the outcome of.
+
+        The question the collection path asks before charging and the
+        reconciler asks before looking. A property on the row for the reason
+        `is_refundable` is one: three copies of the same set membership is how
+        they come to disagree, and disagreeing about this one means charging a
+        card twice.
+        """
+        return self.collection_state in UNRESOLVED_COLLECTION_STATES
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
         return f"Payment(invoice_id={self.invoice_id!r}, status={self.status!r})"

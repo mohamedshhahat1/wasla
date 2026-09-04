@@ -32,6 +32,7 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from app.db.models.invoice import PaymentStatus
+from app.integrations.billing.base import ProviderError
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +293,100 @@ class SavedMethodCharge:
     description: str
 
 
+class InquiryVerdict(StrEnum):
+    """What a provider said when asked what became of one charge.
+
+    Six answers, and the distinctions between them are the point. Collapsing
+    any pair of them is how a reconciler either charges a card twice or leaves
+    a paid invoice open for ever.
+
+    ``ANSWERED``
+        The provider described a transaction. What it says the transaction
+        *did* is carried in the accompanying event and is decided by exactly
+        the same code that reads a callback, because it is the same object.
+
+    ``PENDING``
+        The provider knows about it and has not finished. Nothing to do but
+        ask again.
+
+    ``NOT_FOUND``
+        The provider has no record of this reference. That is evidence the
+        request never arrived - but only evidence, and never on its own a
+        licence to charge again: a provider that has not finished indexing an
+        event answers this way too, which is why the caller weighs it against
+        how long the attempt has been outstanding rather than acting on it.
+
+    ``UNREACHABLE``
+        Nothing was learned. **Not `NOT_FOUND`.** A provider that is down read
+        as one that never received the request would re-charge every card in
+        flight during an outage, which is the same class of mistake as reading
+        an object store's timeout as a missing object (ADR-087).
+
+    ``UNSUPPORTED``
+        This deployment cannot ask. A provider without the credential the
+        lookup needs, or a provider that has no such API. A configuration fact
+        rather than a failure, and the attempt stays where it is.
+    """
+
+    ANSWERED = "answered"
+    PENDING = "pending"
+    NOT_FOUND = "not_found"
+    UNREACHABLE = "unreachable"
+    UNSUPPORTED = "unsupported"
+
+
+@dataclass(frozen=True, slots=True)
+class ChargeInquiry:
+    """The answer to "what happened to the charge I called X?".
+
+    `event` is present only for `ANSWERED`, and it is deliberately the *same*
+    type a callback produces. A provider's answer about a transaction and a
+    provider's notification about that transaction are the same fact arriving
+    by two routes, so they are translated by one function and applied by one
+    settlement path - which is what makes a callback and a reconciler racing
+    for the same payment settle it exactly once rather than twice. See
+    `CheckoutService.apply`, whose `payment_events` insert decides the race.
+    """
+
+    verdict: InquiryVerdict
+    event: CallbackEvent | None = None
+
+    @property
+    def answered(self) -> bool:
+        return self.verdict is InquiryVerdict.ANSWERED and self.event is not None
+
+
+@runtime_checkable
+class ChargeInquiryProvider(Protocol):
+    """A provider that can be asked what became of a reference we sent it.
+
+    A fourth shape, separate for the same reason the other three are separate:
+    a provider may host a checkout, may debit a saved card, and may or may not
+    offer a way to ask about either afterwards - and the credential the lookup
+    needs is not necessarily the credential the charge needs.
+
+    Implementing this protocol is not the same as being able to use it, which
+    is why `can_inquire` exists beside it. A deployment that cannot ask is a
+    supported state: an attempt whose outcome is unknown simply stays unknown,
+    the invoice is not charged again, and the backlog is visible to an
+    operator. Slow is the safe direction here; guessing is not.
+    """
+
+    @property
+    def can_inquire(self) -> bool:
+        """Whether this deployment holds what the lookup needs."""
+        ...
+
+    async def inquire_charge(self, reference: str) -> ChargeInquiry:
+        """Ask what became of the charge sent under our own reference.
+
+        Never raises for an unreachable provider or an unknown reference:
+        both are answers a caller has to act on differently, and an exception
+        would flatten them into the same thing at the first `except`.
+        """
+        ...
+
+
 @runtime_checkable
 class RecurringProvider(Protocol):
     """A provider that can charge a card the customer already saved.
@@ -358,6 +453,22 @@ class CallbackVerificationError(Exception):
     Deliberately not an `ExternalServiceError`: nothing external failed. Either
     somebody forged a request, or the deployment's signing secret is wrong, and
     both are refusals rather than outages.
+    """
+
+
+class ChargeNotSentError(ProviderError):
+    """The money-moving request was never made, so no money can have moved.
+
+    Charging a saved card takes two requests: an intention is created, and
+    only then is the card debited. A failure in the first half is a failure
+    before anything financial happened, and a caller that could not tell it
+    from a failure in the second half would have to treat both as "a card may
+    have been charged" - stranding an invoice behind a lookup for a request
+    that provably never left.
+
+    A `ProviderError` subclass rather than a sibling, so every existing
+    `except ProviderError` keeps working and only the collection path, which
+    orders its handlers deliberately, sees the difference.
     """
 
 

@@ -35,7 +35,13 @@ from app.db.models.billing import (
     Subscription,
     SubscriptionStatus,
 )
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import (
+    CollectionState,
+    Invoice,
+    InvoiceStatus,
+    Payment,
+    PaymentStatus,
+)
 from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
 from app.db.models.tenant import Tenant
 from app.integrations.billing.paymob import PaymobProvider
@@ -47,6 +53,7 @@ from app.services.recurring_service import (
     NOT_DUE,
     NOT_SERVING,
     NOT_SUPPORTED,
+    OUTCOME_UNKNOWN,
     PROVIDER_REFUSED,
     RecurringService,
 )
@@ -481,13 +488,24 @@ async def test_the_last_attempt_schedules_nothing_further(db_session: AsyncSessi
     assert invoice.next_collection_at is None
 
 
-async def test_the_attempt_is_counted_before_the_provider_is_called(
+async def test_a_timed_out_charge_is_unknown_rather_than_failed(
     db_session: AsyncSession,
 ) -> None:
-    """A request that times out has still been made, and a scheme counts it.
+    """No answer is not an answer, and the attempt is counted either way.
 
-    Counting afterwards would let a provider that never answers be retried for
-    ever, which is the shape of an accidental duplicate charge.
+    The pay request - the one that moves money - times out here. Two things
+    have to be true afterwards and they used to conflict.
+
+    The attempt is counted, because a request that was not answered is not a
+    request that was not carried out, and a provider that never answers must
+    not be retried for ever. That was already the case.
+
+    And the payment stays `pending`, in `requested`, rather than being written
+    off as failed. Calling this a failure was the old behaviour and it was a
+    second bug wearing the first one's clothes: `failed -> succeeded` is not a
+    legal transition, so the callback that eventually reported the charge
+    Paymob had in fact taken could never settle the invoice, and the customer
+    would be chased for money they had already paid (ADR-088).
     """
     tenant, subscription, invoice = await _workspace(db_session)
 
@@ -505,8 +523,14 @@ async def test_the_attempt_is_counted_before_the_provider_is_called(
         transport=httpx.MockTransport(handler),
     ).collect(invoice, subscription=subscription, now=NOW)
 
-    assert outcome.reason == PROVIDER_REFUSED
+    assert outcome.reason == OUTCOME_UNKNOWN
     assert invoice.collection_attempts == 1
+
+    payment = await db_session.get(Payment, outcome.payment_id)
+    assert payment is not None
+    assert payment.status is PaymentStatus.PENDING, "an unanswered charge is not a refused one"
+    assert payment.collection_state is CollectionState.REQUESTED
+    assert payment.is_unresolved_collection, "reconciliation has to own this"
 
 
 async def test_two_sweeps_cannot_both_make_the_same_attempt(db_session: AsyncSession) -> None:

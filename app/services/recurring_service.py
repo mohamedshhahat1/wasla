@@ -22,6 +22,38 @@ The charge itself settles nothing. Like every other payment here, the outcome
 arrives on a signed callback, and `CheckoutService.apply` decides what it
 means - so an automatic renewal and a customer paying a link converge on
 exactly the same settlement path.
+
+## The order the writes happen in
+
+This used to be one transaction: claim, insert the payment, count the attempt,
+call Paymob, commit. A process that stopped existing between the call and the
+commit had moved a customer's money while PostgreSQL rolled back every record
+that it had, and the next sweep read an untouched invoice and charged the same
+card again (WSL-01). Neither guard helped: `SKIP LOCKED` protects against a
+second worker rather than a dying one, and the idempotency key lived on the row
+that was rolled back.
+
+So it is three transactions now, and the commits between them are the design
+rather than an implementation detail (ADR-088):
+
+    TX1   claim the invoice, insert the attempt, count it        -> COMMIT
+    TX2   mark it requested                                      -> COMMIT
+    --    call Paymob. No transaction open, no connection held,
+          no row locked.
+    TX3   record what came back                                  -> COMMIT
+
+**TX2 is what makes the difference between the two crash windows nameable.**
+Before it commits, a dying worker leaves an attempt nobody has been asked
+about, which is safe to close and hand its budget back. After it commits, a
+dying worker leaves an attempt that may have taken money, which nothing may
+touch until a callback or a lookup says what happened. Those are opposite
+answers, and the only thing separating them is a write that happens before the
+request is built.
+
+The remaining gap - dying between TX2's commit and the socket - resolves the
+safe way by construction: the attempt says a charge may have happened when it
+did not, and reconciliation discovers that from the provider rather than
+assuming it.
 """
 
 from __future__ import annotations
@@ -36,9 +68,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.models.billing import Subscription
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import (
+    CollectionState,
+    Invoice,
+    InvoiceStatus,
+    Payment,
+    PaymentStatus,
+)
 from app.integrations.billing.base import ProviderError
 from app.integrations.billing.checkout import (
+    ChargeNotSentError,
     RecurringProvider,
     RecurringUnavailableError,
     SavedMethodCharge,
@@ -88,6 +127,14 @@ NOT_COLLECTIBLE: Final = "not_collectible"
 ATTEMPTS_EXHAUSTED: Final = "attempts_exhausted"
 NOT_DUE: Final = "not_due"
 PROVIDER_REFUSED: Final = "provider_refused"
+# The provider was reached and would not accept the request, before anything
+# money-moving was sent. Distinct from `PROVIDER_REFUSED` only in being
+# transient: the attempt is given back rather than spent.
+NOT_SENT: Final = "not_sent"
+# No answer came back. **Not a failure** - the difference between this and
+# `PROVIDER_REFUSED` is the difference between an invoice that waits and a card
+# that is charged twice.
+OUTCOME_UNKNOWN: Final = "outcome_unknown"
 
 
 class RecurringService:
@@ -145,46 +192,86 @@ class RecurringService:
         if payment is None:
             return CollectionOutcome(charged=False, reason=NOT_DUE)
 
-        try:
-            reference = await provider.charge_saved_method(
-                SavedMethodCharge(
-                    # Our id, quoted home by the callback, exactly as at
-                    # checkout. The settlement path does not know or care that
-                    # nobody was watching.
-                    reference=str(payment.id),
-                    token=method.provider_token,
-                    amount=payment.amount,
-                    currency=payment.currency,
-                    description=f"{invoice.plan_code} plan",
-                )
-            )
-        except RecurringUnavailableError:
-            # The account cannot do this after all. The attempt is rolled back
-            # to `pending` with no provider reference, so nothing looks charged.
-            payment.failure_reason = "Automatic collection is not enabled for this account."
-            return CollectionOutcome(charged=False, reason=NOT_SUPPORTED, payment_id=payment.id)
-        except ProviderError as error:
-            payment.status = PaymentStatus.FAILED
-            payment.failure_reason = "The provider refused the automatic charge."
-            payment.processed_at = moment
-            logger.warning(
-                "billing.recurring_charge_failed",
-                extra={
-                    "event": "billing.recurring_charge_failed",
-                    "tenant_id": str(self._tenant_id),
-                    "invoice_id": str(invoice.id),
-                    "payment_id": str(payment.id),
-                    "retryable": error.retryable,
-                },
-            )
-            return CollectionOutcome(
-                charged=False,
-                reason=PROVIDER_REFUSED,
-                payment_id=payment.id,
-            )
+        # TX1 is durable from here. Everything below reads the payment through
+        # its own identity rather than through the invoice, because the invoice
+        # row is a snapshot from before these commits and nothing after this
+        # point needs it.
+        payment_id = payment.id
+        attempt = invoice.collection_attempts
+        charge = SavedMethodCharge(
+            # Our id, quoted home by the callback, exactly as at checkout, and
+            # committed before this object exists. The settlement path does not
+            # know or care that nobody was watching, and neither does
+            # reconciliation - the name is the same either way, and it does not
+            # change if this process is replaced.
+            reference=str(payment_id),
+            token=method.provider_token,
+            amount=payment.amount,
+            currency=payment.currency,
+            description=f"{invoice.plan_code} plan",
+        )
 
-        payment.provider_intent_reference = reference
-        await self._session.flush()
+        # TX2. "A charge may have been sent for this invoice" becomes a fact
+        # PostgreSQL holds, before anything can send one.
+        payment.collection_state = CollectionState.REQUESTED
+        await self._session.commit()
+
+        logger.info(
+            "billing.collection_provider_started",
+            extra={
+                "event": "billing.collection_provider_started",
+                "tenant_id": str(self._tenant_id),
+                "invoice_id": str(invoice.id),
+                "payment_id": str(payment_id),
+                "attempt": attempt,
+            },
+        )
+
+        try:
+            reference = await provider.charge_saved_method(charge)
+        except RecurringUnavailableError:
+            # The account cannot do this after all, and the check happens
+            # before any request leaves - so nothing was sent and the attempt
+            # is given back rather than counted.
+            return await self._abandon(
+                payment_id,
+                reason=NOT_SUPPORTED,
+                detail="Automatic collection is not enabled for this account.",
+            )
+        except ChargeNotSentError as error:
+            # The failure happened while describing the payment, before the
+            # request that moves money. Provably nothing was charged, so this
+            # attempt closes and its budget returns rather than blocking the
+            # invoice behind a lookup about a request that never left.
+            return await self._abandon(
+                payment_id,
+                reason=PROVIDER_REFUSED if not error.retryable else NOT_SENT,
+                detail="The provider would not accept the charge request.",
+            )
+        except ProviderError as error:
+            if error.retryable:
+                # A timeout, a reset connection, a 5xx: no answer came back,
+                # and a request that was not answered is not a request that was
+                # not carried out. **This is the branch that must not guess.**
+                # The attempt stays `requested` and unresolved, the invoice
+                # stays uncollectible, and reconciliation owns it from here.
+                return await self._leave_unknown(payment_id, invoice_id=invoice.id)
+            # A refusal, which is an answer. The provider read the request and
+            # would not perform it, so no money moved and the attempt is
+            # finished - the budget is spent, because the card was tried.
+            return await self._record_refusal(payment_id, invoice_id=invoice.id, now=moment)
+        except Exception:
+            # An exception nobody has classified. Treated exactly as an
+            # unanswered request, because that is the assumption whose worst
+            # case is a delay rather than a second debit.
+            return await self._leave_unknown(payment_id, invoice_id=invoice.id)
+
+        # TX3. The request was accepted; what it *did* is still the callback's
+        # to say, so the attempt stays `requested` and `pending`.
+        stored = await self._payments.get_by_id(payment_id)
+        if stored is not None:
+            stored.provider_intent_reference = reference
+            await self._session.commit()
 
         logger.info(
             "billing.recurring_charge_requested",
@@ -192,13 +279,115 @@ class RecurringService:
                 "event": "billing.recurring_charge_requested",
                 "tenant_id": str(self._tenant_id),
                 "invoice_id": str(invoice.id),
-                "payment_id": str(payment.id),
-                "attempt": invoice.collection_attempts,
-                "amount": str(payment.amount),
-                "currency": payment.currency,
+                "payment_id": str(payment_id),
+                "attempt": attempt,
+                "amount": str(charge.amount),
+                "currency": charge.currency,
             },
         )
-        return CollectionOutcome(charged=True, payment_id=payment.id)
+        return CollectionOutcome(charged=True, payment_id=payment_id)
+
+    async def _abandon(
+        self,
+        payment_id: uuid.UUID,
+        *,
+        reason: str,
+        detail: str,
+    ) -> CollectionOutcome:
+        """Close an attempt that provably never reached the provider.
+
+        The one path that returns an attempt to the budget, and it is only
+        reachable where the code knows no money-moving request was made: the
+        capability check, which runs before anything is sent, and a failure
+        while the payment was still being described. Everything else stays
+        unresolved.
+
+        The payment is marked `failed` rather than deleted - the history of a
+        renewal that could not be attempted is worth as much as the history of
+        one that was declined - but the invoice is put back exactly where it
+        was, so the customer is not charged one attempt for a request that was
+        never made.
+        """
+        payment = await self._payments.get_by_id(payment_id)
+        if payment is None:  # pragma: no cover - it was committed a moment ago
+            return CollectionOutcome(charged=False, reason=reason)
+
+        payment.status = PaymentStatus.FAILED
+        payment.collection_state = CollectionState.ABANDONED
+        payment.failure_reason = detail
+        invoice = await self._invoices.get_by_id(payment.invoice_id)
+        if invoice is not None and invoice.collection_attempts > 0:
+            invoice.collection_attempts -= 1
+            invoice.next_collection_at = None
+        await self._session.commit()
+
+        logger.info(
+            "billing.collection_attempt_abandoned",
+            extra={
+                "event": "billing.collection_attempt_abandoned",
+                "tenant_id": str(self._tenant_id),
+                "payment_id": str(payment_id),
+                "reason": reason,
+            },
+        )
+        return CollectionOutcome(charged=False, reason=reason, payment_id=payment_id)
+
+    async def _leave_unknown(
+        self,
+        payment_id: uuid.UUID,
+        *,
+        invoice_id: uuid.UUID,
+    ) -> CollectionOutcome:
+        """Leave an attempt whose outcome nobody knows exactly where it is.
+
+        Deliberately writes almost nothing. The attempt is already durable and
+        already says `requested`, which is the whole of what is true: a request
+        was made and no answer came back. Marking it `failed` here would be the
+        old bug wearing different clothes - a payment the callback could then
+        never settle, because `failed -> succeeded` is not a legal move.
+
+        The attempt is *not* returned to the budget. A request that may have
+        landed has been made, and a scheme counts it.
+        """
+        logger.warning(
+            "billing.collection_outcome_unknown",
+            extra={
+                "event": "billing.collection_outcome_unknown",
+                "tenant_id": str(self._tenant_id),
+                "invoice_id": str(invoice_id),
+                "payment_id": str(payment_id),
+            },
+        )
+        return CollectionOutcome(charged=False, reason=OUTCOME_UNKNOWN, payment_id=payment_id)
+
+    async def _record_refusal(
+        self,
+        payment_id: uuid.UUID,
+        *,
+        invoice_id: uuid.UUID,
+        now: datetime,
+    ) -> CollectionOutcome:
+        """Record a charge the provider read and would not perform."""
+        payment = await self._payments.get_by_id(payment_id)
+        if payment is None:  # pragma: no cover - it was committed a moment ago
+            return CollectionOutcome(charged=False, reason=PROVIDER_REFUSED)
+
+        payment.status = PaymentStatus.FAILED
+        payment.collection_state = CollectionState.SETTLED
+        payment.failure_reason = "The provider refused the automatic charge."
+        payment.processed_at = now
+        await self._session.commit()
+
+        logger.warning(
+            "billing.recurring_charge_failed",
+            extra={
+                "event": "billing.recurring_charge_failed",
+                "tenant_id": str(self._tenant_id),
+                "invoice_id": str(invoice_id),
+                "payment_id": str(payment_id),
+            },
+        )
+        return CollectionOutcome(charged=False, reason=PROVIDER_REFUSED, payment_id=payment_id)
 
     def _refusal(
         self,
@@ -233,13 +422,28 @@ class RecurringService:
         method_id: uuid.UUID,
         now: datetime,
     ) -> Payment | None:
-        """Take this attempt, or discover that another worker already has.
+        """Take this attempt durably, or discover that somebody already has.
 
-        The claim is a payment row whose idempotency key names the invoice and
-        the attempt number, so two workers sweeping at once cannot both charge:
-        one inserts and the other hits `UNIQUE(tenant_id, idempotency_key)`.
-        Counting the attempt *before* the provider is called is deliberate - a
-        request that times out has still been made, and a scheme counts it.
+        Two database constraints decide this rather than any check written
+        here, and they answer two different questions:
+
+        `UNIQUE(tenant_id, idempotency_key)` on `auto:{invoice}:{attempt}` says
+        one attempt number is claimed once. `uq_payments_unresolved_collection`
+        - partial and on `invoice_id` alone - says **an invoice may have at
+        most one attempt whose outcome nobody knows**, which is the constraint
+        that closes WSL-01. The first stops two workers claiming attempt three;
+        the second stops anybody starting attempt three while attempt two may
+        already have taken the money.
+
+        Counting the attempt before the provider is called is deliberate and
+        unchanged: a request that times out has still been made, and a scheme
+        counts it. What is new is that the count and the row are durable before
+        anything can be sent, and that a request which provably never left
+        hands the count back (`_abandon`).
+
+        **This commits.** The claim is worth nothing uncommitted - that was the
+        defect - so the transaction ends here and the caller resumes in a new
+        one holding a payment that PostgreSQL already knows about.
         """
         attempt = invoice.collection_attempts + 1
         key = f"auto:{invoice.id}:{attempt}"
@@ -257,6 +461,7 @@ class RecurringService:
                 )
                 payment.is_automatic = True
                 payment.payment_method_id = method_id
+                payment.collection_state = CollectionState.CLAIMED
                 await self._session.flush()
         except IntegrityError:
             logger.info(
@@ -271,7 +476,18 @@ class RecurringService:
 
         invoice.collection_attempts = attempt
         invoice.next_collection_at = self._next_attempt_at(attempt, now=now)
-        await self._session.flush()
+        await self._session.commit()
+
+        logger.info(
+            "billing.collection_attempt_created",
+            extra={
+                "event": "billing.collection_attempt_created",
+                "tenant_id": str(self._tenant_id),
+                "invoice_id": str(invoice.id),
+                "payment_id": str(payment.id),
+                "attempt": attempt,
+            },
+        )
         return payment
 
     @staticmethod

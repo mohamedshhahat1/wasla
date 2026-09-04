@@ -25,34 +25,45 @@ changed:
 gone. The idempotency key does not help either: it lived on the row that was
 rolled back. Nothing that is only written inside the transaction can survive
 the transaction not committing, which is why the fix is an ordering change
-rather than a stronger lock.
+rather than a stronger lock (ADR-088).
 
 What is asserted here is the provider's own call count. The payment table
 cannot see this failure - it records one attempt in both the broken and the
 fixed world - and a ledger that agrees with itself while disagreeing with the
 bank is precisely the shape of the bug.
 
-## Where this file is in its life
+## The two drills
 
-Right now it holds the **reproduction**: assertions that describe the defect,
-so that a fix has something to invert. That is deliberate and temporary. When
-the durable collection protocol lands, every number here changes and this file
-becomes the regression suite that keeps it closed.
+`test_a_crash_after_the_charge_does_not_charge_again` injects the failure by
+losing the transaction that was open when the provider returned.
+Deterministic, fast, runs in CI, and produces exactly the state a killed
+process leaves behind.
+
+`test_a_killed_worker_does_not_let_the_next_sweep_charge_again` kills a real
+child process instead. Less precise about *where* it dies, and it is the only
+version that proves no `finally`, no context manager and no rollback of ours is
+what makes this safe - the same argument `test_media_crash_recovery.py` makes
+for object writes.
 """
 
 from __future__ import annotations
 
+import asyncio
+import os
 import secrets
+import sys
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import Settings
@@ -63,7 +74,7 @@ from app.db.models.billing import (
     Subscription,
     SubscriptionStatus,
 )
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment
+from app.db.models.invoice import CollectionState, Invoice, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
 from app.db.models.tenant import Tenant
 from app.integrations.billing.checkout import SavedMethodCharge
@@ -72,6 +83,12 @@ from app.workers.billing_worker import BillingWorker
 from tests.fakes import as_database
 
 pytestmark = pytest.mark.integration
+
+CHILD = Path(__file__).with_name("interrupted_collection_child.py")
+# Generous: what is being waited for is somebody else's Python starting up, and
+# a timeout here is a failed test rather than a flaky assertion - the parent has
+# nothing to assert until the child has spoken.
+CHILD_TIMEOUT_SECONDS = 120
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
 PERIOD_START = datetime(2026, 8, 1, tzinfo=UTC)
@@ -282,24 +299,95 @@ async def _invoice(
 # ------------------------------------------------------- the injected crash
 
 
-async def test_a_crash_after_the_charge_charges_the_card_again(
+async def test_a_crash_after_the_charge_does_not_charge_again(
     committing: async_sessionmaker[AsyncSession],
     workspace: tuple[uuid.UUID, uuid.UUID],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The defect, executed. **These assertions are the bug, not the contract.**
+    """GATE: one invoice, one crash, one charge.
 
-    They say what this code does today so that the fix has something to
-    invert, in the same way `test_media_write_atomicity.py` was written
-    against the orphan before ADR-087 closed it. When the collection protocol
-    commits its attempt before reaching Paymob, every number below changes and
-    this test is rewritten to demand the opposite.
+    This is the assertion the reproduction inverted. Before ADR-088 two
+    money-moving requests left here for one 100.00 EGP invoice under two
+    different references, and the ledger recorded one of them.
+    """
+    tenant_id, _ = workspace
+    sessions = Sessions(committing)
+    sessions.die_after_charging = True
+    provider = ChargeRecorder(sessions)
+    monkeypatch.setattr(worker_module, "build_checkout_provider", lambda settings: provider)
 
-    Two charges leave here for one 100.00 EGP invoice, under two different
-    references, both calling themselves attempt 1 - and the payment table ends
-    up recording one of them. That last part is what makes this expensive to
-    find in production: nothing in Wasla's own data disagrees with itself. The
-    only place the second charge is visible is the customer's statement.
+    await _worker(sessions).run_once(now=NOW)
+    assert sessions.died == 1, "the drill did not lose the transaction it meant to"
+    assert len(provider.charges) == 1, "the sweep should have reached the provider once"
+
+    # A replacement worker, on exactly the state the dead one left behind.
+    await _worker(Sessions(committing)).run_once(now=NOW)
+
+    assert (
+        len(provider.charges) == 1
+    ), f"the card was charged {len(provider.charges)} times for one invoice: {provider.charges}"
+    assert AMOUNT * len(provider.charges) == AMOUNT, "one bill, one debit"
+
+    rows = await _payments(committing, tenant_id)
+    assert len(rows) == 1, "one logical attempt is one durable payment row"
+    assert (
+        str(rows[0].id) == provider.charges[0]
+    ), "the reference Paymob was given must name a row that still exists"
+
+
+async def test_the_attempt_is_committed_before_the_provider_call(
+    committing: async_sessionmaker[AsyncSession],
+    workspace: tuple[uuid.UUID, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GATE: the ordering itself, observed from outside the worker's transaction.
+
+    The provider double reads the payments table on a *separate* connection
+    while the charge is in flight. A row it can see there is a row that is
+    committed, because nothing else could make it visible to another
+    transaction - which is the whole invariant: PostgreSQL knows the attempt
+    exists before Paymob is asked to move money.
+    """
+    tenant_id, _ = workspace
+    seen: list[tuple[str, str]] = []
+
+    class Observing(ChargeRecorder):
+        async def charge_saved_method(self, charge: SavedMethodCharge) -> str:
+            async with committing() as watcher:
+                rows = await watcher.execute(
+                    select(Payment.id, Payment.collection_state).where(
+                        Payment.tenant_id == tenant_id
+                    )
+                )
+                seen.extend((str(pid), str(state)) for pid, state in rows.all())
+            return await super().charge_saved_method(charge)
+
+    provider = Observing()
+    monkeypatch.setattr(worker_module, "build_checkout_provider", lambda settings: provider)
+
+    await _worker(Sessions(committing)).run_once(now=NOW)
+
+    assert len(provider.charges) == 1
+    assert (
+        len(seen) == 1
+    ), "another transaction could not see the attempt while Paymob was being called"
+    payment_id, state = seen[0]
+    assert payment_id == provider.charges[0], "the committed row is the one Paymob was told about"
+    assert (
+        state == CollectionState.REQUESTED.value
+    ), "'a charge may have been sent' has to be durable before one can be"
+
+
+async def test_a_crashed_attempt_keeps_its_reference(
+    committing: async_sessionmaker[AsyncSession],
+    workspace: tuple[uuid.UUID, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restart does not invent a second name for one logical attempt.
+
+    The audit's reproduction showed two charges under two different references,
+    which is what makes a duplicate unattributable: neither Paymob nor Wasla
+    can tell that the two describe one invoice.
     """
     tenant_id, _ = workspace
     sessions = Sessions(committing)
@@ -309,21 +397,186 @@ async def test_a_crash_after_the_charge_charges_the_card_again(
 
     await _worker(sessions).run_once(now=NOW)
 
-    assert sessions.died == 1, "the drill did not lose the transaction it meant to"
-
-    # The reproduction. Two money-moving requests for one invoice.
-    assert len(provider.charges) == 2, "WSL-01 did not reproduce"
-    assert len(set(provider.charges)) == 2, "and under two different references"
-
     rows = await _payments(committing, tenant_id)
-    assert len(rows) == 1, "the ledger records one of the two"
-    assert str(rows[0].id) == provider.charges[1], "the first charge left no row at all"
+    assert len(rows) == 1
+    assert provider.charges == [str(rows[0].id)]
+    assert rows[0].status is PaymentStatus.PENDING, "nobody knows what it did yet"
+    assert rows[0].collection_state is CollectionState.REQUESTED
 
     invoice = await _invoice(committing, tenant_id)
-    assert invoice.collection_attempts == 1, "and one attempt, having made two"
-    assert invoice.status is InvoiceStatus.OPEN
+    assert invoice.collection_attempts == 1, "the attempt the provider was told about was counted"
+    assert invoice.status is InvoiceStatus.OPEN, "a request is not a settlement"
 
-    # Stated in the units that matter. The card was debited twice for a bill
-    # that was issued once.
-    assert AMOUNT * len(provider.charges) == Decimal("200.00")
-    assert invoice.amount_due == AMOUNT
+
+async def test_an_unresolved_attempt_blocks_the_next_charge(
+    committing: async_sessionmaker[AsyncSession],
+    workspace: tuple[uuid.UUID, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GATE: the invoice stays uncollectible while the outcome is unknown.
+
+    Not for one sweep - for every sweep, and however far past the retry
+    schedule the clock has moved. A due date is not a licence to charge; the
+    state of the last attempt decides.
+    """
+    tenant_id, _ = workspace
+    sessions = Sessions(committing)
+    sessions.die_after_charging = True
+    monkeypatch.setattr(
+        worker_module, "build_checkout_provider", lambda settings: ChargeRecorder(sessions)
+    )
+    await _worker(sessions).run_once(now=NOW)
+
+    async with committing() as session:
+        rows = await session.execute(select(Invoice).where(Invoice.tenant_id == tenant_id))
+        invoice = rows.scalars().one()
+        invoice.next_collection_at = NOW - timedelta(days=30)
+        await session.commit()
+
+    later = ChargeRecorder()
+    monkeypatch.setattr(worker_module, "build_checkout_provider", lambda settings: later)
+    for _ in range(3):
+        await _worker(Sessions(committing)).run_once(now=NOW + timedelta(days=40))
+
+    assert later.charges == [], "a due date charged a card whose last outcome is unknown"
+    assert len(await _payments(committing, tenant_id)) == 1
+
+
+async def test_a_second_unresolved_attempt_cannot_be_written_at_all(
+    committing: async_sessionmaker[AsyncSession],
+    workspace: tuple[uuid.UUID, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GATE: the constraint, not the query.
+
+    Everything above stops a second charge by asking first. This asserts what
+    holds underneath when a future edit forgets to ask: a second unresolved
+    attempt against one invoice is refused by PostgreSQL, not by a service.
+    """
+    tenant_id, _ = workspace
+    sessions = Sessions(committing)
+    sessions.die_after_charging = True
+    monkeypatch.setattr(
+        worker_module, "build_checkout_provider", lambda settings: ChargeRecorder(sessions)
+    )
+    await _worker(sessions).run_once(now=NOW)
+
+    rows = await _payments(committing, tenant_id)
+    assert len(rows) == 1
+    existing = rows[0]
+
+    with pytest.raises(IntegrityError):
+        async with committing() as session:
+            session.add(
+                Payment(
+                    tenant_id=tenant_id,
+                    invoice_id=existing.invoice_id,
+                    status=PaymentStatus.PENDING,
+                    amount=AMOUNT,
+                    currency="EGP",
+                    provider="paymob",
+                    is_automatic=True,
+                    collection_state=CollectionState.CLAIMED,
+                    idempotency_key=f"auto:{existing.invoice_id}:99",
+                )
+            )
+            await session.commit()
+
+
+# ------------------------------------------------------------ the real kill
+
+
+async def test_a_killed_worker_does_not_let_the_next_sweep_charge_again(
+    committing: async_sessionmaker[AsyncSession],
+    prepared_database: str,
+    workspace: tuple[uuid.UUID, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GATE: a real process is killed with the money already gone.
+
+    Everything above injects the failure by losing a transaction, which is
+    honest about the state it produces and tidier than the real thing about how
+    it gets there. This one starts a real Python process, waits for it to say
+    the charge has been made, and terminates it from outside - holding an open
+    connection, mid-unit-of-work, with nothing to catch it. `kill()` is
+    `TerminateProcess` on Windows and `SIGKILL` on POSIX, and neither is
+    catchable.
+
+    The child charges through a double that reports to *this* process over a
+    socket, so the count of money-moving requests survives the process that
+    made them. That is the point: once the child is gone, the only two things
+    that know a charge happened are this test and PostgreSQL - and PostgreSQL
+    knowing is the whole of ADR-088.
+    """
+    tenant_id, _ = workspace
+
+    charges: list[str] = []
+    ready = asyncio.Event()
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # One line per charge: the reference. The smallest protocol that
+        # answers the only question - how many times did money move, and for
+        # which attempt.
+        raw = await reader.readline()
+        charges.append(raw.decode().strip())
+        ready.set()
+        writer.close()
+
+    server = await asyncio.start_server(handle, host="127.0.0.1", port=0)
+    port = server.sockets[0].getsockname()[1]
+
+    root = Path(__file__).parents[2]
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "WASLA_CHILD_DATABASE_URL": prepared_database,
+            "WASLA_CHILD_TENANT_ID": str(tenant_id),
+            "WASLA_CHILD_CHARGE_PORT": str(port),
+            # A script's `sys.path[0]` is its own directory, so without this the
+            # child imports whichever `app` an editable install points at -
+            # which in a worktree is a different checkout entirely.
+            "PYTHONPATH": str(root),
+        }
+    )
+
+    async with server:
+        child = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(CHILD),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=environment,
+            cwd=str(root),
+        )
+        try:
+            async with asyncio.timeout(CHILD_TIMEOUT_SECONDS):
+                await ready.wait()
+            # Killed here: the charge has been made and nothing has recorded
+            # its outcome.
+            child.kill()
+        except TimeoutError:
+            child.kill()
+            stderr = b"" if child.stderr is None else await child.stderr.read()
+            pytest.fail(f"the child never charged: {stderr.decode(errors='replace')}")
+        finally:
+            await child.wait()
+
+    assert child.returncode != 0, "the child was supposed to be killed, not to exit"
+    assert len(charges) == 1
+
+    # What the dead worker left behind is enough to say a charge may have
+    # happened.
+    rows = await _payments(committing, tenant_id)
+    assert len(rows) == 1, "the attempt outlived the process that made it"
+    assert str(rows[0].id) == charges[0]
+    assert rows[0].collection_state is CollectionState.REQUESTED
+
+    # And a replacement worker does not send another.
+    provider = ChargeRecorder()
+    monkeypatch.setattr(worker_module, "build_checkout_provider", lambda settings: provider)
+    await _worker(Sessions(committing)).run_once(now=NOW)
+
+    assert (
+        provider.charges == []
+    ), "a replacement worker charged a card whose outcome is still unknown"
+    assert len(await _payments(committing, tenant_id)) == 1
