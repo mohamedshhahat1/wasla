@@ -189,12 +189,19 @@ class MediaWorker:
 
     async def _handle(self, job: MediaJob) -> None:
         async with self._database.session() as session:
-            media = await MediaRepository(session, tenant_id=job.tenant_id).get_by_id(job.media_id)
-            if media is None:
-                # The message was deleted, or the job outlived its workspace.
-                # Nothing to read and nobody to answer.
-                logger.warning("media.row_missing", extra={"media_id": str(job.media_id)})
-                return
+            # `require_by_id` rather than a `None` check that returned quietly,
+            # and the difference is the enqueue-before-commit race (ADR-089).
+            # The webhook enqueues this job inside the transaction that created
+            # the media row, so a worker can arrive before the row is visible -
+            # and returning successfully there released the job, leaving the
+            # customer's photograph never downloaded, never read, and never
+            # answered, with nothing written down anywhere. Raising hands the
+            # decision to the retry policy: attempt one asks again two seconds
+            # later, and a row that is genuinely gone dead-letters on attempt
+            # two where an operator can see it.
+            media = await MediaRepository(session, tenant_id=job.tenant_id).require_by_id(
+                job.media_id
+            )
 
             async with (
                 build_whatsapp_client() as whatsapp_http,

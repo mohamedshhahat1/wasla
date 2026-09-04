@@ -110,6 +110,28 @@ RETRYABLE: Final[frozenset[FailureCategory]] = frozenset(
 # nothing at all.
 NEEDS_OPERATOR: Final[frozenset[FailureCategory]] = frozenset({FailureCategory.UNCERTAIN_DELIVERY})
 
+# Categories that mean one thing on the first attempt and another on the
+# second. There is exactly one, and it exists because every Redis queue in this
+# system is fed from *inside* an uncommitted transaction: the webhook handler
+# enqueues an agent job and `CommittingRoute` commits after the handler returns,
+# and the upload handler does the same with an ingestion job. A worker blocked
+# on `BLMOVE` can therefore receive a job naming a row that is real, is about to
+# be visible, and is not visible yet - and the scoped repository answers that
+# with `TenantIsolationError`, which classifies as `not_found`.
+#
+# `not_found` is *not* in `RETRYABLE` and must not be: a row that is genuinely
+# gone fails identically forever, and retrying it four more times spends the
+# budget a transient failure needs. But the first attempt is different in kind
+# from the ones after it. The producer's commit lands microseconds to tens of
+# milliseconds after the enqueue, so one retry a couple of seconds later asks
+# the question again on the far side of that window: a row that was mid-commit
+# is there, and a row that never existed is still missing and stops for good.
+#
+# The whole set is one category, per policy, retried once. It is deliberately
+# not a wider door: a policy that carries it still refuses it on attempt two,
+# so the failure remains bounded (ADR-089).
+FIRST_ATTEMPT_TRANSIENT: Final[frozenset[FailureCategory]] = frozenset({FailureCategory.NOT_FOUND})
+
 
 def classify(error: BaseException) -> FailureCategory:
     """Name the failure.
@@ -170,6 +192,13 @@ class RetryPolicy:
     # that lands *earlier* than the backoff intended is the one thing the
     # backoff was there to prevent.
     jitter_ratio: float = 0.25
+    # Categories this policy retries on the **first attempt only**, on top of
+    # `RETRYABLE`. Empty by default, so a policy has to ask for the behaviour
+    # rather than inherit it - `NO_RETRY` in particular must never acquire it,
+    # because the only reason a policy is `NO_RETRY` is that the turn already
+    # engaged a provider (ADR-068), and a second attempt there is a second
+    # reply on a customer's phone.
+    first_attempt_transient: frozenset[FailureCategory] = frozenset()
 
     def __post_init__(self) -> None:
         if self.max_attempts < 1:
@@ -182,8 +211,18 @@ class RetryPolicy:
             raise ValueError("jitter_ratio must be in [0, 1)")
 
     def should_retry(self, category: FailureCategory, *, attempt: int) -> bool:
-        """Whether attempt `attempt` may be followed by another one."""
-        return category in RETRYABLE and attempt < self.max_attempts
+        """Whether attempt `attempt` may be followed by another one.
+
+        Two doors, and the second is narrower than the first. `RETRYABLE` is
+        open for the whole budget; `first_attempt_transient` is open once, on
+        attempt one, and shut from attempt two onwards - which is what keeps a
+        row that genuinely does not exist from being asked about forever.
+        """
+        if attempt >= self.max_attempts:
+            return False
+        if category in RETRYABLE:
+            return True
+        return attempt == 1 and category in self.first_attempt_transient
 
     def delay_for(self, attempt: int, *, jitter: float) -> float:
         """Seconds to wait before attempt `attempt + 1`.
@@ -204,7 +243,16 @@ class RetryPolicy:
 # half a minute of transient tolerance, which covers a provider blip and a
 # database failover without covering a provider outage - that is what the
 # dead-letter list is for.
-IDEMPOTENT_RETRY: Final = RetryPolicy(max_attempts=5, base_seconds=2.0, max_seconds=60.0)
+#
+# Both queues it serves are enqueued from inside the transaction that created
+# the row the job names, so both can meet a row that is committing, hence the
+# one-shot door above.
+IDEMPOTENT_RETRY: Final = RetryPolicy(
+    max_attempts=5,
+    base_seconds=2.0,
+    max_seconds=60.0,
+    first_attempt_transient=FIRST_ATTEMPT_TRANSIENT,
+)
 
 # Refuses to retry at all: attempt 1 is already the last one. Used where the
 # work has a side effect that repeating would duplicate.
@@ -212,6 +260,7 @@ NO_RETRY: Final = RetryPolicy(max_attempts=1, base_seconds=1.0, max_seconds=1.0)
 
 
 __all__ = [
+    "FIRST_ATTEMPT_TRANSIENT",
     "IDEMPOTENT_RETRY",
     "NEEDS_OPERATOR",
     "NO_RETRY",

@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.exceptions import TenantIsolationError
 from app.core.storage import LocalMediaStorage
 from app.db.models.conversation import (
     Contact,
@@ -271,16 +272,25 @@ async def test_an_oversized_file_is_skipped_and_still_releases_the_reply(
     assert len(agents.jobs) == 1
 
 
-async def test_a_job_for_a_row_that_is_gone_does_nothing(
+async def test_a_job_for_a_row_that_is_gone_refuses_rather_than_returning(
     db_session: AsyncSession, tmp_path: Path, settings: Settings
 ) -> None:
-    """The message was deleted, or the job outlived its workspace."""
+    """The message was deleted, or the job outlived its workspace.
+
+    This used to log and return, which released the job. That reading was
+    wrong for the case it could not tell apart: a row not visible *yet*,
+    because the webhook enqueues inside the transaction that created it. So
+    the miss is raised and the retry policy decides - one more look, then a
+    dead-letter record an operator can see (ADR-089). What must not change is
+    what follows it: no agent is asked to answer a file nobody read.
+    """
     tenant, _ = await _conversation(db_session)
     worker = _worker(db_session, tmp_path, settings)
 
     import uuid as _uuid
 
-    await worker._handle(MediaJob(tenant_id=tenant.id, media_id=_uuid.uuid4()))
+    with pytest.raises(TenantIsolationError):
+        await worker._handle(MediaJob(tenant_id=tenant.id, media_id=_uuid.uuid4()))
 
     agents = worker._agents
     assert isinstance(agents, RecordingQueue)
@@ -293,14 +303,18 @@ async def test_a_job_from_another_workspace_finds_nothing(
     """Tenant isolation on the worker path, where no request context exists.
 
     The job carries a tenant id, and the repository is scoped to it. A job
-    naming another workspace's file must resolve to nothing rather than read it.
+    naming another workspace's file must resolve to nothing rather than read
+    it - and it resolves to nothing in exactly the way a row that does not
+    exist does, because whether it exists elsewhere is not a question this
+    worker is allowed to answer.
     """
     acme, acme_conversation = await _conversation(db_session, slug="acme")
     globex, _ = await _conversation(db_session, slug="globex")
     media = await _attachment(db_session, tenant=acme, conversation=acme_conversation)
 
     worker = _worker(db_session, tmp_path, settings)
-    await worker._handle(MediaJob(tenant_id=globex.id, media_id=media.id))
+    with pytest.raises(TenantIsolationError):
+        await worker._handle(MediaJob(tenant_id=globex.id, media_id=media.id))
 
     await db_session.refresh(media)
     assert media.status is MediaStatus.PENDING

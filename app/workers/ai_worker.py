@@ -53,6 +53,7 @@ from app.db.session import Database
 from app.integrations.openai.client import ResponsesClient, build_http_client
 from app.integrations.openai.embeddings import EmbeddingsClient
 from app.repositories.agent_repository import AgentRepository
+from app.repositories.conversation_repository import ConversationRepository
 from app.services.entitlement_service import EntitlementService
 from app.services.messaging_service import MessagingService
 from app.services.sentiment_reader import SentimentAnalyzer
@@ -72,7 +73,12 @@ from app.workers.queue import (
     JobEnvelope,
     MalformedJobError,
 )
-from app.workers.retry import NO_RETRY, FailureCategory, RetryPolicy
+from app.workers.retry import (
+    FIRST_ATTEMPT_TRANSIENT,
+    NO_RETRY,
+    FailureCategory,
+    RetryPolicy,
+)
 
 logger = get_logger(__name__)
 
@@ -87,7 +93,18 @@ JOB_TYPE = "agent"
 # policy can ever see are the ones raised before a turn engaged the provider,
 # and those are infrastructure blips that either clear in seconds or are not
 # clearing today.
-AGENT_RETRY = RetryPolicy(max_attempts=3, base_seconds=2.0, max_seconds=30.0)
+AGENT_RETRY = RetryPolicy(
+    max_attempts=3,
+    base_seconds=2.0,
+    max_seconds=30.0,
+    # One more attempt for a conversation that is not visible *yet*. The
+    # webhook enqueues this job inside the transaction that created the
+    # conversation and commits after the handler returns, so a worker can
+    # arrive first (ADR-089). Retried once, and only from the pre-engagement
+    # side: the policy below is what a turn that has already called a provider
+    # gets, and it carries no such door.
+    first_attempt_transient=FIRST_ATTEMPT_TRANSIENT,
+)
 
 
 class _TurnProgress:
@@ -310,6 +327,25 @@ class AgentWorker:
                         "agent.requested_agent_missing",
                         extra={"agent_id": str(job.agent_id)},
                     )
+
+            # Asked here, before the mark below, and that placement is the
+            # whole of the fix for the enqueue-before-commit race (ADR-089).
+            #
+            # The orchestrator loads this conversation too, and refuses a
+            # missing one identically - but it does so *after* the turn has
+            # been marked engaged, at which point the only honest policy is
+            # `NO_RETRY` and a conversation that was merely mid-commit was
+            # dead-lettered on attempt one. A read costs one indexed lookup,
+            # touches nothing outside this transaction and is safe to repeat,
+            # so it belongs on the same side of the line as loading the
+            # workspace and reading the allowance.
+            #
+            # The orchestrator keeps its own lookup. This one decides whether
+            # a retry is safe; that one decides what to say, and a caller that
+            # skipped it would be answering a conversation it had not read.
+            await ConversationRepository(session, tenant_id=job.tenant_id).require_by_id(
+                job.conversation_id
+            )
 
             # Past this line the turn can reserve an allowance, call the
             # provider and send a customer a message, none of which a second

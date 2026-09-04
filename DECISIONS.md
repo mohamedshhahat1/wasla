@@ -4229,3 +4229,145 @@ What is proved rather than argued: a real child process is killed with
 `SIGKILL`/`TerminateProcess` between its Paymob charge and its finalisation
 (`tests/integration/test_billing_crash_recovery.py`), and the replacement sweep
 sends no second charge — where before the fix the same drill produced two.
+
+---
+
+## ADR-089 — A Row That Is Not Visible Yet Is Not a Row That Is Gone
+
+**Context.** Every Redis queue in this system is fed from *inside* an
+uncommitted transaction, and that is deliberate. The webhook handler stores a
+message, projects a conversation, enqueues an agent job and returns;
+`CommittingRoute` commits afterwards (ADR-062). The knowledge upload handler
+does the same with a document. Enqueuing after the commit would trade this race
+for the opposite one — a durable row that no job names — and closing *that*
+needs a transactional outbox, which is a large answer to a small question.
+
+The consequence nobody had costed: a worker blocked on `BLMOVE` can receive a
+job naming a row that is real, is about to be visible, and is not visible yet.
+It opens its own session, asks a tenant-scoped repository for the row, and the
+repository answers `TenantIsolationError` — which `classify` names `not_found`,
+correctly, because from inside that transaction there is no such row.
+
+`not_found` is not in `RETRYABLE`, and must not be: a row that is genuinely gone
+fails identically on every attempt, and retrying it spends the budget a
+transient failure needs. So the job was terminal on attempt one.
+
+Reproduced against real PostgreSQL and real Redis before anything was changed,
+with the producer's transaction held open across the worker's attempt rather
+than raced against it:
+
+```
+API transaction state      : open, uncommitted
+enqueued                   : conversation da62a322-...
+conversation visible to it : 0 rows
+worker consumed the job    : True
+delayed (retry) depth      : 0
+dead-letter depth          : 1
+  category=not_found attempts=1
+API transaction state      : COMMITTED
+conversation now visible   : 1 rows
+jobs left to answer it     : 0
+
+RESULT: the customer is never answered.
+```
+
+The audit found this on the agent queue. Two neighbours had it too, and one of
+them was worse.
+
+**Ingestion**, on the same shape: a document uploaded successfully was
+dead-lettered on attempt one and left at `pending` for ever, with no error on
+the row to explain it — because `require_by_id` raises *before* the block that
+records a failure on the document.
+
+**Media** did not dead-letter at all. It read a missing row as "the message was
+deleted, or the job outlived its workspace", logged `media.row_missing` and
+returned successfully, which released the job. The attachment was never
+downloaded, never read, and the agent job that a finished attachment releases
+was never enqueued either — so the customer's photograph went unanswered with
+nothing written down anywhere. A silent loss is strictly worse than a
+dead-letter record, because the dead-letter list is what an operator reads.
+
+**Decision.** A category can be retryable *once*, and only where a queue asks
+for it.
+
+`RetryPolicy` gained one field:
+
+```python
+first_attempt_transient: frozenset[FailureCategory] = frozenset()
+```
+
+and `should_retry` gained a second, narrower door:
+
+```
+attempt >= max_attempts            -> no
+category in RETRYABLE              -> yes          (the whole budget)
+attempt == 1 and category in door  -> yes          (once)
+otherwise                          -> no
+```
+
+`FIRST_ATTEMPT_TRANSIENT` holds exactly one category — `NOT_FOUND` — and is
+carried by `AGENT_RETRY` and `IDEMPOTENT_RETRY`, the policies of the three
+queues fed from inside a transaction. It is empty by default, so a policy has to
+ask for the behaviour rather than inherit it, and `NO_RETRY` never acquires it.
+
+**Why one retry is enough, as arithmetic rather than as a hope.** The producer's
+commit is one round trip and one fsync after the enqueue, measured at 25–75 ms
+against a containerised PostgreSQL in `test_commit_boundary.py`. The shortest
+delay either policy can produce is two seconds — more than twenty-five times the
+widest figure ever measured here. A row still missing after that was not
+committing; either the transaction rolled back and the row will never exist, or
+the request is still open, and a handler that has held its transaction for two
+seconds after enqueuing has a different problem. Both make the second answer the
+true one.
+
+**Why the agent worker's lookup moved.** The retry above is worth nothing on the
+agent queue by itself, because `_TurnProgress` was marked engaged *before* the
+orchestrator loaded the conversation — and an engaged turn's policy is
+`NO_RETRY`, correctly, because it may already have answered the customer. The
+lookup therefore moved to the other side of the mark:
+
+```
+check the allowance
+resolve the agent
+resolve the conversation      <- moved here
+mark ENGAGED
+build the HTTP client
+```
+
+That is not a new line, it is the line that was already there. `ai_worker`'s
+own docstring names what may be repeated safely — "loading the workspace,
+reading the allowance, looking up the agent" — and a tenant-scoped read of the
+conversation belongs in that list: one indexed lookup, touching nothing outside
+a transaction that rolls back. The orchestrator keeps its own lookup, because
+that one decides what to say and a caller that skipped it would be answering a
+conversation it had not read.
+
+**What did not change.** `not_found` is not globally retryable. A turn that has
+engaged a provider is never retried, for `not_found` or for anything else — no
+lookup answering "gone" afterwards can distinguish a turn that replied from one
+that did not, and ADR-068 is what says so. A conversation that genuinely does
+not exist now dead-letters on attempt *two* rather than attempt one: still
+bounded, still well short of the three-attempt budget, and now carrying an
+`attempts: 2` that says an operator's row was asked about twice.
+
+The retry travels as an ordinary `JobEnvelope.next_attempt`, so the trace
+carrier, the enqueued-at instant an operator measures customer waiting time
+from, and the job's own payload — its workspace and its conversation — all
+survive it unchanged.
+
+**Alternatives weighed.** Enqueuing after the commit was considered and
+rejected: it converts a job whose row is late into a row whose job never
+existed, and the existing crash recovery covers reservations rather than
+enqueues, so nothing would find it. A transactional outbox closes both, and is
+the right answer at the point where a dispatch table is worth its own migration,
+its own sweep and its own dead-letter story. Neither is worth paying for a
+window two seconds of backoff already covers.
+
+**What is proved rather than argued.**
+`tests/integration/test_queue_commit_visibility.py` holds the producer's
+transaction open across a real worker's real attempt on all three queues,
+releases it, promotes the retry against a clock moved forward, and asserts the
+turn completes with exactly one reply composed and zero dead letters — where the
+same drill before the fix produced one dead letter and no reply. It also asserts
+the bounded side: a conversation that never existed, and one committed in
+another workspace, both dead-letter on attempt two.
