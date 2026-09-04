@@ -436,7 +436,8 @@ place that writes `refunded_amount`.
 POST /billing/payments/{id}/refund
         │
         ├─ payment must be this workspace's, collected, not already reversed
-        ├─ refund_requested_at written, audited     ← before the provider call
+        ├─ refund_requested_at written, audited, COMMITTED
+        │                                           ← before the provider call
         │
         ↓
    Paymob POST /api/acceptance/void_refund/refund
@@ -452,10 +453,24 @@ POST /billing/payments/{id}/refund
    refunded_amount set · payment refunded · invoice reopened
 ```
 
-A refund requested and never confirmed is a findable state — `refund_reference`
-set with `refunded_amount` still zero — and it usually means the callback URL
-is wrong and a customer is waiting. `GET /billing/payments/{id}` reports it as
+A refund requested and never confirmed is a findable state — `refund_requested_at`
+set with `refunded_at` still empty — and it usually means the callback URL is
+wrong and a customer is waiting. `GET /billing/payments/{id}` reports it as
 `refund_pending`.
+
+**Committed, not flushed, and that is the difference between one refund and
+two** (ADR-088). The request used to be flushed before the provider call, which
+a rollback undoes along with everything else — so a process killed after Paymob
+accepted the reversal left no record of having asked, and the next request
+reversed the same money again. It is committed now, and the refusal that stops a
+second reversal is keyed on the outstanding request rather than on the reference
+written after the provider answers.
+
+A reversal that got **no answer** therefore refuses the next attempt: the money
+may already be going back, and somebody should look rather than ask again. A
+reversal Paymob explicitly **declined** withdraws the record instead, because
+that is an answer — nothing is reversing, so the cause can be fixed and the
+refund asked for again.
 
 Void is not attempted as a fallback. Paymob documents
 `/api/acceptance/void_refund/void` for a transaction that has not settled yet,
@@ -553,6 +568,81 @@ period ends
 Attempts are counted **before** the provider is called, because a request that
 timed out may still have been carried out. The claim is a payment row keyed
 `auto:{invoice}:{attempt}`, so two sweeps racing cannot both charge.
+
+### The attempt is durable before Paymob can move money (ADR-088)
+
+Two workers racing is not the only way a card gets charged twice. One worker
+*dying* is the other, and it used to be the dangerous one: the payment row, the
+attempt counter and the Paymob request all became durable at the same commit,
+and the money was first. A process killed in that window had taken 100 EGP and
+left PostgreSQL with no record that it had, so the next sweep read an untouched
+invoice and took it again.
+
+So collection is three transactions, and the commits between them are the
+point:
+
+```
+TX1   claim the invoice, insert the attempt, count it
+      collection_state = claimed                          → COMMIT
+TX2   collection_state = requested                        → COMMIT
+--    call Paymob. No transaction, no connection, no lock.
+TX3   record what came back                               → COMMIT
+```
+
+`collection_state` answers a question `status` cannot: **may another charge be
+sent for this invoice?**
+
+| State | Meaning | Another charge? |
+| --- | --- | --- |
+| `claimed` | Durable, provider not asked. Money cannot have moved | No — resolve first |
+| `requested` | Asked, or may have been. **Money may have moved** | No — only a callback or a lookup may resolve it |
+| `settled` | The outcome is known and on the payment | Yes, if the invoice is still open and the budget allows |
+| `abandoned` | Shown never to have reached the provider; the attempt is returned | Yes |
+
+A partial unique index on `payments (invoice_id) WHERE collection_state IN
+('claimed','requested')` is what actually guarantees it. The claim query
+excludes such invoices too, but the query is the politeness and the index is the
+guarantee.
+
+**A due date is not a licence.** An invoice whose last attempt is unresolved is
+not collectible however far `next_collection_at` has passed. If a renewal is not
+being taken, look at the last attempt's state before looking at the schedule.
+
+### Reconciling an attempt nobody answered
+
+The billing sweep asks Paymob what became of an attempt that has gone quiet,
+before it decides what to collect:
+
+```
+POST /api/auth/tokens                        { api_key }        → bearer token
+POST /api/ecommerce/orders/transaction_inquiry
+     Authorization: Bearer …                 { merchant_order_id }
+```
+
+`merchant_order_id` is the `special_reference` sent when the intention was
+created, which is the payment id — an identifier committed before Paymob could
+be told about it. The answer goes through the same translation and the same
+settlement path a webhook does, so a callback and the reconciler arriving at
+once are decided by `UNIQUE(provider, provider_event_id)` on `payment_events`:
+one settles, the other records a duplicate.
+
+| Answer | What happens |
+| --- | --- |
+| Succeeded | Settle the invoice, exactly as a callback would |
+| Failed | Record the decline; the attempt stays spent |
+| Pending | Leave it, ask again next sweep |
+| No such reference | **Wait.** Believed only after a day of the same answer, then the attempt is returned and the invoice becomes collectible by a *new* one |
+| Unreachable | Learn nothing. Never read as "no such reference" |
+
+Nothing in this path can send a charge.
+
+**The inquiry takes a fourth credential.** `PAYMOB_API_KEY` is the legacy API
+key, not the secret key that creates intentions, and Paymob issues them
+separately. Set it wherever `PAYMOB_MOTO_INTEGRATION_ID` is set. Without it an
+attempt whose callback never arrived can never be resolved — the invoice is
+still never charged again, but it also cannot be collected until somebody looks.
+Watch `wasla_payment_reconciliation_total{outcome="pending"}` and
+`wasla_oldest_pending_payment_age_seconds`.
 
 ### Saved cards
 

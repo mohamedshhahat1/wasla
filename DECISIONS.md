@@ -3989,3 +3989,230 @@ What is proved rather than argued: a real child process is killed with
 `SIGKILL`/`TerminateProcess` between its object write and its finalisation
 (`tests/integration/test_media_crash_recovery.py`), and the replacement pass
 recovers the exact object and writes no second one.
+
+
+## ADR-088 — The Collection Attempt Is Committed Before Paymob Can Move Money
+
+**Context.** The repository audit found one confirmed financial defect, and it
+is the same shape ADR-087 closed for object writes — running the other way
+round.
+
+Automatic collection held the payment row, the attempt counter and the Paymob
+request in one transaction and committed afterwards:
+
+```
+BEGIN
+  claim invoice        FOR UPDATE SKIP LOCKED
+  INSERT payment       idempotency_key = auto:{invoice}:{attempt}
+  invoice.collection_attempts += 1
+  POST Paymob          <- money moves here
+  store the reference
+COMMIT                 <- everything above becomes durable only now
+```
+
+A process that stopped existing between the marked line and the commit had
+taken a customer's money while PostgreSQL rolled back every record that it had.
+The next claim read an invoice with `collection_attempts` unchanged and
+`status = OPEN`, built the same idempotency key — which no longer collided,
+because the row carrying it was rolled back — and charged the same card again.
+
+Reproduced against real PostgreSQL before anything was changed
+(`tests/integration/test_billing_crash_recovery.py`, in the commit that added
+it):
+
+```
+invoice                 100.00 EGP
+provider charge 1       reference 617123f5-...  attempt 1
+provider charge 2       reference a8423963-...  attempt 1
+money moved             200.00 EGP
+payment rows recorded   1
+collection_attempts     1
+```
+
+The last three lines are why this is expensive to find in production: nothing in
+Wasla's own data disagrees with itself. One attempt, one row, one counter. The
+only place the second charge exists is the customer's statement.
+
+**Neither existing guard applies.** `FOR UPDATE SKIP LOCKED` protects against a
+second worker, and a lock is held by a *process* — it says nothing about one
+that is gone. The idempotency key lived on the row that was rolled back.
+Nothing written only inside a transaction survives that transaction not
+committing, which is why the fix is an ordering change rather than a stronger
+lock.
+
+**Decision.**
+
+**Commit the attempt, then ask the provider.** Three transactions, and the
+commits between them are the design:
+
+```
+TX1   claim the invoice, insert the attempt, count it,
+      state CLAIMED                                        -> COMMIT
+TX2   state REQUESTED                                      -> COMMIT
+--    call Paymob. No transaction open, no connection held,
+      no row locked.
+TX3   record what came back                                -> COMMIT
+```
+
+Both orders of the pair fail. Only one of them fails recoverably:
+
+- charge, then commit → nothing anywhere remembers the charge. Unfindable, and
+  re-sent by the next sweep.
+- commit, then charge → a row names a charge that may not have happened.
+  Askable.
+
+That is ADR-087's argument, applied to money instead of bytes.
+
+**TX2 exists so that two crash windows can be told apart.** Before it commits,
+a dying worker leaves an attempt nobody has been asked about — money cannot have
+moved, because the request is not built until after this commit — so it may be
+closed and its budget handed back. After it commits, a dying worker leaves an
+attempt that may have taken money, and nothing may touch it until a callback or
+a lookup says what happened. Those are opposite answers and a single `pending`
+cannot carry both.
+
+The gap TX2 leaves — dying between its commit and the socket — resolves the
+safe way by construction: the row says a charge may have happened when it did
+not, and reconciliation discovers that from Paymob rather than assuming it.
+
+**`collection_state`, because `status` cannot express the new state.**
+`PaymentStatus` answers "did money move", and for a merchant-initiated charge
+the honest answer is "nobody knows" for as long as it takes a callback to
+arrive. The question the protocol has to ask before acting is different — *may
+another charge be sent for this invoice* — and four values answer it:
+`claimed`, `requested`, `settled`, `abandoned`. NULL for every payment that is
+not an automatic attempt, because a hosted checkout is somebody at a payment
+page and none of this describes it.
+
+**A partial unique index is the actual guarantee.**
+
+```sql
+CREATE UNIQUE INDEX uq_payments_unresolved_collection ON payments (invoice_id)
+WHERE collection_state IN ('claimed', 'requested');
+```
+
+One invoice, at most one attempt whose outcome nobody knows. The claim query
+excludes such invoices as well, so the ordinary path passes them over quietly
+rather than colliding — but the query is the politeness and the index is the
+guarantee, and a future edit that forgets the first still cannot get past the
+second. `UNIQUE(tenant_id, idempotency_key)` stays and answers a different
+question: one attempt *number* is claimed once.
+
+**An uncertain outcome consumes the attempt budget; a request that provably
+never left does not.** A timeout, a reset connection or a 5xx means the charge
+may have landed, and a scheme reads a merchant that keeps retrying as one to
+look at — so the attempt is spent. A failure while the *intention* was being
+created is different: only the second Paymob request moves money, so a failure
+in the first is provably not a charge. `ChargeNotSentError` carries that
+distinction out of the client, and such an attempt is abandoned with its budget
+returned rather than blocking the invoice behind a lookup about a request that
+never happened.
+
+**A definite refusal is not an unknown.** A 4xx is Paymob reading the request
+and declining it: no money moved, the payment is `failed`, the attempt is spent.
+A timeout is not, and the old code called it one — writing `failed`, which is
+terminal, so the callback that eventually reported the charge Paymob had in fact
+taken could never settle the invoice, because `failed -> succeeded` is not a
+legal transition. A customer who had paid would have been chased and suspended.
+That was a second defect inside the first and it is closed by the same
+distinction.
+
+**Reconciliation asks Paymob, by our own reference.** Paymob's published
+Postman collection documents a transaction inquiry keyed on
+`merchant_order_id`, which is the `special_reference` sent when the intention
+was created, which is the payment id:
+
+```
+POST /api/auth/tokens                        {"api_key": ...}   -> token
+POST /api/ecommerce/orders/transaction_inquiry
+     Authorization: Bearer <token>           {"merchant_order_id": ...}
+```
+
+So the question is asked about an identifier this system generated and
+committed before Paymob could be told about it. **No provider-side idempotency
+is assumed anywhere.** Paymob is not documented to guarantee exactly-once
+charging for a repeated `special_reference`, so nothing here relies on it: the
+protocol is correct against a provider that would happily charge twice, because
+nothing ever sends the second request.
+
+The credential is a fourth Paymob secret — the legacy API key — and not the one
+that creates intentions. A deployment may hold the second and not the first,
+which is why `can_inquire` is its own question. Without it an unanswered attempt
+stays unanswered, the invoice is never charged again, and the backlog is a
+metric. Slow is the safe direction; guessing is not.
+
+**A lookup and a callback are the same fact, so they take the same path.** The
+inquiry response is translated by the same `_event` that reads a webhook, and
+applied by `CheckoutService.apply`, whose `payment_events` insert is claimed
+under `UNIQUE(provider, provider_event_id)`. Both routes build the same event id
+for the same transaction state, so a callback and a reconciler racing for one
+payment are decided by the unique index: one settles, the other reports
+`duplicate`. One invoice paid, one plan granted, however many things noticed at
+once. That is a database constraint rather than a status check, which is what
+makes it hold under a real interleaving instead of the one a test happened to
+produce.
+
+**Five provider answers, and none may be merged.** `answered` (succeeded or
+failed), `pending`, `not found`, `unreachable`, `unsupported`. The pair that
+would be expensive to confuse is the middle two: a provider that is down and a
+provider that never received the request are indistinguishable in their
+silence, and reading the first as the second re-charges every card that was in
+flight when the outage began. It is the same distinction `MediaStorage.exists`
+raises for rather than returning False.
+
+**"No such reference" is evidence, not a verdict.** A provider still making an
+event visible answers exactly as one that never received the request, so only
+elapsed time separates them. An attempt is closed as never-sent — and its budget
+returned — after a full day of the same answer, never on the first one. An
+attempt still in `claimed` needs none of that waiting, because the move to
+`requested` commits before the request is built.
+
+**Reconciliation never re-sends a charge.** It records what Paymob said, or
+hands an attempt back so the ordinary sweep makes a *new* one with a new number
+and a new reference. Nothing in the recovery path can move money.
+
+**The lease is a committed timestamp, not a row lock.** `reconciled_at` is
+written and committed before the lookup, so no lock and no pooled connection is
+held across a call to somebody else's API — the property ADR-082 gave the
+collection path, applied to its recovery. A second worker skips a row somebody
+is already asking about, and a worker that dies mid-lookup leaves one that
+becomes claimable again when the lease elapses. There is no reaper because none
+is needed.
+
+**Refunds had the same window and it is closed the same way.** The refund path
+wrote `refund_requested_at` before calling the provider and *flushed* it, which
+its own comment described as surviving a crash — a flush is undone by the same
+rollback that loses everything else, so it did not. It is committed now, and the
+refusal that stops a second reversal is keyed on the outstanding request rather
+than on the reference written after the provider answers. A reversal that got no
+answer refuses the next attempt; one the provider explicitly declined withdraws
+the record, because that is an answer and nothing is reversing.
+
+**Consequences.**
+
+Saved-card renewals can be enabled in production. `PAYMOB_MOTO_INTEGRATION_ID`
+was the audit's mitigation — leave it unset and the defect is unreachable — and
+it is no longer the only thing standing between a crashed worker and a duplicate
+charge.
+
+An invoice can now be uncollectible for a reason that is not on the invoice. An
+operator asking "why has this renewal not been taken" is answered by the *last
+attempt's* state rather than by `next_collection_at`, and that is deliberate: a
+due date is not a licence to charge a card whose last outcome is unknown.
+
+A deployment without `PAYMOB_API_KEY` trades recovery for nothing else. It never
+double-charges; it simply cannot resolve an attempt whose callback went missing,
+and `wasla_payment_reconciliation_total{outcome="pending"}` with
+`wasla_oldest_pending_payment_age_seconds` is how that becomes visible rather
+than silent.
+
+`wasla_payment_reconciliation_total` carries one label with seven fixed values —
+`settled`, `failed`, `abandoned`, `still_pending`, `not_found`, `unreachable`,
+`pending` — and no workspace, invoice, payment, reference or amount anywhere
+near it. A payment's value is exactly what a metric label domain must never be
+keyed on.
+
+What is proved rather than argued: a real child process is killed with
+`SIGKILL`/`TerminateProcess` between its Paymob charge and its finalisation
+(`tests/integration/test_billing_crash_recovery.py`), and the replacement sweep
+sends no second charge — where before the fix the same drill produced two.

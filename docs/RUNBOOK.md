@@ -628,7 +628,40 @@ Stated plainly, because a runbook that pretends to cover everything is one that 
 - **`usage_events` and `audit_logs` grow without bound.** Neither is swept, deliberately — retention for billing records and audit trails is a legal question, not a disk-space one.
 - **The media store grows until a retention period is set.** `MEDIA_RETENTION_DAYS` defaults to zero, which keeps everything ([ADR-078](../DECISIONS.md)). Watch `wasla_media_retention_total{outcome="pending"}`: a number that stays above zero across sweeps is a store refusing deletions, which is otherwise invisible — the rows are claimed, the sweep reports itself as having run, and the volume does not shrink.
 - **An attachment that is in the bucket and invisible.** An object's key is committed before the object exists, so a worker killed between the two leaves a row in `pending` naming exactly what it was writing ([ADR-087](../DECISIONS.md)). The `uploads` worker settles those every five minutes. If `wasla_media_upload_reconciliation_total{outcome="pending"}` keeps rising while `finalized` stays flat, that loop is not running — check `WORKER_KINDS` — or the store is not answering, which shows up as `unreachable`.
+- **A collection attempt whose outcome nobody knows.** A charge is committed before Paymob is asked to move money, so a worker killed between the two leaves a row saying a card may already have been debited ([ADR-088](../DECISIONS.md)). The billing sweep asks Paymob about those every ten minutes — but only if `PAYMOB_API_KEY` is set, which is a *different* credential from `PAYMOB_SECRET_KEY`. Without it nothing is ever charged twice and nothing is ever resolved either: watch `wasla_payment_reconciliation_total{outcome="pending"}` and `wasla_oldest_pending_payment_age_seconds`.
 - **`mismatched` needs a person, and nothing else will do.** An object is at a key Wasla owns and its contents are not what Wasla wrote. It is left in place deliberately: serving it would hand a colleague a file the row does not describe, and deleting it would destroy the only evidence of how it got there. Find the row by media id in the `media.upload_mismatch` log line, and look at the object by hand before deciding. Nothing in the system will clear this state on its own.
+
+### A renewal is not being collected and the invoice looks due
+
+Check the last attempt before checking the schedule. An invoice whose last
+collection attempt is unresolved is deliberately not collectible, however far
+`next_collection_at` has passed ([ADR-088](../DECISIONS.md)) — a due date is not
+a licence to charge a card whose last outcome nobody knows.
+
+```sql
+SELECT p.id, p.status, p.collection_state, p.created_at, p.reconciled_at,
+       i.id AS invoice_id, i.collection_attempts, i.next_collection_at
+FROM payments p JOIN invoices i ON i.id = p.invoice_id
+WHERE p.collection_state IN ('claimed', 'requested')
+ORDER BY p.created_at;
+```
+
+| What you see | What it means |
+| --- | --- |
+| Nothing returned | Not this. The refusal is an ordinary one — no card, cancelled subscription, budget spent — and `billing.recurring_skipped` names it |
+| `requested`, `reconciled_at` empty | Reconciliation has not reached it yet, or cannot: `PAYMOB_API_KEY` is unset |
+| `requested`, `reconciled_at` moving | It is being asked about and Paymob is still saying pending or nothing |
+| `claimed`, old | A worker died before it built the request. The next pass abandons it and hands the attempt back |
+
+**Do not clear these by hand.** A row in `requested` means a card may already
+have been debited, and the reason it blocks the invoice is that nobody yet knows
+whether it did. If Paymob's dashboard shows the transaction, let the reconciler
+settle it — or replay the callback — rather than editing the row, so the invoice
+is settled by the path that also grants the plan and writes the ledger entry.
+
+If the deployment has no `PAYMOB_API_KEY`, that is the fix: set it, and the next
+sweep resolves the backlog. Until then nothing is charged twice and nothing is
+collected.
 
 ### A refund was issued and the customer says it never arrived
 

@@ -210,9 +210,51 @@ cannot be resolved automatically: the object stays where it is, because deleting
 it destroys the only evidence of how a foreign object reached that key, and it
 is not served, because it is not what the row describes.
 
-`unreachable` is deliberately not the same as `missing`. A store that is down,
-read as "the object is gone", would abandon every upload in flight during the
-outage - and an outbound attachment's bytes arrived in a request body that no
+`wasla_payment_reconciliation_total` is the same shape again, for the seam where
+money moves (ADR-088): one label, seven fixed values, and no workspace, invoice,
+payment, provider reference or amount anywhere near it. A collection attempt is
+committed before Paymob can be asked to debit a card, so a worker that dies
+leaves a row saying a charge may have happened, and this counter is what that
+recovery reports.
+
+| Outcome | Means |
+| --- | --- |
+| `settled` | The provider confirmed the charge. The invoice is paid |
+| `failed` | The provider confirmed the decline. The attempt is spent |
+| `abandoned` | The provider has no record of it after a full day. The attempt was returned |
+| `still_pending` | The provider has not finished. Asked again next sweep |
+| `not_found` | No record *yet*, and too soon to believe. Left alone |
+| `unreachable` | The provider would not answer. Nothing was decided |
+| `pending` | Attempts still unresolved, after this pass. A level |
+
+`wasla_oldest_pending_payment_age_seconds` is the histogram beside it, and it is
+the one to alert on. A backlog of one is a callback in flight; a backlog of one
+that is a day old is an invoice nobody can collect and possibly a customer who
+has already paid.
+
+```
+histogram_quantile(1, rate(wasla_oldest_pending_payment_age_seconds_bucket[1h])) > 3600
+  an attempt has gone unanswered for an hour: callbacks are probably not arriving
+
+increase(wasla_payment_reconciliation_total{outcome="unreachable"}[15m]) > 0
+  Paymob cannot be asked. Nothing is being re-charged, and nothing is settling
+
+increase(wasla_payment_reconciliation_total{outcome="abandoned"}[1d]) > 0
+  a charge request never reached Paymob. Worth knowing why
+
+wasla_payment_reconciliation_total{outcome="pending"} rising while
+wasla_payment_reconciliation_total{outcome="settled"} stays flat
+  PAYMOB_API_KEY is probably unset, so nothing can be resolved at all
+```
+
+`not_found` and `abandoned` are the same provider answer read at two different
+ages, and keeping them apart is the point: the first is "Paymob has not caught
+up", the second is "Paymob never received it". Only elapsed time distinguishes
+them, so a fresh `not_found` decides nothing.
+
+`unreachable` is deliberately not the same as `missing`, or as `not_found`. A
+store or a provider that is down, read as "it is gone", would abandon every
+upload - or re-charge every card - in flight during the outage - and an outbound attachment's bytes arrived in a request body that no
 longer exists, so abandoning is final.
 
 The last two outcomes are the crash-recovery pair, and they are separate
@@ -242,7 +284,7 @@ a fragment of the request that produced it.
 | --- | --- | --- |
 | `openai` | `respond` | `ResponsesClient._post` |
 | `whatsapp` | `send_message`, `fetch_media`, `inbound_webhook` | `WhatsAppClient`, the webhook route |
-| `paymob` | `checkout`, `moto_intention`, `saved_card_charge`, `refund` | `PaymobProvider._post` |
+| `paymob` | `checkout`, `moto_intention`, `saved_card_charge`, `refund`, `inquiry_auth`, `transaction_inquiry` | `PaymobProvider._post` |
 | `email` | `deliver`, `suppress` | `EmailWorker` |
 
 `outcome` is one of `success`, `failure`, `rate_limited`, `unavailable`. Four
