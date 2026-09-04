@@ -176,7 +176,8 @@ BACKUP_DESTINATION=s3
 BACKUP_S3_BUCKET=wasla-backups
 BACKUP_S3_PREFIX=wasla
 BACKUP_S3_ENDPOINT_URL=      # empty for AWS; set it for anything else
-BACKUP_S3_SSE=AES256         # server-side encryption at rest
+BACKUP_S3_SSE=AES256         # REQUIRED: encryption at rest, AES256 or aws:kms
+BACKUP_S3_SSE_KMS_KEY_ID=    # only for aws:kms, and optional even then
 BACKUP_S3_ACCESS_KEY_ID=…    # the backup container's, and nothing else's
 BACKUP_S3_SECRET_ACCESS_KEY=…
 ```
@@ -198,9 +199,37 @@ having left the dump on the host is worse than one that fails.
   disk. The failure being survived is the machine.
 - **Encrypted in transit.** `aws s3` is HTTPS unless an endpoint URL says
   otherwise; do not point it at an `http://` endpoint outside a private network.
-- **Encrypted at rest.** `BACKUP_S3_SSE`, or a bucket policy that enforces it,
-  or platform-managed disk encryption. Nothing here invents its own
-  cryptography — a dump is a file, and the platform storing files encrypts it.
+- **Encrypted at rest, and this is not optional.** `BACKUP_S3_SSE` must be
+  `AES256` or `aws:kms`. The uploader refuses to send a dump without it and
+  refuses to record a success unless the store confirms, on the object itself,
+  that it is encrypted (ADR-090). Nothing here invents its own cryptography — a
+  dump is a file, and the platform storing files encrypts it.
+
+  **Why explicit SSE rather than a bucket rule.** A bucket default is a
+  reasonable way to run a bucket and a poor thing to *verify*.
+  `GetBucketEncryption` is not implemented by every S3-compatible store this
+  script is meant to serve, it needs a permission the backup credential does not
+  otherwise want, and it describes the bucket's policy rather than the object
+  that was just written. Asked against a MinIO with a KMS configured and no
+  explicit bucket rule, it answers
+  `ServerSideEncryptionConfigurationNotFoundError` — a store that *can* encrypt
+  and *does* reporting that it has no configuration. So the contract is the
+  smaller and checkable one: ask for encryption on the request, and read it back
+  off the object.
+
+  **What is verified, and what is not.** The `head-object` that already checks
+  the size now also reads `ServerSideEncryption` and requires it to equal what
+  was asked for. The KMS key id is *not* compared: the store answers with a full
+  ARN whatever an operator configured — a bare id, an alias — so a comparison
+  would fail on correct configurations and prove nothing about wrong ones. That
+  the object is encrypted under KMS is what this can check, and it is the
+  property that matters here.
+
+  **Not every store can honour it.** MinIO needs a KMS (`MINIO_KMS_SECRET_KEY`
+  or KES) and answers `NotImplemented` otherwise. That fails the run, which is
+  the intended behaviour: a store that cannot encrypt is not a backup
+  destination, and the alternative is a green run over a plaintext copy of the
+  whole database.
 - **Credentials the application does not hold.** Only the `backup` service is
   given `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. This is the whole reason
   backups run in their own container: a compromised API must not be able to
@@ -376,6 +405,10 @@ Three things this establishes that the earlier drill did not:
 | Backup with a password in `DATABASE_URL` | the password appears in neither stdout nor stderr |
 | Dump succeeds, upload fails | exit 1, status `failure` at stage `upload`, `last_success_at` **unchanged**, local artifact kept |
 | No `BACKUP_DESTINATION` | refused: "a dump on the same host as its database is not a backup" |
+| `BACKUP_DESTINATION=s3` with no `BACKUP_S3_SSE` | refused before anything is uploaded; status `failure` at stage `upload`, `last_success_at` **unchanged** |
+| `BACKUP_S3_SSE` set to something the S3 API does not define | refused, naming the two values that are |
+| Store rejects the encryption request (MinIO with no KMS) | exit 1, `NotImplemented` from the store, **nothing left in the bucket**, `last_success_at` unchanged |
+| Store accepts the upload but reports no encryption | refused at verification: "reports encryption 'None', not 'AES256'" |
 | Remote copy truncated | refused: sizes compared and reported |
 | Store does not hold the object | refused |
 | Restore from a truncated dump | exit 1 |

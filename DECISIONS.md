@@ -4371,3 +4371,128 @@ turn completes with exactly one reply composed and zero dead letters — where t
 same drill before the fix produced one dead letter and no reply. It also asserts
 the bounded side: a conversation that never existed, and one committed in
 another workspace, both dead-letter on attempt two.
+
+---
+
+## ADR-090 — A Dump Does Not Leave This Host Unencrypted
+
+**Context.** The backup pipeline was already the strongest operational work in
+the repository: `pg_dump -Fc`, validated by reading the archive back with
+`pg_restore --list`, uploaded off-host, size-verified at the destination, and
+refusing to advance the recorded last success until the artifact had actually
+left the machine (ADR-075).
+
+`BACKUP_S3_SSE` was optional, and the comment beside it argued for that: a
+bucket policy might already enforce encryption, and some S3-compatible stores
+reject the header.
+
+What that leaves is a silent failure. A deployment that never set it got a green
+run, a verified remote artifact and a plaintext copy of the whole database in a
+bucket, with nothing anywhere saying so. And the file is not a subset of the
+platform's data — it is all of it: every conversation, every phone number, every
+lead, every email address, every invoice. Workspace WhatsApp credentials stay
+encrypted inside the dump, because the AES key ring lives in the environment
+rather than in the database (ADR-034). Nothing else does.
+
+**Decision.** `BACKUP_S3_SSE` is required whenever `BACKUP_DESTINATION=s3`, and
+the run fails closed without it.
+
+```
+BACKUP_DESTINATION=none + BACKUP_ALLOW_LOCAL_ONLY=yes
+    -> returns before uploading. Nothing leaves the host, so nothing has to
+       leave it encrypted.
+
+BACKUP_DESTINATION=s3
+    -> BACKUP_S3_SSE must be AES256 or aws:kms
+    -> --sse is passed on the upload
+    -> head-object must report that algorithm on the object
+    -> only then does the run continue to retention and to success
+```
+
+There is **no environment detection in the shell scripts**, and none is needed.
+The distinction that already exists — `BACKUP_ALLOW_LOCAL_ONLY`, which
+production Compose never sets and a test asserts as much — is exactly the
+distinction this needs, because it separates "a dump that leaves this host" from
+"a dump that does not". The rule attaches to the upload rather than to an
+environment name.
+
+**Why explicit SSE rather than a verified bucket default.** A bucket default is
+a reasonable way to run a bucket and a poor thing to *check*.
+`GetBucketEncryption` is not implemented by every S3-compatible store this
+script exists to serve, it needs a permission the backup credential does not
+otherwise want, and it describes the bucket's policy rather than the object that
+was just written.
+
+Measured rather than assumed. Against a MinIO with a KMS configured and no
+explicit bucket rule — a store that both can encrypt and does:
+
+```
+$ aws s3api get-bucket-encryption --bucket wasla-backup-drill --endpoint-url ...
+An error occurred (ServerSideEncryptionConfigurationNotFoundError) when calling
+the GetBucketEncryption operation: The server side encryption configuration was
+not found
+```
+
+A contract built on that answer would refuse a correctly configured store and
+would have nothing to say about the object it just wrote. So the contract is the
+smaller and checkable one: ask on the request, read it back off the object.
+
+**What is verified, and what is not.** The `head-object` that already checked
+the size now asks for `[ContentLength,ServerSideEncryption]` and requires the
+algorithm to equal what was asked for. One round trip, both questions, so the
+guarantee costs nothing the size check was not already paying.
+
+The KMS key id is deliberately *not* compared. The store answers with a full ARN
+whatever an operator configured — a bare id, an alias, an ARN — so a string
+comparison would fail on correct configurations and prove nothing about wrong
+ones. That the object is encrypted under KMS is the property this can check, and
+it is the one that matters here.
+
+**No custom cryptography.** Nothing here encrypts anything itself. A dump is a
+file, and the platform storing files encrypts it; inventing a key-management
+story in a POSIX shell script would be a worse answer than the provider's, and
+would need its own review, its own key rotation and its own restore path.
+Client-side encryption remains available as future defence in depth for a
+deployment whose object store is a third party it does not trust with
+ciphertext-at-rest, and it is not this.
+
+**Fail closed, and what that costs.** A store that cannot honour the request
+fails the run. Drilled against a MinIO with no KMS:
+
+```
+upload failed: ... An error occurred (NotImplemented) when calling the PutObject
+operation: Server side encryption specified but KMS is not configured
+backup: FAILED: the dump was not stored off this host
+EXIT=1
+
+status.json  outcome=failure  failed_stage=upload
+             last_success_at=2026-09-04T11:10:52Z   <- the previous good one
+bucket       empty
+```
+
+That deployment now has no backups until it configures a store that can encrypt,
+and it can see that it has none, which is the whole point: the alternative is a
+green run over a plaintext copy of every customer's messages.
+
+**One thing fixed alongside it.** A failed run carried `last_success_at` and
+`last_success_artifact` forward and reset `last_success_bytes` to zero — so the
+status file said the last good backup was an empty file, which is false and
+frightening in exactly the situation somebody is reading it. The byte count now
+travels with the artifact name it describes.
+
+**Credential separation is untouched.** The backup service holds
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` and no application process does;
+the API and the worker hold `MEDIA_S3_*` and the backup service does not.
+`BACKUP_S3_SSE_KMS_KEY_ID` is a key *name*, not a credential, and adds no
+permission to either side. Both directions are asserted in
+`tests/integration/test_deployment_configuration.py`.
+
+**What is proved rather than argued.** The full drill ran against a real MinIO
+with a real dump of the local database: refused with no `BACKUP_S3_SSE`; refused
+with a value the S3 API does not define; uploaded and verified
+`encrypted AES256` with it set; the object as MinIO wrote it to disk carries
+`X-Minio-Internal-Server-Side-Encryption-Sealed-Key` and does not contain the
+`PGDMP` magic the plaintext dump starts with; and `fetch_backup.sh` brought it
+back and `pg_restore --list` read it. The store that ignores `--sse` and answers
+200 — the case no real store here reproduces on demand — is covered by
+`tests/integration/test_backup_upload.py`, whose stub CLI models it directly.

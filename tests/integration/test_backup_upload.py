@@ -38,33 +38,65 @@ needs_shell = pytest.mark.skipif(SHELL is None, reason="No POSIX shell available
 SECRET = "drill-secret-must-never-be-printed"
 
 
-def stub_aws(tmp_path: Path, *, fail_on: str = "", size: int | None = None) -> Path:
+def stub_aws(
+    tmp_path: Path,
+    *,
+    fail_on: str = "",
+    size: int | None = None,
+    honours_sse: bool = True,
+) -> Path:
     """A stand-in for the AWS CLI that records what it was asked to do.
 
     `fail_on` makes one subcommand exit non-zero, which is how the upload and
     verification failures are provoked without an unreachable network.
+
+    `honours_sse=False` models the store this contract exists to catch: one
+    that accepts `--sse`, answers 200, and holds the object in the clear. A
+    flag passed is not a flag honoured, and only `head-object` can tell the
+    difference.
     """
     store = tmp_path / "remote"
     store.mkdir(exist_ok=True)
     binary = tmp_path / "aws"
+    reported = '$(cat "REMOTE/sse" 2>/dev/null)' if honours_sse else "None"
     binary.write_text(
-        "#!/bin/sh\n"
-        "set -eu\n"
-        f'echo "$@" >> "{store}/calls.log"\n'
-        f'if [ "$1" = "{fail_on}" ]; then exit 3; fi\n'
-        'if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then\n'
-        f'  cp "$3" "{store}/$(basename "$3")" 2>/dev/null || true\n'
-        "  exit 0\n"
-        "fi\n"
-        'if [ "$1" = "s3api" ]; then\n'
-        + (
-            f'  echo "{size}"\n'
-            if size is not None
-            else f'  wc -c < "{store}/$(basename "$6")" 2>/dev/null | tr -d " " || exit 4\n'
+        (
+            "#!/bin/sh\n"
+            "set -eu\n"
+            'echo "$@" >> "REMOTE/calls.log"\n'
+            'if [ "$1" = "FAILON" ]; then exit 3; fi\n'
+            'if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then\n'
+            '  cp "$3" "REMOTE/$(basename "$3")" 2>/dev/null || true\n'
+            # What the request asked for, remembered so head-object can answer
+            # it back the way a store that honours the header would.
+            "  asked=None\n"
+            "  while [ $# -gt 0 ]; do\n"
+            '    if [ "$1" = "--sse" ]; then shift; asked="$1"; fi\n'
+            "    shift\n"
+            "  done\n"
+            '  printf "%s" "$asked" > "REMOTE/sse"\n'
+            "  exit 0\n"
+            "fi\n"
+            'if [ "$1" = "s3api" ]; then\n'
+            "  held=SIZE\n"
+            '  sse="REPORTED"\n'
+            '  [ -n "$sse" ] || sse=None\n'
+            '  printf "%s\\t%s\\n" "$held" "$sse"\n'
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n"
         )
-        + "  exit 0\n"
-        "fi\n"
-        "exit 0\n",
+        .replace("REPORTED", reported)
+        .replace("REMOTE", str(store))
+        .replace("FAILON", fail_on)
+        .replace(
+            "SIZE",
+            (
+                str(size)
+                if size is not None
+                else f'$(wc -c < "{store}/$(basename "$6")" 2>/dev/null | tr -d " ")'
+            ),
+        ),
         encoding="utf-8",
         newline="\n",
     )
@@ -100,6 +132,9 @@ def s3_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
         "BACKUP_S3_BUCKET": "wasla-backups",
         "BACKUP_S3_PREFIX": "wasla",
         "BACKUP_S3_CLI": str(tmp_path / "aws"),
+        # Required now, not optional: an off-host dump does not leave
+        # unencrypted (ADR-090). Overridden by the tests that prove the guard.
+        "BACKUP_S3_SSE": "AES256",
         "AWS_ACCESS_KEY_ID": "drill-key-id",
         "AWS_SECRET_ACCESS_KEY": SECRET,
         **overrides,
@@ -210,6 +245,165 @@ def test_an_unknown_destination_is_refused(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "unknown BACKUP_DESTINATION" in result.stdout + result.stderr
+
+
+# ------------------------------------------------------ encryption at rest
+
+
+@needs_shell
+def test_a_production_backup_refuses_without_an_encryption_guarantee(tmp_path: Path) -> None:
+    """The finding, closed. `BACKUP_S3_SSE` used to be optional.
+
+    A dump is every conversation, phone number, lead and email address the
+    platform holds, in one file, in the clear. A deployment that forgot the
+    setting got a green run and a plaintext copy of its whole database in a
+    bucket, with nothing anywhere saying so.
+    """
+    stub_aws(tmp_path)
+    environment = s3_env(tmp_path)
+    del environment["BACKUP_S3_SSE"]
+
+    result = run(UPLOAD, str(artifact(tmp_path)), env=environment)
+
+    assert result.returncode != 0
+    assert "BACKUP_S3_SSE is not set" in result.stdout + result.stderr
+    calls = tmp_path / "remote" / "calls.log"
+    assert not calls.exists(), "the refusal came after something had already been uploaded"
+
+
+@needs_shell
+def test_a_local_only_development_backup_is_untouched_by_the_requirement(tmp_path: Path) -> None:
+    """The escape hatch is one level up, and it still works.
+
+    A laptop sets no destination and takes `BACKUP_ALLOW_LOCAL_ONLY=yes`, which
+    returns before any upload - so there is no encryption question to answer,
+    and no second environment system in the shell scripts to answer it with.
+    """
+    result = run(
+        UPLOAD,
+        str(artifact(tmp_path)),
+        env={"BACKUP_DESTINATION": "none", "BACKUP_ALLOW_LOCAL_ONLY": "yes"},
+    )
+
+    assert result.returncode == 0
+    assert "only on this host" in result.stdout
+
+
+@needs_shell
+@pytest.mark.parametrize("value", ["aes256", "AES-256", "yes", "true", "kms"])
+def test_an_encryption_setting_the_s3_api_does_not_define_is_refused(
+    tmp_path: Path, value: str
+) -> None:
+    """A setting that looks configured and encrypts nothing."""
+    stub_aws(tmp_path)
+    result = run(UPLOAD, str(artifact(tmp_path)), env=s3_env(tmp_path, BACKUP_S3_SSE=value))
+
+    assert result.returncode != 0
+    assert "must be AES256 or aws:kms" in result.stdout + result.stderr
+
+
+@needs_shell
+@pytest.mark.parametrize("algorithm", ["AES256", "aws:kms"])
+def test_the_encryption_request_is_forwarded_to_the_store(tmp_path: Path, algorithm: str) -> None:
+    stub_aws(tmp_path)
+    result = run(UPLOAD, str(artifact(tmp_path)), env=s3_env(tmp_path, BACKUP_S3_SSE=algorithm))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (tmp_path / "remote" / "calls.log").read_text(encoding="utf-8")
+    assert f"--sse {algorithm}" in calls
+
+
+@needs_shell
+def test_a_named_kms_key_is_forwarded_and_a_missing_one_is_not_invented(tmp_path: Path) -> None:
+    """Optional even for KMS: without one, S3 uses the bucket's default key."""
+    stub_aws(tmp_path)
+    named = run(
+        UPLOAD,
+        str(artifact(tmp_path)),
+        env=s3_env(
+            tmp_path,
+            BACKUP_S3_SSE="aws:kms",
+            BACKUP_S3_SSE_KMS_KEY_ID="alias/wasla-backups",
+        ),
+    )
+    assert named.returncode == 0, named.stdout + named.stderr
+    calls = (tmp_path / "remote" / "calls.log").read_text(encoding="utf-8")
+    assert "--sse-kms-key-id alias/wasla-backups" in calls
+
+    (tmp_path / "remote" / "calls.log").unlink()
+    default = run(UPLOAD, str(artifact(tmp_path)), env=s3_env(tmp_path, BACKUP_S3_SSE="aws:kms"))
+    assert default.returncode == 0, default.stdout + default.stderr
+    assert "--sse-kms-key-id" not in (tmp_path / "remote" / "calls.log").read_text(encoding="utf-8")
+
+
+@needs_shell
+def test_a_store_that_ignores_the_request_does_not_produce_a_backup(tmp_path: Path) -> None:
+    """A flag passed is not a flag honoured.
+
+    The store took the object and answered 200. Only `head-object` can tell
+    that what it holds is in the clear, which is why the verification reads the
+    encryption alongside the size rather than trusting the exit code.
+    """
+    stub_aws(tmp_path, honours_sse=False)
+    result = run(UPLOAD, str(artifact(tmp_path)), env=s3_env(tmp_path))
+
+    assert result.returncode != 0
+    assert "reports encryption" in result.stdout + result.stderr
+
+
+@needs_shell
+def test_a_verified_upload_says_what_it_verified(tmp_path: Path) -> None:
+    stub_aws(tmp_path)
+    result = run(UPLOAD, str(artifact(tmp_path)), env=s3_env(tmp_path))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "encrypted AES256" in result.stdout
+    calls = (tmp_path / "remote" / "calls.log").read_text(encoding="utf-8")
+    assert "s3api head-object" in calls, "remote validation stopped happening"
+
+
+@needs_shell
+def test_an_unencrypted_upload_does_not_advance_the_recorded_success(tmp_path: Path) -> None:
+    """Fail closed, and leave the last known good backup where it was.
+
+    Stale-backup alerting is what turns this into somebody being told. A run
+    that advanced its success on an unencrypted artifact would silence the one
+    signal that says the deployment has no recovery point it can trust.
+    """
+    status = tmp_path / "status.json"
+    status.write_text(
+        json.dumps(
+            {
+                "outcome": "success",
+                "written_at": "2026-08-01T00:00:00Z",
+                "last_success_at": "2026-08-01T00:00:00Z",
+                "last_success_artifact": "wasla-20260801T000000Z.dump",
+                "last_success_bytes": 4101,
+                "destination": "s3",
+                "failures_total": 0,
+                "failed_stage": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+    # The stubs below are defined further down the file; both are resolved at
+    # call time. They are what lets this reach the *upload* stage, which is
+    # where the encryption verdict is made.
+    stub_postgres(tmp_path)
+    stub_aws(tmp_path, honours_sse=False)
+
+    result = run(BACKUP, env=backup_env(tmp_path, status))
+
+    assert result.returncode != 0
+    after = read_status(status)
+    assert after["outcome"] == "failure"
+    assert after["last_success_at"] == "2026-08-01T00:00:00Z"
+    assert after["last_success_artifact"] == "wasla-20260801T000000Z.dump"
+    # The byte count travels with the artifact it describes. Resetting it to
+    # zero would read as "the last good backup was empty", which is false and
+    # frightening in exactly the situation somebody is reading this file.
+    assert after["last_success_bytes"] == 4101
+    assert after["failed_stage"] == "upload"
 
 
 # -------------------------------------------------------------- the fetcher

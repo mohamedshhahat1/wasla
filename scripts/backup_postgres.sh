@@ -83,12 +83,15 @@ _write_status() {
 
     previous_success="$(_status_field last_success_at)"
     previous_artifact="$(_status_field last_success_artifact)"
+    previous_bytes="$(_status_number last_success_bytes)"
+    [ -n "${previous_bytes}" ] || previous_bytes=0
     previous_failures="$(_status_number failures_total)"
     [ -n "${previous_failures}" ] || previous_failures=0
 
     if [ "${outcome}" = "success" ]; then
         success_at="${written_at}"
         success_artifact="${artifact}"
+        success_bytes="${size}"
         failures="${previous_failures}"
         failed_stage=""
     else
@@ -96,8 +99,14 @@ _write_status() {
         # point of the file: a failed run must not make the deployment look
         # like it has never had a backup, and must not make it look like it
         # just had one either.
+        #
+        # The byte count travels with the other two. It used to be reset to
+        # zero while the artifact name it describes was kept, which reads as
+        # "the last good backup was empty" - a sentence that is false and
+        # frightening in exactly the situation an operator is reading this.
         success_at="${previous_success}"
         success_artifact="${previous_artifact}"
+        success_bytes="${previous_bytes}"
         failures=$((previous_failures + 1))
         failed_stage="${stage}"
     fi
@@ -109,7 +118,7 @@ _write_status() {
   "written_at": "${written_at}",
   "last_success_at": "${success_at}",
   "last_success_artifact": "${success_artifact}",
-  "last_success_bytes": ${size},
+  "last_success_bytes": ${success_bytes},
   "destination": "${where}",
   "failures_total": ${failures},
   "failed_stage": "${failed_stage}"

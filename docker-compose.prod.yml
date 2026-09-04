@@ -523,7 +523,13 @@ services:
       # Set for any S3-compatible store that is not AWS - MinIO, R2, Wasabi,
       # Backblaze. Left empty for AWS itself.
       BACKUP_S3_ENDPOINT_URL: ${BACKUP_S3_ENDPOINT_URL:-}
-      BACKUP_S3_SSE: ${BACKUP_S3_SSE:-}
+      # Encryption at rest for the artifact, and required rather than optional:
+      # `upload_backup.sh` refuses to send a dump without it and refuses to
+      # record a success unless the store confirms the object is encrypted
+      # (ADR-090). Defaulted to AES256 here so a deployment that sets a
+      # destination and forgets this one is encrypted rather than plaintext.
+      BACKUP_S3_SSE: ${BACKUP_S3_SSE:-AES256}
+      BACKUP_S3_SSE_KMS_KEY_ID: ${BACKUP_S3_SSE_KMS_KEY_ID:-}
       # Read by `aws` from the environment, never from a command line. Neither
       # the API nor the worker is given these: a compromised application
       # container must not be able to read or delete the backups.
