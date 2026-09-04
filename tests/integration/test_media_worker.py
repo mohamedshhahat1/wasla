@@ -187,6 +187,21 @@ def _worker(
     return worker
 
 
+async def _read(worker: MediaWorker, job: MediaJob) -> None:
+    """Run one job the way `_attempt` does: handle it, then queue what it owes.
+
+    `_handle` decides whether the conversation is answerable and returns the
+    turn rather than queueing it, because the transcript it names is only
+    durable once that transaction has committed (ADR-092). These tests share
+    the request's session, so there is no commit to wait for - but they still
+    go through the same two steps in the same order, so an assertion about
+    "exactly one agent job" is an assertion about the code that ships.
+    """
+    follow_up = await worker._handle(job)
+    if follow_up is not None:
+        await worker._agents.enqueue(follow_up)
+
+
 async def test_a_file_is_downloaded_read_and_released(
     db_session: AsyncSession, tmp_path: Path, settings: Settings
 ) -> None:
@@ -197,7 +212,7 @@ async def test_a_file_is_downloaded_read_and_released(
     reader = StubReader("A blue sofa with a price tag reading 4,500 EGP.")
     worker = _worker(db_session, tmp_path, settings, whatsapp=whatsapp, reader=reader)
 
-    await worker._handle(MediaJob(tenant_id=tenant.id, media_id=media.id))
+    await _read(worker, MediaJob(tenant_id=tenant.id, media_id=media.id))
 
     await db_session.refresh(media)
     assert media.status is MediaStatus.READY
@@ -231,14 +246,14 @@ async def test_two_files_on_one_conversation_produce_one_agent_job(
 
     worker = _worker(db_session, tmp_path, settings)
 
-    await worker._handle(MediaJob(tenant_id=tenant.id, media_id=first.id))
+    await _read(worker, MediaJob(tenant_id=tenant.id, media_id=first.id))
     # The first file is read, but its sibling is still pending, so nothing is
     # released yet.
     agents = worker._agents
     assert isinstance(agents, RecordingQueue)
     assert agents.jobs == []
 
-    await worker._handle(MediaJob(tenant_id=tenant.id, media_id=second.id))
+    await _read(worker, MediaJob(tenant_id=tenant.id, media_id=second.id))
 
     await db_session.refresh(first)
     await db_session.refresh(second)
@@ -260,7 +275,7 @@ async def test_an_oversized_file_is_skipped_and_still_releases_the_reply(
     worker = _worker(db_session, tmp_path, settings, whatsapp=huge)
     worker._settings = settings.model_copy(update={"media_max_bytes": 8})
 
-    await worker._handle(MediaJob(tenant_id=tenant.id, media_id=media.id))
+    await _read(worker, MediaJob(tenant_id=tenant.id, media_id=media.id))
 
     await db_session.refresh(media)
     assert media.status is MediaStatus.SKIPPED
@@ -340,8 +355,8 @@ async def test_a_second_run_over_a_read_file_does_not_pay_again(
     worker = _worker(db_session, tmp_path, settings, whatsapp=whatsapp, reader=reader)
 
     job = MediaJob(tenant_id=tenant.id, media_id=media.id)
-    await worker._handle(job)
-    await worker._handle(job)
+    await _read(worker, job)
+    await _read(worker, job)
 
     assert whatsapp.fetched == 1
     assert reader.reads == 1
@@ -534,7 +549,7 @@ async def test_a_stored_file_is_read_without_a_whatsapp_token(
     )
     worker._agents = RecordingQueue()  # type: ignore[assignment]
 
-    await worker._handle(MediaJob(tenant_id=tenant.id, media_id=media.id))
+    await _read(worker, MediaJob(tenant_id=tenant.id, media_id=media.id))
 
     await db_session.refresh(media)
     assert media.status is MediaStatus.READY
@@ -571,7 +586,7 @@ async def test_a_document_is_read_with_no_provider_configured(
     )
     worker._agents = RecordingQueue()  # type: ignore[assignment]
 
-    await worker._handle(MediaJob(tenant_id=tenant.id, media_id=media.id))
+    await _read(worker, MediaJob(tenant_id=tenant.id, media_id=media.id))
 
     await db_session.refresh(media)
     assert media.status is MediaStatus.READY

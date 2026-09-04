@@ -17,6 +17,22 @@ idempotent.
 second worker wait for the first to commit before it counts. Cheapest correct
 answer available - no new table, no Redis key, and the lock is held for one
 count.
+
+The second hard part is *when* the agent job may exist, and it is a different
+question from who may create it. The transcript this worker writes is the whole
+reason an agent turn is being asked for, so the job must not be queued until
+that write is durable:
+
+    read the file
+    resolve the row, take the gate, count the siblings   -> COMMIT
+    --  the transcript is now visible to every other transaction
+    release this job and queue the agent turn, in that order
+
+Queueing from inside the transaction - which is what this worker used to do -
+put a job on a queue that a worker could consume before the transcript
+committed. Unlike ADR-089's race the conversation exists, so nothing answers
+`not_found` and nothing retries: the turn reads `[image, not yet read]` and
+answers a photograph it has not seen (ADR-092).
 """
 
 from __future__ import annotations
@@ -169,7 +185,7 @@ class MediaWorker:
             return outcome.action
 
         try:
-            await self._handle(job)
+            follow_up = await self._handle(job)
         except Exception as error:
             logger.exception("media.job_failed", extra={"media_id": str(job.media_id)})
             outcome = await handle_failure(
@@ -183,11 +199,48 @@ class MediaWorker:
             )
             return outcome.action
 
-        await self._queue.release(raw)
+        # `_handle` has returned, so its session has committed: the transcript
+        # this agent turn exists to read is durable *before* the job that reads
+        # it is queued (ADR-092). The release is what makes the pair happen
+        # once - `_claim_inflight` can only succeed for one caller - so a
+        # worker whose lease was reaped mid-job declines here and leaves the
+        # requeued attempt to do it.
+        released = await self._queue.release(raw)
+        if released and follow_up is not None:
+            await self._enqueue_agent(follow_up)
         await record_success(job_type=JOB_TYPE)
         return SUCCEEDED
 
-    async def _handle(self, job: MediaJob) -> None:
+    async def _enqueue_agent(self, job: AgentJob) -> None:
+        """Ask an agent to answer, without letting a queue failure undo the read.
+
+        Logged rather than raised. Everything the turn needs is committed by
+        now, and a Redis outage that costs the reply must not also cost the
+        transcript by turning a finished job into a retry that re-reads the
+        file at a provider's expense.
+        """
+        try:
+            await self._agents.enqueue(job)
+        except Exception:
+            logger.exception(
+                "media.agent_enqueue_failed",
+                extra={"conversation_id": str(job.conversation_id)},
+            )
+            return
+
+        logger.info(
+            "media.conversation_released",
+            extra={"conversation_id": str(job.conversation_id)},
+        )
+
+    async def _handle(self, job: MediaJob) -> AgentJob | None:
+        """Read one file, and say whether the conversation is now answerable.
+
+        Returns the agent job rather than queueing it. The decision needs the
+        row lock and the count, which belong in this transaction; the queueing
+        needs the transaction to have *committed*, which cannot happen inside
+        it. Splitting the two is the whole of ADR-092.
+        """
         async with self._database.session() as session:
             # `require_by_id` rather than a `None` check that returned quietly,
             # and the difference is the enqueue-before-commit race (ADR-089).
@@ -220,7 +273,7 @@ class MediaWorker:
                     reader=self._reader(openai_http),
                 )
 
-            await self._release_conversation(session=session, job=job, media=media)
+            return await self._release_conversation(session=session, job=job, media=media)
 
     async def _process(
         self,
@@ -296,8 +349,16 @@ class MediaWorker:
         session: AsyncSession,
         job: MediaJob,
         media: MessageMedia,
-    ) -> None:
-        """Ask an agent to answer, if nothing else on this conversation is unread.
+    ) -> AgentJob | None:
+        """The agent turn this conversation is now owed, if it is owed one.
+
+        Decides; it does not queue. An agent turn reads the transcript this
+        transaction is still holding, so a job queued from here can be consumed
+        before the row it names is visible - and unlike ADR-089's race the
+        conversation *is* visible, so nothing answers `not_found` and nothing
+        retries. The turn simply reads `[image, not yet read]` and answers a
+        photograph it has not seen (ADR-092). The caller queues it once this
+        transaction has committed.
 
         The lock is taken **here**, and it used to be taken at the top of
         `_handle`. Two reasons, and the first is a correctness requirement
@@ -319,9 +380,11 @@ class MediaWorker:
         an inference - a row lock across three network calls, which is the
         thing ADR-080 exists to keep out of this codebase.
 
-        A queue failure is logged rather than raised. The file is read and the
-        row is committed either way, and losing the reply to a Redis outage is
-        better than losing the transcript as well.
+        **Deciding under the lock is what keeps the answer single.** Only the
+        worker that finishes last can see a count of zero, because a sibling
+        cannot commit its own row without first waiting here - so exactly one
+        caller is handed a job, and moving the queueing outside the transaction
+        does not change that.
         """
         await ConversationMediaGate(session).lock(media.conversation_id)
 
@@ -333,20 +396,6 @@ class MediaWorker:
                 "media.conversation_still_waiting",
                 extra={"conversation_id": str(media.conversation_id), "remaining": remaining},
             )
-            return
+            return None
 
-        try:
-            await self._agents.enqueue(
-                AgentJob(tenant_id=job.tenant_id, conversation_id=media.conversation_id)
-            )
-        except Exception:
-            logger.exception(
-                "media.agent_enqueue_failed",
-                extra={"conversation_id": str(media.conversation_id)},
-            )
-            return
-
-        logger.info(
-            "media.conversation_released",
-            extra={"conversation_id": str(media.conversation_id)},
-        )
+        return AgentJob(tenant_id=job.tenant_id, conversation_id=media.conversation_id)

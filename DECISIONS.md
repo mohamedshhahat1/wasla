@@ -4641,3 +4641,108 @@ two thousand maximum-size attachments. Enterprise is left without the key,
 because that is what "custom" means in this catalogue, and a deployment that has
 already set its own value keeps it — the migration writes only where the key is
 absent.
+
+---
+
+## ADR-092 — The Transcript Is Committed Before an Agent Can Be Asked to Read It
+
+**Context.** ADR-089 closed the case where a job named a row that was not
+visible yet: the worker asked for it, got nothing, and the retry policy handled
+it. Auditing the other queue producers turned up the same *ordering* with a
+different and worse consequence.
+
+The media worker read a file and queued the agent turn from inside the
+transaction that wrote the transcript:
+
+```
+BEGIN
+  download the file, commit the object intent, finalise it   (ADR-087)
+  understand it -> transcript on the row, flushed
+  take the conversation gate, count what is still unresolved
+  ENQUEUE the agent job          <- the queue can be read from immediately
+COMMIT                           <- the transcript becomes visible only now
+```
+
+`Database.session` commits when the handler returns, so a worker blocked on
+`BLMOVE` could take that job before the transcript existed for anybody else.
+
+**Why no retry could have fixed it.** In ADR-089's race the row was missing, so
+a scoped repository raised, the failure classified as `not_found`, and one
+extra attempt was enough. Here the conversation is committed and visible; only
+the transcript is not. Nothing raises. The turn builds a context that is
+complete, well-formed and wrong:
+
+```
+media worker transaction         : OPEN, uncommitted
+agent jobs already queued        : 1
+conversation visible to the agent: 1 row
+transcript visible to the agent  : None
+agent context it would build     : How much for this?
+                                   [image, not yet read]
+
+media worker transaction         : COMMITTED
+agent context it would build     : How much for this?
+                                   [image] A blue three-seat sofa with a
+                                           wooden frame.
+```
+
+`[image, not yet read]` is a line `memory.py` writes for exactly this state and
+whose own comment said it was "not normally reached: an agent job is not
+enqueued while anything on the conversation is unresolved". It was reachable,
+and reaching it means the customer is answered about a photograph nobody looked
+at. A delay-and-retry would be worse than nothing: there is no signal to retry
+*on*, and by the time one could be invented the answer has been sent.
+
+**Decision.** `_release_conversation` decides; it does not queue.
+
+```
+TX   read the file, resolve the row, take the gate, count siblings   -> COMMIT
+--   the transcript is now visible to every other transaction
+     release this job, and queue the agent turn if the release was ours
+```
+
+**The gate still decides alone.** What has to be serialised is the media row's
+final state and the count that reads every sibling's, and both are still in one
+transaction that commits while the lock is held. A sibling cannot commit its own
+row without waiting at the gate first, so only the worker that finishes last can
+see a count of zero. Moving the *queueing* out of the transaction does not move
+the *decision*, which is why two attachments still produce one turn.
+
+**The crash window this opens, and what closes it.** Committing first means a
+process that stops before queueing has read a file nobody will answer. Nothing
+new was built for that. The media job is still reserved, so its lease runs out,
+the reaper requeues it, and the retry finds the row already `READY` — the
+download and the read both return early — takes the gate, counts zero and
+queues the turn. The reservation *is* the record that the release is still
+owed, which is why this needs no outbox, no dispatch table and no new column.
+
+**The release is the claim, and it is why nothing doubles.** `release` now
+returns whether this call was the one that removed the in-flight entry, exactly
+as `dead_letter` and `schedule_retry` already did, and the turn is queued only
+if it was. Two live workers on one file — what a reclaimed lease produces — end
+with one queued turn between them: the reaper took the slow worker's entry, so
+its release removes nothing and it declines, leaving the replacement to queue
+the turn it already queued. Before this change both would have queued one.
+
+The residual window is the two adjacent Redis commands inside `release`
+followed by the push, which is the same shape `dead_letter` and `schedule_retry`
+have carried since they were written: a crash between them costs the reply and
+is bounded by one visibility timeout. Closing it would need the pair to be one
+scripted operation, which is a real answer to a real problem at a scale nobody
+here has reached.
+
+**Human takeover is still authoritative, and is not part of this.** Releasing a
+conversation asks for a turn; it does not authorise one. The orchestrator
+refuses a conversation a colleague owns before it calls a provider, and re-reads
+the mode after the inference in case they took it over while the model was
+composing (ADR-080). Both checks are unchanged, and both are now driven from the
+media path as well.
+
+**What is proved rather than argued.**
+`tests/integration/test_media_release_ordering.py` holds the media worker's
+transaction open at the moment of the decision, against real PostgreSQL and
+real Redis, and asserts the agent queue is empty and the transcript invisible —
+where the same drill before the fix showed one queued job and a context reading
+`[image, not yet read]`. It then drives the crash after the commit, the
+reclaimed lease, two attachments, an unreadable file, and a takeover in both
+directions.

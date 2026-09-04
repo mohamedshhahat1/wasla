@@ -633,10 +633,20 @@ class ReliableQueue:
     async def _forget_reservation(self, raw: str) -> None:
         await _command(self._redis.hdel(self._reservations, raw))
 
-    async def release(self, raw: str) -> None:
-        """Mark a reserved job done."""
-        await self._claim_inflight(raw)
+    async def release(self, raw: str) -> bool:
+        """Mark a reserved job done. Returns whether this call was the one.
+
+        The answer matters to a worker whose *last* act depends on having
+        finished the job rather than on having tried: the media worker asks an
+        agent to reply only if this call removed the entry, so a worker whose
+        lease a reaper had already reclaimed cannot release a conversation the
+        requeued attempt is about to release again (ADR-092). Callers with no
+        such act ignore the result, exactly as they did when this returned
+        nothing.
+        """
+        claimed = await self._claim_inflight(raw)
         await self._forget_reservation(raw)
+        return claimed
 
     async def schedule_retry(
         self,
