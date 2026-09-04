@@ -1,6 +1,6 @@
 # SaaS Model
 
-**Status: In Progress** — tenants, global users, memberships, invitations, workspace switching and the platform role layer are Implemented (phases 1-2), as is a read-only platform reporting surface (phase 12). Plans, entitlements and billing are Planned (phase 13). Decisions: ADR-001, ADR-002, ADR-003.
+**Status: Implemented** — tenants, global users, memberships, invitations, workspace switching and the platform role layer (phases 1-2); the cross-workspace platform surface (phase 12); and plans, entitlements and billing (phase 13). The first platform role is granted by an operator command rather than by SQL (ADR-094). Decisions: ADR-001, ADR-002, ADR-003.
 
 Scope: tenancy, workspaces, platform administration, plans, and entitlements.
 

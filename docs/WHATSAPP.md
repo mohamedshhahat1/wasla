@@ -100,7 +100,7 @@ Meta retries any non-2xx response and eventually disables a subscription that ke
 
 The workspace is resolved from `metadata.phone_number_id` and never from the customer's phone number, which the sender controls. `phone_number_id` is unique platform-wide, so a number can never map to two workspaces. The lookup is the one deliberately unscoped query in this subsystem — the workspace is what is being discovered — and is isolated in `WhatsAppAccountDirectory`, which holds that single method.
 
-An account row carries no Meta credential. A per-workspace access token in a plain column would put a live sending capability in every database dump; until there is encryption at rest, outbound calls use the platform credential.
+An account row carries the workspace's own Meta token, encrypted (ADR-034, superseding ADR-009). A token in a plain column would put a live sending capability in every database dump, so the column is AES-256-GCM with the tenant id as additional authenticated data — a ciphertext lifted into another workspace's row will not decrypt. A workspace that has supplied one sends as itself; one that has not sends through the platform credential from configuration.
 
 ## Parsing
 

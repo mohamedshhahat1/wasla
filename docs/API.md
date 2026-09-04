@@ -1,6 +1,6 @@
 # API
 
-**Status: In Progress** — health, authentication, invitations, WhatsApp accounts, the WhatsApp webhook, conversations, media, the knowledge base, leads, follow-ups, templates, campaigns, usage and analytics are Implemented. Billing and the platform surface are Planned.
+**Status: Implemented** — health, authentication, invitations, WhatsApp accounts, the WhatsApp webhook, conversations, media, the knowledge base, leads, follow-ups, templates, campaigns, usage, analytics, billing and the platform surface. What is absent is absent on purpose and is listed where it would otherwise appear.
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
@@ -444,7 +444,7 @@ Open to every member, unlike usage: these are the numbers that tell the people s
 
 ## Platform
 
-**Status: In Progress** — the read-only reporting surface is Implemented; administration and billing are Planned.
+**Status: Implemented** — cross-workspace reporting, invoice administration (recording a payment, voiding an invoice), account enable/disable and the audit-log view. Every read here writes an entry of its own (ADR-095).
 
 | Method | Path | Role |
 | --- | --- | --- |
@@ -486,7 +486,7 @@ Readmission reuses the same membership row, so the removal and the return are bo
 
 Platform authority is a property of the user, not of a membership. Owning a workspace grants nothing here, and holding a platform role grants nothing inside a workspace — a platform administrator reading these figures still cannot open a customer's inbox.
 
-- **Read-only on purpose.** Suspending or deleting a workspace is exactly the action that must be audit-logged, and there is no audit log until phase 14.
+- **Almost read-only on purpose.** The three writes here — recording a payment, voiding an invoice, enabling or disabling an account — are each audited. Suspending or deleting a *workspace* is still absent, no longer for want of an audit trail but because the product has no answer for what happens to a suspended workspace's in-flight conversations.
 - **No revenue figures**, and none until there are subscriptions to compute them from. A plausible zero is worse than an absent field.
 - **`/tenants` uses offset paging**, unlike the cursors elsewhere: the list is sorted by name and searched by hand, so an operator wants page three of forty results rather than a stable feed. `total` is the number matching the filter. `search` matches name or address and is escaped, so `%` finds a workspace called "100%" rather than everything.
 - **Each row carries the same counters that workspace sees on its own `/usage`**, so an operator and a customer quote the same number.

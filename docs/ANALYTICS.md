@@ -1,6 +1,6 @@
 # Analytics and Usage
 
-**Status: In Progress** — usage metering, the analytics event model and the tenant dashboard APIs are Implemented; the platform surface is Planned. See [../TASKS.md](../TASKS.md) phase 12. The decision behind how usage is written is ADR-027.
+**Status: Implemented** — usage metering, the analytics event model, the tenant dashboard APIs and the cross-workspace platform surface. Revenue, MRR, ARR and churn are deliberately absent rather than pending; the reasoning is below. See [../TASKS.md](../TASKS.md) phase 12. The decision behind how usage is written is ADR-027.
 
 Scope: analytics events, usage metering, and dashboard data contracts.
 

@@ -1,6 +1,6 @@
 # Authentication and Authorization
 
-**Status: Implemented** — see [../TASKS.md](../TASKS.md) phase 2. Rate limiting on authentication endpoints remains Planned (phase 14).
+**Status: Implemented** — see [../TASKS.md](../TASKS.md) phase 2, and phase 14 for the rate limiting on these endpoints (ADR-032): per client address and, for login, per account as well.
 
 Scope: identity, credentials, sessions, membership resolution, and permission checks.
 

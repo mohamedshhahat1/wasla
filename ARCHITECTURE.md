@@ -58,9 +58,12 @@ wasla/
 |   |-- integrations/        whatsapp/ (signature, payload, client); openai/ (types, client,
 |   |                         embeddings, transcription)
 |   |-- agents/              memory, tool registry, orchestrator
-|   |-- workers/             runner process; agent, ingestion, follow-up and media workers
-|   |                         with their queues
-|   +-- platform/            SaaS owner administration layer  (planned)
+|   |-- workers/             runner process and ten loops: agent, ingestion and media on
+|   |                         Redis queues; follow-up, campaign, billing, email, retention
+|   |                         and upload recovery polling PostgreSQL; and the lease reaper
+|   +-- platform/            SaaS owner administration layer: cross-workspace reporting,
+|                            invoice administration, the platform-role command and the
+|                            access trail those reads leave
 |-- alembic/                 migrations
 |-- tests/                   unit, integration, e2e
 |-- nginx/                   reverse proxy example
@@ -522,7 +525,7 @@ Cross-tenant reads answer `not_found`, never `forbidden`, so error codes cannot 
 
 ## 17. SaaS owner architecture
 
-**Status: In Progress** — the platform role authorization layer and a read-only reporting surface in `app/platform/` are Implemented; tenant administration, billing and audit logs are Planned.
+**Status: Implemented** — the platform role authorization layer, cross-workspace reporting, invoice administration (recording a payment, voiding an invoice), account enable/disable, the audit-log view and the operator command that grants the first platform role (ADR-094). Suspending or deleting a *workspace* is still absent, for the product reason below rather than for want of a trail.
 
 Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated: a platform role grants nothing inside a workspace, and owning a workspace grants nothing across the platform. Both directions are tested.
 
@@ -532,11 +535,13 @@ What it answers today, under `/api/v1/platform/*` and behind the platform-role d
 
 What it deliberately does not answer: revenue, MRR, ARR and churn, which are questions about subscriptions that do not exist until Phase 13; and estimated AI cost, which would need per-model prices stored nowhere — token counts are real, and a cost derived from invented prices would not be. A plausible zero on a dashboard is worse than an absent field.
 
-It is also read-only. Suspending or deleting a workspace is precisely the action that must be audit-logged, and there is no audit log until Phase 14; shipping the action first would mean a period in which the most consequential operations in the product left no trace.
+It is **almost** read-only, and the exceptions are narrow and audited: recording a payment somebody has seen arrive, voiding an invoice that should not have been issued, and disabling or restoring an account. Suspending or deleting a *workspace* remains absent — no longer for want of an audit trail, which exists (ADR-033), but because the product has no answer for what happens to a suspended workspace's in-flight conversations.
+
+The reads on this surface are themselves audited (ADR-095), which no other read in the API is. A workspace administrator reading their own inbox is looking at their own business; a platform administrator reading the estate is looking at somebody else's, and "who looked at our workspace" is a question a customer is entitled to have answered.
 
 ## 18. Authentication and authorization
 
-**Status: Implemented** — rate limiting on authentication endpoints remains Planned (phase 14).
+**Status: Implemented** — including rate limiting on the authentication endpoints (ADR-032): per client address and, for login, per account as well, so a distributed attempt against one account is still bounded.
 
 Argon2id password hashing with rehash-on-login, typed access and refresh tokens, rotating refresh tokens with a Redis denylist, a current-user dependency, workspace resolution and switching from the token, and role dependencies for both scopes. Access tokens are intentionally not revocable and membership is re-verified per request; the reasoning for both, and the invitation flow, is in [docs/AUTH.md](docs/AUTH.md).
 
@@ -548,7 +553,7 @@ Conversation routes are open to every workspace member rather than to admins onl
 
 ## 19. Usage metering and billing
 
-**Status: In Progress** — usage metering (migration `0014`, ADR-027), plans, subscriptions and enforced entitlements (migration `0016`, ADR-029, ADR-030), invoices with payment records behind a provider boundary (migration `0017`, ADR-031), and Paymob checkout, refunds and saved-card renewals (ADR-044, ADR-045) are Implemented. A payment taken from a live merchant account, overage pricing and dunning are Planned.
+**Status: In Progress** — usage metering (migration `0014`, ADR-027), plans, subscriptions and enforced entitlements (migration `0016`, ADR-029, ADR-030), invoices with payment records behind a provider boundary (migration `0017`, ADR-031), Paymob checkout, refunds and saved-card renewals (ADR-044, ADR-045), and dunning (ADR-061) are Implemented — as is the durable collection attempt that makes a renewal safe to retry after a crash (ADR-088). A payment taken from a live merchant account and overage pricing are Planned.
 
 **A priced plan is granted by settlement, never by asking** (ADR-059). `SubscriptionService` refuses a plan with a price to a self-service caller, answering 402; `CheckoutService._settle` applies `invoice.plan_code` when a signed provider callback says the invoice is paid. The plan comes from a row this system wrote before the provider was called, so the callback contributes one fact — that the money arrived — and a declined, unsigned, mismatched or replayed one grants nothing.
 
@@ -706,7 +711,7 @@ one JSON POST does not justify a supply-chain entry.
 
 ## 20. Observability
 
-**Status: Implemented** — structured logging, request IDs, health endpoints and a metrics endpoint exist and are tested. OpenTelemetry tracing and an error-monitoring provider remain Planned; the reasoning for not adding the latter is in [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
+**Status: Implemented** — structured logging, request IDs, health endpoints, a metrics endpoint and OpenTelemetry tracing (ADR-083) exist and are tested. An error-monitoring provider remains Planned; the reasoning for not adding one is in [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 
 Structured JSON logs carry `request_id`, and where applicable `tenant_id`, `user_id`, and `conversation_id`, propagated through context variables so async work keeps its correlation. Fields whose names suggest secrets (password, token, secret, key, authorization, cookie, signature, credential) are redacted recursively before serialisation, so tokens and API keys cannot reach the logs. A console formatter is used locally and JSON in deployed environments.
 
