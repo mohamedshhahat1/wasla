@@ -60,21 +60,29 @@ class LimitKey(StrEnum):
 
     Two kinds, and the difference decides how each is checked:
 
-    - **Resource limits** count rows that exist *now* - numbers, agents, people.
-      Checked with a `COUNT`, and a workspace over the limit stays over it until
-      something is deleted.
+    - **Resource limits** measure what exists *now* - numbers, agents, people,
+      bytes held in the object store. Checked with a `COUNT` or a `SUM`, and a
+      workspace over the limit stays over it until something is deleted.
     - **Usage limits** count what was consumed *in the current billing period*,
       read from `usage_events`. They reset when the period rolls over, which is
       what makes "1,000 messages a month" mean anything.
 
     `PERIOD_` is in the name of the second kind so a reader never has to guess
     which sort of question a key is asking.
+
+    `STORAGE_BYTES` is the first resource limit that is not a row count, and
+    the distinction matters: `usage_events` records `STORAGE_USED` when bytes
+    are *written* and never subtracts when they are purged, so it answers
+    "how much has this workspace ever stored" and cannot answer "how much is it
+    holding". A capacity limit needs the second question, so it is a `SUM` over
+    the rows that still name an object (ADR-091).
     """
 
     WHATSAPP_NUMBERS = "whatsapp_numbers"
     AGENTS = "agents"
     TEAM_MEMBERS = "team_members"
     KNOWLEDGE_DOCUMENTS = "knowledge_documents"
+    STORAGE_BYTES = "storage_bytes"
     PERIOD_MESSAGES = "period_messages"
     PERIOD_AI_REQUESTS = "period_ai_requests"
     PERIOD_CAMPAIGN_MESSAGES = "period_campaign_messages"
@@ -89,6 +97,7 @@ RESOURCE_LIMITS: Final[frozenset[LimitKey]] = frozenset(
         LimitKey.AGENTS,
         LimitKey.TEAM_MEMBERS,
         LimitKey.KNOWLEDGE_DOCUMENTS,
+        LimitKey.STORAGE_BYTES,
     }
 )
 

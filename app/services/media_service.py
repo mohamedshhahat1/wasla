@@ -23,11 +23,16 @@ from typing import Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.exceptions import ExternalServiceError, RateLimitedError
+from app.core.exceptions import (
+    ExternalServiceError,
+    PlanLimitExceededError,
+    RateLimitedError,
+)
 from app.core.logging import get_logger
 from app.core.media_types import SNIFF_BYTES, DetectedMedia, MediaTypeError
 from app.core.media_types import resolve as resolve_media_type
 from app.core.storage import MediaStorage, StorageError, build_key
+from app.db.models.billing import LimitKey
 from app.db.models.media import (
     MAX_TRANSCRIPT_LENGTH,
     MediaStatus,
@@ -38,6 +43,7 @@ from app.db.models.usage import UsageEventType
 from app.db.session import released
 from app.integrations.whatsapp.client import MediaTooLargeError, WhatsAppClient
 from app.repositories.media_repository import MediaRepository
+from app.services.entitlement_service import EntitlementService
 from app.services.extraction import UnreadableDocumentError
 from app.services.media_reader import (
     READABLE_TYPES,
@@ -96,6 +102,11 @@ class MediaService:
         self._whatsapp = whatsapp
         self._media = MediaRepository(session, tenant_id=tenant_id)
         self._usage = UsageRecorder(session, tenant_id=tenant_id)
+        self._entitlements = EntitlementService(
+            session,
+            tenant_id=tenant_id,
+            default_plan_code=settings.default_plan_code,
+        )
 
     async def get(self, media_id: uuid.UUID) -> MessageMedia:
         return await self._media.require_by_id(media_id)
@@ -225,12 +236,22 @@ class MediaService:
             )
 
         # TX1. The object does not exist yet and the database already knows its
-        # name, its size and the hash of what belongs in it.
-        key = await self.intend(
-            media,
-            mime_type=detected.mime_type,
-            data=downloaded.content,
-        )
+        # name, its size and the hash of what belongs in it - and, since the
+        # capacity check below runs under the same lock and commits with it,
+        # the intent is also this upload's claim on the workspace's storage.
+        try:
+            key = await self.intend(
+                media,
+                mime_type=detected.mime_type,
+                data=downloaded.content,
+            )
+        except PlanLimitExceededError as refusal:
+            # Skipped, not failed, and the message it arrived with is untouched.
+            # A customer's WhatsApp message is never refused for the business's
+            # billing (ADR-030); what is refused is writing another object into
+            # a store the workspace has already filled. The row says why, so the
+            # workspace can see it and make room.
+            return await self._skip(media, str(refusal))
         if key is None:
             return await self._fail(
                 media,
@@ -266,6 +287,14 @@ class MediaService:
         bytes. Overwriting there would replace an object somebody may already
         be recovering with contents its own row does not describe.
 
+        Raises `PlanLimitExceededError` when the workspace has no room left,
+        which is a different answer from `None` and wants a different outcome
+        on the row: `None` means "this file conflicts with what is recorded",
+        and this means "there is nowhere to put it". Raised rather than
+        returned as a second sentinel, because a caller that confused the two
+        would write the wrong reason onto a customer's attachment - and
+        because the authenticated upload path wants it to become a 402.
+
         Allocated under a row lock, so two attempts at one file agree on one
         key rather than writing two objects of which only one can be recorded
         (ADR-087). The lock covers a `SELECT` and an `UPDATE` and nothing else;
@@ -291,6 +320,24 @@ class MediaService:
             return row.storage_key
         if row.storage_state is not MediaStorageState.ABSENT:
             return None
+
+        # Asked here, and only for a row that is about to start occupying
+        # space: the two branches above either reuse an intent that is already
+        # counted or refuse outright, and charging capacity for those would
+        # count the same bytes twice.
+        #
+        # `reserve` holds the workspace's advisory lock until this transaction
+        # commits, which is a few statements away - the caller commits the
+        # intent and does the object write outside any transaction. So two
+        # uploads racing for the last megabyte serialise for the length of an
+        # UPDATE rather than for the length of a network write.
+        capacity = await self._entitlements.reserve(LimitKey.STORAGE_BYTES, additional=byte_size)
+        if not capacity.allowed:
+            raise PlanLimitExceededError(
+                "This workspace has used all the file storage its plan allows, "
+                "so this attachment was not saved. Delete some attachments or "
+                "upgrade the plan."
+            )
 
         row.storage_key = build_key(tenant_id=self._tenant_id, mime_type=mime_type)
         row.storage_state = MediaStorageState.PENDING

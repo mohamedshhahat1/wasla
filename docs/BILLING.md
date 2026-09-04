@@ -26,11 +26,24 @@ A plan is a row in `plans`: a stable `code`, a name, a price in `Numeric` (never
 | `agents` | Configured agents, drafts and disabled ones included |
 | `team_members` | Memberships |
 | `knowledge_documents` | Documents |
+| `storage_bytes` | Bytes held in the object store, summed over attachments that still name one |
 | `period_messages` | Messages sent **and** received in the billing period |
 | `period_ai_requests` | Provider calls in the billing period |
 | `period_campaign_messages` | Campaign messages in the billing period |
 
-The first four count rows that exist now; a workspace over one stays over it until something is deleted, because downgrading a plan should stop somebody adding more rather than delete their work. The last three count `usage_events` since `current_period_start`, which is what makes "1,000 messages a month" reset.
+The first five measure what exists now; a workspace over one stays over it until something is deleted, because downgrading a plan should stop somebody adding more rather than delete their work. The last three count `usage_events` since `current_period_start`, which is what makes "1,000 messages a month" reset.
+
+### Storage is the one that is a `SUM` (ADR-091)
+
+`storage_bytes` is a capacity rather than a count, and it is deliberately **not** read from `usage_events`. That table is authoritative for what a workspace has *consumed* and is append-only by design (ADR-030), so `STORAGE_USED` records bytes when they are written and never subtracts when retention deletes them: it answers "how much has this workspace ever stored" and cannot answer "how much is it holding". A capacity limit needs the second question, so it sums `message_media.byte_size` over the rows whose `storage_state` still names an object.
+
+That choice has a consequence worth stating: **the committed upload intent is the reservation.** A row goes `PENDING` before the object exists (ADR-087), and `PENDING` counts — so two uploads racing for the last megabyte serialise on the workspace's advisory lock, the first commits its intent, and the second counts those bytes and is refused. There is no counter to drift and nothing to reconcile: a write that never lands is settled to `ABSENT` by the upload reconciler and its space comes back in the same statement, and retention purging a file frees it the same way.
+
+`MISMATCHED` counts, because that object is still in the bucket and is deliberately never deleted. `PURGING` counts, because a delete in flight is not a delete that happened.
+
+**Where it is enforced.** Both paths that write an object: an inbound attachment is *skipped* with the reason on its row — a customer's WhatsApp message is never refused for the business's billing (ADR-030) — and an authenticated upload is refused with a 402 before Meta is asked to do anything.
+
+**What it is not.** It is not a commercial tier. Migration `0043` writes the same 50 GiB onto starter, pro and business as a technical safety ceiling, because storage pricing is a product decision nobody has taken and a limit a customer hits is one somebody has to have agreed to sell them. Enterprise is left without the key, which is what "custom" means here. Tiering it later is an `UPDATE` on four rows.
 
 A disabled number frees its slot and a draft agent does not, and the asymmetry is deliberate: a disabled number is connected to nothing, while a limit that ignored draft agents would be satisfied by twenty agents somebody toggles.
 

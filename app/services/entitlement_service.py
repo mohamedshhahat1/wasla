@@ -47,6 +47,7 @@ from app.db.models.billing import (
 )
 from app.db.models.enums import MembershipStatus
 from app.db.models.knowledge import Document
+from app.db.models.media import OCCUPYING_STORAGE_STATES, MessageMedia
 from app.db.models.membership import Membership
 from app.db.models.usage import UsageEventType
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
@@ -312,6 +313,53 @@ class EntitlementService:
         await self._session.flush()
         return entitlement
 
+    async def reserve(self, key: LimitKey, *, additional: int) -> Entitlement:
+        """Take this workspace's lock on a capacity limit and answer under it.
+
+        The sibling of :meth:`consume`, for the limits whose ledger is the rows
+        themselves rather than `usage_events`. `consume` records what it
+        reserved; this cannot, because what occupies storage capacity is a
+        media row somebody else is about to write - and writing it here would
+        put the media protocol inside the entitlement service.
+
+        So the contract is stated rather than implied: **the caller writes the
+        occupying row in this same transaction.** The advisory lock is held
+        until that transaction ends, which is what makes the next caller's
+        `SUM` see it. Two uploads racing for the last megabyte serialise here,
+        the first commits its intent, and the second counts those bytes and is
+        refused.
+
+        A caller that takes this and then commits nothing has serialised for
+        nothing and granted nothing, which is the safe direction. A caller that
+        holds the transaction open across a slow write holds the workspace's
+        lock with it - the media path commits the intent immediately and does
+        the object write outside the transaction, for exactly that reason
+        (ADR-080, ADR-087).
+        """
+        if key not in RESOURCE_LIMITS:
+            # A period limit's ledger is `usage_events`, and reserving against
+            # it without recording anything would grant an allowance nobody
+            # spent. Those callers want `consume`.
+            raise ValueError(f"{key.value} is a period limit; use consume()")
+        if additional <= 0:
+            return await self.check(key, additional=0)
+
+        await self._session.execute(
+            select(func.pg_advisory_xact_lock(_lock_id(self._tenant_id, key)))
+        )
+
+        entitlement = await self.check(key, additional=additional)
+        if not entitlement.allowed:
+            logger.info(
+                "billing.reservation_refused",
+                extra={
+                    "event": "billing.reservation_refused",
+                    "tenant_id": str(self._tenant_id),
+                    "key": key.value,
+                },
+            )
+        return entitlement
+
     async def allows(self, key: LimitKey, *, additional: int = 1) -> bool:
         """Whether the action is allowed, without raising.
 
@@ -384,6 +432,27 @@ class EntitlementService:
                     select(func.count())
                     .select_from(Document)
                     .where(Document.tenant_id == self._tenant_id)
+                )
+            case LimitKey.STORAGE_BYTES:
+                # A SUM rather than a COUNT, and over the media rows that still
+                # name an object rather than over `usage_events`.
+                #
+                # `usage_events` is authoritative for what a workspace has
+                # *consumed* and is append-only by design (ADR-030), so
+                # `STORAGE_USED` records bytes when they are written and never
+                # subtracts when retention deletes them. That is the right
+                # shape for a meter and the wrong shape for a capacity: a
+                # workspace that uploaded a gigabyte and purged it has consumed
+                # a gigabyte and is holding nothing.
+                #
+                # So capacity is read from the rows themselves, which are the
+                # only durable record of what is currently held. No second
+                # counter, nothing to drift, and nothing to reconcile - a state
+                # transition that frees the object frees the capacity in the
+                # same statement.
+                statement = select(func.coalesce(func.sum(MessageMedia.byte_size), 0)).where(
+                    MessageMedia.tenant_id == self._tenant_id,
+                    MessageMedia.storage_state.in_(OCCUPYING_STORAGE_STATES),
                 )
             case _:  # pragma: no cover - RESOURCE_LIMITS is exhaustive here
                 raise ValueError(f"{key} is not a resource limit.")

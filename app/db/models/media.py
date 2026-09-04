@@ -113,6 +113,29 @@ class MediaStorageState(StrEnum):
 
 MEDIA_STORAGE_STATE_TYPE = _enum_type(MediaStorageState, name="media_storage_state")
 
+# The storage states in which a workspace is still holding bytes, and is
+# therefore still occupying its storage capacity.
+#
+# Defined by what is *not* in it, which is the safer direction: `ABSENT` names
+# no object, and `PURGED` has had its object deleted and its key cleared.
+# Everything else does name one.
+#
+# `PENDING` counts, and that is what makes the intent a reservation: the row
+# names an object that is about to exist, committed before the write (ADR-087),
+# so a second upload asking "is there room" sees the first one's claim.
+# `MISMATCHED` counts because the object is still in the bucket and is
+# deliberately never deleted. `PURGING` counts because a delete in flight is
+# not a delete that happened - handing out its capacity early would let a
+# workspace exceed the cap whenever a retention sweep is running.
+OCCUPYING_STORAGE_STATES: Final = frozenset(
+    {
+        MediaStorageState.PENDING,
+        MediaStorageState.STORED,
+        MediaStorageState.PURGING,
+        MediaStorageState.MISMATCHED,
+    }
+)
+
 # The statuses that still owe the conversation an answer. A conversation with
 # any media in one of these is not ready for the agent to reply to, which is
 # what the worker checks before it enqueues.

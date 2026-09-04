@@ -278,3 +278,11 @@ Without an OpenAI key, documents are still read — extraction needs no provider
 - **Video is downloaded and stored but not understood.** There is no route from a video to a transcript; it is skipped as an unreadable type.
 - **Nothing streams.** A file is read into memory whole, bounded by the download cap and by a smaller cap on the upload endpoint.
 - **A quarantined object is never cleaned up automatically.** `mismatched` is deliberately terminal: the object stays where it is and an operator decides. It should be zero always, and `wasla_media_upload_reconciliation_total{outcome="quarantined"}` above zero is the alert.
+
+## Storage capacity
+
+A workspace cannot fill the object store without limit. `LimitKey.STORAGE_BYTES` caps the bytes it holds, summed over the attachments whose `storage_state` still names an object — so an intent that never became an object, and a file retention has purged, both stop costing space (ADR-091).
+
+The check runs where the intent is committed, under the workspace's advisory lock, which makes the intent itself the reservation: two uploads racing for the last megabyte cannot both have it.
+
+The two write paths answer differently, and the difference is the same one that runs through the rest of this system. An **inbound** attachment is recorded as `SKIPPED` with the reason on the row, exactly as an oversized file is — a customer's message is stored, projected and answerable whatever the business's plan says. An **authenticated upload** is refused with a 402 before Meta is asked to do anything, because that is a request somebody made and can act on.

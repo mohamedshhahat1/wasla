@@ -28,6 +28,7 @@ from app.core.logging import get_logger
 from app.core.media_types import SNIFF_BYTES, MediaClass
 from app.core.media_types import resolve as resolve_media_type
 from app.core.storage import EXTENSIONS, MediaStorage, StorageError, build_key
+from app.db.models.billing import LimitKey
 from app.db.models.conversation import Conversation, Message, MessageKind, MessageStatus
 from app.db.models.media import MediaStatus, MediaStorageState
 from app.db.models.usage import UsageEventType
@@ -46,6 +47,7 @@ from app.repositories.conversation_repository import (
 from app.repositories.media_repository import MediaRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.credential_service import CredentialService
+from app.services.entitlement_service import EntitlementService
 from app.services.media_service import content_hash as media_content_hash
 from app.services.usage_service import UsageRecorder
 
@@ -144,6 +146,12 @@ class MessagingService:
         self._media = MediaRepository(session, tenant_id=tenant_id)
         self._usage = UsageRecorder(session, tenant_id=tenant_id)
         self._credentials = CredentialService(settings)
+        self._tenant_id = tenant_id
+        self._entitlements = EntitlementService(
+            session,
+            tenant_id=tenant_id,
+            default_plan_code=settings.default_plan_code,
+        )
 
     async def send_text(
         self,
@@ -244,6 +252,26 @@ class MessagingService:
         family = _whatsapp_kind(detected.kind)
         kind = MEDIA_KINDS[family]
 
+        # Refused here, before Meta is asked to do anything.
+        #
+        # The copy is kept after the send, deliberately - a file recorded for a
+        # send that never happened is a file nobody sent. But that ordering
+        # makes *this* the only honest place to refuse: discovering the
+        # workspace is out of room after the customer already has the
+        # attachment leaves a choice between an unrecorded send and an
+        # over-quota write, and neither is a thing to do to somebody.
+        #
+        # `require` rather than `reserve`: nothing is written in this
+        # transaction, so there is no claim to hold a lock over. The
+        # reservation happens where the intent is committed, in
+        # `_record_attachment` below, and this is the early refusal that keeps
+        # a doomed upload from reaching the provider at all. A workspace that
+        # fills its last megabyte between the two gets an unrecorded copy of a
+        # message that was sent, which is the failure the store outage already
+        # produces and which reconciliation already understands.
+        if storage is not None:
+            await self._entitlements.require(LimitKey.STORAGE_BYTES, additional=len(content))
+
         upload_name = _safe_filename(filename, mime_type=canonical)
 
         async def send(client: WhatsAppClient, phone_number_id: str, to: str) -> SentMessage:
@@ -339,7 +367,26 @@ class MessagingService:
             await self._session.flush()
             return
 
-        # TX1: which object, and what will be in it.
+        # TX1: which object, and what will be in it - and, under the same lock
+        # that commits with it, this send's claim on the workspace's storage.
+        # `send_media` refused an over-quota upload before Meta was asked; this
+        # is the claim itself, taken where the row that occupies the space is
+        # written.
+        capacity = await self._entitlements.reserve(LimitKey.STORAGE_BYTES, additional=len(content))
+        if not capacity.allowed:
+            # The message is sent and recorded either way. Only the copy is
+            # lost, which is the same outcome a store outage produces and which
+            # the paragraph above already accepts.
+            logger.warning(
+                "media.outbound_over_capacity",
+                extra={
+                    "event": "media.outbound_over_capacity",
+                    "tenant_id": str(self._tenant_id),
+                },
+            )
+            await self._session.flush()
+            return
+
         key = build_key(tenant_id=row.tenant_id, mime_type=mime_type)
         row.storage_key = key
         row.storage_state = MediaStorageState.PENDING

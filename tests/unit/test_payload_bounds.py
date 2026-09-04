@@ -282,9 +282,7 @@ def test_a_real_template_payload_is_still_accepted() -> None:
             id="tool-config",
         ),
         pytest.param(
-            lambda payload: SendTemplateRequest(
-                name="n", language="ar", components=[payload]
-            ),
+            lambda payload: SendTemplateRequest(name="n", language="ar", components=[payload]),
             "components",
             id="template-components",
         ),

@@ -4496,3 +4496,148 @@ with a value the S3 API does not define; uploaded and verified
 back and `pg_restore --list` read it. The store that ignores `--sse` and answers
 200 — the case no real store here reproduces on demand — is covered by
 `tests/integration/test_backup_upload.py`, whose stub CLI models it directly.
+
+---
+
+## ADR-091 — Bounded Writes, and a Storage Capacity the Rows Themselves Answer
+
+**Context.** The audit found the one denial-of-wallet surface argument could not
+close. Every other cost this platform incurs is metered and capped: AI requests
+are reserved per round under an advisory lock, output tokens are hard-capped in
+code, media over 25 MB is skipped without a provider call, a flooding customer
+still costs one turn per conversation per delivery. Storage was metered and
+capped by nothing.
+
+Two shapes of the same problem, and they want different answers.
+
+### Part one: fields nobody bounded
+
+Nine request fields carried no length at all. Four mattered:
+`leads.custom_fields` and `agent_tools.config` are JSONB, `campaigns.description`
+is `Text`, and template components are forwarded to Meta. Between the 32 MB
+request cap and 300 requests a minute, an authenticated member could write
+roughly nine gigabytes an hour of database nobody is billed for.
+
+**A `max_length` is the wrong tool for a JSON field.** `{"a":{"a":{"a":…}}}` ten
+thousand deep is about sixty kilobytes and would satisfy any plausible byte
+budget, and what it costs is not size — it is whatever walks it next. So
+`app/schemas/bounds.py` bounds four things at once: total compact UTF-8 bytes,
+entries in any one container, nesting depth, and the length of any single
+string.
+
+The walk is **iterative, with an explicit stack**, and that is not a style
+preference. The value being judged may be nested past Python's recursion limit,
+and a validator that raised `RecursionError` would turn a request that should be
+a 422 into a 500. Size accumulates as it walks and is checked inside the loop,
+so a value that has already busted the budget is refused without being
+serialised and without the rest of it being visited.
+
+The template bounds are sized against Meta's published limits — a template's
+whole text is capped at 1,024 characters, a header or footer at 60, a button
+title at 20, at most ten buttons — and are stated as a bound on a *request
+body*, not as a claim about what Meta accepts. That is the same distinction
+`MAX_TEMPLATE_VARIABLES` already draws, and it matters: Meta remains the
+authority on its own contract, and what this guarantees is only that nothing
+large reaches the database or the provider in order to find out.
+
+**Nothing echoes what it refused.** The rejected value is the thing that made
+the request too large to keep, and a 422 body travels — proxy logs, APM
+payloads, error trackers, HAR captures. `_safe_validation_errors` already strips
+`input` and `ctx`; these messages describe the constraint and never the content,
+and a canary test pins it.
+
+The rest got ordinary bounds: a campaign description at 2,000 characters, a lead
+budget at the `Numeric(14, 2)` its column already is, a per-tag length restating
+what the service enforces, and the refresh and invitation tokens at 4 KiB —
+those two because both routes are reachable *without a session*, so an unbounded
+field there hands PyJWT or SHA-256 a multi-megabyte string once per anonymous
+request.
+
+`tests/unit/test_request_field_bounds.py` asserts the property rather than the
+nine fixes. It walks every request component the OpenAPI document reaches, and a
+tenth unbounded field fails the build or gets an exemption somebody had to
+write, with the reason and where the bound actually lives.
+
+### Part two: storage capacity, and why `usage_events` cannot answer it
+
+Bounding fields does nothing about the object store, and the object store is
+where the real liability is. `LimitKey.STORAGE_BYTES` closes it.
+
+**The obvious source is the wrong one.** `usage_events` is the single
+authoritative record of what a workspace has consumed and is append-only by
+design (ADR-030). `STORAGE_USED` is written when bytes are stored and nothing
+ever subtracts when retention deletes them — so it answers "how much has this
+workspace ever stored" and cannot answer "how much is it holding". A workspace
+that uploaded a gigabyte and purged it has consumed a gigabyte and is holding
+nothing, and a capacity limit reading that meter would refuse them for space
+they gave back.
+
+So the capacity is a `SUM` over `message_media.byte_size` for the rows whose
+`storage_state` still names an object. `OCCUPYING_STORAGE_STATES` is defined by
+what it excludes, which is the safer direction: `ABSENT` names no object and
+`PURGED` has had its deleted and its key cleared. `MISMATCHED` counts because
+that object is still in the bucket and is deliberately never deleted;
+`PURGING` counts because a delete in flight is not a delete that happened.
+
+**The committed intent is the reservation**, and that is the part that makes the
+whole thing work without a second ledger. ADR-087 already commits a row naming
+an object before the object can exist. `PENDING` counts toward capacity, so:
+
+```
+intent committed        -> claims its bytes
+PUT succeeds, STORED    -> still claims them
+PUT never lands         -> reconciler sets ABSENT, key cleared, space returned
+crash after the PUT     -> reconciler sets STORED, space stays claimed
+retention purges        -> PURGED, space returned
+```
+
+Every one of those is a state transition that already existed. There is no
+counter to drift, nothing to reconcile, and no crash window in which the
+accounting and the store disagree — the row that says an object exists is the
+row that says it costs something.
+
+**Concurrency** is the same advisory lock `consume` uses, keyed on (workspace,
+limit). `EntitlementService.reserve` takes it and answers under it; the caller
+writes the occupying row in the same transaction, and the lock is held until
+that transaction commits. Two eight-megabyte uploads into ten megabytes of room
+therefore serialise: the first commits its intent, the second counts those bytes
+and is refused. Drilled on two real connections against real PostgreSQL, because
+a fake cannot tell a lock that works from one that does not.
+
+The lock is held for the length of an `UPDATE`, not for the length of a network
+write — the media path commits the intent and does the object PUT outside any
+transaction, which is what ADR-080 is for.
+
+**Why `reserve` rather than `consume`.** `consume` records what it reserved into
+`usage_events`. This cannot, because what occupies storage is a media row the
+caller is about to write, and writing it here would put the media protocol
+inside the entitlement service. So the contract is stated rather than implied,
+and a caller that takes the lock and commits nothing has serialised for nothing
+and granted nothing — the safe direction.
+
+**Where it is enforced, and the asymmetry that matters.** An **inbound**
+attachment is recorded `SKIPPED` with the reason on its row. A customer's
+WhatsApp message is never refused for the business's billing — it is stored,
+projected and answerable — and what is refused is writing another object into a
+store the workspace has already filled. An **authenticated upload** is refused
+with a 402 *before* Meta is asked to do anything, because that is a request
+somebody made and can act on, and discovering the problem after the customer
+already has the attachment leaves a choice between an unrecorded send and an
+over-quota write.
+
+**What counts as storage, stated explicitly.** Object storage — attachments,
+inbound and outbound. Knowledge documents are database rows bounded by
+`KNOWLEDGE_DOCUMENTS` and a 400,000-character content limit, and do not touch
+the object store. Database metadata and JSON are bounded per record by part one
+rather than by this quota, because an exact PostgreSQL byte-accounting system
+built to count small JSONB columns would cost more than it protects.
+
+**The number is a safety ceiling, not a price.** Migration `0043` writes the
+same 50 GiB onto starter, pro and business. Inventing a tier here would be a
+migration deciding pricing, and a limit a customer hits is one somebody has to
+have agreed to sell them; what the platform can decide on its own is that an
+authenticated workspace must not create unbounded cost. Fifty gigabytes is about
+two thousand maximum-size attachments. Enterprise is left without the key,
+because that is what "custom" means in this catalogue, and a deployment that has
+already set its own value keeps it — the migration writes only where the key is
+absent.
