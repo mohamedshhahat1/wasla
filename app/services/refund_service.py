@@ -89,11 +89,13 @@ class RefundService:
         payment = await self._refundable(payment_id)
         amount = payment.amount - payment.refunded_amount
 
-        # Written *before* the provider is called, so a reversal that is
-        # accepted and then lost to a crashed process still leaves a row saying
-        # a refund was asked for. The alternative - call first, record after -
-        # loses the reference to a transaction that is already reversing, and
-        # the next request would reverse it again.
+        # Written *and committed* before the provider is called, so a reversal
+        # that is accepted and then lost to a crashed process still leaves a
+        # row saying a refund was asked for. Flushing was not enough and used
+        # to be all this did: a flush is undone by the same rollback that loses
+        # everything else, so the record of the request died with the request
+        # and the next one reversed the same money again - the refund-shaped
+        # version of WSL-01 (ADR-088).
         payment.refund_requested_at = moment
         self._audit.record(
             AuditAction.PAYMENT_REFUND_REQUESTED,
@@ -106,7 +108,7 @@ class RefundService:
                 "reason": reason[:MAX_REASON_LENGTH] if reason else None,
             },
         )
-        await self._session.flush()
+        await self._session.commit()
 
         try:
             outcome = await self._provider.refund(
@@ -121,10 +123,18 @@ class RefundService:
                 )
             )
         except ProviderError as error:
-            # The request is left recorded and the reference is left empty,
-            # which is exactly the state that says "asked, not accepted" and
-            # lets the operation be tried again. `retryable` distinguishes a
-            # provider that did not answer from one that said no.
+            if not error.retryable:
+                # An answer, and it was no. The provider read the request and
+                # would not perform it, so nothing is reversing and the record
+                # of having asked is withdrawn - which is what lets somebody
+                # fix the cause and ask again.
+                payment.refund_requested_at = None
+                await self._session.commit()
+            # Otherwise the request is left standing, because a provider that
+            # did not answer may still be reversing the money. `_refundable`
+            # refuses the next attempt until a callback says what happened,
+            # which turns a silent double refund into a refusal somebody looks
+            # at.
             logger.warning(
                 "billing.refund_failed",
                 extra={
@@ -176,8 +186,15 @@ class RefundService:
             raise ConflictError("This payment was not collected through a payment provider.")
         if self._provider is not None and payment.provider != self._provider.name:
             raise ConflictError("This payment was collected by a different provider.")
-        if payment.refund_reference:
-            # Already accepted by the provider and waiting on its callback.
-            # Asking again would reverse the same money twice.
+        if payment.refund_requested_at is not None and payment.refunded_at is None:
+            # A reversal is outstanding: asked for, and not yet confirmed by a
+            # callback. Asking again would reverse the same money twice.
+            #
+            # Keyed on the *request* rather than on `refund_reference`, which
+            # is what this used to check. The reference is written after the
+            # provider answers, so a process that died between the answer and
+            # the commit left no reference - and the next request reversed
+            # money that was already on its way back. The request is committed
+            # before the provider is called, so it survives that (ADR-088).
             raise ConflictError("A refund has already been requested for this payment.")
         return payment

@@ -371,34 +371,54 @@ async def test_another_workspaces_payment_cannot_be_refunded(db_session: AsyncSe
         )
 
 
-async def test_a_provider_failure_leaves_the_refund_repeatable(db_session: AsyncSession) -> None:
-    """Asked, not accepted - and therefore safe to ask again.
+async def test_a_refund_that_got_no_answer_is_not_sent_again(
+    db_session: AsyncSession,
+) -> None:
+    """GATE: money may already be going back, so nothing sends it back twice.
 
-    The reference is what marks a refund as in flight, and it is written only
-    after the provider accepts. A refund that failed on the way out must not
-    become a refund nobody can retry.
+    The refund-shaped WSL-01. A reversal that times out may well have been
+    performed - the request reached Paymob and only the answer went missing -
+    and the old code cleared nothing and blocked nothing, so the next request
+    reversed the same money again. Worse, a process killed at that moment
+    rolled back the record of having asked at all, because the request was
+    flushed rather than committed.
+
+    Committing it first means the second attempt is refused rather than
+    performed. An operator looks; a customer is not paid twice (ADR-088).
     """
     tenant = await _tenant(db_session)
     _, payment = await _paid(db_session, tenant)
     transport = _refund_transport(error=httpx.ReadTimeout("slow"))
+    service = RefundService(db_session, tenant_id=tenant.id, provider=_provider(transport))
 
     with pytest.raises(ProviderError) as caught:
-        await RefundService(
-            db_session,
-            tenant_id=tenant.id,
-            provider=_provider(transport),
-        ).refund(payment.id)
+        await service.refund(payment.id)
 
     assert caught.value.retryable
     assert payment.refund_reference is None
-    # The attempt is still on the record, so an operator can see it was tried.
+    # The attempt is on the record, and durably: an operator can see it was
+    # tried, and nothing may try again while it is unresolved.
     assert payment.refund_requested_at is not None
+
+    working = _refund_transport()
+    with pytest.raises(ConflictError):
+        await RefundService(
+            db_session,
+            tenant_id=tenant.id,
+            provider=_provider(working),
+        ).refund(payment.id)
 
 
 async def test_a_refund_the_provider_declines_is_not_recorded_as_accepted(
     db_session: AsyncSession,
 ) -> None:
-    """A 200 saying `success: false` is a refusal wearing a success's clothes."""
+    """A 200 saying `success: false` is a refusal wearing a success's clothes.
+
+    And a refusal is an *answer*: nothing is reversing, so the record of having
+    asked is withdrawn and somebody can fix the cause and ask again. That is
+    the whole difference between this and the timeout above - one knows what
+    happened and the other does not.
+    """
     tenant = await _tenant(db_session)
     _, payment = await _paid(db_session, tenant)
     transport = _refund_transport(
@@ -413,6 +433,15 @@ async def test_a_refund_the_provider_declines_is_not_recorded_as_accepted(
         ).refund(payment.id)
 
     assert payment.refund_reference is None
+    assert payment.refund_requested_at is None, "a refusal leaves nothing outstanding"
+
+    # And the refund can be asked for again once whatever caused it is fixed.
+    refunded = await RefundService(
+        db_session,
+        tenant_id=tenant.id,
+        provider=_provider(_refund_transport()),
+    ).refund(payment.id)
+    assert refunded.refund_reference == REVERSAL_TRANSACTION
 
 
 # ---------------------------------------------------- believing it happened
