@@ -37,6 +37,7 @@ import pytest_asyncio
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.db.models.audit import AuditLog
 from app.db.models.billing import (
     BillingInterval,
     LimitKey,
@@ -221,6 +222,11 @@ async def attempt(
         yield identifiers
     finally:
         async with committing() as session:
+            # Audit rows first, while `tenant_id` still says whose they are:
+            # that foreign key is `ON DELETE SET NULL`, so settling an invoice
+            # here would otherwise leave rows behind for the dunning suites to
+            # count as their own.
+            await session.execute(delete(AuditLog).where(AuditLog.tenant_id == identifiers[0]))
             await session.execute(delete(Tenant).where(Tenant.id == identifiers[0]))
             await session.execute(
                 delete(Plan).where(Plan.code.like("recon-%")).where(Plan.name == "Recon")

@@ -4200,6 +4200,19 @@ operator asking "why has this renewal not been taken" is answered by the *last
 attempt's* state rather than by `next_collection_at`, and that is deliberate: a
 due date is not a licence to charge a card whose last outcome is unknown.
 
+**Suspension waits on the same state, and chasing does not.** The audit named
+two harms and the duplicate charge was only the first; the second was a
+customer whose card had been debited being cut off for non-payment because the
+callback never arrived. The suspension sweep therefore skips an invoice with an
+unresolved attempt. Chasing still happens - `PAST_DUE` serves, and its notice is
+what gets a person to look at an attempt nobody can resolve - and being cut off
+is the act that waits.
+
+The trade is stated rather than hidden: an attempt that can never be resolved
+keeps a workspace served indefinitely. That is acceptable only because the
+backlog is alertable on its age, and it is the right way round - the safety
+property must not depend on `PAYMOB_API_KEY`, which is optional.
+
 A deployment without `PAYMOB_API_KEY` trades recovery for nothing else. It never
 double-charges; it simply cannot resolve an attempt whose callback went missing,
 and `wasla_payment_reconciliation_total{outcome="pending"}` with

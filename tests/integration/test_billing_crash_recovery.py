@@ -67,6 +67,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import Settings
+from app.db.models.audit import AuditLog
 from app.db.models.billing import (
     BillingInterval,
     LimitKey,
@@ -267,6 +268,14 @@ async def workspace(
         yield identifiers
     finally:
         async with committing() as session:
+            # Audit rows first, while `tenant_id` still says whose they are.
+            # That foreign key is `ON DELETE SET NULL` on purpose - a
+            # privileged action survives the workspace it was performed on - so
+            # a suite that commits for real and deletes only its tenants leaves
+            # them behind for the next test to count. The dunning suites count
+            # audit rows by action, and this file sweeps forty days into the
+            # future, which produces exactly the ones they are looking for.
+            await session.execute(delete(AuditLog).where(AuditLog.tenant_id == identifiers[0]))
             await session.execute(delete(Tenant).where(Tenant.id == identifiers[0]))
             await session.execute(delete(Plan).where(Plan.id == identifiers[1]))
             await session.commit()

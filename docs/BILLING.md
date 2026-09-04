@@ -608,6 +608,20 @@ guarantee.
 not collectible however far `next_collection_at` has passed. If a renewal is not
 being taken, look at the last attempt's state before looking at the schedule.
 
+**And such a workspace is not suspended.** The audit named two harms, and the
+second was a customer whose card was debited by a worker that then died being
+cut off for non-payment thirty days later. So the suspension sweep skips an
+invoice whose last collection attempt has no outcome.
+
+Chasing is deliberately *not* guarded, and the asymmetry is the point:
+`PAST_DUE` still serves the customer, and the notice is what gets a person to
+look at an attempt nobody can resolve. Being cut off is the irreversible-feeling
+act, and that is the one that waits.
+
+The cost is stated rather than hidden: an attempt that can never be resolved
+keeps a workspace served. That is why the backlog is alertable on its *age*
+rather than being something only a support ticket would surface.
+
 ### Reconciling an attempt nobody answered
 
 The billing sweep asks Paymob what became of an attempt that has gone quiet,

@@ -311,6 +311,7 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
         subscription_id: uuid.UUID,
         before: datetime,
         subscription_status: SubscriptionStatus,
+        skip_unresolved: bool = False,
     ) -> tuple[Invoice, Subscription] | None:
         """Claim one overdue invoice and its subscription together.
 
@@ -331,6 +332,8 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
             .where(Subscription.status == subscription_status)
             .with_for_update(skip_locked=True, of=(Invoice, Subscription))
         )
+        if skip_unresolved:
+            statement = statement.where(~_has_unresolved_attempt())
         row = (await self.session.execute(statement)).first()
         if row is None:
             return None
@@ -393,6 +396,7 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
         before: datetime,
         subscription_status: SubscriptionStatus,
         limit: int = 200,
+        skip_unresolved: bool = False,
     ) -> list[tuple[Invoice, Subscription]]:
         """Claim overdue invoices whose subscription is in a given state.
 
@@ -433,6 +437,17 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
             .limit(limit)
             .with_for_update(skip_locked=True, of=(Invoice, Subscription))
         )
+        # `skip_unresolved` belongs to the suspension phase and to nothing else.
+        # An invoice whose last collection attempt has no outcome may already
+        # have been paid, and cutting somebody off over money they may have
+        # sent is the second harm WSL-01 produced - the audit named it
+        # alongside the duplicate charge (ADR-088).
+        #
+        # Chasing is deliberately not guarded. `PAST_DUE` still serves, and the
+        # notice is what gets a person to look at an attempt nobody can
+        # resolve - which is exactly what such an attempt needs.
+        if skip_unresolved:
+            statement = statement.where(~_has_unresolved_attempt())
         rows = await self.session.execute(statement)
         return [(invoice, subscription) for invoice, subscription in rows]
 

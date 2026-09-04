@@ -57,7 +57,13 @@ from app.db.models.billing import (
 )
 from app.db.models.email import OutboundEmail
 from app.db.models.enums import TenantRole
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import (
+    CollectionState,
+    Invoice,
+    InvoiceStatus,
+    Payment,
+    PaymentStatus,
+)
 from app.db.models.membership import Membership
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
@@ -474,6 +480,128 @@ async def test_inside_the_soft_threshold_nothing_moves(db_session: AsyncSession)
 
     assert subscription.status is SubscriptionStatus.ACTIVE
     assert await _agent_limit(db_session, tenant) == PAID_AGENTS
+
+
+# ------------------------ 2b. an unresolved charge holds suspension back
+
+
+async def _unresolved_attempt(
+    session: AsyncSession,
+    tenant: Tenant,
+    invoice: Invoice,
+) -> Payment:
+    """What a killed collection worker leaves behind on an invoice.
+
+    A committed attempt saying a card may already have been debited, which is
+    the state the suspension guard exists for (ADR-088).
+    """
+    payment = Payment(
+        tenant_id=tenant.id,
+        invoice_id=invoice.id,
+        status=PaymentStatus.PENDING,
+        amount=invoice.amount_due,
+        currency=invoice.currency,
+        provider="paymob",
+        is_automatic=True,
+        collection_state=CollectionState.REQUESTED,
+        idempotency_key=f"auto:{invoice.id}:1",
+        refunded_amount=Decimal("0.00"),
+    )
+    session.add(payment)
+    invoice.collection_attempts = 1
+    await session.flush()
+    return payment
+
+
+async def test_a_workspace_whose_charge_may_have_landed_is_not_suspended(
+    db_session: AsyncSession,
+) -> None:
+    """GATE: nobody is cut off over money they may already have sent.
+
+    The audit named two harms and this is the second. A worker debits a card,
+    dies before recording it, and the callback never arrives: the invoice stays
+    open, and thirty days later dunning suspends a customer who has paid.
+
+    The invoice here is well past the hard threshold and the workspace is still
+    served, because its last collection attempt has no outcome.
+    """
+    tenant = await _tenant(db_session)
+    await _free_plan(db_session)
+    paid = await _paid_plan(db_session)
+    subscription = await _subscription(db_session, tenant, paid, status=SubscriptionStatus.PAST_DUE)
+    invoice = await _unpaid_invoice(
+        db_session, tenant, subscription, issued_days_ago=SUSPEND_DAYS + 10
+    )
+    await _unresolved_attempt(db_session, tenant, invoice)
+
+    await _worker(db_session).run_once(now=NOW)
+
+    assert subscription.status is SubscriptionStatus.PAST_DUE
+    assert subscription.is_serving is True
+    assert await _agent_limit(db_session, tenant) == PAID_AGENTS
+    assert await _audits(db_session, AuditAction.SUBSCRIPTION_SUSPENDED) == []
+
+
+async def test_being_chased_is_not_held_back_by_an_unresolved_charge(
+    db_session: AsyncSession,
+) -> None:
+    """Only suspension is guarded, and the asymmetry is deliberate.
+
+    `PAST_DUE` still serves the customer, and the notice is what gets a person
+    to look at an attempt nobody can resolve - so withholding it would hide the
+    very thing that needs attention. Being cut off is the irreversible-feeling
+    act, and that is the one that waits.
+    """
+    tenant = await _tenant(db_session)
+    await _free_plan(db_session)
+    paid = await _paid_plan(db_session)
+    subscription = await _subscription(db_session, tenant, paid, status=SubscriptionStatus.ACTIVE)
+    invoice = await _unpaid_invoice(
+        db_session, tenant, subscription, issued_days_ago=PAST_DUE_DAYS + 1
+    )
+    await _unresolved_attempt(db_session, tenant, invoice)
+
+    await _worker(db_session).run_once(now=NOW)
+
+    assert subscription.status is SubscriptionStatus.PAST_DUE
+    assert subscription.is_serving is True
+
+
+async def test_once_the_charge_is_known_to_have_failed_suspension_resumes(
+    db_session: AsyncSession,
+) -> None:
+    """The guard is about *unknown*, not about having tried.
+
+    A workspace whose attempt came back declined is a workspace that has not
+    paid, and it is suspended on the next sweep exactly as one that was never
+    charged at all.
+    """
+    tenant = await _tenant(db_session)
+    await _free_plan(db_session)
+    paid = await _paid_plan(db_session)
+    subscription = await _subscription(db_session, tenant, paid, status=SubscriptionStatus.PAST_DUE)
+    invoice = await _unpaid_invoice(
+        db_session, tenant, subscription, issued_days_ago=SUSPEND_DAYS + 10
+    )
+    payment = await _unresolved_attempt(db_session, tenant, invoice)
+
+    await _worker(db_session).run_once(now=NOW)
+    assert subscription.status is SubscriptionStatus.PAST_DUE
+
+    # The provider answered, or reconciliation asked and was told.
+    payment.status = PaymentStatus.FAILED
+    payment.collection_state = CollectionState.SETTLED
+    await db_session.flush()
+
+    await _worker(db_session).run_once(now=NOW)
+
+    # Re-read rather than trusting the instance the test has been holding: the
+    # assertion is about what the database says after two sweeps.
+    settled = await db_session.get(Subscription, subscription.id)
+    assert settled is not None
+    assert settled.status is SubscriptionStatus.SUSPENDED
+    assert settled.is_serving is False
+    assert await _agent_limit(db_session, tenant) == FREE_AGENTS
 
 
 # ------------------------------------------- 2. hard: entitlements disappear

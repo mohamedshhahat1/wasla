@@ -497,12 +497,28 @@ class BillingWorker:
         The threshold is read from `issued_at`, exactly as the soft one is, so
         both are anchored to the day the customer was asked for money and
         neither can move under a workspace being chased.
+
+        **A workspace whose last collection attempt has no outcome is not
+        suspended** (ADR-088). The audit named two harms and this is the
+        second: a customer whose card was debited by a worker that then died,
+        whose callback never arrived, cut off for non-payment. Reconciliation
+        normally resolves such an attempt within one sweep, so this guard fires
+        only when it cannot - a deployment with no `PAYMOB_API_KEY`, or a
+        provider that has been unreachable for a month - and the safety
+        property should not depend on optional configuration.
+
+        The cost is stated rather than hidden: an attempt nobody can ever
+        resolve keeps a workspace served. That is why the backlog is a metric
+        with an alert on its age (`wasla_oldest_pending_payment_age_seconds`)
+        rather than something only a support ticket would surface. Chasing is
+        not guarded, so such a workspace is still marked behind and still told.
         """
         return await self._dun(
             now=now,
             grace=timedelta(days=self._suspend_after_days),
             require=SubscriptionStatus.PAST_DUE,
             become=SubscriptionStatus.SUSPENDED,
+            skip_unresolved=True,
         )
 
     async def _dun(
@@ -512,6 +528,7 @@ class BillingWorker:
         grace: timedelta,
         require: SubscriptionStatus,
         become: SubscriptionStatus,
+        skip_unresolved: bool = False,
     ) -> int:
         """Claim one batch of overdue invoices and move each subscription on.
 
@@ -531,6 +548,7 @@ class BillingWorker:
                 before=now - grace,
                 subscription_status=require,
                 limit=self._claim_limit,
+                skip_unresolved=skip_unresolved,
             )
             identifiers = [(invoice.id, subscription.id) for invoice, subscription in claimed]
         if not identifiers:
@@ -545,6 +563,7 @@ class BillingWorker:
                 grace=grace,
                 require=require,
                 become=become,
+                skip_unresolved=skip_unresolved,
             )
         return moved
 
@@ -557,6 +576,7 @@ class BillingWorker:
         grace: timedelta,
         require: SubscriptionStatus,
         become: SubscriptionStatus,
+        skip_unresolved: bool = False,
     ) -> int:
         """One transition, its audit row and its notice, in one transaction.
 
@@ -577,6 +597,7 @@ class BillingWorker:
                 subscription_id=subscription_id,
                 before=now - grace,
                 subscription_status=require,
+                skip_unresolved=skip_unresolved,
             )
             if claimed is None:
                 return 0
