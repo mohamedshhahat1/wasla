@@ -60,15 +60,19 @@ from app.db.models.conversation import (
     MessageKind,
     MessageStatus,
 )
+from app.db.models.invoice import Invoice, InvoiceStatus, Payment
+from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEventType
 from app.db.models.whatsapp import WhatsAppAccount
 from app.db.session import Database
+from app.integrations.billing.checkout import SavedMethodCharge, SavedPaymentMethod
 from app.integrations.openai.types import AgentReply, TokenUsage
 from app.repositories.billing_repository import SubscriptionRepository
 from app.services.entitlement_service import EntitlementService
 from app.services.metrics_service import API_ROLE, MetricsService
-from tests.fakes import as_responses
+from app.services.recurring_service import RecurringService
+from tests.fakes import as_recurring, as_responses
 
 pytestmark = pytest.mark.integration
 
@@ -602,3 +606,220 @@ async def test_a_reservation_can_be_taken_while_a_provider_call_is_in_flight(
         task.cancel()
 
     assert outcome.reply == "answered"
+
+
+# --------------------------------------------------- the collection provider
+
+
+class BlockingCard:
+    """A recurring provider that parks every caller until the test lets it go.
+
+    The same shape as `BlockingProvider` above and for the same reason: the
+    window in which "every collection is inside the Paymob call" is held open
+    by the test, so a checkout count sampled there is measuring the wait rather
+    than catching a caller resuming.
+    """
+
+    name = "paymob"
+
+    def __init__(self) -> None:
+        self.arrived = asyncio.Semaphore(0)
+        self.resume = asyncio.Event()
+        self.charges: list[str] = []
+
+    @property
+    def can_charge_saved_methods(self) -> bool:
+        return True
+
+    def verify_token_callback(self, *, payload: bytes, signature: str | None) -> SavedPaymentMethod:
+        raise NotImplementedError("no saved-card callback arrives in this test")
+
+    async def charge_saved_method(self, request: SavedMethodCharge) -> str:
+        self.charges.append(request.reference)
+        self.arrived.release()
+        async with asyncio.timeout(BARRIER_TIMEOUT):
+            await self.resume.wait()
+        return f"txn-{len(self.charges)}"
+
+
+@pytest_asyncio.fixture
+async def renewals(one_connection: Database) -> AsyncIterator[list[uuid.UUID]]:
+    """Two workspaces, each with a saved card and one collectible renewal.
+
+    Two, because the property being tested is that a second collection can
+    reach Paymob while the first is still waiting there - which a pool of one
+    makes impossible unless the first gave its connection back.
+    """
+    factory = one_connection.session_factory
+    tenants: list[uuid.UUID] = []
+    plans: list[uuid.UUID] = []
+
+    async with factory() as session:
+        for index in range(TURNS):
+            tenant = Tenant(name=f"Pool {index}", slug=f"pool-bill-{uuid.uuid4().hex[:10]}")
+            plan = Plan(
+                code=f"pool-bill-{uuid.uuid4().hex[:8]}",
+                name="Pool",
+                price=Decimal("42.00"),
+                currency="EGP",
+                interval=BillingInterval.MONTHLY,
+                limits={LimitKey.AGENTS.value: 5},
+            )
+            session.add_all([tenant, plan])
+            await session.flush()
+            subscription = Subscription(
+                tenant_id=tenant.id,
+                plan_id=plan.id,
+                status=SubscriptionStatus.ACTIVE,
+                current_period_start=PERIOD_START,
+                current_period_end=PERIOD_END,
+            )
+            session.add(subscription)
+            await session.flush()
+            session.add(
+                Invoice(
+                    tenant_id=tenant.id,
+                    subscription_id=subscription.id,
+                    status=InvoiceStatus.OPEN,
+                    plan_code=plan.code,
+                    amount_due=Decimal("42.00"),
+                    amount_paid=Decimal("0.00"),
+                    currency="EGP",
+                    period_start=PERIOD_START - timedelta(days=30),
+                    period_end=PERIOD_START,
+                    issued_at=PERIOD_START,
+                    lines=[],
+                )
+            )
+            session.add(
+                PaymentMethod(
+                    tenant_id=tenant.id,
+                    provider="paymob",
+                    provider_token=f"tok-{uuid.uuid4().hex[:12]}",
+                    provider_token_id="15978654",
+                    masked_pan="**** 2346",
+                    brand="MasterCard",
+                    status=PaymentMethodStatus.ACTIVE,
+                    is_default=True,
+                )
+            )
+            tenants.append(tenant.id)
+            plans.append(plan.id)
+        await session.commit()
+
+    yield tenants
+
+    async with factory() as session:
+        await session.execute(delete(Tenant).where(Tenant.id.in_(tenants)))
+        await session.execute(delete(Plan).where(Plan.id.in_(plans)))
+        await session.commit()
+
+
+async def _collect(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    provider: BlockingCard,
+) -> bool:
+    """One collection on its own session, as the billing worker runs it."""
+    async with factory() as session:
+        invoices = await session.execute(select(Invoice).where(Invoice.tenant_id == tenant_id))
+        invoice = invoices.scalars().one()
+        owners = await session.execute(
+            select(Subscription).where(Subscription.id == invoice.subscription_id)
+        )
+        service = RecurringService(
+            session,
+            tenant_id=tenant_id,
+            provider=as_recurring(provider),
+        )
+        outcome = await service.collect(invoice, subscription=owners.scalars().one())
+        await session.commit()
+        return outcome.charged
+
+
+async def test_two_collections_wait_on_paymob_at_once_through_a_pool_of_one(
+    one_connection: Database,
+    renewals: list[uuid.UUID],
+) -> None:
+    """GATE: the connection is in the pool while Paymob is deciding.
+
+    The billing sweep used to hold one invoice's row lock, and its connection,
+    for the length of a Paymob round trip - deliberately, and documented as
+    such. Committing the attempt before the call (ADR-088) removed the reason
+    to: the durable record no longer depends on a transaction staying open, so
+    the transaction ends before the provider is asked.
+
+    The barrier proves both collections reached Paymob, which a pool of one
+    makes impossible unless the first released. The pool's own checkout count,
+    sampled while both are parked, says the same thing from the other side.
+    """
+    factory = one_connection.session_factory
+    provider = BlockingCard()
+
+    collections = [
+        asyncio.create_task(_collect(factory, tenant_id=tenant_id, provider=provider))
+        for tenant_id in renewals
+    ]
+    try:
+        # Both collections have entered the Paymob call. Before the attempt was
+        # committed first, this line is where the test hangs: the second is
+        # queued for a connection the first is holding for the length of a
+        # provider request.
+        async with asyncio.timeout(BARRIER_TIMEOUT):
+            for _ in range(TURNS):
+                await provider.arrived.acquire()
+
+        checked_out_while_waiting = _pool(one_connection).checkedout()
+        provider.resume.set()
+        charged = await asyncio.gather(*collections)
+    finally:
+        for task in collections:
+            task.cancel()
+
+    assert len(provider.charges) == TURNS
+    assert (
+        checked_out_while_waiting == 0
+    ), "a connection was checked out while every collection was waiting on Paymob"
+    assert charged == [True] * TURNS
+
+
+async def test_the_attempt_is_already_committed_while_paymob_is_waiting(
+    one_connection: Database,
+    renewals: list[uuid.UUID],
+) -> None:
+    """GATE: and the record of it is durable at that moment, not merely staged.
+
+    Releasing the connection would be worth nothing on its own - a charge with
+    no committed attempt behind it is exactly WSL-01. This reads the payments
+    table on a connection of its own while the charge is parked, which is only
+    possible for rows another transaction has committed.
+    """
+    factory = one_connection.session_factory
+    provider = BlockingCard()
+    seen: list[uuid.UUID] = []
+
+    collections = [
+        asyncio.create_task(_collect(factory, tenant_id=tenant_id, provider=provider))
+        for tenant_id in renewals
+    ]
+    try:
+        async with asyncio.timeout(BARRIER_TIMEOUT):
+            for _ in range(TURNS):
+                await provider.arrived.acquire()
+
+        # The pool has one connection and both collections are parked, so this
+        # can only get one if they really did give it back.
+        async with factory() as watcher:
+            rows = await watcher.execute(select(Payment.id).where(Payment.tenant_id.in_(renewals)))
+            seen = list(rows.scalars())
+        provider.resume.set()
+        await asyncio.gather(*collections)
+    finally:
+        for task in collections:
+            task.cancel()
+
+    assert len(seen) == TURNS, "the attempts were not durable while Paymob was being called"
+    assert sorted(str(payment_id) for payment_id in seen) == sorted(
+        provider.charges
+    ), "Paymob was told about a reference that no committed row carried"

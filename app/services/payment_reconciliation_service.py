@@ -81,6 +81,18 @@ from app.services.checkout_service import CheckoutService
 logger = get_logger(__name__)
 
 
+def _aware(moment: datetime) -> datetime:
+    """A timestamp as an aware UTC one, whatever the driver handed back.
+
+    `DateTime(timezone=True)` columns come back aware from asyncpg and naive
+    from some drivers, and the comparisons below decide whether a card may be
+    charged again - so the one place that could get it wrong does it once.
+    """
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
+
+
 class Verdict(StrEnum):
     """What one unresolved attempt turned out to be.
 
@@ -358,7 +370,7 @@ class PaymentReconciler:
         makes a new one - a new number, a new reference, the same budget it
         would have had. Nothing here re-sends anything.
         """
-        if state is not CollectionState.CLAIMED and created_at.replace(tzinfo=UTC) > abandon_before:
+        if state is not CollectionState.CLAIMED and _aware(created_at) > abandon_before:
             # Too soon to believe. The row keeps its lease, and the next pass
             # asks again.
             logger.info(
@@ -408,7 +420,7 @@ class PaymentReconciler:
         oldest = await self._payments.oldest_unresolved_at(provider=self._provider.name)
         if oldest is None:
             return 0.0
-        age = (now - oldest.replace(tzinfo=oldest.tzinfo or UTC)).total_seconds()
+        age = (now - _aware(oldest)).total_seconds()
         return max(age, 0.0)
 
 

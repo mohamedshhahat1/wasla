@@ -54,6 +54,7 @@ from app.core.oauth_flow import OAuthFlowStore
 from app.core.redis import RedisClient
 from app.core.storage import MediaStorage, build_key
 from app.db.session import Database
+from app.integrations.billing.checkout import RecurringProvider
 from app.integrations.google.client import GoogleOAuthClient
 from app.integrations.google.oidc import GoogleIdTokenVerifier
 from app.integrations.openai.client import ResponsesClient
@@ -137,6 +138,11 @@ def as_responses(fake: object) -> ResponsesClient:
 def as_request(fake: object) -> Request:
     """A minimal request object, for a dependency typed against Starlette's."""
     return cast("Request", fake)
+
+
+def as_recurring(fake: object) -> RecurringProvider:
+    """A saved-card stand-in, for code typed against the recurring protocol."""
+    return cast("RecurringProvider", fake)
 
 
 def as_embeddings(fake: object) -> EmbeddingsClient:
@@ -261,6 +267,7 @@ __all__ = [
     "as_media_queue",
     "as_media_reader",
     "as_messaging",
+    "as_recurring",
     "as_redis",
     "as_redis_client",
     "as_request",
