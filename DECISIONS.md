@@ -4746,3 +4746,161 @@ where the same drill before the fix showed one queued job and a context reading
 `[image, not yet read]`. It then drives the crash after the commit, the
 reclaimed lease, two attachments, an unreadable file, and a takeover in both
 directions.
+
+---
+
+## ADR-093 — The Send Intent Is Committed Before Meta Can Deliver Anything
+
+**Context.** `MessagingService._dispatch` staged the outbound message row,
+flushed it, called Meta with the transaction still open, and committed
+afterwards:
+
+```
+BEGIN
+  stage the message row, FLUSH        <- staged, not durable
+  POST Meta                            <- the customer's phone
+  record the provider's message id
+COMMIT                                 <- everything above becomes durable now
+```
+
+A flush is undone by the same rollback that loses everything else, so a process
+that stopped between the send and the commit had put a message on somebody's
+phone and left no record of it anywhere. Reproduced against real PostgreSQL
+before anything changed:
+
+```
+=== 1. connection lifetime, pool_size=1 max_overflow=0 ===
+send parked inside the Meta call : yes
+database connections checked out : 1
+verdict                          : HELD across the provider call
+
+=== 2. Meta accepts, then the process stops before COMMIT ===
+messages Meta accepted           : 1
+outbound rows Wasla can find     : 0
+RESULT: the customer has a message Wasla has no record of.
+```
+
+The second is the expensive one, and it is expensive for the reason ADR-088's
+was: nothing in Wasla's own data disagrees with itself. No row, no error, no
+counter. The only place the message exists is the recipient's phone — and the
+follow-up or campaign that asked for it looks untouched, so the next sweep asks
+again.
+
+**Decision. Commit the intent, then ask Meta.** ADR-087's argument applied to
+messages instead of bytes:
+
+```
+TX1   the send intent, and whatever the caller ties to it        -> COMMIT
+--    (media only) upload the file. Provably delivers nothing.
+TX2   state REQUESTED                                            -> COMMIT
+--    ask Meta to deliver. No transaction, no pooled connection.
+TX3   record what came back
+```
+
+Both orders fail; only one fails recoverably. Send-then-commit leaves a message
+nobody can find. Commit-then-send leaves a row saying a message may have gone
+out, which a person can read a conversation and settle. The gap TX2 leaves —
+dying between its commit and the socket — resolves the safe way by
+construction: the row overstates what happened, which costs somebody a look
+rather than costing a customer a second message.
+
+**`delivery_state`, because `status` cannot express the new state.**
+`MessageStatus` answers "what happened to it" and is advanced by Meta's own
+status webhooks. The question the protocol has to ask is different — *may this
+message be sent to Meta now, and might Meta already have taken it* — and four
+values answer it: `claimed`, `requested`, `sent`, `undelivered`. NULL on every
+inbound message, because none of this describes one.
+
+**The media path has two phases for the reason the Paymob path did.** A media
+send is two Meta requests and only the second delivers anything: uploading a
+file returns a handle valid for one message and reaches nobody. So the upload
+runs while the state is still `claimed`, and a failure there is an ordinary
+undelivered send rather than an outcome somebody has to investigate. Collapsing
+the two would turn every failed upload into an unresolved message.
+
+**There is no unique index here, and that is the difference from ADR-088.** An
+invoice may be charged at most once, so a partial unique index on `invoice_id`
+is the guarantee. A conversation may be written to as often as a business likes;
+a second message to the same customer is the product working. What stops a
+repeat is that no caller may act on a `requested` row — a rule about reading
+rather than about writing.
+
+**A definite refusal is not an unknown, and the client now says which.** Every
+failure used to arrive as `ExternalServiceError`, so "Meta read this and
+declined it" and "nobody knows whether Meta took it" were the same value — and
+the follow-up and campaign sweeps retried both. A read timeout could therefore
+put a second copy of a nudge on somebody's phone, which is precisely the
+duplicate the client's own retry policy refuses to make one line lower down.
+Two types now carry the distinction:
+
+| Failure | Raises | May the caller send again? |
+| --- | --- | --- |
+| 429, connection error | `SendNotAttemptedError` | yes — nothing left this process |
+| 4xx | `SendNotAttemptedError` | yes — Meta read it and declined |
+| 5xx, read timeout | `UncertainDeliveryError` | **no** |
+
+**There is no reconciler, and that is a statement about Meta rather than an
+omission.** ADR-088 could ask Paymob what became of an attempt, because Paymob
+publishes a transaction inquiry keyed on an identifier this system generated and
+committed first. Meta's send endpoint takes no idempotency key and offers no
+lookup on anything Wasla holds before it answers, so an unanswered request
+cannot be asked about — by anyone, ever. `requested` is therefore terminal in
+practice, and the honest thing to do with it is show it to a person rather than
+invent a sweep that guesses. `ix_messages_unresolved_delivery` is the query that
+finds them; on a healthy deployment it is empty.
+
+**The sweeps had to change, and this is the part that is not obvious.** A row
+lock ends where its transaction does. The follow-up sweep claimed a batch with
+`FOR UPDATE SKIP LOCKED` and held it across every send; the campaign sweep did
+the same with campaigns and with the recipients inside them. Committing
+part-way through a send would have dropped every one of those locks at the first
+message and let a second replica take the rows behind it — trading an
+unrecorded send for a duplicated one, which is worse. So both sweeps now claim
+in one short transaction, **commit a lease**, and process one row per
+transaction after that:
+
+```
+TX1  claim the due rows and push their next-due time out    -> COMMIT
+--   the lock is gone; the lease is what keeps others off
+TXn  one transaction per row, re-claimed by id
+```
+
+The lease is a committed timestamp rather than a held lock, which is the shape
+ADR-088 gave payment reconciliation. Neither sweep needed a new column: the
+follow-up's is `scheduled_at`, which its claim already filters on, and the
+campaign's is `next_send_at`, which is the rate limiter's own state and which
+`dispatch_batch` overwrites when the batch finishes.
+
+**A crashed send is named on the row that asked for it.** `_dispatch` takes a
+`link` hook the caller uses inside TX1, so a follow-up or a campaign recipient
+records *which* message was staged for it before Meta is asked. A worker that
+dies mid-send therefore leaves a row that says "a message exists for me and
+nobody resolved it", and the next sweep abandons it rather than sending again.
+The invariant is stated where it is read: **a pending follow-up or recipient
+naming a message is one whose send did not resolve** — the retryable failure
+path unlinks, because a message Meta explicitly declined is a finished
+undelivered send and the next attempt makes a new one.
+
+**Consequences.**
+
+A send no longer holds a pooled connection across a Graph API round trip. On a
+pool of one with the send parked at the provider, `checkedout()` is 0 where it
+was 1 — the property ADR-080 gave the agent turn, now held by the messaging
+path the audit named as the exception to it.
+
+A follow-up or a campaign recipient can now end in `FAILED` for a reason that is
+not a failure: "WhatsApp did not confirm this message, so it was not sent
+again". That is a real behaviour change and it is the point. The previous
+behaviour was to try again, and trying again is how somebody receives the same
+message twice.
+
+A campaign batch is now one transaction per campaign rather than one per sweep,
+so a broken campaign can no longer roll back the batch a different workspace
+sent in the same pass.
+
+**What is proved rather than argued.**
+`tests/integration/test_outbound_delivery_protocol.py` parks a real send inside
+a provider double and asserts, from a *different* transaction, that the intent
+is committed and the pool is empty; kills a session after Meta accepted and
+asserts the send is still findable; and drives a timeout, a rejection, a rate
+limit, a template, a file and a failed upload through the same protocol.

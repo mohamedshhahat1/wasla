@@ -1,9 +1,25 @@
 """Outbound messaging.
 
+The delivery protocol, which is what this module is mostly about (ADR-093):
+
+    TX1   the send intent, state CLAIMED                      -> COMMIT
+    --    (media only) upload the file. Delivers nothing.
+    TX2   state REQUESTED                                     -> COMMIT
+    --    ask Meta to deliver. No transaction, no connection held.
+    TX3   record what came back
+
+The message row used to be *flushed* before the call and committed after it,
+which is not the same thing at all: a process that stopped between the send and
+the commit left a customer holding a message this system had no record of, and
+held a pooled connection for the length of a Graph API round trip while it did.
+
 What this module is careful about:
 
-- The message row is written before Meta is called, so an attempt always leaves
-  a trace.
+- The send intent is **committed** before Meta can deliver anything, so a crash
+  leaves a row that says a message may have gone out rather than no row at all.
+- A refusal and an unknown are different outcomes. Meta declining the request
+  is recorded as failed; a timeout or a 5xx leaves the row in `REQUESTED`, and
+  nothing may send that message again on its own initiative.
 - A rejected send is recorded rather than raised. Raising would roll the request
   back and delete the row that proves the attempt happened.
 - The 24-hour service window is enforced on free text only. Writing outside it
@@ -29,13 +45,20 @@ from app.core.media_types import SNIFF_BYTES, MediaClass
 from app.core.media_types import resolve as resolve_media_type
 from app.core.storage import EXTENSIONS, MediaStorage, StorageError, build_key
 from app.db.models.billing import LimitKey
-from app.db.models.conversation import Conversation, Message, MessageKind, MessageStatus
+from app.db.models.conversation import (
+    Conversation,
+    Message,
+    MessageDeliveryState,
+    MessageKind,
+    MessageStatus,
+)
 from app.db.models.media import MediaStatus, MediaStorageState
 from app.db.models.usage import UsageEventType
 from app.db.models.whatsapp import WhatsAppAccount
 from app.db.session import released
 from app.integrations.whatsapp.client import (
     SentMessage,
+    UncertainDeliveryError,
     WhatsAppClient,
     build_http_client,
 )
@@ -58,6 +81,34 @@ logger = get_logger(__name__)
 SERVICE_WINDOW: Final = timedelta(hours=24)
 
 SendCall = Callable[[WhatsAppClient, str, str], Awaitable[SentMessage]]
+# The half of a send that provably delivers nothing - today, uploading a file to
+# Meta before the message that carries it. Runs while the send intent is still
+# `CLAIMED`, so a failure in it is an ordinary undelivered send.
+PrepareCall = Callable[[WhatsAppClient, str], Awaitable[None]]
+# A caller tying its own row to this send, inside the transaction that commits
+# the intent. Synchronous and staging-only, like `UsageRecorder.record`: it must
+# not touch the session, because the commit that follows is the point.
+LinkCall = Callable[[Message], None]
+
+
+async def _attempt(
+    send: SendCall,
+    client: WhatsAppClient,
+    phone_number_id: str,
+    recipient: str,
+) -> SentMessage | Exception:
+    """Ask Meta to deliver, returning the failure rather than raising it.
+
+    A value rather than an exception because the caller is inside `released`,
+    where nothing may touch the session - and the row that records what
+    happened is on the other side of that block. The same shape
+    `MediaService._write` uses, for the same reason.
+    """
+    try:
+        return await send(client, phone_number_id, recipient)
+    except (ExternalServiceError, RateLimitedError) as error:
+        return error
+
 
 # Meta groups attachments into four kinds, and they are not the mime families.
 # "image/png" is an image, but "application/pdf" is a *document* - so the
@@ -160,6 +211,7 @@ class MessagingService:
         body: str,
         preview_url: bool = False,
         sent_by_id: uuid.UUID | None = None,
+        link: LinkCall | None = None,
     ) -> Message:
         async def send(client: WhatsAppClient, phone_number_id: str, to: str) -> SentMessage:
             return await client.send_text(
@@ -176,6 +228,7 @@ class MessagingService:
             sent_by_id=sent_by_id,
             send=send,
             require_window=True,
+            link=link,
         )
 
     async def send_template(
@@ -186,6 +239,7 @@ class MessagingService:
         language: str,
         components: list[dict[str, Any]] | None = None,
         sent_by_id: uuid.UUID | None = None,
+        link: LinkCall | None = None,
     ) -> Message:
         async def send(client: WhatsAppClient, phone_number_id: str, to: str) -> SentMessage:
             return await client.send_template(
@@ -209,6 +263,7 @@ class MessagingService:
             send=send,
             # Templates are the sanctioned way out of the service window.
             require_window=False,
+            link=link,
         )
 
     async def send_media(
@@ -274,22 +329,33 @@ class MessagingService:
 
         upload_name = _safe_filename(filename, mime_type=canonical)
 
-        async def send(client: WhatsAppClient, phone_number_id: str, to: str) -> SentMessage:
-            media_id = await client.upload_media(
-                phone_number_id=phone_number_id,
-                content=content,
-                # The canonical type, not the caller's. Meta renders an
-                # attachment by what it is told it is, so sending the claim
-                # would let a mislabelled file be mislabelled to the customer
-                # as well.
-                mime_type=canonical,
-                filename=upload_name,
+        # The two halves of a media send, split because only the second one can
+        # reach a customer. Uploading a file to Meta creates a handle valid for
+        # one message and delivers nothing, so it runs while the send intent is
+        # still `CLAIMED` and a failure in it is an ordinary undelivered send
+        # rather than an outcome nobody can determine (ADR-093).
+        uploaded: list[str] = []
+
+        async def prepare(client: WhatsAppClient, phone_number_id: str) -> None:
+            uploaded.append(
+                await client.upload_media(
+                    phone_number_id=phone_number_id,
+                    content=content,
+                    # The canonical type, not the caller's. Meta renders an
+                    # attachment by what it is told it is, so sending the claim
+                    # would let a mislabelled file be mislabelled to the
+                    # customer as well.
+                    mime_type=canonical,
+                    filename=upload_name,
+                )
             )
+
+        async def send(client: WhatsAppClient, phone_number_id: str, to: str) -> SentMessage:
             return await client.send_media(
                 phone_number_id=phone_number_id,
                 to=to,
                 kind=family,  # type: ignore[arg-type]
-                media_id=media_id,
+                media_id=uploaded[0],
                 caption=caption,
                 filename=upload_name,
             )
@@ -301,6 +367,7 @@ class MessagingService:
             # inbound one: it is what the person typed.
             body=caption,
             sent_by_id=sent_by_id,
+            prepare=prepare,
             send=send,
             require_window=True,
         )
@@ -443,7 +510,33 @@ class MessagingService:
         require_window: bool,
         template_name: str | None = None,
         template_language: str | None = None,
+        prepare: PrepareCall | None = None,
+        link: LinkCall | None = None,
     ) -> Message:
+        """One outbound message, under the delivery protocol in ADR-093.
+
+            TX1   the send intent, and whatever the caller ties to it   -> COMMIT
+            --    (media only) upload the file. Provably not delivered.
+            TX2   state REQUESTED                                       -> COMMIT
+            --    ask Meta to deliver it. No transaction, no connection.
+            TX3   record what came back
+
+        The commits before the provider call are the point. Both orders fail;
+        only one of them fails recoverably - send-then-commit leaves a customer
+        holding a message this system has no record of, which is unfindable,
+        while commit-then-send leaves a row that says a message may have gone
+        out, which a person can read a conversation and settle.
+
+        `prepare` exists because a media send is two Meta requests and only the
+        second one delivers anything. Uploading a file is not customer-visible,
+        so it happens while the state still says `CLAIMED` and a failure there
+        is an ordinary undelivered send rather than an unknown.
+
+        `link` lets a caller tie its own row - a follow-up, a campaign
+        recipient - to this send inside TX1, so that a worker which dies mid-send
+        leaves something naming the message rather than a row that looks
+        untouched and gets sent again.
+        """
         conversation = await self._conversations.require_by_id(conversation_id)
         if require_window and not self.window_open(conversation):
             raise ValidationError(
@@ -464,27 +557,56 @@ class MessagingService:
             template_name=template_name,
             template_language=template_language,
         )
-        # Flushed before the network call so the attempt exists as a row even if
-        # everything after this fails.
         await self._session.flush()
+        if link is not None:
+            link(message)
 
         async with self._client(account) as client:
-            try:
-                sent = await send(client, account.phone_number_id, contact.wa_id)
-            except (ExternalServiceError, RateLimitedError) as error:
-                # Recorded, not raised: the caller gets the message back in
-                # failed state, and the row survives the commit.
-                await self._messages.mark_failed(message, reason=str(error))
-                logger.warning(
-                    "whatsapp.outbound_failed",
-                    extra={"conversation_id": str(conversation_id)},
-                )
-                return message
+            if prepare is not None:
+                # TX1. Nothing has been asked of Meta, so a failure in the
+                # upload below is provably not a delivery.
+                async with released(self._session):
+                    try:
+                        await prepare(client, account.phone_number_id)
+                    except (ExternalServiceError, RateLimitedError) as error:
+                        prepared_failure: Exception | None = error
+                    else:
+                        prepared_failure = None
+                if prepared_failure is not None:
+                    return await self._undelivered(message, reason=str(prepared_failure))
+
+            # TX1 for a text or a template, TX2 for a file already uploaded.
+            # Either way the row says "Meta may have this" *before* Meta can.
+            # The gap between this commit and the socket resolves the safe way
+            # by construction: the row claims a send that did not happen, which
+            # costs somebody a look at the conversation rather than costing a
+            # customer a second message.
+            message.delivery_state = MessageDeliveryState.REQUESTED
+            await self._session.flush()
+            async with released(self._session):
+                outcome = await _attempt(send, client, account.phone_number_id, contact.wa_id)
+
+        if isinstance(outcome, UncertainDeliveryError):
+            # Left exactly as it is. `REQUESTED` with `PENDING` is the honest
+            # record of a message that may be on somebody's phone, and the one
+            # thing that must not follow is another send (ADR-093).
+            logger.warning(
+                "whatsapp.outbound_uncertain",
+                extra={
+                    "event": "whatsapp.outbound_uncertain",
+                    "conversation_id": str(conversation_id),
+                },
+            )
+            await self._session.flush()
+            return message
+
+        if isinstance(outcome, Exception):
+            return await self._undelivered(message, reason=str(outcome))
 
         now = datetime.now(UTC)
         await self._messages.mark_sent(
             message,
-            wa_message_id=sent.message_id,
+            wa_message_id=outcome.message_id,
             sent_at=now,
         )
         conversation.last_message_at = now
@@ -497,6 +619,25 @@ class MessagingService:
             occurred_at=now,
             meta={"conversation_id": str(conversation_id), "kind": kind.value},
         )
+        await self._session.flush()
+        return message
+
+    async def _undelivered(self, message: Message, *, reason: str) -> Message:
+        """Nothing was delivered, and that is known rather than assumed.
+
+        Recorded, not raised: the caller gets the message back in failed state,
+        and the row survives the commit. A caller that wants to try again may -
+        as a *new* message, because this one is finished.
+        """
+        await self._messages.mark_failed(message, reason=reason)
+        logger.warning(
+            "whatsapp.outbound_failed",
+            extra={"conversation_id": str(message.conversation_id)},
+        )
+        # The request's commit boundary only commits a session that is in a
+        # transaction, and after `released` above this one is not until
+        # something touches it.
+        await self._session.flush()
         return message
 
     @asynccontextmanager

@@ -14,6 +14,7 @@ from app.db.models.conversation import (
     ConversationMode,
     ConversationStatus,
     Message,
+    MessageDeliveryState,
     MessageDirection,
     MessageKind,
     MessageStatus,
@@ -294,6 +295,11 @@ class MessageRepository(TenantScopedRepository[Message]):
         Written first and deliberately without a `wa_message_id`, so a send that
         never completes still leaves evidence it was attempted rather than
         vanishing.
+
+        `CLAIMED` rather than nothing: this row is committed before Meta is
+        asked for anything, and the state is what says so. A caller reading it
+        knows the message has not been delivered and cannot have been
+        (ADR-093).
         """
         message = Message(
             tenant_id=self.tenant_id,
@@ -301,6 +307,7 @@ class MessageRepository(TenantScopedRepository[Message]):
             direction=MessageDirection.OUTBOUND,
             kind=kind,
             status=MessageStatus.PENDING,
+            delivery_state=MessageDeliveryState.CLAIMED,
             body=body,
             sent_by_id=sent_by_id,
             template_name=template_name,
@@ -318,11 +325,20 @@ class MessageRepository(TenantScopedRepository[Message]):
         message.wa_message_id = wa_message_id
         message.status = MessageStatus.SENT
         message.sent_at = sent_at
+        message.delivery_state = MessageDeliveryState.SENT
         return message
 
     async def mark_failed(self, message: Message, *, reason: str) -> Message:
+        """Record a send that provably delivered nothing.
+
+        Only reached where that is known - Meta declined the request, or the
+        request never left. A send whose outcome is unknown is left in
+        `REQUESTED`, because `FAILED` is a claim about the customer's phone
+        that nobody is in a position to make.
+        """
         message.status = MessageStatus.FAILED
         message.failure_reason = reason[:500]
+        message.delivery_state = MessageDeliveryState.UNDELIVERED
         return message
 
     async def apply_status(

@@ -160,6 +160,7 @@ class DueFollowUpClaim(BaseRepository[FollowUp]):
         *,
         now: datetime,
         limit: int = DEFAULT_CLAIM_LIMIT,
+        lease_until: datetime | None = None,
     ) -> list[FollowUp]:
         """Lock and return the follow-ups whose time has come.
 
@@ -169,9 +170,12 @@ class DueFollowUpClaim(BaseRepository[FollowUp]):
         the second replica steps over what the first has taken and picks up the
         rows behind it instead of blocking on them.
 
-        The lock lives until the caller's transaction ends, so the caller must
-        commit or roll back promptly — which the worker does, one session per
-        sweep.
+        `lease_until` pushes each claimed row's due time out and is committed
+        with the claim, which is what keeps the guarantee once the lock is gone
+        (ADR-093). The lock ends with the transaction, and the send now commits
+        part-way through — so the lock alone would stop protecting the rows at
+        the first send. A lease is a fact on the row; a worker that dies leaves
+        rows that become due again when it elapses.
         """
         statement = (
             select(FollowUp)
@@ -184,4 +188,26 @@ class DueFollowUpClaim(BaseRepository[FollowUp]):
             .with_for_update(skip_locked=True)
         )
         result = await self.session.execute(statement)
-        return list(result.scalars().all())
+        claimed = list(result.scalars().all())
+        if lease_until is not None:
+            for row in claimed:
+                row.scheduled_at = lease_until
+            await self.session.flush()
+        return claimed
+
+    async def claim_by_id(self, follow_up_id: uuid.UUID) -> FollowUp | None:
+        """Re-take one claimed row in a transaction of its own.
+
+        The batch claim above hands back identifiers rather than rows to work
+        with, because its transaction has committed by the time any of them is
+        sent and an object from it is a snapshot. This reads the row again under
+        its own lock, so a follow-up an inbound message cancelled in between is
+        seen as cancelled rather than sent.
+
+        `SKIP LOCKED` rather than a wait: if somebody else holds this row, the
+        answer is to move on, not to queue behind them.
+        """
+        statement = (
+            select(FollowUp).where(FollowUp.id == follow_up_id).with_for_update(skip_locked=True)
+        )
+        return (await self.session.execute(statement)).scalars().one_or_none()

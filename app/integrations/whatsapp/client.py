@@ -4,12 +4,20 @@ Retry policy, and why it is narrow: the send endpoint takes no idempotency key,
 so a retry can duplicate a customer-visible message. Only failures that
 definitely did not send are retried.
 
-| Failure | Retried | Reason |
-| --- | --- | --- |
-| 429 | yes | Rejected outright; nothing was sent |
-| connection error | yes | No connection, so no request arrived |
-| 5xx | no | May have been accepted; a duplicate reply is worse |
-| read timeout | no | Same: the request may have landed |
+| Failure | Retried | Raises | Reason |
+| --- | --- | --- | --- |
+| 429 | yes | `RateLimitedError` | Rejected outright; nothing was sent |
+| connection error | yes | `SendNotAttemptedError` | No connection, so no request arrived |
+| 4xx | no | `SendNotAttemptedError` | Meta read it and declined; nothing delivered |
+| 5xx | no | `UncertainDeliveryError` | May have been accepted |
+| read timeout | no | `UncertainDeliveryError` | Same: the request may have landed |
+
+**The exception type is the answer to a question a caller has to ask.** Every
+one of these used to be `ExternalServiceError`, which left "Meta declined this"
+and "nobody knows whether Meta took it" indistinguishable - so the follow-up
+and campaign sweeps retried both, and a read timeout could put a second copy of
+a message on somebody's phone. The two types above are what a caller reads
+instead of the message text (ADR-093).
 
 Reads are the opposite and have their own path (`_get`). Fetching a file twice
 costs a request and changes nothing anyone can see, so everything transient is
@@ -100,6 +108,28 @@ class _Hop:
 
     body: bytes | None
     redirect_to: str | None
+
+
+class SendNotAttemptedError(ExternalServiceError):
+    """The request provably never reached Meta.
+
+    Raised only where nothing can have been delivered: a connection that was
+    never established, or a rejection issued before the message was read. The
+    caller may record the send as undelivered and, if it wants to, make a new
+    one - which is a decision it cannot safely take after any other failure
+    (ADR-093).
+    """
+
+
+class UncertainDeliveryError(ExternalServiceError):
+    """Meta may or may not have accepted the request, and nobody can tell.
+
+    A read timeout, a reset connection, a 5xx. The request left this process
+    and no answer came back, and Meta publishes no way to ask what became of
+    it - there is no idempotency key on the send endpoint and no lookup keyed
+    on anything this system generated. So this is terminal by construction: the
+    one thing that must not follow it is another send.
+    """
 
 
 class MediaTooLargeError(ExternalServiceError):
@@ -702,15 +732,18 @@ class WhatsAppClient:
                 if attempt >= self._max_attempts:
                     logger.warning("whatsapp.send_unreachable", extra={"attempts": attempt})
                     await call.record(CallOutcome.UNAVAILABLE)
-                    raise ExternalServiceError("WhatsApp could not be reached.") from error
+                    raise SendNotAttemptedError("WhatsApp could not be reached.") from error
                 await self._backoff(attempt)
                 attempt += 1
                 continue
             except httpx.TimeoutException as error:
-                # The request may have landed. Retrying risks a second message.
+                # The request may have landed. Retrying risks a second message,
+                # and so does anything upstream treating this as a failure it
+                # can try again - which is why the exception says so by type
+                # rather than leaving a caller to read the message (ADR-093).
                 logger.warning("whatsapp.send_timed_out", extra={"attempts": attempt})
                 await call.record(CallOutcome.UNAVAILABLE)
-                raise ExternalServiceError("WhatsApp did not respond in time.") from error
+                raise UncertainDeliveryError("WhatsApp did not respond in time.") from error
 
             if response.status_code == TOO_MANY_REQUESTS:
                 if attempt >= self._max_attempts:
@@ -721,12 +754,21 @@ class WhatsAppClient:
                 attempt += 1
                 continue
 
-            if response.status_code >= CLIENT_ERROR_FLOOR:
-                # 5xx is deliberately not retried either: the message may have
-                # been accepted, and a duplicate reply is worse than a failure.
+            if response.status_code >= SERVER_ERROR_FLOOR:
+                # 5xx is not retried, and it is not a refusal either: Meta may
+                # have accepted the message and failed somewhere after. Kept
+                # apart from the 4xx below because the two lead to opposite
+                # decisions upstream.
                 self._log_failure(response)
                 await call.record(CallOutcome.FAILURE)
-                raise ExternalServiceError("WhatsApp rejected the message.")
+                raise UncertainDeliveryError("WhatsApp did not complete the request.")
+
+            if response.status_code >= CLIENT_ERROR_FLOOR:
+                # Meta read the request and declined it. Nothing was delivered,
+                # and that is known rather than assumed.
+                self._log_failure(response)
+                await call.record(CallOutcome.FAILURE)
+                raise SendNotAttemptedError("WhatsApp rejected the message.")
 
             await call.record(CallOutcome.SUCCESS)
             return self._decode(response)

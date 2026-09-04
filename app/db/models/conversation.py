@@ -14,8 +14,18 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from enum import StrEnum
+from typing import Final
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import (
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -83,11 +93,47 @@ class MessageStatus(StrEnum):
     FAILED = "failed"
 
 
+class MessageDeliveryState(StrEnum):
+    """Whether Meta may already have this message, for an outbound send.
+
+    `MessageStatus` answers "what happened to it" and is advanced by webhook
+    status events. This answers a different question, and it is the one the
+    sending code has to ask before it acts: *may this logical message be sent
+    to Meta now, and might Meta already have taken it?* A single status cannot
+    carry both, because the honest answer to the second is sometimes "nobody
+    knows" while the first still reads `pending` (ADR-093).
+
+    NULL on every inbound message and on every row written before this existed.
+    """
+
+    #: Committed, and Meta has not been asked to deliver anything. Provably
+    #: nothing reached a customer, so this send may still be made.
+    CLAIMED = "claimed"
+    #: The request either has been made or is about to be. Meta may have
+    #: accepted it, and nothing may send this message again on that basis.
+    REQUESTED = "requested"
+    #: Meta accepted it and named it. Delivery is Meta's business from here and
+    #: is reported by the status webhooks.
+    SENT = "sent"
+    #: Nothing was delivered and that is known rather than assumed - Meta read
+    #: the request and declined it, or the request provably never left this
+    #: process. A *new* send may be made; this one is finished.
+    UNDELIVERED = "undelivered"
+
+
 CONVERSATION_STATUS_TYPE = _enum_type(ConversationStatus, name="conversation_status")
 CONVERSATION_MODE_TYPE = _enum_type(ConversationMode, name="conversation_mode")
 MESSAGE_DIRECTION_TYPE = _enum_type(MessageDirection, name="message_direction")
 MESSAGE_KIND_TYPE = _enum_type(MessageKind, name="message_kind")
 MESSAGE_STATUS_TYPE = _enum_type(MessageStatus, name="message_status")
+MESSAGE_DELIVERY_STATE_TYPE = _enum_type(MessageDeliveryState, name="message_delivery_state")
+
+# The delivery states that leave a send finished. Anything else is a send whose
+# outcome is still open - which for `REQUESTED` means open for ever, because
+# Meta offers no way to ask what happened to a request it never answered.
+RESOLVED_DELIVERY_STATES: Final[frozenset[MessageDeliveryState]] = frozenset(
+    {MessageDeliveryState.SENT, MessageDeliveryState.UNDELIVERED}
+)
 
 
 class Contact(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
@@ -248,6 +294,16 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         # workspace-wide count, and this is the largest table in the schema
         # after usage events.
         Index("ix_messages_tenant_id_created_at", "tenant_id", "created_at"),
+        # Sends whose outcome is still open. Partial, because on a healthy
+        # deployment this is the empty set and a full index over the largest
+        # table in the schema would be paid for continuously to answer a
+        # question nobody usually has (ADR-093).
+        Index(
+            "ix_messages_unresolved_delivery",
+            "tenant_id",
+            "created_at",
+            postgresql_where=text("delivery_state IN ('claimed', 'requested')"),
+        ),
     )
 
     conversation_id: Mapped[uuid.UUID] = mapped_column(
@@ -283,3 +339,28 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Nullable because an inbound message has no delivery protocol to be in the
+    # middle of, and because every row written before ADR-093 predates the
+    # question. Read through the two properties below rather than compared to
+    # `None` at call sites.
+    delivery_state: Mapped[MessageDeliveryState | None] = mapped_column(
+        MESSAGE_DELIVERY_STATE_TYPE,
+        nullable=True,
+        default=None,
+    )
+
+    @property
+    def delivery_uncertain(self) -> bool:
+        """Whether Meta may hold this message without anyone knowing.
+
+        The one state that must never be answered with another send. Meta
+        publishes no way to ask what became of a request it did not answer, so
+        `REQUESTED` is terminal in practice: a person decides, from the
+        conversation, whether to write again (ADR-093).
+        """
+        return self.delivery_state is MessageDeliveryState.REQUESTED
+
+    @property
+    def delivery_resolved(self) -> bool:
+        """Whether this send has a known outcome, either way."""
+        return self.delivery_state in RESOLVED_DELIVERY_STATES

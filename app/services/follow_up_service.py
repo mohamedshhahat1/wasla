@@ -32,7 +32,7 @@ from app.core.config import Settings
 from app.core.exceptions import ExternalServiceError, RateLimitedError, ValidationError
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
-from app.db.models.conversation import ConversationStatus, MessageStatus
+from app.db.models.conversation import ConversationStatus, Message, MessageStatus
 from app.db.models.follow_up import (
     MAX_ATTEMPTS,
     MAX_BODY_LENGTH,
@@ -301,6 +301,22 @@ class FollowUpService:
             # Something else finished it between the claim and now.
             return DispatchOutcome(follow_up, follow_up.status, "Already resolved.")
 
+        if follow_up.message_id is not None:
+            # **A pending follow-up naming a message is one whose send did not
+            # resolve.** `_fail` clears the link when Meta refused - nothing was
+            # delivered, so the next attempt makes a new message - and success
+            # is not pending. So reaching here means a previous attempt
+            # committed a send intent and its worker then stopped, and whether
+            # Meta took that message is not knowable: there is no idempotency
+            # key on the send endpoint and no lookup to ask with. Terminal
+            # rather than retried, because the alternative is somebody
+            # receiving the same nudge twice because a process died at the
+            # wrong instant (ADR-093).
+            return self._abandon(
+                follow_up,
+                "An earlier attempt could not be confirmed, so this was not sent again.",
+            )
+
         messaging = self._messaging
         if messaging is None:
             if self._settings is None:
@@ -319,8 +335,19 @@ class FollowUpService:
 
         window_open = messaging.window_open(conversation)
 
+        def link(message: Message) -> None:
+            """Name the send on this row, inside the transaction that commits it.
+
+            So that a worker which dies between the commit and Meta's answer
+            leaves a follow-up that says "a message was staged for me" rather
+            than one that looks untouched and gets sent again (ADR-093).
+            """
+            follow_up.message_id = message.id
+
         if window_open and follow_up.body:
-            send = messaging.send_text(conversation_id=conversation.id, body=follow_up.body)
+            send = messaging.send_text(
+                conversation_id=conversation.id, body=follow_up.body, link=link
+            )
         elif follow_up.has_template:
             # Checked again here, not only at scheduling. Meta pauses a template
             # that draws complaints without warning, and hours can pass between
@@ -339,6 +366,7 @@ class FollowUpService:
                 name=str(follow_up.template_name),
                 language=str(follow_up.template_language),
                 components=follow_up.template_components,
+                link=link,
             )
         elif window_open:
             # In the window but nothing to say: a template-only follow-up whose
@@ -354,6 +382,15 @@ class FollowUpService:
             message = await send
         except (ExternalServiceError, RateLimitedError, ValidationError) as error:
             return self._fail(follow_up, str(error))
+
+        if message.delivery_uncertain:
+            # Meta did not answer, and there is no way to ask what it did with
+            # the request. Terminal rather than retried: a nudge nobody is sure
+            # about is not worth risking a second copy of (ADR-093).
+            return self._abandon(
+                follow_up,
+                "WhatsApp did not confirm this message, so it was not sent again.",
+            )
 
         if message.status is MessageStatus.FAILED:
             # The messaging service records a rejected send rather than raising,
@@ -388,6 +425,27 @@ class FollowUpService:
         )
         return DispatchOutcome(follow_up, FollowUpStatus.SKIPPED, detail)
 
+    def _abandon(self, follow_up: FollowUp, detail: str) -> DispatchOutcome:
+        """A send whose outcome nobody can determine. Terminal, and never retried.
+
+        Kept apart from `_fail`, which is for attempts that provably delivered
+        nothing and may be tried again, and from `_skip`, which is for sends
+        policy forbade. This one records that a message may be on somebody's
+        phone - the row names it - and that Wasla declined to send another
+        (ADR-093).
+        """
+        follow_up.attempts += 1
+        follow_up.status = FollowUpStatus.FAILED
+        follow_up.last_error = detail[:500]
+        logger.warning(
+            "follow_up.delivery_uncertain",
+            extra={
+                "event": "follow_up.delivery_uncertain",
+                "follow_up_id": str(follow_up.id),
+            },
+        )
+        return DispatchOutcome(follow_up, FollowUpStatus.FAILED, detail)
+
     def _fail(self, follow_up: FollowUp, detail: str) -> DispatchOutcome:
         """Record an attempt that broke, leaving it retryable until it is not.
 
@@ -398,6 +456,11 @@ class FollowUpService:
         """
         follow_up.attempts += 1
         follow_up.last_error = detail[:500]
+        # The message this attempt staged, if it staged one, is a finished
+        # undelivered send. Unlinking it keeps the invariant the guard in
+        # `dispatch` reads: a pending follow-up naming a message is one whose
+        # send nobody could resolve.
+        follow_up.message_id = None
 
         if follow_up.is_exhausted:
             follow_up.status = FollowUpStatus.FAILED

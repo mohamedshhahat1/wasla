@@ -56,7 +56,7 @@ from app.db.models.campaign import (
     OptOutSource,
     RecipientStatus,
 )
-from app.db.models.conversation import Contact, MessageStatus
+from app.db.models.conversation import Contact, Message, MessageStatus
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
 from app.repositories.campaign_repository import (
@@ -548,12 +548,33 @@ class CampaignService:
             # of it.
             return self._skip(recipient, "This contact has opted out of campaigns.")
 
+        if recipient.message_id is not None:
+            # **A pending recipient naming a message is one whose send did not
+            # resolve.** `_fail_recipient` clears the link when Meta refused -
+            # nothing was delivered, so the next attempt makes a new message -
+            # and success is not pending. So reaching here means a previous
+            # attempt committed a send intent and its worker then stopped, and
+            # whether Meta took that message is not knowable (ADR-093).
+            return self._abandon_recipient(
+                recipient,
+                "An earlier attempt could not be confirmed, so it was not sent again.",
+            )
+
         conversation, _ = await self._conversations.get_or_create(
             contact_id=contact.id,
             account_id=campaign.account_id,
         )
         await self._session.flush()
         recipient.conversation_id = conversation.id
+
+        def link(message: Message) -> None:
+            """Name the send on this row, inside the transaction that commits it.
+
+            So a worker that dies between the commit and Meta's answer leaves a
+            recipient that says "a message was staged for me" rather than one
+            that looks untouched and is sent again.
+            """
+            recipient.message_id = message.id
 
         template = await self._templates.require_by_id(campaign.template_id)
         try:
@@ -563,9 +584,19 @@ class CampaignService:
                 language=template.language,
                 components=_components(campaign.variables),
                 sent_by_id=campaign.created_by_id,
+                link=link,
             )
         except (ExternalServiceError, RateLimitedError, ValidationError) as error:
             return self._fail_recipient(recipient, str(error))
+
+        if message.delivery_uncertain:
+            # Meta did not answer and there is no way to ask what it did with
+            # the request. Terminal: a broadcast that retries an unconfirmed
+            # send is a broadcast that sends some people two copies.
+            return self._abandon_recipient(
+                recipient,
+                "WhatsApp did not confirm this message, so it was not sent again.",
+            )
 
         if message.status is MessageStatus.FAILED:
             # The messaging service records a rejected send rather than raising,
@@ -598,10 +629,28 @@ class CampaignService:
         recipient.last_error = detail[:MAX_ERROR_LENGTH]
         return RecipientStatus.SKIPPED
 
+    def _abandon_recipient(self, recipient: CampaignRecipient, detail: str) -> RecipientStatus:
+        """A send whose outcome nobody can determine. Terminal, never retried.
+
+        Kept apart from `_fail_recipient`, which is for attempts that provably
+        delivered nothing and are worth another go, and from `_skip`, which is a
+        policy refusal. This one records that a message may already be on
+        somebody's phone - `recipient.message_id` names it - and that no second
+        one was sent (ADR-093).
+        """
+        recipient.attempts += 1
+        recipient.status = RecipientStatus.FAILED
+        recipient.last_error = detail[:MAX_ERROR_LENGTH]
+        return RecipientStatus.FAILED
+
     def _fail_recipient(self, recipient: CampaignRecipient, detail: str) -> RecipientStatus:
         """An attempt that broke. Retried until the attempts run out."""
         recipient.attempts += 1
         recipient.last_error = detail[:MAX_ERROR_LENGTH]
+        # The message this attempt staged, if it staged one, is a finished
+        # undelivered send. Unlinking it keeps the invariant `_deliver` reads: a
+        # pending recipient naming a message is one whose send nobody resolved.
+        recipient.message_id = None
         if recipient.is_exhausted:
             recipient.status = RecipientStatus.FAILED
             return RecipientStatus.FAILED

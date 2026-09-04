@@ -12,7 +12,7 @@ under test is which branch the compliance logic takes, not whether httpx works.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -27,6 +27,7 @@ from app.db.models.conversation import (
     ConversationMode,
     ConversationStatus,
     Message,
+    MessageDeliveryState,
     MessageDirection,
     MessageKind,
     MessageStatus,
@@ -104,24 +105,64 @@ class StubMessaging:
             return False
         return datetime.now(UTC) - conversation.last_inbound_at <= SERVICE_WINDOW
 
-    async def _record(self, conversation_id: uuid.UUID, *, kind: MessageKind) -> Message:
+    async def _record(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        kind: MessageKind,
+        link: Callable[[Message], None] | None = None,
+    ) -> Message:
+        """The real protocol's shape, minus the commits (ADR-093).
+
+        `link` is honoured rather than ignored, because the real service calls
+        it inside the transaction that commits the send intent - and a stub
+        that dropped it would leave the follow-up looking untouched in exactly
+        the state the guard exists for.
+
+        `"uncertain"` is Meta not answering: `PENDING` and `REQUESTED`, which is
+        what a read timeout leaves behind.
+        """
+        uncertain = self.outcome == "uncertain"
+        rejected = self.outcome == "rejected"
         message = Message(
             tenant_id=self._tenant_id,
             conversation_id=conversation_id,
             direction=MessageDirection.OUTBOUND,
             kind=kind,
-            status=(MessageStatus.FAILED if self.outcome == "rejected" else MessageStatus.SENT),
-            failure_reason="Meta said no." if self.outcome == "rejected" else None,
+            status=(
+                MessageStatus.PENDING
+                if uncertain
+                else MessageStatus.FAILED
+                if rejected
+                else MessageStatus.SENT
+            ),
+            delivery_state=(
+                MessageDeliveryState.REQUESTED
+                if uncertain
+                else MessageDeliveryState.UNDELIVERED
+                if rejected
+                else MessageDeliveryState.SENT
+            ),
+            failure_reason="Meta said no." if rejected else None,
         )
         self._session.add(message)
         await self._session.flush()
+        if link is not None:
+            link(message)
         return message
 
-    async def send_text(self, *, conversation_id: uuid.UUID, body: str, **kwargs: Any) -> Message:
+    async def send_text(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        body: str,
+        link: Callable[[Message], None] | None = None,
+        **kwargs: Any,
+    ) -> Message:
         if self.outcome == "raise":
             raise ExternalServiceError("The network went away.")
         self.texts.append(body)
-        return await self._record(conversation_id, kind=MessageKind.TEXT)
+        return await self._record(conversation_id, kind=MessageKind.TEXT, link=link)
 
     async def send_template(
         self,
@@ -130,11 +171,12 @@ class StubMessaging:
         name: str,
         language: str,
         components: Sequence[Any] | None = None,
+        link: Callable[[Message], None] | None = None,
     ) -> Message:
         if self.outcome == "raise":
             raise ExternalServiceError("The network went away.")
         self.templates.append((name, language))
-        return await self._record(conversation_id, kind=MessageKind.TEMPLATE)
+        return await self._record(conversation_id, kind=MessageKind.TEMPLATE, link=link)
 
 
 def _service(

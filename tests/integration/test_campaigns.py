@@ -15,7 +15,7 @@ logic takes and what it writes down, not whether httpx works.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -40,6 +40,7 @@ from app.db.models.conversation import (
     ConversationMode,
     ConversationStatus,
     Message,
+    MessageDeliveryState,
     MessageDirection,
     MessageKind,
     MessageStatus,
@@ -82,22 +83,50 @@ class StubMessaging:
         language: str,
         components: Sequence[Any] | None = None,
         sent_by_id: uuid.UUID | None = None,
+        link: Callable[[Message], None] | None = None,
     ) -> Message:
+        """The real protocol's shape, minus the commits (ADR-093).
+
+        `link` is honoured rather than ignored: the real service calls it
+        inside the transaction that commits the send intent, and a stub that
+        dropped it would let the recipient row look untouched in exactly the
+        state the guard exists for.
+
+        `"uncertain"` is Meta not answering: the row stays `PENDING` and
+        `REQUESTED`, which is what a read timeout leaves behind.
+        """
         if self.outcome == "raise":
             raise ExternalServiceError("The network went away.")
         self.sends.append((name, language))
+        uncertain = self.outcome == "uncertain"
+        rejected = self.outcome == "rejected"
         message = Message(
             tenant_id=self._tenant_id,
             conversation_id=conversation_id,
             direction=MessageDirection.OUTBOUND,
             kind=MessageKind.TEMPLATE,
-            status=(MessageStatus.FAILED if self.outcome == "rejected" else MessageStatus.SENT),
-            failure_reason="Meta said no." if self.outcome == "rejected" else None,
+            status=(
+                MessageStatus.PENDING
+                if uncertain
+                else MessageStatus.FAILED
+                if rejected
+                else MessageStatus.SENT
+            ),
+            delivery_state=(
+                MessageDeliveryState.REQUESTED
+                if uncertain
+                else MessageDeliveryState.UNDELIVERED
+                if rejected
+                else MessageDeliveryState.SENT
+            ),
+            failure_reason="Meta said no." if rejected else None,
             template_name=name,
             template_language=language,
         )
         self._session.add(message)
         await self._session.flush()
+        if link is not None:
+            link(message)
         return message
 
 

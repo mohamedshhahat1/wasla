@@ -369,11 +369,25 @@ class DueCampaignClaim(BaseRepository[Campaign]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session)
 
+    async def claim_by_id(self, campaign_id: uuid.UUID) -> Campaign | None:
+        """Re-take one claimed campaign in a transaction of its own.
+
+        The batch claim below hands back identifiers rather than rows to work
+        with, because its transaction has committed by the time any batch is
+        sent and an object from it is a snapshot. This reads the row again under
+        its own lock, so a campaign paused in between is seen as paused.
+        """
+        statement = (
+            select(Campaign).where(Campaign.id == campaign_id).with_for_update(skip_locked=True)
+        )
+        return (await self.session.execute(statement)).scalars().one_or_none()
+
     async def claim_due(
         self,
         *,
         now: datetime,
         limit: int = DEFAULT_CAMPAIGN_CLAIM_LIMIT,
+        lease_until: datetime | None = None,
     ) -> list[Campaign]:
         """Lock and return campaigns that should be sending.
 
@@ -382,6 +396,11 @@ class DueCampaignClaim(BaseRepository[Campaign]):
         query because the worker does the same thing with both — send the next
         batch — and splitting them would be two sweeps racing each other for the
         same rows.
+
+        `lease_until` pushes `next_send_at` out and is committed with the claim,
+        which is what keeps the guarantee once the lock is gone (ADR-093). It is
+        the same column the query above filters on, so the lease is the rate
+        limiter's own mechanism applied a moment earlier rather than a new one.
         """
         statement = (
             select(Campaign)
@@ -406,7 +425,12 @@ class DueCampaignClaim(BaseRepository[Campaign]):
             .with_for_update(skip_locked=True)
         )
         result = await self.session.execute(statement)
-        return list(result.scalars().all())
+        claimed = list(result.scalars().all())
+        if lease_until is not None:
+            for row in claimed:
+                row.next_send_at = lease_until
+            await self.session.flush()
+        return claimed
 
 
 __all__ = [

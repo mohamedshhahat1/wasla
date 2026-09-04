@@ -120,18 +120,48 @@ The uniqueness constraint, not the preceding read, is the guarantee. Two simulta
 
 ### Retry policy
 
-The Cloud API send endpoint accepts **no idempotency key**, so a retry can duplicate a customer-visible message. Only failures that definitely did not send are retried:
+The Cloud API send endpoint accepts **no idempotency key**, so a retry can duplicate a customer-visible message. Only failures that definitely did not send are retried, and the exception type says which kind of failure it was so a caller does not have to read the message text:
 
-| Failure | Retried | Reason |
-| --- | --- | --- |
-| `429` | Yes, with backoff | Rejected outright; nothing was sent |
-| Connection error | Yes, with backoff | No connection, so no request arrived |
-| `5xx` | No | May have been accepted; a duplicate reply is worse than a failure |
-| Read timeout | No | Same: the request may have landed |
+| Failure | Retried in the client | Raises | May a caller send again? |
+| --- | --- | --- | --- |
+| `429` | Yes, with backoff | `RateLimitedError` | Yes — rejected outright, nothing was sent |
+| Connection error | Yes, with backoff | `SendNotAttemptedError` | Yes — no connection, so no request arrived |
+| `4xx` | No | `SendNotAttemptedError` | Yes — Meta read it and declined; nothing was delivered |
+| `5xx` | No | `UncertainDeliveryError` | **No** — may have been accepted |
+| Read timeout | No | `UncertainDeliveryError` | **No** — the request may have landed |
 
 Meta's error `code`, `type` and `error_subcode` are logged; the message raised to callers is our own, because provider error text can echo fragments of a request and this client holds a live platform credential.
 
 A message accepted without an identifier is treated as an error: delivery statuses arrive keyed on that id, so a message that cannot be identified cannot be tracked.
+
+## Delivery protocol
+
+An outbound send commits before Meta can deliver anything ([ADR-093](../DECISIONS.md)):
+
+```
+TX1   the send intent, state claimed                  -> COMMIT
+--    (media only) upload the file. Delivers nothing.
+TX2   state requested                                 -> COMMIT
+--    ask Meta to deliver. No transaction, no pooled connection held.
+TX3   record what came back
+```
+
+The row used to be flushed before the call and committed after it, which is not the same thing: a process that stopped in between left a customer holding a message this system had no record of, and held a pooled connection for the length of a Graph API round trip while it did.
+
+`messages.delivery_state` is what the protocol reads, and it is a different question from `messages.status`. `status` answers *what happened to it* and is advanced by Meta's status webhooks; `delivery_state` answers *may this be sent now, and might Meta already have it*:
+
+| State | Meaning |
+| --- | --- |
+| `claimed` | Committed, and Meta has not been asked. Provably nothing delivered. |
+| `requested` | Meta may have accepted it. **Nothing may send this message again.** |
+| `sent` | Meta accepted it and named it. Delivery statuses take over. |
+| `undelivered` | Nothing was delivered and that is known — Meta declined, or the request never left. |
+
+It is NULL on every inbound message.
+
+**There is no reconciler for `requested`, and that is a fact about Meta.** The send endpoint takes no idempotency key and offers no lookup keyed on anything Wasla holds before Meta answers, so an unanswered request cannot be asked about. A `requested` row is shown to a person rather than resolved by a sweep; `ix_messages_unresolved_delivery` is the query that finds them, and on a healthy deployment it returns nothing.
+
+A follow-up or a campaign recipient whose send ended `requested` is recorded as failed with "WhatsApp did not confirm this message, so it was not sent again", and is never retried. An explicit rejection is different: nothing was delivered, so the existing retry policy applies unchanged.
 
 ## What the webhook does not do
 

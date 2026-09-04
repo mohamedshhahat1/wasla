@@ -15,7 +15,9 @@ each sleep their own way to twice the intended rate.
 **Concurrency is settled by PostgreSQL.** Campaigns are claimed with ``FOR
 UPDATE SKIP LOCKED``, and so are the recipients inside them. Two replicas
 sweeping at the same instant step over each other's work rather than sending ten
-thousand people the same message twice.
+thousand people the same message twice. The claim also pushes ``next_send_at``
+out and commits it, because a row lock ends where its transaction does and a
+send now commits part-way through (ADR-093).
 
 **One connection pool per sweep.** The messaging service is handed an HTTP client
 that lives for the whole sweep, so a batch of fifty is fifty requests over one
@@ -27,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,6 +54,13 @@ logger = get_logger(__name__)
 # this: an idle deployment should not query constantly.
 POLL_SECONDS = 15.0
 
+# How long a claimed campaign is left alone before the sweep may take it again.
+# Long enough for one batch of sends against a slow Meta, short enough that a
+# worker killed mid-batch does not stall the campaign for an hour.
+# `dispatch_batch` overwrites it with the rate limiter's own figure when the
+# batch finishes, so this value only ever applies to a batch in flight.
+CLAIM_LEASE_SECONDS = 300.0
+
 # How the worker obtains something to send with. Injected rather than built
 # inline so a test can drive a sweep without a WhatsApp account, exactly as
 # FollowUpWorker does.
@@ -69,11 +78,13 @@ class CampaignWorker:
         poll_seconds: float = POLL_SECONDS,
         claim_limit: int = DEFAULT_CAMPAIGN_CLAIM_LIMIT,
         messaging_factory: MessagingFactory | None = None,
+        lease_seconds: float = CLAIM_LEASE_SECONDS,
     ) -> None:
         self._database = database
         self._settings = settings
         self._poll_seconds = poll_seconds
         self._claim_limit = claim_limit
+        self._lease = timedelta(seconds=lease_seconds)
         self._messaging_factory = messaging_factory
         self._running = False
         # Set when stop() is called, so a sleeping worker wakes at once instead
@@ -105,10 +116,20 @@ class CampaignWorker:
     async def run_once(self, *, now: datetime | None = None) -> int:
         """Send one batch for every campaign currently due. Returns how many.
 
-        One session and one HTTP client for the whole sweep, committed at the
-        end. The campaign rows stay locked until then, which is what keeps
-        another replica off them, so the sweep is bounded by `claim_limit`
-        rather than draining every campaign on the platform under one lock.
+        Two phases, and the split is a correctness requirement (ADR-093). A
+        send commits its intent before Meta can deliver anything, and a commit
+        ends the transaction the claim's row lock lives in - so a sweep holding
+        one lock across every campaign would drop them all at the first send.
+
+            TX1  claim the due campaigns and push `next_send_at` out by a
+                 lease                                              -> COMMIT
+            --   the lock is gone; the lease is what keeps others off
+            TXn  one transaction per campaign
+
+        `next_send_at` is already the rate limiter's own state and already the
+        column `claim_due` filters on, so the lease is the existing mechanism
+        used a moment earlier rather than a new one. `dispatch_batch` sets it
+        again from its own clock when the batch finishes.
         """
         moment = now or datetime.now(UTC)
         handled = 0
@@ -117,34 +138,55 @@ class CampaignWorker:
             claimed = await DueCampaignClaim(session).claim_due(
                 now=moment,
                 limit=self._claim_limit,
+                lease_until=moment + self._lease,
             )
-            if not claimed:
-                return 0
+            identifiers = [row.id for row in claimed]
 
-            async with build_http_client() as http:
-                for campaign in claimed:
-                    try:
-                        outcome = await self._send_batch(session, campaign, http=http, now=moment)
-                    except Exception:
-                        # Contained to the one campaign. A single broken row
-                        # must not strand every other workspace's sends.
-                        logger.exception(
-                            "campaign.batch_failed",
-                            extra={"campaign_id": str(campaign.id)},
-                        )
-                        continue
+        if not identifiers:
+            return 0
+
+        async with build_http_client() as http:
+            for campaign_id in identifiers:
+                if await self._send_one(campaign_id, http=http, now=moment):
                     handled += 1
-                    logger.debug(
-                        "campaign.batch_handled",
-                        extra={
-                            "campaign_id": str(campaign.id),
-                            "status": outcome.status.value,
-                            "attempted": outcome.attempted,
-                        },
-                    )
 
         logger.info("campaign.sweep_completed", extra={"handled": handled})
         return handled
+
+    async def _send_one(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        http: httpx.AsyncClient,
+        now: datetime,
+    ) -> bool:
+        """One campaign's batch, in a transaction of its own. Returns whether it ran.
+
+        Re-read under a row lock rather than carried over from the claim: that
+        transaction has committed, so its object is a snapshot and the campaign
+        may have been paused or cancelled since.
+        """
+        async with self._database.session() as session:
+            campaign = await DueCampaignClaim(session).claim_by_id(campaign_id)
+            if campaign is None:
+                return False
+            try:
+                outcome = await self._send_batch(session, campaign, http=http, now=now)
+            except Exception:
+                # Contained to the one campaign. A single broken row must not
+                # strand every other workspace's sends.
+                logger.exception("campaign.batch_failed", extra={"campaign_id": str(campaign_id)})
+                return False
+
+        logger.debug(
+            "campaign.batch_handled",
+            extra={
+                "campaign_id": str(campaign_id),
+                "status": outcome.status.value,
+                "attempted": outcome.attempted,
+            },
+        )
+        return True
 
     async def _send_batch(
         self,
