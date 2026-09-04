@@ -98,6 +98,12 @@ FEATURE_SETTINGS: dict[str, tuple[str, ...]] = {
     # so a mismatch is a configuration error rather than a behaviour nobody
     # notices (ADR-078).
     "media_retention_": ("api", "worker"),
+    # WhatsApp. Both processes call the Graph API - the API when a colleague
+    # replies by hand from the inbox, the worker for agent replies, follow-ups,
+    # campaigns and media downloads - so both need the credential and the
+    # version. This mapping was absent, which is how the API came to serve three
+    # send routes in production with no `META_ACCESS_TOKEN` at all.
+    "meta_": ("api", "worker"),
 }
 
 # Fields a mapped prefix picks up that a given service deliberately does not
@@ -121,12 +127,40 @@ EXPECTED_ABSENT: dict[tuple[str, str], str] = {
     ),
     ("api", "EMAIL_MAX_ATTEMPTS"): "delivery retries belong to the email worker",
     ("api", "EMAIL_WORKER_POLL_SECONDS"): "the poll interval belongs to the email worker",
+    ("worker", "META_APP_SECRET"): (
+        "only the API serves the webhook, so only the API verifies a signature"
+    ),
+    ("worker", "META_VERIFY_TOKEN"): ("only the API answers Meta's subscription challenge"),
+    ("api", "META_APP_ID"): "declared for documentation; no code reads it",
+    ("worker", "META_APP_ID"): "declared for documentation; no code reads it",
 }
 
 # Values the *backup* process holds and no application process may. Asserted
 # rather than assumed, because the whole point of giving backups their own
 # container is that taking over an application container does not hand somebody
 # the ability to read or delete the backups (ADR-075).
+# Feature settings that *are* mandatory at interpolation, with the reason. The
+# test below exists because refusing to boot over an absent Google client secret
+# would make an optional integration compulsory; these are the ones where
+# refusing is the point.
+MANDATORY_BY_DESIGN: dict[str, str] = {
+    "META_APP_SECRET": (
+        "the webhook's signature check is the whole of its authorization, and "
+        "production refuses to serve it without one - a deployment that booted "
+        "anyway would accept an unauthenticated POST from anybody"
+    ),
+}
+
+# Settings an operator is deliberately not shown, with the reason. Anything here
+# is a decision; anything missing without being here is drift, and the test
+# below is what makes that true.
+#
+# Empty today, and worth keeping as the mechanism rather than deleting: the
+# argument for hiding a setting is always specific - a knob only a test turns, a
+# value a deployment cannot usefully change - and it belongs next to the name it
+# applies to rather than in a commit message.
+UNDOCUMENTED_BY_DESIGN: dict[str, str] = {}
+
 BACKUP_ONLY: tuple[str, ...] = (
     "BACKUP_DESTINATION",
     "BACKUP_S3_BUCKET",
@@ -158,6 +192,14 @@ def _fields_for(prefix: str) -> set[str]:
     """The `Settings` fields a mapping entry covers, as environment names."""
     return {
         name.upper() for name in Settings.model_fields if name == prefix or name.startswith(prefix)
+    }
+
+
+def _environment_names() -> set[str]:
+    """Every `Settings` field, as the environment variable that supplies it."""
+    return {
+        str(field.validation_alias or field.alias or name).upper()
+        for name, field in Settings.model_fields.items()
     }
 
 
@@ -274,9 +316,10 @@ def test_an_optional_integration_is_never_mandatory_at_interpolation(service: st
         if ":?" in expression
     }
 
-    assert not (mandatory & _expected(service)), (
+    offenders = mandatory & _expected(service) - set(MANDATORY_BY_DESIGN)
+    assert not offenders, (
         f"{service}: feature settings must be optional at interpolation time: "
-        f"{sorted(mandatory & _expected(service))}"
+        f"{sorted(offenders)}"
     )
 
 
@@ -310,6 +353,39 @@ def test_env_example_documents_every_setting_a_deployment_must_provide(service: 
     missing = sorted(_expected(service) - documented)
 
     assert not missing, f".env.example does not mention: {', '.join(missing)}"
+
+
+def test_env_example_documents_every_setting_that_exists() -> None:
+    """The whole of `Settings`, not only what a Compose file forwards.
+
+    The test above answers "can a deployment supply what it must", and it is
+    scoped to the prefixes `FEATURE_SETTINGS` maps - which is correct for what
+    it asserts and is why it missed two security controls. Both
+    `RATE_LIMIT_LOGIN_PER_ACCOUNT_PER_MINUTE` - the login budget counted per
+    account, described in `config.py` as the limit that survives a botnet - and
+    `WEBHOOK_MAX_REQUEST_BYTES` - the cap on the one endpoint an
+    unauthenticated caller can reach - have defaults and appear in no Compose
+    file, so they fell outside that assertion entirely and an operator had no
+    way to discover either existed.
+
+    This one has no scope. Every field is either documented or listed below
+    with a reason, so adding a setting is a decision about whether operators
+    should know it exists rather than an omission nobody notices.
+    """
+    documented = set(re.findall(r"^([A-Z][A-Z0-9_]*)=", ENV_EXAMPLE.read_text("utf-8"), re.M))
+    missing = sorted(_environment_names() - documented - set(UNDOCUMENTED_BY_DESIGN))
+
+    assert not missing, (
+        ".env.example does not mention: "
+        f"{', '.join(missing)}. Document it, or add it to UNDOCUMENTED_BY_DESIGN "
+        "with the reason it should not be."
+    )
+
+
+def test_every_deliberate_omission_names_a_real_setting() -> None:
+    """So the exception list cannot rot into a list of settings that once existed."""
+    stale = sorted(set(UNDOCUMENTED_BY_DESIGN) - _environment_names())
+    assert not stale, f"UNDOCUMENTED_BY_DESIGN names settings that are gone: {stale}"
 
 
 def test_no_secret_value_is_written_into_the_shipped_configuration() -> None:

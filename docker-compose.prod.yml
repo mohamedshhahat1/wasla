@@ -157,6 +157,19 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       META_APP_SECRET: ${META_APP_SECRET:?META_APP_SECRET is required to verify webhook signatures}
       META_VERIFY_TOKEN: ${META_VERIFY_TOKEN:-}
+      # The API sends too, and this was missing. `POST /conversations/{id}/text`
+      # is a colleague replying by hand from the inbox, and it resolves the same
+      # credential the worker does: the workspace's own encrypted token where
+      # there is one, and this platform token where there is not. Without it,
+      # every hand-written reply from a workspace that has not connected its own
+      # number went to Meta with an empty bearer while the agent's automatic
+      # replies on the worker went through.
+      META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:-}
+      # Both processes call the Graph API, so both need to agree on which
+      # version they are calling. It has a default in `Settings`, which is why
+      # nothing broke - but a deployment that cannot pin the version cannot
+      # respond to Meta deprecating one either.
+      META_API_VERSION: ${META_API_VERSION:-v21.0}
       # --- Media storage (ADR-077) ---
       #
       # Both processes get the same values, and they must: the worker writes an
@@ -363,6 +376,14 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:-}
+      # Pinned on both processes, and to the same value: the API and the worker
+      # both call the Graph API, and two containers disagreeing about the
+      # version is a deployment where a message sends and its media download
+      # does not.
+      META_API_VERSION: ${META_API_VERSION:-v21.0}
+      # `META_APP_SECRET` and `META_VERIFY_TOKEN` are deliberately absent: only
+      # the API serves the webhook, so only the API verifies a signature or
+      # answers a subscription challenge.
       # --- Media storage (ADR-077) ---
       #
       # Both processes get the same values, and they must: the worker writes an

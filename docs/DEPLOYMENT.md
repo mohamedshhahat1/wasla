@@ -139,6 +139,8 @@ process that does not read it fails CI the same way a missing one does
 | `GOOGLE_*` | ✓ | — | Nothing in the worker touches OIDC, so the client secret reaches exactly one container |
 | `BILLING_PROVIDER`, `PAYMOB_*` | ✓ | ✓ | The API creates intentions and verifies callbacks; the worker collects renewals |
 | `BILLING_PAST_DUE_DAYS`, `BILLING_SUSPEND_AFTER_DAYS` | ✓ | ✓ | The worker acts on them; the API carries them so the ordering rule is validated by whichever process starts first |
+| `META_ACCESS_TOKEN`, `META_API_VERSION` | ✓ | ✓ | **Both processes call the Graph API.** The worker sends agent replies, follow-ups and campaigns and downloads inbound media; the API sends when a colleague replies by hand from the inbox. Each resolves the workspace's own encrypted token where there is one and this platform token where there is not, so a container without it sends with an empty bearer |
+| `META_APP_SECRET`, `META_VERIFY_TOKEN` | ✓ | — | Only the API serves the webhook, so only the API verifies a signature or answers a subscription challenge |
 
 `docker-compose.yml` is not held to this: it forwards a developer's whole `.env`
 through `env_file` and therefore cannot drift.
