@@ -221,6 +221,14 @@ class AuditAction(StrEnum):
     # be days apart, and because a request that is never confirmed is exactly
     # the state worth being able to find.
     PAYMENT_REFUNDED = "payment_refunded"
+    # The plan that payment had bought was taken back with it (ADR-096). Kept
+    # apart from `SUBSCRIPTION_PLAN_CHANGED` because the two answer different
+    # questions: that one says a customer chose something, and this one says
+    # the platform withdrew a grant whose settlement was reversed. Reading a
+    # downgrade to the free plan without it would look like the customer's own
+    # decision, which is precisely the confusion an audit trail exists to
+    # prevent.
+    SUBSCRIPTION_PLAN_WITHDRAWN = "subscription_plan_withdrawn"
     INVOICE_VOIDED = "invoice_voided"
     # A renewal went unpaid long enough that the workspace was marked behind.
     SUBSCRIPTION_PAST_DUE = "subscription_past_due"

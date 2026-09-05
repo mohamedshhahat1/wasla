@@ -122,10 +122,22 @@ class CheckoutService:
         *,
         tenant_id: uuid.UUID,
         provider: CheckoutProvider | None = None,
+        default_plan_code: str | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self._provider = provider
+        # Where a workspace lands when a settlement is reversed (ADR-096). It
+        # is the same string `EntitlementService` falls back to, passed in for
+        # the same reason: a service reading `Settings` itself is a service
+        # that cannot be constructed in a test without one.
+        #
+        # `None` is a real state rather than an oversight - the reconciliation
+        # sweep builds this service to resolve *collections*, never reversals -
+        # and it is loud rather than silent: a reversal that needs a plan to
+        # fall back to and has none logs and leaves the subscription alone,
+        # exactly as a missing catalogue row does in the other direction.
+        self._default_plan_code = default_plan_code
         self._invoices = InvoiceRepository(session, tenant_id=tenant_id)
         self._payments = PaymentRepository(session, tenant_id=tenant_id)
         self._plans = PlanRepository(session)
@@ -527,7 +539,7 @@ class CheckoutService:
             return MISMATCHED, f"Expected {invoice.currency}, was told {event.currency}."
 
         if event.kind in (EventKind.REFUNDED, EventKind.VOIDED):
-            return self._apply_reversal(event, payment=payment, invoice=invoice, now=now)
+            return await self._apply_reversal(event, payment=payment, invoice=invoice, now=now)
         return await self._apply_collection(event, payment=payment, invoice=invoice, now=now)
 
     async def _apply_collection(
@@ -590,7 +602,7 @@ class CheckoutService:
             return APPLIED, f"Payment {event.status.value}."
         return await self._settle(invoice, payment=payment, now=now)
 
-    def _apply_reversal(
+    async def _apply_reversal(
         self,
         event: CallbackEvent,
         *,
@@ -638,6 +650,21 @@ class CheckoutService:
         ):
             invoice.status = InvoiceStatus.OPEN
             invoice.paid_at = None
+
+        if invoice.status is InvoiceStatus.OPEN:
+            if invoice.amount_paid <= 0:
+                await self._withdraw_purchased_plan(invoice, now=now)
+            elif invoice.issued_at is None:
+                # A part-reversed invoice is the one shape in which a checkout
+                # row becomes a genuine debt: the customer keeps what they
+                # bought and owes the difference, so the dunning clock starts
+                # here (ADR-096). `issued_at` is written once and never
+                # rewritten, so this cannot restart somebody's grace period,
+                # and it is deliberately not written on the branch above -
+                # somebody who was fully repaid owes nothing, and chasing them
+                # for the sum they were just refunded would be a worse defect
+                # than the one this fixes.
+                invoice.issued_at = now
 
         self._audit.record(
             AuditAction.PAYMENT_REFUNDED,
@@ -854,6 +881,133 @@ class CheckoutService:
             },
         )
         return APPLIED, f"Invoice {invoice.status.value}."
+
+    async def _withdraw_purchased_plan(self, invoice: Invoice, *, now: datetime) -> None:
+        """Take back the plan an invoice bought, now that nothing paid for it.
+
+        The mirror of `_apply_purchased_plan`, and the answer to the question
+        that method never asked: **what commercial grant survives when the
+        settlement behind it is fully reversed?** (ADR-096). Nothing did, which
+        is how a workspace owner could refund their own payment through the
+        self-service endpoint and keep the plan it bought - permanently, since
+        no later sweep looks at a grant nobody is paying for.
+
+        Reached only when the invoice has been emptied: every unit collected
+        against it has gone back. A partial reversal leaves the plan alone,
+        because the customer has still paid for most of it and taking a month
+        of Pro away over one unit returned is not the trade anybody wants. What
+        the partial case gets instead is a dunning clock, set by the caller.
+
+        Four conditions, and each excludes a downgrade that would be wrong:
+
+        - **There is a subscription, and a plan to fall back to.** Neither is
+          guaranteed by a misconfigured deployment, and inventing one in a
+          settlement path is how a second billing machine gets built.
+        - **It is not terminal.** Cancelled and expired stay as they are - the
+          same rule `_apply_purchased_plan` follows in the other direction, and
+          `EntitlementService` already resolves those to the default plan, so
+          there is nothing to take away either.
+        - **The workspace is still on the plan this invoice bought.** A refund
+          withdraws what it granted and never what somebody else did, so a
+          workspace that has since moved on is left where it moved to.
+        - **Nothing else covers the plan right now.** A second settled invoice
+          whose period contains this moment is somebody's money holding the
+          plan up, and the reversal of a different invoice must not spend it.
+
+        Failure is contained in the same way settlement is: the money is the
+        part that must never be rolled back. A grant that could not be
+        withdrawn is an operator's problem; losing the record that a customer
+        was repaid is a customer's.
+        """
+        subscription = await self._subscriptions.get()
+        if subscription is None or subscription.is_terminal:
+            return
+        if not self._default_plan_code:
+            logger.warning(
+                "billing.reversal_without_default_plan",
+                extra={
+                    "event": "billing.reversal_without_default_plan",
+                    "tenant_id": str(self._tenant_id),
+                    "invoice_id": str(invoice.id),
+                    "plan_code": invoice.plan_code,
+                },
+            )
+            return
+        if invoice.plan_code == self._default_plan_code:
+            # The free plan is what a withdrawal moves *to*. Reversing a
+            # zero-priced invoice grants nothing back and would otherwise raise
+            # `ConflictError` out of `change_plan` for being already there.
+            return
+
+        current = await self._plans.get_by_id(subscription.plan_id)
+        if current is None or current.code != invoice.plan_code:
+            return
+        if await self._invoices.has_other_settled_cover(
+            invoice_id=invoice.id,
+            plan_code=invoice.plan_code,
+            at=now,
+        ):
+            logger.info(
+                "billing.reversal_kept_plan",
+                extra={
+                    "event": "billing.reversal_kept_plan",
+                    "tenant_id": str(self._tenant_id),
+                    "invoice_id": str(invoice.id),
+                    "plan_code": invoice.plan_code,
+                },
+            )
+            return
+
+        try:
+            await SubscriptionService(self._session, tenant_id=self._tenant_id).change_plan(
+                plan_code=self._default_plan_code,
+                now=now,
+                # The platform withdrawing a grant, not a customer choosing -
+                # which is also what lets the transition through `_require_plan`
+                # if the default plan is ever made non-public.
+                self_service=False,
+                actor=None,
+            )
+        except WaslaError:
+            logger.exception(
+                "billing.plan_withdrawal_failed",
+                extra={
+                    "event": "billing.plan_withdrawal_failed",
+                    "tenant_id": str(self._tenant_id),
+                    "invoice_id": str(invoice.id),
+                    "plan_code": invoice.plan_code,
+                },
+            )
+            return
+
+        # Beside the entry `change_plan` writes rather than instead of it. That
+        # one records the movement; this one records the *reason*, and without
+        # it a downgrade read from the trail is indistinguishable from the
+        # customer having chosen the free plan themselves.
+        self._audit.record(
+            AuditAction.SUBSCRIPTION_PLAN_WITHDRAWN,
+            actor=None,
+            actor_kind=AuditActorKind.SYSTEM,
+            tenant_id=self._tenant_id,
+            target_type="subscription",
+            target_id=subscription.id,
+            target_label=self._default_plan_code,
+            meta={
+                "invoice_id": str(invoice.id),
+                "plan_code": invoice.plan_code,
+                "reason": "settlement_reversed",
+            },
+        )
+        logger.info(
+            "billing.plan_withdrawn",
+            extra={
+                "event": "billing.plan_withdrawn",
+                "tenant_id": str(self._tenant_id),
+                "invoice_id": str(invoice.id),
+                "from_plan": invoice.plan_code,
+                "to_plan": self._default_plan_code,
+            },
+        )
 
     async def _apply_purchased_plan(
         self,

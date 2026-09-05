@@ -305,7 +305,11 @@ class BillingWorker:
             return 0
 
         async with self._database.session() as session:
-            reconciler = PaymentReconciler(session=session, provider=provider)
+            reconciler = PaymentReconciler(
+                session=session,
+                provider=provider,
+                default_plan_code=self._settings.default_plan_code,
+            )
             if not reconciler.available:
                 return 0
             outcome = await reconciler.run(

@@ -151,9 +151,15 @@ class PaymentReconciler:
         *,
         session: AsyncSession,
         provider: CheckoutProvider,
+        default_plan_code: str | None = None,
     ) -> None:
         self._session = session
         self._provider = provider
+        # Carried only to hand on. An inquiry answers with whatever the
+        # transaction has become, and "refunded" is one of the answers - so
+        # this path can reach `_apply_reversal` and needs to know where a
+        # withdrawn grant lands, exactly as the callback path does (ADR-096).
+        self._default_plan_code = default_plan_code
         self._payments = PlatformPaymentRepository(session)
         # Narrowed once, at construction, and held as its own name. The
         # alternative is an `isinstance` at every call site or an `assert` that
@@ -320,7 +326,12 @@ class PaymentReconciler:
         there first and the invoice is already settled, which is precisely the
         outcome this exists to reach.
         """
-        service = CheckoutService(self._session, tenant_id=tenant_id, provider=self._provider)
+        service = CheckoutService(
+            self._session,
+            tenant_id=tenant_id,
+            provider=self._provider,
+            default_plan_code=self._default_plan_code,
+        )
         outcome = await service.apply(event, now=now)
 
         payment = await self._payments.get_by_id(payment_id)

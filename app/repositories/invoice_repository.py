@@ -77,6 +77,45 @@ class InvoiceRepository(TenantScopedRepository[Invoice]):
         """
         return await self._first(self._select().where(Invoice.period_start == period_start))
 
+    async def has_other_settled_cover(
+        self,
+        *,
+        invoice_id: uuid.UUID,
+        plan_code: str,
+        at: datetime,
+    ) -> bool:
+        """Whether some *other* invoice still pays for this plan right now.
+
+        The query behind "unless another valid settlement independently covers
+        it" (ADR-096). A reversal withdraws the grant its own invoice made, and
+        this is what stops it withdrawing one somebody else's money is holding
+        up: a workspace that paid for the current period on a second invoice
+        has bought the plan twice over, and taking it away because the first
+        was refunded would be the wrong direction of the same bug.
+
+        Three predicates, and each is load-bearing:
+
+        - **money is still on it** - `amount_paid > 0` rather than
+          `status = PAID`, because a part-paid invoice is part cover and a
+          reversed one drops out of this set the moment its balance does.
+        - **it is not void.** A voided invoice is a record that something was
+          cancelled, not a claim on the period.
+        - **its period contains `at`.** Cover means cover *now*. Without it the
+          test is "have you ever paid for this plan", and every refund after
+          the first would be free.
+        """
+        statement = (
+            self._select()
+            .where(Invoice.id != invoice_id)
+            .where(Invoice.plan_code == plan_code)
+            .where(Invoice.status != InvoiceStatus.VOID)
+            .where(Invoice.amount_paid > 0)
+            .where(Invoice.period_start <= at)
+            .where(Invoice.period_end > at)
+            .limit(1)
+        )
+        return await self._first(statement) is not None
+
     async def list_invoices(
         self,
         *,

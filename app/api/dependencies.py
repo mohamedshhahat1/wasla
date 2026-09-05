@@ -584,6 +584,7 @@ def get_checkout_service(
         session,
         tenant_id=workspace.tenant.id,
         provider=build_checkout_provider(settings),
+        default_plan_code=settings.default_plan_code,
     )
 
 

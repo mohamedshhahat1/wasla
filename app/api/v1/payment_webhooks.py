@@ -129,7 +129,12 @@ async def receive_payment_callback(
         )
         return {"status": "received"}
 
-    service = CheckoutService(session, tenant_id=tenant_id, provider=provider)
+    service = CheckoutService(
+        session,
+        tenant_id=tenant_id,
+        provider=provider,
+        default_plan_code=settings.default_plan_code,
+    )
     outcome = await service.apply(event)
     logger.info(
         "billing.callback_processed",
