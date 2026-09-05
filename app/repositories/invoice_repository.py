@@ -18,6 +18,7 @@ from app.core.pagination import Cursor
 from app.db.models.billing import Subscription, SubscriptionStatus
 from app.db.models.invoice import (
     UNRESOLVED_COLLECTION_STATES,
+    CollectionState,
     Invoice,
     InvoiceStatus,
     Payment,
@@ -175,6 +176,23 @@ class PaymentRepository(TenantScopedRepository[Payment]):
         convenience.
         """
         return await self._first(self._select().where(Payment.id == payment_id))
+
+    async def count_abandoned(self, *, invoice_id: uuid.UUID) -> int:
+        """How many attempts on this invoice never reached the provider.
+
+        The widening in `RecurringService._abandon` is keyed on this rather
+        than on a counter column, because these rows are already the record:
+        each one is a committed payment in `ABANDONED`. A column beside them
+        could disagree with them, and disagreeing with the ledger is the one
+        thing a billing counter must not do.
+        """
+        statement = (
+            select(func.count(Payment.id))
+            .where(self._tenant_filter())
+            .where(Payment.invoice_id == invoice_id)
+            .where(Payment.collection_state == CollectionState.ABANDONED)
+        )
+        return int((await self.session.execute(statement)).scalar_one())
 
     async def list_for_invoice(self, invoice_id: uuid.UUID) -> list[Payment]:
         """Every attempt, oldest first: the history is the point.

@@ -101,6 +101,29 @@ RETRY_BACKOFF: Final[tuple[timedelta, ...]] = (
     timedelta(days=3),
 )
 
+# Spacing after an attempt that provably never reached the provider. A separate
+# table from `RETRY_BACKOFF` because it answers a different question: that one
+# spaces out asking a *customer's card* again, and this one spaces out asking a
+# *provider* again after it would not take the request.
+#
+# It starts far shorter, because the commonest not-sent failure is a moment - a
+# 5xx, a reset connection - and making somebody wait a day for a renewal that
+# failed on a blip would be worse than the loop this replaces. It ends at a day,
+# and the last entry is the cap: an invoice whose cause is persistent is asked
+# once a day for ever rather than once per poll, which is the difference between
+# a queryable backlog and a log nobody reads.
+#
+# The budget in `MAX_COLLECTION_ATTEMPTS` is deliberately *not* spent by any of
+# these, so the table has no terminal entry. A charge that was never sent has
+# not used up a chance to debit a card, and expressing "give up" by spending one
+# would make the count mean two different things.
+ABANDON_BACKOFF: Final[tuple[timedelta, ...]] = (
+    timedelta(minutes=15),
+    timedelta(hours=1),
+    timedelta(hours=6),
+    timedelta(days=1),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class CollectionOutcome:
@@ -237,6 +260,7 @@ class RecurringService:
                 payment_id,
                 reason=NOT_SUPPORTED,
                 detail="Automatic collection is not enabled for this account.",
+                moment=moment,
             )
         except ChargeNotSentError as error:
             # The failure happened while describing the payment, before the
@@ -247,6 +271,7 @@ class RecurringService:
                 payment_id,
                 reason=PROVIDER_REFUSED if not error.retryable else NOT_SENT,
                 detail="The provider would not accept the charge request.",
+                moment=moment,
             )
         except ProviderError as error:
             if error.retryable:
@@ -293,6 +318,7 @@ class RecurringService:
         *,
         reason: str,
         detail: str,
+        moment: datetime,
     ) -> CollectionOutcome:
         """Close an attempt that provably never reached the provider.
 
@@ -304,9 +330,21 @@ class RecurringService:
 
         The payment is marked `failed` rather than deleted - the history of a
         renewal that could not be attempted is worth as much as the history of
-        one that was declined - but the invoice is put back exactly where it
-        was, so the customer is not charged one attempt for a request that was
-        never made.
+        one that was declined - and the attempt count is put back, so the
+        customer is not charged one attempt for a request that was never made.
+
+        **The schedule is not put back with it**, and that is the fix for the
+        loop. Returning the budget *and* clearing `next_collection_at` made the
+        invoice collectible again on the very next poll, so a persistent cause
+        wrote one `FAILED` row per invoice per poll indefinitely and
+        `MAX_COLLECTION_ATTEMPTS` could never engage - the branch that declined
+        to spend the budget was the branch that also cleared the schedule.
+
+        The two are now separated. The budget returns because nothing was sent;
+        the schedule advances because something went wrong and will probably go
+        wrong again. The delay widens with the number of attempts this invoice
+        has already abandoned, so a blip is retried in a quarter of an hour and
+        a missing merchant capability is retried once a day.
         """
         payment = await self._payments.get_by_id(payment_id)
         if payment is None:  # pragma: no cover - it was committed a moment ago
@@ -316,9 +354,20 @@ class RecurringService:
         payment.collection_state = CollectionState.ABANDONED
         payment.failure_reason = detail
         invoice = await self._invoices.get_by_id(payment.invoice_id)
-        if invoice is not None and invoice.collection_attempts > 0:
-            invoice.collection_attempts -= 1
-            invoice.next_collection_at = None
+        abandoned = 0
+        next_at: datetime | None = None
+        if invoice is not None:
+            if invoice.collection_attempts > 0:
+                invoice.collection_attempts -= 1
+            # Counted from the rows rather than from a column of its own. The
+            # abandoned attempts *are* the history - every one of them is a
+            # committed payment row in `ABANDONED` - so a second counter would
+            # be a denormalisation that could disagree with them, and this is
+            # the query an operator runs to find a workspace stuck in this
+            # state anyway.
+            abandoned = await self._payments.count_abandoned(invoice_id=invoice.id)
+            next_at = moment + ABANDON_BACKOFF[min(abandoned - 1, len(ABANDON_BACKOFF) - 1)]
+            invoice.next_collection_at = next_at
         await self._session.commit()
 
         logger.info(
@@ -328,6 +377,12 @@ class RecurringService:
                 "tenant_id": str(self._tenant_id),
                 "payment_id": str(payment_id),
                 "reason": reason,
+                # What separates a blip from a configuration problem nobody has
+                # noticed. One abandoned attempt is noise; the fourth in a row
+                # on one invoice is something a person has to fix, and the
+                # count is the only thing that tells them apart.
+                "abandoned_attempts": abandoned,
+                "next_collection_at": next_at.isoformat() if next_at else None,
             },
         )
         return CollectionOutcome(charged=False, reason=reason, payment_id=payment_id)
@@ -441,12 +496,28 @@ class RecurringService:
         anything can be sent, and that a request which provably never left
         hands the count back (`_abandon`).
 
+        **Handing the count back is what makes the retry suffix necessary.**
+        An abandoned attempt keeps its row, and that row keeps the key it was
+        claimed under - so with the count returned, the next attempt is number
+        one again and collides with the abandoned one for ever. The invoice
+        then stops being collectible at all: every later poll claims nothing,
+        reports "not due", and the workspace is never debited again even after
+        the cause is fixed. Naming the retry is what closes that, and the key
+        stays exactly as it was for the ordinary case so nothing that never
+        abandons changes shape.
+
+        Two workers on one poll read the same committed count, build the same
+        key, and are still separated by `UNIQUE(tenant_id, idempotency_key)`.
+        One that reads a stale count collides with the abandoned row instead,
+        which skips the poll - the safe direction.
+
         **This commits.** The claim is worth nothing uncommitted - that was the
         defect - so the transaction ends here and the caller resumes in a new
         one holding a payment that PostgreSQL already knows about.
         """
         attempt = invoice.collection_attempts + 1
-        key = f"auto:{invoice.id}:{attempt}"
+        retries = await self._payments.count_abandoned(invoice_id=invoice.id)
+        key = f"auto:{invoice.id}:{attempt}" + (f":r{retries}" if retries else "")
 
         try:
             async with self._session.begin_nested():

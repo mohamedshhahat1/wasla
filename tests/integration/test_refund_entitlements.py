@@ -363,8 +363,10 @@ async def test_the_withdrawal_is_audited_as_a_reversal_and_not_as_a_choice(
         .all()
     )
     assert len(entries) == 1
-    assert entries[0].meta["invoice_id"] == str(invoice.id)
-    assert entries[0].meta["plan_code"] == PAID_PLAN
+    meta = entries[0].meta or {}
+    assert meta["invoice_id"] == str(invoice.id)
+    assert meta["plan_code"] == PAID_PLAN
+    assert meta["reason"] == "settlement_reversed"
     assert entries[0].target_label == FREE_PLAN
 
 
@@ -440,7 +442,7 @@ async def test_a_full_reversal_does_not_start_chasing_the_refunded_customer(
 async def test_another_settled_invoice_for_the_same_plan_keeps_it(
     db_session: AsyncSession,
 ) -> None:
-    """"Granted solely by this payment" is a query, not an assumption.
+    """ "Granted solely by this payment" is a query, not an assumption.
 
     A workspace that paid for August and again for September, then refunded
     August, has bought September. Downgrading on the strength of the reversed
