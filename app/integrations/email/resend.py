@@ -19,6 +19,7 @@ from typing import Any, Final
 import httpx
 
 from app.core.logging import get_logger
+from app.core.net import UnsafeUrlError, build_guarded_client
 from app.integrations.email.base import EmailMessage, EmailSendResult, EmailSendState
 
 logger = get_logger(__name__)
@@ -59,6 +60,34 @@ class ResendEmailProvider:
         # network, the same way the WhatsApp client takes one.
         self._transport = transport
 
+    def _client(self) -> httpx.AsyncClient:
+        """The HTTP client every Resend call uses.
+
+        `build_guarded_client`, the same constructor OpenAI, WhatsApp, Google
+        and Paymob use, so the answer to "which outbound clients are guarded?"
+        is "all of them" rather than a list that goes stale (ADR-067). This
+        integration was the stale entry: it passed `transport=self._transport`,
+        which is `None` in production, so every real send went out on httpx's
+        default transport with no address check at all.
+
+        The URL is a constant, so what the guard closes is narrow - a hijacked
+        or poisoned resolver for `api.resend.com` - and the request it protects
+        carries `RESEND_API_KEY` in an Authorization header. Narrow is not
+        absent, and the point of the rule is that the question has one answer.
+
+        Redirects stay off, which is the httpx default and what
+        `GuardedTransport` assumes: it judges one hop, so a client following
+        the next one would follow it unjudged.
+
+        A `transport` is supplied only by tests, which need a mock socket
+        rather than a real one. Production never passes one, so the guarded
+        path is the only path a deployment can take.
+        """
+        timeout = httpx.Timeout(self._timeout)
+        if self._transport is not None:
+            return httpx.AsyncClient(timeout=timeout, transport=self._transport)
+        return build_guarded_client(timeout=timeout)
+
     @property
     def name(self) -> str:
         return "resend"
@@ -91,10 +120,7 @@ class ResendEmailProvider:
             headers["Idempotency-Key"] = idempotency_key
 
         try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout,
-                transport=self._transport,
-            ) as client:
+            async with self._client() as client:
                 response = await client.post(RESEND_ENDPOINT, json=payload, headers=headers)
         except httpx.TimeoutException:
             return EmailSendResult(
@@ -102,6 +128,29 @@ class ResendEmailProvider:
                 provider=self.name,
                 error_code="timeout",
                 error_message="the provider did not answer in time",
+            )
+        except UnsafeUrlError:
+            # The guard refused the destination: `api.resend.com` resolved to
+            # something that is not publicly routable. Translated here and
+            # **not** allowed to escape, for the reason `PaymobProvider._post`
+            # gives - `UnsafeUrlError` is deliberately not a `WaslaError`, so
+            # uncaught it becomes a 500 from whatever route happened to trigger
+            # a send, which is the wrong report for "this deployment cannot
+            # safely reach its email provider".
+            #
+            # Transient, because the outbox's alternative is marking a message
+            # permanently undeliverable over what is usually a resolver having
+            # a bad minute. Which address was refused stays out of the result,
+            # following the argument `app/core/net.py` makes for its own log.
+            logger.warning(
+                "email.destination_refused",
+                extra={"event": "email.destination_refused", "provider": self.name},
+            )
+            return EmailSendResult(
+                state=EmailSendState.TRANSIENT_FAILURE,
+                provider=self.name,
+                error_code="transport_error",
+                error_message="the provider host did not resolve to a public address",
             )
         except httpx.HTTPError as error:
             # Transport-level: DNS, refused connection, TLS. The provider was

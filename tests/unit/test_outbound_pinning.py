@@ -22,21 +22,32 @@ certificate against the pinned IP would have traded one hole for a larger one.
 
 The last section asks a different question: **which clients are guarded?** The
 intended answer is "all of them", and the way that stops being true is one
-integration built by hand. Paymob was that integration (SEC-08), so the check is
-now an assertion over every outbound client rather than a sentence in a
-docstring.
+integration built by hand. Paymob was that integration (SEC-08) and Resend was
+the next one (F-3) - which is the interesting part, because a test claiming to
+assert "every client any integration hands out is guarded" was already green
+over a dict literal of exactly four.
+
+So the set is no longer written down. It is discovered by parsing every module
+under `app/` for two facts - does it construct an `httpx.AsyncClient`, does it
+reference `build_guarded_client` - and a module that does the first without the
+second fails unless it is an exemption with a stated reason. The live-client
+dict survives, because each provider needs different constructor arguments, but
+it is now checked *against* the discovery rather than trusted.
 """
 
 from __future__ import annotations
 
+import ast
 import contextlib
+import pathlib
 import socket
-from typing import Any
+from typing import Any, Final
 
 import anyio._core._sockets as anyio_sockets
 import httpx
 import pytest
 
+import app as app_package
 from app.core.net import (
     GuardedTransport,
     UnsafeUrlError,
@@ -45,6 +56,8 @@ from app.core.net import (
     validate_outbound_url,
 )
 from app.integrations.billing.paymob import PaymobProvider
+from app.integrations.email.base import EmailMessage, EmailSendState
+from app.integrations.email.resend import RESEND_ENDPOINT, ResendEmailProvider
 from app.integrations.openai import client as openai_client
 from app.integrations.openai import embeddings
 from app.integrations.whatsapp import client as whatsapp_client
@@ -74,8 +87,12 @@ class Resolver:
     prove nothing about the gap between them, which is precisely the gap.
     """
 
-    def __init__(self, *answers: str) -> None:
+    def __init__(self, *answers: str, hostname: str = HOSTNAME) -> None:
         self._answers = list(answers)
+        # Which name this resolver answers for. Every other host falls through
+        # to the real one, which is what keeps a test that forgets to name its
+        # host from silently reaching the internet instead of the script.
+        self._hostname = hostname
         self.validating_calls: list[str] = []
         self.connecting_calls: list[str] = []
 
@@ -97,14 +114,14 @@ class Resolver:
         real_anyio = anyio_sockets.getaddrinfo
 
         def validating(host: str, port: int, *args: Any, **kwargs: Any) -> Any:
-            if host != HOSTNAME:
+            if host != self._hostname:
                 return real_socket(host, port, *args, **kwargs)
             self.validating_calls.append(host)
             return self._entry(self._next(), port or 443)
 
         async def connecting(host: str, port: int, **kwargs: Any) -> Any:
             name = host
-            if name != HOSTNAME:
+            if name != self._hostname:
                 return await real_anyio(host, port, **kwargs)
             self.connecting_calls.append(name)
             return self._entry(self._next(), port or 443)
@@ -386,39 +403,191 @@ async def test_every_hop_of_a_redirect_chain_is_resolved_and_judged(
 # ------------------------------------------- every integration, not a list
 
 
+# Modules under `app/` that build an outbound HTTP client and are deliberately
+# not guarded. Each entry is a decision with a reason, and the reason is
+# asserted somewhere rather than only written here.
+EXEMPT_MODULES: Final[dict[str, str]] = {
+    # The one guarded constructor itself. It *is* the rule.
+    "app.core.net": "builds the guarded client every integration uses",
+    # Infrastructure rather than an integration: its endpoint comes from
+    # `Settings` and from nowhere else, and `http://minio:9000` is the correct
+    # value for a self-hosted stack. Guarding it would make the ordinary
+    # deployment unreachable while protecting against nothing. Argued in the
+    # module docstring and asserted by
+    # `test_the_object_store_is_deliberately_not_an_integration_client`.
+    "app.core.object_store": "an object store endpoint is configuration, not a response",
+}
+
+
+def _module_name(path: pathlib.Path) -> str:
+    root = pathlib.Path(app_package.__file__).resolve().parent.parent
+    return ".".join(path.resolve().relative_to(root).with_suffix("").parts)
+
+
+def _outbound_modules() -> dict[str, set[str]]:
+    """Every module under `app/` that reaches the network, and how.
+
+    Discovered by parsing rather than by listing, because a list is exactly the
+    thing that goes stale - which is what F-3 was. The previous version of this
+    file built a dict literal of four clients under a docstring claiming the
+    assertion was "every client any integration hands out is guarded"; Resend
+    had been added to the codebase and not to the dict, so the sentence was
+    true of the docstring and false of the code.
+
+    Two facts per module, and the pair is what the tests below reason over:
+
+    - ``constructs`` - it calls ``httpx.AsyncClient(...)`` itself.
+    - ``guarded``    - it references ``build_guarded_client``.
+
+    A module that constructs and does not guard is the defect. A module that
+    guards and does not construct needs nothing further: it can only produce a
+    guarded client.
+    """
+    root = pathlib.Path(app_package.__file__).resolve().parent
+    found: dict[str, set[str]] = {}
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        marks: set[str] = set()
+        for node in ast.walk(tree):
+            # A *call*, not a mention. `client: httpx.AsyncClient` is a
+            # parameter annotation on a function somebody hands a client to,
+            # and half the workers have one - counting those would make the
+            # rule below fire on modules that never build anything.
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "AsyncClient"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "httpx"
+            ):
+                marks.add("constructs")
+            if isinstance(node, ast.Name) and node.id == "build_guarded_client":
+                marks.add("guarded")
+        if marks:
+            found[_module_name(path)] = marks
+    return found
+
+
 def _integration_clients() -> dict[str, httpx.AsyncClient]:
-    """One entry per outbound client this application builds.
+    """A live client from every module that builds one itself.
 
-    A list is exactly the thing that goes stale, which is why the assertion
-    below is not "these four are guarded" but "every client any integration
-    hands out is guarded" - and why the Paymob entry constructs the provider
-    the way `build_checkout_provider` does, with no transport, rather than
-    reaching for an attribute.
+    Still written out, because each provider needs different arguments and
+    there is no generic way to construct one. What is new is that it is no
+    longer *trusted*: `test_every_module_that_builds_a_client_is_exercised`
+    compares this against the discovery above, so a module added to the code
+    and not to this dict fails rather than being silently uncovered.
 
-    Paymob was the stale entry (SEC-08). Every other integration went through
-    `build_guarded_client`; this one built a bare `httpx.AsyncClient`, and it is
-    the one request that carries a payment secret key.
+    Modules that call `build_guarded_client` inline - Google's token and JWKS
+    fetches, the WhatsApp ownership probe - are absent on purpose. They cannot
+    produce anything but a guarded client, and there is no object to reach.
     """
     return {
-        "openai.responses": openai_client.build_http_client(),
-        "openai.embeddings": embeddings.build_http_client(),
-        "whatsapp": whatsapp_client.build_http_client(),
-        "paymob": PaymobProvider(
+        "app.integrations.openai.client": openai_client.build_http_client(),
+        "app.integrations.openai.embeddings": embeddings.build_http_client(),
+        "app.integrations.whatsapp.client": whatsapp_client.build_http_client(),
+        "app.integrations.billing.paymob": PaymobProvider(
             secret_key="sk_test_notreal000000000000",
             public_key="pk_test_notreal000000000000",
             hmac_secret="a-test-hmac-secret",
             integration_ids=[1],
         )._client(),
+        "app.integrations.email.resend": ResendEmailProvider(
+            api_key="re_notreal_000000000000000000",
+        )._client(),
     }
+
+
+def test_the_discovery_finds_the_modules_it_is_supposed_to() -> None:
+    """Non-vacuity, before anything is concluded from the walk.
+
+    A discovery that finds nothing satisfies every completeness assertion ever
+    written against it, so the shape is pinned first: a minimum count, the
+    guarded constructor itself, and one integration of each kind - one that
+    builds a client and one that only calls the constructor inline.
+    """
+    modules = _outbound_modules()
+
+    assert len(modules) >= 8, sorted(modules)
+    assert modules["app.core.net"] == {"constructs"}
+    assert "constructs" in modules["app.integrations.email.resend"]
+    assert modules["app.integrations.google.oidc"] == {"guarded"}
+
+
+def test_no_integration_builds_an_unguarded_client() -> None:
+    """F-3, as a rule rather than as a list.
+
+    Resend built `httpx.AsyncClient(timeout=..., transport=self._transport)`
+    and `self._transport` is `None` in production, so every real send went out
+    on httpx's default transport with no address check - carrying
+    `RESEND_API_KEY` in an Authorization header. It passed a `transport=`
+    keyword, which is why a rule about the *argument* would not have caught it;
+    what it did not do was reference the guard at all.
+
+    A module that constructs its own client must therefore also name
+    `build_guarded_client`, which is the test-injection idiom Paymob already
+    used: guarded in production, a mock socket under test. Anything else is
+    either in `EXEMPT_MODULES` with a reason or a failure here.
+    """
+    unguarded = {
+        name
+        for name, marks in _outbound_modules().items()
+        if "constructs" in marks and "guarded" not in marks and name not in EXEMPT_MODULES
+    }
+
+    assert unguarded == set(), f"builds an unguarded HTTP client: {sorted(unguarded)}"
+
+
+def test_every_module_that_builds_a_client_is_exercised() -> None:
+    """The list cannot go stale, because discovery decides what belongs in it.
+
+    This is the assertion the old file was missing, and it runs in both
+    directions.
+
+    Every module that builds a client *itself* must be exercised, because that
+    is the shape in which the guard can be forgotten - it holds a branch, and a
+    branch can be wrong. Modules that only call `build_guarded_client` inline
+    may be in the dict as extra evidence and need not be: there is no branch to
+    get wrong and often no object to reach.
+
+    Nothing in the dict may name a module that has stopped making outbound
+    calls, or the coverage it appears to give is imaginary.
+    """
+    modules = _outbound_modules()
+    builders = {
+        name
+        for name, marks in modules.items()
+        if "constructs" in marks and name not in EXEMPT_MODULES
+    }
+    exercised = set(_integration_clients())
+
+    assert builders, "the discovery found nothing to check"
+    assert builders <= exercised, f"builds its own client, never checked: {builders - exercised}"
+    assert exercised <= set(modules), f"named here, reaches nothing: {exercised - set(modules)}"
+
+
+def test_the_exemptions_are_declared_and_still_apply() -> None:
+    """An exemption that no longer describes anything is a rule nobody checks.
+
+    Both entries must still be modules that build a client, or the dictionary
+    is quietly granting permission to something that has moved.
+    """
+    modules = _outbound_modules()
+
+    assert set(EXEMPT_MODULES) <= set(modules)
+    for name, reason in EXEMPT_MODULES.items():
+        assert "constructs" in modules[name], name
+        assert reason
 
 
 @pytest.mark.parametrize("name", sorted(_integration_clients()))
 async def test_every_integration_client_is_guarded(name: str) -> None:
-    """The invariant `openai/client.py` states in prose, asserted.
+    """The invariant `openai/client.py` states in prose, asserted at runtime.
 
     "The guard is used here although the URL is a constant, so that the answer
     to which clients are guarded? is all of them rather than a list that goes
-    stale." This is the test that keeps that sentence true.
+    stale." The structural tests above keep the *set* honest; this one checks
+    that each member of it really carries `GuardedTransport` rather than merely
+    mentioning the constructor.
     """
     clients = _integration_clients()
     try:
@@ -444,6 +613,46 @@ async def test_no_integration_client_follows_redirects_by_itself() -> None:
     finally:
         for client in clients.values():
             await client.aclose()
+
+
+async def test_a_poisoned_resend_resolution_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-3 as an outcome rather than as a property of an object.
+
+    The transport check above says the right class is attached; this says the
+    guard actually fires on the hostname the provider uses. Before the fix the
+    same resolver answer produced a connection attempt to a private address
+    carrying `RESEND_API_KEY` in an Authorization header.
+
+    The result is a transient failure rather than an exception, because the
+    provider translates transport errors into the outbox's vocabulary - a
+    refused send is retryable by definition, and a message that cannot leave
+    must not be marked delivered.
+    """
+    resolver = Resolver("10.0.0.9", hostname=httpx.URL(RESEND_ENDPOINT).host)
+    resolver.install(monkeypatch)
+
+    result = await ResendEmailProvider(
+        api_key="re_notreal_000000000000000000",
+        timeout_seconds=0.2,
+    ).send(
+        EmailMessage(
+            sender="no-reply@example.com",
+            to=("someone@example.com",),
+            subject="s",
+            text="t",
+        )
+    )
+
+    assert resolver.validating_calls == [
+        "api.resend.com"
+    ], "the guard never resolved the name, so it never judged it"
+    assert result.state is EmailSendState.TRANSIENT_FAILURE
+    assert result.error_code == "transport_error"
+    # The exception type survives and its text does not: httpx errors quote the
+    # request they were carrying, and this one is credentialed.
+    assert "re_notreal" not in (result.error_message or "")
 
 
 # ------------------------------------------- the one client that is not guarded
