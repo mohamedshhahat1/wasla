@@ -371,6 +371,76 @@ Starlette answers wildcard-plus-credentials by echoing whatever `Origin` arrives
 Bearer-token authentication limits the damage, but "the other control saves us"
 is not a reason to ship the combination.
 
+## What each environment may be lax about
+
+Two guards used to read `settings.is_production`, and the property they were
+protecting is not "is this called production" — it is **can somebody outside
+this machine reach it**. `staging` is a first-class tier here and *must* be
+internet-reachable, because Meta delivers webhooks to it, so a check naming
+production exactly left the tier most likely to hold real customer data behind
+the weakest door.
+
+Both now read `Settings.is_developer_environment`, a closed list of `local` and
+`test`. Closed rather than open, so a tier added later is on the safe side by
+default — the same correction the signing-key rule already had.
+
+| | `local` | `test` | `staging` | `production` |
+|---|---|---|---|---|
+| WhatsApp webhook, no `META_APP_SECRET` | accepted, warned | accepted, warned | **503** | refuses to start |
+| WhatsApp webhook, no signature | accepted, warned | accepted, warned | **403** | **403** |
+| WhatsApp webhook, bad signature | **403** | **403** | **403** | **403** |
+| WhatsApp webhook, valid signature | accepted | accepted | accepted | accepted |
+| 500 response body | exception + message | exception + message | **sanitised** | **sanitised** |
+
+Three things that table is saying deliberately:
+
+- **503, not 403, for a missing secret.** A deployment that cannot authenticate
+  anything must refuse everything, and the refusal has to be the kind Meta
+  retries — dropping real deliveries while somebody fixes a variable would be
+  the wrong trade. Paymob and Resend already answered this way.
+- **Production never reached that branch.** `_validate_hardening` refuses to
+  start production without `META_APP_SECRET`, which is why staging was the only
+  tier where the fail-open could run. That gate stays production-only on
+  purpose — a staging tier that has not connected WhatsApp yet should still
+  boot — so the runtime guard does not lean on it, and both are tested.
+- **The sanitised body still carries the request id.** The exception goes to the
+  log; what the caller gets is the identifier that finds it. Suppressing the
+  detail without that would trade a disclosure for an unanswerable support
+  ticket.
+
+What a leaked 500 body actually cost: an exception raised deep in a driver
+quotes the thing it could not reach, and that is a hostname and sometimes a
+credential.
+
+## Every outbound client is guarded, and that is now discovered
+
+`build_guarded_client` resolves a host once, refuses any answer that is not
+publicly routable, and connects to the literal address it judged — keeping the
+original hostname in `Host` and in the TLS server name. Every integration uses
+it: OpenAI's responses and embeddings clients, WhatsApp, the WhatsApp ownership
+probe, Google's token and JWKS fetches, Paymob and Resend.
+
+Resend did not. It built `httpx.AsyncClient(timeout=…, transport=self._transport)`
+and `self._transport` is `None` in production, so every real send went out on
+httpx's default transport with no address check, carrying `RESEND_API_KEY` in an
+Authorization header.
+
+The interesting part is that a test asserting "every client any integration
+hands out is guarded" was green over a dict literal of exactly four clients —
+which is the failure mode ADR-067 named when it wrote the rule down: *a rule
+with an exception is a list, and lists go stale*. So the list is gone. Every
+module under `app/` is parsed for two facts — does it call
+`httpx.AsyncClient(...)`, does it reference `build_guarded_client` — and one
+that does the first without the second fails CI unless it is an exemption with
+a stated reason.
+
+There is one exemption. The object store builds a plain client because its
+endpoint comes from `Settings` and from nowhere else, and `http://minio:9000`
+is the correct value for a self-hosted stack; guarding it would make the
+ordinary deployment unreachable while protecting against nothing. That is
+asserted rather than asserted-in-a-comment: a separate test checks that no
+request, provider response or database row can influence the endpoint.
+
 ## CSRF
 
 **Not applicable, and this is a conclusion rather than an omission.**

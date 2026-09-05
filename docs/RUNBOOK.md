@@ -613,11 +613,16 @@ Every log line carries `request_id`, and `tenant_id`, `user_id` and `conversatio
 Stated plainly, because a runbook that pretends to cover everything is one that gets trusted where it should not be:
 
 - **No production deployment exists yet.** Every procedure here has been executed against local containers and real PostgreSQL. None has been run under load, against real customer traffic, or during an actual incident.
-- **No message has ever been delivered by Resend from this repository.** The
-  email procedures above are written from the code and exercised against a
-  fake provider and a mock transport. No real API key has been used and no
-  delivery event has arrived from Resend's own infrastructure, so the first
-  production send is also the first test of the DNS, the webhook endpoint and
+- **One message has been delivered by Resend; the webhook half never has.**
+  On 2026-08-27 an `EMAIL_VERIFICATION` message was sent with a real
+  `RESEND_API_KEY` to a real mailbox, reported `delivered` by Resend's own API,
+  and the code in the delivered body verified the account over HTTP - see
+  [EMAIL.md](EMAIL.md) for what that send confirmed. What has *not* happened is
+  an inbound delivery event: no `resend.email.*` webhook has arrived from
+  Resend's infrastructure, because that needs a publicly reachable URL this
+  environment does not have. Suppression, bounce and complaint handling are
+  exercised only against synthesised, correctly-signed payloads, so the first
+  production deployment is still the first test of the webhook endpoint and of
   the sending reputation.
 - **A wedged event loop is invisible.** Lease renewal and the worker heartbeat both assert the same thing — the process is up and scheduling — so a loop blocked by a genuinely synchronous call keeps renewing its leases and is never reclaimed. Every loop here is I/O-bound async, so that is a bug rather than a state, but it is one this design cannot detect.
 - **Backups cover PostgreSQL and nothing else.** [BACKUP.md](BACKUP.md) has the scripts, the schedule, the retention policy and a restore drill that was actually executed — against synthetic data on local containers, never against production, because there is no production. **Redis is deliberately not backed up** (queued work is late rather than lost; the messages themselves are in PostgreSQL), and **media is not in the dump and is not meant to be**: the rows and the storage keys are, the bytes are the object store's to keep ([ADR-077](../DECISIONS.md), [ADR-078](../DECISIONS.md)). On `MEDIA_STORAGE_BACKEND=local` that means nothing keeps them, and losing the host loses every attachment.

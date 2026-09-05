@@ -252,6 +252,34 @@ ages, and keeping them apart is the point: the first is "Paymob has not caught
 up", the second is "Paymob never received it". Only elapsed time distinguishes
 them, so a fresh `not_found` decides nothing.
 
+**Both of these were written to Redis and never rendered, and the alerts above
+could not have fired.** The scrape iterates a declared catalogue, and
+`wasla_payment_reconciliation_total` was not in it, so the hash accumulated and
+nothing read it. `wasla_oldest_pending_payment_age_seconds` was declared and
+still rendered no samples, for a different reason with the same effect: it is
+the only cross-process metric with *no labels*, and the field parser read the
+empty label string as unparseable. The exposition carried its `# HELP` and
+`# TYPE` and never a bucket, which is indistinguishable from "nothing has
+happened yet".
+
+That is closed, and it is now closed structurally rather than by adding two
+entries: `tests/integration/test_metric_catalogue.py` parses `telemetry.py` for
+every metric name the recording paths pass and asserts the catalogues cover
+them in both directions — a name written but not declared is a hash nobody
+reads, and a name declared but never written is an alert that can never fire.
+The discovery asserts what it found before it asserts completeness, because the
+failure mode of a discovery test is finding nothing and passing.
+
+**Confirm both render before enabling saved-card renewal.** Not as a formality:
+ADR-088 accepts a stated risk — an attempt that can never be resolved keeps a
+workspace served indefinitely — on the grounds that the backlog is alertable on
+its age, and until these rendered that compensating control did not exist.
+
+```
+curl -s localhost:8000/metrics | grep wasla_payment_reconciliation_total
+curl -s localhost:8000/metrics | grep wasla_oldest_pending_payment_age_seconds_bucket
+```
+
 `unreachable` is deliberately not the same as `missing`, or as `not_found`. A
 store or a provider that is down, read as "it is gone", would abandon every
 upload - or re-charge every card - in flight during the outage - and an outbound attachment's bytes arrived in a request body that no

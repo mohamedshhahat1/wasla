@@ -11,11 +11,11 @@ Technical source of truth for the current system architecture. Every section car
 
 ## 1. System overview
 
-**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport, conversations, the agent orchestrator with its queue and worker, tenant-scoped knowledge retrieval, lead management, scheduled follow-ups, media understanding, sentiment and escalation, campaigns with an approved-template registry, usage metering with tenant and platform analytics, and plans, subscriptions and enforced entitlements all exist. Invoices and a payment provider do not.
+**Status: In Progress** — identity, tenancy, authorization, the WhatsApp transport, conversations, the agent orchestrator with its queue and worker, tenant-scoped knowledge retrieval, lead management, scheduled follow-ups, media understanding, sentiment and escalation, campaigns with an approved-template registry, usage metering with tenant and platform analytics, plans, subscriptions and enforced entitlements, and billing — invoices, hosted checkout through Paymob, signed callbacks, refunds, saved cards, saved-card renewals, reconciliation by transaction inquiry and dunning — all exist. What has never run is a production deployment: the pipeline builds, scans, publishes and can deploy an image, and no host has received one.
 
 Wasla is an API-first, multi-tenant backend. A business (tenant) connects one or more WhatsApp Business phone numbers. Inbound customer messages arrive as Meta webhooks, are resolved to a tenant, persisted, and queued for asynchronous AI processing. An agent orchestrator loads the conversation, retrieves tenant-scoped knowledge, calls the OpenAI Responses API with a controlled tool set, and replies through the WhatsApp Cloud API.
 
-The whole of that pipeline is built, and a worker process runs the six loops that feed it. Everything it does is metered in the transaction that did it, reported back through tenant and platform analytics, and bounded by the plan the workspace is on. What is not built is money changing hands: invoices and a payment provider are the remainder of Phase 13.
+The whole of that pipeline is built, and a worker process runs the ten loops that feed it — media, agent, ingestion, follow-up, campaign, billing, email, recovery, retention and uploads, selected by `WORKER_KINDS`. Everything it does is metered in the transaction that did it, reported back through tenant and platform analytics, and bounded by the plan the workspace is on. Money changes hands too: a workspace buys a plan through a hosted Paymob checkout, the settlement arrives on a signed callback, and refunds, saved cards, automatic renewals and dunning follow from there.
 
 ```
 WhatsApp

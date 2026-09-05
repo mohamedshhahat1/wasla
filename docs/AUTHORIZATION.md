@@ -608,10 +608,14 @@ Recorded rather than silently carried.
 - **Ownership is proven once, at claim time.** A number that moves at Meta after
   the fact is not noticed. Re-verification on a schedule is the obvious next
   step and is not built.
-- **DNS rebinding is not defeated** by `validate_outbound_url`: a name that
-  resolves to a public address at check time and a private one when the socket
-  opens would pass. Closing it needs the connection pinned to the checked
-  address. Recorded in `app/core/net.py`.
+- ~~**DNS rebinding is not defeated** by `validate_outbound_url`~~ —
+  **closed by ADR-040.** The gap was real: a name that resolved to a public
+  address at check time and a private one when the socket opened passed the
+  validator. `GuardedTransport` now resolves once, judges every address
+  returned, and connects to the literal it judged, keeping the original
+  hostname in `Host` and in the TLS server name. §8 lists the test, which
+  proves the connection layer never resolves again — a version that only
+  patched the validator would still pass a check the transport then undid.
 - **A released number cannot be reclaimed by its previous holder without
   re-proving control.** That is the intended semantic, not an oversight, but it
   means an accidental release costs a round trip through Meta.
@@ -630,7 +634,7 @@ Recorded rather than silently carried.
 | `tests/integration/test_membership_revocation.py` | The removal rules, and the sweep: a revoked member holding a genuine signed token is refused by **every** workspace-scoped route, with the route list walked out of the dependency graph rather than written down |
 | `tests/integration/test_refresh_reuse.py` | Replay detection, the token-version bump, the thief's access token dying, two simultaneous presentations on separate connections yielding exactly one new pair, three concurrent replays each raising the version, the audit entry surviving the failed request, and no token material in the log or the trail |
 | `tests/unit/test_config.py` | Also: `JWT_ALGORITHM` outside the HMAC family is refused |
-| `tests/unit/test_outbound_pinning.py` | DNS rebinding: a guarded request resolves exactly once and the connection layer never resolves again; private v4/v6, loopback, link-local, IPv4-mapped and mixed answer sets refused; the pin keeps `Host` and the TLS server name |
+| `tests/unit/test_outbound_pinning.py` | DNS rebinding: a guarded request resolves exactly once and the connection layer never resolves again; private v4/v6, loopback, link-local, IPv4-mapped and mixed answer sets refused; the pin keeps `Host` and the TLS server name. Also that *every* integration is guarded, discovered by parsing `app/` for modules that build an `httpx.AsyncClient` without referencing `build_guarded_client` — the previous version enumerated four clients by hand and Resend was the fifth |
 | `tests/unit/test_rate_limit_degradation.py` | Under connection-refused, timeout and auth-failure: capacity limits allow, credential limits still bound attempts, and refresh-token spending fails closed |
 | `tests/integration/test_account_enumeration.py` | Login and invitation acceptance answer identically for known and unknown; login spends the same Argon2 work either way; registration's accepted leak is pinned to a bare 409 |
 | `tests/integration/test_whatsapp_reverification.py` | A legacy row can be proven in place without releasing the number, cannot be proven by another workspace, and cannot be used to move a claim |

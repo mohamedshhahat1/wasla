@@ -479,6 +479,48 @@ reversed the same money again. It is committed now, and the refusal that stops a
 second reversal is keyed on the outstanding request rather than on the reference
 written after the provider answers.
 
+### Reversals: what happens to the plan the money bought (ADR-096)
+
+The money going back is half of a refund. The other half is the commercial
+grant, and until this was written there was no answer to it: a workspace owner
+could refund their own payment through the endpoint above, receive the money,
+and keep the plan it had bought — permanently, because nothing later looks at a
+grant nobody is paying for.
+
+The rule is about **cover**, not about the refund existing:
+
+| after the reversal | plan | invoice |
+|---|---|---|
+| nothing is left paid on the invoice | withdrawn to `DEFAULT_PLAN_CODE` | reopened, not chased |
+| some money remains on it | unchanged | reopened, and the dunning clock starts |
+
+Withdrawing on a *partial* reversal would take a month of Pro away over one
+unit returned, which is not the trade anybody wants; the customer has still
+paid for most of it and owes the difference, so the invoice becomes chaseable
+instead. That is what `issued_at` is for, and it is written at the reopen
+rather than at creation — a checkout invoice somebody abandoned is not a debt,
+and a fully refunded one is not either. Chasing somebody for the sum they were
+just repaid would be worse than the defect this fixes.
+
+Four conditions each exclude a downgrade that would be wrong. There must be a
+subscription and a plan to fall back to; it must not be cancelled or expired,
+which stay as the customer left them; the workspace must still be on the plan
+*this* invoice bought, so a reversal never reaches past a later decision; and
+no other settled invoice whose period contains this moment may be covering it
+— a workspace paid up for the current period on a second invoice has bought
+the plan, whatever happened to the first.
+
+The transition is `SubscriptionService.change_plan(self_service=False)`, the
+same state machine settlement uses, so period arithmetic and trial clearing
+have one owner. It is audited as `subscription_plan_withdrawn` rather than as a
+plan change, because a downgrade read from the trail must not be
+indistinguishable from the customer having chosen the free plan themselves.
+
+Failure is contained in the same direction as settlement: the money is the part
+that must never be rolled back. A grant that could not be withdrawn — a
+deployment whose `DEFAULT_PLAN_CODE` names no catalogue row — is logged loudly
+and leaves the reversal recorded.
+
 A reversal that got **no answer** therefore refuses the next attempt: the money
 may already be going back, and somebody should look rather than ask again. A
 reversal Paymob explicitly **declined** withdraws the record instead, because
@@ -520,7 +562,17 @@ The grace runs from `issued_at` rather than from the period boundary, so a
 customer gets seven days from being *asked*, and a sweep that had been down for
 a fortnight does not mark every customer behind the moment it comes back.
 
-### Automatic card debits are not built, and why
+### Automatic card debits: the decision that was superseded
+
+**Superseded by ADR-046.** Saved cards and merchant-initiated renewal ship —
+see *Saved cards* and *Automatic renewal* below, which describe what actually
+runs. This section is kept because the reasoning it records is still the
+reasoning for the part that did *not* change: Paymob's Subscriptions Module is
+still not used, and *Why the Subscriptions Module is not used* below is the
+current statement of that.
+
+What follows is the position as it stood before a MOTO integration was
+available.
 
 Paymob documents a Subscription API
 (`POST /api/acceptance/subscription-plans`, then `subscription_plan_id` on the
@@ -543,6 +595,12 @@ Building that against a payload shape nobody here can exercise would be writing
 an unverifiable subsystem to match a provider capability. The provider seam —
 `CheckoutProvider` — is where it goes if the product decides it wants card-on-
 file renewals, and the merchant-level dependency is the thing to resolve first.
+
+**That is where it went.** `RecurringProvider` extends the seam,
+`PaymobProvider.charge_saved_method` implements it, and the merchant-level
+dependency is still the gate: `can_charge_saved_methods` is false without
+`PAYMOB_MOTO_INTEGRATION_ID`, and a deployment without one bills exactly as
+this section describes.
 
 ### Automatic renewal (ADR-046)
 
@@ -610,7 +668,46 @@ sent for this invoice?**
 | `claimed` | Durable, provider not asked. Money cannot have moved | No — resolve first |
 | `requested` | Asked, or may have been. **Money may have moved** | No — only a callback or a lookup may resolve it |
 | `settled` | The outcome is known and on the payment | Yes, if the invoice is still open and the budget allows |
-| `abandoned` | Shown never to have reached the provider; the attempt is returned | Yes |
+| `abandoned` | Shown never to have reached the provider; the attempt is returned, the schedule is not | Yes, after a backoff |
+
+**`abandoned` returns the money-moving budget and advances the clock, and it
+took a bug to separate those.** A request that provably never left must not
+spend one of the three chances to debit a card — that half was always right.
+What it also did was clear `next_collection_at`, which made the invoice
+eligible again on the very next poll, so `MAX_COLLECTION_ATTEMPTS` could never
+engage: the branch that declined to spend the budget was the branch that
+cleared the schedule.
+
+Two things followed from that, and the second is the worse one. Every poll
+re-ran the eligibility checks, re-read the card and attempted an insert that
+rolled back. And because the count went back to zero, the *next* attempt was
+number one again — whose idempotency key the abandoned row already holds, for
+ever. Measured against real PostgreSQL with a provider refusing the intention:
+
+```
+8 polls, five minutes apart
+  provider calls 1 · payment rows 1 · collection_attempts 0
+  next_collection_at None · eligible every poll
+  30 days later, provider fixed: charged=False reason=not_due
+```
+
+One transient misconfiguration ended automatic collection for that invoice
+permanently, in silence, even after the cause was fixed.
+
+`ABANDON_BACKOFF` now spaces the retries — fifteen minutes, an hour, six hours,
+then a day as the cap — keyed on how many attempts this invoice has already
+abandoned, counted from the `ABANDONED` rows rather than a column beside them.
+It is a separate table from `RETRY_BACKOFF` because it answers a different
+question: that one spaces out asking a *customer's card* again, this one spaces
+out asking a *provider* that would not take the request. It has no terminal
+entry, because "give up" must not be expressed by spending a money-moving
+attempt. And the claim key carries a retry suffix once an invoice has abandoned
+anything, so a returned budget can actually be spent again.
+
+`billing.collection_attempt_abandoned` carries the running count and the next
+attempt time. One abandonment is noise; the fourth on one invoice is a
+configuration problem somebody has to fix, and the count is what tells them
+apart.
 
 A partial unique index on `payments (invoice_id) WHERE collection_state IN
 ('claimed','requested')` is what actually guarantees it. The claim query
@@ -712,12 +809,19 @@ the processor only to move money.
 
 Honest list.
 
-- **Automatic card debits**, for the reasons above. The external dependency is
-  *merchant must enable a MOTO integration and issue an API key*, not missing
-  code.
-- **Credit notes and partial refunds.** A refund returns a payment's remaining
-  balance; there is no way to say "half of March" because there is nothing that
-  would render it on an invoice.
+- **Automatic card debits in a deployment without a MOTO integration.** The
+  code ships; the capability is a merchant-level setting, so
+  `can_charge_saved_methods` is false and renewals fall back to invoicing.
+  `PAYMOB_API_KEY` belongs with it: without that credential an attempt whose
+  callback never arrives cannot be reconciled, and the backlog is a metric
+  rather than a duplicate debit.
+- **Credit notes, and partial refunds *initiated here*.** `POST
+  /billing/payments/{id}/refund` always asks for the payment's whole remaining
+  balance: there is no field a caller can send to name a smaller figure, which
+  is also why there is no field to name a larger one. A partial reversal can
+  still *arrive* — issued from Paymob's own dashboard — and is applied, because
+  the ledger has to match the bank whoever moved the money. What that does to
+  the plan is set out under *Reversals* below.
 - **Void.** Available at the provider seam and through Paymob's dashboard; not
   wired to an endpoint, because choosing between void and refund needs error
   semantics this integration has not seen.

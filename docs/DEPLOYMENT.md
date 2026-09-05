@@ -228,13 +228,34 @@ does:
 - **Leave a renewal unpaid** past `GRACE_DAYS` if you can move the clock, and
   confirm the subscription becomes `past_due` while still serving.
 
-**5. Recurring card debits are not part of this.** Wasla renews on its own
-calendar and emails an invoice; the customer pays it through a checkout. There
-is no card on file, so nothing is charged without somebody choosing to pay.
-Automatic debits would need a MOTO integration id enabled by Paymob for the
-merchant and an API key for their older auth-token flow — see
-[docs/BILLING.md](BILLING.md) for why that is a decision rather than an
-oversight.
+**5. Recurring card debits ship, and they are off until you configure them.**
+Wasla renews on its own calendar and raises an invoice. If the workspace has a
+saved card and this deployment is configured for merchant-initiated charges,
+the billing sweep debits it; otherwise the customer pays the invoice through a
+checkout exactly as before, which is the state every deployment starts in.
+
+Turning them on takes two values, and the second is the one that gets
+forgotten:
+
+- **`PAYMOB_MOTO_INTEGRATION_ID`** — a MOTO integration Paymob enables per
+  merchant. Without it `can_charge_saved_methods` is false and no automatic
+  charge is attempted.
+- **`PAYMOB_API_KEY`** — Paymob's older auth-token flow, which is what the
+  *inquiry* endpoint takes. **Set it wherever you set the integration id.**
+  Without it an attempt whose callback never arrives can never be resolved:
+  the invoice is never charged again, the workspace keeps being served, and
+  the only thing that says so is the reconciliation backlog metric.
+
+Before enabling either, confirm the metrics exist. `curl` the exposition and
+look for `wasla_payment_reconciliation_total` and
+`wasla_oldest_pending_payment_age_seconds`; both render now, and the alert
+expressions in [docs/OBSERVABILITY.md](OBSERVABILITY.md) are written against
+them. An unresolved attempt keeps a workspace served indefinitely, and that is
+only acceptable because the backlog is alertable on its age.
+
+See [docs/BILLING.md](BILLING.md) for the protocol - the attempt is committed
+before Paymob is called, so a crash leaves a question a query can answer rather
+than a fact nothing recorded.
 
 ## Email sending domain
 
@@ -360,7 +381,43 @@ push to main → ci.yml (quality, tests, migrations, image)
             deploy.yml publish  → build → push to ghcr.io → Trivy scan
                   │  image addressed by digest
                   ▼
-            deploy.yml deploy   → migrate → up --wait → /health/ready
+            deploy.yml deploy   → migrate → up --wait → readiness gate
+```
+
+**The last step asks the application, not the proxy.** It was
+
+```
+curl -fsS --max-time 10 http://127.0.0.1/health/ready
+```
+
+and port 80 on the host is nginx, whose only non-ACME rule is a 301 to HTTPS.
+`curl -f` fails on 4xx and 5xx; a 301 without `-L` exits **zero**. So the final
+gate of every deployment passed whenever nginx was running, whatever had
+happened to the API, the database or the migrations. `up -d --wait` does not
+cover that either: it waits on *liveness*, which is deliberately independent of
+PostgreSQL and Redis, so a running API with a dead database satisfied both.
+
+It is now `docker compose exec -T api scripts/check_readiness.sh`, which puts
+the request inside the compose network on the application's own port — there is
+nothing in between to redirect — and checks two things rather than one: the
+status must be a 2xx, and the body must say the application is ready. A 200
+from something that is not this endpoint satisfies the first and proves
+nothing.
+
+Measured against real containers:
+
+| What is wrong | Gate |
+| --- | --- |
+| nginx answering on port 80 | fails — `expected a 2xx, got 301` |
+| PostgreSQL stopped | fails — `expected a 2xx, got 503` |
+| API not listening | fails — `could not reach` |
+| a 200 that is not this endpoint | fails — `did not report ready` |
+| everything reachable | passes — `reported ready` |
+
+Run it by hand after any deployment you did not watch:
+
+```bash
+docker compose -f docker-compose.prod.yml exec -T api scripts/check_readiness.sh
 ```
 
 **Deployment is gated on CI rather than repeating it.** `deploy.yml` triggers on `workflow_run` and refuses any conclusion other than success, which is "do not deploy if tests fail" expressed as a dependency instead of a second copy of the test job that could drift from the first.

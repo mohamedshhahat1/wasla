@@ -14,7 +14,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Documentation protocol (`Documentation_Protocol.md`) | Implemented |
 | Project memory (`README` / `ARCHITECTURE` / `TASKS` / `DECISIONS`, `docs/`) | Implemented |
 | Application foundation (FastAPI, config, logging, errors, DB, Redis, health, Docker, CI) | Implemented |
-| Domain models and migrations (`0001`–`0046`) | Implemented |
+| Domain models and migrations (`0001`–`0047`) | Implemented |
 | Multi-tenancy, authentication, workspace RBAC, invitations | Implemented |
 | WhatsApp Cloud API (webhook, signatures, idempotency, outbound client) | Implemented |
 | Conversations, inbox, human handoff, templates, cursor paging | Implemented |
@@ -121,7 +121,7 @@ docker compose up --build
 - Interactive docs: http://localhost:8000/docs
 - Migrations are applied on startup (`RUN_MIGRATIONS=true` in `docker-compose.yml`)
 
-There is no worker service yet; background workers arrive in Phase 8.
+The `worker` service runs the background loops. `WORKER_KINDS` selects which of the ten it runs — media, agent, ingestion, follow-up, campaign, billing, email, recovery, retention, uploads — and an unset value runs all of them. A kind no container runs is a queue that grows silently, so include `recovery` or there is no crash recovery at all.
 
 ### Verify the service
 
