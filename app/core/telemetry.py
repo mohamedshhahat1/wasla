@@ -216,6 +216,23 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Interrupted object writes by how reconciliation settled them.",
         ("outcome",),
     ),
+    # Payment reconciliation (ADR-088), and the compensating control that ADR
+    # names for an accepted risk: an attempt that can never be resolved keeps a
+    # workspace served indefinitely, and that is only acceptable because the
+    # backlog is alertable on its age. It was written to Redis and absent from
+    # this dictionary, so the hash accumulated and the scrape never read it -
+    # while `docs/OBSERVABILITY.md`, `docs/BILLING.md` and `docs/RUNBOOK.md` all
+    # told operators to watch it.
+    #
+    # One label, seven fixed values, and no identifier among them: no workspace,
+    # no invoice, no payment, no provider reference, no amount. `pending` is the
+    # level to watch and `unreachable` is the one that must never be read as
+    # `not_found` - see the reconciler. The age of the oldest unresolved attempt
+    # is the histogram beside this, because summing ages is meaningless.
+    "wasla_payment_reconciliation_total": (
+        "Unresolved collection attempts by how reconciliation settled them.",
+        ("outcome",),
+    ),
 }
 
 # Distributions written across processes, by metric name: help text, the labels
@@ -268,13 +285,30 @@ def _field(labels: Mapping[str, str]) -> str:
 
 
 def _parse_field(field: str) -> dict[str, str] | None:
+    """Labels back out of a hash field, or None if the field does not parse.
+
+    **An empty field is an answer rather than a failure.** A metric with no
+    labels occupies exactly one hash field, and `_field({})` spells that field
+    as the empty string - so reading it as unparseable meant every sample of an
+    unlabelled cross-process metric was written to Redis and then dropped on
+    the way out. `wasla_oldest_pending_payment_age_seconds` is the only one, and
+    it is the metric ADR-088 nominates as the alerting signal for an attempt
+    nobody can resolve: the exposition carried its HELP and TYPE and never a
+    single bucket, so the alert written against it could not fire.
+
+    None is still returned for a field that is genuinely malformed - a part
+    with no `=`, or an empty key - which is what keeps a field written by an
+    older release from being read as a label combination it is not.
+    """
+    if not field:
+        return {}
     labels: dict[str, str] = {}
     for part in field.split(","):
         key, separator, value = part.partition("=")
         if not separator or not key:
             return None
         labels[key] = value
-    return labels or None
+    return labels
 
 
 # Where cross-process counters are written, set once per process at start-up.
