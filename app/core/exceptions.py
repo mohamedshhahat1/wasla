@@ -276,10 +276,19 @@ def register_exception_handlers(app: FastAPI) -> None:
         # here with an exception type would put a class name from any library
         # in the tree into a label domain.
         observe_unhandled_error()
+        # The exception class and message go to the log and no further unless
+        # the only person who can read the response is the person running the
+        # process. An exception raised deep in a driver quotes the thing it
+        # could not reach, which is a hostname and sometimes a credential -
+        # and `staging` is internet-reachable, so it was publishing both.
+        #
+        # What the caller gets instead is the request id, which is what finds
+        # the logged exception. Suppressing the body without that would trade a
+        # disclosure for an unanswerable support ticket.
         details = (
-            None
-            if settings.is_production
-            else {"exception": type(exc).__name__, "message": str(exc)}
+            {"exception": type(exc).__name__, "message": str(exc)}
+            if settings.is_developer_environment
+            else None
         )
         return JSONResponse(
             status_code=500,

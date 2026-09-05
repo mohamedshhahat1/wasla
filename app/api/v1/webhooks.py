@@ -60,14 +60,39 @@ IngestionServiceDep = Annotated[WhatsAppIngestionService, Depends(get_ingestion_
 def _require_signature(*, body: bytes, header: str | None, settings: Settings) -> None:
     """Reject anything not signed with the app secret.
 
-    With no secret configured the behaviour splits on purpose: production
-    refuses to serve the endpoint rather than accept unverified traffic, while
-    local and test environments continue with a warning so the flow can be
-    exercised without Meta credentials.
+    With no secret configured the behaviour splits on purpose, and **the split
+    is by whether anybody outside this machine can reach the endpoint** rather
+    than by whether the environment is called production. Exercising the
+    inbound flow on a laptop with no Meta account is what the fail-open branch
+    is for; `staging` was never that, because Meta has to deliver webhooks to
+    it and therefore so can anyone else.
+
+    What that cost while the check read `is_production`: the payload names
+    `phone_number_id`, so an unauthenticated caller chose which workspace to
+    write into - contacts created, messages injected, agent jobs enqueued - and
+    the injected text is read by the agent as customer input, which makes it a
+    prompt-injection channel with outbound sends as the effect.
+
+    A public deployment with no secret answers 503 rather than 403, and rather
+    than dropping the delivery: it cannot authenticate anything, so it must
+    refuse everything, and the refusal has to be the kind Meta retries. That is
+    the same answer the Paymob and Resend callbacks already give.
+
+    Production additionally refuses to *start* without the secret
+    (`_validate_hardening`), which is stronger and is why this branch was only
+    ever reachable on staging. Both guards stay: the configuration gate is
+    production-only on purpose, so the runtime one may not lean on it.
     """
     app_secret = settings.meta_app_secret
     if not app_secret:
-        if settings.is_production:
+        if not settings.is_developer_environment:
+            logger.error(
+                "whatsapp.webhook_unconfigured",
+                extra={
+                    "event": "whatsapp.webhook_unconfigured",
+                    "environment": settings.environment,
+                },
+            )
             raise DependencyUnavailableError("WhatsApp webhooks are not configured.")
         logger.warning("whatsapp.signature_verification_skipped")
         return

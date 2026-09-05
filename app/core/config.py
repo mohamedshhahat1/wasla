@@ -19,6 +19,12 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from app.core.proxy import parse_trusted_proxies
 
 Environment = Literal["local", "test", "staging", "production"]
+
+# The environments a developer runs on their own machine, and the only ones
+# permitted to take a shortcut a public deployment must not. Read by
+# `Settings.is_developer_environment`; see that property for why the list is of
+# what is *allowed* rather than of what is not.
+DEVELOPER_ENVIRONMENTS: Final[frozenset[str]] = frozenset({"local", "test"})
 LogFormat = Literal["json", "console"]
 
 # Sentinel, not a credential: production configuration rejects this value.
@@ -882,6 +888,25 @@ class Settings(BaseSettings):
     @property
     def is_testing(self) -> bool:
         return self.environment == "test"
+
+    @property
+    def is_developer_environment(self) -> bool:
+        """Whether nothing outside this machine can reach the application.
+
+        The question two guards actually need, and the one `is_production` was
+        standing in for. `staging` is a first-class tier here and **must** be
+        internet-reachable, because Meta delivers webhooks to it - so a check
+        written as `is_production` left the tier most likely to hold real
+        customer data with the weakest door: it accepted unsigned WhatsApp
+        deliveries with no app secret configured, and it returned the exception
+        class and message on a 500.
+
+        Closed rather than open, deliberately, and for the same reason
+        `_validate_hardening` below stopped keying the signing-key rule on
+        `is_production`: an environment added later is on the safe side by
+        default, instead of being lax until somebody remembers to name it.
+        """
+        return self.environment in DEVELOPER_ENVIRONMENTS
 
     @model_validator(mode="after")
     def _validate_hardening(self) -> Settings:
