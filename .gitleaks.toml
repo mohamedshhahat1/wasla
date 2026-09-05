@@ -28,4 +28,40 @@ regexes = [
   # this value now (tests/integration/test_billing_worker.py); the literal
   # survives in commit 420ea01, which the history scan still reaches.
   '''a-test-secret-that-is-long-enough-32''',
+
+  # --- Paymob fixtures (F-9) ---------------------------------------------
+  #
+  # Nineteen findings, no real credential, and the whole branch red because of
+  # them - which is the larger cost. A scanner with standing false positives is
+  # a scanner a team learns to skip, and the next real finding is skipped with
+  # them.
+  #
+  # Every entry below is a *deliberately fake prefix*, not a path and not a
+  # rule. `paths = ['^tests/']` would have closed all nineteen in one line and
+  # would also have made a real key committed into a fixture invisible, which
+  # is exactly the shape of leak that happens. These match only values that
+  # say, in the value itself, that they are not real.
+  #
+  # Paymob secret keys begin `sk_`, which is also Stripe's shape, so gitleaks'
+  # `stripe-access-token` rule fires on all of them. The three fixtures are
+  # named for what they are: `notreal` and `endtoend` are test-mode shapes, and
+  # `realone` is a *live*-shaped fake, used by `tests/unit/test_config.py` to
+  # assert that production refuses a test key and accepts a live one. That test
+  # cannot be written without a string that looks live.
+  '''sk_test_notreal''',
+  '''sk_live_realone''',
+  '''sk_test_endtoend''',
+  # Paymob's own test-mode client secret prefix. A live one is `egy_csk_live_`,
+  # which is deliberately not allowlisted.
+  '''egy_csk_test_''',
+  # The one card-token fixture, matched whole rather than by prefix: a token
+  # has no prefix to be narrow about, so the narrowness is the exact value.
+  # Paymob tokens are per-merchant and this one belongs to no merchant.
+  '''3f22ce8a4e77125c70f0bc69830e34c36df469351e2fa6be76428be4''',
+  # A Google OAuth client secret of the issued length, spelled as the alphabet
+  # so that reading it is the whole proof (tests/unit/test_oauth_binding.py).
+  '''0123456789abcdefghijklmnopqrstuvwxyzABCDEFG''',
+  # The Paymob inquiry API key fixture. Base64 of a JWT header followed by
+  # `.test`, so it has the shape the rule looks for and decodes to nothing.
+  '''ZXlKaGJHY2lPaUpJVXpVeE1pSXNJblI1Y0NJNklrcFhWQ0o5LnRlc3Q''',
 ]

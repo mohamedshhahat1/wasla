@@ -13,6 +13,7 @@ not, and a test that breaks on every edit is one somebody deletes.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -242,6 +243,53 @@ def test_the_security_workflow_scans_dependencies_secrets_and_the_image() -> Non
     assert "pip-audit" in _text(jobs["dependencies"])
     assert "gitleaks" in _text(jobs["secrets"])
     assert "trivy-action" in _text(jobs["image"])
+
+
+def test_the_secret_allowlist_suppresses_values_and_never_a_class() -> None:
+    """F-9. Nineteen standing false positives, and the branch red on its own gate.
+
+    The cost of that is not the red tick. A scanner with standing false
+    positives is a scanner a team learns to skip, and the next real finding is
+    skipped with it - which is why the config's own header already says "A real
+    secret must be rotated, never allowlisted."
+
+    The fix had to close nineteen findings without closing anything else, and
+    the two easy ways to do it are the two that must not happen: allowlisting
+    `tests/` as a path, or allowlisting a rule. Either would have made a real
+    key committed into a fixture invisible, and a fixture is exactly where one
+    gets committed.
+
+    So this pins the *shape* of the allowlist rather than its contents. Every
+    entry must be a value, and every path entry must name a single file. A
+    directory, a wildcard over a tree, or a rule id would all be caught here.
+
+    The proof that the values are narrow enough is a control run rather than an
+    assertion: a live-shaped Paymob key with no fake marker, committed into
+    `tests/` under the very rule the fixtures trip, is still reported.
+    """
+    config = tomllib.loads((WORKFLOWS.parents[1] / ".gitleaks.toml").read_text(encoding="utf-8"))
+    allowlist = config["allowlist"]
+
+    assert allowlist["regexes"], "an empty allowlist would pass every check below"
+
+    # No rule is switched off, anywhere.
+    assert "rules" not in config
+    assert "disabledRules" not in config.get("extend", {})
+    assert config["extend"]["useDefault"] is True
+
+    # Every path is one file, anchored at both ends. `^tests/` or `.*` would
+    # close the finding and open the hole.
+    for path in allowlist.get("paths", []):
+        assert path.startswith("^") and path.endswith("$"), f"{path} is not anchored"
+        assert not path.strip("^$").endswith("/"), f"{path} is a tree, not a file"
+
+    # And every regex is a value rather than a wildcard dressed as one: it must
+    # carry a run of at least six literal characters, so a pattern that would
+    # match a real secret cannot be written without saying which one.
+    for regex in allowlist["regexes"]:
+        assert ".*" not in regex and ".+" not in regex, f"{regex} is a wildcard"
+        literals = re.findall(r"[A-Za-z0-9_-]{6,}", regex)
+        assert literals, f"{regex} has no literal long enough to be specific"
 
 
 def test_a_pull_request_is_not_failed_by_an_unfixable_finding() -> None:
