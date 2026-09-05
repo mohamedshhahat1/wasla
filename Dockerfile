@@ -84,7 +84,7 @@ COPY scripts ./scripts
 # that does not exist in the image is created owned by root, and this container
 # runs as `wasla` - so every attempt to store a customer's attachment would
 # fail on permissions, in the worker, at run time, and nowhere earlier.
-RUN chmod +x scripts/entrypoint.sh \
+RUN chmod +x scripts/entrypoint.sh scripts/check_readiness.sh \
  && mkdir -p /var/lib/wasla/media \
  && chown -R wasla:wasla /app /var/lib/wasla
 USER wasla

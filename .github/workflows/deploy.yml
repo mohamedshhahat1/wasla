@@ -223,12 +223,33 @@ jobs:
         # The deployment is not finished when the containers start; it is
         # finished when the thing they run answers. A readiness check here is
         # what turns "the command exited zero" into "the release works".
+        #
+        # It did not, and this is the fix. The check was
+        # `curl -fsS http://127.0.0.1/health/ready`, and port 80 on the host is
+        # nginx, whose only non-ACME rule is a 301 to HTTPS. `curl -f` fails on
+        # 4xx and 5xx; a 301 without `-L` exits zero - so the gate passed
+        # whenever nginx was running, whatever had happened to the API, the
+        # database or the migrations. `up --wait` does not cover it either: it
+        # waits on liveness, which is deliberately independent of PostgreSQL
+        # and Redis, so a running API with a dead database satisfied both.
+        #
+        # Two changes. The request goes *inside* the compose network on the
+        # application's own port, so there is nothing in between to redirect.
+        # And it is `scripts/check_readiness.sh` rather than a `curl` line,
+        # because the script checks the status *and* the body and can be run by
+        # a test - `tests/unit/test_readiness_gate.py` drives it against a stub
+        # serving a 301, a 503, a refused connection and a 200 that is not this
+        # endpoint. The test it replaces asserted that "/health/ready" appeared
+        # somewhere in this file.
         run: |
           ssh -i ~/.ssh/deploy_key "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "curl -fsS --max-time 10 http://127.0.0.1/health/ready"
+            "cd ${DEPLOY_PATH} \
+             && docker compose -f docker-compose.prod.yml exec -T api \
+                  scripts/check_readiness.sh"
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/wasla' }}
 
       - name: Report the image that shipped
         if: always()

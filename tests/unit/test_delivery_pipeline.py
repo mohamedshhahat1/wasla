@@ -133,10 +133,26 @@ def test_migrations_run_before_the_new_version_serves() -> None:
 
 def test_the_deployment_is_verified_rather_than_assumed() -> None:
     """A deployment is finished when the thing it started answers, not when the
-    command that started it exits zero."""
+    command that started it exits zero.
+
+    This used to assert `"/health/ready" in steps`, which certified a string
+    and not a property - and the command containing that string could not fail,
+    because it asked nginx on port 80 and a 301 exits zero under `curl -f`
+    (F-8). What the gate actually does is now proven by executing it:
+    `tests/unit/test_readiness_gate.py` runs the script against a stub serving
+    a redirect, a 503, a refused connection, a 200 that is not this endpoint,
+    and a real ready response.
+
+    What is left here is the part that belongs to the *pipeline* rather than to
+    the script: that the gate exists, that it asks the application rather than
+    the proxy, and that it runs after the new version is up.
+    """
     steps = _text(_steps(_load("deploy.yml"), "deploy"))
 
-    assert "/health/ready" in steps
+    assert "check_readiness.sh" in steps
+    assert "exec -T api" in steps
+    assert "http://127.0.0.1/health/ready" not in steps, "that is nginx, and it answers 301"
+    assert steps.index("up -d --wait") < steps.index("check_readiness.sh")
 
 
 # A literal that is unmistakably a throwaway. CI needs *a* JWT secret to start
