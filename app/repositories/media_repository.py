@@ -143,7 +143,7 @@ class MediaRepository(TenantScopedRepository[MessageMedia]):
         return int((await self._session.execute(statement)).scalar_one())
 
 
-class ConversationMediaGate(BaseRepository[Conversation]):
+class ConversationMediaGate(TenantScopedRepository[Conversation]):
     """Serialises the decision to let an agent answer a conversation.
 
     The problem this exists for: one webhook delivery can carry two photographs,
@@ -161,18 +161,38 @@ class ConversationMediaGate(BaseRepository[Conversation]):
 
     model = Conversation
 
-    def __init__(self, session: AsyncSession) -> None:
-        super().__init__(session)
+    def _tenant_filter(self) -> ColumnElement[bool]:
+        return Conversation.tenant_id == self.tenant_id
 
     async def lock(self, conversation_id: uuid.UUID) -> None:
-        """Hold the conversation row until this transaction ends.
+        """Hold this workspace's conversation row until the transaction ends.
 
         Deliberately returns nothing. The row is not the point - the ordering
         is - and returning it would invite a caller to read it and believe the
         lock was about its contents.
+
+        The tenant predicate is here for uniformity rather than because
+        anything leaked without it (F-10, carried over as M-04). This selects
+        one column, hands back nothing, and its only reachable argument is a
+        `media.conversation_id` read moments earlier through a scoped
+        repository - so the unscoped version disclosed nothing and locked
+        nothing it should not have.
+
+        It is still worth closing, because the repository's tenancy rule is
+        that the predicate lives in one place and a subclass that forgets it
+        cannot be constructed. One conversation addressed by id alone was the
+        single exception to that, and an exception is what a reader has to
+        remember. `TenantScopedRepository` makes forgetting a `TypeError`.
+
+        The tenant comes from the job the media row was loaded under, never
+        from anything the row itself carries: a predicate fed by the value it
+        is supposed to constrain is decoration.
         """
         await self._session.execute(
-            select(Conversation.id).where(Conversation.id == conversation_id).with_for_update()
+            select(Conversation.id)
+            .where(self._tenant_filter())
+            .where(Conversation.id == conversation_id)
+            .with_for_update()
         )
 
 

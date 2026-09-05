@@ -386,7 +386,7 @@ class MediaWorker:
         caller is handed a job, and moving the queueing outside the transaction
         does not change that.
         """
-        await ConversationMediaGate(session).lock(media.conversation_id)
+        await ConversationMediaGate(session, tenant_id=job.tenant_id).lock(media.conversation_id)
 
         remaining = await MediaRepository(session, tenant_id=job.tenant_id).count_unresolved(
             media.conversation_id
