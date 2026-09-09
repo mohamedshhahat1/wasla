@@ -617,7 +617,7 @@ async def test_a_reversal_in_another_currency_is_refused(db_session: AsyncSessio
     outcome = await _apply(
         db_session,
         tenant,
-        _reversal(reference=str(payment.id), refunded_cents=9900, currency="EGP"),
+        _reversal(reference=str(payment.id), refunded_cents=9900, currency="USD"),
     )
 
     assert outcome == MISMATCHED

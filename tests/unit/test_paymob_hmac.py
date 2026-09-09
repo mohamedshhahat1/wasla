@@ -199,7 +199,7 @@ def test_the_event_id_pairs_the_transaction_with_what_is_reported() -> None:
 TAMPERINGS: list[tuple[str, object]] = [
     ("amount_cents", 1),
     ("created_at", "2020-01-01T00:00:00.000000"),
-    ("currency", "EGP"),
+    ("currency", "USD"),
     ("error_occured", True),
     ("has_parent_transaction", True),
     ("id", 999999999),
