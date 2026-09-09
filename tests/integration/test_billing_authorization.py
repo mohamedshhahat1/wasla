@@ -399,7 +399,7 @@ async def test_a_client_cannot_ask_to_be_charged_a_figure_of_its_choosing(
 
     response = await http.post(
         f"{BILLING}/checkout",
-        json={"plan_code": plan.code, "amount": "0.01", "currency": "USD"},
+        json={"plan_code": plan.code, "amount": "0.01", "currency": "EGP"},
     )
 
     assert response.status_code == 422

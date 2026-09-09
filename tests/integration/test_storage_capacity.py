@@ -104,7 +104,7 @@ async def _plan(session: AsyncSession, limits: Mapping[LimitKey, int]) -> Plan:
         code=f"cap-{uuid.uuid4().hex[:8]}",
         name="Capacity",
         price=Decimal("10.00"),
-        currency="USD",
+        currency="EGP",
         interval=BillingInterval.MONTHLY,
         limits={key.value: value for key, value in limits.items()},
     )

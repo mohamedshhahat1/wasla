@@ -39,7 +39,7 @@ CONTEXTS: dict[EmailTemplate, dict[str, str]] = {
     EmailTemplate.EMAIL_VERIFICATION: {"code": "482731", "expires_minutes": "10"},
     EmailTemplate.INVOICE_ISSUED: {
         "amount_due": "49.00",
-        "currency": "USD",
+        "currency": "EGP",
         "period_start": "2026-08-01",
         "period_end": "2026-08-31",
     },
@@ -49,7 +49,7 @@ CONTEXTS: dict[EmailTemplate, dict[str, str]] = {
     EmailTemplate.SUBSCRIPTION_SUSPENDED: {
         "workspace_name": "Acme",
         "amount_due": "99.00",
-        "currency": "USD",
+        "currency": "EGP",
     },
 }
 

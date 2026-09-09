@@ -52,7 +52,7 @@ MAX_PLAN_CODE_LENGTH: Final = 50
 # than one currency is a normal thing to become, and retrofitting it means
 # rewriting every stored price.
 CURRENCY_LENGTH: Final = 3
-DEFAULT_CURRENCY: Final = "USD"
+DEFAULT_CURRENCY: Final = "EGP"
 
 
 class LimitKey(StrEnum):

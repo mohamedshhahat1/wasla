@@ -685,7 +685,7 @@ async def _plan_with_ai_limit(session: AsyncSession, *, tenant: Tenant, limit: i
         code=f"cap-{uuid.uuid4().hex[:8]}",
         name="Capped",
         price=Decimal("10.00"),
-        currency="USD",
+        currency="EGP",
         interval=BillingInterval.MONTHLY,
         limits={LimitKey.PERIOD_AI_REQUESTS.value: limit},
     )
@@ -789,7 +789,7 @@ async def test_concurrent_reservations_cannot_oversell_the_allowance(
                 code=f"race-{uuid.uuid4().hex[:8]}",
                 name="Race",
                 price=Decimal("10.00"),
-                currency="USD",
+                currency="EGP",
                 interval=BillingInterval.MONTHLY,
                 limits={LimitKey.PERIOD_AI_REQUESTS.value: limit},
             )

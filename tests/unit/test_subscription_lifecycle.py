@@ -30,7 +30,7 @@ def _plan(interval: BillingInterval = BillingInterval.MONTHLY) -> Plan:
         code="pro",
         name="Pro",
         price=Decimal("99.00"),
-        currency="USD",
+        currency="EGP",
         interval=interval,
         limits={},
     )

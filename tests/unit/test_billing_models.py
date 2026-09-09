@@ -34,7 +34,7 @@ def _plan(**limits: Any) -> Plan:
         code="test",
         name="Test",
         price=Decimal("0.00"),
-        currency="USD",
+        currency="EGP",
         interval=BillingInterval.MONTHLY,
         limits=dict(limits),
     )
@@ -81,7 +81,7 @@ def test_a_malformed_limit_is_unlimited_rather_than_zero(
         code="test",
         name="Test",
         price=Decimal("0.00"),
-        currency="USD",
+        currency="EGP",
         interval=BillingInterval.MONTHLY,
         limits={LimitKey.AGENTS.value: value},
     )

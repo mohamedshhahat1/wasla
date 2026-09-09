@@ -260,7 +260,7 @@ async def _seed(session: AsyncSession, settings: Settings, *, slug: str) -> Work
         plan_code="starter",
         status=InvoiceStatus.OPEN,
         amount_due=Decimal("100.00"),
-        currency="USD",
+        currency="EGP",
         period_start=MOMENT,
         period_end=MOMENT + timedelta(days=30),
         lines=[],
@@ -745,7 +745,7 @@ async def test_platform_administration_is_closed_to_a_workspace_owner(
         (
             "POST",
             f"{API}/platform/invoices/{victim.invoice.id}/payments",
-            {"amount": "100.00", "currency": "USD", "provider": "manual"},
+            {"amount": "100.00", "currency": "EGP", "provider": "manual"},
         ),
         ("POST", f"{API}/platform/invoices/{victim.invoice.id}/void", None),
     ]

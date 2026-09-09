@@ -301,7 +301,7 @@ async def _subscription(
         code=f"plan-{slug}",
         name="Pro",
         price=Decimal("49.00"),
-        currency="USD",
+        currency="EGP",
         interval=BillingInterval.MONTHLY,
     )
     db_session.add(plan)

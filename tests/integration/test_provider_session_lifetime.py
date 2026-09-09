@@ -494,7 +494,7 @@ async def test_the_allowance_is_resolved_again_for_every_round(
             code=f"paid-{uuid.uuid4().hex[:8]}",
             name="Paid",
             price=Decimal("10.00"),
-            currency="USD",
+            currency="EGP",
             interval=BillingInterval.MONTHLY,
             limits={LimitKey.PERIOD_AI_REQUESTS.value: 100},
         )
@@ -502,7 +502,7 @@ async def test_the_allowance_is_resolved_again_for_every_round(
             code=f"free-{uuid.uuid4().hex[:8]}",
             name="Free",
             price=Decimal("0.00"),
-            currency="USD",
+            currency="EGP",
             interval=BillingInterval.MONTHLY,
             limits={LimitKey.PERIOD_AI_REQUESTS.value: 0},
         )

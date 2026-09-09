@@ -88,7 +88,7 @@ async def _plan(session: AsyncSession, *, code: str = "pro", price: str = "99.00
         code=code,
         name=code.title(),
         price=Decimal(price),
-        currency="USD",
+        currency="EGP",
         interval=BillingInterval.MONTHLY,
         limits={},
     )
@@ -507,8 +507,8 @@ async def test_platform_revenue_counts_only_what_was_paid(db_session: AsyncSessi
     revenue = await PlatformInvoiceRepository(db_session).revenue()
     outstanding = await PlatformInvoiceRepository(db_session).outstanding()
 
-    assert [(row.currency, row.amount) for row in revenue] == [("USD", Decimal("99.00"))]
-    assert [(row.currency, row.amount) for row in outstanding] == [("USD", Decimal("99.00"))]
+    assert [(row.currency, row.amount) for row in revenue] == [("EGP", Decimal("99.00"))]
+    assert [(row.currency, row.amount) for row in outstanding] == [("EGP", Decimal("99.00"))]
 
 
 async def test_revenue_is_grouped_by_currency(db_session: AsyncSession) -> None:
@@ -516,7 +516,7 @@ async def test_revenue_is_grouped_by_currency(db_session: AsyncSession) -> None:
     can see."""
     acme = await _tenant(db_session, "acme")
     rival = await _tenant(db_session, "rival")
-    dollars = await _plan(db_session, code="usd-plan")
+    dollars = await _plan(db_session, code="EGP-plan")
     euros = await _plan(db_session, code="eur-plan")
     euros.currency = "EUR"
     await db_session.flush()
@@ -533,4 +533,4 @@ async def test_revenue_is_grouped_by_currency(db_session: AsyncSession) -> None:
     await db_session.flush()
 
     revenue = await PlatformInvoiceRepository(db_session).revenue()
-    assert {row.currency for row in revenue} == {"USD", "EUR"}
+    assert {row.currency for row in revenue} == {"EGP", "EUR"}

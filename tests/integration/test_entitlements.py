@@ -59,7 +59,7 @@ async def _plan(
         code=code,
         name=code.title(),
         price=Decimal("10.00"),
-        currency="USD",
+        currency="EGP",
         interval=BillingInterval.MONTHLY,
         limits={key.value: value for key, value in (limits or {}).items()},
     )

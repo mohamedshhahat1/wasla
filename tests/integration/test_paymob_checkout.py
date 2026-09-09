@@ -450,7 +450,7 @@ async def test_a_callback_in_a_different_currency_is_refused(db_session: AsyncSe
     started = await _started(db_session, tenant, user)
 
     event = await _verified(
-        _transaction(reference=str(started.payment_id), currency="USD"),
+        _transaction(reference=str(started.payment_id), currency="EGP"),
     )
 
     assert await _service(db_session, tenant).apply(event) == MISMATCHED

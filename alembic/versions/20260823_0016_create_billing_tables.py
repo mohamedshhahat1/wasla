@@ -220,7 +220,7 @@ def _seed_plans() -> None:
             trial_days, limits, is_public, is_active, sort_order
         )
         VALUES (
-            gen_random_uuid(), :code, :name, :description, :price, 'USD', 'monthly',
+            gen_random_uuid(), :code, :name, :description, :price, 'EGP', 'monthly',
             :trial_days, CAST(:limits AS jsonb), :is_public, true, :sort_order
         )
         """)

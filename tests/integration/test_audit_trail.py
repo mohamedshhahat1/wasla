@@ -217,7 +217,7 @@ async def test_starting_a_subscription_is_recorded_with_its_plan(db_session: Asy
         code="pro",
         name="Pro",
         price=Decimal("99.00"),
-        currency="USD",
+        currency="EGP",
         interval=BillingInterval.MONTHLY,
         limits={},
     )
@@ -247,7 +247,7 @@ async def test_a_subscription_started_by_registration_is_recorded_as_the_system(
         code="starter",
         name="Starter",
         price=Decimal("0.00"),
-        currency="USD",
+        currency="EGP",
         interval=BillingInterval.MONTHLY,
         limits={},
     )
@@ -279,7 +279,7 @@ async def test_a_platform_payment_appears_in_the_workspaces_own_trail(
         plan_code="pro",
         amount_due=Decimal("99.00"),
         amount_paid=Decimal("0.00"),
-        currency="USD",
+        currency="EGP",
         period_start=NOW,
         period_end=NOW,
         lines=[],

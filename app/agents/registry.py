@@ -472,7 +472,7 @@ RECORD_LEAD_DEFINITION: Final = ToolDefinition(
         ToolParameter(
             name="budget_currency",
             type="string",
-            description="Three-letter currency code for the budget, such as EGP or USD.",
+            description="Three-letter currency code for the budget, such as EGP.",
             required=False,
         ),
     ),
