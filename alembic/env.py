@@ -25,8 +25,18 @@ if config.config_file_name is not None:
 
 settings = get_settings()
 
+# A caller that drives Alembic as a library - the integration suite building a
+# migration-built schema - passes the database it means explicitly. Nothing
+# else sets this, so a command-line `alembic upgrade head` still takes the URL
+# from application settings and there remains one source of truth for it.
+#
+# Passed as an attribute rather than read from the environment on purpose: the
+# environment is where the developer's own `DATABASE_URL` lives, and a test
+# fixture that could not out-argue it would migrate their working database.
+database_url = config.attributes.get("wasla_database_url") or settings.database_url
+
 # Escape % so ConfigParser interpolation cannot mangle credentials.
-config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
+config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
@@ -34,7 +44,7 @@ target_metadata = Base.metadata
 def run_migrations_offline() -> None:
     """Emit SQL to stdout without connecting."""
     context.configure(
-        url=settings.database_url,
+        url=database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},

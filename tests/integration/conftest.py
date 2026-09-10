@@ -1,9 +1,34 @@
 """Fixtures for tests that need a real PostgreSQL database.
 
-The schema is built from the models rather than by running Alembic. CI runs
-pytest before it applies migrations, and the migration path has its own gates
-(upgrade/downgrade/upgrade, then ``alembic check``), so building from metadata
-here keeps the two concerns separate.
+Schema strategy
+---------------
+
+``WASLA_TEST_SCHEMA`` chooses how the schema under test is built:
+
+``models`` (the default)
+    ``Base.metadata.create_all``. Fast, and what the bulk of the suite runs
+    against.
+
+``migrations``
+    ``alembic upgrade head`` against an empty ``public`` schema — the same path
+    a deployment takes.
+
+The default is not the safe one, and saying so is the point. A schema built
+from the models is *by construction* in agreement with the models: a native
+PostgreSQL enum created by ``create_all`` carries every Python member, so a
+value the migrations never added is present anyway and every test that writes
+one passes. That is exactly how AUTH-01 shipped — four ``AuditAction`` labels
+lived in Python and in no migration, six account-security endpoints raised
+``InvalidTextRepresentation`` and rolled back in production, and the suite was
+green.
+
+Two things stop that recurring, and both are run in CI (``migration-parity``):
+
+* ``test_schema_parity.py`` compares every model enum against ``pg_enum`` on a
+  migration-built database and fails on any difference.
+* The account and workspace lifecycle suites are re-run with
+  ``WASLA_TEST_SCHEMA=migrations``, so the guarantees those endpoints make are
+  proven against the schema production actually has.
 
 When no database URL is configured these tests skip instead of failing, so the
 unit suite stays usable without PostgreSQL running.
@@ -41,6 +66,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pathlib
 from collections.abc import AsyncIterator, Iterator
 
 import pytest
@@ -56,10 +82,38 @@ from sqlalchemy.pool import NullPool
 
 from app.db.models import Base
 
+REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
 # TEST_DATABASE_URL wins so a developer can point these at a scratch database
 # without touching the one their application uses.
 URL_VARIABLES = ("TEST_DATABASE_URL", "DATABASE_URL")
 REQUIRED_EXTENSIONS = ("pgcrypto", "vector")
+
+# How the schema under test is built. See the module docstring.
+SCHEMA_VARIABLE = "WASLA_TEST_SCHEMA"
+MODEL_SCHEMA = "models"
+MIGRATION_SCHEMA = "migrations"
+
+
+def schema_strategy() -> str:
+    """Which of the two schema builds this run uses.
+
+    Read through a function rather than captured at import so a test can report
+    it, and so the value is validated once: an unrecognised setting is a typo in
+    a CI workflow, and defaulting quietly would run the fast path under a name
+    somebody chose to get the slow one.
+    """
+    value = os.environ.get(SCHEMA_VARIABLE, MODEL_SCHEMA).strip().lower()
+    if value not in (MODEL_SCHEMA, MIGRATION_SCHEMA):
+        raise RuntimeError(
+            f"{SCHEMA_VARIABLE} must be {MODEL_SCHEMA!r} or {MIGRATION_SCHEMA!r}, not {value!r}"
+        )
+    return value
+
+
+def built_from_migrations() -> bool:
+    """Whether this run's schema came from ``alembic upgrade head``."""
+    return schema_strategy() == MIGRATION_SCHEMA
 
 
 @pytest.fixture(scope="session")
@@ -77,35 +131,83 @@ def database_url() -> str:
     pytest.skip("No PostgreSQL URL configured; set TEST_DATABASE_URL to run these tests.")
 
 
-async def _build_schema(url: str) -> None:
-    """Drop and recreate every table, once.
+async def _reset_public_schema(url: str) -> None:
+    """Empty the database completely, extensions included.
 
-    The drop before the create still matters: a crashed run must not poison the
-    next one. It happens once per session now rather than once per test.
+    ``DROP SCHEMA public CASCADE`` rather than ``Base.metadata.drop_all``,
+    because the things a migration leaves behind are precisely the things the
+    metadata does not know about: ``alembic_version``, and any enum type whose
+    labels have drifted from the models. Dropping only what the models describe
+    would leave a stale ``audit_action`` standing for the next run to reuse -
+    which is the failure this whole strategy exists to expose.
+
+    The extensions are recreated immediately afterwards because they live in
+    ``public`` and go down with it.
     """
+    engine = create_async_engine(url, poolclass=NullPool, isolation_level="AUTOCOMMIT")
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            await connection.execute(text("CREATE SCHEMA public"))
+            for extension in REQUIRED_EXTENSIONS:
+                await connection.execute(text(f'CREATE EXTENSION IF NOT EXISTS "{extension}"'))
+    finally:
+        await engine.dispose()
+
+
+def _run_migrations(url: str) -> None:
+    """``alembic upgrade head``, in this process, against ``url``.
+
+    Deliberately the library entry point rather than a subprocess. A subprocess
+    would take the developer's ``DATABASE_URL`` from the environment and quietly
+    migrate whichever database that names, which is somebody's working copy; the
+    config override below cannot address the wrong database.
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    config = Config(str(REPOSITORY_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(REPOSITORY_ROOT / "alembic"))
+    # `env.py` reads settings for the URL, so it is passed as an attribute the
+    # environment cannot override, and escaped for ConfigParser exactly as
+    # `env.py` escapes its own.
+    config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
+    config.attributes["wasla_database_url"] = url
+    command.upgrade(config, "head")
+
+
+async def _create_from_models(url: str) -> None:
+    """The fast build: every table straight off the mapped metadata."""
     engine = create_async_engine(url, poolclass=NullPool)
     try:
         async with engine.begin() as connection:
-            for extension in REQUIRED_EXTENSIONS:
-                await connection.execute(text(f'CREATE EXTENSION IF NOT EXISTS "{extension}"'))
-            await connection.run_sync(Base.metadata.drop_all)
             await connection.run_sync(Base.metadata.create_all)
     finally:
         await engine.dispose()
 
 
-async def _drop_schema(url: str) -> None:
-    """Remove every table the session created.
+def _build_schema(url: str) -> None:
+    """Build the schema this run tests against, once.
 
-    The extensions are left alone: they are cheap, shared, and dropping
-    ``vector`` out from under a concurrently running suite would be rude.
+    Synchronous, and each async step gets its own ``asyncio.run``. That is not
+    style: ``alembic`` drives its own event loop from ``env.py``, so calling
+    ``command.upgrade`` from inside a running loop raises "asyncio.run() cannot
+    be called from a running event loop" - which is what a single enclosing
+    coroutine here produced.
+
+    The reset before the build still matters: a crashed run must not poison the
+    next one. It happens once per session now rather than once per test.
     """
-    engine = create_async_engine(url, poolclass=NullPool)
-    try:
-        async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.drop_all)
-    finally:
-        await engine.dispose()
+    asyncio.run(_reset_public_schema(url))
+    if built_from_migrations():
+        _run_migrations(url)
+        return
+    asyncio.run(_create_from_models(url))
+
+
+def _drop_schema(url: str) -> None:
+    """Remove everything the session created."""
+    asyncio.run(_reset_public_schema(url))
 
 
 @pytest.fixture(scope="session")
@@ -118,11 +220,11 @@ def prepared_database(database_url: str) -> Iterator[str]:
     fixture would introduce here. The teardown gets its own loop for the same
     reason.
 
-    **The teardown is not tidiness.** The suite builds this schema from the
-    models, and CI points pytest and Alembic at the *same* database: it runs the
-    tests, then ``alembic upgrade head`` on what is left behind. Tables left
-    standing make that upgrade fail on ``CREATE TABLE ... already exists``,
-    which reads as a broken migration when it is nothing of the sort.
+    **The teardown is not tidiness.** CI points pytest and Alembic at the *same*
+    database: it runs the tests, then ``alembic upgrade head`` on what is left
+    behind. Tables left standing make that upgrade fail on ``CREATE TABLE ...
+    already exists``, which reads as a broken migration when it is nothing of
+    the sort.
 
     That is not hypothetical. An earlier version of this file dropped the schema
     per test, so the last teardown happened to leave the database clean; moving
@@ -130,12 +232,17 @@ def prepared_database(database_url: str) -> Iterator[str]:
     for two commits. CI is the regression test - it runs the two steps in that
     order - so if this teardown disappears again, it will fail there rather than
     here.
+
+    Under ``WASLA_TEST_SCHEMA=migrations`` the teardown carries a second job:
+    it drops ``alembic_version`` and every enum type along with the tables, so
+    a subsequent run genuinely starts from nothing rather than reusing an enum
+    whose labels have since drifted.
     """
-    asyncio.run(_build_schema(database_url))
+    _build_schema(database_url)
     try:
         yield database_url
     finally:
-        asyncio.run(_drop_schema(database_url))
+        _drop_schema(database_url)
 
 
 @pytest_asyncio.fixture

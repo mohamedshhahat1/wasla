@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
@@ -210,19 +211,47 @@ async def test_disabling_a_number_is_a_different_action_from_enabling(
     assert AuditAction.WHATSAPP_ACCOUNT_ENABLED in actions
 
 
-async def test_starting_a_subscription_is_recorded_with_its_plan(db_session: AsyncSession) -> None:
-    tenant = await _tenant(db_session)
-    user = await _user(db_session)
+async def _plan(
+    session: AsyncSession,
+    *,
+    code: str,
+    name: str,
+    price: str,
+) -> Plan:
+    """A catalogue row, whether or not migration 0016 already seeded one.
+
+    Written this way because of a real difference between the two schema builds
+    (see `tests/integration/conftest.py`). Migration 0016 seeds `starter`,
+    `pro`, `business` and `enterprise`; `Base.metadata.create_all` seeds
+    nothing. A plain `INSERT` therefore passes against a model-built schema and
+    raises `UniqueViolationError` on `uq_plans_code` against the schema a
+    deployment actually has - which is the AUTH-02 class of drift in miniature,
+    found by running this suite under `WASLA_TEST_SCHEMA=migrations`.
+
+    Reusing the seeded row rather than deleting and reinserting it: these tests
+    are about the audit trail, not about the catalogue, and what they need is a
+    plan with this code to exist.
+    """
+    existing = await session.scalar(select(Plan).where(Plan.code == code))
+    if existing is not None:
+        return existing
     plan = Plan(
-        code="pro",
-        name="Pro",
-        price=Decimal("99.00"),
+        code=code,
+        name=name,
+        price=Decimal(price),
         currency="EGP",
         interval=BillingInterval.MONTHLY,
         limits={},
     )
-    db_session.add(plan)
-    await db_session.flush()
+    session.add(plan)
+    await session.flush()
+    return plan
+
+
+async def test_starting_a_subscription_is_recorded_with_its_plan(db_session: AsyncSession) -> None:
+    tenant = await _tenant(db_session)
+    user = await _user(db_session)
+    await _plan(db_session, code="pro", name="Pro", price="99.00")
 
     await SubscriptionService(db_session, tenant_id=tenant.id).start(
         plan_code="pro",
@@ -243,16 +272,7 @@ async def test_a_subscription_started_by_registration_is_recorded_as_the_system(
 ) -> None:
     """Nobody chose it: the workspace was put on the default plan at signup."""
     tenant = await _tenant(db_session)
-    plan = Plan(
-        code="starter",
-        name="Starter",
-        price=Decimal("0.00"),
-        currency="EGP",
-        interval=BillingInterval.MONTHLY,
-        limits={},
-    )
-    db_session.add(plan)
-    await db_session.flush()
+    await _plan(db_session, code="starter", name="Starter", price="0.00")
 
     await SubscriptionService(db_session, tenant_id=tenant.id).start(
         plan_code="starter",
