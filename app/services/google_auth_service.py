@@ -56,7 +56,8 @@ from app.core.oauth_flow import (
     OAuthFlowStore,
     code_challenge,
 )
-from app.core.telemetry import observe_auth_event
+from app.core.reauth import ReauthProofStore, ReauthPurpose
+from app.core.telemetry import observe_auth_event, observe_lifecycle_event
 from app.db.models import FederatedIdentity, User
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.identity import IdentityProvider
@@ -73,6 +74,11 @@ from app.services.audit_service import AuditTrail
 from app.services.auth_service import AuthenticatedSession, AuthService
 
 logger = get_logger(__name__)
+
+# The account has no Google identity, so there is nothing to re-prove. A
+# conflict rather than a redirect, so a client can fall back to asking for a
+# password instead of sending somebody to Google pointlessly.
+REAUTHENTICATION_UNAVAILABLE = "reauthentication_unavailable"
 
 # One answer for every way a Google authorization can fail: a bad state, a
 # replayed state, a refused code, a forged token, a wrong nonce, an unknown key.
@@ -125,6 +131,7 @@ class GoogleAuthService:
         client: GoogleOAuthClient,
         verifier: GoogleIdTokenVerifier,
         auth: AuthService,
+        reauth: ReauthProofStore,
     ) -> None:
         self._session = session
         self._settings = settings
@@ -132,6 +139,7 @@ class GoogleAuthService:
         self._client = client
         self._verifier = verifier
         self._auth = auth
+        self._reauth = reauth
         self._users = UserRepository(session)
         self._identities = FederatedIdentityRepository(session)
         self._audit = AuditTrail(session)
@@ -170,6 +178,139 @@ class GoogleAuthService:
                 reason="account_unavailable",
             )
             raise AuthenticationError(GOOGLE_FAILED)
+
+    async def start_reauth(self, *, user: User, binding: str) -> tuple[str, int]:
+        """Begin proving that this account's own Google identity is present.
+
+        Refused for an account with no Google identity at all: there is nothing
+        to re-prove, and returning an authorization URL would send somebody to
+        Google to come back and be told it was pointless. The refusal is a
+        conflict rather than a redirect, so a client can fall back to asking for
+        a password.
+
+        Everything that makes the linking flow safe applies unchanged - PKCE
+        S256, a nonce, a single-use server-side state, the browser binding, the
+        fixed redirect URI - because this *is* that flow with a different kind
+        stamped on it. What differs is only what the callback does with the
+        identity that comes back.
+        """
+        self._ensure_live(user)
+        if await self._identities.get_for_user(user_id=user.id, provider=_PROVIDER) is None:
+            raise ConflictError(
+                "This account is not connected to a Google account.",
+                error_code=REAUTHENTICATION_UNAVAILABLE,
+            )
+        return await self._start(
+            kind=FlowKind.REAUTH_DELETE_ACCOUNT,
+            user=user,
+            binding=binding,
+        )
+
+    async def complete_reauth(
+        self,
+        *,
+        user: User,
+        code: str,
+        state: str,
+        binding: str | None,
+    ) -> str:
+        """Finish a re-authentication and return a single-use proof token.
+
+        **Identity is the Google `sub`, never the email.** The subject that
+        comes back is looked up against `user_identities` and must resolve to a
+        row belonging to *this* account. An address match proves nothing: Google
+        addresses are reassignable within a workspace domain, a person may hold
+        several, and somebody who controls a mailbox is not thereby the person
+        who linked it. The `sub` is the stable identifier Google issues per
+        account and is what the whole federated design is keyed on already.
+
+        Three independent bindings must all hold, and each stops a different
+        attack:
+
+        - **`flow.user_id`** - recorded server-side when the flow began, so
+          nothing in the callback can redirect a proof onto another account.
+        - **The browser binding** - checked inside `_redeem`, so a stolen state
+          completed from elsewhere fails even with a valid session.
+        - **The subject match** - so signing in with *a* Google account is not
+          proof of controlling *this* account's Google account. Without it the
+          flow would accept any Google login as authorisation to delete
+          somebody else's account, which is the failure the separate `FlowKind`
+          exists to make impossible at the state layer and this check makes
+          impossible at the identity layer.
+
+        Nothing is deleted here. What comes back is a proof that
+        `DELETE /auth/me` consumes - see `app/core/reauth.py` for why that
+        separation is deliberate.
+        """
+        self._ensure_live(user)
+        flow, claims = await self._redeem(
+            code=code,
+            state=state,
+            binding=binding,
+            expected=FlowKind.REAUTH_DELETE_ACCOUNT,
+        )
+
+        if flow.user_id != user.id:
+            self._record(
+                AuditAction.GOOGLE_LOGIN_FAILED,
+                user=user,
+                actor_kind=AuditActorKind.SYSTEM,
+                reason="reauth_flow_owner_mismatch",
+            )
+            logger.warning(
+                "google.reauth_flow_owner_mismatch",
+                extra={
+                    "event": "google.reauth_flow_owner_mismatch",
+                    "user_id": str(user.id),
+                },
+            )
+            raise AuthenticationError(GOOGLE_FAILED)
+
+        identity = await self._identities.get_by_subject(
+            provider=_PROVIDER,
+            subject=claims.subject,
+        )
+        if identity is None or identity.user_id != user.id:
+            # Either an unknown Google account, or one belonging to somebody
+            # else. Both are "that is not you", and both get the same answer
+            # so the endpoint cannot be used to discover which Google accounts
+            # are linked to which Wasla accounts.
+            self._record(
+                AuditAction.GOOGLE_LOGIN_FAILED,
+                user=user,
+                actor_kind=AuditActorKind.SYSTEM,
+                reason="reauth_subject_mismatch",
+            )
+            logger.warning(
+                "google.reauth_subject_mismatch",
+                extra={
+                    "event": "google.reauth_subject_mismatch",
+                    "user_id": str(user.id),
+                    # Whether a row existed at all, never which one or whose.
+                    "identity_known": identity is not None,
+                },
+            )
+            observe_lifecycle_event(operation="account_reauth", outcome="conflict")
+            raise AuthenticationError(GOOGLE_FAILED)
+
+        token = await self._reauth.issue(
+            user_id=user.id,
+            purpose=ReauthPurpose.DELETE_ACCOUNT,
+        )
+        self._record(
+            AuditAction.ACCOUNT_REAUTHENTICATED,
+            user=user,
+            reason="google",
+        )
+        # The token is never logged and never audited. It is a bearer proof for
+        # the next five minutes, and a copy of it in a log is a copy of the
+        # authorisation.
+        observe_lifecycle_event(operation="account_reauth", outcome="success")
+        logger.info(
+            "google.reauthenticated",
+            extra={"event": "google.reauthenticated", "user_id": str(user.id)},
+        )
+        return token
 
     async def _start(self, *, kind: FlowKind, user: User | None, binding: str) -> tuple[str, int]:
         started = await self._flows.start(

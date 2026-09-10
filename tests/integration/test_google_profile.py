@@ -31,7 +31,13 @@ from app.integrations.google.oidc import GoogleIdentityClaims
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService
 from app.services.google_auth_service import GoogleAuthService
-from tests.fakes import as_flow_store, as_google_client, as_id_token_verifier, as_redis_client
+from tests.fakes import (
+    as_flow_store,
+    as_google_client,
+    as_id_token_verifier,
+    as_reauth_store,
+    as_redis_client,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -120,6 +126,8 @@ def _service(
         flows=as_flow_store(_ScriptedFlows(flow)),
         client=as_google_client(_ScriptedClient()),
         verifier=as_id_token_verifier(_ScriptedVerifier(claims)),
+        # Never reached by these tests: none of them re-authenticate.
+        reauth=as_reauth_store(object()),
         auth=AuthService(
             session=db_session,
             settings=settings,

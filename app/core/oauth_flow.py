@@ -91,6 +91,18 @@ class FlowKind(StrEnum):
 
     LOGIN = "login"
     LINK = "link"
+    # Proving control of an identity already linked to this account, in order to
+    # authorise a high-risk action - today, closing the account
+    # (docs/GOOGLE_OAUTH.md).
+    #
+    # A third kind rather than a reuse of `LOGIN`, and the reason is the one
+    # this enum exists for: a flow begun as a sign-in must not be completable as
+    # a re-authentication. `LOGIN` will happily enrol a brand-new account, so a
+    # callback that accepted a login-kind flow as proof would accept somebody
+    # signing in with *any* Google account as authorisation to delete the
+    # account the session belongs to. The kind is what stops the two endpoints
+    # sharing a state namespace.
+    REAUTH_DELETE_ACCOUNT = "reauth_delete_account"
 
 
 @dataclass(frozen=True, slots=True)

@@ -17,6 +17,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.core.dependencies import RedisDep, SessionDep, SettingsDep
 from app.core.exceptions import AuthenticationError, PermissionDeniedError
 from app.core.rate_limit import RateLimiter
+from app.core.reauth import ReauthProofStore
 from app.core.security import TokenClaims, TokenType, decode_token
 from app.core.storage import MediaStorage, build_media_storage
 from app.core.telemetry import observe_auth_event
@@ -91,7 +92,11 @@ def get_auth_service(
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 
 
-def get_account_service(settings: SettingsDep, session: SessionDep) -> AccountService:
+def get_account_service(
+    settings: SettingsDep,
+    session: SessionDep,
+    redis: RedisDep,
+) -> AccountService:
     """Account lifecycle and session revocation (ADR-036).
 
     Not workspace-scoped, and deliberately: an account is a global identity,
@@ -103,7 +108,9 @@ def get_account_service(settings: SettingsDep, session: SessionDep) -> AccountSe
     (ADR-042), not a call to a provider, so the service still reaches nothing
     outside PostgreSQL.
     """
-    return AccountService(session, settings=settings)
+    # The proof store is wired here rather than left to the service to build,
+    # so the one route that closes an account cannot be the one that forgot.
+    return AccountService(session, settings=settings, reauth=ReauthProofStore(redis))
 
 
 AccountServiceDep = Annotated[AccountService, Depends(get_account_service)]

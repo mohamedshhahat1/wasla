@@ -52,6 +52,7 @@ from starlette.requests import Request
 from app.core.config import Settings
 from app.core.crypto import generate_key
 from app.core.oauth_flow import OAuthFlowStore
+from app.core.reauth import ReauthProofStore
 from app.core.redis import RedisClient
 from app.core.storage import MediaStorage, build_key
 from app.db.session import Database
@@ -205,6 +206,16 @@ def as_id_token_verifier(fake: object) -> GoogleIdTokenVerifier:
     return cast("GoogleIdTokenVerifier", fake)
 
 
+def as_reauth_store(fake: object) -> ReauthProofStore:
+    """A scripted re-authentication proof store.
+
+    Only the flows that mint a proof reach it, so most Google tests hand over a
+    stub that would raise if it were used - which is the point: a test that
+    starts issuing proofs without meaning to fails loudly.
+    """
+    return cast("ReauthProofStore", fake)
+
+
 def as_sentiment(fake: object) -> SentimentService:
     """A sentiment stand-in, for an agent turn typed against the service."""
     return cast("SentimentService", fake)
@@ -273,6 +284,7 @@ __all__ = [
     "as_media_queue",
     "as_media_reader",
     "as_messaging",
+    "as_reauth_store",
     "as_recurring",
     "as_redis",
     "as_redis_client",

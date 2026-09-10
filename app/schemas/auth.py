@@ -112,6 +112,17 @@ class PasswordSetRequest(_Payload):
     )
 
 
+class ReauthProofResponse(BaseModel):
+    """A completed re-authentication, and how long it stays usable.
+
+    The token is shown exactly once. Nothing can recover it afterwards - only
+    its digest is stored - so a client that loses it starts the flow again.
+    """
+
+    reauthentication_token: str
+    expires_in: int
+
+
 class AccountDeleteRequest(_Payload):
     """Proof that the person closing the account is the person who owns it.
 
@@ -120,13 +131,37 @@ class AccountDeleteRequest(_Payload):
     somebody else would make this a global user-deletion endpoint that happened
     to have a guard in front of it today.
 
-    An account with no password - one created by Google sign-in - is refused
-    with `password_required` and told to set one through `/auth/password/set`.
-    See `AccountService.delete_self` for why that is the strong answer here
-    rather than the convenient one.
+    Exactly one of the two must be supplied, and either is sufficient:
+
+    * `current_password` - for an account that has one.
+    * `reauthentication_token` - the single-use proof from a completed Google
+      re-authentication, for an account that has no password, or one that has
+      both and would rather use Google.
+
+    Requiring both where both exist would be step-up MFA. That is a deliberate
+    product choice the product has not made, and inventing it here would mean a
+    person with a password *and* a Google identity has a harder time leaving
+    than one with either - punishing the more secure configuration.
+
+    Neither is refused with `reauthentication_required`, which is also what an
+    account with no password gets: it names the thing to go and do rather than
+    the thing that is missing.
     """
 
-    current_password: str = Field(min_length=1, max_length=MAXIMUM_PASSWORD_LENGTH)
+    current_password: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAXIMUM_PASSWORD_LENGTH,
+    )
+    # The proof from `POST /auth/google/reauth/callback`. An alternative to the
+    # password, not an addition to it: requiring both would be step-up MFA, and
+    # the product has not asked for that. Either is a fresh demonstration that
+    # the person holding the session is the person who owns the account.
+    reauthentication_token: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAXIMUM_TOKEN_LENGTH,
+    )
 
 
 class AccountStateResponse(BaseModel):

@@ -50,11 +50,12 @@ from app.core.exceptions import NotFoundError
 from app.core.oauth_binding import attach, clear, ensure, presented
 from app.core.oauth_flow import OAuthFlowStore
 from app.core.rate_limit import RateLimiter
+from app.core.reauth import PROOF_TTL_SECONDS, ReauthProofStore
 from app.core.telemetry import observe_auth_event
 from app.core.token_store import RefreshTokenStore
 from app.integrations.google.client import GoogleOAuthClient
 from app.integrations.google.oidc import GoogleIdTokenVerifier, GoogleKeyRing
-from app.schemas.auth import SessionResponse
+from app.schemas.auth import ReauthProofResponse, SessionResponse
 from app.schemas.google_oauth import (
     GoogleAuthorizationResponse,
     GoogleCallbackRequest,
@@ -101,6 +102,7 @@ def _service(settings: SettingsDep, session: SessionDep, redis: RedisDep) -> Goo
             redirect_uri=redirect_uri,
         ),
         verifier=GoogleIdTokenVerifier(client_id=client_id, key_ring=_KEY_RING),
+        reauth=ReauthProofStore(redis),
         auth=AuthService(
             session=session,
             settings=settings,
@@ -262,3 +264,88 @@ async def unlink_google_identity(
     the account with no way to sign in - no password and no other identity.
     """
     await _service(settings, session, redis).unlink(user=current.user)
+
+
+@router.post("/google/reauth/authorize", response_model=GoogleAuthorizationResponse)
+async def start_google_reauth(
+    request: Request,
+    response: Response,
+    current: CurrentUserDep,
+    settings: SettingsDep,
+    session: SessionDep,
+    redis: RedisDep,
+    _limit: GoogleOAuthRateLimit,
+) -> GoogleAuthorizationResponse:
+    """Begin re-proving the Google identity already linked to this account.
+
+    For a high-risk action - today, closing the account. A Google-only account
+    has no password to confirm with, and until this existed the answer was to
+    make somebody set one first: secure, and a poor thing to ask of a person
+    who is leaving.
+
+    Authenticated, and the account is written into the flow record here where
+    no caller can influence it. The flow is the linking flow with a different
+    `FlowKind`: same PKCE S256, same nonce, same single-use server-side state,
+    same browser binding, same fixed redirect URI. The kind is what stops a
+    sign-in flow being completed here or this being completed as a sign-in.
+
+    Errors: 404 when Google sign-in is not configured; 409
+    `reauthentication_unavailable` when this account has no Google identity to
+    re-prove, so a client can fall back to asking for a password.
+    """
+    binding = ensure(request, settings)
+    try:
+        url, expires_in = await _service(settings, session, redis).start_reauth(
+            user=current.user,
+            binding=binding,
+        )
+    except Exception:
+        observe_auth_event(event="oauth_start", outcome="failure", reason="reauth")
+        raise
+    attach(response, secret=binding, settings=settings)
+    return GoogleAuthorizationResponse(authorization_url=url, expires_in=expires_in)
+
+
+@router.post("/google/reauth/callback", response_model=ReauthProofResponse)
+async def complete_google_reauth(
+    payload: GoogleCallbackRequest,
+    request: Request,
+    response: Response,
+    current: CurrentUserDep,
+    settings: SettingsDep,
+    session: SessionDep,
+    redis: RedisDep,
+    _limit: GoogleOAuthRateLimit,
+) -> ReauthProofResponse:
+    """Finish re-authentication and hand back a single-use proof.
+
+    **Identity is the Google `sub`.** The subject that comes back must resolve
+    to a `user_identities` row belonging to this account. An email match is not
+    accepted and never has been anywhere in this flow: addresses are
+    reassignable inside a Google Workspace domain and a person may hold several,
+    while the subject is the stable per-account identifier Google issues.
+
+    **Nothing is deleted here.** The proof is short-lived, single-use, bound to
+    this user and bound to the purpose, and `DELETE /auth/me` consumes it. A
+    callback is reached by Google redirecting a browser, and a browser
+    navigation is the wrong thing to hang an irreversible action on.
+
+    Errors: 401 for a failed authorization, a stale or replayed state, a
+    callback from a browser that did not start the flow, a flow belonging to a
+    different account, or a Google account that is not the one linked here. All
+    of them answer alike, so the endpoint cannot be used to discover which
+    Google account is attached to which Wasla account.
+    """
+    try:
+        token = await _service(settings, session, redis).complete_reauth(
+            user=current.user,
+            code=payload.code,
+            state=payload.state,
+            binding=presented(request, settings),
+        )
+    except Exception:
+        observe_auth_event(event="oauth_callback", outcome="failure", reason="reauth")
+        raise
+    observe_auth_event(event="oauth_callback", outcome="success", reason="reauth")
+    clear(response, settings)
+    return ReauthProofResponse(reauthentication_token=token, expires_in=PROOF_TTL_SECONDS)

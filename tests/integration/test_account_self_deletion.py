@@ -325,20 +325,23 @@ async def test_the_current_password_is_required(
     assert user.deleted_at is None
 
 
-async def test_a_passwordless_account_is_told_to_set_one(
+async def test_a_passwordless_account_is_told_what_to_do(
     http: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
-    """The Google-only case, refused rather than exempted.
+    """The Google-only case, refused with the thing to go and do.
 
-    Setting a password bumps the token version and emails the address on the
-    account, so an attacker holding only a stolen session cannot get through
-    this door without the real owner being told. It is the same rule
-    disconnecting Google already follows (ADR-057), and it is why there is no
-    weaker branch here for accounts that cannot prove a password.
+    It used to be `password_required` - set a password first - which was secure
+    and a poor thing to ask of somebody on their way out. The answer is now
+    `reauthentication_required`, and a Google-linked account satisfies it by
+    re-proving that identity (`tests/integration/test_google_reauth.py`).
+
+    The code names a demonstration rather than a credential, because there are
+    now two ways to give one. An account with no password *and* no Google
+    identity cannot reach this route at all - the product cannot produce one.
 
     Driven with a hand-minted session because a passwordless account is, by
-    design, unable to use `/auth/login` at all.
+    design, unable to use `/auth/login`.
     """
     from app.core.security import create_access_token
 
@@ -363,7 +366,7 @@ async def test_a_passwordless_account_is_told_to_set_one(
     )
 
     assert response.status_code == 409, response.text
-    assert response.json()["error"]["code"] == "password_required"
+    assert response.json()["error"]["code"] == "reauthentication_required"
     await db_session.refresh(user)
     assert user.deleted_at is None
 

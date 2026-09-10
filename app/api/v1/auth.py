@@ -327,12 +327,20 @@ async def delete_account(
     workspace is `DELETE /workspace/members/{user_id}` and reaches only their
     membership.
 
-    **The current password is required**, and an account that has none - created
-    by Google sign-in - is refused with `password_required` and told to set one
-    at `/auth/password/set`. That route bumps the token version and emails the
-    address on the account, so somebody holding only a stolen session cannot
-    reach this one without the real owner being told. It is the same rule
-    disconnecting Google already follows (ADR-057).
+    **Proof beyond the session is required, and either kind will do**: the
+    current password, or a single-use `reauthentication_token` from a completed
+    Google re-authentication (`POST /auth/google/reauth/callback`). A session is
+    not proof - a stolen access token is a session - and this is the one action
+    that cannot be undone.
+
+    Either, never both. Requiring both from an account that has both would be
+    step-up MFA, which is a product decision nobody has made, and it would make
+    the more securely configured account the harder one to close. An account
+    with no password and no Google identity cannot reach this route at all,
+    which is not a state the product can currently produce.
+
+    Neither supplied is `409 reauthentication_required`, naming the thing to go
+    and do rather than the thing that is absent.
 
     **Workspaces are resolved first.** If the account is the last active owner of
     any live workspace, the response is 409 `account_owns_workspaces` carrying
@@ -349,6 +357,7 @@ async def delete_account(
     user = await accounts.delete_self(
         user=current_user.user,
         current_password=payload.current_password,
+        reauthentication_token=payload.reauthentication_token,
     )
     return _account_state(user)
 
