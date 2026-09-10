@@ -15,9 +15,11 @@ plus the outbox row that carries it, which is cleared on completion.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -47,6 +49,10 @@ from app.services.email_templates import EmailTemplate
 logger = get_logger(__name__)
 
 RESET_TOKEN_TTL_MINUTES: Final = 30
+# Namespace for the advisory lock that serialises reset issuance per account.
+# Arbitrary but fixed, and distinct from every other advisory lock in the
+# system, so two unrelated operations cannot block each other.
+_RESET_REQUEST_LOCK_NAMESPACE: Final = 0x5741_5302
 # The one answer the request endpoint ever gives. Registered, unknown,
 # disabled and passwordless addresses all receive it, so the endpoint cannot
 # be used to ask which addresses have accounts.
@@ -126,6 +132,25 @@ class PasswordResetService:
             )
             return
 
+        # Serialised per account across supersede-then-create, so two
+        # simultaneous requests cannot both insert. Without it they both
+        # supersede nothing, both insert, and the partial unique index added
+        # for AUTH-09 refuses one of them - which would be correct about the
+        # invariant and would turn an endpoint whose whole contract is a
+        # constant answer into a 500. The lock is what keeps the answer
+        # constant *and* the invariant a database fact.
+        #
+        # `pg_advisory_xact_lock` rather than a row lock on `users`, and its own
+        # namespace, for the reasons `WorkspaceService.create` sets out: locking
+        # the account row would serialise this against every other write to that
+        # account, and PostgreSQL releases an advisory transaction lock at
+        # commit or rollback with no cleanup path to get wrong.
+        #
+        # Taken here rather than at the top of the method, so an address nobody
+        # has registered never waits on one. The lock is only reachable once
+        # this request is already known to be issuing a token.
+        await self._lock_account(user.id)
+
         now = datetime.now(UTC)
         await self._tokens.supersede_outstanding(user_id=user.id, now=now)
         token = await self._tokens.create(
@@ -145,6 +170,20 @@ class PasswordResetService:
             extra={"event": "password_reset.requested", "user_id": str(user.id)},
         )
         observe_auth_event(event="password_reset_request", outcome="queued", reason="eligible")
+
+    async def _lock_account(self, user_id: uuid.UUID) -> None:
+        """Hold this account's reset slot until the request commits."""
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:namespace, :key)"),
+            {
+                # A fixed namespace so this cannot collide with the workspace
+                # creation lock or anything added later, and the low 31 bits of
+                # the account id as the key. A collision between two different
+                # accounts costs one of them a short wait and nothing else.
+                "namespace": _RESET_REQUEST_LOCK_NAMESPACE,
+                "key": user_id.int & 0x7FFFFFFF,
+            },
+        )
 
     async def _account_budget_allows(self, email: str) -> bool:
         if self._limiter is None or not self._settings.rate_limit_enabled:
