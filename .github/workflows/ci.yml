@@ -147,16 +147,25 @@ jobs:
           # are the same line. The object-store guard below makes that argument
           # for one suite; this makes it for the whole run.
           #
-          # Two reasons are allowed, and both are written down. The
+          # Three reasons are allowed, and all three are written down. The
           # real-provider suite opts out when the repository has no OpenAI key,
-          # because a key is a paid secret and a fork cannot have one. And a
+          # because a key is a paid secret and a fork cannot have one. A
           # real-provider test skips when the model declined to call a tool,
           # which is a property of the model rather than of this code.
+          #
+          # And the schema-parity suite skips *in this job*, deliberately: this
+          # job builds its schema from the models, and against a model-built
+          # schema that suite can only pass tautologically - the enum types are
+          # created from the same Python members it would be checking. It has
+          # its own job (`migration-parity`) which builds the schema with
+          # `alembic upgrade head` and asserts there that it did **not** skip,
+          # so the exemption granted here cannot become a place for it to go
+          # quietly missing.
           #
           # Any other skip - a fixture that started returning None, a marker
           # added to get a red build green - fails here rather than blending
           # into a count.
-          UNEXPECTED=$(grep -E "^SKIPPED" /tmp/pytest.txt             | grep -vE "real-provider tests are opt-in|the model declined to call a tool" || true)
+          UNEXPECTED=$(grep -E "^SKIPPED" /tmp/pytest.txt             | grep -vE "real-provider tests are opt-in|the model declined to call a tool|schema parity is only meaningful against a migration-built database" || true)
           if [ -n "$UNEXPECTED" ]; then
             echo "::error::a test skipped for a reason nobody chose"
             echo "$UNEXPECTED"
