@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **127 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **135 operations**, of which
 17 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -460,18 +460,188 @@ Open to every member, unlike usage: these are the numbers that tell the people s
 | --- | --- | --- |
 | GET | `/api/v1/platform/overview` | Platform owner or admin |
 | GET | `/api/v1/platform/tenants` | Platform owner or admin |
+| POST | `/api/v1/platform/tenants/{tenant_id}/suspend` | Platform owner or admin |
+| POST | `/api/v1/platform/tenants/{tenant_id}/restore` | Platform owner or admin |
 | POST | `/api/v1/platform/users/{user_id}/disable` | Platform owner or admin |
 | POST | `/api/v1/platform/users/{user_id}/enable` | Platform owner or admin |
+| DELETE | `/api/v1/platform/users/{user_id}` | Platform owner or admin |
 | POST | `/api/v1/platform/invoices/{invoice_id}/payments` | Platform owner or admin |
 | POST | `/api/v1/platform/invoices/{invoice_id}/void` | Platform owner or admin |
 | GET | `/api/v1/platform/audit-logs` | Platform owner or admin |
 
-**Disabling an account is a platform action, not a workspace one.** An account is a
-global identity, so a tenant administrator able to suspend one could evict somebody from
-workspaces that administrator has nothing to do with. Removing a person from a single
-workspace is a different operation against a different object, and does not exist yet.
+**Disabling or deleting an account is a platform action, not a workspace one.** An
+account is a global identity, so a tenant administrator able to suspend one could evict
+somebody from workspaces that administrator has nothing to do with. Removing a person
+from a single workspace is a different operation against a different object:
+`DELETE /workspace/members/{user_id}`, which reaches their membership and nothing else.
+**No workspace role — owner included — can reach another person's Wasla identity.**
+
 `enable` raises the token version as well as restoring the account, so tokens issued
-before a suspension do not come back with it.
+before a suspension do not come back with it. `DELETE /platform/users/{user_id}` is an
+irreversible tombstone and has no `enable` counterpart; it is audited as `user_deleted`
+by a `platform_staff` actor, which is what distinguishes it in the trail from somebody
+closing their own account through `DELETE /auth/me`.
+
+**Suspending a workspace is reversible; deleting one is not, and is not on this
+surface.** Staff suspend and restore; ending the business relationship is the customer's
+decision and lives on `DELETE /workspace`. See *Workspace lifecycle* above.
+
+## Workspace lifecycle
+
+**Status: Implemented.** Creating, updating, transferring, closing — and, for platform
+staff, suspending and restoring.
+
+| Method | Path | Who |
+| --- | --- | --- |
+| POST | `/api/v1/workspaces` | Any verified account |
+| GET | `/api/v1/workspace` | Any member |
+| PATCH | `/api/v1/workspace` | Owner or admin (address: owner only) |
+| POST | `/api/v1/workspace/ownership` | Owner |
+| DELETE | `/api/v1/workspace` | Owner |
+
+### Creating one
+
+`POST /workspaces` is the only route on this group that does **not** resolve a workspace,
+because it is the request that creates one. It takes a `name` and a `slug` and nothing
+else — no role, no plan, no owner: the caller is the owner because they made it, the plan
+is `DEFAULT_PLAN_CODE`, and the status is active. The tenant, the owner membership and
+the subscription are one unit of work; a workspace without its owner membership is the
+unrecoverable state the whole design exists to prevent.
+
+It exists because **registration was the only way to create a workspace**, and that
+stranded Google-first accounts: signing in with Google creates an account and no
+workspace (Google supplies no business name, and a slug invented from a display name is a
+trap — `SLUG_PATTERN` is strict ASCII and a great many real names are not, ADR-047). Such
+a person held a valid session, an empty workspace list and no way forward except being
+invited somewhere. The onboarding flow is now: authenticate with Google → the client
+asks for a business name → `POST /workspaces` → `POST /auth/workspace` to select it.
+
+The response carries **no token**. Selecting the new workspace is `POST /auth/workspace`,
+which re-checks membership and mints an access token with the new `tid`; keeping token
+issuance in one place is what stops a second, subtly different path from existing
+(ADR-058).
+
+`MAX_OWNED_WORKSPACES_PER_USER` bounds how many live workspaces one account may own —
+the route's per-address rate limit bounds the rate, not the total. Deleting one gives the
+slot back; being a member of somebody else's costs nothing.
+
+### Transferring ownership
+
+`POST /workspace/ownership` promotes the target to owner and demotes the caller to admin,
+atomically. It is a *transfer*, not a promotion: the membership model supports several
+owners at once and this does not change that, but a route that only added an owner would
+be a role-granting endpoint under a misleading name. The caller keeps administrator
+access rather than being ejected — handing over ownership before going on leave should
+not cost you the ability to do your job. Leaving entirely is a separate request.
+
+| Case | Answer |
+| --- | --- |
+| Caller is not an owner | `403` |
+| Target is not an active member here | `409 ownership_transfer_invalid`, saying nothing about whether that account exists |
+| Target's account is disabled | `409 ownership_transfer_invalid` — an owner who cannot sign in satisfies the invariant while being unable to act on it |
+| Target is the caller | `409 ownership_transfer_invalid` |
+
+### Closing one
+
+`DELETE /workspace` is owner-only and requires the workspace's address typed exactly in
+`confirmation`, checked server-side. A frontend modal is not a control — this route is
+reachable with curl — and a boolean flag is not one either, because anything a client can
+send once it can send again by accident. A mismatch is `409
+workspace_confirmation_invalid`.
+
+**It is a tombstone, not an erasure.** Twenty-eight tables cascade from `tenants`,
+invoices and payments among them, so a hard delete would destroy financial records to
+satisfy a button. `deleted_at` is set, every membership is withdrawn, and access ends on
+the next request for everybody — authorization re-reads the tenant each time, so nothing
+has to expire. The rows stay addressable for the accounting and dispute questions that
+arrive after a customer leaves.
+
+**A tombstoned address is never released.** Freeing the slug would let a stranger take
+the address a closed business's invitation links, bookmarks and support tickets still
+name, and inherit the trust attached to it.
+
+**Nobody's account is deleted** — not the owner's, not any member's — and nobody is
+signed out of anything else. A colleague signed in to three workspaces keeps the other
+two.
+
+**There is no scheduled purge**, and it is not pretended: this repository has no
+deferred-job infrastructure that could run one reliably. Erasure is an operator step in
+[RUNBOOK.md](RUNBOOK.md).
+
+**Restoring a deleted workspace is not an API operation** in either direction. Suspension
+is the reversible state and belongs to platform staff; deletion is the customer ending
+the relationship. Reversing one made in error is a database operation with the
+deliberation that implies.
+
+### Suspension
+
+`POST /platform/tenants/{tenant_id}/suspend` and `.../restore` are platform authority.
+`TenantStatus.SUSPENDED` existed from the first tenancy migration and nothing ever wrote
+it; these are what reach it.
+
+Suspension stops **workspace-scoped** operations — every one of them, because enforcement
+is centralised in `get_active_workspace`, which reads `Tenant.is_active` on every
+request. A route cannot forget it, and a token minted before the suspension stops working
+at once rather than at expiry.
+
+It leaves everything else alone. Memberships, data, subscription and number claims are
+untouched, so `restore` returns the workspace to precisely the state it was in. **No
+session is revoked**, deliberately: bumping `token_version` would sign those people out of
+every *other* workspace they belong to, which punishes the wrong people for a decision
+about one workspace. Their account keeps working; this workspace stops.
+
+Restoration is not a general-purpose undo. Somebody an administrator had removed stays
+removed; somebody the platform had disabled stays disabled.
+
+Billing is untouched by both — see [BILLING.md](BILLING.md), which states that plainly
+because it is the decision most likely to be assumed rather than read.
+
+### Errors
+
+Lifecycle conflicts are `409` with a stable `code`, never `500`. A well-formed request
+from an authorized caller that the *state* refuses is not a server error.
+
+| Code | Meaning |
+| --- | --- |
+| `last_workspace_owner` | Leaving or removal would leave the workspace with no owner |
+| `account_owns_workspaces` | The account is the last owner of workspaces listed in `details.workspaces` |
+| `ownership_transfer_invalid` | The target is not an eligible active member |
+| `workspace_confirmation_invalid` | The typed address does not match |
+| `workspace_deleted` | The workspace has been tombstoned |
+| `workspace_already_suspended` / `workspace_not_suspended` | The state transition does not apply |
+| `workspace_limit_reached` | The account already owns `MAX_OWNED_WORKSPACES_PER_USER` |
+| `password_required` | The account has no password to prove; set one first |
+
+## Closing an account
+
+`DELETE /auth/me` — the same resource `GET /auth/me` describes, the authenticated
+account. There is **no `user_id` in the request**, which is what distinguishes it from
+`DELETE /platform/users/{user_id}`: the target is always the caller, and a field that
+could name somebody else would make this a global user-deletion endpoint with a guard in
+front of it. Extra fields are rejected rather than ignored, so smuggling one is a `422`.
+
+**The current password is required.** An account with none — created by Google sign-in —
+is refused with `409 password_required` and told to set one at `/auth/password/set`. That
+is the strong answer, not the convenient one: setting a password bumps the token version
+and emails the address on the account, so somebody holding only a stolen session cannot
+reach this route without the real owner being told. It is the same rule disconnecting
+Google already follows (ADR-057). A "recent authentication" check in its place would
+assert something already true — an access token is at most fifteen minutes old by
+construction — and a refresh token can mint fresh ones for two weeks without anybody
+proving anything.
+
+**Owned workspaces are resolved first.** If the caller is the last active owner of any
+live workspace, the answer is `409 account_owns_workspaces` carrying those workspaces —
+and only those; nothing about a tenant the caller does not belong to appears. They must
+transfer ownership or delete each one first. An already-deleted workspace does not count,
+so somebody who has already wound their business down is not trapped.
+
+On success: every session ends, every membership is withdrawn (revoked, not deleted, so
+the trail keeps who left and when), the identity is tombstoned, and neither a password
+nor Google will open it again — the federated identity row is deliberately **kept**, so
+`GoogleAuthService` finds it, sees `deleted_at` and refuses, rather than the subject being
+freed to create a new account on an address the tombstone still holds. The address is not
+released. Nobody else's account is touched.
 
 ### Removing a member
 
@@ -496,7 +666,8 @@ Readmission reuses the same membership row, so the removal and the return are bo
 
 Platform authority is a property of the user, not of a membership. Owning a workspace grants nothing here, and holding a platform role grants nothing inside a workspace — a platform administrator reading these figures still cannot open a customer's inbox.
 
-- **Almost read-only on purpose.** The three writes here — recording a payment, voiding an invoice, enabling or disabling an account — are each audited. Suspending or deleting a *workspace* is still absent, no longer for want of an audit trail but because the product has no answer for what happens to a suspended workspace's in-flight conversations.
+- **Writes are the exception and each one is argued.** Recording a payment asserts that somebody saw money arrive; voiding an invoice withdraws one that should not have been issued; enabling, disabling and deleting an account act on a *global* identity, which is why they are platform authority; and suspending or restoring a workspace stops or resumes service for somebody else's business. All are audited, and platform staff are not exempt from the trail.
+- **Force-deleting a customer's workspace is still absent, now deliberately.** Ending the relationship is the customer's decision (`DELETE /workspace`). Staff who genuinely must remove one are doing something that deserves a runbook rather than a button — see [RUNBOOK.md](RUNBOOK.md).
 - **No revenue figures**, and none until there are subscriptions to compute them from. A plausible zero is worse than an absent field.
 - **`/tenants` uses offset paging**, unlike the cursors elsewhere: the list is sorted by name and searched by hand, so an operator wants page three of forty results rather than a stable feed. `total` is the number matching the filter. `search` matches name or address and is escaped, so `%` finds a workspace called "100%" rather than everything.
 - **Each row carries the same counters that workspace sees on its own `/usage`**, so an operator and a customer quote the same number.

@@ -58,7 +58,65 @@ refuses the identity regardless of credentials.
 | Passwordless Google | password no / Google yes | limited until proof, then yes | reset no / verify yes | yes | membership and verification required |
 | Invited new account | password set by acceptance / unlinked no | no session minted | after login | one atomic winner | verification and membership required |
 | Membership revoked | account login yes | account session yes | yes / yes | a new valid invite may reinstate | revoked workspace denied |
-| Tenant suspended or deleted | account login yes | account session yes | yes / yes | account-level acceptance may succeed | that tenant's business actions denied |
+| Tenant suspended | account login yes | account session yes | yes / yes | account-level acceptance may succeed | that tenant's business actions denied (403) |
+| Tenant deleted | account login yes | account session yes | yes / yes | account-level acceptance may succeed | that tenant's routes not found (404 — membership withdrawn) |
+| Self-deleted | no / no; tombstone not reused | no / no | neutral no-op / no | refused | no |
+
+## Closing an account
+
+`DELETE /auth/me` closes the caller's own account. It is the same resource
+`GET /auth/me` describes, and it names no target: the authenticated caller is
+always the one deleted, which is what keeps it from being a global user-deletion
+endpoint that happens to have a guard in front of it today.
+
+**Proof is the current password.** A passwordless account — one created by
+Google sign-in — is refused with `409 password_required` and directed to
+`POST /auth/password/set`. This is the same position `unlink` already takes
+(ADR-057), and it is stronger than the alternative rather than more convenient:
+setting a password raises `token_version` and sends a notice to the address on
+the account, so somebody holding a stolen session cannot close the account
+without the owner being told. Requiring "recent authentication" instead would
+assert something already true — an access token is at most `ACCESS_TOKEN_TTL`
+old by construction — while a refresh token mints fresh ones for a fortnight.
+
+**Ownership is resolved before deletion, never after.** The account cannot close
+while it is the last active owner of a live workspace; the refusal carries those
+workspaces so the person can transfer ownership or delete them. Workspaces
+already tombstoned do not count, so somebody who has wound their business down
+is not trapped.
+
+**What deletion does.** In one unit of work: every membership withdrawn (revoked
+rather than deleted, so the trail keeps who left and when), `deleted_at` set,
+`is_active` cleared, `token_version` raised. Every access and refresh token dies
+with the bump; password login finds no live row; Google login resolves the
+identity, sees `deleted_at`, and refuses.
+
+**What it deliberately does not do.** It does not release the address, does not
+delete the federated identity, does not touch the audit trail, and does not
+reach any other account. The `SET NULL` foreign keys on `analytics_events`,
+`audit_logs`, `conversations`, `leads`, `messages` and the rest mean history
+keeps its shape and simply stops naming the person; `audit_logs.actor_label`
+holds their address as a copy, which is the entire reason it is a copy.
+
+### The tombstone policy, stated
+
+Unchanged by this work and written down so it is not changed by accident:
+
+- **The email address is reserved for ever.** Re-registration is refused, and so
+  is a Google first-login that resolves to it. Releasing it would let a stranger
+  inherit whatever an old invitation, a colleague's memory or a support ticket
+  still associates with the address.
+- **The federated identity is kept, not deleted.** Deleting it would free the
+  Google `sub` while the address stayed reserved — the next sign-in would try to
+  create an account the unique constraint refuses, which is a `500` where a
+  clean refusal belongs.
+- **There is no undelete.** Not by the person, not by platform staff. Reversing
+  one is a database operation, in [RUNBOOK.md](RUNBOOK.md).
+
+Platform staff close somebody else's account with
+`DELETE /platform/users/{user_id}`, which follows the same policy. Both write
+`user_deleted`; `actor_kind` (`user` versus `platform_staff`) is what tells them
+apart in the trail.
 
 ## Reset abuse budget and outbox credentials
 

@@ -569,6 +569,122 @@ asyncio.run(main())
 PY
 ```
 
+### Suspend a workspace, and restore it
+
+Both are API operations and neither needs the database.
+
+```
+POST /api/v1/platform/tenants/{tenant_id}/suspend   {"reason": "…"}
+POST /api/v1/platform/tenants/{tenant_id}/restore
+```
+
+Find the id from `GET /api/v1/platform/tenants` (search by name or address).
+The reason is free text, is recorded verbatim in the audit entry, and is read by
+colleagues — write the ticket number.
+
+**What suspension does:** every workspace-scoped route refuses on the next
+request. **What it does not do:** revoke anybody's session (they stay signed in
+and keep their *other* workspaces), touch memberships, touch data, or touch
+billing. The subscription keeps running — if the intent is to stop charging,
+cancel the subscription as a separate, deliberate act. See
+[BILLING.md](BILLING.md).
+
+Restoration gives back exactly what suspension took. It does not readmit
+somebody an administrator had removed, and does not re-enable an account the
+platform had disabled. If a customer says they still cannot get in after a
+restore, that is why — check `memberships.status` and `users.is_active` before
+assuming the restore failed.
+
+### A workspace was deleted and should not have been
+
+There is **no undelete API**, in either direction. Deletion is the customer's
+decision, and a button that let staff reopen a business relationship the
+customer ended would be worse than the inconvenience of this procedure.
+
+Confirm first, from the audit trail, who did it and when:
+
+```sql
+SELECT occurred_at, actor_label, target_label, metadata
+FROM audit_logs
+WHERE action = 'workspace_deleted' AND target_id = :tenant_id;
+```
+
+Reversing it needs two writes, and the second is the one people forget —
+deletion revokes every membership, so clearing `deleted_at` alone produces a
+workspace nobody can enter:
+
+```sql
+BEGIN;
+UPDATE tenants SET deleted_at = NULL WHERE id = :tenant_id;
+-- Only the memberships this deletion revoked. `revoked_at` is stamped with the
+-- deletion's own timestamp, so it identifies them without touching anybody
+-- removed for an unrelated reason beforehand.
+UPDATE memberships
+SET status = 'active', revoked_at = NULL, revoked_by_id = NULL
+WHERE tenant_id = :tenant_id AND revoked_at = :deleted_at;
+COMMIT;
+```
+
+Take `:deleted_at` from `tenants.deleted_at` **before** clearing it. Check the
+roster afterwards and confirm there is at least one active owner; if the last
+owner also closed their account, promote somebody by hand
+(`UPDATE memberships SET role = 'tenant_owner' …`) rather than leaving a
+workspace nobody can administer.
+
+### Erase a deleted workspace's data
+
+**Not automated, and deliberately so.** There is no deferred-job infrastructure
+in this repository that could run a purge reliably, and a scheduler that claimed
+to and did not would be worse than none.
+
+When a retention or erasure request requires it, work outward from the tenant
+and stop before the financial records:
+
+1. Confirm the tombstone: `SELECT deleted_at FROM tenants WHERE id = :tenant_id`
+   — non-null, and old enough to satisfy whatever retention period applies.
+2. Delete conversational and knowledge data first (`messages`, `message_media`,
+   `message_sentiments`, `conversations`, `contacts`, `documents`,
+   `document_chunks`, `knowledge_bases`, `leads` and their notes and
+   activities, `follow_ups`, `campaigns`, `campaign_recipients`).
+3. Remove stored objects for that tenant from the object store. The database
+   holds keys, not files, so a row deletion does not reclaim storage.
+4. **Stop.** Do not delete `invoices`, `payments`, `payment_events` or
+   `audit_logs`. Those are the accounting and evidentiary record and outlive the
+   workspace on purpose. If an erasure request genuinely reaches them, that is a
+   legal decision and not a runbook one.
+5. Provider-side records (Paymob's own transaction history) are not reachable
+   from here and need their own request.
+
+Deleting the `tenants` row itself would cascade through twenty-eight tables,
+including step 4's. Do not.
+
+### Close somebody's account on their behalf
+
+```
+DELETE /api/v1/platform/users/{user_id}
+```
+
+Irreversible, and there is no `enable` counterpart. Before running it, check
+whether the person is the last owner of any live workspace — the platform route,
+unlike the self-service one, does **not** refuse for that:
+
+```sql
+SELECT t.slug
+FROM memberships m
+JOIN tenants t ON t.id = m.tenant_id
+WHERE m.user_id = :user_id
+  AND m.status = 'active'
+  AND m.role = 'tenant_owner'
+  AND t.deleted_at IS NULL
+  AND (SELECT count(*) FROM memberships o
+       WHERE o.tenant_id = m.tenant_id
+         AND o.status = 'active'
+         AND o.role = 'tenant_owner') = 1;
+```
+
+Any row returned is a workspace that will be left with no owner. Promote
+somebody there first.
+
 ## What to watch
 
 **Start with the metrics.** `/metrics` publishes request rates and latency,

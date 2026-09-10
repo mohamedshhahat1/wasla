@@ -206,6 +206,25 @@ def test_the_billing_subsystem_the_documentation_describes_is_importable() -> No
         ("saved cards", "There is no card on file"),
         ("email", "No message has ever been delivered by Resend"),
         ("whatsapp", "configuration only until the WhatsApp phase lands"),
+        # The Google document carried a build-state banner saying none of it
+        # had been executed, written when the session had no interpreter. It
+        # survived the arrival of PostgreSQL, a full test suite and 36
+        # passing integration tests, which is precisely the unfalsifiable
+        # shape the rest of this list exists to hold down.
+        ("google sign-in", "None\n> of it has been executed"),
+        # The platform surface said suspending a workspace was absent for
+        # want of a product decision. It ships.
+        ("platform", "Suspending or deleting a *workspace* is still absent"),
+        # The account-lifecycle section of SECURITY.md said memberships had
+        # no status column and no members router existed. Both stopped being
+        # true with ADR-038 and the sentence stayed for two more phases.
+        ("account lifecycle", "`memberships` has no\n  `status` column"),
+        # And API.md said removing somebody from one workspace did not
+        # exist, in the same paragraph that explains why it should.
+        (
+            "member removal",
+            "is a different operation against a different object, and does not exist yet",
+        ),
     ],
 )
 def test_a_corrected_claim_has_not_come_back(subject: str, phrase: str) -> None:

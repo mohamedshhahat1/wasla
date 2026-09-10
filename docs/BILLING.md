@@ -105,6 +105,67 @@ Every attempt is a row. A failure is not forgotten when a later attempt succeeds
 
 `UNIQUE(provider, provider_reference)` is the processor's idempotency key: two webhooks about one charge become one payment.
 
+## What the workspace lifecycle does to billing
+
+The decision most likely to be assumed rather than read, so it is stated here in
+full. A subscription belongs to a **workspace**, not to an account: one person
+who owns three workspaces has three subscriptions, and closing their account
+does not touch any of them (they must hand the workspaces over first — see
+[AUTH.md](AUTH.md)).
+
+| Lifecycle event | Subscription | Invoices and payments | Provider records |
+|---|---|---|---|
+| **Workspace created** (`POST /workspaces`) | started on `DEFAULT_PLAN_CODE`, on trial if the plan offers one | — | — |
+| **Workspace suspended** (platform) | **untouched**; the period keeps running | untouched | untouched |
+| **Workspace restored** (platform) | untouched | untouched | untouched |
+| **Workspace deleted** (owner) | **untouched**; nothing is cancelled | retained in full | retained |
+| **Account closed** (self or staff) | untouched — a subscription is a workspace's | retained | retained |
+
+Three of those rows say "untouched", and each is a decision rather than an
+omission.
+
+**Suspension does not stop the money.** Platform suspension is an operational
+stop — an abuse investigation, a legal hold — and is not a statement about
+billing. The billing sweep has its own, separate suspension for an unpaid
+invoice (`SubscriptionStatus.SUSPENDED`, ADR-061), and conflating the two would
+mean an abuse investigation silently cancelled a paying customer's plan, or that
+restoring a workspace resurrected a subscription the sweep had deliberately
+ended. An operator who means to stop charging cancels the subscription as well;
+that is a second, deliberate act, and the audit trail records `workspace_suspended`
+and `subscription_cancelled` as the separate decisions they are.
+
+**Deletion does not cancel, and does not erase.** This is the one most likely to
+look like a bug. Twenty-eight tables cascade from `tenants` — `invoices`,
+`payments` and `payment_events` among them — so a hard delete would destroy
+financial records to satisfy a button, and nobody would be asked. Deletion is a
+tombstone (`tenants.deleted_at`), so every row stays addressable for the
+accounting, tax and dispute questions that arrive *after* a customer leaves.
+
+### What that leaves open, honestly
+
+These are product decisions this work did not make, and it is better to name
+them than to guess:
+
+- **Nothing cancels the subscription when a workspace is deleted.** For the
+  current catalogue that is harmless — the default plan is free and no provider
+  charge recurs without a saved card and an open subscription — but a workspace
+  deleted while on a paid recurring plan would keep its period, and the
+  recurring sweep would keep looking at it. An operator closing a paying
+  customer should cancel the subscription first. **Wiring deletion to an
+  automatic cancellation is the obvious next step and is deliberately not
+  guessed at**, because "immediately" and "at period end" are different
+  refund positions and neither is written down anywhere.
+- **No refund is issued by any lifecycle operation.** A customer who deletes a
+  workspace mid-period is not refunded automatically. Refunds remain the
+  deliberate, audited operation described under *Refunds* below.
+- **Provider-side customer records are not deleted.** Paymob holds its own
+  transaction history and this system does not reach into it. Any erasure
+  request that has to cover the provider is a manual step.
+- **There is no grace period during which a deleted workspace can be restored
+  through the API.** The tombstone is immediate and restoration is a database
+  operation ([RUNBOOK.md](RUNBOOK.md)). A grace window is a reasonable product
+  decision; it is not this one.
+
 ## Provider independence
 
 `PaymentProvider` is one method — charge this amount, with this idempotency key, and say what happened. Subscriptions, plans and periods stay Wasla's, because the moment a service knows what a "payment intent" is, the system belongs to that processor. A decline is an outcome, not an exception; only an unreachable provider raises.

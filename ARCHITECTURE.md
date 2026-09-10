@@ -525,7 +525,7 @@ Cross-tenant reads answer `not_found`, never `forbidden`, so error codes cannot 
 
 ## 17. SaaS owner architecture
 
-**Status: Implemented** — the platform role authorization layer, cross-workspace reporting, invoice administration (recording a payment, voiding an invoice), account enable/disable, the audit-log view and the operator command that grants the first platform role (ADR-094). Suspending or deleting a *workspace* is still absent, for the product reason below rather than for want of a trail.
+**Status: Implemented** — the platform role authorization layer, cross-workspace reporting, invoice administration (recording a payment, voiding an invoice), account enable/disable/delete, workspace suspension and restoration, the audit-log view and the operator command that grants the first platform role (ADR-094). *Force-deleting* a customer's workspace is deliberately absent; the reason is below.
 
 Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated: a platform role grants nothing inside a workspace, and owning a workspace grants nothing across the platform. Both directions are tested.
 
@@ -535,7 +535,11 @@ What it answers today, under `/api/v1/platform/*` and behind the platform-role d
 
 What it deliberately does not answer: revenue, MRR, ARR and churn, which are questions about subscriptions that do not exist until Phase 13; and estimated AI cost, which would need per-model prices stored nowhere — token counts are real, and a cost derived from invented prices would not be. A plausible zero on a dashboard is worse than an absent field.
 
-It is **almost** read-only, and the exceptions are narrow and audited: recording a payment somebody has seen arrive, voiding an invoice that should not have been issued, and disabling or restoring an account. Suspending or deleting a *workspace* remains absent — no longer for want of an audit trail, which exists (ADR-033), but because the product has no answer for what happens to a suspended workspace's in-flight conversations.
+It is **mostly** read-only, and every exception is narrow and audited: recording a payment somebody has seen arrive, voiding an invoice that should not have been issued, disabling, restoring or deleting an account, and suspending or restoring a workspace.
+
+`TenantStatus.SUSPENDED` existed from the first tenancy migration and nothing wrote it, so the state was declared and unreachable; `POST /platform/tenants/{id}/suspend` is what reaches it. Suspension stops every workspace-scoped route at once — enforcement is centralised in `get_active_workspace`, which reads `Tenant.is_active` on every request, so no route had to be changed and none can forget. It revokes no sessions, touches no memberships and touches no billing, which is what makes `restore` an exact inverse rather than an approximation.
+
+**Force-deleting a customer's workspace remains absent, and now deliberately.** Ending the business relationship is the customer's decision (`DELETE /workspace`, owner-only, with the address typed to confirm). Staff who genuinely must remove one are doing something that deserves a runbook rather than a button. The earlier reason recorded here — that the product had no answer for a suspended workspace's in-flight conversations — has been answered: a suspended workspace serves no requests, its workers see an inactive tenant, and nothing about the conversations changes, because suspension is reversible and destroying state would make it not.
 
 The reads on this surface are themselves audited (ADR-095), which no other read in the API is. A workspace administrator reading their own inbox is looking at their own business; a platform administrator reading the estate is looking at somebody else's, and "who looked at our workspace" is a question a customer is entitled to have answered.
 

@@ -3,12 +3,75 @@
 How somebody signs in to Wasla with a Google account, why the flow is shaped
 the way it is, and what has and has not been proven about it.
 
-> **Build state.** Every piece described here is written and committed. **None
-> of it has been executed.** There was no Python interpreter, no PostgreSQL, no
-> Redis, no Docker and no network available while it was written, so no test
-> has run, no migration has been applied and no request has been served. The
-> table at the end of this document says which claims are code and which are
-> observations. Read it before deploying anything.
+> **Build state.** Written, committed and **executed.** The banner here used to
+> say the opposite — "none of it has been executed", from a session with no
+> interpreter, no PostgreSQL and no network — and it stayed after the tooling
+> arrived, which made it exactly the kind of unfalsifiable claim this
+> documentation set has been burned by before.
+>
+> What now runs against real PostgreSQL: `tests/integration/test_google_endpoints.py`
+> (36 tests over the authorize, callback, link and unlink routes),
+> `tests/unit/test_google_oidc.py` (token verification, including the hostile
+> shapes), and the deleted-account refusal in
+> `tests/integration/test_account_self_deletion.py`.
+>
+> What is still **not** executed is a round trip against Google itself: the
+> issuer's socket is replaced in every test, because the alternative needs a
+> real Google project and a browser. Signature verification, nonce and PKCE
+> handling are proven against constructed tokens rather than against Google's.
+> The table at the end of this document says which claims are code and which are
+> observations.
+
+
+## Onboarding after a first Google sign-in
+
+A first Google sign-in creates an account and **no workspace**. That is
+deliberate and argued in ADR-047: `register` needs a business name and a slug
+that Google does not supply, and inventing one from a display name is a trap,
+because `SLUG_PATTERN` is strict ASCII and a great many real names are not.
+
+What used to follow was a dead end. Such an account held a valid session,
+`active_workspace: null`, no memberships, and no route that could create one —
+so every workspace-scoped request answered `403 "No workspace is selected for
+this session"` and the only way forward was being invited somewhere by somebody
+else.
+
+`POST /workspaces` is the way out, and the onboarding flow is:
+
+```
+POST /auth/google/callback        → session, active_workspace: null
+   ↓  the client asks for a business name and address
+POST /workspaces                  → tenant + owner membership + subscription
+   ↓
+POST /auth/workspace              → an access token carrying the new `tid`
+   ↓
+any workspace-scoped route
+```
+
+Two details worth knowing when building that screen:
+
+- **The creation response carries no token.** Selecting the workspace is a
+  separate call, because token issuance lives in one place (ADR-058) and a
+  second, subtly different minting path is how the `ver` claim went missing the
+  first time.
+- **The account must be verified.** A Google account whose mailbox domain Google
+  is authoritative for — Gmail, or a matching `hd` claim — is stamped verified at
+  enrolment and passes straight through. A third-party address authenticates by
+  stable `sub` but stays in the limited onboarding state until its emailed code
+  is confirmed, so the client may need to route through verification first.
+
+Closing such an account is the one place the passwordless shape is refused
+rather than accommodated: `DELETE /auth/me` requires the current password, and a
+Google-only account is told to set one at `POST /auth/password/set` first. See
+[AUTH.md](AUTH.md) — the short version is that setting a password notifies the
+real owner, so a stolen session alone cannot close the account quietly.
+
+**Deleting an account does not free the Google subject.** The
+`user_identities` row is kept, so a later sign-in with the same Google account
+resolves to the tombstoned user and is refused (`account_deleted` in the trail).
+Deleting the row would free the `sub` while the email address stayed reserved,
+and the next sign-in would try to create an account the unique constraint
+refuses — a `500` where a clean refusal belongs.
 
 ## What this is, and is not
 

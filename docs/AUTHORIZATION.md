@@ -426,6 +426,10 @@ which every workspace-scoped route already resolves — so a revocation takes
 effect on the next request without touching the person's account, their other
 workspaces or their tokens.
 
+The rest of the lifecycle followed later — creating, transferring, closing and
+suspending a workspace, and closing an account. §6.16 states the resulting
+authority in one table.
+
 ### 6.9 Reuse of a refresh token was detected and not acted on — fixed
 
 Recorded as W-10. The presented token was refused; the thief's chain was
@@ -570,6 +574,50 @@ tool name, the wording of the refusal, and hostile arguments. The last found the
 defence is stronger than expected — an undeclared argument such as `tenant_id`
 is rejected before the handler is entered, so a model cannot smuggle one at all,
 and `ToolContext` has no field its arguments could reach in any case.
+
+## 6.16 Lifecycle authority, as it now stands
+
+Added by the account and workspace lifecycle work. The table is the whole
+policy; everything under it is the reasoning for a line somebody will otherwise
+be tempted to relax.
+
+| | Use workspace | Leave | Manage members | Transfer ownership | Delete workspace | Suspend workspace | Delete own account | Delete another account |
+|---|---|---|---|---|---|---|---|---|
+| **Member** | yes | yes¹ | no | no | no | no | yes¹ | **no** |
+| **Workspace admin** | yes | yes¹ | yes² | no | no | no | yes¹ | **no** |
+| **Workspace owner** | yes | yes¹ | yes | yes | yes³ | no | yes¹ | **no** |
+| **Platform admin** | no⁴ | — | no⁴ | no⁴ | no | yes | yes¹ | yes |
+| **Platform owner** | no⁴ | — | no⁴ | no⁴ | no | yes | yes¹ | yes |
+
+1. Subject to the ownership rules: you cannot leave, and cannot close your
+   account, while you are the last active owner of a live workspace.
+2. An admin may not remove an owner — otherwise an administrator promotes
+   themselves by subtraction.
+3. Owner only, with the workspace's address typed to confirm.
+4. **Platform authority is not workspace authority.** A platform administrator
+   reading the estate still cannot open a customer's inbox, and holding a
+   platform role grants nothing inside a workspace. The two are separate
+   dependencies over separate columns, and the separation is the point.
+
+**The column that matters most is the last one.** No workspace role reaches
+another person's Wasla identity. `DELETE /auth/me` takes no target — the
+authenticated caller is the only account it can close, and an extra field in the
+payload is a `422` rather than an ignored key — and `DELETE /platform/users/{id}`
+requires a platform role. There is no composition of the two that lets a
+workspace owner delete a colleague's account, and that is asserted at the routes
+rather than argued here.
+
+**Deviations from the target policy, and why.** Two, both deliberate:
+
+- **Platform staff cannot force-delete a workspace.** The target model offers it
+  as optional; it is not built. Ending the business relationship is the
+  customer's decision, and staff who genuinely must remove one are doing
+  something that deserves a runbook rather than a button. They can suspend,
+  which is the reversible operation an investigation actually needs.
+- **A workspace admin cannot change the workspace's address**, though they can
+  rename it. A slug is what invitation links, bookmarks and support tickets
+  name; changing it redirects all of them and frees the old one for somebody
+  else to claim. That is an owner's decision.
 
 ## 7. Known gaps, not fixed here
 

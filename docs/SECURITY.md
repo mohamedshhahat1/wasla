@@ -266,26 +266,77 @@ later that forgets. The hostile shapes are enumerated in
 code, and no refresh token, because `access_type=online` means Google never
 issues one. "It is never issued" is a stronger guarantee than "do not store it".
 
-## Account lifecycle — what is still missing
+## Account and workspace lifecycle
 
-Stated rather than carried silently.
+This section was a list of gaps and had gone badly stale — it claimed
+`memberships` has no `status` column and that no `/members` router exists, both
+of which stopped being true with ADR-038, and it predated the workspace
+lifecycle entirely. What follows is the current state, with the real remaining
+gaps at the end.
 
-- **A workspace cannot remove or suspend a member.** `memberships` has no
-  `status` column and there is no `/members` router. Platform staff can disable
-  a person's whole account, and a person can end their own sessions, but a
-  workspace owner cannot withdraw one colleague's access to one workspace. This
-  is the tenant-scoped counterpart to what ADR-036 built, and it is the largest
-  remaining gap in access control.
-- **Refresh-token families are not revoked on reuse.** Presenting a spent token
-  is detected and refused, but the chain a thief already established is not torn
-  down by it. Bumping the version does tear it down, so the lever exists — it is
-  simply not pulled automatically on reuse.
-- **`POST /auth/logout` is unauthenticated and unlimited.** Revoking a token you
-  hold is legitimate, but so is revoking one you stole.
-- **No email verification.** A decision, not a gap; see ADR-042.
+### The three operations, and why they are three
+
+Collapsing any pair of these would hand somebody authority they must not have.
+
+| Operation | Route | Reaches | Never reaches |
+|---|---|---|---|
+| **Remove a member** | `DELETE /workspace/members/{user_id}` | one membership, in one workspace | the person's account, sessions, or other workspaces |
+| **Delete a workspace** | `DELETE /workspace` (owner) | the tenant and its memberships | any member's account, or any other tenant |
+| **Delete an account** | `DELETE /auth/me` (self) or `DELETE /platform/users/{id}` (staff) | one global identity | anybody else's identity |
+
+**No workspace role reaches a global identity.** Not member, not admin, not
+owner. `DELETE /auth/me` names no target, and `DELETE /platform/users/{id}`
+requires a platform role that owning a workspace does not confer — so there is
+no combination of the two that gets there. This is asserted at the routes in
+`tests/integration/test_account_self_deletion.py`, not merely intended.
+
+### Closing an account
+
+Requires the current password. An account with none — created by Google sign-in
+— is refused and told to set one first, which is the same rule disconnecting
+Google follows (ADR-057) and is deliberately not softened: setting a password
+bumps the token version and emails the account, so a stolen session alone cannot
+reach this route silently. A "recent authentication" check would be the weak
+option here, because an access token is at most fifteen minutes old by
+construction and a refresh token can mint fresh ones for a fortnight.
+
+Refused while the caller is the last owner of a live workspace, with those
+workspaces named in the response so a client can offer the two ways out. The
+alternative is silently stranding a workspace nobody can administer.
+
+On success the identity is tombstoned, every session dies, every membership is
+withdrawn, and the federated identity row is **kept** — so a later Google
+sign-in resolves to a deleted account and is refused, rather than the subject
+being freed to create a new account on an address the tombstone still holds.
+
+**The address is reserved permanently**, and that is a decision rather than a
+side effect: releasing it would let a stranger register the address a closed
+account used and inherit whatever a colleague's memory, an old invitation or a
+support ticket still associates with it.
+
+### Suspending a workspace
+
+Platform authority, reversible, and enforced in one place:
+`get_active_workspace` reads `Tenant.is_active` on every request, so every
+workspace-scoped route refuses at once and none of them had to be changed. No
+session is revoked — that would sign people out of their *other* workspaces,
+which punishes the wrong people for a decision about one.
+
+### What is genuinely still missing
+
+- **No scheduled purge of a deleted workspace's data.** Deletion is a
+  tombstone; erasure is an operator step in [RUNBOOK.md](RUNBOOK.md). There is
+  no deferred-job infrastructure here that could run one reliably, and a method
+  claiming to schedule erasure while nothing ran would be worse than none.
+- **No Google re-authentication challenge.** A `prompt=login` flow would let a
+  passwordless account prove itself without acquiring a password. Until it
+  exists, such an account sets a password first.
 - **Revocation is per-user, not per-session.** Signing one device out while
   leaving another alone would need a session table (ADR-036 records why one was
   not built).
+- **`POST /auth/logout` is unauthenticated.** Revoking a token you hold is
+  legitimate, but so is revoking one you stole. It now carries a per-address
+  budget (ADR-040), which bounds the abuse rather than removing it.
 
 ## Response surface
 
