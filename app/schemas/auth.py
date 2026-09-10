@@ -15,6 +15,12 @@ from app.db.models import PlatformRole, TenantRole
 # way in, so a workspace address is never case-sensitive.
 SLUG_PATTERN: Final = r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$"
 MAXIMUM_NAME_LENGTH: Final = 200
+# Two characters, so a workspace address is at least pronounceable and a
+# single-letter land grab is not on offer. Named rather than repeated as a
+# literal: `app/schemas/workspace.py` builds the same field for the same
+# column, and the two rules disagreeing would mean an address accepted by
+# one creation route and refused by the other.
+MINIMUM_SLUG_LENGTH: Final = 2
 MAXIMUM_SLUG_LENGTH: Final = 100
 # A refresh token this system issues is a compact HS256 JWT of a few hundred
 # bytes. Four kilobytes is the size everything else in the HTTP world treats as
@@ -44,7 +50,7 @@ class RegistrationRequest(_Payload):
     full_name: str | None = Field(default=None, max_length=MAXIMUM_NAME_LENGTH)
     workspace_name: str = Field(min_length=1, max_length=MAXIMUM_NAME_LENGTH)
     workspace_slug: str = Field(
-        min_length=2,
+        min_length=MINIMUM_SLUG_LENGTH,
         max_length=MAXIMUM_SLUG_LENGTH,
         pattern=SLUG_PATTERN,
     )
@@ -68,7 +74,7 @@ class LogoutRequest(_Payload):
 
 
 class WorkspaceSwitchRequest(_Payload):
-    workspace_slug: str = Field(min_length=2, max_length=MAXIMUM_SLUG_LENGTH)
+    workspace_slug: str = Field(min_length=MINIMUM_SLUG_LENGTH, max_length=MAXIMUM_SLUG_LENGTH)
 
 
 class PasswordChangeRequest(_Payload):
@@ -104,6 +110,23 @@ class PasswordSetRequest(_Payload):
         min_length=MINIMUM_PASSWORD_LENGTH,
         max_length=MAXIMUM_PASSWORD_LENGTH,
     )
+
+
+class AccountDeleteRequest(_Payload):
+    """Proof that the person closing the account is the person who owns it.
+
+    The current password, and nothing else. There is deliberately no `user_id`:
+    the target is always the authenticated caller, and a field that could name
+    somebody else would make this a global user-deletion endpoint that happened
+    to have a guard in front of it today.
+
+    An account with no password - one created by Google sign-in - is refused
+    with `password_required` and told to set one through `/auth/password/set`.
+    See `AccountService.delete_self` for why that is the strong answer here
+    rather than the convenient one.
+    """
+
+    current_password: str = Field(min_length=1, max_length=MAXIMUM_PASSWORD_LENGTH)
 
 
 class AccountStateResponse(BaseModel):

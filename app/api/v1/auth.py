@@ -16,6 +16,7 @@ from app.core.dependencies import SessionDep, SettingsDep
 from app.db.models import User
 from app.schemas.auth import (
     AccessTokenResponse,
+    AccountDeleteRequest,
     AccountStateResponse,
     LoginRequest,
     LogoutRequest,
@@ -293,6 +294,61 @@ async def set_password(
     user = await accounts.set_password(
         user=current_user.user,
         new_password=payload.new_password,
+    )
+    return _account_state(user)
+
+
+@router.delete(
+    "/me",
+    response_model=AccountStateResponse,
+    summary="Close this account permanently",
+    responses={
+        401: {"description": "The current password is incorrect."},
+        409: {"description": ("The account has no password to prove, or still owns workspaces.")},
+    },
+)
+async def delete_account(
+    payload: AccountDeleteRequest,
+    current_user: CurrentUserDep,
+    accounts: AccountServiceDep,
+    # Counted per client address like the rest of the credential surface: this
+    # route verifies a password, so it is guessable in principle, and what it
+    # does on success cannot be undone.
+    limit: AuthRateLimit,
+) -> AccountStateResponse:
+    """Close your own account. The caller is always the target.
+
+    `DELETE` on the same path `GET /auth/me` describes, because it is the same
+    resource: the authenticated account. There is no `user_id` anywhere in the
+    request, which is what distinguishes this from `DELETE /platform/users/{id}`
+    - that one is platform staff acting on somebody else and requires a platform
+    role. **A workspace owner or administrator has no route to another person's
+    Wasla identity at all**, and this is not one: removing somebody from a
+    workspace is `DELETE /workspace/members/{user_id}` and reaches only their
+    membership.
+
+    **The current password is required**, and an account that has none - created
+    by Google sign-in - is refused with `password_required` and told to set one
+    at `/auth/password/set`. That route bumps the token version and emails the
+    address on the account, so somebody holding only a stolen session cannot
+    reach this one without the real owner being told. It is the same rule
+    disconnecting Google already follows (ADR-057).
+
+    **Workspaces are resolved first.** If the account is the last active owner of
+    any live workspace, the response is 409 `account_owns_workspaces` carrying
+    those workspaces, and the person must transfer ownership or delete each one
+    before this succeeds. Deleting the account anyway would leave those
+    workspaces with nobody able to invite an owner or close them.
+
+    On success every session ends immediately, the identity is tombstoned, every
+    membership is withdrawn, and neither a password nor Google will ever open
+    the account again. The address is not released: it stays on the tombstoned
+    row, so it cannot be re-registered and cannot be used to claim the deleted
+    account's history. Nobody else's account is touched.
+    """
+    user = await accounts.delete_self(
+        user=current_user.user,
+        current_password=payload.current_password,
     )
     return _account_state(user)
 

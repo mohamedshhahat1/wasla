@@ -32,6 +32,9 @@ CONTEXTS: dict[EmailTemplate, dict[str, str]] = {
     EmailTemplate.SESSIONS_REVOKED: {},
     EmailTemplate.ACCOUNT_DISABLED: {},
     EmailTemplate.ACCOUNT_ENABLED: {},
+    # No variables: an account closure notice names nothing, not even the
+    # workspaces the person belonged to. Those belong to other people now.
+    EmailTemplate.ACCOUNT_DELETED: {},
     # The only template whose secret is read and retyped rather than clicked
     # (ADR-043). A `KeyError` here is this dictionary's whole purpose: adding a
     # member to the enum without a context is what made these four tests fail

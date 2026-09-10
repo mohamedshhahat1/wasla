@@ -37,6 +37,11 @@ class EmailTemplate(StrEnum):
     SESSIONS_REVOKED = "sessions_revoked"
     ACCOUNT_DISABLED = "account_disabled"
     ACCOUNT_ENABLED = "account_enabled"
+    # The account was closed, by the person who owned it or by platform
+    # staff. Its own template rather than a reuse of the suspension notice,
+    # because the two differ in the only way the reader cares about: one can
+    # be undone by contacting support and this one cannot.
+    ACCOUNT_DELETED = "account_deleted"
     # Proving control of the address on an account
     # (docs/EMAIL_VERIFICATION.md). The only template whose secret is meant to
     # be read and retyped rather than clicked.
@@ -67,6 +72,7 @@ _SUBJECTS: Final[dict[EmailTemplate, str]] = {
     EmailTemplate.SESSIONS_REVOKED: "You were signed out of every Wasla session",
     EmailTemplate.ACCOUNT_DISABLED: "Your Wasla account has been suspended",
     EmailTemplate.ACCOUNT_ENABLED: "Your Wasla account has been restored",
+    EmailTemplate.ACCOUNT_DELETED: "Your Wasla account has been closed",
     # Constant, and in particular *not* the code. A subject line is the one
     # part of a message that shows up on a lock screen, in a notification
     # preview and in somebody else's shoulder-surfing line of sight.
@@ -84,6 +90,7 @@ _REQUIRED_KEYS: Final[dict[EmailTemplate, frozenset[str]]] = {
     EmailTemplate.SESSIONS_REVOKED: frozenset(),
     EmailTemplate.ACCOUNT_DISABLED: frozenset(),
     EmailTemplate.ACCOUNT_ENABLED: frozenset(),
+    EmailTemplate.ACCOUNT_DELETED: frozenset(),
     # Two keys and no more. Not the account id, not the workspace, not the
     # address itself - a message proving control of an inbox does not need to
     # tell that inbox anything about the account it belongs to.
@@ -264,6 +271,30 @@ def render(
                 "Your Wasla account has been restored.",
                 "Sessions from before the suspension remain signed out; sign in "
                 "again to continue.",
+            ],
+            None,
+        )
+    elif template is EmailTemplate.ACCOUNT_DELETED:
+        # Says what is gone and what is not. A person who did this themselves
+        # wants to know their workspaces were not taken down with them; a person
+        # who did not needs to be told plainly that it cannot be undone from a
+        # sign-in page, because that is where they will try first.
+        text = (
+            "Your Wasla account has been closed and every session was signed "
+            "out.\n\n"
+            "You can no longer sign in with this address, including through "
+            "Google. Workspaces you belonged to were not deleted, and their "
+            "other members are unaffected.\n\n"
+            "If you did not do this, contact support immediately."
+        )
+        html_body = _layout(
+            subject,
+            [
+                "Your Wasla account has been closed and every session was signed out.",
+                "You can no longer sign in with this address, including through "
+                "Google. Workspaces you belonged to were not deleted, and their "
+                "other members are unaffected.",
+                "If you did not do this, contact support immediately.",
             ],
             None,
         )
