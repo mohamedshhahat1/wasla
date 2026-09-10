@@ -395,9 +395,7 @@ async def test_five_submissions_of_one_verification_code_verify_once(
                 assert signed_in.status_code == 200, signed_in.text
                 bearer = {"Authorization": f"Bearer {signed_in.json()['access_token']}"}
 
-            monkeypatch.setattr(
-                EmailVerificationRepository, "get_active", synchronised_read
-            )
+            monkeypatch.setattr(EmailVerificationRepository, "get_active", synchronised_read)
 
             async def submit() -> tuple[int, tuple[str, str]]:
                 async with _client(prepared_database, redis) as client:
