@@ -19,6 +19,7 @@ from app.workers.campaign_worker import CampaignWorker
 from app.workers.follow_up_worker import FollowUpWorker
 from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_worker import MediaWorker
+from app.workers.purge_worker import PurgeWorker
 from app.workers.recovery import RecoveryWorker
 from app.workers.retention_worker import RetentionWorker
 from app.workers.runner import (
@@ -149,6 +150,11 @@ def test_each_kind_builds_its_own_worker(settings: Settings) -> None:
         # with nothing to say so. It removes nothing until MEDIA_RETENTION_DAYS
         # is set, but its reconciliation pass still has to run (ADR-078).
         RetentionWorker,
+        # Purge beside it, and present for the same reason once more: a
+        # deployment that runs it nowhere keeps deleted workspaces' data for
+        # ever while its documentation says thirty days, which is a commitment
+        # missed silently rather than an outage anybody notices (ADR-098).
+        PurgeWorker,
         # And upload recovery for the sharpest version of that rule. A
         # deployment running it nowhere has attachments sitting in the bucket
         # that no query will ever finish - the process that would have finished

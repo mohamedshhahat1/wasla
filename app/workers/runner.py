@@ -44,6 +44,7 @@ from app.workers.heartbeat import (
 )
 from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_worker import MediaWorker
+from app.workers.purge_worker import PurgeWorker
 from app.workers.queue import LEASE_RENEWAL_FRACTION, ReliableQueue
 from app.workers.recovery import RecoveryWorker
 from app.workers.retention_worker import RetentionWorker
@@ -60,6 +61,11 @@ BILLING: Final = "billing"
 EMAIL: Final = "email"
 RECOVERY: Final = "recovery"
 RETENTION: Final = "retention"
+# Erasing a deleted workspace once its retention window has passed. Beside
+# retention at the end for the same reason: housekeeping rather than
+# customer-facing work, on a daily clock, and the only other loop whose
+# purpose is to delete things.
+PURGE: Final = "purge"
 UPLOADS: Final = "uploads"
 # Media comes before agent deliberately. It is the order the work flows in -
 # a file is read, then answered - and the order the log lines appear in at
@@ -94,6 +100,7 @@ ALL_KINDS: Final = (
     EMAIL,
     RECOVERY,
     RETENTION,
+    PURGE,
     UPLOADS,
 )
 
@@ -175,6 +182,8 @@ def build_workers(
             workers.append(RecoveryWorker(redis=redis, settings=settings))
         elif kind == RETENTION:
             workers.append(RetentionWorker(database=database, settings=settings))
+        elif kind == PURGE:
+            workers.append(PurgeWorker(database=database, settings=settings))
         elif kind == UPLOADS:
             workers.append(UploadRecoveryWorker(database=database, settings=settings))
     return workers
