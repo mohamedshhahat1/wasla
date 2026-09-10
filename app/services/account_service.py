@@ -45,17 +45,19 @@ from app.core.config import Settings, get_settings
 from app.core.exceptions import (
     AuthenticationError,
     ConflictError,
+    DependencyUnavailableError,
     NotFoundError,
     ValidationError,
 )
 from app.core.logging import get_logger
+from app.core.reauth import ReauthProofStore, ReauthPurpose
 from app.core.security import (
     hash_password,
     validate_password_strength,
     verify_password,
 )
 from app.core.telemetry import observe_lifecycle_event
-from app.db.models import MembershipStatus, Tenant
+from app.db.models import MembershipStatus, Tenant, TenantStatus
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.user import User
 from app.repositories import (
@@ -73,8 +75,17 @@ logger = get_logger(__name__)
 # Stable machine-readable codes for the two refusals a client has to act on
 # rather than merely display. Both are 409: the request was well-formed and the
 # caller was allowed to make it, and the state of the account is what refused.
+# Why a workspace was suspended without anybody asking for it. Written into
+# the audit entry's metadata rather than into a second tenant status: the
+# state *is* suspension, and a parallel "orphaned" status would be a second
+# thing every status check had to learn about for no behavioural difference.
+LAST_OWNER_REMOVED_BY_PLATFORM = "last_owner_removed_by_platform"
 ACCOUNT_OWNS_WORKSPACES = "account_owns_workspaces"
-PASSWORD_REQUIRED = "password_required"  # noqa: S105 - an error code, not a credential
+# No usable proof was supplied. Replaces the old `password_required`, which
+# named the wrong thing once Google re-authentication became an alternative:
+# an account with no password is not missing a password, it is missing a
+# demonstration, and there are now two ways to give one.
+REAUTHENTICATION_REQUIRED = "reauthentication_required"
 
 
 class AccountService:
@@ -92,6 +103,7 @@ class AccountService:
         session: AsyncSession,
         *,
         settings: Settings | None = None,
+        reauth: ReauthProofStore | None = None,
     ) -> None:
         self._session = session
         # Defaulted rather than required so existing construction sites keep
@@ -101,6 +113,27 @@ class AccountService:
         # No tenant: these are platform-level acts on a global identity.
         self._audit = AuditTrail(session)
         self._outbox = EmailOutbox(session, self._settings)
+        # Optional so the many construction sites that never delete an account
+        # keep working unchanged. `delete_self` is the only method that reaches
+        # for it, and it refuses rather than proceeding without one - a route
+        # that forgot to wire the store must not turn into a route that skips
+        # the proof.
+        self._reauth_store = reauth
+
+    @property
+    def _reauth(self) -> ReauthProofStore:
+        """The proof store, or a refusal.
+
+        Fails closed on purpose. A `None` store means the route did not wire
+        one, and the safe reading of "I cannot check this proof" is "this proof
+        is not accepted" - never "no proof was needed".
+        """
+        if self._reauth_store is None:  # pragma: no cover - a wiring defect
+            raise DependencyUnavailableError(
+                "Re-authentication is temporarily unavailable.",
+                details={"dependency": "redis"},
+            )
+        return self._reauth_store
 
     async def _require(self, user_id: uuid.UUID) -> User:
         user = await self._users.get_by_id(user_id)
@@ -157,7 +190,7 @@ class AccountService:
         if user is None:
             raise NotFoundError("No account matches that identifier.")
 
-        orphaned = await self._withdraw_memberships(user)
+        orphaned = await self._withdraw_memberships(user, actor=actor)
 
         # `USER_DELETED`, not `USER_DISABLED` with a flag in the metadata. The
         # old spelling was chosen to avoid a migration and cost more than it
@@ -204,7 +237,13 @@ class AccountService:
         )
         return user
 
-    async def delete_self(self, *, user: User, current_password: str) -> User:
+    async def delete_self(
+        self,
+        *,
+        user: User,
+        current_password: str | None = None,
+        reauthentication_token: str | None = None,
+    ) -> User:
         """Close the caller's own account, irreversibly.
 
         **Only ever the caller.** The signature takes the authenticated `User`
@@ -213,24 +252,30 @@ class AccountService:
         target would be a global user-deletion endpoint available to every
         signed-in person, whatever guard was written in front of it today.
 
-        **The password is the proof, and a passwordless account is refused.**
-        An account with no hash - one created by Google sign-in - is told to set
-        one first, through `POST /auth/password/set`, exactly as `unlink`
-        already refuses to disconnect Google while no password exists (ADR-057).
-        That is not a detour invented to avoid the problem: setting a password
-        bumps `token_version` and emails the address on the account, so an
-        attacker holding nothing but a stolen session cannot reach this route
-        without the real owner being told. A "recent authentication" check in
-        its place would be the weak bypass - an access token is at most fifteen
-        minutes old *by construction*, so requiring recency of one asserts
-        something already true, and a refresh token can mint a fresh one for two
-        weeks without anybody proving anything.
+        **Something beyond the session must be proved, and either proof will
+        do.** A session is not enough: a stolen access token is a session, and
+        this is the one action that cannot be undone. Two things count.
 
-        The alternative worth building one day is a Google re-authentication
-        challenge with `prompt=login`, reusing the linking flow. It is real work
-        - a third flow kind, its own state and binding - and until it exists,
-        requiring the password the product already knows how to set is the
-        honest answer rather than a placeholder.
+        *The current password*, for an account that has one. Verified the same
+        way a login is, and refused the same way.
+
+        *A Google re-authentication proof*, for an account with a linked Google
+        identity. The person went back through Google, the callback checked the
+        returned `sub` against the identity already on this account, and what
+        it left behind is a short-lived single-use token this method spends
+        (`app/core/reauth.py`). It was previously the case that a Google-only
+        account had to set a password before it could leave, which was secure
+        and a poor thing to ask of somebody on their way out; this is the
+        answer that does not require acquiring a credential to discard one.
+
+        **Either, not both.** Requiring both from an account that has both would
+        be step-up MFA - a product decision nobody has made - and would mean the
+        more securely configured account is the harder one to close.
+
+        What is deliberately *not* accepted is "recent authentication" on its
+        own. An access token is at most fifteen minutes old by construction, so
+        requiring recency of one asserts something already true, and a refresh
+        token mints fresh ones for a fortnight without anybody proving anything.
 
         **Owned workspaces are resolved first, not orphaned.** The caller is
         refused while they are the last active owner of any live workspace, with
@@ -247,17 +292,11 @@ class AccountService:
         them. `audit_logs.actor_label` holds the address as a copy, so the trail
         stays readable afterwards - which is the entire reason it is a copy.
         """
-        if user.hashed_password is None:
-            raise ConflictError(
-                "Set a password before closing this account.",
-                error_code=PASSWORD_REQUIRED,
-            )
-        if not verify_password(password=current_password, password_hash=user.hashed_password):
-            # The same shape as a failed login, and for the same reason: the
-            # caller holding a session but not the password is precisely the
-            # caller this is defending against.
-            observe_lifecycle_event(operation="account_delete", outcome="conflict")
-            raise AuthenticationError("The current password is incorrect.")
+        await self._require_deletion_proof(
+            user=user,
+            current_password=current_password,
+            reauthentication_token=reauthentication_token,
+        )
 
         owned = await self._sole_ownerships(user)
         if owned:
@@ -276,6 +315,70 @@ class AccountService:
             )
 
         return await self._tombstone(user)
+
+    async def _require_deletion_proof(
+        self,
+        *,
+        user: User,
+        current_password: str | None,
+        reauthentication_token: str | None,
+    ) -> None:
+        """Establish that the caller is the account holder, or refuse.
+
+        The proof is checked **before** the owned-workspace scan, and the order
+        matters: that scan discloses which workspaces the account owns, and a
+        caller who has not proved themselves is not entitled to that answer
+        merely by being refused afterwards.
+
+        The re-authentication proof is tried first when one is supplied, because
+        it is the one an account may hold *instead of* a password. It is spent
+        atomically - single use is a property of the `GETDEL` pipeline in the
+        store, not of anything here - and then checked against this user and
+        this purpose. A proof issued to somebody else, or for some other
+        purpose, is refused after being consumed, which is the right way round:
+        presenting a proof spends it whether or not it was yours.
+        """
+        if reauthentication_token is not None:
+            proof = await self._reauth.spend(token=reauthentication_token)
+            if (
+                proof is None
+                or proof.user_id != user.id
+                or proof.purpose is not ReauthPurpose.DELETE_ACCOUNT
+            ):
+                # One answer for expired, replayed, forged, another account's,
+                # and issued for something else. They are indistinguishable to
+                # somebody guessing, and telling them apart helps only them.
+                observe_lifecycle_event(operation="account_delete", outcome="conflict")
+                logger.warning(
+                    "account.reauthentication_refused",
+                    extra={
+                        "event": "account.reauthentication_refused",
+                        "user_id": str(user.id),
+                    },
+                )
+                raise AuthenticationError("Re-authentication is required to close this account.")
+            return
+
+        if current_password is None:
+            raise ConflictError(
+                "Confirm your password, or re-authenticate with Google, to close this account.",
+                error_code=REAUTHENTICATION_REQUIRED,
+            )
+
+        if user.hashed_password is None:
+            # No password to prove and none offered. Named as the thing to go
+            # and do rather than as the thing that is absent.
+            raise ConflictError(
+                "Re-authenticate with Google to close this account.",
+                error_code=REAUTHENTICATION_REQUIRED,
+            )
+
+        if not verify_password(password=current_password, password_hash=user.hashed_password):
+            # The same shape as a failed login, and for the same reason: the
+            # caller holding a session but not the password is precisely the
+            # caller this is defending against.
+            observe_lifecycle_event(operation="account_delete", outcome="conflict")
+            raise AuthenticationError("The current password is incorrect.")
 
     async def _sole_ownerships(self, user: User) -> list[Tenant]:
         """Live workspaces this account is the last active owner of.
@@ -305,20 +408,37 @@ class AccountService:
                 stranded.append(locked)
         return stranded
 
-    async def _withdraw_memberships(self, user: User) -> list[str]:
-        """Revoke every membership, and report the workspaces left ownerless.
+    async def _withdraw_memberships(self, user: User, *, actor: User) -> list[str]:
+        """Revoke every membership, suspending any workspace left ownerless.
 
         Shared by both deletion paths so they cannot drift: an account closed by
         its owner and one closed by staff must leave the same shape behind.
 
+        **Suspension is what keeps an invalid state from existing.**
+        `delete_self` refuses while the caller is somebody's last owner, so on
+        that path this loop finds nothing; `delete` deliberately does *not*
+        refuse, because an abusive or compromised account must not become
+        undeletable by owning a workspace. That leaves the platform path able to
+        remove the last owner, and an ACTIVE workspace with zero owners is
+        unadministrable - nobody can invite an owner, change the plan or close
+        it, since all three are owner-only. So the workspace is suspended
+        instead, which stops service, is audited with a reason, and is undone by
+        `WorkspaceService.repair_ownership` once somebody is put back in charge.
+        A workspace that was already suspended is left as it is.
+
         The ownership check runs *before* the revocation for each workspace,
         under that workspace's own lock, because afterwards the answer is always
-        "no owners" and would be useless. Locks are taken in tenant-id order so
-        two deletions touching the same workspaces queue rather than deadlock.
+        "no owners" and would be useless. The lock is held until this request
+        commits, so a transfer racing this either lands first and is counted, or
+        waits and finds the workspace suspended. Locks are taken in tenant-id
+        order so two deletions touching the same workspaces queue rather than
+        deadlock.
         """
         memberships = UserMembershipRepository(self._session)
         owned = await memberships.list_owned_live_workspaces(user.id)
+        moment = datetime.now(UTC)
         orphaned: list[str] = []
+
         for _, tenant in sorted(owned, key=lambda row: row[1].id):
             locked = await TenantRepository(self._session).lock(tenant.id)
             if locked is None or locked.deleted_at is not None:
@@ -326,10 +446,36 @@ class AccountService:
             owners = await MembershipRepository(
                 self._session, tenant_id=tenant.id
             ).list_active_owners()
-            if len(owners) <= 1:
-                orphaned.append(locked.slug)
+            # Under the lock, and the lock is held until this request commits -
+            # so a concurrent transfer or invitation either lands before this
+            # count and is seen by it, or waits and sees the suspension.
+            if any(owner.user_id != user.id for owner in owners):
+                continue
 
-        moment = datetime.now(UTC)
+            orphaned.append(locked.slug)
+            if locked.status is TenantStatus.ACTIVE:
+                # An ACTIVE workspace with no owner is not a state the product
+                # has any answer for: nobody can invite an owner, change the
+                # plan, or close it, and every one of those is an owner-only
+                # operation by design. Suspending it is not a punishment of the
+                # colleagues still in it - it is refusing to serve a workspace
+                # that has become unadministrable, and it is reversible the
+                # moment ownership is repaired.
+                locked.status = TenantStatus.SUSPENDED
+                AuditTrail(self._session, tenant_id=locked.id).record(
+                    AuditAction.WORKSPACE_SUSPENDED,
+                    actor=actor,
+                    actor_kind=AuditActorKind.PLATFORM_STAFF,
+                    target_type="tenant",
+                    target_id=locked.id,
+                    target_label=locked.slug,
+                    meta={"reason": LAST_OWNER_REMOVED_BY_PLATFORM},
+                )
+                observe_lifecycle_event(
+                    operation="workspace_orphan_suspend",
+                    outcome="success",
+                )
+
         for membership in await memberships.list_all_for_user(user.id):
             if membership.status is MembershipStatus.ACTIVE:
                 membership.status = MembershipStatus.REVOKED
@@ -357,7 +503,7 @@ class AccountService:
         # construction - the shared helper is used for the withdrawal, not for
         # the check. `revoked_by_id` is the person themselves: nobody threw them
         # out.
-        await self._withdraw_memberships(user)
+        await self._withdraw_memberships(user, actor=user)
 
         user.deleted_at = datetime.now(UTC)
         user.is_active = False

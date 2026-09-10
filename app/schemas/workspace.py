@@ -103,6 +103,17 @@ class WorkspaceDeleteRequest(_Payload):
     )
 
 
+class OwnershipRepairRequest(_Payload):
+    """Who platform staff are putting back in charge of an orphaned workspace.
+
+    An id rather than an address, matching `OwnershipTransferRequest`: staff are
+    looking at the workspace's own member list, and resolving an address would
+    turn this into a probe for whether a given person has a Wasla account.
+    """
+
+    user_id: uuid.UUID
+
+
 class WorkspaceSuspendRequest(_Payload):
     """Why the workspace is being suspended. Optional, and recorded verbatim."""
 

@@ -62,8 +62,8 @@ from app.schemas.invoice import (
     PaymentRecordRequest,
 )
 from app.schemas.platform import PlatformOverviewRead, WorkspacePageRead
+from app.schemas.workspace import OwnershipRepairRequest, WorkspaceSuspendRequest
 from app.schemas.workspace import WorkspaceRead as WorkspaceStateRead
-from app.schemas.workspace import WorkspaceSuspendRequest
 
 router = APIRouter(route_class=CommittingRoute, prefix="/platform", tags=["platform"])
 
@@ -375,6 +375,61 @@ async def restore_workspace(
     (docs/RUNBOOK.md).
     """
     tenant = await workspaces.restore(tenant_id=tenant_id, actor=staff.user)
+    return WorkspaceStateRead(
+        id=tenant.id,
+        name=tenant.name,
+        slug=tenant.slug,
+        status=tenant.status,
+        is_active=tenant.is_active,
+    )
+
+
+@router.post(
+    "/tenants/{tenant_id}/ownership",
+    response_model=WorkspaceStateRead,
+    summary="Give an ownerless workspace an owner again",
+    responses={
+        404: {"description": "No such workspace."},
+        409: {
+            "description": (
+                "The workspace already has an owner, is deleted, "
+                "or that person cannot take ownership."
+            )
+        },
+    },
+)
+async def repair_workspace_ownership(
+    tenant_id: uuid.UUID,
+    payload: OwnershipRepairRequest,
+    staff: PlatformStaffDep,
+    workspaces: WorkspaceServiceDep,
+) -> WorkspaceStateRead:
+    """The recovery half of platform account deletion.
+
+    Deleting a user is allowed to remove a workspace's last owner - an abusive
+    or compromised account must not become undeletable by owning something - and
+    the workspace is suspended when that happens, because ACTIVE with zero
+    owners is a state nobody can administer: inviting an owner, changing the
+    plan and closing the workspace are all owner-only. This is how it gets back.
+
+    **Deliberately the smallest power that achieves it.** It promotes somebody
+    who is *already* a member; it cannot add an account to a customer's
+    workspace, staff's own included, which is the escalation this endpoint would
+    otherwise be. It refuses a workspace that still has an owner, so it is not a
+    general role-editing tool. A revoked membership is eligible, because the
+    colleagues left behind are frequently the ones removed alongside the owner.
+
+    The workspace stays **suspended**. Restoring it is a separate, deliberate
+    call by somebody who can see that ownership is sound, and `restore` re-reads
+    the owner set under the same lock - so the two cannot interleave into the
+    restoration of something still ownerless.
+    """
+    membership = await workspaces.repair_ownership(
+        tenant_id=tenant_id,
+        actor=staff.user,
+        user_id=payload.user_id,
+    )
+    tenant = await workspaces.get(tenant_id=membership.tenant_id)
     return WorkspaceStateRead(
         id=tenant.id,
         name=tenant.name,
