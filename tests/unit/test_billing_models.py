@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from app.db.models.billing import (
+    ACCOUNT_LIMITS,
     PERIOD_LIMITS,
     RESOURCE_LIMITS,
     SERVING_STATUSES,
@@ -40,11 +41,22 @@ def _plan(**limits: Any) -> Plan:
     )
 
 
-def test_every_limit_is_either_a_resource_or_a_period() -> None:
-    """The two are checked by different queries, so a key belonging to neither
-    would be silently unenforceable."""
-    assert set(LimitKey) == RESOURCE_LIMITS | PERIOD_LIMITS
+def test_every_limit_is_a_resource_a_period_or_an_account_limit() -> None:
+    """The three categories partition the vocabulary, with nothing left over.
+
+    Two of them decide which query runs - a `COUNT` of what exists now, or a
+    sum over the current billing period. The third, `ACCOUNT_LIMITS`, decides
+    which *service* can answer at all: those limits span every tenant a person
+    owns, so `EntitlementService` cannot evaluate one and refuses to try.
+
+    A key in none of the three would fall into `PERIOD_LIMITS` by construction -
+    it is defined by subtraction - and the period meters would then look for a
+    meter that does not exist. So the partition is asserted rather than assumed.
+    """
+    assert frozenset(LimitKey) == RESOURCE_LIMITS | PERIOD_LIMITS | ACCOUNT_LIMITS
     assert not RESOURCE_LIMITS & PERIOD_LIMITS
+    assert not RESOURCE_LIMITS & ACCOUNT_LIMITS
+    assert not PERIOD_LIMITS & ACCOUNT_LIMITS
 
 
 def test_every_period_limit_knows_which_meters_it_counts() -> None:

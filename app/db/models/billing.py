@@ -80,6 +80,17 @@ class LimitKey(StrEnum):
 
     WHATSAPP_NUMBERS = "whatsapp_numbers"
     AGENTS = "agents"
+    # How many live workspaces one *account* may own. The only key here that is
+    # not a property of a workspace, which is why it needs its own category
+    # below rather than joining `RESOURCE_LIMITS`.
+    #
+    # It lives in this vocabulary anyway, and deliberately: it is a thing a plan
+    # sells, it belongs in `plans.limits` with everything else a plan sells, and
+    # a second storage location for "one more limit that did not fit" is how a
+    # pricing model ends up in two places. `EntitlementService` refuses it -
+    # that service is scoped to one tenant and genuinely cannot answer a
+    # question about a person - and `WorkspaceEntitlementService` answers it.
+    OWNED_WORKSPACES = "owned_workspaces"
     TEAM_MEMBERS = "team_members"
     KNOWLEDGE_DOCUMENTS = "knowledge_documents"
     STORAGE_BYTES = "storage_bytes"
@@ -101,7 +112,13 @@ RESOURCE_LIMITS: Final[frozenset[LimitKey]] = frozenset(
     }
 )
 
-PERIOD_LIMITS: Final[frozenset[LimitKey]] = frozenset(LimitKey) - RESOURCE_LIMITS
+# Limits that belong to an *account* rather than to a workspace. Counted across
+# every tenant a person owns, so no tenant-scoped service can evaluate one - and
+# subtracted from `PERIOD_LIMITS` below, which would otherwise absorb them by
+# construction and have the period meters look for a meter that does not exist.
+ACCOUNT_LIMITS: Final[frozenset[LimitKey]] = frozenset({LimitKey.OWNED_WORKSPACES})
+
+PERIOD_LIMITS: Final[frozenset[LimitKey]] = frozenset(LimitKey) - RESOURCE_LIMITS - ACCOUNT_LIMITS
 
 
 class BillingInterval(StrEnum):

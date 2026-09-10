@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import PlanLimitExceededError
 from app.db.models.agent import Agent, AgentStatus
 from app.db.models.billing import (
+    ACCOUNT_LIMITS,
     BillingInterval,
     LimitKey,
     Plan,
@@ -373,7 +374,11 @@ async def test_a_snapshot_reports_every_limit(db_session: AsyncSession) -> None:
     await _subscribe(db_session, tenant, plan)
 
     snapshot = await _service(db_session, tenant).snapshot()
-    assert {item.key for item in snapshot} == set(LimitKey)
+    # Every limit that applies to a *workspace*. `ACCOUNT_LIMITS` are excluded
+    # by construction: they span every tenant a person owns, so this service
+    # cannot evaluate one and a snapshot of one workspace is not where the
+    # answer belongs. `test_workspace_entitlements.py` covers them.
+    assert {item.key for item in snapshot} == set(LimitKey) - ACCOUNT_LIMITS
     # Nothing is refused by asking: a snapshot adds nothing.
     assert all(item.allowed for item in snapshot)
 

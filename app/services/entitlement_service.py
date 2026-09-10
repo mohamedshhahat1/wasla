@@ -40,6 +40,7 @@ from app.core.exceptions import PlanLimitExceededError
 from app.core.logging import get_logger
 from app.db.models.agent import Agent
 from app.db.models.billing import (
+    ACCOUNT_LIMITS,
     RESOURCE_LIMITS,
     LimitKey,
     Plan,
@@ -196,6 +197,15 @@ class EntitlementService:
         more" and "am I at the limit" are different questions at the boundary,
         and only the caller knows which one it means.
         """
+        if key in ACCOUNT_LIMITS:
+            # Not a refusal of the caller - a refusal of the question. This
+            # service resolves one workspace's plan and counts one workspace's
+            # rows; an account limit spans every tenant a person owns, and there
+            # is no tenant here that could answer it. Raised rather than
+            # silently allowed, because "allowed" from a service that cannot
+            # evaluate the limit is the shape of a bypass.
+            raise ValueError(f"{key} is an account limit; use WorkspaceEntitlementService.")
+
         plan, subscription = await self._resolve()
         if plan is None:
             # Unenforced, and already logged in `_resolve`.
@@ -369,8 +379,23 @@ class EntitlementService:
         return (await self.check(key, additional=additional)).allowed
 
     async def snapshot(self, keys: Iterable[LimitKey] | None = None) -> list[Entitlement]:
-        """Every limit and its current standing, for a settings page."""
-        selected = list(keys) if keys is not None else list(LimitKey)
+        """Where this workspace stands against every limit that applies to it.
+
+        Account limits are excluded from the default set rather than raising,
+        and the distinction matters: `check` raises because a caller asking a
+        tenant-scoped service about an account limit has made a mistake, while
+        a *snapshot* is "tell me about this workspace" and an account limit is
+        simply not part of that answer. Iterating `LimitKey` and refusing on one
+        member would make the obvious call site an error.
+
+        An explicit `keys` argument is honoured as given, so a caller who names
+        an account limit still gets `check`'s refusal.
+        """
+        selected = (
+            list(keys)
+            if keys is not None
+            else [key for key in LimitKey if key not in ACCOUNT_LIMITS]
+        )
         return [await self.check(key, additional=0) for key in selected]
 
     async def _used(self, key: LimitKey, *, subscription: Subscription | None) -> int:

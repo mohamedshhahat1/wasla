@@ -27,6 +27,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -39,11 +40,13 @@ from app.core.security import generate_reset_token, hash_password
 from app.db.models import (
     Membership,
     MembershipStatus,
+    PlatformRole,
     Tenant,
     TenantRole,
     User,
 )
 from app.db.models.audit import AuditLog
+from app.db.models.billing import BillingInterval, LimitKey, Plan
 from app.db.models.email import OutboundEmail
 from app.db.models.enums import TenantStatus
 from app.db.models.password_reset import PasswordResetToken
@@ -110,7 +113,7 @@ class _Redis:
         return self
 
 
-def _settings(database_url: str) -> Settings:
+def _settings(database_url: str, *, default_plan: str | None = None) -> Settings:
     return Settings(
         _env_file=None,
         environment="test",
@@ -124,13 +127,21 @@ def _settings(database_url: str) -> Settings:
         email_from="no-reply@example.com",
         app_public_url="https://app.example.com",
         credential_encryption_keys=[TEST_CREDENTIAL_ENCRYPTION_KEY],
-        default_plan_code="",
+        # Empty unless a test needs a real plan resolved, which the
+        # workspace-entitlement race does: the limit it is racing against lives
+        # in plan data, so there has to be a plan.
+        default_plan_code=default_plan or "",
     )
 
 
 @asynccontextmanager
-async def _client(database_url: str, redis: _Redis) -> AsyncIterator[AsyncClient]:
-    settings = _settings(database_url)
+async def _client(
+    database_url: str,
+    redis: _Redis,
+    *,
+    default_plan: str | None = None,
+) -> AsyncIterator[AsyncClient]:
+    settings = _settings(database_url, default_plan=default_plan)
     application = create_app(settings)
     database = Database(settings)
     application.state.database = database
@@ -764,3 +775,184 @@ async def test_two_confirmations_of_one_reset_token_produce_one_winner(
                 )
                 await session.commit()
             await _cleanup(maker, slugs=[], emails=emails)
+
+
+# ------------------------------------------------- entitlement and orphans
+
+
+async def test_two_simultaneous_creations_cannot_exceed_the_plan_limit(
+    prepared_database: str,
+) -> None:
+    """The bypass a per-account limit invites, and the lock that closes it.
+
+    Every other limit in the product is per workspace, so it can be enforced
+    under the tenant row lock. This one is per *account*, and at creation time
+    there is no tenant to lock - which is exactly why two simultaneous requests
+    both read "none owned, limit one" and both proceed.
+
+    `WorkspaceService._require_workspace_allowance` takes a
+    `pg_advisory_xact_lock` keyed on the owner instead, held until the request
+    commits, so the second creation reads the state the first one left. Both are
+    launched together against a limit of one; exactly one may win.
+    """
+    suffix = uuid.uuid4().hex[:10]
+    email = f"limit-race-{suffix}@example.com"
+    slugs = [f"limit-race-a-{suffix}", f"limit-race-b-{suffix}"]
+    plan_code = f"race-plan-{suffix}"
+    redis = _Redis()
+
+    async with _sessions(prepared_database) as maker:
+        try:
+            async with maker() as session:
+                await _seed_user(session, email=email)
+                session.add(
+                    Plan(
+                        code=plan_code,
+                        name="Race Plan",
+                        price=Decimal("0.00"),
+                        currency="EGP",
+                        interval=BillingInterval.MONTHLY,
+                        limits={LimitKey.OWNED_WORKSPACES.value: 1},
+                    )
+                )
+                await session.commit()
+
+            start = asyncio.Barrier(2)
+
+            async def create(slug: str) -> int:
+                async with _client(prepared_database, redis, default_plan=plan_code) as client:
+                    payload = await _login(client, email)
+                    # Synchronised at the door: both requests are in flight
+                    # together and the database decides the order, which is the
+                    # realistic shape of this race.
+                    await start.wait()
+                    response = await client.post(
+                        f"{API}/workspaces",
+                        json={"name": slug.title(), "slug": slug},
+                        headers=_bearer(payload),
+                    )
+                    return response.status_code
+
+            statuses = sorted(await asyncio.gather(create(slugs[0]), create(slugs[1])))
+            assert statuses == [201, 409], statuses
+
+            async with maker() as session:
+                owned = await session.scalar(
+                    select(func.count())
+                    .select_from(Membership)
+                    .join(Tenant, Tenant.id == Membership.tenant_id)
+                    .join(User, User.id == Membership.user_id)
+                    .where(
+                        User.email == email,
+                        Membership.role == TenantRole.TENANT_OWNER,
+                        Membership.status == MembershipStatus.ACTIVE,
+                        Tenant.deleted_at.is_(None),
+                    )
+                )
+                assert owned == 1, "the per-account workspace limit was bypassed"
+        finally:
+            # Tenants first: a subscription references the plan, and the
+            # workspaces this test created are what own those subscriptions.
+            await _cleanup(maker, slugs=slugs, emails=[email])
+            async with maker() as session:
+                await session.execute(delete(Plan).where(Plan.code == plan_code))
+                await session.commit()
+
+
+async def test_platform_deletion_racing_an_ownership_transfer_never_orphans(
+    prepared_database: str,
+) -> None:
+    """Two ways for a workspace to lose its last owner, at the same moment.
+
+    One request hands ownership to a colleague; the other deletes the owner's
+    account from the platform. Both read the owner set and act on it, and both
+    take the tenant lock to do so - so whichever lands second sees what the
+    first left.
+
+    Two end states are correct and the assertion accepts either, because which
+    one happens depends on the interleaving and both satisfy the invariant:
+    the transfer landed first and the heir owns a live workspace, or the
+    deletion did and the workspace is suspended. What is never acceptable is
+    the third - ACTIVE with nobody in charge.
+    """
+    suffix = uuid.uuid4().hex[:10]
+    slug = f"orphan-race-{suffix}"
+    owner_email = f"orphan-owner-{suffix}@example.com"
+    heir_email = f"orphan-heir-{suffix}@example.com"
+    staff_email = f"orphan-staff-{suffix}@example.com"
+    redis = _Redis()
+
+    async with _sessions(prepared_database) as maker:
+        try:
+            async with maker() as session:
+                tenant = await _seed_workspace(session, slug=slug)
+                owner = await _seed_user(session, email=owner_email)
+                heir = await _seed_user(session, email=heir_email)
+                staff = await _seed_user(session, email=staff_email)
+                staff.platform_role = PlatformRole.PLATFORM_OWNER
+                session.add_all(
+                    [
+                        Membership(
+                            tenant_id=tenant.id,
+                            user_id=owner.id,
+                            role=TenantRole.TENANT_OWNER,
+                        ),
+                        Membership(
+                            tenant_id=tenant.id,
+                            user_id=heir.id,
+                            role=TenantRole.MEMBER,
+                        ),
+                    ]
+                )
+                await session.commit()
+                owner_id, heir_id, tenant_id = owner.id, heir.id, tenant.id
+
+            start = asyncio.Barrier(2)
+
+            async def transfer() -> int:
+                async with _client(prepared_database, redis) as client:
+                    payload = await _login(client, owner_email)
+                    headers = await _workspace_headers(client, payload, slug)
+                    await start.wait()
+                    response = await client.post(
+                        f"{API}/workspace/ownership",
+                        json={"user_id": str(heir_id)},
+                        headers=headers,
+                    )
+                    return response.status_code
+
+            async def delete_owner() -> int:
+                async with _client(prepared_database, redis) as client:
+                    payload = await _login(client, staff_email)
+                    await start.wait()
+                    response = await client.delete(
+                        f"{API}/platform/users/{owner_id}",
+                        headers=_bearer(payload),
+                    )
+                    return response.status_code
+
+            await asyncio.gather(transfer(), delete_owner(), return_exceptions=True)
+
+            async with maker() as session:
+                row = await session.get(Tenant, tenant_id)
+                assert row is not None
+                owners = await session.scalar(
+                    select(func.count())
+                    .select_from(Membership)
+                    .where(
+                        Membership.tenant_id == tenant_id,
+                        Membership.role == TenantRole.TENANT_OWNER,
+                        Membership.status == MembershipStatus.ACTIVE,
+                    )
+                )
+                assert owners is not None
+                if row.status is TenantStatus.ACTIVE:
+                    assert owners >= 1, "an active workspace was left with no owner"
+                else:
+                    assert row.status is TenantStatus.SUSPENDED
+        finally:
+            await _cleanup(
+                maker,
+                slugs=[slug],
+                emails=[owner_email, heir_email, staff_email],
+            )

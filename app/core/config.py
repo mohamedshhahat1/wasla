@@ -524,21 +524,42 @@ class Settings(BaseSettings):
     # over a missing catalogue row.
     default_plan_code: str = "starter"
 
-    # How many live workspaces one account may own (ADR-097).
+    # A technical abuse ceiling, and explicitly **not** a product entitlement.
     #
-    # A ceiling exists because `POST /workspaces` does. Before it, creating a
-    # workspace meant registering an account, which costs an address and is
-    # limited per client address at the door; now one verified account can do it
-    # in a loop, and every workspace it makes is a tenant, a subscription and a
-    # row in every operator's dashboard. The per-address limit on the route
-    # bounds the rate, not the total.
+    # How many workspaces a plan allows is `plans.limits["owned_workspaces"]`,
+    # resolved per account by `WorkspaceEntitlementService`. This is the
+    # backstop underneath it: a deployment with an empty plan catalogue, a plan
+    # edited to unlimited by mistake, or a bug in the resolver would otherwise
+    # leave `POST /workspaces` with no bound at all, and every workspace is a
+    # tenant, a subscription and a row in every operator's dashboard.
     #
-    # Counted over workspaces the account currently *owns and that still exist*,
-    # so deleting one gives the slot back and being a member of somebody else's
-    # costs nothing. Generous on purpose: an agency legitimately runs several
-    # businesses, and the number that stops abuse is far above the number a real
-    # customer reaches. An operator who needs a different answer sets one.
-    max_owned_workspaces_per_user: int = Field(default=10, ge=1)
+    # It is set far above anything a real customer reaches, because a ceiling
+    # that a paying customer can hit is a pricing decision wearing a safety
+    # label - and the moment it starts refusing legitimate use, somebody will
+    # raise it rather than notice that the plan limit was the thing to change.
+    # A refusal here is a defect to investigate, not an upsell.
+    absolute_workspace_safety_limit: int = Field(default=100, ge=1)
+
+    # How long a deleted workspace's operational data is kept before it is
+    # erased (ADR-098).
+    #
+    # Deletion is a tombstone: access stops at once and the rows stay. This is
+    # the window between those two things, and it exists because the mistake
+    # deletion invites is irreversible - somebody closes the wrong workspace,
+    # or closes one and then needs an export from it. Thirty days is the span
+    # over which that is usually discovered.
+    #
+    # **The window is stamped onto the row at deletion, not read at purge
+    # time.** Shortening this setting therefore affects workspaces deleted
+    # afterwards and never brings forward the erasure of data already
+    # tombstoned - the promise made to a customer is the one that was in force
+    # on the day they left.
+    #
+    # Zero disables the purge sweep entirely: rows become due the moment they
+    # are deleted, which is not what a zero-day retention should mean, so it is
+    # refused by the bound below. A deployment that genuinely wants no purge
+    # runs the worker set without `purge` in it.
+    workspace_deletion_retention_days: int = Field(default=30, ge=1)
 
     # Dunning, in days from the moment an invoice was *issued* (ADR-061). That
     # anchor is the one the customer experienced - the day they were asked for

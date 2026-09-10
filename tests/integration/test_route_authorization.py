@@ -84,6 +84,12 @@ ACCOUNT_OR_PLATFORM: frozenset[str] = frozenset(
         # a workspace - and the accounts that need it are Google-first ones,
         # which may hold no membership at all.
         "/auth/password/set",
+        # Closing an account must not require a verified address: somebody
+        # who signed up and never confirmed their email is exactly the
+        # person most likely to want to leave, and the deletion route
+        # itself is `CurrentUserDep` for the same reason.
+        "/auth/google/reauth/authorize",
+        "/auth/google/reauth/callback",
         "/auth/email/verification/send",
         "/auth/email/verification/verify",
         # Connecting and disconnecting Google is about the account, not about
@@ -115,6 +121,13 @@ UNVERIFIED_ALLOWED: frozenset[str] = frozenset(
         "/auth/logout-all",
         "/auth/password",
         "/auth/password/set",
+        # Closing an account must not require a verified address, and neither
+        # must the Google re-authentication that authorises it: somebody who
+        # signed up and never confirmed their email is exactly the person most
+        # likely to want to leave. `DELETE /auth/me` is `CurrentUserDep` for the
+        # same reason, and these two exist only to produce the proof it takes.
+        "/auth/google/reauth/authorize",
+        "/auth/google/reauth/callback",
         "/auth/email/verification/send",
         "/auth/email/verification/verify",
         "/auth/identities/google/authorize",

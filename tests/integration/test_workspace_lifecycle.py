@@ -352,14 +352,16 @@ async def test_creation_is_refused_past_the_configured_ceiling(
     db_session: AsyncSession,
     lifecycle_settings: Settings,
 ) -> None:
-    """`POST /workspaces` is bounded per account, not only per address.
+    """The technical safety ceiling, which is not the product entitlement.
 
-    The route's rate limit counts by client address and bounds the *rate*; this
-    bounds the total, because one verified account should not be able to
-    accumulate tenants indefinitely. Set to one here so the assertion is about
+    How many workspaces a plan allows is `plans.limits["owned_workspaces"]`,
+    resolved per account by `WorkspaceEntitlementService` and covered in
+    `test_workspace_entitlements.py`. This is the backstop underneath it - the
+    thing that still bounds creation when the plan catalogue is empty, which is
+    exactly the state this fixture is in. Set to one so the assertion is about
     the rule rather than about a number.
     """
-    lifecycle_settings.max_owned_workspaces_per_user = 1
+    lifecycle_settings.absolute_workspace_safety_limit = 1
     user = await _user(db_session, email="collector@example.com")
     session = await _login(http, user.email)
 
