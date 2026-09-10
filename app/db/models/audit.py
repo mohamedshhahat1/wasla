@@ -124,6 +124,12 @@ class AuditAction(StrEnum):
     # trail that reported an irreversible act with a reversible label would be
     # answering the wrong question during the one review that asks it.
     USER_DELETED = "user_deleted"
+    # Somebody proved control of an already-linked Google identity in order to
+    # authorise a high-risk action (docs/GOOGLE_OAUTH.md). Recorded because it
+    # is a credential check that stands in for a password, and "what proved this
+    # deletion" is the question asked afterwards. Carries the purpose it was
+    # granted for and never the proof itself.
+    ACCOUNT_REAUTHENTICATED = "account_reauthenticated"
     # The name of an event, not a credential. Nothing here ever holds one.
     PASSWORD_CHANGED = "password_changed"  # noqa: S105
     # A reset token from the email flow was consumed and the password replaced
@@ -286,6 +292,18 @@ class AuditAction(StrEnum):
     # removed it, and `target_label` carries the slug so the entry stays
     # readable when nothing joins to it any more.
     WORKSPACE_DELETED = "workspace_deleted"
+    # Platform staff put an ownerless workspace back under somebody's control
+    # (docs/RUNBOOK.md). Its own action rather than a reuse of
+    # `WORKSPACE_OWNERSHIP_TRANSFERRED`, because the two answer different
+    # questions: a transfer is a customer handing their business to a colleague,
+    # and this is the platform reaching into a customer's roster - which is the
+    # rarer act, the more sensitive one, and the one an audit review filters for.
+    WORKSPACE_OWNERSHIP_REPAIRED = "workspace_ownership_repaired"
+    # A deleted workspace's operational data was erased after its retention
+    # window (ADR-098). Distinct from `WORKSPACE_DELETED`, which is the moment
+    # access stopped: this is the moment the data stopped existing, and "when
+    # was this actually erased" is the question a retention enquiry asks.
+    WORKSPACE_PURGED = "workspace_purged"
 
     # Writing to many customers at once
     CAMPAIGN_SCHEDULED = "campaign_scheduled"
