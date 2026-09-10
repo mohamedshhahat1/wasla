@@ -24,6 +24,7 @@ from app.db.models.invoice import (
     Payment,
     PaymentStatus,
 )
+from app.db.models.tenant import Tenant
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
 
@@ -434,9 +435,18 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
         `FOR UPDATE OF invoices SKIP LOCKED`, so two workers charge two
         different cards rather than the same one twice. The invoice is what a
         collection attempt belongs to, so the invoice is what is locked.
+
+        **A deleted workspace is excluded**, for the reason argued on
+        `SubscriptionRepository.claim_due`: not being charged after closing a
+        workspace is an invariant, and an invariant enforced only by the code
+        path that closes it is one step away from being untrue. This is the
+        query that stands immediately in front of a card debit, so it is the
+        last place worth being certain.
         """
         return await self._all(
             self._select()
+            .join(Tenant, Tenant.id == Invoice.tenant_id)
+            .where(Tenant.deleted_at.is_(None))
             .where(Invoice.status == InvoiceStatus.OPEN)
             .where(Invoice.subscription_id.is_not(None))
             .where(Invoice.collection_attempts < max_attempts)

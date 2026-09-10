@@ -43,8 +43,10 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,19 +62,31 @@ from app.core.telemetry import observe_lifecycle_event
 from app.db.models import Membership, MembershipStatus, Tenant, TenantRole, User
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.enums import TenantStatus
+from app.db.models.payment_method import PaymentMethodStatus
 from app.repositories import (
     MembershipRepository,
     TenantRepository,
     UserMembershipRepository,
     UserRepository,
 )
+from app.repositories.billing_repository import SubscriptionRepository
+from app.repositories.payment_method_repository import PaymentMethodRepository
 from app.repositories.tenant_repository import normalise_slug
 from app.services.audit_service import AuditTrail
-from app.services.subscription_service import bootstrap_default_subscription
+from app.services.subscription_service import (
+    SubscriptionService,
+    bootstrap_default_subscription,
+)
+from app.services.workspace_entitlement_service import WorkspaceEntitlementService
 
 logger = get_logger(__name__)
 
 TENANT_SLUG_CONSTRAINT = "uq_tenants_slug"
+
+# Namespace for the advisory lock that serialises workspace creation per
+# account. Arbitrary but fixed: what matters is that nothing else in the
+# system uses it, so two unrelated operations cannot block each other.
+_WORKSPACE_CREATION_LOCK_NAMESPACE = 0x5741_5301
 
 # Stable machine-readable codes for the lifecycle conflicts a client has to be
 # able to act on. Every one of them is a 409: the request was well-formed and
@@ -86,6 +100,12 @@ WORKSPACE_NOT_SUSPENDED = "workspace_not_suspended"
 WORKSPACE_DELETED = "workspace_deleted"
 WORKSPACE_LIMIT_REACHED = "workspace_limit_reached"
 WORKSPACE_CONFIRMATION_INVALID = "workspace_confirmation_invalid"
+# The workspace has no active owner. Raised by `restore`, which refuses to
+# put an unadministrable workspace back into service, and answered by
+# `repair_ownership`.
+WORKSPACE_ORPHANED = "workspace_orphaned"
+WORKSPACE_HAS_OWNER = "workspace_has_owner"
+WORKSPACE_OWNER_REQUIRED = "workspace_owner_required"
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,15 +176,11 @@ class WorkspaceService:
         not be returned - the session would already be poisoned. Only the slug
         constraint is translated; any other integrity error stays a 500 and
         therefore stays visible as a defect.
+
+        How many workspaces this account may own comes from its plan; see
+        :meth:`_require_workspace_allowance`.
         """
-        limit = self._settings.max_owned_workspaces_per_user
-        owned = await self._memberships.list_owned_live_workspaces(owner.id)
-        if len(owned) >= limit:
-            raise ConflictError(
-                f"This account already owns the maximum of {limit} workspaces.",
-                error_code=WORKSPACE_LIMIT_REACHED,
-                details={"limit": limit, "owned": len(owned)},
-            )
+        await self._require_workspace_allowance(owner)
 
         try:
             async with self._session.begin_nested():
@@ -211,6 +227,93 @@ class WorkspaceService:
             },
         )
         return WorkspaceCreation(tenant=tenant, membership=membership)
+
+    async def _require_workspace_allowance(self, owner: User) -> None:
+        """Refuse a creation the account's plan does not allow.
+
+        Two ceilings, and they are different kinds of thing. The **plan limit**
+        is what the product sells, resolved across every workspace this person
+        owns by `WorkspaceEntitlementService`. The **safety limit** is a
+        technical backstop against an empty catalogue or a plan edited to
+        unlimited by mistake; a customer should never meet it, and one who does
+        has found a defect rather than an upsell.
+
+        **The lock, not the count, is what stops a concurrent bypass.** Two
+        simultaneous creations both read "four owned, limit five" and both
+        proceed, which is the classic check-then-act, and no amount of care in
+        the count fixes it. Serialising on the *account* is what does: an
+        advisory lock keyed by the owner's id, held until this request commits,
+        so the second creation reads the state the first one left. It is keyed
+        on the user rather than on a tenant because the limit is the user's -
+        there is no tenant yet to lock, which is the whole difficulty with
+        enforcing a per-account limit at creation time.
+
+        `pg_advisory_xact_lock` rather than a row lock: `users` is the row that
+        would otherwise be locked, and locking a user row for the duration of a
+        workspace creation would serialise it against every other write to that
+        account. The advisory lock namespaces the contention to exactly this
+        operation, and PostgreSQL releases it at commit or rollback with no
+        cleanup path to get wrong.
+        """
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:namespace, :key)"),
+            {
+                # A fixed namespace so this lock cannot collide with another
+                # advisory lock in the system, and the low 31 bits of the user
+                # id as the key. A collision between two *different* accounts
+                # costs one of them a short wait and nothing else, which is why
+                # a truncated id is acceptable here and would not be if the
+                # lock were protecting correctness between them.
+                "namespace": _WORKSPACE_CREATION_LOCK_NAMESPACE,
+                "key": owner.id.int & 0x7FFFFFFF,
+            },
+        )
+
+        allowance = await WorkspaceEntitlementService(
+            self._session,
+            settings=self._settings,
+        ).allowance(user=owner)
+
+        if not allowance.allowed:
+            observe_lifecycle_event(operation="workspace_create", outcome="conflict")
+            logger.info(
+                "workspace.entitlement_refused",
+                extra={
+                    "event": "workspace.entitlement_refused",
+                    "user_id": str(owner.id),
+                    "owned": allowance.owned,
+                    "limit": allowance.limit,
+                    "plan_code": allowance.plan_code,
+                },
+            )
+            raise ConflictError(
+                "This account's plan does not allow another workspace.",
+                error_code=WORKSPACE_LIMIT_REACHED,
+                # The two numbers a client needs to render the message, and
+                # nothing else about the subscription: what a person pays, when
+                # they renew and which provider holds their card are not this
+                # endpoint's to disclose.
+                details={"limit": allowance.limit, "owned": allowance.owned},
+            )
+
+        ceiling = self._settings.absolute_workspace_safety_limit
+        if allowance.owned >= ceiling:
+            observe_lifecycle_event(operation="workspace_create", outcome="conflict")
+            logger.warning(
+                # Warning, not info: a customer reaching this means either an
+                # abuse pattern or a plan limit that is not doing its job.
+                "workspace.safety_ceiling_reached",
+                extra={
+                    "event": "workspace.safety_ceiling_reached",
+                    "user_id": str(owner.id),
+                    "owned": allowance.owned,
+                },
+            )
+            raise ConflictError(
+                "This account cannot create further workspaces.",
+                error_code=WORKSPACE_LIMIT_REACHED,
+                details={"limit": ceiling, "owned": allowance.owned},
+            )
 
     # --------------------------------------------------------------- update
 
@@ -411,11 +514,16 @@ class WorkspaceService:
         closed, and there is nothing to revoke - authorization re-reads the
         tenant on every request, so the tokens simply stop opening this door.
 
-        What is *not* implemented is a scheduled purge. There is no deferred-job
-        infrastructure in this repository that could run one reliably, and a
-        method that claimed to schedule erasure while nothing ran is worse than
-        one that does not claim it. Erasure remains an operator runbook step;
-        see docs/RUNBOOK.md.
+        **Erasure follows, on a schedule.** `purge_due_at` is stamped here from
+        `WORKSPACE_DELETION_RETENTION_DAYS`, and `PurgeWorker` erases the
+        operational data once that deadline passes - conversations, messages,
+        contacts, agents, knowledge, campaigns and the objects behind them.
+        Invoices, payments and the audit trail are deliberately kept; see
+        `WorkspacePurgeService` for the classification and its reasoning.
+
+        Between the two the workspace is unreachable and its data is intact,
+        which is the window in which somebody who deleted the wrong workspace
+        can be helped (docs/RUNBOOK.md).
 
         The confirmation is checked here rather than in the schema, because the
         value it must equal is the workspace's own slug and a schema cannot see
@@ -440,7 +548,23 @@ class WorkspaceService:
             raise PermissionDeniedError("Only a workspace owner can delete it.")
 
         moment = datetime.now(UTC)
+
+        # Billing first, and inside the same transaction as the tombstone. The
+        # ordering matters in one direction only: if the cancellation fails the
+        # whole request rolls back and the workspace is still open, which is the
+        # safe failure. A tombstone that committed while the subscription stayed
+        # live would be the unsafe one - a workspace nobody can open, still
+        # renewing.
+        billing = await self._wind_down_billing(tenant=tenant, actor=actor, now=moment)
+
         tenant.deleted_at = moment
+        # Stamped now rather than computed at purge time, so the retention a
+        # customer was promised on the day they left is the one they get, and
+        # an operator shortening the setting cannot retroactively erase data
+        # sooner than it was due.
+        tenant.purge_due_at = moment + timedelta(
+            days=self._settings.workspace_deletion_retention_days
+        )
         for membership in await memberships.list_members(include_revoked=False):
             membership.status = MembershipStatus.REVOKED
             membership.revoked_at = moment
@@ -456,7 +580,7 @@ class WorkspaceService:
             # The slug, because `audit_logs.tenant_id` is `SET NULL` on delete
             # and this entry has to stay readable if the row ever does go.
             target_label=tenant.slug,
-            meta={"slug": tenant.slug},
+            meta={"slug": tenant.slug, **billing},
         )
         observe_lifecycle_event(operation="workspace_delete", outcome="success")
         logger.info(
@@ -468,6 +592,99 @@ class WorkspaceService:
             },
         )
         return tenant
+
+    async def _wind_down_billing(
+        self,
+        *,
+        tenant: Tenant,
+        actor: User,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Stop the money before the workspace goes, and say what was stopped.
+
+        **The invariant**: a customer is never charged for a renewal belonging
+        to a workspace they closed. Two things enforce it, and both are here
+        because either alone is a single point of failure.
+
+        **Cancel the subscription, immediately.** Not `cancel_at_period_end`,
+        which is the right default when somebody merely stops wanting a plan -
+        they keep what they paid for and the workspace stays open until the
+        period ends. Deletion is different: access ends *now*, so leaving the
+        subscription serving until the period boundary would mean a live
+        subscription attached to a workspace nobody can open, and the sweep
+        would roll it over on schedule. `immediately=True` sets
+        `current_period_end` to this moment, which is also what stops usage
+        counting against an allowance the workspace no longer has.
+
+        **Revoke every saved card.** This is the part that reaches outside the
+        subscription row, and it is worth being exact about what "the provider"
+        means here, because the shape is not the one a Stripe-shaped system has.
+        **There is no provider-side subscription object in this architecture**:
+        `Subscription.provider_reference` is declared and never written by any
+        code path, and the Paymob client exposes checkout, a saved-card charge,
+        an inquiry and a refund - no subscription resource and no cancellation
+        endpoint. Wasla *is* the recurring engine: the sweep issues an invoice
+        and `RecurringService` debits a stored token. So the thing that can
+        still take money after this request is the token, and revoking it is
+        the cancellation - there is no remote object to call `DELETE` on, and a
+        method here that pretended to make one would be inventing an API.
+
+        Revocation is local and therefore cannot fail halfway or time out,
+        which is why there is no cancellation-pending state: the ambiguous
+        outcome that state exists to represent cannot arise. If a provider that
+        does hold its own subscriptions is added later, this is the seam - it
+        becomes an await, it can fail, and *then* it needs a pending state and
+        a retry. Until then, one would be a mechanism with nothing to do.
+
+        Returns what happened, for the audit entry. A workspace on the free
+        plan and a workspace on a paid one both delete successfully, and an
+        operator reading the trail afterwards needs to know which this was.
+        """
+        summary: dict[str, Any] = {
+            "subscription_cancelled": False,
+            "payment_methods_revoked": 0,
+        }
+
+        subscriptions = SubscriptionRepository(self._session, tenant_id=tenant.id)
+        subscription = await subscriptions.get()
+        if subscription is not None and not subscription.is_terminal:
+            # `SubscriptionService.cancel` refuses a terminal subscription, and
+            # refusing here would mean a workspace whose plan had already
+            # expired could not be deleted at all. Already-cancelled is the
+            # outcome this wants, so it is not an error to find it.
+            await SubscriptionService(
+                self._session,
+                tenant_id=tenant.id,
+                settings=self._settings,
+            ).cancel(immediately=True, now=now, actor=actor)
+            summary["subscription_cancelled"] = True
+            summary["subscription_status_was"] = subscription.status.value
+
+        revoked = 0
+        for method in await PaymentMethodRepository(
+            self._session, tenant_id=tenant.id
+        ).list_active():
+            method.status = PaymentMethodStatus.REVOKED
+            method.revoked_at = now
+            method.is_default = False
+            revoked += 1
+        summary["payment_methods_revoked"] = revoked
+        await self._session.flush()
+
+        observe_lifecycle_event(
+            operation="workspace_billing_wind_down",
+            outcome="success",
+        )
+        logger.info(
+            "workspace.billing_wound_down",
+            extra={
+                "event": "workspace.billing_wound_down",
+                "tenant_id": str(tenant.id),
+                "subscription_cancelled": summary["subscription_cancelled"],
+                "payment_methods_revoked": revoked,
+            },
+        )
+        return summary
 
     # ----------------------------------------------------- platform control
 
@@ -564,6 +781,26 @@ class WorkspaceService:
                 error_code=WORKSPACE_NOT_SUSPENDED,
             )
 
+        # Restoring a workspace with no owner would put the invalid state back:
+        # ACTIVE, and unadministrable, because inviting an owner, changing the
+        # plan and closing the workspace are all owner-only. The suspension is
+        # what represents "this needs a person before it can serve again", and
+        # lifting it without one would make that representation a lie.
+        #
+        # Read under the lock rather than off an unlocked count: `repair_ownership`
+        # takes the same lock, so an operator assigning an owner and an operator
+        # restoring cannot interleave into a restore that observed the assignment
+        # a moment before it was rolled back.
+        locked = await self._tenants.lock(tenant.id)
+        if locked is None:  # pragma: no cover - the row was read a line ago
+            raise NotFoundError("No workspace matches that identifier.")
+        owners = await MembershipRepository(self._session, tenant_id=tenant.id).list_active_owners()
+        if not owners:
+            raise ConflictError(
+                "That workspace has no owner. Assign one before restoring it.",
+                error_code=WORKSPACE_ORPHANED,
+            )
+
         tenant.status = TenantStatus.ACTIVE
         await self._session.flush()
 
@@ -586,7 +823,106 @@ class WorkspaceService:
         )
         return tenant
 
+    async def repair_ownership(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        actor: User,
+        user_id: uuid.UUID,
+    ) -> Membership:
+        """Give an ownerless workspace an owner again. Platform staff only.
+
+        The smallest operation that makes the suspension in
+        `AccountService._withdraw_memberships` recoverable, and deliberately no
+        larger. Platform staff acquire exactly one new power here - putting a
+        workspace back under somebody's control - and specifically **not** a
+        general ability to edit memberships, add themselves to a customer's
+        workspace, or change anybody's role in a workspace that is functioning.
+
+        Three guards express that, and each one closes a way this could become
+        the general power it must not be:
+
+        - **Only a workspace with no active owner.** A workspace that still has
+          one is administrable by its own people, and staff have no business in
+          its roster. A workspace with an owner is refused, not silently
+          ignored.
+        - **Only somebody who is already a member.** This promotes; it does not
+          admit. Staff cannot add an account - their own included - to a
+          customer's workspace, which is the escalation this endpoint would
+          otherwise be. A revoked membership is eligible: the usual cause of an
+          orphan is the owner's account being closed, and the colleagues left
+          behind are frequently the ones who were removed alongside them.
+        - **Only an account that can actually use it.** A disabled or deleted
+          account would satisfy "has an owner" while leaving the workspace
+          exactly as unadministrable as before.
+
+        The workspace is left **suspended**. Restoring it is a second,
+        deliberate act by a person who can see that ownership is now sound -
+        and `restore` re-reads the owner set under the same lock, so the two
+        cannot be interleaved into a restore of something still ownerless.
+        """
+        tenant = await self._lock_live_workspace(tenant_id)
+        memberships = MembershipRepository(self._session, tenant_id=tenant.id)
+
+        if await memberships.list_active_owners():
+            raise ConflictError(
+                "That workspace already has an owner.",
+                error_code=WORKSPACE_HAS_OWNER,
+            )
+
+        membership = await memberships.get_any_for_user(user_id)
+        if membership is None:
+            raise ConflictError(
+                "That person has never been a member of this workspace.",
+                error_code=WORKSPACE_OWNER_REQUIRED,
+            )
+
+        target = await self._users.get_by_id(user_id)
+        if target is None or not target.is_active:
+            raise ConflictError(
+                "That account cannot take ownership.",
+                error_code=WORKSPACE_OWNER_REQUIRED,
+            )
+
+        membership.status = MembershipStatus.ACTIVE
+        membership.role = TenantRole.TENANT_OWNER
+        membership.revoked_at = None
+        membership.revoked_by_id = None
+        await self._session.flush()
+
+        AuditTrail(self._session, tenant_id=tenant.id).record(
+            AuditAction.WORKSPACE_OWNERSHIP_REPAIRED,
+            actor=actor,
+            actor_kind=AuditActorKind.PLATFORM_STAFF,
+            target_type="tenant",
+            target_id=tenant.id,
+            target_label=tenant.slug,
+            meta={"to_user_id": str(target.id), "to_user": target.email},
+        )
+        observe_lifecycle_event(operation="workspace_ownership_repair", outcome="success")
+        logger.warning(
+            # Warning rather than info: staff reaching into a customer's roster
+            # is rare and worth seeing in a log search without a filter.
+            "workspace.ownership_repaired",
+            extra={
+                "event": "workspace.ownership_repaired",
+                "tenant_id": str(tenant.id),
+                "user_id": str(target.id),
+                "actor_id": str(actor.id),
+            },
+        )
+        return membership
+
     # ------------------------------------------------------------- internals
+
+    async def get(self, *, tenant_id: uuid.UUID) -> Tenant:
+        """One workspace, for a caller that has already been authorized.
+
+        Public because the platform routes render a workspace after acting on
+        it, and reaching into `_require_workspace` from a route would be reading
+        a private name to avoid writing a one-line public one.
+        """
+        return await self._require_workspace(tenant_id)
 
     async def _require_workspace(self, tenant_id: uuid.UUID) -> Tenant:
         tenant = await self._tenants.get_by_id(tenant_id)

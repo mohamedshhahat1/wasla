@@ -20,6 +20,7 @@ from datetime import datetime
 from sqlalchemy import ColumnElement, func, select
 
 from app.db.models.billing import Plan, Subscription, SubscriptionStatus
+from app.db.models.tenant import Tenant
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
 
@@ -188,9 +189,22 @@ class PlatformSubscriptionRepository(BaseRepository[Subscription]):
         Ordered by the oldest period end, so a backlog drains in the order
         customers have been waiting rather than in whatever order the planner
         finds convenient - and so a workspace cannot be perpetually last.
+
+        **A deleted workspace is excluded here as well as at deletion time**,
+        and the redundancy is the point. `WorkspaceService.delete` cancels the
+        subscription, so in the ordinary case this filter never fires; it exists
+        because "the customer must never be charged for a workspace they closed"
+        is an invariant rather than a step, and a step can be missed. A row
+        tombstoned by an operator's SQL, by a restore from an older backup, or
+        by a future deletion path that forgets to cancel would otherwise keep
+        rolling periods over and issuing invoices against a workspace nobody can
+        open. The join costs one index lookup per claimed row on a sweep that
+        runs every ten minutes.
         """
         statement = (
             self._select()
+            .join(Tenant, Tenant.id == Subscription.tenant_id)
+            .where(Tenant.deleted_at.is_(None))
             .where(Subscription.current_period_end <= now)
             .where(
                 Subscription.status.in_(
@@ -203,6 +217,6 @@ class PlatformSubscriptionRepository(BaseRepository[Subscription]):
             )
             .order_by(Subscription.current_period_end)
             .limit(limit)
-            .with_for_update(skip_locked=True)
+            .with_for_update(skip_locked=True, of=Subscription)
         )
         return await self._all(statement)
