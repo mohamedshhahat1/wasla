@@ -6,12 +6,19 @@ workspace grants nothing here, and holding a platform role grants nothing
 *inside* a workspace - a platform administrator reading these figures still
 cannot open a customer's inbox.
 
-Read-only with one narrow exception - recording a payment against an invoice,
-which asserts that somebody has seen money arrive and cannot change what the
-invoice says. Suspending or deleting a workspace remains absent: those
-are destructive, and the product has no answer yet for what happens to a
-suspended workspace's in-flight conversations. The audit trail that would make
-them safe to add now exists, and is readable here.
+Reads, plus a short list of writes that each needed an argument to be here.
+
+Recording a payment against an invoice asserts that somebody has seen money
+arrive, and a customer able to make that assertion about their own invoice pays
+nothing. Disabling, enabling and deleting an account act on a *global* identity,
+which is why they are platform authority and not a workspace administrator's.
+And suspending or restoring a workspace stops or resumes service for somebody
+else's business, which is the definition of platform authority.
+
+Deleting a customer's workspace is still absent, and now deliberately rather
+than for want of an audit trail: ending the relationship is the customer's
+decision and lives on their own router. Staff who genuinely must force one are
+doing something that deserves a runbook rather than a button.
 
 **The reads on this router are audited, and no other read in the API is.** Every
 platform *write* was already recorded and no platform read was, which was
@@ -40,6 +47,7 @@ from app.api.dependencies import (
     PlatformAuditLogRepositoryDep,
     PlatformInvoiceServiceDep,
     PlatformStaffDep,
+    WorkspaceServiceDep,
 )
 from app.api.route import CommittingRoute
 from app.db.models.audit import AuditAction
@@ -54,6 +62,8 @@ from app.schemas.invoice import (
     PaymentRecordRequest,
 )
 from app.schemas.platform import PlatformOverviewRead, WorkspacePageRead
+from app.schemas.workspace import WorkspaceRead as WorkspaceStateRead
+from app.schemas.workspace import WorkspaceSuspendRequest
 
 router = APIRouter(route_class=CommittingRoute, prefix="/platform", tags=["platform"])
 
@@ -271,4 +281,104 @@ async def delete_user(
         email=user.email,
         is_active=user.is_active,
         token_version=user.token_version,
+    )
+
+
+@router.post(
+    "/tenants/{tenant_id}/suspend",
+    response_model=WorkspaceStateRead,
+    summary="Stop serving a workspace",
+    responses={
+        404: {"description": "No such workspace."},
+        409: {"description": "Already suspended, or deleted."},
+    },
+)
+async def suspend_workspace(
+    tenant_id: uuid.UUID,
+    payload: WorkspaceSuspendRequest,
+    staff: PlatformStaffDep,
+    workspaces: WorkspaceServiceDep,
+) -> WorkspaceStateRead:
+    """Platform authority over a customer's workspace, and the state it reaches.
+
+    `TenantStatus.SUSPENDED` has existed since the first tenancy migration and
+    nothing has ever written it, so the docstring at the top of this module -
+    "suspending or deleting a workspace remains absent" - described a real gap.
+    This closes half of it. The other half, deleting a customer's workspace,
+    stays absent on purpose: ending the relationship is the customer's decision
+    and lives on their own router, and staff who needed to force one would be
+    doing something deliberate enough to deserve a runbook rather than a button.
+
+    **What suspension does.** Every workspace-scoped route refuses on the next
+    request, because `get_active_workspace` reads `Tenant.is_active` and a
+    suspended tenant is not active. Nothing else changes: memberships,
+    subscription, data and number claims are all left exactly as they are, so
+    `restore` returns the workspace to precisely the state it was in.
+
+    **What it does not do is touch anybody's account.** No session is revoked,
+    and that is deliberate rather than an omission - a person in this workspace
+    and two others would otherwise be signed out of all three, which punishes
+    the wrong people for a decision about one workspace. Their account keeps
+    working; this workspace stops.
+
+    Billing is deliberately untouched too, and this is the decision most worth
+    being explicit about: a suspended workspace keeps its subscription and its
+    period keeps running. Suspension here is an operational stop - an abuse
+    investigation, a legal hold - not a statement about money, and the billing
+    sweep has its own separate `SUBSCRIPTION_SUSPENDED` state for an unpaid
+    invoice (ADR-061). An operator who means to stop charging cancels the
+    subscription as well; the two are not the same act and were never intended
+    to be. See docs/BILLING.md.
+    """
+    tenant = await workspaces.suspend(
+        tenant_id=tenant_id,
+        actor=staff.user,
+        reason=payload.reason,
+    )
+    return WorkspaceStateRead(
+        id=tenant.id,
+        name=tenant.name,
+        slug=tenant.slug,
+        status=tenant.status,
+        is_active=tenant.is_active,
+    )
+
+
+@router.post(
+    "/tenants/{tenant_id}/restore",
+    response_model=WorkspaceStateRead,
+    summary="Return a suspended workspace to service",
+    responses={
+        404: {"description": "No such workspace."},
+        409: {"description": "Not suspended, or deleted."},
+    },
+)
+async def restore_workspace(
+    tenant_id: uuid.UUID,
+    staff: PlatformStaffDep,
+    workspaces: WorkspaceServiceDep,
+) -> WorkspaceStateRead:
+    """The exact inverse of suspension, and nothing more.
+
+    It resurrects nothing. No session is reinstated, because none was revoked;
+    no membership is restored, because none was withdrawn. People who could use
+    the workspace before can use it again on their next request, and anybody who
+    lost access for a *different* reason - removed by an administrator, disabled
+    at the platform - stays without it. That is the property worth checking
+    after any restore: a lifecycle operation that quietly gave access back to
+    somebody a customer had removed would be a security defect wearing the shape
+    of a convenience.
+
+    A **deleted** workspace is refused here. Undoing a customer's decision to
+    close their business is not something staff should be able to do with one
+    request; it is a database operation with the deliberation that implies
+    (docs/RUNBOOK.md).
+    """
+    tenant = await workspaces.restore(tenant_id=tenant_id, actor=staff.user)
+    return WorkspaceStateRead(
+        id=tenant.id,
+        name=tenant.name,
+        slug=tenant.slug,
+        status=tenant.status,
+        is_active=tenant.is_active,
     )

@@ -28,7 +28,39 @@ class TenantRepository(BaseRepository[Tenant]):
         return await self._first(self._select().where(Tenant.id == tenant_id))
 
     async def get_by_slug(self, slug: str) -> Tenant | None:
+        """Including tombstoned workspaces, and that is deliberate.
+
+        A deleted workspace keeps its address for ever. Freeing it would let
+        somebody register the slug a customer's invitation links, support
+        tickets and bookmarks all still name, and inherit the trust attached to
+        it - so the unique constraint covers deleted rows and this read has to
+        see them or it would promise a slug the insert then refuses.
+        """
         return await self._first(self._select().where(Tenant.slug == normalise_slug(slug)))
+
+    async def lock(self, tenant_id: uuid.UUID) -> Tenant | None:
+        """The workspace row, held under ``FOR UPDATE`` until this transaction ends.
+
+        The serialisation point for every operation that must not interleave
+        with another one on the same workspace: transferring ownership, leaving,
+        removing the last owner, and deleting the workspace outright. All of
+        them read a count of owners and then act on it, and a count read outside
+        a lock is a decision made about a state that another transaction is in
+        the middle of changing - two owners leaving at once both see "two
+        owners, safe to go" and the workspace ends up with none.
+
+        The tenant row rather than the membership rows, because the invariant is
+        about the *set* of memberships and a lock on the rows you can see cannot
+        stop a row you cannot see from appearing. One row per workspace also
+        means these operations queue behind each other rather than deadlocking
+        in an order that depends on which user id sorts first.
+
+        A plain ``FOR UPDATE``: the caller wants this workspace, so skipping a
+        locked row would silently do nothing, and ``NOWAIT`` would turn a
+        half-second overlap into a failed request. These operations are rare and
+        waiting is the correct behaviour.
+        """
+        return await self._first(self._select().where(Tenant.id == tenant_id).with_for_update())
 
     async def require_by_slug(self, slug: str) -> Tenant:
         tenant = await self.get_by_slug(slug)

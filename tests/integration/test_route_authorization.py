@@ -93,6 +93,16 @@ ACCOUNT_OR_PLATFORM: frozenset[str] = frozenset(
         "/auth/identities/google/authorize",
         "/auth/identities/google/link",
         "/auth/identities/google",
+        # Creating a workspace cannot resolve one: it is the request that brings
+        # the workspace into existence, so there is no `tid` on the token and no
+        # membership to check. This is the case the comment above was written
+        # for - "a user with no workspace at all must still be able to read
+        # themselves and create one" - and until now nothing satisfied the
+        # second half of that sentence. It is still authorized: `VerifiedUserDep`
+        # gates it, and `WorkspaceService.create` bounds how many one account may
+        # own. Every *other* route on that router is workspace-scoped and is
+        # checked by this test in the ordinary way.
+        "/workspaces",
     }
 )
 

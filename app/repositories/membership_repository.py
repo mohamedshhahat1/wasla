@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import ColumnElement, Select
+from sqlalchemy import ColumnElement, Select, select
 
-from app.db.models import Membership, MembershipStatus, TenantRole
+from app.db.models import Membership, MembershipStatus, Tenant, TenantRole
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
 
@@ -76,6 +76,24 @@ class MembershipRepository(TenantScopedRepository[Membership]):
         )
         return len(owners)
 
+    async def list_active_owners(self) -> list[Membership]:
+        """Everyone who currently holds ownership of this workspace.
+
+        The rows rather than a count, because the callers that need this need to
+        know *who*: an ownership transfer has to tell an owner apart from the
+        person they are handing it to, and a last-owner refusal is only correct
+        if the one remaining owner is the caller themselves.
+
+        Read under the tenant lock (see ``TenantRepository.lock``) wherever the
+        answer is about to be acted on. Read outside it this is a snapshot, and
+        a snapshot of an invariant is not the invariant.
+        """
+        return await self._all(
+            self._active()
+            .where(Membership.role == TenantRole.TENANT_OWNER)
+            .order_by(Membership.created_at)
+        )
+
     async def add_member(self, *, user_id: uuid.UUID, role: TenantRole) -> Membership:
         """Grant a role.
 
@@ -122,3 +140,43 @@ class UserMembershipRepository(BaseRepository[Membership]):
             .order_by(Membership.created_at)
         )
         return await self._all(statement)
+
+    async def list_owned_live_workspaces(
+        self, user_id: uuid.UUID
+    ) -> list[tuple[Membership, Tenant]]:
+        """Workspaces this person owns that are still alive, with the tenant row.
+
+        Read before an account is deleted. Closing an account must not strand a
+        workspace with no owner, and answering that question needs the tenant
+        alongside the membership: a suspended or already-tombstoned workspace is
+        not something the departing owner has to resolve first, and asking them
+        to hand over a workspace that no longer exists would make deletion
+        impossible for exactly the people most likely to want it.
+
+        Joined rather than looked up per membership, because the caller is about
+        to render every row of this to somebody as a list of things they must
+        deal with, and a query per workspace to build one refusal is a query per
+        workspace on a path that is already refusing.
+        """
+        statement = (
+            select(Membership, Tenant)
+            .join(Tenant, Tenant.id == Membership.tenant_id)
+            .where(
+                Membership.user_id == user_id,
+                Membership.status == MembershipStatus.ACTIVE,
+                Membership.role == TenantRole.TENANT_OWNER,
+                Tenant.deleted_at.is_(None),
+            )
+            .order_by(Tenant.name)
+        )
+        rows = await self.session.execute(statement)
+        return [(membership, tenant) for membership, tenant in rows]
+
+    async def list_all_for_user(self, user_id: uuid.UUID) -> list[Membership]:
+        """Every membership this person holds, revoked ones included.
+
+        For account deletion, which withdraws them all. Deliberately unfiltered:
+        the active-only read above is the access decision, and this one is the
+        cleanup that must not miss a row merely because it was already inert.
+        """
+        return await self._all(self._select().where(Membership.user_id == user_id))

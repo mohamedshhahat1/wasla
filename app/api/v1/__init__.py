@@ -49,6 +49,7 @@ from app.api.v1 import (
     usage,
     webhooks,
     whatsapp,
+    workspaces,
 )
 
 # Declared once, so the same policy cannot drift between the routers it is
@@ -84,7 +85,14 @@ WORKSPACE_ROUTERS = (
 # a test that overrode the workspace dependency reported it working. A guard
 # whose signature pulls in authentication cannot be attached to a group that
 # contains an unauthenticated route.
-MIXED_ROUTERS = (invitations.router,)
+# `workspaces` joined for the same structural reason, found the same way - by a
+# test rather than by review. `POST /workspaces` *creates* the workspace, so
+# there is no `tid` on the token and no membership yet; attaching a guard that
+# resolves `ActiveWorkspaceDep` made the first request of Google-first
+# onboarding answer "No workspace is selected for this session", which is the
+# dead end the route exists to fix. Its other three routes are workspace-scoped
+# and carry the workspace limit individually.
+MIXED_ROUTERS = (invitations.router, workspaces.router)
 
 # Expensive and rare: a broadcast, a template sync against Meta.
 CAMPAIGN_ROUTERS = (

@@ -146,6 +146,13 @@ AUTH_SECURITY_EVENTS = REGISTRY.counter(
 )
 
 
+LIFECYCLE_EVENTS = REGISTRY.counter(
+    "wasla_lifecycle_operations_total",
+    "Account and workspace lifecycle operations by outcome.",
+    ("operation", "outcome"),
+)
+
+
 def observe_http(*, method: str, route: str, status_code: int, duration_seconds: float) -> None:
     """Record one served request.
 
@@ -183,6 +190,29 @@ def observe_auth_event(*, event: str, outcome: str, reason: str) -> None:
     """Count one auth/security event without identities or caller input."""
     try:
         AUTH_SECURITY_EVENTS.increment(event=event, outcome=outcome, reason=reason)
+    except Exception:
+        logger.warning("metrics.record_failed", extra={"event": "metrics.record_failed"})
+
+
+def observe_lifecycle_event(*, operation: str, outcome: str) -> None:
+    """Count one account or workspace lifecycle operation.
+
+    **Both labels come from module constants, never from a request.** The
+    operation is one of a fixed list written down at the call sites, and the
+    outcome is one of three words. That is the whole cardinality of this metric
+    and it cannot grow with traffic - no user id, no tenant id, no slug, no
+    email. A workspace identifier here would mean a time series per customer,
+    which is how a metrics backend is taken down by a successful product.
+
+    Recorded for the *decided* outcomes only. A refusal the caller caused is
+    `conflict`; work that completed is `success`; an unexpected failure is
+    `error`, and is also already counted by `wasla_unhandled_errors_total` and
+    by the 5xx class on `wasla_http_requests_total` - which is what an alert on
+    "the lifecycle endpoints are failing" should actually fire on, because it
+    catches a failure that never reached a call site here at all.
+    """
+    try:
+        LIFECYCLE_EVENTS.increment(operation=operation, outcome=outcome)
     except Exception:
         logger.warning("metrics.record_failed", extra={"event": "metrics.record_failed"})
 

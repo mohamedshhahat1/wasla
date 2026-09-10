@@ -47,7 +47,7 @@ from app.repositories import (
 )
 from app.services.audit_service import AuditTrail
 from app.services.email_verification_service import EmailVerificationService
-from app.services.subscription_service import SubscriptionService
+from app.services.subscription_service import bootstrap_default_subscription
 
 logger = get_logger(__name__)
 
@@ -229,34 +229,16 @@ class AuthService:
     async def _start_subscription(self, *, tenant_id: uuid.UUID) -> None:
         """Put the new workspace on the default plan, if there is one.
 
-        Registration must not fail because a catalogue row is missing. A
-        workspace without a subscription is still entitled to the default plan
-        by the same code (ADR-029), so the worst case is a missing row rather
-        than a customer who cannot sign up - and a signup that 500s over
-        billing configuration is the least forgivable failure in the product.
+        The policy itself lives in `bootstrap_default_subscription`, shared with
+        `WorkspaceService.create`: both create a workspace, and a workspace
+        created through one must not arrive on a different plan from one created
+        through the other.
         """
-        code = self._settings.default_plan_code
-        if not code:
-            return
-        try:
-            # `self_service=False`: this is the platform putting a new workspace
-            # on the plan an operator configured as the default, not a customer
-            # choosing from the catalogue. A deployment whose default plan is
-            # private is making a deliberate choice, and registration should not
-            # start failing because of it.
-            await SubscriptionService(self._session, tenant_id=tenant_id).start(
-                plan_code=code,
-                self_service=False,
-            )
-        except ValidationError:
-            logger.warning(
-                "billing.default_plan_missing",
-                extra={
-                    "event": "billing.default_plan_missing",
-                    "tenant_id": str(tenant_id),
-                    "plan_code": code,
-                },
-            )
+        await bootstrap_default_subscription(
+            self._session,
+            tenant_id=tenant_id,
+            settings=self._settings,
+        )
 
     async def login(
         self,

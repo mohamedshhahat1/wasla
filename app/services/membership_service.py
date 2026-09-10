@@ -33,10 +33,16 @@ from app.core.exceptions import ConflictError, PermissionDeniedError, Validation
 from app.core.logging import get_logger
 from app.db.models import Membership, MembershipStatus, TenantRole, User
 from app.db.models.audit import AuditAction, AuditActorKind
-from app.repositories import MembershipRepository, UserRepository
+from app.repositories import MembershipRepository, TenantRepository, UserRepository
 from app.services.audit_service import AuditTrail
 
 logger = get_logger(__name__)
+
+# The refusal a client has to act on rather than merely display: it is the one
+# that tells somebody they must hand the workspace over, or close it, before
+# they can go. Shared with `WorkspaceService`, which raises the same code from
+# the account-deletion path for the same reason.
+LAST_WORKSPACE_OWNER = "last_workspace_owner"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +70,7 @@ class MembershipService:
         self._tenant_id = tenant_id
         self._memberships = MembershipRepository(session, tenant_id=tenant_id)
         self._users = UserRepository(session)
+        self._tenants = TenantRepository(session)
         self._audit = AuditTrail(session, tenant_id=tenant_id)
 
     async def list_members(self, *, include_revoked: bool = False) -> list[MemberView]:
@@ -102,7 +109,19 @@ class MembershipService:
           mean to.
         - **Removing somebody already removed is a conflict, not a no-op.** The
           caller is looking at a stale roster and should see it refreshed.
+
+        The last-owner rule is only a rule if it is read under a lock. Two
+        owners leaving at the same moment each counted two owners, each
+        concluded that leaving was safe, and the workspace ended with none - the
+        count and the write have to be in the same critical section. Taking the
+        tenant row first (`TenantRepository.lock`) puts them there, and puts this
+        operation in the same queue as ownership transfer and workspace
+        deletion, which race with it for the same reason.
         """
+        # Before any read of the membership set. The lock is the whole point and
+        # a lock taken after the decision is decoration.
+        await self._tenants.lock(self._tenant_id)
+
         membership = await self._memberships.get_any_for_user(user_id)
         if membership is None:
             # Not "forbidden": whether a person exists in another workspace is
@@ -129,7 +148,11 @@ class MembershipService:
             if owners <= 1:
                 raise ConflictError(
                     "This workspace would be left without an owner. "
-                    "Make somebody else an owner first."
+                    "Transfer ownership or delete the workspace first.",
+                    # A client shows a different screen for this than for a
+                    # stale roster, and both are 409, so the code is the only
+                    # thing that tells them apart.
+                    error_code=LAST_WORKSPACE_OWNER,
                 )
 
         membership.status = MembershipStatus.REVOKED

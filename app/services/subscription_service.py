@@ -397,6 +397,50 @@ class SubscriptionService:
         return plan
 
 
+async def bootstrap_default_subscription(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    settings: Settings,
+) -> None:
+    """Put a newly created workspace on the plan an operator configured.
+
+    Shared by the two paths that create a workspace - registration, and
+    `POST /workspaces` - because they must not be able to disagree about it. It
+    was `AuthService._start_subscription`, reachable only from registration; a
+    second copy in the workspace service would be a second policy, and a policy
+    that exists twice is one that differs the first time either is touched.
+
+    **Creating a workspace must not fail because a catalogue row is missing.**
+    A workspace without a subscription is still entitled to the default plan by
+    the same code (ADR-029), so the worst case here is an absent row rather than
+    a customer who cannot get started - and a signup that 500s over billing
+    configuration is the least forgivable failure in the product.
+
+    `self_service=False`: this is the platform putting a new workspace on the
+    configured default, not a customer choosing from the catalogue. A deployment
+    whose default plan is private is making a deliberate choice, and workspace
+    creation should not start failing because of it.
+    """
+    code = settings.default_plan_code
+    if not code:
+        return
+    try:
+        await SubscriptionService(session, tenant_id=tenant_id, settings=settings).start(
+            plan_code=code,
+            self_service=False,
+        )
+    except ValidationError:
+        logger.warning(
+            "billing.default_plan_missing",
+            extra={
+                "event": "billing.default_plan_missing",
+                "tenant_id": str(tenant_id),
+                "plan_code": code,
+            },
+        )
+
+
 async def roll_over(
     subscription: Subscription,
     *,

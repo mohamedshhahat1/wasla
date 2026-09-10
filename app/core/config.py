@@ -524,6 +524,22 @@ class Settings(BaseSettings):
     # over a missing catalogue row.
     default_plan_code: str = "starter"
 
+    # How many live workspaces one account may own (ADR-097).
+    #
+    # A ceiling exists because `POST /workspaces` does. Before it, creating a
+    # workspace meant registering an account, which costs an address and is
+    # limited per client address at the door; now one verified account can do it
+    # in a loop, and every workspace it makes is a tenant, a subscription and a
+    # row in every operator's dashboard. The per-address limit on the route
+    # bounds the rate, not the total.
+    #
+    # Counted over workspaces the account currently *owns and that still exist*,
+    # so deleting one gives the slot back and being a member of somebody else's
+    # costs nothing. Generous on purpose: an agency legitimately runs several
+    # businesses, and the number that stops abuse is far above the number a real
+    # customer reaches. An operator who needs a different answer sets one.
+    max_owned_workspaces_per_user: int = Field(default=10, ge=1)
+
     # Dunning, in days from the moment an invoice was *issued* (ADR-061). That
     # anchor is the one the customer experienced - the day they were asked for
     # money - rather than a period boundary they never saw, and it is stable:

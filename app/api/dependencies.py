@@ -58,6 +58,7 @@ from app.services.subscription_service import SubscriptionService
 from app.services.template_service import TemplateService
 from app.services.usage_service import UsageService
 from app.services.whatsapp_account_service import WhatsAppAccountService
+from app.services.workspace_service import WorkspaceService
 from app.workers.ingestion_queue import IngestionQueue
 
 # auto_error is off so a missing header raises the same domain error as a bad
@@ -106,6 +107,28 @@ def get_account_service(settings: SettingsDep, session: SessionDep) -> AccountSe
 
 
 AccountServiceDep = Annotated[AccountService, Depends(get_account_service)]
+
+
+def get_workspace_service(settings: SettingsDep, session: SessionDep) -> WorkspaceService:
+    """Workspace lifecycle operations.
+
+    Deliberately **not** built from `ActiveWorkspaceDep`, unlike
+    `get_membership_service`. Two of its operations are platform authority over
+    an arbitrary workspace and a third creates the workspace it acts on, so
+    there is no tenant to bind here for most of the surface - and a provider
+    that bound one would have to be duplicated for the routes that cannot use
+    it.
+
+    The tenant is therefore an argument at each call site, and every call site
+    takes it from an `ActiveWorkspace` or is guarded by `PlatformStaffDep`.
+    That is checked by reading the routes rather than enforced by the type, so
+    it is worth stating plainly: **no route may pass this service a tenant id
+    that came from a request body.**
+    """
+    return WorkspaceService(session, settings=settings)
+
+
+WorkspaceServiceDep = Annotated[WorkspaceService, Depends(get_workspace_service)]
 
 
 def get_invitation_service(
