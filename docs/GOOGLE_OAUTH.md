@@ -221,19 +221,18 @@ ADR-057 closes. An account **with** a password can always unlink.
 
 ---
 
-## ADR-050 — Google's `email_verified` is trusted, because it buys nothing
+## ADR-050 — Google's `email_verified` is accepted as mailbox proof
 
 **Decision.** A validated `email_verified: true` sets `users.email_verified_at`.
 
-**The analysis that makes this safe, and it is not about Google.** It is about
-what the column does. `app/db/models/user.py` records that `email_verified_at`
-**grants nothing**: no route reads it, no permission depends on it, and
-authentication does not consult it. It is an account-integrity fact. So the
-question is not "is Google's claim strong enough to authorize something" - it
-authorizes nothing - but "is it strong enough to record as true". A claim inside
-a token whose signature, issuer, audience, expiry and nonce have all been
-verified is stronger evidence than a six-digit code emailed to the same address,
-which is what the alternative would require.
+**The current launch policy.** A validated Google `email_verified: true` claim
+is accepted as current mailbox proof only when the address is `@gmail.com` or
+the token carries a matching `hd` hosted-domain claim. Google warns that a
+third-party address may have changed owners after its Google Account was
+created; such an identity may authenticate by stable `sub` but remains in
+Wasla's limited onboarding state until it completes the six-digit code flow.
+The claim is used only after signature, issuer, audience, expiry, nonce, and
+browser-binding validation.
 
 **When it does not apply.** On the **link** path the column is set only if the
 validated Google address equals the account's current address. Google proving
@@ -241,10 +240,9 @@ that somebody owns `other@example.com` says nothing about whether this account
 owns the one it is registered under, and stamping it from a mismatched claim
 would be verifying the wrong mailbox.
 
-**The trigger to reopen this.** If any future route makes a decision based on
-`email_verified_at`, this decision must be re-examined before that route ships.
-The premise here is "the column grants nothing", and the day that stops being
-true is the day this becomes a grant of access on a third party's assertion.
+**Scope.** Google proof satisfies the same gate as Wasla's code; it does not
+grant a workspace membership, platform role, or session on its own. Those
+independent authorization checks still apply.
 
 **Never from the frontend.** `email_verified` is read only from a validated ID
 token, and the comparison is `is True` rather than a truthiness test - the

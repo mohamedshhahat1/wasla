@@ -598,6 +598,35 @@ against the metrics that actually exist, for whatever an operator points at
 | Email failing | `sum(rate(wasla_provider_requests_total{provider="email",operation="deliver",outcome="failure"}[30m])) > 0.05` | warn | Verification codes and password resets are not arriving. |
 | Rate limited | `sum by (provider) (rate(wasla_provider_requests_total{outcome="rate_limited"}[10m])) > 0` for 15m | warn | Sustained throttling; the backoff is working and the throughput is not. |
 
+### Authentication and account security
+
+`wasla_auth_security_events_total{event,outcome,reason}` is emitted in the API
+process. Its three labels are closed, call-site-owned vocabulary; email,
+account/user/workspace identifiers, IP addresses, tokens, OAuth subjects, and
+provider payloads are never labels. It covers password login success/failure,
+client and account rate-limit refusals, suppressed reset requests, verification
+failure/exhaustion, OAuth start/callback failures and account collisions,
+refresh replay, disabled/deleted-account use, invalid/replayed invitations, and
+invalid email-webhook signatures. Email delivery failure remains the worker's
+cross-process `wasla_provider_requests_total{provider="email",...}` signal.
+
+| Alert | Condition | Severity | What it means |
+| --- | --- | --- | --- |
+| Login failures spike | `sum(increase(wasla_auth_security_events_total{event="login",outcome="failure"}[10m])) > 50` | warn | Credential guessing or a broken client release; compare success rate and rate-limit events. |
+| Credential limits firing | `sum(increase(wasla_auth_security_events_total{event="rate_limit",outcome="blocked"}[10m])) > 20` | warn | Sustained IP/account abuse or a shared-proxy identity problem. |
+| Reset abuse suppressed | `sum(increase(wasla_auth_security_events_total{event="password_reset_request",outcome="suppressed"}[30m])) > 10` | warn | A mailbox is being targeted across sources or a client is looping. |
+| Refresh replay | `sum(increase(wasla_auth_security_events_total{event="refresh",reason="replay"}[15m])) > 0` | **page** | A stolen or duplicated refresh token triggered account-wide teardown. |
+| Deleted/disabled identity used | `sum(increase(wasla_auth_security_events_total{event=~"login|access_token|oauth_audit",reason=~"account_(deleted|inactive|unavailable)"}[15m])) > 0` | warn | Credentials are being presented for a closed account. |
+| OAuth failures spike | `sum(increase(wasla_auth_security_events_total{event=~"oauth_start|oauth_callback",outcome="failure"}[15m])) > 10` | warn | Provider/configuration failure or state/binding probes. |
+| Verification exhausted | `sum(increase(wasla_auth_security_events_total{event="email_verification",reason="attempts_exhausted"}[30m])) > 5` | warn | Repeated code guessing or confusing delivery delays. |
+| Invitation failures spike | `sum(increase(wasla_auth_security_events_total{event="invitation_accept",outcome="failure"}[30m])) > 20` | warn | Expired/replayed bearer links or automated probing. |
+| Webhook signature failures | `sum(increase(wasla_auth_security_events_total{event="email_webhook",reason="invalid_signature"}[10m])) > 5` | warn | Wrong secret after rotation or unauthenticated probing. |
+
+These are alert definitions supplied as operator guidance, not configured
+alerts. A deployment is not monitoring-ready until its scraper sees every API
+replica, the expressions are installed, and a test notification reaches the
+on-call receiver.
+
 ### Backups
 
 | Alert | Condition | Severity | What it means |

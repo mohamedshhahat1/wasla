@@ -578,14 +578,12 @@ Recorded rather than silently carried.
 - ~~No password reset~~ — **shipped** with ADR-042, once the repository could
   send email. A password *change* remains beside it for somebody already signed
   in. See [SECURITY.md](SECURITY.md).
-- **Email verification is not an authorization input, and that is deliberate**
-  (ADR-043). `users.email_verified_at` is written by one service and read by no
-  dependency: no route, role, membership or entitlement consults it. An
-  unverified account reaches every route a verified one does, and a test in
-  `tests/integration/test_email_verification_endpoints.py` pins that so nobody
-  "fixes" it into a lockout of every account created before the column existed.
-  If a product rule ever needs a verified address, it belongs in this matrix as
-  an explicit column rather than as a scattered check.
+- **Email verification is a centralized onboarding authorization input.**
+  `require_verified_user` gates workspace switching, every active-workspace
+  route, and platform administration. Account identity, logout, recovery,
+  verification, and Google identity management remain available. The route
+  dependency-graph test fails if a future material route lacks an explicit
+  classification.
 - **Revocation is per-user, not per-session.** Signing one device out while
   leaving another alone needs a session table; ADR-036 records why one was not
   built. Note that this is *session* revocation — workspace membership

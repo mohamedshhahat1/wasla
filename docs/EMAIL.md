@@ -20,7 +20,7 @@ await self._outbox.enqueue(
     template=EmailTemplate.PASSWORD_RESET,
     recipient=user.email,
     idempotency_key=f"password-reset:{token.id}",
-    context={"token": raw_token},
+    context={"token": raw_token},  # sealed before the database write
 )
 ```
 
@@ -60,16 +60,19 @@ it describes commit together:
 - A provider outage does not fail the request that queued the mail.
 - A request never waits on `api.resend.com`.
 
-What the row holds is minimal on purpose. Not rendered HTML - a structured
-`context` the worker renders at send time, so a leaked database dump yields
-an address and a template name rather than the finished message. **No
-secrets belong in an outbox row.**
+What the row holds is minimal on purpose. It stores a structured `context`,
+not rendered HTML. For password reset, invitation, and email-verification
+templates, `EmailOutbox` seals the deterministic JSON context with AES-256-GCM
+before the database write. The idempotency key is additional authenticated
+data, so ciphertext cannot be copied to another logical message. The worker
+alone opens it in memory immediately before rendering.
 
-The one deliberate exception is a reset or invitation token, which is the
-point of those two messages. It is a short-lived single-use capability, not
-a stored credential, and `mark_sent`/`mark_failed` clear `context` on every
-terminal transition so it does not outlive its delivery. A token still
-sitting in a pending row is a token whose email has not gone out yet.
+`CREDENTIAL_ENCRYPTION_KEYS` is the existing ordered key ring: the first key
+encrypts and all configured keys may decrypt during rotation. An enabled email
+deployment without a usable key refuses startup. Invalid ciphertext or a
+missing decryption key is a permanent, render-stage failure; no malformed or
+partially rendered message is sent. Successful and permanently failed rows
+clear `context`. Transient provider retries retain only ciphertext.
 
 Indexes: `(status, available_at)` for the claim query, `tenant_id` for
 workspace lookups, `provider_message_id` for webhook resolution, and a
@@ -156,7 +159,7 @@ here would silently convert a consent-free channel into a marketing one.
 | --- | --- |
 | Account enumeration | `POST /auth/password-reset/request` always answers 202 with the same body, whether or not the address exists |
 | Timing oracle | The work either side of the branch is equivalent; no early return distinguishes a known address |
-| Token theft from the database | Only a SHA-256 hash is stored; the raw token exists in the response to nobody and in the email only |
+| Token theft from the database | The reset table stores only a SHA-256 hash and the pending outbox stores AES-GCM ciphertext; the raw token exists transiently only in process memory and in the delivered email |
 | Token in logs | Never logged. Logs carry `email_message_id`, template and user id |
 | Token in an API response | Never returned. The endpoint returns a message, not a token |
 | Replay / double use | Consumed atomically; a spent token is invalid |
@@ -194,7 +197,7 @@ secret is meant to be read and retyped rather than clicked.
 | Two valid codes at once | A partial unique index on live challenges, so the database refuses a second |
 | Verifying somebody else's address | The challenge is found by account, and the request schema forbids extra fields |
 | Surviving an email change | Each challenge records the address it was issued for, and both the check and the consuming UPDATE compare it to the current one |
-| Code lingering in the outbox | The context carries it so the worker can render the message, and terminal transitions clear it - the reset link's arrangement, unchanged |
+| Code lingering in the outbox | Pending context is AES-GCM ciphertext; the worker opens it only in memory, and terminal transitions clear it |
 
 Redis degradation follows ADR-040 rather than ADR-032: both policies stand in
 front of a guessable secret, so both carry the process-local fallback. An
@@ -356,12 +359,13 @@ is wired.
   expired), payment succeeded, payment failed, payment pending. Each needs a
   domain event that does not exist yet; none was invented to give a template
   a caller.
-- ~~No email verification flow~~ - **built** (ADR-043). Six-digit codes
-  under `POST /auth/email/verification/{send,verify}`, with the same
-  hash-only, single-use, superseded-on-reissue handling as reset, plus an
-  attempt cap the reset token does not need. It still grants nothing:
-  workspace access comes from a membership row and platform authority from
-  `platform_role`, exactly as before. See `docs/EMAIL_VERIFICATION.md`.
+- ~~No email verification flow~~ - **built** (ADR-043, with the later launch
+  policy documented in `AUTH.md`). Six-digit codes under
+  `POST /auth/email/verification/{send,verify}`, with the same hash-only,
+  single-use, superseded-on-reissue handling as reset, plus an attempt cap the
+  reset token does not need. Authentication and account recovery remain
+  reachable before verification; workspace and platform business actions are
+  centrally gated. See `docs/EMAIL_VERIFICATION.md`.
 - **Redis degradation of the reset rate limiter is untested.** The limiter
   itself degrades rather than disappears (ADR-040) and is covered there; what
   is not covered is that path specifically through the reset endpoints.
@@ -374,10 +378,11 @@ is wired.
   them, and that code then verified the account over HTTP. The send path is
   no longer a claim about code.
 
-  Three things were confirmed by that send rather than argued: the outbox
-  `context` was `{}` afterwards, so the plaintext left the database on the
-  terminal transition exactly as this document says; the API key appeared in
-  no log line the worker wrote; and the code appeared in none either.
+  Three things were confirmed by that historical send rather than argued: the
+  outbox `context` was `{}` afterwards; the API key appeared in no log line the
+  worker wrote; and the code appeared in none either. That observation predates
+  outbox encryption; current ciphertext-at-rest behavior is covered locally
+  and still requires a newly authorized real-delivery regression.
 - **The delivery webhook has still never fired.** No event has arrived from
   Resend's infrastructure, because that needs a publicly reachable URL this
   environment does not have. Suppression, bounce and complaint handling

@@ -151,14 +151,16 @@ implementation, item for item:
 - **An identical response either way.** Registered, unknown, suspended and
   passwordless addresses all receive `202` with the same body, so the endpoint
   is not an oracle for which addresses have accounts.
-- **A rate limit on requests.** Both routes carry the client-address credential
-  limit, which degrades rather than disappears when Redis does (ADR-040).
+- **Two independent request budgets.** Both routes carry the client-address
+  credential limit; reset requests additionally consume a canonical-account
+  budget (3/hour by default), so source-IP rotation cannot flood one mailbox.
+  Both use ADR-040's bounded process-local fallback when Redis is unavailable.
 - **A session bump on success.** `token_version` is raised, so every access and
   refresh token dies with the old password (ADR-036), and the account is told
   through the outbox in the same transaction.
-- **The token never logged and never returned through the API.** It exists in
-  the emailed link and in the outbox row carrying it, and that row's context is
-  cleared the moment the message is sent or permanently fails.
+- **The token never logged and never returned through the API.** Its outbox
+  context is AES-256-GCM ciphertext under the application key ring; only the
+  worker decrypts it, and context is cleared when sent or permanently failed.
 - **Tests covering replay and expiry.** `tests/integration/test_password_reset.py`
   covers reuse, expiry, supersession, enumeration, the constant refusal, and
   that no token reaches the audit trail.
@@ -184,9 +186,8 @@ same strength rule, same `token_version` bump, same audit action, same notice.
 
 All three notify the account holder afterwards.
 
-**Email verification is deliberately absent**, and that is a decision rather
-than a gap — nothing in the authorization model reads a verified flag. See
-ADR-042 for the reasoning and the residual account-squatting risk.
+**Email verification gates business authority but not account recovery.** See
+the section below and `docs/EMAIL_VERIFICATION.md`.
 
 ## Email verification — a six-digit code that proves an inbox
 
@@ -223,9 +224,9 @@ The controls, and why each differs from the reset flow where it does:
   test that drives both endpoints with a known code and asserts it appears in
   no captured log record and in no audit row.
 
-**It grants nothing.** No route reads the column. That is the property most
-worth protecting here: a verified-email check added casually would lock out
-every account created before the column existed.
+**It unlocks business authority through one central dependency.** Login,
+refresh, logout, password recovery, and verification stay usable before the
+timestamp is set; workspace and platform operations do not.
 
 ## Google sign-in — a second issuer, and two rules about what it may change
 

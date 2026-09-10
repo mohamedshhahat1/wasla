@@ -27,6 +27,16 @@ what it proves is the remote copy.
 | Queued and in-flight jobs, rate-limit counters, the refresh-token denylist, OAuth flow state, worker heartbeats | Redis | **No, deliberately** |
 | Customer attachments | The media store: a local volume, or an object bucket ([ADR-077](../DECISIONS.md)) | **No, and it is not meant to — see below** |
 
+The PostgreSQL dump includes email outbox recipients, template names, and
+pending sensitive context. Verification codes, password-reset tokens, and
+invitation tokens in that context are AES-256-GCM ciphertext, not plaintext.
+The backup remains sensitive account data and must stay encrypted off host.
+`CREDENTIAL_ENCRYPTION_KEYS` is deliberately not part of the dump; restore
+operations must recover the matching key ring through the deployment secret
+store, with old keys retained until no backup inside the retention window can
+contain ciphertext written by them. Losing those keys makes pending messages
+unreadable and safely unsendable; it does not justify bypassing decryption.
+
 **Redis is deliberately not backed up.** Everything in it is either
 reconstructible or worth losing. A queued job is a message that will be
 answered late rather than never — the message itself is in PostgreSQL. A

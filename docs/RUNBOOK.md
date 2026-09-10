@@ -604,6 +604,19 @@ that are more specific than a counter can be.
 | `email.suppressed_skipped` | A message was not sent because its address is suppressed | Low, High if sudden and widespread |
 | `request.timed_out` | A handler exceeded its budget while holding a connection | Medium |
 
+Authentication incidents should start with
+`wasla_auth_security_events_total`, whose labels contain categories rather than
+identities. A `refresh/replay` sample means the account-wide token-version
+teardown already ran; direct the person to sign in again and investigate token
+exposure. Repeated `password_reset_request/suppressed` means the per-account
+budget is stopping distributed mailbox abuse; do not raise the limit until a
+client loop is ruled out. `account_deleted` or `account_inactive` attempts are
+expected immediately after an operator action but suspicious if sustained.
+OAuth callback failures should be split by login/link and checked against
+provider status, callback URI, state/nonce expiry, and browser-cookie policy.
+Never search metrics by email or user id; use request/audit correlation under
+the incident-access policy when an individual investigation is authorized.
+
 Every log line carries `request_id`, and `tenant_id`, `user_id` and `conversation_id` where they apply. Fields whose names suggest secrets are redacted before serialisation, so a token cannot reach the logs even when a payload is logged whole.
 
 ---
@@ -629,6 +642,10 @@ Stated plainly, because a runbook that pretends to cover everything is one that 
 - **The media recovery check ran against MinIO, not a provider.** A synthetic object was stored, its metadata recorded, the runtime and the local volume destroyed, and the same bytes and canonical type read back by a fresh process against the same off-host store. That proves the application half — the client, the signing, the key, the metadata — and not any provider's IAM, TLS chain, replication lag or lifecycle rules.
 - **Nothing verifies that a bucket's lifecycle rule outlives this backup's retention.** Restoring a database from one date against a bucket that has already expired the objects it references gives a working product with missing files, and no check anywhere compares the two windows.
 - **There is no configured alerting.** [OBSERVABILITY.md](OBSERVABILITY.md) gives concrete expressions against metrics that now exist, and the table above lists the log events worth watching. Neither is a running alert: no Alertmanager, no monitoring vendor, nobody paged.
+- **Auth alert delivery is externally unverified.** The API emits bounded
+  auth/security counters and the observability guide supplies alert expressions,
+  but no production scraper, rule evaluator, receiver, or paging drill exists
+  in this repository.
 - **Media durability depends on `MEDIA_STORAGE_BACKEND`** ([ADR-077](../DECISIONS.md)). On `local` the volume is the only copy and losing the host loses every attachment. On `s3` the bytes outlive the host, and their durability, versioning and lifecycle are the bucket's - the PostgreSQL backup carries the rows and the keys, never the files, and is not meant to ([BACKUP.md](BACKUP.md)).
 - **`usage_events` and `audit_logs` grow without bound.** Neither is swept, deliberately — retention for billing records and audit trails is a legal question, not a disk-space one.
 - **The media store grows until a retention period is set.** `MEDIA_RETENTION_DAYS` defaults to zero, which keeps everything ([ADR-078](../DECISIONS.md)). Watch `wasla_media_retention_total{outcome="pending"}`: a number that stays above zero across sweeps is a store refusing deletions, which is otherwise invisible — the rows are claimed, the sweep reports itself as having run, and the volume does not shrink.

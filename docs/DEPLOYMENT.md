@@ -57,7 +57,21 @@ Every secret in the production file is required and interpolated from the deploy
 
 `CREDENTIAL_ENCRYPTION_KEYS` **must be identical for the API and the worker.** The worker decrypts a workspace's credential in order to send with it, so a worker missing a key the API used cannot send for that workspace at all.
 
+When `EMAIL_ENABLED=true`, at least one valid AES-256 key is mandatory even if
+no workspace-specific Meta credential is used. The API seals verification,
+reset, and invitation outbox context; the worker must receive the same ordered
+key ring to open it. Rotate by prepending the new key, deploy API and worker
+together, and retain old keys through the longest pending-message and backup
+retention window before removing them.
+
 ## Reverse proxy and TLS
+
+The shipped API command explicitly starts Uvicorn with `--no-proxy-headers`.
+Wasla's own `client_identity` code is therefore the sole parser of forwarded
+addresses and applies the configured trusted-proxy list. Keep this flag in
+every direct/systemd/Kubernetes command, including loopback-proxy topologies;
+otherwise Uvicorn may rewrite the ASGI peer from attacker-supplied
+`X-Forwarded-For` before the application can enforce its trust boundary.
 
 `nginx/nginx.conf` covers reverse proxying, request size limits, security headers, client IP forwarding, proxy timeouts and WebSocket upgrade support. It has been validated with `nginx -t` and exercised end to end: the HTTP listener redirects, the proxy passes traffic, an oversized body is refused at the proxy, and `X-Forwarded-For` reaches the application.
 

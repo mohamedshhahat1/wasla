@@ -10,10 +10,10 @@ describing it afterwards. Where implementation showed an answer to be wrong,
 the answer has been corrected here rather than left standing - three were,
 and they are called out in [Build state](#build-state).
 
-**Status: implemented, unexecuted.** Schema, crypto, repository, service,
-template and endpoints exist. Configuration settings, registration
-integration and tests do not. Nothing in this phase has been run. See
-[Build state](#build-state).
+**Status: implemented and locally tested.** Registration integration, the
+centralized business gate, encrypted outbox context, and PostgreSQL-backed
+service/endpoint tests are present. Real-provider delivery is a separate
+deployment verification; see [Build state](#build-state).
 
 ## What this is, and is not
 
@@ -39,26 +39,15 @@ time, by somebody already authenticated as that account.
 **2. What does it not prove?** The table above. Above all it is not a factor
 and not an identity claim.
 
-**3. Which application actions require a verified email?** **None.** This is
-the most important answer in the document. No route checks
-`email_verified_at`, no permission depends on it, no entitlement reads it.
-Wasla's authorization model is membership plus role plus entitlement:
-workspace access comes from a `memberships` row, platform authority from
-`users.platform_role`, and plan limits from a subscription. A verified
-address is not an input to any of those, and adding it as one would be
-inventing a product rule that nobody has asked for.
+**3. Which application actions require a verified email?** Every meaningful
+workspace/business operation, workspace switching, and platform
+administration. The centralized `require_verified_user` dependency is reached
+directly by platform routes and indirectly by every active-workspace route.
 
-> Email verification is currently an account-integrity primitive and does not
-> independently grant or revoke authorization.
-
-This is verifiable rather than aspirational: `email_verified_at` is written in
-exactly one place, `EmailVerificationService.confirm`, and read in exactly
-one, the same service's short-circuit for an already-verified address. No
-dependency in `app/api/dependencies.py` consults it.
-
-**4. What remains available before verification?** Everything. Registration,
-login, workspace creation, invitations, billing, every API route. An
-unverified account is a fully functional account.
+**4. What remains available before verification?** Registration, login,
+`/auth/me`, refresh, logout/logout-all, password recovery/change/set,
+verification resend/confirm, and Google identity recovery/linking. This is a
+limited onboarding session, not a fully functional workspace session.
 
 **5. What happens when a user changes their email?** There is no
 email-change flow in this repository today. When one is added it must set
@@ -158,16 +147,17 @@ small, they carry no usable secret once dead, and adding a cleanup job for
 them would be inventing operational work this repository does not otherwise
 have. If retention ever matters they can be swept on age.
 
-**18. Does verification affect workspace membership?** No. Membership is a
-row in `memberships`; nothing in this feature reads or writes it. The
-endpoints deliberately sit outside the workspace router group so that they do
-not even resolve a membership - see
+**18. Does verification affect workspace membership?** It never creates,
+changes, or revokes the membership row, but an unverified account cannot
+exercise membership authority. The endpoints deliberately sit outside the
+workspace router group - see
 [Why these routes are not workspace-scoped](#why-these-routes-are-not-workspace-scoped).
 
-**19. Does verification affect authentication?** No. Login, refresh, logout
-and `token_version` are untouched. An unverified account signs in normally.
-Verifying does not mint, revoke or alter any token, and the verify response
-contains a timestamp rather than a credential.
+**19. Does verification affect authentication?** It does not block login,
+refresh, logout, or recovery and does not alter `token_version`. It does affect
+authorization after authentication: the limited session cannot cross the
+business gate until verification. The verify response contains a timestamp,
+not a credential.
 
 **20. Does verification affect password reset?** No, and deliberately not.
 Reset already treats delivery to the address on file as proof of control -
@@ -201,8 +191,8 @@ kills three problems at once rather than mitigating them:
 - **Cross-account sends** - there is no target user id to tamper with, so
   one account cannot trigger mail for another.
 
-An unauthenticated send would be needed only if verification gated something
-before first login. It gates nothing, so it is not needed.
+An unauthenticated send is unnecessary because registration returns the
+limited session needed to request a code.
 
 The request body of the verify route sets `extra="forbid"`, so a client that
 sends `user_id` or `email` beside its code receives a 422 rather than having
@@ -330,16 +320,11 @@ rate-limited request is logged by the limiter.
 **Never logged:** the code, in any form - not truncated, not hashed, not in
 an exception message, not in audit metadata, not in a trace. Not the
 submitted value either, since a near-miss narrows the keyspace. The template
-renders the code at send time from the outbox context, and the outbox clears
-context on terminal transition, so the plaintext code's persisted lifetime is
-bounded by delivery.
-
-That last point is a real weakening of the outbox's usual guarantee and is
-stated plainly rather than buried: **the plaintext code sits in
-`email_messages.context` until the row reaches a terminal state.** It is
-unavoidable given that the worker, not the request, renders the message; the
-same is already true of reset and invitation tokens (ADR-042). It is bounded
-by delivery, never logged, and exposed by no endpoint.
+renders only after the worker decrypts an AES-256-GCM envelope from the outbox.
+Plaintext exists transiently in worker memory only. Database rows and backups
+contain ciphertext; sent and permanently failed rows clear context. The
+ordered credential key ring supports decrypting rows written with the previous
+key during rotation.
 
 ## Lifetime and configuration
 

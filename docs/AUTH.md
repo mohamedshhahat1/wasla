@@ -10,7 +10,7 @@ Argon2id via `argon2-cffi`, in `app/core/security.py`. Hashes carry their own pa
 
 A login against an unknown address still spends the time a real verification would. Response time discloses whether an address is registered just as surely as a different error message would, so both are made uniform: every credential failure answers `401` with one message.
 
-An account that exists but is disabled is only told so **after** its password is proven, which reveals nothing the caller did not already know.
+An account that exists but is disabled is only told so **after** its password is proven, which reveals nothing the caller did not already know. Soft-deleted accounts are excluded by ordinary repository lookups and every session-issuance path checks lifecycle state again. Platform deletion atomically writes the tombstone, disables the account, and increments `token_version`; explicit `*_including_deleted` methods are reserved for collision checks and lifecycle tooling.
 
 ## Signing in with Google
 
@@ -24,7 +24,7 @@ The account's `full_name` and `avatar_url` follow Google on every login; its `em
 
 | Token | Lifetime | Carries | Revocable |
 | --- | --- | --- | --- |
-| Access | `ACCESS_TOKEN_TTL_SECONDS` (15 min default) | subject, type, `jti`, active `tid` | No, by design |
+| Access | `ACCESS_TOKEN_TTL_SECONDS` (15 min default) | subject, type, `jti`, active `tid`, `ver` | Not individually; immediately in bulk through `token_version` |
 | Refresh | `REFRESH_TOKEN_TTL_SECONDS` (14 days default) | subject, type, `jti` | Yes, in Redis |
 
 Tokens are typed (`typ`), so a refresh token cannot be presented where an access token is required, and each carries a unique `jti`.
@@ -35,7 +35,36 @@ The atomicity is the security property, not an optimisation (ADR-039). Checking 
 
 **A replayed token tears the whole session estate down.** Rotation alone spends only the copy that is presented — usually the victim's, since the thief is the one racing — so the response to a replay is to raise `users.token_version`, which invalidates every access and refresh token the account holds. Both parties are signed out; the real person signs in again with a password the thief does not have. A `refresh_token_reused` audit entry is written and committed *before* the refusal is raised, because an exception would otherwise roll back the revocation that accompanies it. The caller learns only that the credentials are not valid: naming the teardown would tell a thief to move faster, and nothing on this path logs or records token material.
 
-**Access tokens are deliberately not revocable.** They live for minutes, and checking a denylist on every request would surrender the whole benefit of stateless verification for very little. Immediate withdrawal of access is handled where it actually belongs — see below.
+**Access tokens are deliberately not individually denylisted.** `POST /auth/logout` spends the supplied refresh token, but its already-issued access token can remain usable until its 15-minute maximum lifetime. `logout-all`, password reset, disable, delete, and refresh-replay teardown increment `token_version`, so their access tokens stop on the next request. Clients must clear both tokens after logout.
+
+## Verification onboarding gate
+
+Registration and password login may establish a limited session before inbox verification. `require_verified_user` centrally gates workspace selection, every workspace-scoped business API, and platform administration. `/auth/me`, refresh, logout, password recovery/change, verification itself, and Google identity recovery/linking remain reachable. A denied business request is `403 email_verification_required`. Google's signed `email_verified` claim satisfies the gate only for Gmail or a matching hosted Workspace domain; third-party addresses remain limited until they complete Wasla's code flow.
+
+The dependency-graph test inventories every FastAPI route and fails if a future authenticated material route has no verification classification.
+
+### Account lifecycle matrix
+
+`limited` means account/recovery endpoints remain available but material
+workspace/platform operations are refused. `no` means the lifecycle guard
+refuses the identity regardless of credentials.
+
+| State | Password / Google login | Access / refresh | Reset / verify | Invite acceptance | Workspace switch / business action |
+| --- | --- | --- | --- | --- | --- |
+| Active, verified | yes / yes when linked | yes / yes | reset yes / verify idempotent | yes | yes, subject to membership/tenant state |
+| Active, unverified | yes / Google proof verifies | limited / yes | yes / yes | yes | no until verified |
+| Disabled | no / no | no / no | neutral no-op / no | existing identity refused | no |
+| Soft deleted | no / no; tombstone not reused | no / no | neutral no-op / no | refused | no |
+| Passwordless Google | password no / Google yes | limited until proof, then yes | reset no / verify yes | yes | membership and verification required |
+| Invited new account | password set by acceptance / unlinked no | no session minted | after login | one atomic winner | verification and membership required |
+| Membership revoked | account login yes | account session yes | yes / yes | a new valid invite may reinstate | revoked workspace denied |
+| Tenant suspended or deleted | account login yes | account session yes | yes / yes | account-level acceptance may succeed | that tenant's business actions denied |
+
+## Reset abuse budget and outbox credentials
+
+Password reset retains its client-address budget and adds a privacy-safe SHA-256 bucket over the canonical email (3 requests/hour by default). This account budget is shared through Redis, uses ADR-040's bounded process-local fallback, and suppresses additional reset rows/mail while returning the same generic 202 contract.
+
+Verification codes, password-reset tokens, and invitation tokens are AES-256-GCM encrypted before `email_messages.context` is written. The ordered credential key ring supports rotation: the first key encrypts and every configured key may decrypt. The worker alone opens context; sent and permanently failed rows clear it.
 
 ## Authorization model
 
@@ -60,13 +89,13 @@ Switching workspace mints a new access token and leaves the refresh token untouc
 
 ## Invitations
 
-Invitation tokens are generated from `secrets` and stored **only** as a SHA-256 hash, so a stolen database yields no usable invitation. The raw token is visible exactly once, in the response to the administrator who issued it; when mail delivery lands it will go only to the invited address.
+Invitation tokens are generated from `secrets` and stored **only** as a SHA-256 hash on the invitation. The raw token is never returned by the API; its outbox copy is encrypted and delivered only to the invited address.
 
 Acceptance is unauthenticated by necessity — the invited person may have no account yet — and the token in the body is the authorization. It creates the account when needed and always creates the membership, but **mints no session**: signing in stays a separate step, so a leaked invitation link cannot by itself produce a live session.
 
 An administrator cannot invite an owner; only an owner can. Otherwise the boundary between the two roles would be decorative, since any admin could mint themselves a peer with full authority.
 
-Unknown, spent, revoked, and expired invitations all answer identically, so the endpoint cannot be used to probe which tokens once existed.
+Unknown, spent, revoked, expired, and concurrently consumed invitations all answer identically. Acceptance claims the pending row with one conditional update before creating a user or membership.
 
 ## Enforcement points
 
