@@ -42,21 +42,39 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.core.exceptions import AuthenticationError, NotFoundError, ValidationError
+from app.core.exceptions import (
+    AuthenticationError,
+    ConflictError,
+    NotFoundError,
+    ValidationError,
+)
 from app.core.logging import get_logger
 from app.core.security import (
     hash_password,
     validate_password_strength,
     verify_password,
 )
+from app.core.telemetry import observe_lifecycle_event
+from app.db.models import MembershipStatus, Tenant
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.user import User
-from app.repositories import UserRepository
+from app.repositories import (
+    MembershipRepository,
+    TenantRepository,
+    UserMembershipRepository,
+    UserRepository,
+)
 from app.services.audit_service import AuditTrail
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
 
 logger = get_logger(__name__)
+
+# Stable machine-readable codes for the two refusals a client has to act on
+# rather than merely display. Both are 409: the request was well-formed and the
+# caller was allowed to make it, and the state of the account is what refused.
+ACCOUNT_OWNS_WORKSPACES = "account_owns_workspaces"
+PASSWORD_REQUIRED = "password_required"  # noqa: S105 - an error code, not a credential
 
 
 class AccountService:
@@ -93,9 +111,30 @@ class AccountService:
     async def delete(self, *, user_id: uuid.UUID, actor: User) -> User:
         """Create an irreversible authentication tombstone for an account.
 
-        This is platform lifecycle tooling, not self-service deletion. The
-        lifecycle fields change in one statement so deletion cannot leave an
-        active account or preserve credentials minted before the tombstone.
+        Platform lifecycle tooling, not self-service deletion. The lifecycle
+        fields change in one statement so deletion cannot leave an active
+        account or preserve credentials minted before the tombstone.
+
+        **It does not refuse for owned workspaces, and `delete_self` does.**
+        That asymmetry is the point rather than an inconsistency. Self-deletion
+        is somebody tidying up, and there is always a way for them to hand a
+        workspace over first, so refusing costs them one extra step and saves a
+        workspace. This route is how an abusive or compromised account is shut
+        down *now*, and a refusal here would mean the one account most worth
+        removing is the one that cannot be removed - an attacker would only have
+        to own a workspace to become undeletable.
+
+        So the consequence is made visible instead of being prevented: any
+        workspace left with no active owner is named in the audit entry and
+        logged at warning, and docs/RUNBOOK.md tells an operator to check for
+        them and promote somebody. An orphaned workspace that nobody knows about
+        is the failure worth avoiding; an orphaned workspace on a checklist is a
+        chore.
+
+        Memberships are withdrawn here exactly as `delete_self` withdraws them.
+        Leaving them active would make a deleted person a ghost on every roster
+        they were on - unable to act, because authentication refuses them first,
+        but visible to colleagues as somebody who still has access.
         """
         if user_id == actor.id:
             raise ValidationError("An administrator cannot delete their own account.")
@@ -118,17 +157,43 @@ class AccountService:
         if user is None:
             raise NotFoundError("No account matches that identifier.")
 
-        # The existing enum stays stable; the metadata makes the irreversible
-        # tombstone distinct from a reversible suspension in the audit trail.
+        orphaned = await self._withdraw_memberships(user)
+
+        # `USER_DELETED`, not `USER_DISABLED` with a flag in the metadata. The
+        # old spelling was chosen to avoid a migration and cost more than it
+        # saved: an irreversible tombstone filed under the reversible action is
+        # invisible to anybody filtering the trail for account destruction, and
+        # `USER_ENABLED` reads as its undo when nothing can undo it. The label
+        # arrives with migration 0049, alongside the four this endpoint needed
+        # all along.
         self._audit.record(
-            AuditAction.USER_DISABLED,
+            AuditAction.USER_DELETED,
             actor=actor,
             actor_kind=AuditActorKind.PLATFORM_STAFF,
             target_type="user",
             target_id=user.id,
             target_label=user.email,
-            meta={"token_version": user.token_version, "deleted": True},
+            meta={
+                "token_version": user.token_version,
+                "self_service": False,
+                # Named rather than counted: an operator reading this entry has
+                # to go and fix them, and a number tells them nothing about
+                # where to look. Empty in the ordinary case.
+                "orphaned_workspaces": orphaned,
+            },
         )
+        if orphaned:
+            # Warning, not info. This is the one outcome of the request that
+            # needs somebody to do something afterwards.
+            logger.warning(
+                "account.deleted_orphaned_workspaces",
+                extra={
+                    "event": "account.deleted_orphaned_workspaces",
+                    "user_id": str(user.id),
+                    "actor_id": str(actor.id),
+                    "workspaces": orphaned,
+                },
+            )
         logger.info(
             "account.deleted",
             extra={
@@ -136,6 +201,186 @@ class AccountService:
                 "user_id": str(user.id),
                 "actor_id": str(actor.id),
             },
+        )
+        return user
+
+    async def delete_self(self, *, user: User, current_password: str) -> User:
+        """Close the caller's own account, irreversibly.
+
+        **Only ever the caller.** The signature takes the authenticated `User`
+        and there is no argument that could be somebody else's id, which is the
+        difference between this and :meth:`delete`. A route that accepted a
+        target would be a global user-deletion endpoint available to every
+        signed-in person, whatever guard was written in front of it today.
+
+        **The password is the proof, and a passwordless account is refused.**
+        An account with no hash - one created by Google sign-in - is told to set
+        one first, through `POST /auth/password/set`, exactly as `unlink`
+        already refuses to disconnect Google while no password exists (ADR-057).
+        That is not a detour invented to avoid the problem: setting a password
+        bumps `token_version` and emails the address on the account, so an
+        attacker holding nothing but a stolen session cannot reach this route
+        without the real owner being told. A "recent authentication" check in
+        its place would be the weak bypass - an access token is at most fifteen
+        minutes old *by construction*, so requiring recency of one asserts
+        something already true, and a refresh token can mint a fresh one for two
+        weeks without anybody proving anything.
+
+        The alternative worth building one day is a Google re-authentication
+        challenge with `prompt=login`, reusing the linking flow. It is real work
+        - a third flow kind, its own state and binding - and until it exists,
+        requiring the password the product already knows how to set is the
+        honest answer rather than a placeholder.
+
+        **Owned workspaces are resolved first, not orphaned.** The caller is
+        refused while they are the last active owner of any live workspace, with
+        the list attached so a client can offer the two ways out: transfer
+        ownership, or delete the workspace. Silently deleting the account would
+        leave those workspaces with no one able to invite an owner, change a
+        plan or close them - unrecoverable from inside, for people who had no
+        part in the decision.
+
+        **What it does not touch.** Other people's accounts, obviously; but also
+        this person's audit trail, the messages they sent, the leads they
+        recorded and the invoices their workspaces owe. Every one of those
+        foreign keys is `SET NULL`, so history keeps its shape and stops naming
+        them. `audit_logs.actor_label` holds the address as a copy, so the trail
+        stays readable afterwards - which is the entire reason it is a copy.
+        """
+        if user.hashed_password is None:
+            raise ConflictError(
+                "Set a password before closing this account.",
+                error_code=PASSWORD_REQUIRED,
+            )
+        if not verify_password(password=current_password, password_hash=user.hashed_password):
+            # The same shape as a failed login, and for the same reason: the
+            # caller holding a session but not the password is precisely the
+            # caller this is defending against.
+            observe_lifecycle_event(operation="account_delete", outcome="conflict")
+            raise AuthenticationError("The current password is incorrect.")
+
+        owned = await self._sole_ownerships(user)
+        if owned:
+            observe_lifecycle_event(operation="account_delete", outcome="conflict")
+            raise ConflictError(
+                "Transfer or delete the workspaces this account owns before closing it.",
+                error_code=ACCOUNT_OWNS_WORKSPACES,
+                # Only workspaces this caller is in. Nothing here discloses a
+                # tenant they have no membership of.
+                details={
+                    "workspaces": [
+                        {"id": str(tenant.id), "name": tenant.name, "slug": tenant.slug}
+                        for tenant in owned
+                    ]
+                },
+            )
+
+        return await self._tombstone(user)
+
+    async def _sole_ownerships(self, user: User) -> list[Tenant]:
+        """Live workspaces this account is the last active owner of.
+
+        Read under each workspace's own lock, because the answer is about to be
+        acted on: an owner leaving concurrently would otherwise let both of them
+        pass a check that was true when each looked and false by the time either
+        finished. Taking the locks here also holds them for the rest of the
+        request, so nothing can remove the *other* owner between this check and
+        the tombstone below.
+
+        Locks are taken in a stable order - by tenant id - so two accounts being
+        closed at once queue rather than deadlocking on the workspaces they
+        share.
+        """
+        tenants = UserMembershipRepository(self._session)
+        owned = await tenants.list_owned_live_workspaces(user.id)
+        stranded: list[Tenant] = []
+        for _, tenant in sorted(owned, key=lambda row: row[1].id):
+            locked = await TenantRepository(self._session).lock(tenant.id)
+            if locked is None or locked.deleted_at is not None:
+                continue
+            owners = await MembershipRepository(
+                self._session, tenant_id=tenant.id
+            ).list_active_owners()
+            if len(owners) <= 1:
+                stranded.append(locked)
+        return stranded
+
+    async def _withdraw_memberships(self, user: User) -> list[str]:
+        """Revoke every membership, and report the workspaces left ownerless.
+
+        Shared by both deletion paths so they cannot drift: an account closed by
+        its owner and one closed by staff must leave the same shape behind.
+
+        The ownership check runs *before* the revocation for each workspace,
+        under that workspace's own lock, because afterwards the answer is always
+        "no owners" and would be useless. Locks are taken in tenant-id order so
+        two deletions touching the same workspaces queue rather than deadlock.
+        """
+        memberships = UserMembershipRepository(self._session)
+        owned = await memberships.list_owned_live_workspaces(user.id)
+        orphaned: list[str] = []
+        for _, tenant in sorted(owned, key=lambda row: row[1].id):
+            locked = await TenantRepository(self._session).lock(tenant.id)
+            if locked is None or locked.deleted_at is not None:
+                continue
+            owners = await MembershipRepository(
+                self._session, tenant_id=tenant.id
+            ).list_active_owners()
+            if len(owners) <= 1:
+                orphaned.append(locked.slug)
+
+        moment = datetime.now(UTC)
+        for membership in await memberships.list_all_for_user(user.id):
+            if membership.status is MembershipStatus.ACTIVE:
+                membership.status = MembershipStatus.REVOKED
+                membership.revoked_at = moment
+                membership.revoked_by_id = user.id
+        await self._session.flush()
+        return orphaned
+
+    async def _tombstone(self, user: User) -> User:
+        """Withdraw every membership, then make the identity unusable for ever.
+
+        The order matters. Memberships go first so that a request already in
+        flight for one of those workspaces cannot find an active membership
+        after the account is gone, and the version bump goes last so that no
+        window exists in which the account is deleted but its tokens still
+        verify.
+
+        Revoked rather than deleted, matching ADR-038: the rows keep the answer
+        to "when did they leave, and why does the roster show them", and the
+        unique constraint on `(user_id, tenant_id)` means a deleted row would
+        make a future re-invitation indistinguishable from a first one.
+        """
+        # `_sole_ownerships` has already refused if any of these would be left
+        # ownerless, so the list this returns is empty on this path by
+        # construction - the shared helper is used for the withdrawal, not for
+        # the check. `revoked_by_id` is the person themselves: nobody threw them
+        # out.
+        await self._withdraw_memberships(user)
+
+        user.deleted_at = datetime.now(UTC)
+        user.is_active = False
+        version = self._bump(user)
+        await self._session.flush()
+
+        self._audit.record(
+            AuditAction.USER_DELETED,
+            actor=user,
+            actor_kind=AuditActorKind.USER,
+            target_type="user",
+            target_id=user.id,
+            target_label=user.email,
+            meta={"token_version": version, "self_service": True},
+        )
+        # The last message this address will get from us, and the one that
+        # matters most: if the person reading it did not do this, somebody who
+        # had their password just closed their account.
+        await self._notify(user, EmailTemplate.ACCOUNT_DELETED, version=version)
+        observe_lifecycle_event(operation="account_delete", outcome="success")
+        logger.info(
+            "account.self_deleted",
+            extra={"event": "account.self_deleted", "user_id": str(user.id)},
         )
         return user
 

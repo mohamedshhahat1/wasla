@@ -112,6 +112,18 @@ class AuditAction(StrEnum):
     PLATFORM_ROLE_GRANTED = "platform_role_granted"
     PLATFORM_ROLE_REVOKED = "platform_role_revoked"
     USER_SESSIONS_REVOKED = "user_sessions_revoked"
+    # An identity was tombstoned and can never authenticate again. One action
+    # for both routes that reach it, because `actor_kind` already separates
+    # them: `PLATFORM_STAFF` is an administrator closing somebody's account,
+    # `USER` is that person closing their own. Splitting the enum instead would
+    # add a label carrying information the row already holds, and would make
+    # "when was this identity destroyed" a two-value query.
+    #
+    # Not a variant of `USER_DISABLED`. Disabling is reversible and `USER_ENABLED`
+    # is the entry that undoes it; this has no counterpart and never will, and a
+    # trail that reported an irreversible act with a reversible label would be
+    # answering the wrong question during the one review that asks it.
+    USER_DELETED = "user_deleted"
     # The name of an event, not a credential. Nothing here ever holds one.
     PASSWORD_CHANGED = "password_changed"  # noqa: S105
     # A reset token from the email flow was consumed and the password replaced
@@ -237,6 +249,43 @@ class AuditAction(StrEnum):
     # decision rather than the customer's, and an investigation asking "did
     # they leave or did we cut them off" must be able to tell the two apart.
     SUBSCRIPTION_SUSPENDED = "subscription_suspended"
+
+    # The workspace itself (docs/AUTHORIZATION.md).
+    #
+    # These are the acts that create, reshape and end a customer's whole
+    # tenancy, and every one of them is recorded *with* a tenant, so they are
+    # readable from the workspace's own trail as well as the platform's - a
+    # customer asking "who suspended us, and when" is asking about their
+    # workspace, not about the platform.
+    #
+    # `WORKSPACE_CREATED` is here despite being routine, because it is the row
+    # that dates a tenancy and names the person who opened it; a workspace whose
+    # origin cannot be established is a problem during a billing dispute and
+    # during an abuse report alike.
+    WORKSPACE_CREATED = "workspace_created"
+    # Only security-relevant metadata changes are recorded. Renaming a workspace
+    # is not audited; changing its address is, because a slug is how invitations,
+    # links and support tickets name it, and a silent change makes every one of
+    # those point somewhere else.
+    WORKSPACE_UPDATED = "workspace_updated"
+    # Ownership moved from one person to another. The most consequential act
+    # available inside a workspace - it is the authority that can delete the
+    # workspace, remove any member and move billing - so it is recorded with
+    # both parties in `meta`, and neither of them merely as an id.
+    WORKSPACE_OWNERSHIP_TRANSFERRED = "workspace_ownership_transferred"
+    # Platform staff stopped, and restarted, a workspace's service. Kept apart
+    # from `SUBSCRIPTION_SUSPENDED`, which is the billing sweep deciding an
+    # invoice has gone unpaid: these are a person's decision about a customer,
+    # and an investigation that could not tell "we stopped serving them" from
+    # "their card failed" would reach the wrong conclusion about both.
+    WORKSPACE_SUSPENDED = "workspace_suspended"
+    WORKSPACE_RESTORED = "workspace_restored"
+    # The workspace was tombstoned by its owner. Deliberately outlives what it
+    # describes: `audit_logs.tenant_id` is `SET NULL` rather than `CASCADE`
+    # precisely so that a workspace being removed cannot take the record of who
+    # removed it, and `target_label` carries the slug so the entry stays
+    # readable when nothing joins to it any more.
+    WORKSPACE_DELETED = "workspace_deleted"
 
     # Writing to many customers at once
     CAMPAIGN_SCHEDULED = "campaign_scheduled"

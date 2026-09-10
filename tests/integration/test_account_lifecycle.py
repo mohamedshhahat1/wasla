@@ -260,9 +260,34 @@ async def test_platform_deletion_is_atomic_irreversible_and_audited(
     assert target.token_version == before + 1
     assert enabled.status_code == 404
 
-    from app.db.models.audit import AuditLog
+    from app.db.models.audit import AuditActorKind, AuditLog
 
+    # `USER_DELETED`, not `USER_DISABLED` carrying a flag. The old spelling was
+    # chosen to avoid a migration and cost more than it saved: an irreversible
+    # tombstone filed under the reversible action is invisible to anybody
+    # filtering the trail for account destruction, and `USER_ENABLED` reads as
+    # its undo when nothing can undo it. Migration 0049 adds the label - along
+    # with the four this endpoint needed all along (AUTH-01).
     audit = (
+        (
+            await db_session.execute(
+                select(AuditLog).where(
+                    AuditLog.target_id == target.id,
+                    AuditLog.action == AuditAction.USER_DELETED,
+                )
+            )
+        )
+        .scalars()
+        .one()
+    )
+    assert audit.meta is not None
+    # Platform staff acting on somebody else, which is what separates this entry
+    # from the one `DELETE /auth/me` writes for the same action.
+    assert audit.actor_kind is AuditActorKind.PLATFORM_STAFF
+    assert audit.meta["self_service"] is False
+    # And no `USER_DISABLED` entry was written, so a search for suspensions does
+    # not turn up a destruction wearing the wrong label.
+    disabled = (
         (
             await db_session.execute(
                 select(AuditLog).where(
@@ -272,10 +297,9 @@ async def test_platform_deletion_is_atomic_irreversible_and_audited(
             )
         )
         .scalars()
-        .one()
+        .all()
     )
-    assert audit.meta is not None
-    assert audit.meta["deleted"] is True
+    assert disabled == []
 
 
 # ------------------------------------------------- the threat, closed
