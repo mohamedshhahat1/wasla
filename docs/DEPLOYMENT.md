@@ -378,6 +378,58 @@ password reset for it, and confirm the message arrives, that its link opens
 your `APP_PUBLIC_URL`, and that the row reaches `delivered` — which only
 happens if the webhook is wired correctly.
 
+## Monitoring
+
+`docker-compose.prod.yml` runs Prometheus and Alertmanager alongside the API and
+the worker. Neither publishes a port: a published Prometheus is an
+unauthenticated read of the deployment's operational shape, and a published
+Alertmanager is an unauthenticated way to *silence* alerts. Reach them by
+tunnelling (`docs/OBSERVABILITY.md`).
+
+Configuration lives in `deploy/monitoring/` and is bind-mounted read-only:
+
+| File | What it is |
+|---|---|
+| `prometheus.yml` | Scrape config and the Alertmanager address. `external_labels.environment` is a **literal** — Prometheus does not expand environment variables, so a deployment that wants a different value mounts its own copy. |
+| `alerts.yml` | Eight rules over lifecycle, security and availability. |
+| `alertmanager.yml` | Two receivers, split critical/warning, plus an inhibit rule. |
+
+### The webhook is a file, not an environment variable
+
+**Alertmanager does not expand environment variables in its configuration.** A
+`${...}` placeholder there produces a container that refuses to start
+(`unsupported scheme ""`). The Slack webhook is read from a file instead, which
+is also the better place for a credential — an environment variable is visible
+in `docker inspect` and in `/proc/<pid>/environ` to anything that can read the
+process.
+
+```bash
+install -m 0400 /dev/stdin /srv/secrets/wasla_slack_webhook <<'EOF'
+https://hooks.slack.com/services/...
+EOF
+echo 'ALERTMANAGER_SLACK_WEBHOOK_FILE=/srv/secrets/wasla_slack_webhook' >> .env
+```
+
+A **Slack webhook URL is a credential** — anybody holding it can post to the
+channel. Never commit one.
+
+The default is a committed *empty* placeholder, so a deployment that has not
+chosen a chat tool still starts. Rules evaluate and firing alerts are visible in
+Alertmanager's own UI; only delivery fails, and it logs that it did.
+
+### Confirm delivery once
+
+The pipeline's configuration is verified in CI; **delivery to a real receiver is
+not**, because it needs a credential CI cannot have. Confirm it by hand after
+the first deploy:
+
+```bash
+docker compose -f docker-compose.prod.yml exec alertmanager   amtool --alertmanager.url=http://localhost:9093 alert add   alertname=DeliveryTest severity=critical component=lifecycle
+```
+
+A message should arrive in the configured channel. Until somebody has seen one,
+treat alerting as unproven however green CI is.
+
 ## CI/CD
 
 | Workflow | Responsibility | Status |

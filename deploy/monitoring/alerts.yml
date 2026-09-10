@@ -1,0 +1,183 @@
+# Alert rules for the lifecycle and security surface.
+#
+# Metrics existing is not monitoring. Until this file, `/metrics` served a
+# correct Prometheus document that nothing scraped and nothing evaluated - the
+# audit's finding, and the reason the account-security endpoints could return
+# 500 for a fortnight without anybody being told.
+#
+# Every rule below is written against a metric the application already emits.
+# Nothing here needs a new instrumentation point, and nothing fires on a label
+# that could grow with the customer base: no tenant id, no user id, no email,
+# no provider reference. `route` is a FastAPI path *template*, which is bounded
+# by the number of routes.
+#
+# `for:` durations are deliberately not zero. A single 5xx during a deploy is
+# not an incident, and a rule that pages on one teaches people to ignore the
+# pager - which is the failure mode that makes alerting worse than none.
+
+groups:
+  - name: wasla-lifecycle
+    interval: 30s
+    rules:
+      # ---------------------------------------------------------------- 5xx
+      - alert: LifecycleEndpointErrors
+        # The endpoints where a 500 means a security operation silently did not
+        # happen: sessions that were not revoked, a password that was not
+        # changed, an account that was not closed, a workspace that was not
+        # suspended. AUTH-01 was exactly this signal, unwatched.
+        #
+        # The route list is explicit rather than a regex over `/auth/.*`,
+        # because most of `/auth` failing is a different, louder problem and
+        # this rule is about the quiet one.
+        expr: |
+          sum by (route) (
+            rate(wasla_http_requests_total{status="5xx", route=~"/api/v1/auth/logout-all|/api/v1/auth/password|/api/v1/auth/password/set|/api/v1/auth/me|/api/v1/workspaces|/api/v1/workspace|/api/v1/workspace/ownership|/api/v1/platform/users/.*|/api/v1/platform/tenants/.*"}[5m])
+          ) > 0
+        for: 10m
+        labels:
+          severity: critical
+          component: lifecycle
+        annotations:
+          summary: "Lifecycle endpoint {{ $labels.route }} is returning 5xx"
+          description: >-
+            A security or lifecycle operation is failing after the caller was
+            authorised. The most likely causes are a database enum the code
+            writes and the schema does not carry (see AUTH-01 and
+            tests/integration/test_schema_parity.py), a migration that has not
+            been applied, or a dependency that is down. Check the application
+            logs for the request id and the exception.
+          runbook: docs/RUNBOOK.md
+
+      # ------------------------------------------------------- orphan check
+      - alert: OrphanedWorkspace
+        # A state invariant rather than an event: `wasla_orphaned_workspaces` is
+        # counted at scrape time by a query, so this fires whatever produced the
+        # state - including a path nobody instrumented, and including somebody's
+        # SQL. An ACTIVE workspace with no owner cannot be administered by
+        # anybody: inviting an owner, changing the plan and closing it are all
+        # owner-only.
+        expr: wasla_orphaned_workspaces > 0
+        for: 15m
+        labels:
+          severity: critical
+          component: tenancy
+        annotations:
+          summary: "{{ $value }} active workspace(s) have no owner"
+          description: >-
+            Platform deletion of a last owner is supposed to suspend the
+            workspace automatically. A non-zero value here means that did not
+            happen, or the state was produced another way. Identify the
+            workspaces with the query in docs/RUNBOOK.md and repair ownership
+            with POST /api/v1/platform/tenants/{id}/ownership.
+          runbook: docs/RUNBOOK.md
+
+      # ------------------------------------------------- lifecycle failures
+      - alert: LifecycleOperationFailureRate
+        # The ratio, not the count. A handful of conflicts is normal - people
+        # do try to delete workspaces they do not own - and a *rate* of them is
+        # a client bug or an attack. `error` is always abnormal.
+        expr: |
+          (
+            sum(rate(wasla_lifecycle_operations_total{outcome!="success"}[15m]))
+            /
+            clamp_min(sum(rate(wasla_lifecycle_operations_total[15m])), 0.001)
+          ) > 0.5
+        for: 15m
+        labels:
+          severity: warning
+          component: lifecycle
+        annotations:
+          summary: "More than half of lifecycle operations are failing"
+          description: >-
+            Account and workspace lifecycle operations are mostly not
+            succeeding. Check wasla_lifecycle_operations_total by operation to
+            see which one, and the application logs for why.
+          runbook: docs/RUNBOOK.md
+
+      - alert: WorkspaceBillingWindDownFailing
+        # Deleting a workspace cancels its subscription and revokes its saved
+        # cards in the same transaction. A failure here means the deletion
+        # rolled back - which is the safe direction, and still means a customer
+        # cannot close their workspace.
+        expr: |
+          sum(rate(wasla_lifecycle_operations_total{operation="workspace_billing_wind_down", outcome="error"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: critical
+          component: billing
+        annotations:
+          summary: "Workspace deletion cannot wind down billing"
+          description: >-
+            Subscription cancellation or payment-method revocation is failing
+            during workspace deletion. Deletions are rolling back rather than
+            leaving a live subscription on a closed workspace, so no customer is
+            being charged incorrectly - but they cannot close their workspace.
+          runbook: docs/BILLING.md
+
+      - alert: WorkspacePurgeFailing
+        # The retention sweep. A purge that cannot run means data a customer
+        # was told would be erased is not being erased, which is a commitment
+        # being quietly missed rather than an outage anybody notices.
+        expr: |
+          sum(rate(wasla_lifecycle_operations_total{operation="workspace_purge", outcome="error"}[1h])) > 0
+        for: 2h
+        labels:
+          severity: warning
+          component: retention
+        annotations:
+          summary: "The workspace purge sweep is failing"
+          description: >-
+            Deleted workspaces past their retention window are not being
+            erased. Check the purge worker's logs; the sweep is idempotent, so
+            it is safe to let it retry once the cause is fixed.
+          runbook: docs/RUNBOOK.md
+
+      # ------------------------------------------------------ re-auth abuse
+      - alert: ReauthenticationFailureSpike
+        # Failed Google re-authentication in front of account deletion. A burst
+        # is somebody trying to authorise a deletion they cannot prove they may
+        # make - or a broken client, which is also worth knowing.
+        expr: |
+          sum(rate(wasla_lifecycle_operations_total{operation="account_reauth", outcome="conflict"}[15m])) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+          component: security
+        annotations:
+          summary: "Google re-authentication is failing repeatedly"
+          description: >-
+            Re-authentication proofs are being refused - a mismatched Google
+            subject, a replayed state, or a proof belonging to another account.
+            Check the audit log for google_login_failed entries.
+          runbook: docs/GOOGLE_OAUTH.md
+
+  - name: wasla-availability
+    interval: 30s
+    rules:
+      - alert: ApplicationUnhandledErrors
+        # Everything the handlers did not expect. Deliberately unlabelled at
+        # source, so this is a single series and a single alert.
+        expr: sum(rate(wasla_unhandled_errors_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          component: application
+        annotations:
+          summary: "Unhandled exceptions are being raised"
+          runbook: docs/RUNBOOK.md
+
+      - alert: ScrapeTargetDown
+        # The rule that makes every other rule mean something. Without it,
+        # "no alerts firing" and "nothing being scraped" look identical - which
+        # is the state this whole file was written to get out of.
+        expr: up{job="wasla-api"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: application
+        annotations:
+          summary: "Prometheus cannot scrape the Wasla API"
+          description: >-
+            No metrics are arriving, so no other alert in this file can fire.
+            Treat a silent monitoring system as an incident in its own right.
+          runbook: docs/RUNBOOK.md

@@ -1,0 +1,92 @@
+# promtool unit tests for the lifecycle alert rules.
+#
+# Proves the rules do what their names say against synthetic series: the alert
+# enters firing state when the condition holds for its `for:` duration, and
+# stops when it stops. That is the half of "alerting works" that can be proved
+# without a chat webhook.
+# Relative to this file, so the tests live beside the rules they check.
+rule_files:
+  - ../alerts.yml
+
+evaluation_interval: 30s
+
+tests:
+  # --------------------------------------------------------------- 5xx rule
+  - interval: 30s
+    name: lifecycle 5xx fires after ten minutes and clears on recovery
+    input_series:
+      - series: 'wasla_http_requests_total{job="wasla-api", route="/api/v1/auth/logout-all", status="5xx", method="POST"}'
+        # Rising for 20 minutes, then flat - flat means the rate decays to zero,
+        # which is what recovery looks like for a counter.
+        values: "0+1x40 40+0x40"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LifecycleEndpointErrors
+        # Errors are happening, but not yet for the 10m the rule requires.
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LifecycleEndpointErrors
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: lifecycle
+              route: /api/v1/auth/logout-all
+            exp_annotations:
+              summary: "Lifecycle endpoint /api/v1/auth/logout-all is returning 5xx"
+              description: >-
+                A security or lifecycle operation is failing after the caller was authorised. The most likely causes are a database enum the code writes and the schema does not carry (see AUTH-01 and tests/integration/test_schema_parity.py), a migration that has not been applied, or a dependency that is down. Check the application logs for the request id and the exception.
+              runbook: docs/RUNBOOK.md
+      - eval_time: 39m
+        alertname: LifecycleEndpointErrors
+        # The counter stopped rising, so the rate fell back to zero.
+        exp_alerts: []
+
+  # ------------------------------------------------------------ orphan rule
+  - interval: 30s
+    name: an orphaned workspace fires and clears when ownership is repaired
+    input_series:
+      - series: 'wasla_orphaned_workspaces{job="wasla-api"}'
+        values: "0+0x40 1+0x40 0+0x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OrphanedWorkspace
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: OrphanedWorkspace
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: tenancy
+              job: wasla-api
+            exp_annotations:
+              summary: "1 active workspace(s) have no owner"
+              description: >-
+                Platform deletion of a last owner is supposed to suspend the workspace automatically. A non-zero value here means that did not happen, or the state was produced another way. Identify the workspaces with the query in docs/RUNBOOK.md and repair ownership with POST /api/v1/platform/tenants/{id}/ownership.
+              runbook: docs/RUNBOOK.md
+      - eval_time: 62m
+        alertname: OrphanedWorkspace
+        exp_alerts: []
+
+  # ------------------------------------------------------- scrape-down rule
+  - interval: 30s
+    name: a target that stops answering is itself an alert
+    input_series:
+      - series: 'up{job="wasla-api", instance="api:8000"}'
+        values: "1+0x20 0+0x40"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ScrapeTargetDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ScrapeTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: application
+              job: wasla-api
+              instance: api:8000
+            exp_annotations:
+              summary: "Prometheus cannot scrape the Wasla API"
+              description: >-
+                No metrics are arriving, so no other alert in this file can fire. Treat a silent monitoring system as an incident in its own right.
+              runbook: docs/RUNBOOK.md

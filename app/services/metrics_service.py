@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from typing import Final
 
 from redis.asyncio import Redis
+from sqlalchemy import text
 from sqlalchemy.pool import QueuePool
 
 from app.core.logging import get_logger
@@ -147,7 +148,61 @@ class MetricsService:
         lines = await self._external(now=now)
         lines.extend(self._pool_lines())
         lines.extend(self._backup_lines(now=now))
+        lines.extend(await self._consistency_lines())
         return self._registry.render(extra=lines)
+
+    async def _consistency_lines(self) -> list[str]:
+        """Invariants counted at scrape time, so a violation is alertable.
+
+        One today: **active workspaces with no active owner**. Every code path
+        that could produce one is supposed to prevent it - the tenant lock in
+        `WorkspaceService`, the last-owner refusals in `MembershipService`, the
+        automatic suspension in `AccountService._withdraw_memberships` - and
+        this is what notices when one of them stops working, or when somebody
+        produces the state with SQL.
+
+        Counted rather than derived from an event, and that is the point: an
+        event tells you a path you instrumented was taken, and a count tells you
+        the state of the world however it got there. A defect nobody thought of
+        does not emit an event.
+
+        No labels at all. The number of offending workspaces is what an alert
+        fires on; *which* ones is a question for the audit log and the database,
+        where an identifier is appropriate. A tenant id here would be a time
+        series per customer.
+
+        Failures are swallowed and logged. A scrape that raises publishes
+        nothing, and losing every other metric because one consistency query
+        timed out is a worse outcome than losing this one.
+        """
+        database = self._database
+        if database is None:
+            return []
+        try:
+            async with database.session() as session:
+                offenders = await session.scalar(text("""
+                        SELECT count(*) FROM tenants t
+                        WHERE t.status = 'active'
+                          AND t.deleted_at IS NULL
+                          AND NOT EXISTS (
+                              SELECT 1 FROM memberships m
+                              WHERE m.tenant_id = t.id
+                                AND m.status = 'active'
+                                AND m.role = 'tenant_owner'
+                          )
+                        """))
+        except Exception:
+            logger.warning(
+                "metrics.consistency_read_failed",
+                extra={"event": "metrics.consistency_read_failed"},
+            )
+            return []
+
+        return render_gauge_lines(
+            "wasla_orphaned_workspaces",
+            "Active workspaces with no active owner. Should always be zero.",
+            [({}, float(offenders or 0))],
+        )
 
     def _pool_lines(self) -> list[str]:
         """This process's connection pool, read at the moment of the scrape.

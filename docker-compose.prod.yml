@@ -600,10 +600,98 @@ services:
         ipv4_address: 10.89.0.10
     restart: always
 
+  # ------------------------------------------------------------- monitoring
+  #
+  # The half that was missing. `/metrics` has served a correct Prometheus
+  # document since ADR-070 and nothing read it, which is why six
+  # account-security endpoints could return 500 for a fortnight without anybody
+  # being told. Metrics that nothing scrapes are not monitoring.
+  #
+  # Both services sit on the internal network and publish **no ports**. They
+  # reach the API the same way the API reaches PostgreSQL, and an operator
+  # reaches them by tunnelling - `docs/OBSERVABILITY.md` has the command. A
+  # published Prometheus is an unauthenticated read of the deployment's
+  # operational shape, and a published Alertmanager is an unauthenticated way
+  # to silence alerts.
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Long enough to look back over an incident and short enough that the
+      # volume does not become an operational problem of its own.
+      - --storage.tsdb.retention.time=30d
+      # No admin API and no lifecycle endpoint: nothing needs to delete series
+      # or reload remotely, and both are unauthenticated when enabled.
+      - --web.enable-lifecycle=false
+    depends_on:
+      - api
+    networks:
+      - internal
+    restart: always
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    volumes:
+      - ./deploy/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    # The Slack webhook, read from a file rather than an environment variable.
+    # Alertmanager does not expand environment variables in its config, and a
+    # file is the better place for a credential anyway: an env var is visible
+    # in `docker inspect` and in /proc to anything that can read the process.
+    #
+    # A deployment that has not created the secret still starts, still
+    # evaluates every rule and still shows firing alerts in its own UI - only
+    # the delivery step fails, and it says so in the logs. See
+    # `docs/OBSERVABILITY.md`.
+    secrets:
+      - source: alertmanager_slack_webhook_url
+        target: /etc/alertmanager/secrets/slack_webhook_url
+        mode: 0400
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    networks:
+      - internal
+    restart: always
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9093/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+secrets:
+  alertmanager_slack_webhook_url:
+    # A host file the operator creates, containing the webhook URL and nothing
+    # else. Absent is a supported state; see the note on the service above.
+    #
+    # Defaults to a committed **empty** placeholder so `docker compose up`
+    # works on a deployment that has not chosen a chat tool yet. Compose
+    # refuses to start a stack whose secret file is missing, so the default
+    # has to be a file that exists - and an empty one is the honest version of
+    # "no receiver configured": Alertmanager starts, every rule evaluates,
+    # firing alerts are visible in its own UI and API, and only the final
+    # delivery fails, which it logs.
+    #
+    # An operator with a webhook points this at a file containing it:
+    #   ALERTMANAGER_SLACK_WEBHOOK_FILE=/run/secrets/wasla_slack_webhook
+    file: ${ALERTMANAGER_SLACK_WEBHOOK_FILE:-./deploy/monitoring/slack_webhook_url.placeholder}
+
 volumes:
   postgres-data:
   redis-data:
   media-data:
+  prometheus-data:
+  alertmanager-data:
 
 networks:
   internal:

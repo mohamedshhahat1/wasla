@@ -1,0 +1,93 @@
+# Where an alert actually goes.
+#
+# This file is the difference between "alerting is configured" and "somebody
+# finds out". A Prometheus with rules and no receiver evaluates them correctly
+# and tells nobody, which is the same operational outcome as having no rules.
+#
+# ## Secrets
+#
+# **Alertmanager does not expand environment variables in this file.** An
+# earlier draft of it used `${ALERTMANAGER_SLACK_WEBHOOK_URL}` and would have
+# shipped a container that refused to start - `amtool check-config` rejects it
+# with `unsupported scheme ""`, which is what caught it.
+#
+# So the webhook URL is read from a **file**, which is Alertmanager's own
+# mechanism for exactly this and is better than an environment variable anyway:
+# an env var is visible in `docker inspect` and in `/proc/<pid>/environ` to
+# anything that can read the process, while a mounted file has the permissions
+# of the file. `docker-compose.prod.yml` mounts it from a Docker secret.
+#
+# A Slack webhook URL *is* a credential - anybody holding it can post into the
+# channel - so it is treated as one.
+#
+# **A deployment that has not configured a receiver still works.** The file is
+# read when a notification is sent, not at load, so Alertmanager starts, scrapes
+# happen, rules evaluate and alerts become visible in the Alertmanager UI and
+# API. Only the final delivery step fails, and it says so in Alertmanager's own
+# logs. That ordering is deliberate: an operator who has not yet chosen a chat
+# tool gets working monitoring rather than a container that will not boot.
+#
+# ## Routing
+#
+# Two receivers, split by what somebody should do about it:
+#
+#   critical - a security or lifecycle operation is failing, or a customer's
+#              workspace has become unadministrable. Somebody looks now.
+#   warning  - a rate worth investigating during the day.
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: wasla-warning
+  # Grouped by alert and component rather than by any per-customer label, so a
+  # hundred workspaces hitting the same defect is one notification.
+  group_by: ["alertname", "component"]
+  # Long enough to batch a burst, short enough that the first notification is
+  # not stale.
+  group_wait: 30s
+  group_interval: 5m
+  # Deliberately not aggressive. A repeat every four hours is a reminder; every
+  # five minutes is what makes people mute a channel.
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: wasla-critical
+      group_wait: 10s
+      repeat_interval: 1h
+
+receivers:
+  - name: wasla-critical
+    slack_configs:
+      # Mounted from a secret. See the note at the top of this file.
+      - api_url_file: /etc/alertmanager/secrets/slack_webhook_url
+        channel: "#wasla-alerts"
+        send_resolved: true
+        title: "[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}"
+        text: >-
+          {{ range .Alerts }}{{ .Annotations.summary }}
+          {{ if .Annotations.description }}{{ .Annotations.description }}{{ end }}
+          {{ if .Annotations.runbook }}Runbook: {{ .Annotations.runbook }}{{ end }}
+          {{ end }}
+
+  - name: wasla-warning
+    slack_configs:
+      - api_url_file: /etc/alertmanager/secrets/slack_webhook_url
+        channel: "#wasla-alerts"
+        send_resolved: true
+        title: "[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}"
+        text: >-
+          {{ range .Alerts }}{{ .Annotations.summary }}
+          {{ if .Annotations.runbook }}Runbook: {{ .Annotations.runbook }}{{ end }}
+          {{ end }}
+
+inhibit_rules:
+  # When the scraper cannot reach the application, every other rule in the file
+  # is evaluating stale or absent data. Suppressing the rest keeps the one
+  # actionable alert from being buried under the alerts it caused.
+  - source_matchers:
+      - alertname = "ScrapeTargetDown"
+    target_matchers:
+      - component =~ "lifecycle|tenancy|billing|retention|security"
+    equal: ["environment"]
