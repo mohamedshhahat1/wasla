@@ -19,6 +19,7 @@ from app.core.exceptions import AuthenticationError, PermissionDeniedError
 from app.core.rate_limit import RateLimiter
 from app.core.security import TokenClaims, TokenType, decode_token
 from app.core.storage import MediaStorage, build_media_storage
+from app.core.telemetry import observe_auth_event
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.db.models.billing import LimitKey
@@ -177,6 +178,15 @@ async def get_current_user(
     if user is None or not user.is_active:
         # The token is still signed and unexpired, but the account behind it is
         # gone or disabled, so it stops working now rather than at expiry.
+        including_deleted = await UserRepository(session).get_by_id_including_deleted(
+            claims.subject
+        )
+        reason = (
+            "account_deleted"
+            if including_deleted is not None and including_deleted.deleted_at is not None
+            else "account_inactive"
+        )
+        observe_auth_event(event="access_token", outcome="blocked", reason=reason)
         raise AuthenticationError("The credentials are not valid.")
     if claims.token_version != user.token_version:
         # Revocation (ADR-036). The row is already loaded to check `is_active`
@@ -193,6 +203,24 @@ async def get_current_user(
 CurrentUserDep = Annotated[CurrentUser, Depends(get_current_user)]
 
 
+def require_verified_user(current_user: CurrentUserDep) -> CurrentUser:
+    """Allow account/recovery actions but gate material business authority."""
+    if current_user.user.email_verified_at is None:
+        observe_auth_event(
+            event="business_access",
+            outcome="blocked",
+            reason="email_unverified",
+        )
+        raise PermissionDeniedError(
+            "Verify your email address before using workspace features.",
+            error_code="email_verification_required",
+        )
+    return current_user
+
+
+VerifiedUserDep = Annotated[CurrentUser, Depends(require_verified_user)]
+
+
 @dataclass(frozen=True, slots=True)
 class ActiveWorkspace:
     """The workspace a request is scoped to, and the caller's standing in it."""
@@ -207,7 +235,7 @@ class ActiveWorkspace:
 
 
 async def get_active_workspace(
-    current_user: CurrentUserDep,
+    current_user: VerifiedUserDep,
     session: SessionDep,
 ) -> ActiveWorkspace:
     """Resolve the workspace named by the token, re-checking membership.
@@ -713,7 +741,7 @@ def require_platform_roles(*roles: PlatformRole) -> Callable[[CurrentUser], Curr
     """
     allowed = frozenset(roles)
 
-    def guard(current_user: CurrentUserDep) -> CurrentUser:
+    def guard(current_user: VerifiedUserDep) -> CurrentUser:
         if current_user.user.platform_role not in allowed:
             raise PermissionDeniedError("This action requires platform administration rights.")
         return current_user

@@ -6,11 +6,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Final
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.exceptions import (
     AuthenticationError,
+    ConflictError,
     PermissionDeniedError,
     TenantIsolationError,
     ValidationError,
@@ -33,6 +35,7 @@ from app.core.security import (
     validate_password_strength,
     verify_password,
 )
+from app.core.telemetry import observe_auth_event
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, Tenant, TenantRole, User
 from app.db.models.audit import AuditAction, AuditActorKind
@@ -51,6 +54,8 @@ logger = get_logger(__name__)
 # One answer for every credential failure. Which half was wrong is not
 # something an unauthenticated caller may learn.
 INVALID_CREDENTIALS: Final = "The email address or password is incorrect."
+USER_EMAIL_CONSTRAINT: Final = "uq_users_email"
+TENANT_SLUG_CONSTRAINT: Final = "uq_tenants_slug"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,8 +122,39 @@ class AuthService:
         workspace_slug: str,
         full_name: str | None = None,
     ) -> AuthenticatedSession:
-        """Create an account, its first workspace, and an owner membership."""
+        """Create an account atomically, translating only known uniqueness races."""
         validate_password_strength(password)
+        try:
+            async with self._session.begin_nested():
+                return await self._register(
+                    email=email,
+                    password=password,
+                    workspace_name=workspace_name,
+                    workspace_slug=workspace_slug,
+                    full_name=full_name,
+                )
+        except IntegrityError as error:
+            # A failed PostgreSQL statement aborts its transaction. The
+            # savepoint above contains that abort so the controlled conflict
+            # can still be returned. Only the two constraints this operation
+            # intentionally races are translated; every other integrity error
+            # remains a 500 and therefore visible as a defect.
+            constraint = str(error.orig)
+            if USER_EMAIL_CONSTRAINT in constraint:
+                raise ConflictError("An account with that email address already exists.") from error
+            if TENANT_SLUG_CONSTRAINT in constraint:
+                raise ConflictError("That workspace address is already in use.") from error
+            raise
+
+    async def _register(
+        self,
+        *,
+        email: str,
+        password: str,
+        workspace_name: str,
+        workspace_slug: str,
+        full_name: str | None,
+    ) -> AuthenticatedSession:
         user = await self._users.create(
             email=email,
             full_name=full_name,
@@ -160,10 +196,9 @@ class AuthService:
         account is certain to want.
 
         The account is created **unverified** and stays that way until the code
-        comes back. Nothing about the session issued below depends on that: an
-        unverified account signs in and uses every route normally
-        (docs/EMAIL_VERIFICATION.md). Registration does not, and must not,
-        become a flow that returns a code or blocks on one.
+        comes back. Registration still returns the limited onboarding session;
+        the centralized verified-user dependency keeps it away from workspace
+        business operations while leaving verification and recovery reachable.
 
         Rate limiting is deliberately not applied. `EmailVerificationService`
         limits the *endpoint*, where an account can ask repeatedly; this path
@@ -247,14 +282,25 @@ class AuthService:
             # hash to verify, so the attempt is refused here, in the same breath
             # and after the same delay as an address that does not exist.
             spend_verification_time(password)
+            deleted = (
+                await self._users.get_by_email_including_deleted(email) if user is None else None
+            )
+            reason = (
+                "account_deleted"
+                if deleted is not None and deleted.deleted_at is not None
+                else "invalid_credentials"
+            )
+            observe_auth_event(event="login", outcome="failure", reason=reason)
             raise AuthenticationError(INVALID_CREDENTIALS)
 
         if not verify_password(password=password, password_hash=user.hashed_password):
+            observe_auth_event(event="login", outcome="failure", reason="invalid_credentials")
             raise AuthenticationError(INVALID_CREDENTIALS)
 
         # Only after the password is proven: telling this caller that their own
         # account is disabled reveals nothing they did not already know.
-        if not user.is_active:
+        if user.deleted_at is not None or not user.is_active:
+            observe_auth_event(event="login", outcome="blocked", reason="account_inactive")
             raise PermissionDeniedError("This account has been disabled.")
 
         if password_needs_rehash(user.hashed_password):
@@ -266,6 +312,7 @@ class AuthService:
             "auth.logged_in",
             extra={"event": "auth.logged_in", "user_id": str(user.id)},
         )
+        observe_auth_event(event="login", outcome="success", reason="password")
         return self._issue(user=user, workspace=workspace)
 
     async def _limit_by_account(self, email: str) -> None:
@@ -320,7 +367,7 @@ class AuthService:
         become reachable from the address-collision path, where the caller has
         proven control of a *mailbox* and nothing at all about the account.
         """
-        if not user.is_active:
+        if user.deleted_at is not None or not user.is_active:
             raise PermissionDeniedError("This account has been disabled.")
 
         workspace = await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
@@ -373,11 +420,13 @@ class AuthService:
             ttl_seconds=claims.seconds_until_expiry,
         )
         if not first:
+            observe_auth_event(event="refresh", outcome="blocked", reason="replay")
             await self._tear_down_after_reuse(claims.subject)
             raise AuthenticationError(INVALID_CREDENTIALS)
 
         user = await self._users.get_by_id(claims.subject)
-        if user is None or not user.is_active:
+        if user is None or user.deleted_at is not None or not user.is_active:
+            observe_auth_event(event="refresh", outcome="blocked", reason="account_unavailable")
             raise AuthenticationError(INVALID_CREDENTIALS)
 
         if claims.token_version != user.token_version:
@@ -569,6 +618,11 @@ class AuthService:
         return token
 
     def _issue(self, *, user: User, workspace: WorkspaceContext | None) -> AuthenticatedSession:
+        # Last-line invariant shared by password, federated, registration and
+        # refresh issuance. Callers check earlier for useful error semantics;
+        # this prevents a future issuance path from forgetting lifecycle state.
+        if user.deleted_at is not None or not user.is_active:
+            raise AuthenticationError(INVALID_CREDENTIALS)
         access_token = self._access_token(user=user, workspace=workspace)
         refresh_token, _ = create_refresh_token(
             settings=self._settings,

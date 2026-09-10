@@ -18,9 +18,10 @@ account (SEC-07).
 **`email_verified` is checked before any account is looked up.** This is what
 lets the collision response name the collision without becoming an enumeration
 oracle. Anybody who gets as far as the lookup has proven, cryptographically,
-that Google considers them the owner of that mailbox - so telling them an
-account exists under it tells them nothing they could not have found by trying
-to reset its password. Reverse the two and the endpoint becomes a directory:
+that Google verified the address on its account. That is enough to keep the
+collision response from being a general directory; only Gmail or a matching
+hosted-domain claim satisfies Wasla's stronger current-mailbox gate. Reverse
+the two and the endpoint becomes a directory:
 register a Google account claiming an unverified address, submit a callback,
 read the answer.
 
@@ -55,6 +56,7 @@ from app.core.oauth_flow import (
     OAuthFlowStore,
     code_challenge,
 )
+from app.core.telemetry import observe_auth_event
 from app.db.models import FederatedIdentity, User
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.identity import IdentityProvider
@@ -88,6 +90,22 @@ ADDRESS_IN_USE: Final = (
 )
 
 _PROVIDER: Final = IdentityProvider.GOOGLE
+
+
+def _google_is_authoritative_for_email(claims: GoogleIdentityClaims) -> bool:
+    """Whether Google's proof is current proof of this mailbox domain.
+
+    Google documents itself as authoritative for Gmail and hosted Workspace
+    domains. For an arbitrary third-party address, ``email_verified`` can mean
+    only that the address was verified when the Google Account was created.
+    """
+    normalized = normalise_email(claims.email)
+    _, separator, domain = normalized.rpartition("@")
+    if not separator:
+        return False
+    return domain == "gmail.com" or (
+        claims.hosted_domain is not None and domain == claims.hosted_domain.lower()
+    )
 
 
 class GoogleAuthService:
@@ -139,7 +157,19 @@ class GoogleAuthService:
         *who asked*, and linking is the more sensitive of the two flows because
         a successful one adds a permanent way into an existing account.
         """
+        self._ensure_live(user)
         return await self._start(kind=FlowKind.LINK, user=user, binding=binding)
+
+    @staticmethod
+    def _ensure_live(user: User) -> None:
+        """Defend service callers that bypass the HTTP authentication dependency."""
+        if user.deleted_at is not None or not user.is_active:
+            observe_auth_event(
+                event="oauth_account_action",
+                outcome="blocked",
+                reason="account_unavailable",
+            )
+            raise AuthenticationError(GOOGLE_FAILED)
 
     async def _start(self, *, kind: FlowKind, user: User | None, binding: str) -> tuple[str, int]:
         started = await self._flows.start(
@@ -208,7 +238,11 @@ class GoogleAuthService:
             raise AuthenticationError(GOOGLE_FAILED)
 
         email = normalise_email(claims.email)
-        existing = await self._users.get_by_email(email)
+        # Deleted identities retain both their email and provider bindings.
+        # Including tombstones here turns reuse into an explicit collision
+        # instead of attempting to create a replacement account and relying on
+        # the database constraint for the refusal.
+        existing = await self._users.get_by_email_including_deleted(email)
         if existing is not None:
             return await self._refuse_collision(user=existing)
 
@@ -231,7 +265,7 @@ class GoogleAuthService:
         :meth:`_refresh_profile`. Name and picture are decoration and follow
         Google; the address is identity and does not.
         """
-        user = await self._users.get_by_id(identity.user_id)
+        user = await self._users.get_by_id_including_deleted(identity.user_id)
         if user is None:
             # The foreign key cascades, so this should be unreachable. If it
             # happens, something deleted a user without the constraint firing.
@@ -241,6 +275,19 @@ class GoogleAuthService:
                     "event": "google.identity_without_user",
                     "identity_id": str(identity.id),
                 },
+            )
+            raise AuthenticationError(GOOGLE_FAILED)
+
+        if user.deleted_at is not None:
+            self._record(
+                AuditAction.GOOGLE_LOGIN_FAILED,
+                user=user,
+                actor_kind=AuditActorKind.SYSTEM,
+                reason="account_deleted",
+            )
+            logger.warning(
+                "google.deleted_account_refused",
+                extra={"event": "google.deleted_account_refused"},
             )
             raise AuthenticationError(GOOGLE_FAILED)
 
@@ -321,6 +368,11 @@ class GoogleAuthService:
                 "user_id": str(user.id),
             },
         )
+        observe_auth_event(
+            event="oauth_collision",
+            outcome="blocked",
+            reason="account_deleted" if user.deleted_at is not None else "address_in_use",
+        )
         raise ConflictError(ADDRESS_IN_USE)
 
     async def _enrol(
@@ -337,10 +389,10 @@ class GoogleAuthService:
         address that does not exist, so this account is unreachable by password
         without a line of code being added anywhere.
 
-        `email_verified_at` is stamped here because the address arrived inside a
-        signature we checked (ADR-050). It grants nothing - `users.py` records
-        that no route reads the column and no permission depends on it - so this
-        writes down a fact rather than handing out access.
+        `email_verified_at` is stamped only when Google is authoritative for
+        the mailbox domain (Gmail or a matching hosted-domain claim). A
+        third-party address may authenticate by stable subject but remains in
+        Wasla's limited onboarding state until its emailed code is confirmed.
 
         No workspace is created. `register` needs a name and a slug that Google
         does not supply, and inventing one from a display name is a trap:
@@ -381,7 +433,8 @@ class GoogleAuthService:
             )
             raise ConflictError("Please try signing in again.") from exc
 
-        user.email_verified_at = datetime.now(UTC)
+        if _google_is_authoritative_for_email(claims):
+            user.email_verified_at = datetime.now(UTC)
         session = await self._auth.authenticate_federated(
             user=user,
             workspace_slug=workspace_slug,
@@ -411,6 +464,7 @@ class GoogleAuthService:
         from anywhere else fails the second even when the session passes the
         first.
         """
+        self._ensure_live(user)
         flow, claims = await self._redeem(
             code=code,
             state=state,
@@ -508,7 +562,11 @@ class GoogleAuthService:
         stamping the column from a mismatched claim would be a verification of
         the wrong mailbox.
         """
-        if not claims.email_verified or user.email_verified_at is not None:
+        if (
+            not claims.email_verified
+            or not _google_is_authoritative_for_email(claims)
+            or user.email_verified_at is not None
+        ):
             return
         if normalise_email(claims.email) != normalise_email(user.email):
             return
@@ -527,6 +585,7 @@ class GoogleAuthService:
         a Google-first account owns its mailbox, so the existing reset flow
         reaches it. Documented in ADR-049.
         """
+        self._ensure_live(user)
         identity = await self._identities.get_for_user(user_id=user.id, provider=_PROVIDER)
         if identity is None:
             raise NotFoundError("No Google account is connected.")
@@ -650,3 +709,14 @@ class GoogleAuthService:
             target_label=user.email,
             meta={"provider": _PROVIDER.value, "reason": reason},
         )
+        outcome = (
+            "success"
+            if action
+            in {
+                AuditAction.GOOGLE_LOGIN_SUCCEEDED,
+                AuditAction.GOOGLE_IDENTITY_LINKED,
+                AuditAction.GOOGLE_IDENTITY_UNLINKED,
+            }
+            else "failure"
+        )
+        observe_auth_event(event="oauth_audit", outcome=outcome, reason=reason)

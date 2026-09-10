@@ -29,6 +29,7 @@ from app.api.route import CommittingRoute
 from app.core.dependencies import SessionDep, SettingsDep
 from app.core.exceptions import DependencyUnavailableError, PermissionDeniedError
 from app.core.logging import get_logger
+from app.core.telemetry import observe_auth_event
 from app.integrations.email.signature import (
     ID_HEADER,
     SIGNATURE_HEADER,
@@ -79,6 +80,11 @@ async def receive_email_events(
         logger.warning(
             "email.webhook_invalid_signature",
             extra={"event": "email.webhook_invalid_signature"},
+        )
+        observe_auth_event(
+            event="email_webhook",
+            outcome="blocked",
+            reason="invalid_signature",
         )
         raise PermissionDeniedError("Invalid webhook signature.")
 

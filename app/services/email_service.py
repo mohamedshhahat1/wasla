@@ -13,14 +13,17 @@ is a spam relay with extra steps.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from typing import Final
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.crypto import CredentialCipher
 from app.core.logging import get_logger
 from app.db.models import Membership, MembershipStatus, TenantRole, User
 from app.db.models.email import OutboundEmail
@@ -29,6 +32,79 @@ from app.repositories.email_repository import EmailOutboxRepository
 from app.services.email_templates import EmailTemplate, subject_for
 
 logger = get_logger(__name__)
+
+SEALED_CONTEXT_KEY: Final = "sealed"
+SENSITIVE_EMAIL_TEMPLATES: Final = frozenset(
+    {
+        EmailTemplate.WORKSPACE_INVITATION,
+        EmailTemplate.PASSWORD_RESET,
+        EmailTemplate.EMAIL_VERIFICATION,
+    }
+)
+
+
+class EmailContextError(ValueError):
+    """A sensitive outbox context is missing, malformed, or undecryptable."""
+
+
+def _context_aad(idempotency_key: str) -> str:
+    return f"email-outbox:{idempotency_key}"
+
+
+def seal_email_context(
+    *,
+    template: EmailTemplate,
+    context: Mapping[str, object],
+    idempotency_key: str,
+    settings: Settings,
+) -> dict[str, str]:
+    """Encrypt credential-bearing template context before persistence."""
+    values = {key: str(value) for key, value in context.items()}
+    if template not in SENSITIVE_EMAIL_TEMPLATES:
+        return values
+    plaintext = json.dumps(values, separators=(",", ":"), sort_keys=True)
+    sealed = CredentialCipher(settings.credential_encryption_keys).encrypt(
+        plaintext,
+        context=_context_aad(idempotency_key),
+    )
+    return {SEALED_CONTEXT_KEY: sealed}
+
+
+def open_email_context(email: OutboundEmail, settings: Settings) -> dict[str, str]:
+    """Decrypt sensitive context only in the worker process.
+
+    Plaintext context on a credential-bearing template is rejected rather than
+    treated as a legacy format. This project is pre-production and deliberately
+    has no plaintext compatibility path.
+    """
+    try:
+        template = EmailTemplate(email.template)
+    except ValueError as error:
+        raise EmailContextError("The email context could not be opened.") from error
+
+    if template not in SENSITIVE_EMAIL_TEMPLATES:
+        return {str(key): str(value) for key, value in email.context.items()}
+
+    if set(email.context) != {SEALED_CONTEXT_KEY}:
+        raise EmailContextError("The email context could not be opened.")
+    stored = email.context.get(SEALED_CONTEXT_KEY)
+    if not isinstance(stored, str):
+        raise EmailContextError("The email context could not be opened.")
+    try:
+        plaintext = CredentialCipher(settings.credential_encryption_keys).decrypt(
+            stored,
+            context=_context_aad(email.idempotency_key),
+        )
+        decoded = json.loads(plaintext)
+    except Exception as error:
+        # The ciphertext and parser detail must never reach logs or the row's
+        # error message. The underlying cipher already emits a bounded event.
+        raise EmailContextError("The email context could not be opened.") from error
+    if not isinstance(decoded, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in decoded.items()
+    ):
+        raise EmailContextError("The email context could not be opened.")
+    return decoded
 
 
 class EmailOutbox:
@@ -82,11 +158,17 @@ class EmailOutbox:
             )
             return None
 
+        stored_context = seal_email_context(
+            template=template,
+            context=context or {},
+            idempotency_key=idempotency_key,
+            settings=self._settings,
+        )
         row = await self._repository.enqueue(
             recipient=address,
             template=template.value,
             subject=subject_for(template),
-            context={key: str(value) for key, value in (context or {}).items()},
+            context=stored_context,
             idempotency_key=idempotency_key,
             available_at=datetime.now(UTC),
             tenant_id=tenant_id,

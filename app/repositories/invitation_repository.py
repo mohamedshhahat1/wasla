@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ColumnElement
+from sqlalchemy import ColumnElement, update
 
 from app.core.exceptions import ConflictError
 from app.db.models import InvitationStatus, TenantInvitation, TenantRole
@@ -42,6 +42,20 @@ class InvitationRepository(TenantScopedRepository[TenantInvitation]):
             .limit(limit)
         )
         return await self._all(statement)
+
+    async def revoke_pending(self, invitation_id: uuid.UUID) -> TenantInvitation | None:
+        """Atomically revoke only a still-pending invitation."""
+        statement = (
+            update(TenantInvitation)
+            .where(
+                self._tenant_filter(),
+                TenantInvitation.id == invitation_id,
+                TenantInvitation.status == InvitationStatus.PENDING,
+            )
+            .values(status=InvitationStatus.REVOKED)
+            .returning(TenantInvitation)
+        )
+        return (await self.session.execute(statement)).scalar_one_or_none()
 
     async def create(
         self,
@@ -88,3 +102,28 @@ class InvitationTokenRepository(BaseRepository[TenantInvitation]):
 
     async def get_by_token_hash(self, token_hash: str) -> TenantInvitation | None:
         return await self._first(self._select().where(TenantInvitation.token_hash == token_hash))
+
+    async def claim(
+        self,
+        *,
+        token_hash: str,
+        now: datetime,
+    ) -> TenantInvitation | None:
+        """Atomically spend one unexpired invitation token.
+
+        The conditional update is the claim. Concurrent callers cannot both
+        change ``pending`` to ``accepted``; PostgreSQL makes the loser wait for
+        the winner and then re-evaluate the predicate against the committed
+        status.
+        """
+        statement = (
+            update(TenantInvitation)
+            .where(
+                TenantInvitation.token_hash == token_hash,
+                TenantInvitation.status == InvitationStatus.PENDING,
+                TenantInvitation.expires_at > now,
+            )
+            .values(status=InvitationStatus.ACCEPTED, accepted_at=now)
+            .returning(TenantInvitation)
+        )
+        return (await self.session.execute(statement)).scalar_one_or_none()

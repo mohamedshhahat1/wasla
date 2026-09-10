@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, status
 
-from app.api.dependencies import AccountServiceDep, AuthServiceDep, CurrentUserDep
-from app.api.rate_limits import AuthRateLimit
+from app.api.dependencies import (
+    AccountServiceDep,
+    AuthServiceDep,
+    CurrentUserDep,
+    VerifiedUserDep,
+)
+from app.api.rate_limits import AuthRateLimit, RateLimiterDep
 from app.api.route import CommittingRoute
 from app.core.dependencies import SessionDep, SettingsDep
 from app.db.models import User
@@ -156,7 +161,7 @@ async def logout(
 )
 async def switch_workspace(
     payload: WorkspaceSwitchRequest,
-    current_user: CurrentUserDep,
+    current_user: VerifiedUserDep,
     service: AuthServiceDep,
 ) -> AccessTokenResponse:
     result = await service.select_workspace(
@@ -302,6 +307,7 @@ async def request_password_reset(
     payload: PasswordResetRequestPayload,
     session: SessionDep,
     settings: SettingsDep,
+    limiter: RateLimiterDep,
     # Counted per client address with the process-local Redis fallback, like
     # the rest of the credential surface (ADR-040): this route stands in
     # front of a credential and in front of somebody else's inbox.
@@ -314,7 +320,7 @@ async def request_password_reset(
     addresses have accounts (docs/SECURITY.md). The token travels only in
     the email; nothing about it appears here.
     """
-    service = PasswordResetService(session=session, settings=settings)
+    service = PasswordResetService(session=session, settings=settings, limiter=limiter)
     await service.request(email=payload.email)
     return PasswordResetRequestedResponse(detail=RESET_REQUESTED_MESSAGE)
 

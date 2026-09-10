@@ -23,12 +23,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.exceptions import AuthenticationError
 from app.core.logging import get_logger
+from app.core.rate_limit import (
+    PASSWORD_RESET_ACCOUNT_POLICY,
+    RateLimiter,
+    RateLimitPolicy,
+    account_identity,
+)
 from app.core.security import (
     generate_reset_token,
     hash_password,
     hash_reset_token,
     validate_password_strength,
 )
+from app.core.telemetry import observe_auth_event
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.user import User
 from app.repositories import UserRepository
@@ -60,9 +67,16 @@ class PasswordResetService:
     another.
     """
 
-    def __init__(self, *, session: AsyncSession, settings: Settings) -> None:
+    def __init__(
+        self,
+        *,
+        session: AsyncSession,
+        settings: Settings,
+        limiter: RateLimiter | None = None,
+    ) -> None:
         self._session = session
         self._settings = settings
+        self._limiter = limiter
         self._users = UserRepository(session)
         self._tokens = PasswordResetTokenRepository(session)
         self._outbox = EmailOutbox(session, settings)
@@ -82,6 +96,19 @@ class PasswordResetService:
         whatever an attacker does to the endpoint.
         """
         raw_token, token_hash = generate_reset_token()
+        if not await self._account_budget_allows(email):
+            # Same return as an unknown, disabled or passwordless account. A
+            # rate limit must not become an account-existence oracle.
+            logger.info(
+                "password_reset.request_suppressed",
+                extra={"event": "password_reset.request_suppressed", "reason": "account_budget"},
+            )
+            observe_auth_event(
+                event="password_reset_request",
+                outcome="suppressed",
+                reason="account_rate_limit",
+            )
+            return
         user = await self._users.get_by_email(email)
         if user is None or not user.is_active or user.hashed_password is None:
             # Unknown address, suspended account, or an invitation-created
@@ -91,6 +118,11 @@ class PasswordResetService:
             logger.info(
                 "password_reset.request_unmatched",
                 extra={"event": "password_reset.request_unmatched"},
+            )
+            observe_auth_event(
+                event="password_reset_request",
+                outcome="suppressed",
+                reason="account_unavailable",
             )
             return
 
@@ -112,6 +144,21 @@ class PasswordResetService:
             "password_reset.requested",
             extra={"event": "password_reset.requested", "user_id": str(user.id)},
         )
+        observe_auth_event(event="password_reset_request", outcome="queued", reason="eligible")
+
+    async def _account_budget_allows(self, email: str) -> bool:
+        if self._limiter is None or not self._settings.rate_limit_enabled:
+            return True
+        decision = await self._limiter.check(
+            RateLimitPolicy(
+                name=PASSWORD_RESET_ACCOUNT_POLICY,
+                limit=self._settings.rate_limit_password_reset_per_account_per_hour,
+                window_seconds=3600,
+                local_fallback=True,
+            ),
+            account_identity(email),
+        )
+        return decision.allowed
 
     async def confirm(self, *, raw_token: str, new_password: str) -> User:
         """Redeem a token for a new password, ending every session.

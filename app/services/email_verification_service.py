@@ -1,9 +1,10 @@
 """Proving that somebody can read the address on their account.
 
 A six-digit code, mailed through the existing outbox, checked against the
-account that asked for it. What this is *not* is stated first because it is the
-easiest thing to get wrong: verification is not a second factor, not a login
-mechanism, and not a permission. It sets one timestamp and grants nothing. See
+account that asked for it. Verification is not a second factor or a login
+mechanism. It sets one timestamp; the centralized authorization dependencies
+use that timestamp to keep an unverified account out of workspace and platform
+business actions while leaving verification and recovery reachable. See
 docs/EMAIL_VERIFICATION.md.
 
 The service owns no transaction. Issuing supersedes, creates and enqueues on
@@ -30,6 +31,7 @@ from app.core.security import (
     spend_code_verification_time,
     verify_verification_code,
 )
+from app.core.telemetry import observe_auth_event
 from app.db.models import User
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.email_verification import (
@@ -188,6 +190,14 @@ class EmailVerificationService:
         Returns a message that reads the same whether a code was sent, the
         recipient is suppressed, or the address was already verified.
         """
+        if user.deleted_at is not None or not user.is_active:
+            observe_auth_event(
+                event="email_verification",
+                outcome="blocked",
+                reason="account_unavailable",
+            )
+            return VERIFICATION_SENT_MESSAGE
+
         await self._limit(VERIFICATION_SEND_POLICY, user, _SEND_LIMIT, _SEND_WINDOW_SECONDS)
 
         if user.email_verified_at is not None:
@@ -218,12 +228,11 @@ class EmailVerificationService:
             expires_at=now + timedelta(seconds=self._ttl_seconds),
         )
 
-        # The plaintext code reaches the worker through the outbox context,
-        # because the worker renders the message - the request does not talk to
-        # the provider (ADR-042). It is never logged, exposed by no endpoint,
-        # and the outbox clears context on terminal transition, so its persisted
-        # life is bounded by delivery. This is documented rather than hidden:
-        # see docs/EMAIL_VERIFICATION.md.
+        # The plaintext code reaches EmailOutbox in memory because the worker
+        # renders the message; sensitive context is sealed before the row is
+        # written and opened only in worker memory (ADR-042's transactional
+        # boundary). It is never logged or exposed by an endpoint, and terminal
+        # transitions clear the ciphertext. See docs/EMAIL_VERIFICATION.md.
         await self._outbox.enqueue(
             template=EmailTemplate.EMAIL_VERIFICATION,
             recipient=user.email,
@@ -268,6 +277,14 @@ class EmailVerificationService:
         Every failure raises the same error with the same message. The reason is
         recorded for an operator and withheld from the caller.
         """
+        if user.deleted_at is not None or not user.is_active:
+            observe_auth_event(
+                event="email_verification",
+                outcome="blocked",
+                reason="account_unavailable",
+            )
+            raise ValidationError(INVALID_CODE)
+
         await self._limit(
             VERIFICATION_ATTEMPT_POLICY,
             user,
@@ -347,6 +364,7 @@ class EmailVerificationService:
                 "challenge_id": str(challenge.id),
             },
         )
+        observe_auth_event(event="email_verification", outcome="success", reason="code_accepted")
         return VerificationOutcome(verified_at=now)
 
     def _dead_reason(
@@ -423,6 +441,7 @@ class EmailVerificationService:
                 "reason": reason,
             },
         )
+        observe_auth_event(event="email_verification", outcome="failure", reason=reason)
         await self._session.commit()
 
     async def _limit(self, name: str, user: User, limit: int, window_seconds: int) -> None:

@@ -196,6 +196,10 @@ class GoogleIdentityClaims:
     # Google's hosted avatar, or None. Optional in every sense: absent from
     # some tokens, and never required for a login to succeed.
     picture: str | None
+    # Present for Google Workspace/Cloud-organization accounts. This is not an
+    # identity key; it only helps decide whether Google is authoritative for
+    # the mailbox domain.
+    hosted_domain: str | None = None
 
 
 class GoogleKeyRing:
@@ -536,10 +540,19 @@ class GoogleIdTokenVerifier:
             # a name and `None` is an account with nobody's name on it.
             full_name = full_name.strip()[:MAX_NAME_LENGTH]
 
+        hosted_domain = payload.get("hd")
+        if not isinstance(hosted_domain, str) or not hosted_domain.strip():
+            hosted_domain = None
+        else:
+            hosted_domain = hosted_domain.strip().lower()
+            if len(hosted_domain) > 253:
+                hosted_domain = None
+
         return GoogleIdentityClaims(
             subject=subject,
             email=email,
             email_verified=payload.get("email_verified") is True,
             full_name=full_name,
             picture=_safe_picture(payload.get("picture")),
+            hosted_domain=hosted_domain,
         )

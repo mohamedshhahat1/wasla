@@ -503,6 +503,10 @@ class Settings(BaseSettings):
     # tighter than the address limit, because one person signing in does not
     # need many attempts a minute and a password sprayer needs exactly this.
     rate_limit_login_per_account_per_minute: int = Field(default=5, gt=0)
+    # Reset requests are externally uniform and suppressed after this many
+    # attempts for one canonical address in an hour. The client-address budget
+    # remains in front of the route as an independent layer.
+    rate_limit_password_reset_per_account_per_hour: int = Field(default=3, gt=0)
     # Everything else a workspace does, counted per workspace rather than per
     # user: the limit protects the platform's shared resources, and a workspace
     # with fifty colleagues is fifty times the load of one with one.
@@ -1009,7 +1013,7 @@ class Settings(BaseSettings):
                 # so a typo in this one value silently discards every email
                 # the deployment ever queues.
                 problems.append(
-                    "EMAIL_FROM must be a bare email address such as " "no-reply@example.com"
+                    "EMAIL_FROM must be a bare email address such as no-reply@example.com"
                 )
 
             if not self.app_public_url:
@@ -1019,6 +1023,13 @@ class Settings(BaseSettings):
                 )
             else:
                 problems.extend(_public_url_problems(self.app_public_url))
+
+            if not self.credential_encryption_keys:
+                problems.append(
+                    "CREDENTIAL_ENCRYPTION_KEYS must contain an AES-256 key when "
+                    "EMAIL_ENABLED is true: verification, reset, and invitation "
+                    "credentials may not be stored in plaintext"
+                )
 
             if self.is_production:
                 if self.email_provider != "resend":

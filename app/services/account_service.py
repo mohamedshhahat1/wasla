@@ -36,7 +36,9 @@ it commits with the change or not at all - and it is addressed to the row's own
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
@@ -86,6 +88,55 @@ class AccountService:
         user = await self._users.get_by_id(user_id)
         if user is None:
             raise NotFoundError("No account matches that identifier.")
+        return user
+
+    async def delete(self, *, user_id: uuid.UUID, actor: User) -> User:
+        """Create an irreversible authentication tombstone for an account.
+
+        This is platform lifecycle tooling, not self-service deletion. The
+        lifecycle fields change in one statement so deletion cannot leave an
+        active account or preserve credentials minted before the tombstone.
+        """
+        if user_id == actor.id:
+            raise ValidationError("An administrator cannot delete their own account.")
+
+        statement = (
+            update(User)
+            .where(User.id == user_id, User.deleted_at.is_(None))
+            .values(
+                deleted_at=datetime.now(UTC),
+                is_active=False,
+                token_version=User.token_version + 1,
+            )
+            .returning(User)
+        )
+        result = await self._session.execute(
+            statement,
+            execution_options={"synchronize_session": False},
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise NotFoundError("No account matches that identifier.")
+
+        # The existing enum stays stable; the metadata makes the irreversible
+        # tombstone distinct from a reversible suspension in the audit trail.
+        self._audit.record(
+            AuditAction.USER_DISABLED,
+            actor=actor,
+            actor_kind=AuditActorKind.PLATFORM_STAFF,
+            target_type="user",
+            target_id=user.id,
+            target_label=user.email,
+            meta={"token_version": user.token_version, "deleted": True},
+        )
+        logger.info(
+            "account.deleted",
+            extra={
+                "event": "account.deleted",
+                "user_id": str(user.id),
+                "actor_id": str(actor.id),
+            },
+        )
         return user
 
     @staticmethod

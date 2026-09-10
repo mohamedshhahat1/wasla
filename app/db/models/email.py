@@ -13,11 +13,10 @@ email carries a deterministic key built from the domain id that caused it,
 and the unique constraint is what makes a retried request, a replayed event
 or a sweep that ran twice produce one row however the callers race.
 
-**The context is cleared at the end.** For a reset or an invitation the
-context briefly carries the very link being delivered - that is the outbox's
-job - but a message that has been sent or has permanently failed has no
-reason to keep it, so terminal transitions empty it. The exposure of a token
-in this table is bounded by the life of the send, not the life of the row.
+**Credential context is sealed and cleared.** Verification, reset and
+invitation material is AES-GCM ciphertext while pending and exists as plaintext
+only in worker memory while rendering. A message that has been accepted or has
+permanently failed keeps no context at all.
 """
 
 from __future__ import annotations
@@ -114,8 +113,9 @@ class OutboundEmail(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     recipient: Mapped[str] = mapped_column(String(320), nullable=False)
     template: Mapped[str] = mapped_column(String(MAX_TEMPLATE_LENGTH), nullable=False)
     subject: Mapped[str] = mapped_column(String(200), nullable=False)
-    # String values only, written by `EmailOutbox`. Cleared on terminal
-    # transitions - see the module docstring for why.
+    # String values only, written by `EmailOutbox`. Credential-bearing
+    # templates store a single authenticated ciphertext envelope here; other
+    # templates keep their non-secret render values. Cleared on terminal state.
     context: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,

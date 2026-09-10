@@ -50,6 +50,7 @@ from app.core.exceptions import NotFoundError
 from app.core.oauth_binding import attach, clear, ensure, presented
 from app.core.oauth_flow import OAuthFlowStore
 from app.core.rate_limit import RateLimiter
+from app.core.telemetry import observe_auth_event
 from app.core.token_store import RefreshTokenStore
 from app.integrations.google.client import GoogleOAuthClient
 from app.integrations.google.oidc import GoogleIdTokenVerifier, GoogleKeyRing
@@ -128,7 +129,11 @@ async def start_google_login(
     tab does not silently break the first.
     """
     binding = ensure(request, settings)
-    url, expires_in = await _service(settings, session, redis).start_login(binding=binding)
+    try:
+        url, expires_in = await _service(settings, session, redis).start_login(binding=binding)
+    except Exception:
+        observe_auth_event(event="oauth_start", outcome="failure", reason="login")
+        raise
     attach(response, secret=binding, settings=settings)
     return GoogleAuthorizationResponse(authorization_url=url, expires_in=expires_in)
 
@@ -159,11 +164,16 @@ async def complete_google_login(
     anybody who can induce one forged callback destroy a legitimate flow still
     running in the same browser.
     """
-    result = await _service(settings, session, redis).complete_login(
-        code=payload.code,
-        state=payload.state,
-        binding=presented(request, settings),
-    )
+    try:
+        result = await _service(settings, session, redis).complete_login(
+            code=payload.code,
+            state=payload.state,
+            binding=presented(request, settings),
+        )
+    except Exception:
+        observe_auth_event(event="oauth_callback", outcome="failure", reason="login")
+        raise
+    observe_auth_event(event="oauth_callback", outcome="success", reason="login")
     clear(response, settings)
     return _session_response(result)
 
@@ -189,10 +199,14 @@ async def start_google_link(
     behind is a permanent additional way into an existing account.
     """
     binding = ensure(request, settings)
-    url, expires_in = await _service(settings, session, redis).start_link(
-        user=current.user,
-        binding=binding,
-    )
+    try:
+        url, expires_in = await _service(settings, session, redis).start_link(
+            user=current.user,
+            binding=binding,
+        )
+    except Exception:
+        observe_auth_event(event="oauth_start", outcome="failure", reason="link")
+        raise
     attach(response, secret=binding, settings=settings)
     return GoogleAuthorizationResponse(authorization_url=url, expires_in=expires_in)
 
@@ -215,12 +229,17 @@ async def link_google_identity(
     Google account is already connected somewhere, or when this account already
     has one.
     """
-    identity = await _service(settings, session, redis).complete_link(
-        user=current.user,
-        code=payload.code,
-        state=payload.state,
-        binding=presented(request, settings),
-    )
+    try:
+        identity = await _service(settings, session, redis).complete_link(
+            user=current.user,
+            code=payload.code,
+            state=payload.state,
+            binding=presented(request, settings),
+        )
+    except Exception:
+        observe_auth_event(event="oauth_callback", outcome="failure", reason="link")
+        raise
+    observe_auth_event(event="oauth_callback", outcome="success", reason="link")
     clear(response, settings)
     return GoogleIdentityResponse(
         provider=identity.provider,

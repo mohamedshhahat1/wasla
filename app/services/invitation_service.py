@@ -23,8 +23,8 @@ from app.core.security import (
     hash_password,
     validate_password_strength,
 )
+from app.core.telemetry import observe_auth_event
 from app.db.models import (
-    InvitationStatus,
     Membership,
     MembershipStatus,
     Tenant,
@@ -184,10 +184,14 @@ class InvitationService:
         invitation_id: uuid.UUID,
     ) -> TenantInvitation:
         invitations = InvitationRepository(self._session, tenant_id=tenant_id)
-        invitation = await invitations.require_by_id(invitation_id)
-        if invitation.status is not InvitationStatus.PENDING:
+        # Preserve tenant-resource non-disclosure: a missing invitation and an
+        # invitation owned by another workspace both answer 404.  The
+        # conditional UPDATE below remains the concurrency control; this read
+        # only distinguishes absence from a same-tenant state conflict.
+        await invitations.require_by_id(invitation_id)
+        invitation = await invitations.revoke_pending(invitation_id)
+        if invitation is None:
             raise ConflictError("That invitation is no longer pending.")
-        invitation.status = InvitationStatus.REVOKED
         await self._session.flush()
         # Deliberately no email. Revoking an invitation the person may never
         # have seen, to a workspace they were never in, would be telling a
@@ -215,26 +219,55 @@ class InvitationService:
         The lookup is by hash, so a stolen database yields no usable
         invitation.
         """
-        invitation = await self._tokens.get_by_token_hash(hash_invitation_token(raw_token))
+        token_hash = hash_invitation_token(raw_token)
+        invitation = await self._tokens.get_by_token_hash(token_hash)
         now = datetime.now(UTC)
         if invitation is None or not invitation.is_open(now=now):
+            observe_auth_event(
+                event="invitation_accept",
+                outcome="failure",
+                reason="invalid_or_replayed",
+            )
             raise AuthenticationError(INVALID_INVITATION)
 
         tenant = await self._tenants.get_by_id(invitation.tenant_id)
         if tenant is None or not tenant.is_active:
             raise PermissionDeniedError("That workspace is not available.")
 
-        user = await self._users.get_by_email(invitation.email)
+        # Read tombstones explicitly so an invitation can never create a new
+        # identity over a deleted account's retained email.
+        user = await self._users.get_by_email_including_deleted(invitation.email)
+        if user is not None and user.deleted_at is not None:
+            observe_auth_event(
+                event="invitation_accept",
+                outcome="blocked",
+                reason="account_deleted",
+            )
+            raise AuthenticationError(INVALID_INVITATION)
+
+        if user is None and password is None:
+            raise ValidationError("A password is required to create the account.")
+        if user is None:
+            validate_password_strength(password or "")
+
+        # Claim after all non-mutating validation and before any identity or
+        # membership write. Exactly one concurrent caller proceeds beyond it.
+        invitation = await self._tokens.claim(token_hash=token_hash, now=now)
+        if invitation is None:
+            observe_auth_event(
+                event="invitation_accept",
+                outcome="failure",
+                reason="lost_claim",
+            )
+            raise AuthenticationError(INVALID_INVITATION)
+
         if user is None:
             # The only branch that may set a password, because it is the only
             # branch that creates the account it sets one on.
-            if password is None:
-                raise ValidationError("A password is required to create the account.")
-            validate_password_strength(password)
             user = await self._users.create(
                 email=invitation.email,
                 full_name=full_name,
-                hashed_password=hash_password(password),
+                hashed_password=hash_password(password or ""),
             )
             await self._session.flush()
         else:
@@ -287,8 +320,6 @@ class InvitationService:
             membership.revoked_at = None
             membership.revoked_by_id = None
 
-        invitation.status = InvitationStatus.ACCEPTED
-        invitation.accepted_at = now
         await self._session.flush()
 
         logger.info(
@@ -299,4 +330,5 @@ class InvitationService:
                 "user_id": str(user.id),
             },
         )
+        observe_auth_event(event="invitation_accept", outcome="success", reason="claimed")
         return AcceptedInvitation(user=user, membership=membership, tenant=tenant)

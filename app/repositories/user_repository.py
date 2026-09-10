@@ -27,9 +27,24 @@ class UserRepository(BaseRepository[User]):
     model = User
 
     async def get_by_id(self, user_id: uuid.UUID) -> User | None:
-        return await self._first(self._select().where(User.id == user_id))
+        return await self._first(
+            self._select().where(User.id == user_id, User.deleted_at.is_(None))
+        )
 
     async def get_by_email(self, email: str) -> User | None:
+        return await self._first(
+            self._select().where(
+                User.email == normalise_email(email),
+                User.deleted_at.is_(None),
+            )
+        )
+
+    async def get_by_id_including_deleted(self, user_id: uuid.UUID) -> User | None:
+        """Explicit lifecycle/administrative lookup that includes tombstones."""
+        return await self._first(self._select().where(User.id == user_id))
+
+    async def get_by_email_including_deleted(self, email: str) -> User | None:
+        """Explicit uniqueness lookup; deleted identities retain their email."""
         return await self._first(self._select().where(User.email == normalise_email(email)))
 
     async def bump_token_version(self, user_id: uuid.UUID) -> int | None:
@@ -75,7 +90,10 @@ class UserRepository(BaseRepository[User]):
         password must never reach this method.
         """
         normalised = normalise_email(email)
-        if await self.get_by_email(normalised) is not None:
+        # A deleted identity remains a tombstone. Reusing its address would
+        # silently attach a new person to historical memberships, identities,
+        # messages and audit records protected by database foreign keys.
+        if await self.get_by_email_including_deleted(normalised) is not None:
             raise ConflictError("An account with that email address already exists.")
         return self.add(
             User(

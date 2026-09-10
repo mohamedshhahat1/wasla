@@ -18,9 +18,13 @@ case "${command}" in
     # command bypasses this branch entirely - migrations included. That is
     # exactly the bug this flag exists to make impossible.
     if [ "${UVICORN_RELOAD:-false}" = "true" ]; then
-      exec uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}" --reload
+      exec uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}" --reload --no-proxy-headers
     fi
-    exec uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}"
+    # Wasla owns the only forwarding-header policy. Uvicorn must not rewrite
+    # request.client before `client_identity` can verify the immediate peer
+    # against TRUSTED_PROXY_IPS; two trust systems with different allowlists
+    # turn a forged X-Forwarded-For value into a socket address.
+    exec uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}" --no-proxy-headers
     ;;
   worker)
     # Never runs migrations, whatever RUN_MIGRATIONS says. Workers scale to

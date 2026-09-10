@@ -139,6 +139,12 @@ UNHANDLED_ERRORS = REGISTRY.counter(
     "Exceptions that reached the last-resort handler and became a 500.",
 )
 
+AUTH_SECURITY_EVENTS = REGISTRY.counter(
+    "wasla_auth_security_events_total",
+    "Authentication and account-security outcomes with bounded privacy-safe labels.",
+    ("event", "outcome", "reason"),
+)
+
 
 def observe_http(*, method: str, route: str, status_code: int, duration_seconds: float) -> None:
     """Record one served request.
@@ -171,6 +177,14 @@ def observe_unhandled_error() -> None:
     # raising a second one there would replace the error an operator needs to see.
     with contextlib.suppress(Exception):
         UNHANDLED_ERRORS.increment()
+
+
+def observe_auth_event(*, event: str, outcome: str, reason: str) -> None:
+    """Count one auth/security event without identities or caller input."""
+    try:
+        AUTH_SECURITY_EVENTS.increment(event=event, outcome=outcome, reason=reason)
+    except Exception:
+        logger.warning("metrics.record_failed", extra={"event": "metrics.record_failed"})
 
 
 # ------------------------------------------------- cross-process (via Redis)
@@ -746,6 +760,7 @@ __all__ = [
     "Provider",
     "ProviderCall",
     "counter_sink",
+    "observe_auth_event",
     "observe_dependency",
     "observe_http",
     "observe_unhandled_error",

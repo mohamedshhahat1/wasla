@@ -252,3 +252,23 @@ async def enable_user(
         is_active=user.is_active,
         token_version=user.token_version,
     )
+
+
+@router.delete(
+    "/users/{user_id}",
+    response_model=AccountStateResponse,
+    summary="Permanently tombstone an account and end every session",
+)
+async def delete_user(
+    user_id: uuid.UUID,
+    staff: PlatformStaffDep,
+    accounts: AccountServiceDep,
+) -> AccountStateResponse:
+    """Platform lifecycle operation; deleted identities are never reusable."""
+    user = await accounts.delete(user_id=user_id, actor=staff.user)
+    return AccountStateResponse(
+        id=user.id,
+        email=user.email,
+        is_active=user.is_active,
+        token_version=user.token_version,
+    )

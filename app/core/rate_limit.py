@@ -51,6 +51,7 @@ from redis.exceptions import RedisError
 from app.core.exceptions import RateLimitedError
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
+from app.core.telemetry import observe_auth_event
 
 logger = get_logger(__name__)
 
@@ -63,6 +64,9 @@ KEY_PREFIX: Final = "ratelimit"
 # identity is inside the request body, and a route dependency that read the body
 # to find it would consume the stream before the handler saw it.
 LOGIN_ACCOUNT_POLICY: Final = "auth:account"
+# Password-reset mail, counted by canonical account rather than source IP so
+# rotating botnet addresses cannot flood one mailbox or supersede every link.
+PASSWORD_RESET_ACCOUNT_POLICY: Final = "auth:password_reset_account"  # noqa: S105
 
 
 def account_identity(email: str) -> str:
@@ -290,6 +294,13 @@ class RateLimiter:
         """
         decision = await self.check(policy, identity)
         if not decision.allowed:
+            if policy.name.startswith("auth"):
+                reason = (
+                    "account_reset"
+                    if policy.name == PASSWORD_RESET_ACCOUNT_POLICY
+                    else "account" if policy.name == LOGIN_ACCOUNT_POLICY else "client"
+                )
+                observe_auth_event(event="rate_limit", outcome="blocked", reason=reason)
             raise RateLimitedError(
                 f"Too many requests. Try again in {decision.retry_after_seconds} seconds.",
                 headers=decision.headers,

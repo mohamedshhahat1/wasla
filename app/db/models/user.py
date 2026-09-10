@@ -63,12 +63,10 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     # asked later: a flag cannot tell you whether the proof predates a support
     # ticket, and it cannot be compared against the moment an address changed.
     #
-    # NULL means unverified, and unverified is a completely ordinary state. This
-    # column grants nothing (docs/EMAIL_VERIFICATION.md): no route reads it, no
-    # permission depends on it, and authentication does not consult it. It is an
-    # account-integrity fact, not an authorization input - and it must not
-    # quietly become one, because a column that starts gating things is a column
-    # that locks out every account created before it existed.
+    # NULL means unverified, and unverified is a recoverable onboarding state.
+    # Authentication and account recovery remain available, while the shared
+    # authorization dependency refuses workspace and platform actions until
+    # ownership is proven (docs/EMAIL_VERIFICATION.md).
     #
     # Any future flow that changes `email` must set this back to NULL. It does
     # not also have to hunt down outstanding challenges: each one records the
@@ -110,9 +108,5 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
 
     @property
     def is_email_verified(self) -> bool:
-        """Whether inbox ownership has ever been proven for the current address.
-
-        A convenience for reading, not a permission. Nothing in the application
-        may branch on this to decide access - see docs/EMAIL_VERIFICATION.md.
-        """
+        """Whether inbox ownership has been proven for the current address."""
         return self.email_verified_at is not None
