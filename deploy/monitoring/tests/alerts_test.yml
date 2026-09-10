@@ -90,3 +90,153 @@ tests:
               description: >-
                 No metrics are arriving, so no other alert in this file can fire. Treat a silent monitoring system as an incident in its own right.
               runbook: docs/RUNBOOK.md
+
+  # ---------------------------------------------------- refresh token replay
+  - interval: 30s
+    name: a single replayed refresh token fires, and clears once it stops
+    input_series:
+      # One increment, at t=0, then flat. A counter that stops rising is a
+      # rate that decays to zero, which is what "no further replays" looks
+      # like - so this case also proves the alert resolves rather than
+      # latching on for ever.
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="refresh", outcome="blocked", reason="replay"}'
+        values: "0+0x2 1+0x60"
+      # Ordinary successful refreshes, deliberately present: the rule must not
+      # be satisfied by traffic on the same metric with a different outcome.
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="refresh", outcome="success", reason="rotated"}'
+        values: "0+10x60"
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: RefreshTokenReplayDetected
+        # The increment has not landed yet, and successful refreshes alone
+        # must never fire this.
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RefreshTokenReplayDetected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: security
+            exp_annotations:
+              summary: "A refresh token was replayed"
+              description: >-
+                A refresh token was presented twice. Wasla has already revoked the account's whole token family, so every session it held is dead and the person will be asked to sign in again. Establish which it was: audit_logs carries a refresh_token_reused row naming the account and the version it was raised to. Two causes are worth telling apart - a leaked token being used by somebody else, and a client that retries a refresh with the token it has already spent.
+              runbook: docs/RUNBOOK.md
+      - eval_time: 20m
+        alertname: RefreshTokenReplayDetected
+        # The 5m rate window has moved past the single increment.
+        exp_alerts: []
+
+  # ------------------------------------------------------ login failure rate
+  - interval: 30s
+    name: ordinary mistyped passwords stay quiet
+    input_series:
+      # ~0.033/s - two failures a minute, which is a normal product. Well
+      # under the 0.2/s threshold, and it runs for the whole window so this is
+      # a real negative control rather than an absence of data.
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="login", outcome="failure", reason="invalid_credentials"}'
+        values: "0+1x120"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: PasswordLoginFailureSpike
+        exp_alerts: []
+
+  - interval: 30s
+    name: a sustained login-failure spike fires after fifteen minutes
+    input_series:
+      # 0.4/s across two reasons - twelve a minute each. Split deliberately:
+      # neither series alone would cross the threshold, and the rule sums them
+      # because a list-walking attacker produces exactly this mixture.
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="login", outcome="failure", reason="invalid_credentials"}'
+        values: "0+6x120"
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="login", outcome="failure", reason="account_deleted"}'
+        values: "0+6x120"
+      # Successes at a healthy rate, which must not suppress or satisfy it.
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="login", outcome="success", reason="password"}'
+        values: "0+3x120"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PasswordLoginFailureSpike
+        # Over threshold, but not yet for the fifteen minutes the rule wants.
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PasswordLoginFailureSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: security
+            exp_annotations:
+              summary: "Password logins are failing far above the normal rate"
+              description: >-
+                Sustained password-login failures. Most likely a credential-stuffing or spray attempt; a broken client that retries a bad credential in a loop looks the same from here and is also worth stopping. The per-account and per-address limits are already refusing the excess - check wasla_auth_security_events_total{event="rate_limit"} to see whether they are engaged, and the audit trail for login_failed rows to see which accounts are being named.
+              runbook: docs/RUNBOOK.md
+
+  # ---------------------------------------------------------- rate limiting
+  - interval: 30s
+    name: a rate-limit spike names which budget is being spent
+    input_series:
+      # 0.4/s on the per-account budget, which is what a targeted attempt on
+      # one person looks like once the limiter engages.
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="rate_limit", outcome="blocked", reason="account"}'
+        values: "0+12x120"
+      # And a trickle on the per-client budget, under threshold. It must not
+      # produce a second alert: the split by `reason` is what makes the first
+      # actionable, and it would be worthless if every reason fired together.
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="rate_limit", outcome="blocked", reason="client"}'
+        values: "0+1x120"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AuthenticationRateLimitSpike
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: AuthenticationRateLimitSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: security
+              reason: account
+            exp_annotations:
+              summary: "Authentication rate limiting is engaged (account)"
+              description: >-
+                The authentication limiters are refusing traffic at a sustained rate. reason=client is a single caller being throttled; reason=account means one account's login budget is being spent, which is what a targeted attempt on a named person looks like; reason=account_reset is the password-reset budget, which bounds the reset endpoint's use as a mailbox-flooding tool. The limits are working - this says somebody is pushing against them.
+              runbook: docs/RUNBOOK.md
+
+  # ------------------------------------------------- email webhook signatures
+  - interval: 30s
+    name: one stray unsigned callback is not an incident
+    input_series:
+      # A single refusal at t=0 and nothing after. Somebody probed the
+      # endpoint once; that is not worth anybody's afternoon.
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="email_webhook", outcome="blocked", reason="invalid_signature"}'
+        values: "0+0x2 1+0x120"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: EmailWebhookSignatureFailures
+        exp_alerts: []
+
+  - interval: 30s
+    name: a provider secret mismatch fires as a warning
+    input_series:
+      # ~0.033/s - two refusals a minute, sustained. That is a secret that no
+      # longer matches, not a passer-by.
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="email_webhook", outcome="blocked", reason="invalid_signature"}'
+        values: "0+1x160"
+      # Accepted callbacks alongside them, so the rule is shown to select on
+      # the outcome rather than on the event.
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="email_webhook", outcome="success", reason="recorded"}'
+        values: "0+4x160"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: EmailWebhookSignatureFailures
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: EmailWebhookSignatureFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: security
+            exp_annotations:
+              summary: "Email webhook callbacks are failing signature verification"
+              description: >-
+                Repeated callbacks are being refused before they are parsed. Check that RESEND_WEBHOOK_SECRET matches the signing secret configured at the provider - a mismatch means delivery, bounce and complaint events are being discarded, so suppression will stop working while the endpoint keeps answering. If the secret is correct, this is unsigned traffic reaching the endpoint from somewhere else.
+              runbook: docs/EMAIL.md

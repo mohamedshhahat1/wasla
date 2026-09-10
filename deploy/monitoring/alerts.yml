@@ -151,6 +151,145 @@ groups:
             Check the audit log for google_login_failed entries.
           runbook: docs/GOOGLE_OAUTH.md
 
+  # ------------------------------------------------------------------------
+  # Authentication security events.
+  #
+  # `wasla_auth_security_events_total` was defined, emitted and scraped for
+  # three phases, and no rule referenced it (AUTH-06). That is the shape of
+  # monitoring that reads as monitoring and detects nothing: the code goes to
+  # considerable lengths to notice a replayed refresh token, and the noticing
+  # reached a counter nobody was watching.
+  #
+  # Every label matched below comes from a module constant at the call site -
+  # `event`, `outcome` and `reason` are all closed vocabularies - so nothing
+  # here can grow a series per customer, per address or per account. That is
+  # also why no rule groups by anything a person could be identified from: an
+  # alert that named the account under attack would put an email address in a
+  # chat channel and in Alertmanager's API.
+  - name: wasla-auth-security
+    interval: 30s
+    rules:
+      # ------------------------------------------------------ refresh replay
+      - alert: RefreshTokenReplayDetected
+        # The highest-signal security event this system can produce. A refresh
+        # token was presented after it had already been spent, which is either
+        # a stolen token being used alongside the real one or a client that has
+        # broken rotation - and the first is worth waking somebody for. The
+        # application has already torn the account's sessions down by the time
+        # this fires; what the alert adds is that a person finds out.
+        #
+        # No threshold, because one is the number that matters. `for: 2m` is
+        # the shortest duration in this file and is about scrape settling
+        # rather than about doubting the event: a counter increment is not a
+        # blip, so waiting longer would only delay the page.
+        expr: |
+          sum(
+            rate(wasla_auth_security_events_total{event="refresh", outcome="blocked", reason="replay"}[5m])
+          ) > 0
+        for: 2m
+        labels:
+          severity: critical
+          component: security
+        annotations:
+          summary: "A refresh token was replayed"
+          description: >-
+            A refresh token was presented twice. Wasla has already revoked the
+            account's whole token family, so every session it held is dead and
+            the person will be asked to sign in again. Establish which it was:
+            audit_logs carries a refresh_token_reused row naming the account and
+            the version it was raised to. Two causes are worth telling apart - a
+            leaked token being used by somebody else, and a client that retries
+            a refresh with the token it has already spent.
+          runbook: docs/RUNBOOK.md
+
+      # ------------------------------------------------------- login failures
+      - alert: PasswordLoginFailureSpike
+        # A rate, never a count. People mistype passwords, and a rule that
+        # fired on one would be muted within a week. This threshold is roughly
+        # twelve failures a minute sustained for a quarter of an hour - about
+        # 180 refusals, which no honest traffic produces and which a spray
+        # does immediately.
+        #
+        # Summed rather than split by `reason`, deliberately: an attacker
+        # working through a list produces a mixture of invalid_credentials and
+        # account_deleted, and a rule that watched each separately could let a
+        # spray sit under both thresholds.
+        expr: |
+          sum(
+            rate(wasla_auth_security_events_total{event="login", outcome="failure"}[10m])
+          ) > 0.2
+        for: 15m
+        labels:
+          severity: warning
+          component: security
+        annotations:
+          summary: "Password logins are failing far above the normal rate"
+          description: >-
+            Sustained password-login failures. Most likely a credential-stuffing
+            or spray attempt; a broken client that retries a bad credential in a
+            loop looks the same from here and is also worth stopping. The
+            per-account and per-address limits are already refusing the excess -
+            check wasla_auth_security_events_total{event="rate_limit"} to see
+            whether they are engaged, and the audit trail for login_failed rows
+            to see which accounts are being named.
+          runbook: docs/RUNBOOK.md
+
+      # ---------------------------------------------------------- rate limits
+      - alert: AuthenticationRateLimitSpike
+        # Split by `reason` because the three mean genuinely different things -
+        # `client` is one address being throttled, `account` is one account
+        # being hammered from many, `account_reset` is the password-reset
+        # budget - and an operator's first question is which. Three bounded
+        # values, and Alertmanager groups by alertname and component, so the
+        # worst case is one notification carrying three lines rather than three
+        # notifications.
+        expr: |
+          sum by (reason) (
+            rate(wasla_auth_security_events_total{event="rate_limit", outcome="blocked"}[10m])
+          ) > 0.2
+        for: 15m
+        labels:
+          severity: warning
+          component: security
+        annotations:
+          summary: "Authentication rate limiting is engaged ({{ $labels.reason }})"
+          description: >-
+            The authentication limiters are refusing traffic at a sustained
+            rate. reason=client is a single caller being throttled; reason=account
+            means one account's login budget is being spent, which is what a
+            targeted attempt on a named person looks like; reason=account_reset
+            is the password-reset budget, which bounds the reset endpoint's use
+            as a mailbox-flooding tool. The limits are working - this says
+            somebody is pushing against them.
+          runbook: docs/RUNBOOK.md
+
+      # -------------------------------------------------- email webhook forgery
+      - alert: EmailWebhookSignatureFailures
+        # A correctly configured provider signs every callback, so the honest
+        # rate here is zero. Repeated refusals mean the shared secret has
+        # drifted from the provider's - in which case delivery events are being
+        # dropped and bounce handling has silently stopped - or that somebody
+        # is posting to the endpoint to see what happens. Both are worth a
+        # look; neither is worth a page.
+        expr: |
+          sum(
+            rate(wasla_auth_security_events_total{event="email_webhook", outcome="blocked", reason="invalid_signature"}[15m])
+          ) > 0.01
+        for: 15m
+        labels:
+          severity: warning
+          component: security
+        annotations:
+          summary: "Email webhook callbacks are failing signature verification"
+          description: >-
+            Repeated callbacks are being refused before they are parsed. Check
+            that RESEND_WEBHOOK_SECRET matches the signing secret configured at
+            the provider - a mismatch means delivery, bounce and complaint
+            events are being discarded, so suppression will stop working while
+            the endpoint keeps answering. If the secret is correct, this is
+            unsigned traffic reaching the endpoint from somewhere else.
+          runbook: docs/EMAIL.md
+
   - name: wasla-availability
     interval: 30s
     rules:
