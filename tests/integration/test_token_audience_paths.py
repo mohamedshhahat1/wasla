@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import jwt
@@ -151,6 +152,7 @@ async def account(db_session: AsyncSession) -> User:
         full_name="Audience Tester",
         hashed_password=hash_password(PASSWORD),
         is_active=True,
+        email_verified_at=datetime.now(UTC),
     )
     db_session.add(user)
     await db_session.flush()

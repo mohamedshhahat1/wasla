@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -58,7 +59,12 @@ API = "/api/v1"
 
 
 async def _person(session: AsyncSession, email: str) -> User:
-    user = User(email=email, hashed_password="x", is_active=True)
+    user = User(
+        email=email,
+        hashed_password="x",
+        is_active=True,
+        email_verified_at=datetime.now(UTC),
+    )
     session.add(user)
     await session.flush()
     return user

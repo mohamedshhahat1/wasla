@@ -50,6 +50,7 @@ def _claims(**overrides: Any) -> GoogleIdentityClaims:
         email_verified=True,
         full_name=NAME,
         picture=PICTURE,
+        hosted_domain="example.com",
     )
     return replace(base, **overrides)
 
@@ -181,6 +182,30 @@ async def test_a_first_login_stores_the_name_and_the_picture(
     # The address arrived inside a signature, so it is recorded as proven.
     assert user.email_verified_at is not None
     assert user.hashed_password is None
+
+
+async def test_a_third_party_google_address_still_needs_wasla_verification(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    """Google may remember an old third-party proof after mailbox ownership moves."""
+    await _login(db_session, settings, _claims(hosted_domain=None), state="third-party")
+
+    user = await _stored(db_session)
+    assert user.email_verified_at is None
+
+
+async def test_a_mismatched_hosted_domain_does_not_verify_the_mailbox(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    await _login(
+        db_session,
+        settings,
+        _claims(hosted_domain="different.example"),
+        state="wrong-hosted-domain",
+    )
+
+    user = await _stored(db_session)
+    assert user.email_verified_at is None
 
 
 async def test_a_later_login_follows_a_changed_google_profile(

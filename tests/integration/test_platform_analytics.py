@@ -236,6 +236,7 @@ def _as_user(app: FastAPI, role: PlatformRole | None) -> None:
         id=uuid.uuid4(),
         email="someone@example.com",
         is_active=True,
+        email_verified_at=datetime.now(UTC),
         platform_role=role,
     )
     claims = TokenClaims(

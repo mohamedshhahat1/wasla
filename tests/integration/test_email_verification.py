@@ -37,12 +37,14 @@ from app.db.models.email import EmailStatus, OutboundEmail
 from app.db.models.email_verification import EmailVerificationChallenge
 from app.db.models.user import User
 from app.repositories.email_verification_repository import EmailVerificationRepository
+from app.services.email_service import open_email_context
 from app.services.email_templates import EmailTemplate, render
 from app.services.email_verification_service import (
     INVALID_CODE,
     VERIFICATION_SENT_MESSAGE,
     EmailVerificationService,
 )
+from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY
 
 pytestmark = pytest.mark.integration
 
@@ -63,6 +65,7 @@ def _settings(**overrides: Any) -> Settings:
         email_provider="fake",
         email_from="no-reply@example.com",
         app_public_url="https://app.example.com",
+        credential_encryption_keys=[TEST_CREDENTIAL_ENCRYPTION_KEY],
         **overrides,
     )
 
@@ -109,7 +112,7 @@ async def _issue(session: AsyncSession, user: User, **kwargs: object) -> str:
     assert challenge is not None
     row = await _queued(session, challenge.id)
     assert row is not None
-    return str(row.context["code"])
+    return open_email_context(row, _settings())["code"]
 
 
 async def _queued(session: AsyncSession, challenge_id: uuid.UUID) -> OutboundEmail | None:
@@ -133,6 +136,36 @@ async def _challenges(
 
 async def _live(session: AsyncSession, user: User) -> EmailVerificationChallenge | None:
     return await EmailVerificationRepository(session).get_active(user_id=user.id)
+
+
+@pytest.mark.parametrize("active_after_delete", [True, False])
+async def test_deleted_accounts_cannot_request_or_complete_verification(
+    db_session: AsyncSession,
+    active_after_delete: bool,
+) -> None:
+    user = await _account(db_session, f"deleted-{active_after_delete}@example.com")
+    code = await _issue(db_session, user)
+    before = len(
+        (await db_session.execute(select(OutboundEmail).where(OutboundEmail.user_id == user.id)))
+        .scalars()
+        .all()
+    )
+    user.deleted_at = datetime.now(UTC)
+    user.is_active = active_after_delete
+    await db_session.flush()
+
+    response = await _service(db_session).request(user=user)
+    with pytest.raises(ValidationError, match=INVALID_CODE):
+        await _service(db_session).confirm(user=user, submitted=code)
+
+    assert response == VERIFICATION_SENT_MESSAGE
+    assert user.email_verified_at is None
+    after = len(
+        (await db_session.execute(select(OutboundEmail).where(OutboundEmail.user_id == user.id)))
+        .scalars()
+        .all()
+    )
+    assert after == before
 
 
 async def _audit_reasons(session: AsyncSession, user: User) -> Counter[str]:
@@ -200,7 +233,7 @@ async def test_the_rendered_email_carries_the_code_and_no_link(
 
     rendered = render(
         EmailTemplate.EMAIL_VERIFICATION,
-        row.context,
+        open_email_context(row, _settings()),
         public_url="https://app.example.com",
     )
     assert code in rendered.text

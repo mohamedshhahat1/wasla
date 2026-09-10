@@ -239,7 +239,8 @@ def test_the_security_workflow_scans_dependencies_secrets_and_the_image() -> Non
     leaked credential, and a base image nobody has rebuilt."""
     jobs = _load("security.yml")["jobs"]
 
-    assert set(jobs) == {"dependencies", "secrets", "image"}
+    assert set(jobs) == {"auth-regressions", "dependencies", "secrets", "image"}
+    assert "WASLA_SECURITY_TESTS" in _text(jobs["auth-regressions"])
     assert "pip-audit" in _text(jobs["dependencies"])
     assert "gitleaks" in _text(jobs["secrets"])
     assert "trivy-action" in _text(jobs["image"])

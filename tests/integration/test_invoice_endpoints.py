@@ -158,7 +158,12 @@ class StubPlatformBilling:
 
 def _workspace(role: TenantRole) -> ActiveWorkspace:
     return ActiveWorkspace(
-        user=User(id=USER_ID, email="owner@example.com", is_active=True),
+        user=User(
+            id=USER_ID,
+            email="owner@example.com",
+            is_active=True,
+            email_verified_at=NOW,
+        ),
         membership=Membership(id=uuid.uuid4(), user_id=USER_ID, tenant_id=TENANT_ID, role=role),
         tenant=Tenant(id=TENANT_ID, name="Acme", slug="acme", status=TenantStatus.ACTIVE),
     )
@@ -176,6 +181,7 @@ def _as_platform(app: FastAPI, platform_role: PlatformRole | None) -> None:
         id=uuid.uuid4(),
         email="staff@example.com",
         is_active=True,
+        email_verified_at=NOW,
         platform_role=platform_role,
     )
     claims = TokenClaims(

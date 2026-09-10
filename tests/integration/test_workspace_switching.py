@@ -23,6 +23,7 @@ workspace the request was actually scoped to.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -136,7 +137,12 @@ async def http(app: FastAPI) -> AsyncIterator[AsyncClient]:
 
 
 async def _person(session: AsyncSession) -> User:
-    user = User(email=EMAIL, hashed_password=hash_password(PASSWORD), is_active=True)
+    user = User(
+        email=EMAIL,
+        hashed_password=hash_password(PASSWORD),
+        is_active=True,
+        email_verified_at=datetime.now(UTC),
+    )
     session.add(user)
     await session.flush()
     return user

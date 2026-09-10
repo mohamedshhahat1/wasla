@@ -13,11 +13,13 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
+from app.core.crypto import generate_key
 from app.db.models.email import EmailStatus, EmailSuppression, OutboundEmail
 from app.db.models.tenant import Tenant
 from app.integrations.email.base import EmailProvider, EmailSendResult, EmailSendState
@@ -26,9 +28,10 @@ from app.repositories.email_repository import (
     STUCK_AFTER_SECONDS,
     EmailOutboxRepository,
 )
+from app.services.email_service import SENSITIVE_EMAIL_TEMPLATES, seal_email_context
 from app.services.email_templates import EmailTemplate
 from app.workers.email_worker import MAX_BACKOFF_SECONDS, EmailWorker
-from tests.fakes import as_database, as_settings
+from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY, as_database, as_settings
 
 pytestmark = pytest.mark.integration
 
@@ -63,6 +66,7 @@ class _WorkerSettings:
     app_public_url = "https://app.example.com"
     email_max_attempts = 3
     email_worker_poll_seconds = 10.0
+    credential_encryption_keys: ClassVar[list[str]] = [TEST_CREDENTIAL_ENCRYPTION_KEY]
 
 
 async def _enqueue(
@@ -75,12 +79,21 @@ async def _enqueue(
     tenant_id: uuid.UUID | None = None,
     context: dict[str, str] | None = None,
 ) -> OutboundEmail | None:
+    idempotency_key = key or f"key-{uuid.uuid4()}"
+    stored_context = context or {}
+    if template in SENSITIVE_EMAIL_TEMPLATES and stored_context:
+        stored_context = seal_email_context(
+            template=template,
+            context=stored_context,
+            idempotency_key=idempotency_key,
+            settings=as_settings(_WorkerSettings()),
+        )
     return await EmailOutboxRepository(session).enqueue(
         recipient=recipient,
         template=template.value,
         subject="A subject",
-        context=context or {},
-        idempotency_key=key or f"key-{uuid.uuid4()}",
+        context=stored_context,
+        idempotency_key=idempotency_key,
         available_at=available_at or NOW,
         tenant_id=tenant_id,
     )
@@ -89,13 +102,26 @@ async def _enqueue(
 def _worker(
     session: AsyncSession,
     provider: EmailProvider | None = None,
+    settings: Settings | None = None,
     **kwargs: Any,
 ) -> EmailWorker:
     return EmailWorker(
         database=as_database(SessionHandle(session)),
-        settings=as_settings(_WorkerSettings()),
+        settings=settings or as_settings(_WorkerSettings()),
         provider=provider if provider is not None else FakeEmailProvider(),
         **kwargs,
+    )
+
+
+def _email_settings(*keys: str) -> Settings:
+    return Settings(
+        _env_file=None,
+        environment="test",
+        email_enabled=True,
+        email_provider="fake",
+        email_from="no-reply@example.com",
+        app_public_url="https://app.example.com",
+        credential_encryption_keys=list(keys),
     )
 
 
@@ -226,6 +252,117 @@ async def test_the_sent_message_carries_the_rendered_link(db_session: AsyncSessi
     await _worker(db_session, provider).run_once(now=NOW)
 
     assert "https://app.example.com/reset-password?token=tok-9" in provider.sent[0].text
+
+
+async def test_a_rotation_key_can_open_context_written_by_the_old_key(
+    db_session: AsyncSession,
+) -> None:
+    old_key, new_key = generate_key(), generate_key()
+    idempotency_key = f"old-key-{uuid.uuid4()}"
+    email = await EmailOutboxRepository(db_session).enqueue(
+        recipient="person@example.com",
+        template=EmailTemplate.PASSWORD_RESET.value,
+        subject="Reset your password",
+        context=seal_email_context(
+            template=EmailTemplate.PASSWORD_RESET,
+            context={"token": "old-key-token"},
+            idempotency_key=idempotency_key,
+            settings=_email_settings(old_key),
+        ),
+        idempotency_key=idempotency_key,
+        available_at=NOW,
+    )
+    assert email is not None
+    provider = FakeEmailProvider()
+
+    await _worker(
+        db_session,
+        provider,
+        settings=_email_settings(new_key, old_key),
+    ).run_once(now=NOW)
+
+    assert "old-key-token" in provider.sent[0].text
+    assert (await _reload(db_session, email.id)).context == {}
+
+
+async def test_invalid_ciphertext_fails_closed_and_is_cleared(
+    db_session: AsyncSession,
+) -> None:
+    email = await EmailOutboxRepository(db_session).enqueue(
+        recipient="person@example.com",
+        template=EmailTemplate.PASSWORD_RESET.value,
+        subject="Reset your password",
+        context={"sealed": "not-an-aes-gcm-envelope"},
+        idempotency_key=f"invalid-ciphertext-{uuid.uuid4()}",
+        available_at=NOW,
+    )
+    assert email is not None
+    provider = FakeEmailProvider()
+
+    await _worker(db_session, provider).run_once(now=NOW)
+
+    row = await _reload(db_session, email.id)
+    assert row.status is EmailStatus.FAILED
+    assert row.last_error_code == "render_error"
+    assert row.context == {}
+    assert provider.sent == []
+
+
+async def test_missing_decryption_key_fails_without_sending(db_session: AsyncSession) -> None:
+    email = await _enqueue(
+        db_session,
+        template=EmailTemplate.PASSWORD_RESET,
+        context={"token": "unavailable-key-token"},
+    )
+    assert email is not None
+    provider = FakeEmailProvider()
+
+    await _worker(
+        db_session,
+        provider,
+        settings=_email_settings(),
+    ).run_once(now=NOW)
+
+    row = await _reload(db_session, email.id)
+    assert row.status is EmailStatus.FAILED
+    assert row.context == {}
+    assert provider.sent == []
+
+
+async def test_sensitive_ciphertext_survives_retry_but_not_permanent_failure(
+    db_session: AsyncSession,
+) -> None:
+    email = await _enqueue(
+        db_session,
+        template=EmailTemplate.PASSWORD_RESET,
+        context={"token": "retry-token"},
+    )
+    assert email is not None
+    stored = dict(email.context)
+    provider = FakeEmailProvider()
+    provider.script = [
+        EmailSendResult(
+            state=EmailSendState.TRANSIENT_FAILURE,
+            provider="fake",
+            error_code="http_503",
+        ),
+        EmailSendResult(
+            state=EmailSendState.PERMANENT_FAILURE,
+            provider="fake",
+            error_code="invalid_recipient",
+        ),
+    ]
+
+    worker = _worker(db_session, provider)
+    await worker.run_once(now=NOW)
+    retried = await _reload(db_session, email.id)
+    assert retried.status is EmailStatus.PENDING
+    assert retried.context == stored
+
+    await worker.run_once(now=retried.available_at)
+    failed = await _reload(db_session, email.id)
+    assert failed.status is EmailStatus.FAILED
+    assert failed.context == {}
 
 
 async def test_a_permanent_refusal_fails_the_row_at_once(db_session: AsyncSession) -> None:

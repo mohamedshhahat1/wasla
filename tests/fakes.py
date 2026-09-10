@@ -50,6 +50,7 @@ from sqlalchemy.sql.expression import FromClause
 from starlette.requests import Request
 
 from app.core.config import Settings
+from app.core.crypto import generate_key
 from app.core.oauth_flow import OAuthFlowStore
 from app.core.redis import RedisClient
 from app.core.storage import MediaStorage, build_key
@@ -66,6 +67,10 @@ from app.services.sentiment_reader import SentimentAnalyzer
 from app.services.sentiment_service import SentimentService
 from app.workers.media_queue import MediaQueue
 from app.workers.queue import AgentQueue
+
+# One process-local key keeps test outbox rows decryptable without putting a
+# reusable credential in the repository.
+TEST_CREDENTIAL_ENCRYPTION_KEY = generate_key()
 
 
 def as_redis(fake: object) -> Redis:
@@ -255,6 +260,7 @@ async def store_object(
 
 
 __all__ = [
+    "TEST_CREDENTIAL_ENCRYPTION_KEY",
     "as_agent_queue",
     "as_analyzer",
     "as_credentials",

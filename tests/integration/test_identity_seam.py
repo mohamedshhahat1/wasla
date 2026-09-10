@@ -27,6 +27,7 @@ even when the attacker is assumed to hold the token.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
@@ -44,7 +45,9 @@ from app.db.models.email import OutboundEmail
 from app.db.models.enums import TenantStatus
 from app.db.models.identity import FederatedIdentity, IdentityProvider
 from app.main import create_app
+from app.services.email_service import open_email_context
 from tests.conftest import AllowingEntitlements
+from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY
 
 pytestmark = pytest.mark.integration
 
@@ -132,6 +135,7 @@ def seam_settings() -> Settings:
         email_provider="fake",
         email_from="no-reply@wasla.test",
         app_public_url="https://app.wasla.test",
+        credential_encryption_keys=[TEST_CREDENTIAL_ENCRYPTION_KEY],
     )
 
 
@@ -208,6 +212,7 @@ async def _attacker(session: AsyncSession) -> User:
         full_name="Somebody Else",
         hashed_password=hash_password(ATTACKER_PASSWORD),
         is_active=True,
+        email_verified_at=datetime.now(UTC),
     )
     session.add(user)
     await session.flush()
@@ -238,7 +243,14 @@ async def _invitation_token(session: AsyncSession, *, recipient: str) -> str:
             .where(OutboundEmail.template == "workspace_invitation")
         )
     ).scalar_one()
-    token = row.context.get("token")
+    token = open_email_context(
+        row,
+        Settings(
+            _env_file=None,
+            environment="test",
+            credential_encryption_keys=[TEST_CREDENTIAL_ENCRYPTION_KEY],
+        ),
+    )["token"]
     assert isinstance(token, str) and token, "the invitation email carried no token"
     return token
 

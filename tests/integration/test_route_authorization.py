@@ -96,6 +96,23 @@ ACCOUNT_OR_PLATFORM: frozenset[str] = frozenset(
     }
 )
 
+# Authenticated account and recovery operations that remain available during
+# onboarding. Every other authenticated route must resolve the centralized
+# verification guard, directly or through ``get_active_workspace``.
+UNVERIFIED_ALLOWED: frozenset[str] = frozenset(
+    {
+        "/auth/me",
+        "/auth/logout-all",
+        "/auth/password",
+        "/auth/password/set",
+        "/auth/email/verification/send",
+        "/auth/email/verification/verify",
+        "/auth/identities/google/authorize",
+        "/auth/identities/google/link",
+        "/auth/identities/google",
+    }
+)
+
 
 def _routes(routes: Sequence[Any]) -> Iterator[APIRoute]:
     """Every `APIRoute`, descending through deferred inclusion.
@@ -228,3 +245,17 @@ def test_no_open_route_reaches_a_workspace_service(graph: dict[tuple[str, str], 
         names = graph.get(key, set())
         assert "get_active_workspace" not in names, f"{key} resolves a workspace while open"
         assert "get_current_user" not in names, f"{key} resolves a user while open"
+
+
+def test_every_material_authenticated_route_requires_verified_email(
+    graph: dict[tuple[str, str], set[str]],
+) -> None:
+    """A new business route cannot silently bypass the onboarding gate."""
+    offenders = sorted(
+        (method, path)
+        for (method, path), names in graph.items()
+        if (method, path) not in OPEN_ROUTES
+        and path not in UNVERIFIED_ALLOWED
+        and "require_verified_user" not in names
+    )
+    assert not offenders, f"material authenticated routes without verification: {offenders}"

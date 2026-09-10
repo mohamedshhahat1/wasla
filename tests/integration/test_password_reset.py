@@ -22,11 +22,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.dependencies import get_session
-from app.core.security import hash_password, hash_reset_token
+from app.core.rate_limit import RateLimiter
+from app.core.security import hash_password, hash_reset_token, verify_password
 from app.db.models.email import OutboundEmail
 from app.db.models.password_reset import PasswordResetToken
 from app.db.models.user import User
+from app.services.email_service import open_email_context
 from app.services.email_templates import EmailTemplate
+from app.services.password_reset_service import PasswordResetService
+from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY, as_redis_client
 
 pytestmark = pytest.mark.integration
 
@@ -39,6 +43,24 @@ EMAIL = "person@example.com"
 class _Infra:
     async def check(self, timeout_seconds: float | None = None) -> None:
         return None
+
+
+class _CounterRedis:
+    def __init__(self) -> None:
+        self.client = self
+        self.values: dict[str, int] = {}
+        self.expiries: dict[str, int] = {}
+
+    async def incr(self, key: str) -> int:
+        self.values[key] = self.values.get(key, 0) + 1
+        return self.values[key]
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        self.expiries[key] = seconds
+        return True
+
+    async def ttl(self, key: str) -> int:
+        return self.expiries.get(key, -1)
 
 
 @pytest.fixture
@@ -54,6 +76,7 @@ def reset_settings() -> Settings:
         email_provider="fake",
         email_from="no-reply@example.com",
         app_public_url="https://app.example.com",
+        credential_encryption_keys=[TEST_CREDENTIAL_ENCRYPTION_KEY],
     )
 
 
@@ -122,7 +145,12 @@ async def _queued_reset_token(session: AsyncSession) -> str:
         select(OutboundEmail).where(OutboundEmail.template == EmailTemplate.PASSWORD_RESET.value)
     )
     email = rows.scalars().one()
-    value: str = email.context["token"]
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        credential_encryption_keys=[TEST_CREDENTIAL_ENCRYPTION_KEY],
+    )
+    value = open_email_context(email, settings)["token"]
     return value
 
 
@@ -176,6 +204,44 @@ async def test_an_unknown_address_queues_nothing(
 
     rows = await db_session.execute(select(OutboundEmail))
     assert rows.scalars().all() == []
+
+
+@pytest.mark.parametrize("active_after_delete", [True, False])
+async def test_a_deleted_account_gets_the_neutral_response_and_no_reset_material(
+    http: AsyncClient,
+    db_session: AsyncSession,
+    user: User,
+    active_after_delete: bool,
+) -> None:
+    user.deleted_at = datetime.now(UTC)
+    user.is_active = active_after_delete
+    await db_session.flush()
+
+    response = await _request_reset(http)
+
+    assert response.status_code == 202
+    assert await _tokens(db_session, user.id) == []
+    assert (await db_session.execute(select(OutboundEmail))).scalars().all() == []
+
+
+@pytest.mark.parametrize("active_after_delete", [True, False])
+async def test_a_reset_issued_before_soft_deletion_cannot_be_redeemed(
+    http: AsyncClient,
+    db_session: AsyncSession,
+    user: User,
+    active_after_delete: bool,
+) -> None:
+    await _request_reset(http)
+    token = await _queued_reset_token(db_session)
+    user.deleted_at = datetime.now(UTC)
+    user.is_active = active_after_delete
+    await db_session.flush()
+
+    response = await _confirm(http, token)
+
+    assert response.status_code == 401
+    assert user.hashed_password is not None
+    assert verify_password(password=PASSWORD, password_hash=user.hashed_password)
 
 
 async def test_a_suspended_account_answers_the_same_and_queues_nothing(
@@ -443,3 +509,47 @@ async def test_the_address_is_matched_case_insensitively(
     assert response.status_code == 202
     rows = await db_session.execute(select(OutboundEmail))
     assert len(rows.scalars().all()) == 1
+
+
+async def test_account_reset_budget_survives_source_and_address_variation(
+    db_session: AsyncSession,
+    user: User,
+    reset_settings: Settings,
+) -> None:
+    settings = reset_settings.model_copy(
+        update={
+            "rate_limit_enabled": True,
+            "rate_limit_password_reset_per_account_per_hour": 2,
+        }
+    )
+    redis = _CounterRedis()
+
+    for address in (
+        "person@example.com",
+        "PERSON@EXAMPLE.COM",
+        " person@example.com ",
+        "Person@Example.Com",
+    ):
+        # A new service mirrors a new request/API replica object. The shared
+        # Redis counter, not object identity or source address, is the budget.
+        await PasswordResetService(
+            session=db_session,
+            settings=settings,
+            limiter=RateLimiter(as_redis_client(redis)),
+        ).request(email=address)
+
+    reset_rows = await _tokens(db_session, user.id)
+    queued = (
+        (
+            await db_session.execute(
+                select(OutboundEmail).where(
+                    OutboundEmail.template == EmailTemplate.PASSWORD_RESET.value
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(reset_rows) == 2
+    assert len(queued) == 2
+    assert sum(redis.values.values()) == 4

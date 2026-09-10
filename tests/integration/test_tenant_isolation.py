@@ -139,6 +139,7 @@ async def _seed(session: AsyncSession, settings: Settings, *, slug: str) -> Work
         full_name=f"{slug.title()} Owner",
         hashed_password="x",
         is_active=True,
+        email_verified_at=datetime.now(UTC),
         platform_role=None,
     )
     session.add_all([tenant, user])
@@ -547,9 +548,9 @@ async def test_every_operation_against_another_workspace_answers_not_found(
             leaked.append(label)
 
     assert leaked == [], f"another workspace's content appeared in the response: {leaked}"
-    assert reachable == [], (
-        "these routes did not answer 404 for another workspace's identifier: " f"{reachable}"
-    )
+    assert (
+        reachable == []
+    ), f"these routes did not answer 404 for another workspace's identifier: {reachable}"
 
 
 async def test_the_owner_can_reach_everything_the_attacker_could_not(

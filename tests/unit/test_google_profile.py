@@ -32,6 +32,7 @@ def _claims(**overrides: Any) -> GoogleIdentityClaims:
         "email_verified": True,
         "full_name": "A Person",
         "picture": PICTURE,
+        "hosted_domain": "example.com",
     }
     values.update(overrides)
     return GoogleIdentityClaims(**values)

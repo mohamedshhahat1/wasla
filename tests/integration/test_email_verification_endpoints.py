@@ -39,6 +39,7 @@ from app.db.models.email import OutboundEmail
 from app.db.models.email_verification import EmailVerificationChallenge
 from app.db.models.user import User
 from app.main import create_app
+from app.services.email_service import open_email_context
 from app.services.email_templates import EmailTemplate
 from app.services.email_verification_service import (
     _ATTEMPT_LIMIT,
@@ -47,6 +48,7 @@ from app.services.email_verification_service import (
     VERIFICATION_SENT_MESSAGE,
 )
 from tests.conftest import AllowingEntitlements
+from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY
 
 pytestmark = pytest.mark.integration
 
@@ -121,6 +123,7 @@ def _settings(**overrides: Any) -> Settings:
         "email_provider": "fake",
         "email_from": "no-reply@example.com",
         "app_public_url": "https://app.example.com",
+        "credential_encryption_keys": [TEST_CREDENTIAL_ENCRYPTION_KEY],
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)  # type: ignore[arg-type]
@@ -188,7 +191,7 @@ def _bearer(user: User, settings: Settings) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _code(session: AsyncSession, user: User) -> str:
+async def _code(session: AsyncSession, user: User, settings: Settings | None = None) -> str:
     """The plaintext of the account's live challenge, from the queued mail."""
     challenge = (
         (
@@ -216,7 +219,7 @@ async def _code(session: AsyncSession, user: User) -> str:
         .first()
     )
     assert row is not None
-    return str(row.context["code"])
+    return open_email_context(row, settings or _settings())["code"]
 
 
 # ------------------------------------------------------------------- wiring
@@ -804,6 +807,7 @@ async def test_registering_queues_a_verification_code_in_the_same_transaction(
 async def test_registration_does_not_return_the_code(
     http: AsyncClient,
     db_session: AsyncSession,
+    verification_settings: Settings,
 ) -> None:
     response = await http.post(
         f"{API}/auth/register",
@@ -843,24 +847,24 @@ async def test_registration_does_not_return_the_code(
         .scalars()
         .one()
     )
-    assert str(row.context["code"]) not in response.text
+    assert open_email_context(row, verification_settings)["code"] not in response.text
 
 
-async def test_an_unverified_account_can_use_the_application(
+async def test_an_unverified_account_can_recover_but_not_use_workspace_features(
     http: AsyncClient,
     db_session: AsyncSession,
     verification_settings: Settings,
 ) -> None:
-    """The most important assertion in this file.
-
-    Verification grants nothing, so it must also withhold nothing. If this ever
-    starts failing, somebody has turned an account-integrity fact into an
-    authorization input and locked out every account created before it existed.
-    """
+    """Onboarding stays usable while material business authority is gated."""
     user = await _account(db_session, "unproven@acme-example.com")
     headers = _bearer(user, verification_settings)
 
     assert user.email_verified_at is None
-    for path in (f"{API}/auth/me", "/health"):
-        response = await http.get(path, headers=headers)
-        assert response.status_code == 200, path
+    me = await http.get(f"{API}/auth/me", headers=headers)
+    resend = await http.post(SEND, headers=headers)
+    business = await http.get(f"{API}/leads", headers=headers)
+
+    assert me.status_code == 200
+    assert resend.status_code == 202
+    assert business.status_code == 403
+    assert business.json()["error"]["code"] == "email_verification_required"

@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_entitlement_service
@@ -35,6 +37,7 @@ from app.core.config import Settings
 from app.core.dependencies import get_session
 from app.core.security import create_access_token, hash_password
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
+from app.db.models.audit import AuditAction
 from app.db.models.enums import TenantStatus
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
@@ -125,6 +128,7 @@ async def _account(
         full_name=email.split("@")[0].title(),
         hashed_password=hash_password(PASSWORD),
         is_active=True,
+        email_verified_at=datetime.now(UTC),
         platform_role=platform_role,
     )
     tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
@@ -192,6 +196,86 @@ def _bearer(session: dict[str, Any]) -> dict[str, str]:
 
 async def _refresh(http: AsyncClient, token: str) -> Response:
     return await http.post(f"{API}/auth/refresh", json={"refresh_token": token})
+
+
+@pytest.mark.parametrize("active_after_delete", [True, False])
+async def test_soft_deleted_accounts_are_denied_on_every_session_path(
+    http: AsyncClient,
+    db_session: AsyncSession,
+    active_after_delete: bool,
+) -> None:
+    user, _ = await _account(
+        db_session,
+        email=f"deleted-{str(active_after_delete).lower()}@example.com",
+        slug=f"deleted-{str(active_after_delete).lower()}",
+    )
+    live = await _login(http, user.email)
+    user.deleted_at = datetime.now(UTC)
+    user.is_active = active_after_delete
+    await db_session.flush()
+
+    login = await http.post(
+        f"{API}/auth/login",
+        json={"email": user.email, "password": PASSWORD},
+    )
+    access = await http.get(f"{API}/auth/me", headers=_bearer(live))
+    refresh = await _refresh(http, str(live["refresh_token"]))
+    switch = await http.post(
+        f"{API}/auth/workspace",
+        json={"workspace_slug": f"deleted-{str(active_after_delete).lower()}"},
+        headers=_bearer(live),
+    )
+
+    assert login.status_code == 401
+    assert access.status_code == refresh.status_code == switch.status_code == 401
+
+
+async def test_platform_deletion_is_atomic_irreversible_and_audited(
+    http: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    target, _ = await _account(db_session, email="tombstone@example.com", slug="tombstone")
+    operator, _ = await _account(
+        db_session,
+        email="delete-operator@example.com",
+        slug="delete-operator",
+        platform_role=PlatformRole.PLATFORM_OWNER,
+    )
+    session = await _login(http, operator.email)
+    before = target.token_version
+
+    deleted = await http.delete(
+        f"{API}/platform/users/{target.id}",
+        headers=_bearer(session),
+    )
+    await db_session.refresh(target)
+    enabled = await http.post(
+        f"{API}/platform/users/{target.id}/enable",
+        headers=_bearer(session),
+    )
+
+    assert deleted.status_code == 200
+    assert target.deleted_at is not None
+    assert target.is_active is False
+    assert target.token_version == before + 1
+    assert enabled.status_code == 404
+
+    from app.db.models.audit import AuditLog
+
+    audit = (
+        (
+            await db_session.execute(
+                select(AuditLog).where(
+                    AuditLog.target_id == target.id,
+                    AuditLog.action == AuditAction.USER_DISABLED,
+                )
+            )
+        )
+        .scalars()
+        .one()
+    )
+    assert audit.meta is not None
+    assert audit.meta["deleted"] is True
 
 
 # ------------------------------------------------- the threat, closed

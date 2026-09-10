@@ -182,6 +182,15 @@ async def _seed_default_plan(engine: AsyncEngine) -> None:
         )
 
 
+async def _mark_registered_account_verified(engine: AsyncEngine, email: str) -> None:
+    """Billing E2E begins after onboarding; verification has its own E2E path."""
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE users SET email_verified_at = now() WHERE email = :email"),
+            {"email": email},
+        )
+
+
 async def _forget(engine: AsyncEngine, *, slug: str, email: str, plan_code: str) -> None:
     """Remove what the server committed.
 
@@ -291,6 +300,7 @@ async def test_paying_a_plan_settles_the_invoice_and_moves_the_entitlements(
                 },
             )
             assert registered.status_code == 201
+            await _mark_registered_account_verified(scratch_engine, email)
             auth = {"Authorization": f"Bearer {registered.json()['access_token']}"}
 
             # The plan cannot simply be asked for (ADR-059). A real
@@ -397,6 +407,7 @@ async def test_a_declined_payment_leaves_the_workspace_exactly_as_it_was(
                     "workspace_slug": slug,
                 },
             )
+            await _mark_registered_account_verified(scratch_engine, email)
             auth = {"Authorization": f"Bearer {registered.json()['access_token']}"}
             # No plan selection: a priced plan is only ever granted by
             # settlement, so the checkout below is the whole of the request.
@@ -474,6 +485,7 @@ async def test_a_forged_callback_cannot_settle_anything_over_a_real_socket(
                     "workspace_slug": slug,
                 },
             )
+            await _mark_registered_account_verified(scratch_engine, email)
             auth = {"Authorization": f"Bearer {registered.json()['access_token']}"}
             # No plan selection: a priced plan is only ever granted by
             # settlement, so the checkout below is the whole of the request.
@@ -583,6 +595,7 @@ async def test_a_retried_callback_settles_the_invoice_once(
                     "workspace_slug": slug,
                 },
             )
+            await _mark_registered_account_verified(scratch_engine, email)
             auth = {"Authorization": f"Bearer {registered.json()['access_token']}"}
             # No plan selection: a priced plan is only ever granted by
             # settlement, so the checkout below is the whole of the request.

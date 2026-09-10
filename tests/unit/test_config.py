@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings, get_settings
+from app.core.crypto import generate_key
 
 # Long enough to satisfy the signing-key rule, which now applies in every
 # environment except `test`. Supplied by the helper below so that the tests
@@ -261,6 +262,7 @@ def _email_production(**overrides: Any) -> Settings:
         "email_from": "no-reply@example.com",
         "app_public_url": "https://app.example.com",
         "resend_webhook_secret": "whsec_abc",
+        "credential_encryption_keys": [generate_key()],
     }
     fields.update(overrides)
     return Settings(**fields)
@@ -374,6 +376,7 @@ def test_a_non_production_environment_may_use_the_fake_over_plain_http() -> None
         email_provider="fake",
         email_from="no-reply@example.com",
         app_public_url="http://localhost:3000",
+        credential_encryption_keys=[generate_key()],
     )
     assert settings is not None
 

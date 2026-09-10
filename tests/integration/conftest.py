@@ -64,6 +64,12 @@ REQUIRED_EXTENSIONS = ("pgcrypto", "vector")
 
 @pytest.fixture(scope="session")
 def database_url() -> str:
+    security_run = os.environ.get("WASLA_SECURITY_TESTS") == "1"
+    if security_run and not os.environ.get("TEST_DATABASE_URL"):
+        pytest.fail(
+            "WASLA_SECURITY_TESTS=1 requires an explicit TEST_DATABASE_URL; "
+            "critical database security coverage may not be skipped."
+        )
     for variable in URL_VARIABLES:
         value = os.environ.get(variable)
         if value:

@@ -48,6 +48,7 @@ def user() -> User:
         full_name="Owner",
         avatar_url="https://lh3.googleusercontent.com/a/abc123=s96-c",
         is_active=True,
+        email_verified_at=datetime.now(UTC),
     )
 
 

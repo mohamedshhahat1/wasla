@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,7 @@ async def _workspace(session: AsyncSession, slug: str) -> tuple[Tenant, User]:
         full_name=f"{slug.title()} Owner",
         hashed_password=hash_password(PASSWORD),
         is_active=True,
+        email_verified_at=datetime.now(UTC),
     )
     session.add_all([tenant, user])
     await session.flush()
@@ -376,6 +378,7 @@ async def test_a_member_of_the_workspace_may_read_it(
         full_name="Inbox Colleague",
         hashed_password=hash_password(PASSWORD),
         is_active=True,
+        email_verified_at=datetime.now(UTC),
     )
     db_session.add(colleague)
     await db_session.flush()

@@ -93,6 +93,7 @@ def _id_token(*, nonce: str, **overrides: Any) -> str:
         "sub": SUBJECT,
         "email": GOOGLE_EMAIL,
         "email_verified": True,
+        "hd": "example.com",
         "name": GOOGLE_NAME,
         "picture": GOOGLE_PICTURE,
         "nonce": nonce,
@@ -586,6 +587,52 @@ async def test_a_disabled_account_is_refused_with_403(
     assert response.status_code == 403
     assert "access_token" not in json.dumps(response.json())
     assert await _audit(db_session, AuditAction.GOOGLE_LOGIN_FAILED)
+
+
+@pytest.mark.parametrize("active_after_delete", [True, False])
+async def test_a_soft_deleted_google_account_cannot_login_link_or_unlink(
+    http: AsyncClient,
+    exchange: _Exchange,
+    google_settings: Settings,
+    db_session: AsyncSession,
+    active_after_delete: bool,
+) -> None:
+    user = await _account(
+        db_session,
+        email=GOOGLE_EMAIL,
+        hashed_password="still-not-a-real-hash",
+        is_active=active_after_delete,
+    )
+    db_session.add(
+        FederatedIdentity(
+            user_id=user.id,
+            provider=IdentityProvider.GOOGLE,
+            provider_subject=SUBJECT,
+        )
+    )
+    await db_session.flush()
+    headers = _bearer(user, google_settings)
+    user.deleted_at = datetime.now(UTC)
+    await db_session.flush()
+
+    state, nonce = await _start(http, "/auth/google/authorize")
+    exchange.id_token = _id_token(nonce=nonce)
+    login = await http.post(
+        f"{API}/auth/google/callback",
+        json={"code": "c", "state": state},
+    )
+    link_start = await http.post(
+        f"{API}/auth/identities/google/authorize",
+        headers=headers,
+    )
+    unlink = await http.delete(
+        f"{API}/auth/identities/google",
+        headers=headers,
+    )
+
+    assert login.status_code == 401
+    assert link_start.status_code == unlink.status_code == 401
+    assert len(await _identities(db_session)) == 1
 
 
 async def test_a_replayed_state_is_refused(

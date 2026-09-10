@@ -40,10 +40,11 @@ from app.db.models.billing import (
 )
 from app.db.models.email import OutboundEmail
 from app.services.account_service import AccountService
+from app.services.email_service import open_email_context, seal_email_context
 from app.services.email_templates import EmailTemplate
 from app.services.invitation_service import InvitationService
 from app.services.subscription_service import SubscriptionService
-from tests.fakes import as_database
+from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY, as_database
 
 pytestmark = pytest.mark.integration
 
@@ -62,6 +63,7 @@ def _settings() -> Settings:
         email_provider="fake",
         email_from="no-reply@example.com",
         app_public_url="https://app.example.com",
+        credential_encryption_keys=[TEST_CREDENTIAL_ENCRYPTION_KEY],
     )
 
 
@@ -138,9 +140,11 @@ async def test_the_invitation_email_carries_the_token_and_the_workspace_name(
     )
 
     queued = await _queued(db_session, EmailTemplate.WORKSPACE_INVITATION)
-    assert queued[0].context["token"] == raw_token
+    context = open_email_context(queued[0], _settings())
+    assert context["token"] == raw_token
     # Read from the tenant row, never from the request.
-    assert queued[0].context["workspace_name"] == tenant.name
+    assert context["workspace_name"] == tenant.name
+    assert raw_token not in str(queued[0].context)
 
 
 async def test_the_invitation_email_is_keyed_to_its_invitation_row(
@@ -412,12 +416,18 @@ async def test_no_reset_token_survives_a_completed_send(db_session: AsyncSession
 
     person = await _user(db_session, "contained@example.com")
     settings = _settings()
+    idempotency_key = "reset-containment"
     await EmailOutboxRepository(db_session).enqueue(
         recipient=person.email,
         template=EmailTemplate.PASSWORD_RESET.value,
         subject="Reset your Wasla password",
-        context={"token": "a-very-secret-token"},
-        idempotency_key="reset-containment",
+        context=seal_email_context(
+            template=EmailTemplate.PASSWORD_RESET,
+            context={"token": "a-very-secret-token"},
+            idempotency_key=idempotency_key,
+            settings=settings,
+        ),
+        idempotency_key=idempotency_key,
         available_at=datetime.now(UTC),
         user_id=person.id,
     )

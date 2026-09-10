@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 from app.core.config import Settings
+from app.core.crypto import generate_key
 from app.integrations.email import build_email_provider, require_delivery_verification
 from app.main import create_app
 
@@ -46,6 +47,7 @@ def _production(**overrides: Any) -> Settings:
         "app_public_url": "https://app.example.com",
         "resend_webhook_secret": "whsec_abc",
         "resend_api_key": "re_abc",
+        "credential_encryption_keys": [generate_key()],
     }
     fields.update(overrides)
     return Settings(**fields)  # type: ignore[arg-type]

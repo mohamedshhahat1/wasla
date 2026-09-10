@@ -93,6 +93,7 @@ async def _account(session: AsyncSession, *, role: PlatformRole | None) -> User:
         email=f"staff-{uuid.uuid4().hex[:8]}@example.com",
         hashed_password="argon2-placeholder-never-verified-here",
         is_active=True,
+        email_verified_at=datetime.now(UTC),
         platform_role=role,
     )
     session.add(user)
