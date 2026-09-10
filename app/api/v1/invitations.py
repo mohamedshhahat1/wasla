@@ -99,6 +99,7 @@ async def revoke_invitation(
     invitation = await service.revoke(
         tenant_id=workspace.tenant.id,
         invitation_id=invitation_id,
+        actor=workspace.user,
     )
     return _response(invitation)
 

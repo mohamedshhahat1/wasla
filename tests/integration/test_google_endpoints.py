@@ -454,6 +454,14 @@ async def test_a_first_login_opens_a_session_and_creates_one_account(
     assert identities[0].provider_subject == SUBJECT
     assert identities[0].user_id == user.id
 
+    # A federated login is recorded as a federated login and nothing else.
+    # Password login acquired its own audit actions when AUTH-04 was closed,
+    # and `authenticate_federated` shares `_issue` with `login` - so this pins
+    # that the two vocabularies stayed separate, which is what keeps "which
+    # issuer let somebody into my account" a question the trail can answer.
+    assert await _audit(db_session, AuditAction.GOOGLE_LOGIN_SUCCEEDED)
+    assert await _audit(db_session, AuditAction.LOGIN_SUCCEEDED) == []
+
 
 async def test_the_session_from_a_google_login_authenticates_auth_me(
     http: AsyncClient,

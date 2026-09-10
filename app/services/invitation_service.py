@@ -182,7 +182,15 @@ class InvitationService:
         *,
         tenant_id: uuid.UUID,
         invitation_id: uuid.UUID,
+        actor: User,
     ) -> TenantInvitation:
+        """Withdraw a pending invitation, and record who withdrew it.
+
+        `actor` is required rather than optional. Revocation is an
+        administrator's decision about somebody else's access, and an entry
+        that could not say whose decision it was would answer none of the
+        questions the trail is read for.
+        """
         invitations = InvitationRepository(self._session, tenant_id=tenant_id)
         # Preserve tenant-resource non-disclosure: a missing invitation and an
         # invitation owned by another workspace both answer 404.  The
@@ -193,6 +201,25 @@ class InvitationService:
         if invitation is None:
             raise ConflictError("That invitation is no longer pending.")
         await self._session.flush()
+
+        # Written only here, past the conditional UPDATE that actually changed
+        # the row. An invitation that does not exist, belongs to another
+        # workspace, or had already been accepted or revoked leaves this method
+        # by an exception above, so the trail cannot report a revocation that
+        # did not happen. The token is never recorded - only which invitation,
+        # to which address, at what role.
+        AuditTrail(self._session, tenant_id=tenant_id).record(
+            AuditAction.INVITATION_REVOKED,
+            actor=actor,
+            # As a member of this workspace even if they hold a platform role:
+            # they are acting inside a workspace they belong to, the same
+            # reading `issue` takes.
+            actor_kind=AuditActorKind.USER,
+            target_type="invitation",
+            target_id=invitation.id,
+            target_label=invitation.email,
+            meta={"role": invitation.role.value},
+        )
         # Deliberately no email. Revoking an invitation the person may never
         # have seen, to a workspace they were never in, would be telling a
         # stranger they had been un-invited - and if the outbox row is still
@@ -321,6 +348,26 @@ class InvitationService:
             membership.revoked_by_id = None
 
         await self._session.flush()
+
+        # The security-relevant event, and the one the trail was missing:
+        # `member_invited` said somebody was asked, and nothing said anybody
+        # arrived. Written past the claim and past the membership write, so a
+        # caller that lost the race for the token or was refused earlier leaves
+        # no row.
+        #
+        # The raw token is never recorded. It is a live credential until the
+        # claim above spends it, and an audit entry is read by people and kept
+        # for years - so what goes in is which invitation, which address, which
+        # account and what they came in as.
+        AuditTrail(self._session, tenant_id=invitation.tenant_id).record(
+            AuditAction.INVITATION_ACCEPTED,
+            actor=user,
+            actor_kind=AuditActorKind.USER,
+            target_type="invitation",
+            target_id=invitation.id,
+            target_label=invitation.email,
+            meta={"role": membership.role.value, "user_id": str(user.id)},
+        )
 
         logger.info(
             "invitation.accepted",

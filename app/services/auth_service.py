@@ -273,16 +273,22 @@ class AuthService:
                 else "invalid_credentials"
             )
             observe_auth_event(event="login", outcome="failure", reason=reason)
+            # `user` here is an account with no password hash; `deleted` is a
+            # tombstone. Either names an account, and an unknown address names
+            # none - which is the whole of the rule.
+            await self._record_login_failure(user if user is not None else deleted, reason=reason)
             raise AuthenticationError(INVALID_CREDENTIALS)
 
         if not verify_password(password=password, password_hash=user.hashed_password):
             observe_auth_event(event="login", outcome="failure", reason="invalid_credentials")
+            await self._record_login_failure(user, reason="invalid_credentials")
             raise AuthenticationError(INVALID_CREDENTIALS)
 
         # Only after the password is proven: telling this caller that their own
         # account is disabled reveals nothing they did not already know.
         if user.deleted_at is not None or not user.is_active:
             observe_auth_event(event="login", outcome="blocked", reason="account_inactive")
+            await self._record_login_failure(user, reason="account_inactive")
             raise PermissionDeniedError("This account has been disabled.")
 
         if password_needs_rehash(user.hashed_password):
@@ -290,12 +296,59 @@ class AuthService:
             user.hashed_password = hash_password(password)
 
         workspace = await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
+        AuditTrail(self._session).record(
+            AuditAction.LOGIN_SUCCEEDED,
+            actor=user,
+            actor_kind=AuditActorKind.USER,
+            target_type="user",
+            target_id=user.id,
+            target_label=user.email,
+            meta={"method": "password"},
+        )
         logger.info(
             "auth.logged_in",
             extra={"event": "auth.logged_in", "user_id": str(user.id)},
         )
         observe_auth_event(event="login", outcome="success", reason="password")
         return self._issue(user=user, workspace=workspace)
+
+    async def _record_login_failure(self, user: User | None, *, reason: str) -> None:
+        """Write a refused password login to the trail, and make it durable.
+
+        The commit is what makes this an audit entry rather than an intention.
+        Every caller raises immediately afterwards, and the request's
+        transaction is discarded on the way out - so a staged row would be
+        rolled back with the refusal it describes, which is how
+        `GOOGLE_LOGIN_FAILED` came to be defined and almost never present. The
+        same explicit commit is what `_tear_down_after_reuse` and the email
+        verification service's `_reject` already do for the same reason.
+
+        Nothing is written for an address nobody has registered. There is no
+        account to attribute it to, and this endpoint is unauthenticated, so a
+        row a stranger can cause at will is a way to flood a trail people have
+        to read. The rate limiter bounds what one account can attract; nothing
+        would bound the other case.
+
+        `meta` carries the reason and nothing else. Never the submitted
+        password, never the hash, never a token: the audit log is read by
+        people, and a log of near-misses is a log that narrows a keyspace.
+        """
+        if user is None:
+            return
+        AuditTrail(self._session).record(
+            AuditAction.LOGIN_FAILED,
+            actor=user,
+            # The account did not do this - something presenting its address
+            # did, and the whole point of the entry is that it may not be them.
+            # Recorded as a system observation for the reason
+            # `REFRESH_TOKEN_REUSED` is.
+            actor_kind=AuditActorKind.SYSTEM,
+            target_type="user",
+            target_id=user.id,
+            target_label=user.email,
+            meta={"method": "password", "reason": reason},
+        )
+        await self._session.commit()
 
     async def _limit_by_account(self, email: str) -> None:
         """Refuse a login that has already used up this account's attempts.

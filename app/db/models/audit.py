@@ -160,16 +160,43 @@ class AuditAction(StrEnum):
     # one account is the signal worth alerting on whatever the reason says.
     EMAIL_VERIFICATION_FAILED = "email_verification_failed"
 
+    # Opening a session with a password (ADR-036, docs/AUTH.md).
+    #
+    # An earlier version of this comment argued that password login belonged
+    # outside the vocabulary while Google login belonged inside it, on the
+    # grounds that a federated login has a third party to ask about and a
+    # password login is self-evidenced. The asymmetry it produced is the
+    # problem: "who signed in to this account, and when" was answerable for
+    # federated sessions and not for password ones, and during an incident the
+    # trail is the artefact people reach for. The metric
+    # `wasla_auth_security_events_total{event="login"}` counts these in
+    # aggregate, which is the wrong shape for a question about one account.
+    #
+    # Recorded with no tenant, like the other account-level actions: a session
+    # is opened against a global identity, and which workspace it happens to
+    # select afterwards is not what this entry is about.
+    LOGIN_SUCCEEDED = "login_succeeded"
+    # A password login that was refused, and `meta["reason"]` says which
+    # refusal: a wrong password, an account that has been disabled or closed,
+    # or an address whose account has no password at all.
+    #
+    # **Written only when the refusal names an account.** An address nobody has
+    # registered leaves a metric and a log line and no row, for the reason
+    # `GOOGLE_LOGIN_FAILED` gives below: this endpoint is unauthenticated, so a
+    # row anybody can cause is a way to flood a trail that colleagues have to
+    # read, and there is no account to attribute it to in any case. What that
+    # costs is the ability to see spraying against addresses that do not exist,
+    # which is what the login-failure metric and its alert are for.
+    LOGIN_FAILED = "login_failed"
+
     # Signing in through an external issuer, and attaching one to an account
     # (docs/GOOGLE_OAUTH.md).
     #
-    # Password login is not in this vocabulary and this is, which is a real
-    # asymmetry rather than an oversight. A federated login means somebody
-    # *else* vouched for the person, and "which issuer let someone into my
-    # account, and when" is exactly the question asked after a Google account
-    # turns out to have been compromised. A password login is self-evidenced;
-    # there is no third party to ask about. If password login is ever audited
-    # too, these stay as they are.
+    # Kept separate from `LOGIN_SUCCEEDED` rather than folded into it with a
+    # `method` in `meta`. A federated login means somebody *else* vouched for
+    # the person, and "which issuer let someone into my account, and when" is
+    # exactly the question asked after a Google account turns out to have been
+    # compromised - so it is worth being able to filter for on its own.
     GOOGLE_LOGIN_SUCCEEDED = "google_login_succeeded"
     # Recorded only when the refusal names an account: a disabled user, or an
     # address that already belongs to somebody who must link Google explicitly.
