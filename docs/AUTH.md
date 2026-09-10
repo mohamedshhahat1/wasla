@@ -69,15 +69,27 @@ refuses the identity regardless of credentials.
 always the one deleted, which is what keeps it from being a global user-deletion
 endpoint that happens to have a guard in front of it today.
 
-**Proof is the current password.** A passwordless account — one created by
-Google sign-in — is refused with `409 password_required` and directed to
-`POST /auth/password/set`. This is the same position `unlink` already takes
-(ADR-057), and it is stronger than the alternative rather than more convenient:
-setting a password raises `token_version` and sends a notice to the address on
-the account, so somebody holding a stolen session cannot close the account
-without the owner being told. Requiring "recent authentication" instead would
-assert something already true — an access token is at most `ACCESS_TOKEN_TTL`
-old by construction — while a refresh token mints fresh ones for a fortnight.
+**Proof beyond the session is required, and either kind will do.**
+
+*The current password*, for an account that has one, verified the way a login is.
+
+*A Google re-authentication proof*, for an account with a linked Google identity.
+The person goes back through Google, the callback checks the returned `sub`
+against the identity already on the account, and leaves a short-lived single-use
+token that `DELETE /auth/me` spends. See [GOOGLE_OAUTH.md](GOOGLE_OAUTH.md).
+
+This replaces the earlier rule, which was "set a password first". That was
+secure and was a poor thing to ask of somebody who is leaving — it made them
+acquire a credential in order to discard one.
+
+**Either, not both.** Requiring both from an account that has both would be
+step-up MFA, a product decision nobody has made, and would make the more
+securely configured account the harder one to close.
+
+Requiring "recent authentication" on its own is deliberately not accepted: an
+access token is at most `ACCESS_TOKEN_TTL` old by construction, so requiring
+recency of one asserts something already true, while a refresh token mints fresh
+ones for a fortnight.
 
 **Ownership is resolved before deletion, never after.** The account cannot close
 while it is the last active owner of a live workspace; the refusal carries those

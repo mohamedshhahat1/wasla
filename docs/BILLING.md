@@ -107,66 +107,133 @@ Every attempt is a row. A failure is not forgotten when a later attempt succeeds
 
 ## What the workspace lifecycle does to billing
 
-The decision most likely to be assumed rather than read, so it is stated here in
-full. A subscription belongs to a **workspace**, not to an account: one person
-who owns three workspaces has three subscriptions, and closing their account
-does not touch any of them (they must hand the workspaces over first — see
-[AUTH.md](AUTH.md)).
+**The invariant**: a customer is never charged for a renewal belonging to a
+workspace they closed. Everything below follows from it.
 
-| Lifecycle event | Subscription | Invoices and payments | Provider records |
+A subscription belongs to a **workspace**, not to an account - one person who
+owns three workspaces has three subscriptions, enforced by a unique index on
+`subscriptions.tenant_id`. So deleting one workspace cancels one subscription
+and cannot touch another, which is what makes the policy safe to state simply.
+
+| Lifecycle event | Subscription | Saved cards | Invoices and payments |
 |---|---|---|---|
-| **Workspace created** (`POST /workspaces`) | started on `DEFAULT_PLAN_CODE`, on trial if the plan offers one | — | — |
+| **Workspace created** | started on `DEFAULT_PLAN_CODE`, on trial if the plan offers one | — | — |
 | **Workspace suspended** (platform) | **untouched**; the period keeps running | untouched | untouched |
 | **Workspace restored** (platform) | untouched | untouched | untouched |
-| **Workspace deleted** (owner) | **untouched**; nothing is cancelled | retained in full | retained |
-| **Account closed** (self or staff) | untouched — a subscription is a workspace's | retained | retained |
+| **Workspace deleted** (owner) | **cancelled immediately** | **all revoked** | retained in full |
+| **Account closed** | untouched — a subscription is a workspace's | untouched | retained |
 
-Three of those rows say "untouched", and each is a decision rather than an
-omission.
+### Deletion cancels immediately, not at period end
 
-**Suspension does not stop the money.** Platform suspension is an operational
-stop — an abuse investigation, a legal hold — and is not a statement about
-billing. The billing sweep has its own, separate suspension for an unpaid
-invoice (`SubscriptionStatus.SUSPENDED`, ADR-061), and conflating the two would
-mean an abuse investigation silently cancelled a paying customer's plan, or that
-restoring a workspace resurrected a subscription the sweep had deliberately
-ended. An operator who means to stop charging cancels the subscription as well;
-that is a second, deliberate act, and the audit trail records `workspace_suspended`
-and `subscription_cancelled` as the separate decisions they are.
+`cancel_at_period_end` is the right default when somebody merely stops wanting a
+plan: they keep what they paid for and the workspace stays open until the period
+ends. **Deletion is different, because access ends now.** A subscription left
+serving until the boundary would be a live subscription attached to a workspace
+nobody can open, and the sweep would roll it over on schedule.
 
-**Deletion does not cancel, and does not erase.** This is the one most likely to
-look like a bug. Twenty-eight tables cascade from `tenants` — `invoices`,
-`payments` and `payment_events` among them — so a hard delete would destroy
-financial records to satisfy a button, and nobody would be asked. Deletion is a
-tombstone (`tenants.deleted_at`), so every row stays addressable for the
-accounting, tax and dispute questions that arrive *after* a customer leaves.
+So `WorkspaceService._wind_down_billing` calls `cancel(immediately=True)`, which
+also closes `current_period_end` — so nothing counts against an allowance the
+workspace no longer has. It runs **in the same transaction as the tombstone**, so
+a failure rolls the whole deletion back. That failure direction is deliberate: a
+customer who cannot close their workspace can try again, and a tombstone that
+committed while the subscription stayed live is money taken from somebody who
+left.
 
-### What that leaves open, honestly
+**No refund is issued**, and that is an unresolved product decision rather than
+a policy. Deleting mid-period forfeits the remainder. Refunds remain the
+deliberate, audited operation described under *Refunds*.
 
-These are product decisions this work did not make, and it is better to name
-them than to guess:
+### What "cancel at the provider" means here
 
-- **Nothing cancels the subscription when a workspace is deleted.** For the
-  current catalogue that is harmless — the default plan is free and no provider
-  charge recurs without a saved card and an open subscription — but a workspace
-  deleted while on a paid recurring plan would keep its period, and the
-  recurring sweep would keep looking at it. An operator closing a paying
-  customer should cancel the subscription first. **Wiring deletion to an
-  automatic cancellation is the obvious next step and is deliberately not
-  guessed at**, because "immediately" and "at period end" are different
-  refund positions and neither is written down anywhere.
-- **No refund is issued by any lifecycle operation.** A customer who deletes a
-  workspace mid-period is not refunded automatically. Refunds remain the
-  deliberate, audited operation described under *Refunds* below.
-- **Provider-side customer records are not deleted.** Paymob holds its own
-  transaction history and this system does not reach into it. Any erasure
-  request that has to cover the provider is a manual step.
-- **There is no grace period during which a deleted workspace can be restored
-  through the API.** The tombstone is immediate and restoration is a database
-  operation ([RUNBOOK.md](RUNBOOK.md)). A grace window is a reasonable product
-  decision; it is not this one.
+**There is no provider-side subscription object**, and the shape of this system
+is not the one a Stripe-shaped integration has:
 
-## Provider independence
+- `Subscription.provider_reference` is declared and **written by no code path**.
+- The Paymob client exposes checkout, a saved-card charge, an inquiry and a
+  refund. There is no subscription resource and no cancellation endpoint.
+
+**Wasla is the recurring engine.** The billing sweep issues an invoice when a
+period ends, and `RecurringService` debits a stored card token. So the thing
+that can still take money after a deletion is *the token*, and revoking it is
+the cancellation — there is no remote object to call `DELETE` on, and a method
+pretending to make one would be inventing an API.
+
+Revocation is local, so it cannot time out or half-succeed. That is why there is
+**no cancellation-pending state**: the ambiguous outcome such a state exists to
+represent cannot arise here. If a provider that holds its own subscriptions is
+added later, `_wind_down_billing` is the seam — it becomes an await, it can
+fail, and *then* it needs a pending state and a retry.
+
+### The sweep refuses deleted workspaces too
+
+Belt and braces, and not redundant. Deletion cancels the subscription, so in the
+ordinary case the filters never fire; they exist because being charged after
+closing a workspace is an **invariant** rather than a step, and a step can be
+missed. A workspace tombstoned by an operator's SQL, by a restore from an older
+backup, or by a future deletion path that forgets to cancel would otherwise keep
+rolling periods over and issuing invoices.
+
+- `PlatformSubscriptionRepository.claim_due` joins `tenants` and excludes
+  `deleted_at IS NOT NULL`.
+- `PlatformInvoiceRepository.claim_collectible` does the same — the query
+  immediately in front of a card debit, so the last place worth being certain.
+
+### Financial records are never purged
+
+Invoices, payments, `payment_events` and subscriptions survive both deletion and
+the retention purge that follows it. A tax authority, a chargeback, a
+reconciliation against the processor's ledger and a dispute all arrive after a
+customer leaves, and all of them need the row. See `docs/SECURITY.md` for the
+full retention classification.
+
+### Still unresolved
+
+Named rather than guessed at:
+
+- **Refund policy on mid-period deletion.** Nothing is refunded today. Whether
+  it should be, and whether pro-rata, is a product decision.
+- **Provider-side customer records.** Paymob keeps its own transaction history
+  and this system does not reach into it. An erasure request covering the
+  provider is a manual step.
+- **No restore-after-delete during retention.** The data is there for the
+  window, and there is no API to bring the workspace back; recovery is an
+  operator procedure in `docs/RUNBOOK.md`.
+
+## Plan limits that are not a workspace's
+
+One entitlement in the catalogue belongs to a **person** rather than to a
+workspace: `owned_workspaces`, how many live workspaces one account may own.
+
+It is stored in `plans.limits` like every other limit and read by
+`WorkspaceEntitlementService` rather than by `EntitlementService` — that service
+resolves one tenant's subscription and counts one tenant's rows, and this
+question spans every tenant somebody owns. Asking it for an account limit raises
+rather than answering, because "allowed" from a service that cannot evaluate the
+limit is the shape of a bypass.
+
+**Which plan applies to a person**: the most generous limit among the plans they
+are actually paying for, with an absent key meaning unlimited. Somebody paying
+for Business who also keeps a free sandbox gets Business's allowance. Only
+*serving* subscriptions count, so cancelling is not a way to keep the
+entitlement and stop the invoices.
+
+**What counts**: live workspaces they own — active and suspended, never deleted.
+Suspended counts because ownership still exists; deleted does not because
+nothing is there to own; being a colleague in somebody else's workspace never
+counts.
+
+**Downgrading never destroys anything.** An account that owns five workspaces
+and moves to a three-workspace plan keeps all five. What it loses is the ability
+to create a sixth, which is a refusal somebody can act on rather than a deletion
+they cannot undo.
+
+**The per-plan numbers are not set.** No seeded plan carries `owned_workspaces`,
+so every plan is currently unlimited and the only ceiling in force is
+`ABSOLUTE_WORKSPACE_SAFETY_LIMIT` — a technical abuse ceiling, explicitly not a
+product entitlement. Choosing what Starter, Pro and Business allow is a pricing
+decision; the mechanism is ready and the values are the product's to set.
+
+## Provider independence## Provider independence
 
 `PaymentProvider` is one method — charge this amount, with this idempotency key, and say what happened. Subscriptions, plans and periods stay Wasla's, because the moment a service knows what a "payment intent" is, the system belongs to that processor. A decline is an outcome, not an exception; only an unreachable provider raises.
 

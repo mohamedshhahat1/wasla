@@ -284,6 +284,17 @@ Collapsing any pair of these would hand somebody authority they must not have.
 | **Delete a workspace** | `DELETE /workspace` (owner) | the tenant and its memberships | any member's account, or any other tenant |
 | **Delete an account** | `DELETE /auth/me` (self) or `DELETE /platform/users/{id}` (staff) | one global identity | anybody else's identity |
 
+**Platform deletion of a last owner suspends the workspace rather than
+refusing.** An abusive or compromised account must not become undeletable by
+owning something, so the deletion succeeds - and an ACTIVE workspace with zero
+owners is a state nobody can administer, because inviting an owner, changing the
+plan and closing the workspace are all owner-only. The workspace is suspended,
+the reason is audited (`last_owner_removed_by_platform`), and
+`POST /platform/tenants/{id}/ownership` puts it back under somebody's control.
+Restoration is refused until it has. Self-deletion, by contrast, *is* refused
+while the caller is a last owner: they always have a way to hand over first, so
+refusing costs one step and saves a workspace.
+
 **No workspace role reaches a global identity.** Not member, not admin, not
 owner. `DELETE /auth/me` names no target, and `DELETE /platform/users/{id}`
 requires a platform role that owning a workspace does not confer — so there is
@@ -322,15 +333,75 @@ workspace-scoped route refuses at once and none of them had to be changed. No
 session is revoked — that would sign people out of their *other* workspaces,
 which punishes the wrong people for a decision about one.
 
+### Retention and erasure
+
+**Deletion is a tombstone, and a tombstone is not erasure.** Saying otherwise is
+the claim this section exists to avoid making. Access stops at once; the rows
+stay for a configured window and are then erased by the `purge` worker.
+
+```
+T0  workspace deleted    access stops, subscription cancelled, cards revoked
+                         purge_due_at stamped from WORKSPACE_DELETION_RETENTION_DAYS
+T0 + 30 days             operational data erased, purged_at recorded
+for ever                 invoices, payments, subscriptions, audit log
+```
+
+The window is **stamped on the row at deletion**, not computed at purge time:
+the promise made to a customer is the one that was in force the day they left,
+and an operator shortening the setting must not retroactively bring forward the
+erasure of data already tombstoned.
+
+Thirty days is a **product default**, not a legal determination. Whether it
+satisfies any particular regulation is a question for somebody qualified to
+answer it.
+
+#### The classification
+
+Every one of the twenty-nine tenant-scoped tables is in exactly one column, and
+a test asserts the partition is total — a table added later has to be sorted
+before it can ship.
+
+| Treatment | Tables | Why |
+|---|---|---|
+| **Erased** | conversations, messages, message media and sentiment, contacts, leads with their notes and activities, follow-ups, campaigns and recipients, agents and tool grants, knowledge bases, documents, chunks, WhatsApp accounts, templates and events, outbound email, unaccepted invitations, usage and analytics events | The customer's business data. Nothing here answers a question anybody is entitled to ask once the customer is gone and the window has passed. |
+| **Retained for ever** | invoices, payments, `payment_events`, subscriptions, audit logs | Accounting and evidentiary records. A tax authority, a chargeback, a reconciliation and a dispute all arrive afterwards. A purge that took them would destroy financial history to satisfy a policy nobody wrote down as requiring it. |
+| **Revoked at deletion** | payment methods | The card token is revoked in the deletion transaction — that is when it stops being usable — and the row is erased at purge. |
+| **Left alone** | memberships | Already revoked at deletion. Records who was in the workspace and when they left; carries no customer content. |
+
+**Object storage is deleted after the database commit**, not inside it. A crash
+between them leaves orphaned objects, which cost storage and disclose nothing
+new; the other ordering would leave rows pointing at files that are already gone.
+
+**Anonymisation was considered and rejected** for `usage_events` and
+`analytics_events`. Detaching them — `tenant_id` to NULL — would keep
+platform-wide historical totals intact and would require making that column
+nullable on the two highest-volume tables in the schema. That trades the
+invariant tenant isolation rests on (*every tenant-scoped row has a tenant*) for
+a reporting nicety. They are erased instead, and the honest consequence is that
+platform totals shift downward when a purge runs.
+
+#### Account deletion
+
+The same shape, with a smaller scope. Closing an account immediately revokes
+every session, blocks authentication, withdraws every membership and tombstones
+the identity. The address stays reserved for ever and the federated identity row
+is kept — deleting it would free the Google `sub` while the address stayed
+reserved, and the next sign-in would hit a uniqueness error where a clean
+refusal belongs.
+
+A workspace's financial records are **not** touched by an account deletion.
+They belong to the workspace, and the workspace may still be running under
+somebody else.
+
 ### What is genuinely still missing
 
-- **No scheduled purge of a deleted workspace's data.** Deletion is a
-  tombstone; erasure is an operator step in [RUNBOOK.md](RUNBOOK.md). There is
-  no deferred-job infrastructure here that could run one reliably, and a method
-  claiming to schedule erasure while nothing ran would be worse than none.
-- **No Google re-authentication challenge.** A `prompt=login` flow would let a
-  passwordless account prove itself without acquiring a password. Until it
-  exists, such an account sets a password first.
+- **No restore-after-delete API.** The data is present during the retention
+  window and there is no route that brings a workspace back; recovery is an
+  operator procedure ([RUNBOOK.md](RUNBOOK.md)). Adding one is a real product
+  decision — it would need the subscription reconciled and the revoked
+  integrations deliberately *not* resurrected.
+- **No erasure of provider-side records.** Paymob keeps its own transaction
+  history and this system does not reach into it.
 - **Revocation is per-user, not per-session.** Signing one device out while
   leaving another alone would need a session table (ADR-036 records why one was
   not built).

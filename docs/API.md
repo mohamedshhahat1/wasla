@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **135 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **138 operations**, of which
 17 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -462,6 +462,7 @@ Open to every member, unlike usage: these are the numbers that tell the people s
 | GET | `/api/v1/platform/tenants` | Platform owner or admin |
 | POST | `/api/v1/platform/tenants/{tenant_id}/suspend` | Platform owner or admin |
 | POST | `/api/v1/platform/tenants/{tenant_id}/restore` | Platform owner or admin |
+| POST | `/api/v1/platform/tenants/{tenant_id}/ownership` | Platform owner or admin |
 | POST | `/api/v1/platform/users/{user_id}/disable` | Platform owner or admin |
 | POST | `/api/v1/platform/users/{user_id}/enable` | Platform owner or admin |
 | DELETE | `/api/v1/platform/users/{user_id}` | Platform owner or admin |
@@ -610,7 +611,59 @@ from an authorized caller that the *state* refuses is not a server error.
 | `workspace_deleted` | The workspace has been tombstoned |
 | `workspace_already_suspended` / `workspace_not_suspended` | The state transition does not apply |
 | `workspace_limit_reached` | The account already owns `MAX_OWNED_WORKSPACES_PER_USER` |
-| `password_required` | The account has no password to prove; set one first |
+| `reauthentication_required` | No usable proof supplied: confirm a password or re-authenticate with Google |
+| `reauthentication_unavailable` | The account has no Google identity to re-prove |
+| `workspace_orphaned` | The workspace has no active owner; assign one before restoring |
+| `workspace_has_owner` | Ownership repair was attempted on a workspace that is not orphaned |
+| `workspace_owner_required` | The named person cannot take ownership |
+
+## Re-authenticating with Google
+
+| Method | Path | Auth |
+| --- | --- | --- |
+| POST | `/api/v1/auth/google/reauth/authorize` | Session (verification not required) |
+| POST | `/api/v1/auth/google/reauth/callback` | Session (verification not required) |
+
+For a high-risk action - today, closing the account. A Google-only account has
+no password to confirm with, and the previous answer was "set one first": secure,
+and a poor thing to ask of somebody on their way out.
+
+**It is the linking flow with a different `FlowKind`.** PKCE S256, the nonce, the
+single-use server-side state, the browser binding and the fixed redirect URI are
+all unchanged. The separate kind is what stops a sign-in flow being completed
+here: `login` will enrol a brand-new account, so a callback accepting one as
+proof would treat signing in with *any* Google account as authorisation to
+delete the account the session belongs to.
+
+**Identity is the Google `sub`, never the email.** The subject that comes back
+must resolve to a `user_identities` row belonging to this account. Addresses are
+reassignable inside a Workspace domain and a person may hold several, so
+controlling a mailbox proves nothing about who linked it.
+
+The callback returns a **proof**, not a deletion:
+
+```
+reauthentication_token   opaque, single-use, 5 minutes
+```
+
+Stored server-side under its SHA-256 digest, bound to the user and to the
+purpose. It grants no session and opens no route; it is useless without the
+access token of the account it belongs to. `DELETE /auth/me` consumes it
+atomically.
+
+Deleting in the callback would have been fewer moving parts and the wrong shape:
+a callback is reached by Google redirecting a *browser*, and a navigation is not
+where an irreversible action belongs. It also keeps one deletion path, so
+password and Google accounts converge on the same endpoint with the same
+effects.
+
+Errors: `404` when Google sign-in is not configured; `409
+reauthentication_unavailable` when the account has no Google identity to
+re-prove, so a client can fall back to asking for a password; `401` for a failed
+authorization, a stale or replayed state, a callback from a browser that did not
+start the flow, a flow belonging to a different account, or a Google account
+that is not the one linked here - all answering alike, so the endpoint cannot be
+used to discover which Google account is attached to which Wasla account.
 
 ## Closing an account
 
@@ -620,15 +673,25 @@ account. There is **no `user_id` in the request**, which is what distinguishes i
 could name somebody else would make this a global user-deletion endpoint with a guard in
 front of it. Extra fields are rejected rather than ignored, so smuggling one is a `422`.
 
-**The current password is required.** An account with none — created by Google sign-in —
-is refused with `409 password_required` and told to set one at `/auth/password/set`. That
-is the strong answer, not the convenient one: setting a password bumps the token version
-and emails the address on the account, so somebody holding only a stolen session cannot
-reach this route without the real owner being told. It is the same rule disconnecting
-Google already follows (ADR-057). A "recent authentication" check in its place would
-assert something already true — an access token is at most fifteen minutes old by
-construction — and a refresh token can mint fresh ones for two weeks without anybody
-proving anything.
+**Proof beyond the session is required, and either kind will do.** A session is not
+proof: a stolen access token *is* a session, and this is the one action that cannot be
+undone.
+
+| Field | For |
+| --- | --- |
+| `current_password` | An account that has a password |
+| `reauthentication_token` | An account with a linked Google identity — the single-use proof from `POST /auth/google/reauth/callback` |
+
+**Either, never both.** Requiring both from an account that has both would be step-up
+MFA, which is a product decision nobody has made, and it would make the more securely
+configured account the harder one to close. Neither supplied is `409
+reauthentication_required`, which names the thing to go and do rather than the thing
+that is missing.
+
+A "recent authentication" check on its own is deliberately *not* accepted: an access
+token is at most fifteen minutes old by construction, so requiring recency of one
+asserts something already true, and a refresh token mints fresh ones for a fortnight
+without anybody proving anything.
 
 **Owned workspaces are resolved first.** If the caller is the last active owner of any
 live workspace, the answer is `409 account_owns_workspaces` carrying those workspaces —

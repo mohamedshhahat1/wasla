@@ -60,11 +60,48 @@ Two details worth knowing when building that screen:
   stable `sub` but stays in the limited onboarding state until its emailed code
   is confirmed, so the client may need to route through verification first.
 
-Closing such an account is the one place the passwordless shape is refused
-rather than accommodated: `DELETE /auth/me` requires the current password, and a
-Google-only account is told to set one at `POST /auth/password/set` first. See
-[AUTH.md](AUTH.md) — the short version is that setting a password notifies the
-real owner, so a stolen session alone cannot close the account quietly.
+## Re-authenticating to close an account
+
+A Google-only account has no password, and `DELETE /auth/me` needs proof beyond
+a session — a stolen access token *is* a session. The earlier answer was "set a
+password first", which was secure and a poor thing to ask of somebody leaving.
+
+```
+POST /auth/google/reauth/authorize   →  Google  →  callback
+POST /auth/google/reauth/callback    →  reauthentication_token (single use, 5 min)
+DELETE /auth/me                      →  consumes it, deletes the account
+```
+
+**It is this document's flow with a third `FlowKind`.** PKCE S256, the nonce,
+the single-use server-side state, the browser binding and the fixed redirect URI
+are unchanged; `reauth_delete_account` is what stops a sign-in being completed
+as a re-authentication. That separation is load-bearing: `login` will enrol a
+brand-new account, so a callback accepting a login-kind flow as proof would
+accept signing in with *any* Google account as authorisation to delete the
+account the session belongs to.
+
+**Three bindings must all hold**, each stopping a different attack:
+
+| Binding | Stops |
+|---|---|
+| `flow.user_id`, written server-side at authorize | A proof being redirected onto another account |
+| The browser-binding cookie | A stolen state completed elsewhere, even with a valid session |
+| **The `sub` match** | Signing in with a different Google account counting as proof |
+
+The third is the one specific to this flow, and it is checked against
+`user_identities` — **never against the email address**. Google addresses are
+reassignable inside a Workspace domain and a person may hold several, so
+controlling a mailbox proves nothing about who linked the account.
+
+The callback returns a proof rather than deleting: a callback is reached by
+Google redirecting a *browser*, and a navigation is the wrong thing to hang an
+irreversible action on. The proof is stored under its SHA-256 digest, bound to
+the user and the purpose, single-use and short-lived; it grants no session and
+is useless without an access token for the account it belongs to.
+
+An account with a password *and* a Google identity may use either. Requiring
+both would be step-up MFA — a product decision nobody has made, and one that
+would make the more securely configured account the harder to close.
 
 **Deleting an account does not free the Google subject.** The
 `user_identities` row is kept, so a later sign-in with the same Google account

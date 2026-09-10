@@ -631,32 +631,112 @@ owner also closed their account, promote somebody by hand
 (`UPDATE memberships SET role = 'tenant_owner' …`) rather than leaving a
 workspace nobody can administer.
 
-### Erase a deleted workspace's data
+### Erasing a deleted workspace's data
 
-**Not automated, and deliberately so.** There is no deferred-job infrastructure
-in this repository that could run a purge reliably, and a scheduler that claimed
-to and did not would be worse than none.
+**Automated.** The `purge` worker erases a deleted workspace's operational data
+once `WORKSPACE_DELETION_RETENTION_DAYS` has passed, and records `purged_at` so
+it happens once. Nothing here is normally an operator's job.
 
-When a retention or erasure request requires it, work outward from the tenant
-and stop before the financial records:
+What you may need to do:
 
-1. Confirm the tombstone: `SELECT deleted_at FROM tenants WHERE id = :tenant_id`
-   — non-null, and old enough to satisfy whatever retention period applies.
-2. Delete conversational and knowledge data first (`messages`, `message_media`,
-   `message_sentiments`, `conversations`, `contacts`, `documents`,
-   `document_chunks`, `knowledge_bases`, `leads` and their notes and
-   activities, `follow_ups`, `campaigns`, `campaign_recipients`).
-3. Remove stored objects for that tenant from the object store. The database
-   holds keys, not files, so a row deletion does not reclaim storage.
-4. **Stop.** Do not delete `invoices`, `payments`, `payment_events` or
-   `audit_logs`. Those are the accounting and evidentiary record and outlive the
-   workspace on purpose. If an erasure request genuinely reaches them, that is a
-   legal decision and not a runbook one.
-5. Provider-side records (Paymob's own transaction history) are not reachable
-   from here and need their own request.
+**Check what is pending.**
 
-Deleting the `tenants` row itself would cascade through twenty-eight tables,
-including step 4's. Do not.
+```sql
+SELECT slug, deleted_at, purge_due_at, purged_at
+FROM tenants
+WHERE deleted_at IS NOT NULL
+ORDER BY purge_due_at;
+```
+
+`purge_due_at IS NULL` on a deleted workspace means it predates migration 0050
+and the backfill missed it — give it a deadline rather than leaving it retained
+for ever by accident.
+
+**Confirm the worker is running.** `WORKER_KINDS` must include `purge`, or
+nothing erases anything and the documentation is making a promise the deployment
+does not keep. The `WorkspacePurgeFailing` alert covers the sweep erroring; it
+cannot cover a sweep that was never started.
+
+**Bring a purge forward** (a customer asking for erasure sooner) by moving the
+deadline, not by deleting rows by hand:
+
+```sql
+UPDATE tenants SET purge_due_at = now() WHERE id = :tenant_id AND deleted_at IS NOT NULL;
+```
+
+**What the purge deliberately does not touch**: `invoices`, `payments`,
+`payment_events`, `subscriptions` and `audit_logs`. Those are the accounting and
+evidentiary record and outlive the workspace on purpose. If an erasure request
+genuinely reaches them, that is a legal decision and not a runbook one — and
+deleting the `tenants` row itself would cascade through twenty-eight tables
+including all of them. Do not.
+
+Provider-side records (Paymob's own transaction history) are not reachable from
+here and need their own request.
+
+### A workspace was suspended and nobody suspended it
+
+Look for the reason on the audit entry:
+
+```sql
+SELECT occurred_at, actor_label, metadata
+FROM audit_logs
+WHERE action = 'workspace_suspended' AND target_id = :tenant_id
+ORDER BY occurred_at DESC;
+```
+
+`{"reason": "last_owner_removed_by_platform"}` means platform staff deleted or
+disabled the workspace's last owner, and the workspace was suspended
+automatically because an ACTIVE workspace with no owner cannot be administered
+by anybody — inviting an owner, changing the plan and closing it are all
+owner-only.
+
+**Recovery is two deliberate steps, in this order.**
+
+```
+POST /api/v1/platform/tenants/{tenant_id}/ownership   {"user_id": "..."}
+POST /api/v1/platform/tenants/{tenant_id}/restore
+```
+
+The first promotes somebody who is **already a member** — it cannot admit a new
+account, staff's own included, which is what keeps it from being a general
+membership power. A revoked membership is eligible, and is usually the only
+candidate: the colleagues left behind are frequently the ones removed alongside
+the owner.
+
+Find candidates with:
+
+```sql
+SELECT u.id, u.email, m.role, m.status
+FROM memberships m JOIN users u ON u.id = m.user_id
+WHERE m.tenant_id = :tenant_id AND u.deleted_at IS NULL AND u.is_active
+ORDER BY m.created_at;
+```
+
+The second re-enables service, and **refuses while the workspace still has no
+owner** (`409 workspace_orphaned`) — so the order above is enforced rather than
+merely recommended.
+
+If no eligible member exists at all, there is nobody to hand the workspace to.
+That is a conversation with the customer, not a database edit.
+
+### Watch for orphans that nobody reported
+
+`wasla_orphaned_workspaces` is counted at every scrape and should always be
+zero. The `OrphanedWorkspace` alert fires if it is not. To see which:
+
+```sql
+SELECT t.id, t.slug
+FROM tenants t
+WHERE t.status = 'active' AND t.deleted_at IS NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM memberships m
+      WHERE m.tenant_id = t.id AND m.status = 'active' AND m.role = 'tenant_owner'
+  );
+```
+
+A non-zero count means an invariant was broken by a path that was supposed to
+prevent it. Repair ownership as above, and treat the cause as a defect.
 
 ### Close somebody's account on their behalf
 
@@ -682,8 +762,17 @@ WHERE m.user_id = :user_id
          AND o.role = 'tenant_owner') = 1;
 ```
 
-Any row returned is a workspace that will be left with no owner. Promote
-somebody there first.
+Any row returned is a workspace that **will be suspended automatically** when
+the deletion runs — an ACTIVE workspace with no owner is unadministrable, so the
+platform stops serving it rather than leaving it in that state. The audit entry
+records `last_owner_removed_by_platform`, the deletion's own entry lists the
+slugs under `orphaned_workspaces`, and a warning line
+(`account.deleted_orphaned_workspaces`) names them in the log.
+
+The deletion is deliberately **not** refused: an abusive or compromised account
+must not become undeletable by owning a workspace. If the workspace should keep
+running, promote somebody there *first* — otherwise expect to run the ownership
+repair above afterwards.
 
 ## What to watch
 

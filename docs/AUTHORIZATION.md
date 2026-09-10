@@ -619,6 +619,38 @@ rather than argued here.
   name; changing it redirects all of them and frees the old one for somebody
   else to claim. That is an owner's decision.
 
+### 6.17 Platform deletion of a last owner, and its recovery
+
+The one place the authority table above needs a footnote longer than a line.
+
+`DELETE /auth/me` refuses while the caller is somebody's last owner.
+`DELETE /platform/users/{id}` does **not**, and the asymmetry is deliberate: an
+abusive or compromised account must not become undeletable by owning a
+workspace, and a refusal there would mean the account most worth removing is the
+one that cannot be removed.
+
+What follows from allowing it is the state that must not exist: `ACTIVE` with
+zero active owners. Such a workspace cannot be administered by anybody, because
+inviting an owner, changing the plan and closing the workspace are all
+owner-only. So the workspace is **suspended** in the same transaction, audited
+with `{"reason": "last_owner_removed_by_platform"}`.
+
+Recovery adds exactly one power to platform staff, and no more:
+
+| | May | May not |
+|---|---|---|
+| `POST /platform/tenants/{id}/ownership` | Promote an existing member - including a revoked one - to owner, in a workspace that has none | Admit an account that was never a member (staff's own included); touch a workspace that still has an owner; change any other role |
+| `POST /platform/tenants/{id}/restore` | Resume service | Do so while the workspace still has no owner (`409 workspace_orphaned`) |
+
+Both take the tenant row lock, so an assignment and a restore cannot interleave
+into the restoration of something still ownerless.
+
+**Disabling an owner is not the same as deleting one.** Disable ends sessions
+and blocks authentication; it does not withdraw memberships, so the workspace
+keeps an owner who cannot sign in and is *not* suspended. That is a weaker
+guarantee than the deletion path's, and it is stated here rather than left to be
+discovered: an operator who wants the workspace stopped should suspend it.
+
 ## 7. Known gaps, not fixed here
 
 Recorded rather than silently carried.

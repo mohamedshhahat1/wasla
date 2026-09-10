@@ -300,10 +300,52 @@ jobs:
             tests/integration/test_account_lifecycle.py \
             tests/integration/test_account_self_deletion.py \
             tests/integration/test_workspace_lifecycle.py \
+            tests/integration/test_workspace_billing_lifecycle.py \
+            tests/integration/test_workspace_entitlements.py \
+            tests/integration/test_workspace_purge.py \
+            tests/integration/test_orphan_workspace.py \
+            tests/integration/test_google_reauth.py \
             tests/integration/test_lifecycle_concurrency.py \
             tests/integration/test_audit_trail.py \
             tests/integration/test_route_authorization.py \
             tests/e2e/test_account_and_workspace_lifecycle.py
+
+  monitoring:
+    name: Alert rules and receivers
+    runs-on: ubuntu-latest
+
+    # Metrics that nothing scrapes are not monitoring, and rules nothing
+    # evaluates are not alerting. This job checks the half that can be checked
+    # without a chat webhook: the Prometheus config parses, the rules load, the
+    # rules actually *fire* against synthetic series and clear on recovery, and
+    # the Alertmanager config is valid.
+    #
+    # What it deliberately does not claim is delivery to a real receiver. That
+    # needs a credential a fork cannot have, and asserting it here would be the
+    # kind of claim this repository has been burned by. See docs/OBSERVABILITY.md.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Prometheus configuration and rules load
+        run: |
+          docker run --rm -v "$PWD/deploy/monitoring:/cfg:ro" \
+            --entrypoint promtool prom/prometheus:v3.1.0 \
+            check config /cfg/prometheus.yml
+
+      - name: Alert rules fire and clear
+        # promtool's own unit-test runner. Each case drives synthetic series
+        # past a rule's `for:` duration and asserts the alert appears, then
+        # stops when the condition does.
+        run: |
+          docker run --rm -v "$PWD/deploy/monitoring:/cfg:ro" -w /cfg \
+            --entrypoint promtool prom/prometheus:v3.1.0 \
+            test rules /cfg/tests/alerts_test.yml
+
+      - name: Alertmanager configuration is valid
+        run: |
+          docker run --rm -v "$PWD/deploy/monitoring:/cfg:ro" \
+            --entrypoint amtool prom/alertmanager:v0.28.0 \
+            check-config /cfg/alertmanager.yml
 
   docker:
     name: Docker build

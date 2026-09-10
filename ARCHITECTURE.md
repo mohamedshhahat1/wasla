@@ -15,7 +15,7 @@ Technical source of truth for the current system architecture. Every section car
 
 Wasla is an API-first, multi-tenant backend. A business (tenant) connects one or more WhatsApp Business phone numbers. Inbound customer messages arrive as Meta webhooks, are resolved to a tenant, persisted, and queued for asynchronous AI processing. An agent orchestrator loads the conversation, retrieves tenant-scoped knowledge, calls the OpenAI Responses API with a controlled tool set, and replies through the WhatsApp Cloud API.
 
-The whole of that pipeline is built, and a worker process runs the ten loops that feed it — media, agent, ingestion, follow-up, campaign, billing, email, recovery, retention and uploads, selected by `WORKER_KINDS`. Everything it does is metered in the transaction that did it, reported back through tenant and platform analytics, and bounded by the plan the workspace is on. Money changes hands too: a workspace buys a plan through a hosted Paymob checkout, the settlement arrives on a signed callback, and refunds, saved cards, automatic renewals and dunning follow from there.
+The whole of that pipeline is built, and a worker process runs the eleven loops that feed it — media, agent, ingestion, follow-up, campaign, billing, email, recovery, retention, purge and uploads, selected by `WORKER_KINDS`. Everything it does is metered in the transaction that did it, reported back through tenant and platform analytics, and bounded by the plan the workspace is on. Money changes hands too: a workspace buys a plan through a hosted Paymob checkout, the settlement arrives on a signed callback, and refunds, saved cards, automatic renewals and dunning follow from there.
 
 ```
 WhatsApp
