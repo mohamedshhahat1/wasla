@@ -23,6 +23,7 @@ from app.db.models.sentiment import ConversationPriority
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.services.analytics_service import AnalyticsRecorder
+from app.services.follow_up_service import FollowUpService
 
 logger = get_logger(__name__)
 
@@ -36,6 +37,9 @@ class InboxService:
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._memberships = MembershipRepository(session, tenant_id=tenant_id)
         self._analytics = AnalyticsRecorder(session, tenant_id=tenant_id)
+        # Constructed without settings, like the ingestion path's copy: nothing
+        # here sends, and only `dispatch` needs somewhere to send from.
+        self._follow_ups = FollowUpService(session=session, tenant_id=tenant_id)
 
     async def list_conversations(
         self,
@@ -106,6 +110,30 @@ class InboxService:
         changed = conversation.mode is not mode
         conversation.mode = mode
         conversation.handoff_reason = handoff_reason if mode is ConversationMode.HUMAN else None
+
+        if changed and mode is ConversationMode.HUMAN:
+            # Taking a conversation over stops the AI, and a follow-up is an
+            # AI-originated message. Cancelled here rather than left to the
+            # worker to refuse, so the pending nudge stops existing instead of
+            # waiting to be declined - and so the colleague can see that it
+            # will not arrive (MSG-05).
+            #
+            # The first of two guards. `FollowUpService.dispatch` checks the
+            # mode again before it sends, because a handover landing after the
+            # sweep has claimed the row cannot be cancelled by this one.
+            cancelled = await self._follow_ups.cancel_for_conversation(
+                conversation_id=conversation_id,
+                reason="A colleague took the conversation over.",
+            )
+            if cancelled:
+                logger.info(
+                    "follow_up.cancelled_on_handoff",
+                    extra={
+                        "event": "follow_up.cancelled_on_handoff",
+                        "conversation_id": str(conversation_id),
+                        "cancelled": cancelled,
+                    },
+                )
 
         if changed:
             # Only a real change is an event. Setting HUMAN on a conversation a

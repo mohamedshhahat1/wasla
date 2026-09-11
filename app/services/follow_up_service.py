@@ -17,6 +17,21 @@ before anything else has a chance to send it.
 service window, free text. Outside it, an approved template or nothing at all.
 "Nothing at all" is a recorded outcome (`SKIPPED`) rather than a silent
 discard, because the business needs to know the nudge it configured never went.
+
+**A colleague taking the conversation over stops it, and so does a customer who
+asked not to be marketed at.** Both are re-read at dispatch rather than trusted
+from scheduling, because hours pass between the two moments and both facts
+change in that gap. Neither was checked at all: a follow-up fired underneath a
+person who had taken the conversation over - defeating the product's own
+mechanism for stopping the AI - and fired at somebody who had written STOP
+(MSG-05, MSG-06).
+
+The opt-out rule needs stating, because the codebase applies it unevenly on
+purpose. A campaign honours it and an AI reply does not, and both are right: a
+customer refusing marketing has not refused an answer to their own question. A
+follow-up sits between the two and is filed with the campaign, because it is
+unsolicited and automated - nobody asked for it, and it arrives after the
+conversation has gone quiet. See `docs/CAMPAIGNS.md`.
 """
 
 from __future__ import annotations
@@ -32,7 +47,12 @@ from app.core.config import Settings
 from app.core.exceptions import ExternalServiceError, RateLimitedError, ValidationError
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
-from app.db.models.conversation import ConversationStatus, Message, MessageStatus
+from app.db.models.conversation import (
+    ConversationMode,
+    ConversationStatus,
+    Message,
+    MessageStatus,
+)
 from app.db.models.follow_up import (
     MAX_ATTEMPTS,
     MAX_BODY_LENGTH,
@@ -41,7 +61,11 @@ from app.db.models.follow_up import (
     FollowUpStatus,
 )
 from app.db.models.lead import ActorKind
-from app.repositories.conversation_repository import ConversationRepository
+from app.integrations.whatsapp.client import ProviderAuthError
+from app.repositories.conversation_repository import (
+    ContactRepository,
+    ConversationRepository,
+)
 from app.repositories.follow_up_repository import FollowUpRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.services.messaging_service import MessagingService
@@ -92,6 +116,7 @@ class FollowUpService:
         self._messaging = messaging
         self._follow_ups = FollowUpRepository(session, tenant_id=tenant_id)
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
+        self._contacts = ContactRepository(session, tenant_id=tenant_id)
         self._templates = WhatsAppTemplateRepository(session, tenant_id=tenant_id)
 
     # ------------------------------------------------------------------ reads
@@ -333,6 +358,32 @@ class FollowUpService:
                 follow_up, "The conversation was closed before the follow-up was due."
             )
 
+        if conversation.mode is ConversationMode.HUMAN:
+            # A colleague owns this conversation. Handing it over is the
+            # documented way to stop the AI, and a nudge arriving underneath
+            # somebody who is mid-conversation with the customer makes that
+            # promise false in the most visible way available (MSG-05).
+            #
+            # The second of two guards. `InboxService.set_mode` cancels pending
+            # follow-ups at the moment of handover, which handles the ordinary
+            # case; this one handles the race, because the mode can change
+            # between the sweep claiming this row and the send leaving. The
+            # claim commits, so no lock survives to serialise the two.
+            return self._skip(
+                follow_up,
+                "A colleague has taken this conversation over.",
+            )
+
+        contact = await self._contacts.require_by_id(conversation.contact_id)
+        if not contact.accepts_campaigns:
+            # Re-read here rather than trusted from scheduling, exactly as the
+            # campaign sweep does: somebody who says STOP after the nudge was
+            # scheduled must not receive it (MSG-06).
+            return self._skip(
+                follow_up,
+                "The customer has opted out of automated messages.",
+            )
+
         window_open = messaging.window_open(conversation)
 
         def link(message: Message) -> None:
@@ -380,6 +431,13 @@ class FollowUpService:
 
         try:
             message = await send
+        except ProviderAuthError:
+            # Let out rather than recorded against this nudge. The number's
+            # credential is refused, so every other follow-up queued for this
+            # workspace fails the same way; the worker stops sweeping them for
+            # the rest of the pass instead of discovering it one at a time
+            # (MSG-18).
+            raise
         except (ExternalServiceError, RateLimitedError, ValidationError) as error:
             return self._fail(follow_up, str(error))
 
