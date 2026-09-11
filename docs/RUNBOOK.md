@@ -738,15 +738,71 @@ WHERE t.status = 'active' AND t.deleted_at IS NULL
 A non-zero count means an invariant was broken by a path that was supposed to
 prevent it. Repair ownership as above, and treat the cause as a defect.
 
+### Platform staff: who can act on whom
+
+`PLATFORM_OWNER` outranks `PLATFORM_ADMIN`. An admin administers the platform
+over every account that is **not** a platform owner; disabling, deleting or
+demoting an owner is an owner's act and answers `403 permission_denied` to
+anybody else.
+
+Above that sits one invariant the platform cannot be talked out of: **at least
+one live platform owner must remain**, where live means `is_active` and
+`deleted_at IS NULL`. Four commands can take ownership away, and every one of
+them refuses the last:
+
+```
+DELETE /api/v1/platform/users/{user_id}
+POST   /api/v1/platform/users/{user_id}/disable
+python -m app.platform.roles revoke <email-or-id>
+python -m app.platform.roles grant  <email-or-id> platform_admin   # a demotion
+```
+
+The last one is the trap worth knowing about: `grant … platform_admin` against
+an account that currently owns the platform *removes* platform ownership, under
+a subcommand whose name suggests it only ever adds. It is guarded the same way.
+
+Who counts, right now:
+
+```sql
+SELECT email, is_active, deleted_at IS NOT NULL AS deleted
+FROM users
+WHERE platform_role = 'platform_owner';
+```
+
+Only rows with `is_active = true` and `deleted = false` count. A deleted owner
+does not, and since the deletion path clears `platform_role`, new tombstones do
+not appear here at all — the role they held is recorded in the audit entry's
+`previous_platform_role` instead.
+
+**Neither role can act on its own account** through the platform API: both
+`disable` and `delete` answer `422` for a self-target. Closing your own account
+is `DELETE /auth/me`, which asks for the password first.
+
+**If the platform somehow has no live owner**, the way back is the operator
+command from a shell on the deployment — it is the only path that can create
+platform authority, by design, and it cannot create an account:
+
+```
+python -m app.platform.roles grant <email-or-id> platform_owner
+```
+
+It refuses a deleted account outright, and a disabled one until it is re-enabled
+(`POST /api/v1/platform/users/{id}/enable`, which any platform staff may run).
+
+
 ### Close somebody's account on their behalf
 
 ```
 DELETE /api/v1/platform/users/{user_id}
 ```
 
-Irreversible, and there is no `enable` counterpart. Before running it, check
-whether the person is the last owner of any live workspace — the platform route,
-unlike the self-service one, does **not** refuse for that:
+Irreversible, and there is no `enable` counterpart. Two things it *will* refuse:
+your own account, and — if you are a platform admin — an account holding
+platform ownership. See the section above.
+
+Before running it, check whether the person is the last owner of any live
+workspace. The platform route, unlike the self-service one, does **not** refuse
+for that:
 
 ```sql
 SELECT t.slug

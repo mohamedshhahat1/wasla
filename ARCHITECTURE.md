@@ -527,7 +527,7 @@ Cross-tenant reads answer `not_found`, never `forbidden`, so error codes cannot 
 
 **Status: Implemented** — the platform role authorization layer, cross-workspace reporting, invoice administration (recording a payment, voiding an invoice), account enable/disable/delete, workspace suspension and restoration, the audit-log view and the operator command that grants the first platform role (ADR-094). *Force-deleting* a customer's workspace is deliberately absent; the reason is below.
 
-Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated: a platform role grants nothing inside a workspace, and owning a workspace grants nothing across the platform. Both directions are tested.
+Platform roles (`PLATFORM_OWNER`, `PLATFORM_ADMIN`) are separate from tenant roles (`TENANT_OWNER`, `TENANT_ADMIN`, `MEMBER`) and are never conflated: a platform role grants nothing inside a workspace, and owning a workspace grants nothing across the platform. Both directions are tested. Within the platform the two roles are ranked — an admin cannot disable, delete or demote a platform owner — and one live platform owner must always remain; `app/platform/hierarchy.py` holds both rules and the single definition of "live" they share.
 
 `app/platform/` is a package rather than a few methods on existing services, and that is the point: every other query in this codebase is built so it *cannot* cross a tenant boundary, so the exception belongs somewhere a reviewer looks for it. A cross-tenant read outside this package is a bug.
 

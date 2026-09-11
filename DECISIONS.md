@@ -5072,3 +5072,207 @@ platform role produces none, and that a refused request leaves nothing behind.
 A last test enumerates the router's read routes from the OpenAPI document and
 asserts each produces exactly one entry, so a route added later without one
 fails here.
+## ADR-099 — Platform Ownership Outranks Platform Administration, and One Owner Always Remains
+
+**Context.** Two platform roles existed and were the same thing. All eleven
+`/platform/*` routes sat behind `PlatformStaffDep`, which admits an owner or an
+admin; `PlatformOwnerDep` had been written for the distinction and guarded zero
+routes; and `AccountService.delete` and `.disable` asked exactly one question
+about the target — *is it the caller?* — and never *what is it?*
+
+The consequence was demonstrated at runtime. A platform admin disabled one
+platform owner, tombstoned a second, tombstoned a third, and went on reading
+`/platform/tenants`. Live platform owners afterwards: zero. A tombstone is
+documented as never reusable, so the accounts were not recoverable; only the
+*authority* was, through the operator command, by somebody with a shell on the
+deployment.
+
+Beside it sat a quieter version of the same hole. `PlatformRoleService.owners()`
+was `select(User).where(User.platform_role == PLATFORM_OWNER)` — no lifecycle
+filter at all. A tombstoned account keeps `platform_role`, so a deleted owner
+counted as "remaining", and the guard whose stated purpose is to stop an
+installation losing every platform owner could be satisfied by an owner who no
+longer existed. Delete one of two owners, revoke the survivor, and the command
+agrees. No attacker is involved; that is the order an operator does things in.
+
+Neither reached customer data. A platform role grants nothing inside a
+workspace, and that boundary held under everything the audit threw at it. What
+was at stake was the platform's ability to administer itself.
+
+**Decision. Rank the two roles, define "live platform owner" exactly once, and
+make the count and the mutation one critical section.**
+
+`PLATFORM_OWNER > PLATFORM_ADMIN`. An admin may not disable, delete, or revoke
+the role of an account holding platform ownership. An owner may act on any
+platform account, including another owner, while at least one live owner would
+remain afterwards.
+
+*Live* means `platform_role = PLATFORM_OWNER AND is_active AND deleted_at IS
+NULL`, written once in `app/platform/hierarchy.py` and imported by every caller.
+That single definition is the actual repair. The bug was never a wrong `WHERE`
+clause somebody could have spotted in review — it was that "is a platform owner"
+had two independent spellings, one in the account lifecycle and one in the role
+lifecycle, and they disagreed about what a deleted account is. A second reviewer
+reading either one would have found nothing wrong with it.
+
+**Why a target-aware dependency rather than `PlatformOwnerDep`.** The obvious
+fix is to put `DELETE /platform/users/{id}` behind the owner-only dependency
+that already exists, and it is the wrong one: it repairs the boundary by
+deleting the job. Shutting down an abusive or compromised customer account
+*now* is ordinary platform administration, and an installation whose owner is
+asleep should not have to wait for them. The distinction that matters is not who
+is calling — it is who is being called about. So `PlatformAccountTargetDep`
+resolves the target and applies the hierarchy, two routes carry it, and the
+other nine keep plain staff authority. `enable` is deliberately among the nine:
+it is the only account route that *restores* authority, so it cannot be the path
+by which an installation loses its owners, and it is the way back if they are
+ever suspended.
+
+**Why the service checks again.** A route dependency protects the routes it is
+attached to. `AccountService` is a service, and the next caller — a second
+route, a worker, an operator command — inherits nothing from it. The finding
+reached HTTP precisely because one layer held the only guard and the other was
+assumed to, so the two layers now answer independently.
+
+**Why a lock, and why a singleton one.** Every guard here reads a set and then
+acts on it, which is check-then-act and is worth nothing unserialised: two
+owners removing each other at the same instant both read "two owners, mine may
+go" and both commit. `require_surviving_platform_owner` takes
+`pg_advisory_xact_lock` before it counts, so the count, the decision and the
+mutation are one section. An advisory lock rather than a row lock because the
+invariant is about a *set* and no row represents it — and the specific race is
+two transactions each locking the row it is about to remove, which serialises
+nothing, because they are different rows. This is the same architectural shape
+`WorkspaceService` uses for the tenant owner set via `TenantRepository.lock`;
+the only difference is that a workspace has a row to lock and a platform does
+not.
+
+**Why a tombstone stops holding the role.** Deletion clears `platform_role`
+while writing the tombstone, and the role the account held is recorded in the
+audit entry's `previous_platform_role`. History is kept where history belongs,
+and the live authority table stops asserting something untrue. This does not
+replace the lifecycle filter — tombstones written before this change keep their
+column, and the filter is what makes them harmless — it is the second lock on
+the same door, making the data true rather than only the readers careful.
+
+**Consequences.**
+
+A platform admin now sees `403 permission_denied` on two routes they previously
+had, against one class of target. Everything else they could do, they still can.
+
+Four paths can take platform ownership away and all four are guarded: the two
+HTTP routes, `roles revoke`, and the demotion hidden inside `roles grant <owner>
+platform_admin` — a command whose name suggests it only ever adds. That last one
+is the reason the invariant follows the *shape of the act* rather than the
+subcommand it arrived under.
+
+`grant` also now refuses a deleted account outright and a disabled one until it
+is re-enabled. Writing authority onto a row that can never authenticate again
+produces an audit entry saying somebody was made a platform owner, and no owner
+at the end of it.
+
+**What is proved rather than argued.**
+`tests/integration/test_platform_hierarchy.py` drives the full actor-by-target
+matrix over HTTP and checks the row after every call, because the finding *was*
+a 200 that tombstoned an owner — a status code alone would not settle it. It
+also covers self-delete and self-disable for both roles, which had no test at
+all and whose guard a mutation had already been shown to survive silently.
+`tests/integration/test_platform_owner_concurrency.py` races all four removal
+paths against each other on a real database with committed transactions and a
+forced lock hand-off; in each, exactly one removal lands and one live owner
+remains. `tests/integration/test_platform_role_lifecycle.py` asks the "live"
+definition about every lifecycle state an account can be in, in both directions,
+so a guard that refused every revocation would fail as loudly as one that
+allowed the last.
+
+---
+
+## ADR-100 — Six Parent/Child Relations Are Tenant-Agreed in the Database
+
+**Context.** Every tenant-owned table carries `tenant_id`, and every foreign key
+between two of them referenced the parent's `id` alone. PostgreSQL therefore
+accepted a conversation in workspace A whose contact belonged to workspace B,
+and an audit demonstrated it with a direct `INSERT`.
+
+Nothing in the application builds such a row. Conversations and contacts are
+created only by the webhook ingestion path, which derives every id from one
+resolved account inside one tenant-scoped service, and a sweep of ten relational
+invariants across the schema found zero violations other than the one inserted
+by hand. This was never a reachable defect and is not recorded as one.
+
+What it was is the difference between two claims that sound alike. "No code path
+does this" is a property of today's call graph, and it has to be re-established
+by every reviewer of every writer anybody adds. "This cannot be" is a property
+of the schema, and it re-establishes itself.
+
+**Decision. Composite foreign keys of the form `(tenant_id, parent_id) ->
+parent(tenant_id, id)` on six relations, and deliberately not on the other
+twenty-four.**
+
+```
+conversations    -> contacts            whose conversation this is
+conversations    -> whatsapp_accounts   which number it arrived on
+messages         -> conversations       the transcript itself
+documents        -> knowledge_bases     the corpus a document joins
+document_chunks  -> documents           what a retrieval actually reads
+document_chunks  -> knowledge_bases     how a retrieval scopes itself
+```
+
+**Why these six and not all thirty.** Adding constraints mechanically is the
+failure mode this decision exists to avoid. The schema's other tenant-to-tenant
+relations include `usage_events`, `analytics_events` and `campaign_recipients` —
+high-volume tables whose worst case under a mismatch is a wrong number on a
+dashboard. These six carry customer messages and the corpus a retrieval answers
+from, where a mismatch would be a confidentiality event. A rule that cannot say
+why it stops is a rule that will be applied to the write path of the largest
+table in the system by somebody who read it as a checklist.
+
+`document_chunks` gets both its parents rather than one, because it is the table
+a retrieval reads and `KnowledgeRepository.search` filters chunks by
+`knowledge_base_id` directly — that column is a scoping field in its own right,
+not a denormalised convenience, and pinning only `document_id` would leave the
+row half-anchored.
+
+**Why the parents gain a unique constraint that cannot fail.** `UNIQUE
+(tenant_id, id)` on a table whose primary key is `id` is not a uniqueness claim;
+a composite foreign key can only reference a uniquely constrained set of
+columns, and this is the target. It is worth a comment at each site, because it
+reads as redundant and removing it would silently take the constraint with it.
+
+**Why the single-column keys were dropped rather than kept alongside.**
+`(tenant_id, child_id)` referencing `(tenant_id, id)` already guarantees a
+parent row with that id. Keeping `child_id -> parent.id` beside it is the same
+check paid for twice on every insert into the two largest tables in the schema.
+`ON DELETE CASCADE` carries over unchanged and the explicit indexes on the child
+columns are untouched — they serve queries, not the constraint.
+
+**Why the migration refuses rather than repairs.** `ALTER TABLE ... ADD FOREIGN
+KEY` validates existing rows, so a deployment holding a crossed row fails on the
+constraint. Migration 0053 runs the six counting queries first only so the error
+names the rows instead of the constraint. It deletes and rewrites nothing: a
+cross-tenant row is evidence of something worth understanding, and a migration
+is the wrong place to decide what that was.
+
+**Consequences.**
+
+The invariant is now structural for the relations where it matters most, and
+`docs/AUTHORIZATION.md` §6.19 records which those are and why the rest are not —
+so the next person to ask "why only six" finds the reasoning rather than
+inferring an oversight.
+
+`tenant_id` on the constrained children now participates in more than one
+foreign key, which broke a metadata test that unpacked `tenant_id.foreign_keys`
+as a single value. That test now selects the key by its target table, which is
+the question it always meant to ask.
+
+**What is proved rather than argued.**
+`tests/integration/test_tenant_relational_integrity.py` writes every probe as
+raw SQL, deliberately: going through a repository would test the application's
+tenant scoping, which is the layer this is meant to do without. Each of the six
+relations is attempted with a parent from another workspace and refused by
+PostgreSQL, and each is paired with the same statement using a same-workspace
+parent and accepted — without that half, a constraint that rejected everything
+would pass. A last test runs the migration's own six counting queries against a
+populated schema, so the code that guards a deployment at three in the morning
+has been executed at least once.
+

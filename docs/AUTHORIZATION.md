@@ -21,7 +21,15 @@ of the **user row**, while the middle three are a property of a **membership**.
 | **MEMBER** | Holds a membership in the active workspace | `memberships.role` |
 | **TENANT_ADMIN** | Administers one workspace | `memberships.role` |
 | **TENANT_OWNER** | Owns one workspace; the only role that can touch money | `memberships.role` |
-| **PLATFORM_STAFF** | `PLATFORM_OWNER` or `PLATFORM_ADMIN` | `users.platform_role` |
+| **PLATFORM_ADMIN** | Administers the platform, over accounts that are not platform owners | `users.platform_role` |
+| **PLATFORM_OWNER** | Administers the platform, platform staff included | `users.platform_role` |
+
+**The two platform roles are ranked.** `PLATFORM_OWNER` outranks
+`PLATFORM_ADMIN`, and the rank is load-bearing in exactly one place: an admin
+may not disable or delete an account that holds platform ownership, and may not
+take that role away. Everywhere else they are equals - nine of the eleven
+platform routes are staff-wide, because reading the estate, settling an invoice
+and suspending a workspace are the job rather than a privilege. See §6.18.
 
 **Owning a workspace confers nothing across the platform, and holding a platform
 role confers no membership.** The two guards read different sources
@@ -586,8 +594,8 @@ be tempted to relax.
 | **Member** | yes | yes¹ | no | no | no | no | yes¹ | **no** |
 | **Workspace admin** | yes | yes¹ | yes² | no | no | no | yes¹ | **no** |
 | **Workspace owner** | yes | yes¹ | yes | yes | yes³ | no | yes¹ | **no** |
-| **Platform admin** | no⁴ | — | no⁴ | no⁴ | no | yes | yes¹ | yes |
-| **Platform owner** | no⁴ | — | no⁴ | no⁴ | no | yes | yes¹ | yes |
+| **Platform admin** | no⁴ | — | no⁴ | no⁴ | no | yes | **no**⁵ | yes, unless the target is a platform owner⁶ |
+| **Platform owner** | no⁴ | — | no⁴ | no⁴ | no | yes | **no**⁵ | yes, while one live platform owner remains⁶ |
 
 1. Subject to the ownership rules: you cannot leave, and cannot close your
    account, while you are the last active owner of a live workspace.
@@ -598,6 +606,11 @@ be tempted to relax.
    reading the estate still cannot open a customer's inbox, and holding a
    platform role grants nothing inside a workspace. The two are separate
    dependencies over separate columns, and the separation is the point.
+5. Through the platform API. `DELETE /auth/me` is how anybody closes their own
+   account, and it asks for the password first; the admin routes refuse a
+   self-target with a `422`, because locking yourself out of the platform is
+   not a thing to do by accident and there may be nobody to undo it.
+6. See §6.18.
 
 **The column that matters most is the last one.** No workspace role reaches
 another person's Wasla identity. `DELETE /auth/me` takes no target — the
@@ -650,6 +663,145 @@ and blocks authentication; it does not withdraw memberships, so the workspace
 keeps an owner who cannot sign in and is *not* suspended. That is a weaker
 guarantee than the deletion path's, and it is stated here rather than left to be
 discovered: an operator who wants the workspace stopped should suspend it.
+
+### 6.18 The platform staff hierarchy, and the owner who must remain
+
+Added by the AUTHZ-01/AUTHZ-02 remediation (ADR-099). Before it, the two platform roles
+were the same authority wearing different names: all eleven `/platform/*` routes
+sat behind `PlatformStaffDep`, `PlatformOwnerDep` was defined and guarded zero
+routes, and `AccountService.delete` asked only whether the target was the
+*caller* — never what the target was. A platform admin could disable and then
+permanently tombstone every platform owner on the installation, and keep reading
+`/platform/tenants` afterwards.
+
+No customer data was reachable through it; a platform role grants nothing inside
+a workspace, and that boundary was never in question. What could be lost was the
+platform's own way back in, irreversibly, since a tombstone is never reusable.
+
+**The policy.**
+
+```
+PLATFORM_OWNER > PLATFORM_ADMIN
+```
+
+An admin may not disable, delete, or revoke the role of an account holding
+platform ownership. An owner may act on any platform account, including another
+owner, while doing so leaves at least one **live** platform owner. Tenant roles
+are untouched by all of this and imply no platform authority whatsoever.
+
+**The route matrix.** Eleven routes, and the hierarchy narrowed two of them.
+
+| Route | Platform admin | Platform owner | Guard |
+|---|---|---|---|
+| `GET /platform/overview` | yes | yes | `PlatformStaffDep` |
+| `GET /platform/tenants` | yes | yes | `PlatformStaffDep` |
+| `GET /platform/audit-logs` | yes | yes | `PlatformStaffDep` |
+| `POST /platform/invoices/{id}/payments` | yes | yes | `PlatformStaffDep` |
+| `POST /platform/invoices/{id}/void` | yes | yes | `PlatformStaffDep` |
+| `POST /platform/tenants/{id}/suspend` | yes | yes | `PlatformStaffDep` |
+| `POST /platform/tenants/{id}/restore` | yes | yes | `PlatformStaffDep` |
+| `POST /platform/tenants/{id}/ownership` | yes | yes | `PlatformStaffDep` |
+| `POST /platform/users/{id}/enable` | yes | yes | `PlatformStaffDep` |
+| `POST /platform/users/{id}/disable` | **not against an owner** | yes, guarded | `PlatformAccountTargetDep` |
+| `DELETE /platform/users/{id}` | **not against an owner** | yes, guarded | `PlatformAccountTargetDep` |
+
+`PlatformAccountTargetDep` rather than `PlatformOwnerDep`, deliberately. Making
+the destructive routes owner-only would have fixed the finding by removing the
+job: shutting down an abusive or compromised customer account *now* is ordinary
+platform administration, and an installation whose owner is asleep should not
+have to wait. The distinction that matters is not who is calling, it is who is
+being called about — so that is what the dependency asks.
+
+`enable` keeps plain staff authority because it is the only one of the three
+that *restores* authority. It cannot be the route by which an installation loses
+its owners, and it is the way back if they are ever suspended with nobody senior
+available to undo it.
+
+**Enforced twice, on purpose.** The dependency protects the routes it is
+attached to; `AccountService.delete` and `.disable` check again, because a
+service inherits nothing from a route guard and the next caller — a second
+route, a worker, an operator command — has not been written yet. The finding
+reached HTTP precisely because one layer held the only guard and the other was
+assumed to.
+
+**"Live platform owner" has exactly one definition.**
+
+```
+platform_role = PLATFORM_OWNER  AND  is_active  AND  deleted_at IS NULL
+```
+
+It lives in `app/platform/hierarchy.py`, and every last-owner question uses it.
+The second finding was that it had two: `PlatformRoleService.owners()` selected
+on `platform_role` alone, and because a tombstoned account keeps its role, a
+deleted owner still counted as "remaining". Delete one of two owners, revoke the
+survivor, and the guard designed to prevent an installation reaching zero owners
+said yes. No adversary is needed — that is simply the order an operator does
+things in.
+
+Four supported paths can remove platform ownership, and all four take the same
+guard: `DELETE /platform/users/{id}`, `POST /platform/users/{id}/disable`,
+`python -m app.platform.roles revoke`, and the demotion hidden inside
+`python -m app.platform.roles grant <owner> platform_admin` — a command whose
+name suggests it only ever adds.
+
+**A tombstone holds no role.** Deletion now clears `platform_role` as it writes
+the tombstone, and the role the account held goes into the audit entry's
+`previous_platform_role`. The history is kept where history belongs; the live
+authority table stops asserting something untrue. Tombstones written before this
+change keep their column, which is why the lifecycle filter above is the real
+fix and clearing the column is the second lock on the same door.
+
+**Counting is not enough, so it happens under a lock.** Two owners removing each
+other at the same instant both read "two owners, mine may go" and both commit.
+`require_surviving_platform_owner` takes a singleton `pg_advisory_xact_lock`
+before it counts, so the count, the decision and the mutation are one critical
+section — the same shape `WorkspaceService` uses for the tenant owner set,
+differing only in that a platform has no row to lock. Five forced races prove it
+against a real database; in each, exactly one removal lands and one live owner
+remains.
+
+**Revocation is not retroactive, and that is correct.** A request whose
+authorization check passed before a concurrent revocation committed still
+completes; the next request is refused. This is ordinary read-committed
+behaviour rather than a flaw — the request's authorization was genuinely valid
+at the moment it was taken — and "revocation is immediate" should be read
+precisely: immediate for every request that *starts* after the revocation
+commits, not retroactive for one already admitted.
+
+### 6.19 Tenant parent/child agreement, enforced by PostgreSQL (ADR-100)
+
+Every tenant-owned table carries `tenant_id`, and until migration 0053 every
+foreign key between two of them referenced the parent's `id` alone — so the
+database accepted a conversation in workspace A holding workspace B's contact.
+No API path builds one, and a sweep of ten relational invariants found none, so
+this was defence in depth rather than a reachable defect. What it closes is the
+gap between "no code path does this" and "this cannot be": the first has to be
+re-established by every reviewer of every future writer.
+
+Six relations are now composite foreign keys of the form
+`(tenant_id, parent_id)` referencing `parent(tenant_id, id)`:
+
+| Child | Column | Parent | Why this one |
+|---|---|---|---|
+| `conversations` | `contact_id` | `contacts` | whose conversation this is |
+| `conversations` | `account_id` | `whatsapp_accounts` | which number it arrived on |
+| `messages` | `conversation_id` | `conversations` | the transcript itself |
+| `documents` | `knowledge_base_id` | `knowledge_bases` | the corpus a document joins |
+| `document_chunks` | `document_id` | `documents` | what a retrieval actually reads |
+| `document_chunks` | `knowledge_base_id` | `knowledge_bases` | how a retrieval scopes itself |
+
+The schema has thirty tenant-to-tenant parent/child relations; the other
+twenty-four are **deliberately not** constrained. These six are the ones where a
+mismatch would be a confidentiality event rather than an inconsistency. Adding
+the rest mechanically would buy write-path cost on the highest-volume tables in
+the schema — `usage_events`, `analytics_events` — for relations whose worst case
+is a wrong number on a dashboard.
+
+The parents carry a `UNIQUE (tenant_id, id)` that looks redundant and is not: a
+composite foreign key can only reference a uniquely constrained set of columns.
+The single-column keys were dropped rather than kept alongside, since the
+composite already implies them and keeping both is the same check paid for twice
+on every insert.
 
 ## 7. Known gaps, not fixed here
 
