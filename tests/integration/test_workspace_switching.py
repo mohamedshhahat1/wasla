@@ -360,3 +360,129 @@ async def test_global_revocation_invalidates_a_switched_token(
     after = await http.get(f"{API}/auth/me", headers=_bearer(token))
 
     assert after.status_code == 401
+
+
+# ---------------------------------------- a workspace that is not yours
+
+
+async def _stranger_workspace(session: AsyncSession, slug: str) -> Tenant:
+    """A real, active workspace that belongs to somebody else entirely.
+
+    Owned by another account rather than left membership-less, because the
+    branch under test is "you are not in it" and an unowned workspace is a
+    shape production never has.
+    """
+    other = User(
+        email=f"stranger-{slug}@example.com",
+        hashed_password=hash_password(PASSWORD),
+        is_active=True,
+        email_verified_at=datetime.now(UTC),
+    )
+    session.add(other)
+    await session.flush()
+    tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
+    session.add(tenant)
+    await session.flush()
+    session.add(
+        Membership(
+            tenant_id=tenant.id,
+            user_id=other.id,
+            role=TenantRole.TENANT_OWNER,
+            status=MembershipStatus.ACTIVE,
+        )
+    )
+    await session.flush()
+    return tenant
+
+
+def _refusal(response: Response) -> tuple[int, dict[str, Any]]:
+    """Everything the caller can see, minus what varies per request by design.
+
+    `request_id` is a correlation handle stamped on every error and differs
+    between any two responses, so comparing it would make the test fail for a
+    reason that has nothing to do with enumeration.
+    """
+    error = dict(response.json()["error"])
+    error.pop("request_id", None)
+    return response.status_code, error
+
+
+async def test_a_foreign_workspace_and_a_nonexistent_one_answer_identically(
+    http: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """The workspace oracle, on every route that takes a slug from the client.
+
+    `_resolve_workspace` refuses "no such workspace" and "you are not in it" in
+    one branch, deliberately, so that nobody can map which workspaces exist by
+    asking. Nothing pinned that. `test_a_workspace_without_a_membership_is_not
+    _switchable` asserts the foreign case is a 404 and stops there - it passes
+    unchanged against an implementation that answers 404 for a foreign slug and
+    something else for an invented one, which is the same leak read backwards.
+
+    So both are asked here, and the two answers are compared rather than
+    matched against a constant. Changing either branch alone fails this;
+    changing the wording of both together does not, which is the right
+    sensitivity for a property about indistinguishability.
+    """
+    person = await _person(db_session)
+    await _workspace(db_session, user=person, slug="alpha")
+    await _stranger_workspace(db_session, slug="theirs")
+
+    access = (await _login(http))["access_token"]
+
+    async def _refresh(slug: str) -> Response:
+        # A fresh token per probe. A refused refresh still spends the one it
+        # was given, so reusing it for the second probe would be a replay - the
+        # 401 family teardown, not the workspace branch this test is about.
+        token = (await _login(http))["refresh_token"]
+        return await http.post(
+            f"{API}/auth/refresh",
+            json={"refresh_token": token, "workspace_slug": slug},
+        )
+
+    async def _login_to(slug: str) -> Response:
+        return await http.post(
+            f"{API}/auth/login",
+            json={"email": EMAIL, "password": PASSWORD, "workspace_slug": slug},
+        )
+
+    probes: list[tuple[str, Response, Response]] = [
+        (
+            "POST /auth/workspace",
+            await _switch(http, access, "theirs"),
+            await _switch(http, access, "nowhere"),
+        ),
+        ("POST /auth/login", await _login_to("theirs"), await _login_to("nowhere")),
+        ("POST /auth/refresh", await _refresh("theirs"), await _refresh("nowhere")),
+    ]
+
+    for route, foreign, invented in probes:
+        assert _refusal(foreign) == _refusal(invented), (
+            f"{route} distinguishes a workspace that exists from one that does not: "
+            f"{foreign.status_code} {foreign.text} vs {invented.status_code} {invented.text}"
+        )
+        # Non-vacuity. Two 200s would compare equal and prove nothing, and a
+        # 422 would mean the payload never reached the branch under test.
+        assert foreign.status_code == 404, f"{route} -> {foreign.status_code}"
+
+
+async def test_a_workspace_the_caller_does_belong_to_is_reachable(
+    http: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """The control for the test above.
+
+    Without it, an endpoint broken into refusing every slug would satisfy the
+    indifference assertion perfectly.
+    """
+    person = await _person(db_session)
+    await _workspace(db_session, user=person, slug="alpha")
+    await _workspace(db_session, user=person, slug="beta")
+    await _stranger_workspace(db_session, slug="theirs")
+
+    session = await _login(http)
+    reachable = await _switch(http, session["access_token"], "beta")
+
+    assert reachable.status_code == 200, reachable.text
+    assert reachable.json()["active_workspace"]["slug"] == "beta"
