@@ -141,8 +141,23 @@ class ConversationProjectionService:
             )
         return stored
 
-    async def project_status(self, *, status: DeliveryStatus) -> Message | None:
-        """Advance the delivery state of a message Wasla sent."""
+    async def project_status(
+        self,
+        *,
+        status: DeliveryStatus,
+        message: Message | None = None,
+    ) -> Message | None:
+        """Advance the delivery state of a message Wasla sent.
+
+        `message` is the row the ingestion service already resolved from the
+        provider id, across every workspace that has held the number. Passed in
+        rather than looked up again because that resolution is what survives a
+        number changing hands: looking it up here, inside one workspace, is
+        exactly the step that dropped the previous owner's in-flight statuses
+        on the floor (MSG-04). The tenant-scoped lookup remains the fallback,
+        so a caller that has not resolved anything - a replay, a test - behaves
+        as it always did.
+        """
         mapped = DELIVERY_STATUSES.get(status.status)
         if mapped is None:
             logger.info(
@@ -151,16 +166,20 @@ class ConversationProjectionService:
             )
             return None
 
-        message = await self._messages.apply_status(
+        at = status.timestamp or datetime.now(UTC)
+        if message is not None:
+            return self._messages.advance_status(message, status=mapped, at=at)
+
+        resolved = await self._messages.apply_status(
             wa_message_id=status.message_id,
             status=mapped,
-            at=status.timestamp or datetime.now(UTC),
+            at=at,
         )
-        if message is None:
+        if resolved is None:
             # Expected, not an error: a template sent from Meta's own console,
             # or traffic that predates this number being connected to Wasla.
             logger.info(
                 "whatsapp.status_for_unknown_message",
                 extra={"wa_message_id": status.message_id},
             )
-        return message
+        return resolved

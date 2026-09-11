@@ -91,6 +91,10 @@ def test_whatsapp_tables_declare_the_indexes_the_migrations_create() -> None:
         "ix_whatsapp_accounts_tenant_id",
         # Migration 0022. Unique, and partial: one *live* claim per number.
         "uq_whatsapp_accounts_live_phone_number_id",
+        # Migration 0054. Not partial, unlike the one above, and that is the
+        # point of it: released rows are exactly what the historical ownership
+        # resolver reads, so the live-only index cannot serve that query.
+        "ix_whatsapp_accounts_phone_number_id_ownership_started_at",
     }
     assert _index_names(as_table(WhatsAppEvent.__table__)) == {
         "ix_whatsapp_events_tenant_id",

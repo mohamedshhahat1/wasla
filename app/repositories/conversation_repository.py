@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 
 from sqlalchemy import ColumnElement, and_, or_
@@ -20,7 +21,7 @@ from app.db.models.conversation import (
     MessageStatus,
 )
 from app.db.models.sentiment import ConversationPriority
-from app.repositories.base import TenantScopedRepository
+from app.repositories.base import BaseRepository, TenantScopedRepository
 
 
 def _after_nullable(model: type[Conversation], after: Cursor) -> ColumnElement[bool]:
@@ -40,6 +41,49 @@ def _after_nullable(model: type[Conversation], after: Cursor) -> ColumnElement[b
         and_(column == after.sort_value, model.id < after.id),
         column.is_(None),
     )
+
+
+class OutboundMessageDirectory(BaseRepository[Message]):
+    """The one unscoped message lookup, and the only caller is the webhook.
+
+    A delivery status identifies itself by the provider message id, not by the
+    number it arrived on - so after a number changes hands, resolving the
+    workspace from the number and *then* looking the message up inside it finds
+    nothing, and every message the previous workspace had in flight stays
+    unreconciled for ever (MSG-04).
+
+    Unscoped, and therefore fenced three ways. The candidate workspaces are
+    supplied by the caller and come from `WhatsAppAccountDirectory.holders_of`,
+    so they are exactly the workspaces that have held the number Meta is
+    reporting about. An empty candidate set returns nothing rather than
+    searching the platform. And no API route reaches this class: it is
+    constructed by the ingestion service and by the inbound sweeper, both of
+    which are answering Meta rather than a person.
+    """
+
+    model = Message
+
+    async def find_by_wa_message_id(
+        self,
+        wa_message_id: str,
+        *,
+        tenant_ids: Sequence[uuid.UUID],
+    ) -> Message | None:
+        """The outbound message this provider id names, among these workspaces.
+
+        `UNIQUE(tenant_id, wa_message_id)` makes at most one row match per
+        workspace, and a provider id belongs to one workspace because a number
+        resolves to one live claim at a time - so this is a single row or none.
+        """
+        if not tenant_ids:
+            return None
+        return await self._first(
+            self._select().where(
+                Message.wa_message_id == wa_message_id,
+                Message.tenant_id.in_(tenant_ids),
+                Message.direction == MessageDirection.OUTBOUND,
+            )
+        )
 
 
 class ContactRepository(TenantScopedRepository[Contact]):
@@ -348,37 +392,73 @@ class MessageRepository(TenantScopedRepository[Message]):
         status: MessageStatus,
         at: datetime,
     ) -> Message | None:
-        """Project a delivery status onto its message.
+        """Project a delivery status onto its message, found in this workspace.
 
-        Statuses arrive out of order, so the projection never moves a message
-        backwards: a `delivered` arriving after `read` sets its timestamp but
-        leaves the status alone. Returns None when the message is unknown, which
-        is normal for traffic sent outside Wasla.
+        Returns None when the message is unknown, which is normal for traffic
+        sent outside Wasla. The ingestion path resolves the message itself,
+        across every workspace that has held the number, and calls
+        `advance_status` with what it found (MSG-04); this remains the lookup
+        for callers holding only an id and a workspace.
         """
         message = await self.get_by_wa_message_id(wa_message_id)
         if message is None:
             return None
+        return self.advance_status(message, status=status, at=at)
 
+    def advance_status(
+        self,
+        message: Message,
+        *,
+        status: MessageStatus,
+        at: datetime,
+    ) -> Message:
+        """Move a message forward, and never backwards.
+
+        Statuses arrive out of order and are redelivered, so every timestamp is
+        written once and the visible status only ever climbs.
+
+        **Delivery evidence outranks a failure report, and that is the ordering
+        below.** `failed` used to be set unconditionally and to win from any
+        state, which made two contradictions reachable: a message the customer
+        demonstrably read could be downgraded to `failed`, and a row could
+        carry `failed` beside a non-null `delivered_at` - a pair a reader has
+        to pick a side on, and the projection had already picked the wrong one
+        (MSG-14). Ranking `failed` above `sent` and below `delivered` settles
+        both: a send that never arrived still fails, and a message Meta has
+        confirmed arriving is not un-delivered by a later report.
+
+        The report is not discarded either way. `failure_reason` records that
+        Meta said the message failed, so a contradiction is visible on the row
+        rather than only in a log nobody is reading.
+        """
         if status is MessageStatus.DELIVERED and message.delivered_at is None:
             message.delivered_at = at
         elif status is MessageStatus.READ and message.read_at is None:
             message.read_at = at
-        elif status is MessageStatus.FAILED:
-            message.status = MessageStatus.FAILED
-            return message
+        elif status is MessageStatus.FAILED and message.failure_reason is None:
+            message.failure_reason = PROVIDER_REPORTED_FAILURE
 
         if _STATUS_ORDER[status] > _STATUS_ORDER[message.status]:
             message.status = status
         return message
 
 
+# What a provider `failed` status records when it cannot claim the message.
+# A fixed sentence rather than Meta's own error text: that text can echo
+# fragments of the request, and this column is read back by an API.
+PROVIDER_REPORTED_FAILURE = "WhatsApp reported this message as failed."
+
 # Only the outbound progression is ordered; the rest share the floor so an
 # unexpected status can never appear to advance a message.
+#
+# `FAILED` sits between `SENT` and `DELIVERED` deliberately. It has to beat
+# `sent`, which is only an acknowledgement that Meta accepted the message, and
+# it must not beat `delivered` or `read`, which are reports that it arrived.
 _STATUS_ORDER: dict[MessageStatus, int] = {
     MessageStatus.RECEIVED: 0,
     MessageStatus.PENDING: 0,
     MessageStatus.SENT: 1,
-    MessageStatus.DELIVERED: 2,
-    MessageStatus.READ: 3,
-    MessageStatus.FAILED: 4,
+    MessageStatus.FAILED: 2,
+    MessageStatus.DELIVERED: 3,
+    MessageStatus.READ: 4,
 }

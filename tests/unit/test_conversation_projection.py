@@ -52,14 +52,29 @@ def test_every_status_has_an_order() -> None:
 
 
 def test_outbound_progression_is_strictly_increasing() -> None:
+    """The order a message actually travels in, each step outranking the last."""
     progression = (
         MessageStatus.SENT,
         MessageStatus.DELIVERED,
         MessageStatus.READ,
-        MessageStatus.FAILED,
     )
     ranks = [_STATUS_ORDER[status] for status in progression]
     assert ranks == sorted(set(ranks))
+
+
+def test_a_failure_report_outranks_sent_but_not_a_delivery() -> None:
+    """Where `failed` sits, and why it sits there (MSG-14).
+
+    A send Meta accepted and then could not deliver must end up `failed`, so
+    `failed` has to beat `sent`. A message Meta has confirmed arriving must not
+    be un-delivered by a later failure report, so `failed` must not beat
+    `delivered` or `read` - and the two contradictions that made reachable, a
+    read message downgraded to failed and a row carrying `failed` beside a
+    non-null `delivered_at`, are what this ranking removes.
+    """
+    assert _STATUS_ORDER[MessageStatus.SENT] < _STATUS_ORDER[MessageStatus.FAILED]
+    assert _STATUS_ORDER[MessageStatus.FAILED] < _STATUS_ORDER[MessageStatus.DELIVERED]
+    assert _STATUS_ORDER[MessageStatus.FAILED] < _STATUS_ORDER[MessageStatus.READ]
 
 
 def test_arrival_states_share_the_floor() -> None:

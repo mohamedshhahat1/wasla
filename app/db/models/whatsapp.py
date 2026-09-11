@@ -20,7 +20,16 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint, text
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -96,6 +105,16 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
             postgresql_where=text("released_at IS NULL"),
         ),
         Index("ix_whatsapp_accounts_tenant_id", "tenant_id"),
+        # Who held this number when an event happened. Ordered by claim time
+        # so the historical resolver walks a number's claims newest first and
+        # stops at the interval containing the event (ADR-101). Released rows
+        # are the ones this query exists to find, so the partial live-only
+        # index above cannot serve it.
+        Index(
+            "ix_whatsapp_accounts_phone_number_id_ownership_started_at",
+            "phone_number_id",
+            "ownership_started_at",
+        ),
         # The target of the composite foreign key that pins a conversation to
         # an account in its own workspace (ADR-100). Not a new uniqueness claim
         # - `id` is already the primary key - but a composite foreign key can
@@ -124,6 +143,24 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
         DateTime(timezone=True),
         nullable=True,
     )
+    # When this workspace's claim on the number began. The other half of
+    # `released_at`, and together they are the tenure interval inbound routing
+    # asks about: `[ownership_started_at, released_at)`.
+    #
+    # A column of its own rather than `created_at`, which coincides with it
+    # today only because `connect` is this table's one writer. Attributing a
+    # customer's message to the right workspace is not a decision to rest on a
+    # generic audit timestamp continuing to mean something specific (ADR-101).
+    #
+    # `connect` sets it explicitly, at the instant it decides the claim is
+    # granted. The server default is for every other way a row can come into
+    # existence - a fixture, a seed - where "the claim began when the row did"
+    # is both true and the only defensible answer.
+    ownership_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
     # Set when the workspace gives the number up. Non-null takes the row out of
     # the uniqueness index above, which is what frees the number.
     released_at: Mapped[datetime | None] = mapped_column(
@@ -143,6 +180,19 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
     @property
     def is_active(self) -> bool:
         return self.status is WhatsAppAccountStatus.ACTIVE and self.released_at is None
+
+    def held_at(self, instant: datetime) -> bool:
+        """Whether this workspace held the number at `instant`.
+
+        Half-open on purpose: `[ownership_started_at, released_at)`. A claim
+        and the release that precedes it can share a timestamp to the
+        microsecond when a number moves quickly, and a closed interval would
+        make that instant belong to two workspaces at once - which is the one
+        answer this method must never give.
+        """
+        if instant < self.ownership_started_at:
+            return False
+        return self.released_at is None or instant < self.released_at
 
     @property
     def is_released(self) -> bool:
