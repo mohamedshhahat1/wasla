@@ -1,10 +1,19 @@
 """Platform administration endpoints.
 
-Behind `PlatformStaffDep`, which is a different authority from every other route
-in this API: it is a property of the user, not of a membership. Owning a
+Behind platform authority, which is a different authority from every other
+route in this API: it is a property of the user, not of a membership. Owning a
 workspace grants nothing here, and holding a platform role grants nothing
 *inside* a workspace - a platform administrator reading these figures still
 cannot open a customer's inbox.
+
+**Two platform roles, and they are no longer the same thing.** Nine routes take
+`PlatformStaffDep`: an owner or an admin, because reading the platform's
+figures, settling an invoice and suspending a workspace are the job. The two
+that end an account's authority - `disable` and `delete` - take
+`PlatformAccountTargetDep`, which additionally asks what the *target* is and
+refuses an admin acting on a platform owner. Until that existed the pair were
+identical over HTTP and the lesser could permanently tombstone the greater
+(AUTHZ-01). `enable` stays on `PlatformStaffDep` and the route says why.
 
 Reads, plus a short list of writes that each needed an argument to be here.
 
@@ -43,6 +52,7 @@ from fastapi import APIRouter, Query
 from app.api.dependencies import (
     AccountServiceDep,
     PlatformAccessAuditDep,
+    PlatformAccountTargetDep,
     PlatformAnalyticsServiceDep,
     PlatformAuditLogRepositoryDep,
     PlatformInvoiceServiceDep,
@@ -214,7 +224,7 @@ async def platform_audit_logs(
 )
 async def disable_user(
     user_id: uuid.UUID,
-    staff: PlatformStaffDep,
+    staff: PlatformAccountTargetDep,
     accounts: AccountServiceDep,
 ) -> AccountStateResponse:
     """Platform-authorized, and deliberately not available to a workspace.
@@ -250,6 +260,14 @@ async def enable_user(
 ) -> AccountStateResponse:
     """Re-enabling bumps the version too, and that is the point.
 
+    The one account route that keeps plain `PlatformStaffDep`, deliberately.
+    Its two neighbours became target-aware because they *remove* authority, and
+    restoring an account cannot: enabling a suspended platform owner puts an
+    owner back, which is the direction the AUTHZ-01 guards exist to protect. It
+    is also the recovery path - an admin who finds the installation's owners
+    suspended must be able to undo that without one of them to authorise it.
+
+
     A token minted before the suspension may still be signed and unexpired.
     Without the bump, restoring the account would hand that token its authority
     back - so a disable/enable cycle would resurrect exactly the credentials the
@@ -271,7 +289,7 @@ async def enable_user(
 )
 async def delete_user(
     user_id: uuid.UUID,
-    staff: PlatformStaffDep,
+    staff: PlatformAccountTargetDep,
     accounts: AccountServiceDep,
 ) -> AccountStateResponse:
     """Platform lifecycle operation; deleted identities are never reusable."""

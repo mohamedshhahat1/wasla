@@ -7,6 +7,7 @@ could forge to aim a route at another workspace's data.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated
@@ -15,7 +16,7 @@ from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.dependencies import RedisDep, SessionDep, SettingsDep
-from app.core.exceptions import AuthenticationError, PermissionDeniedError
+from app.core.exceptions import AuthenticationError, NotFoundError, PermissionDeniedError
 from app.core.rate_limit import RateLimiter
 from app.core.reauth import ReauthProofStore
 from app.core.security import TokenClaims, TokenType, decode_token
@@ -27,6 +28,7 @@ from app.db.models.billing import LimitKey
 from app.integrations.billing import build_checkout_provider
 from app.integrations.whatsapp.ownership import MetaOwnershipVerifier
 from app.platform.access_audit import PlatformAccessAudit
+from app.platform.hierarchy import require_platform_authority_over
 from app.platform.platform_analytics import PlatformAnalyticsService
 from app.platform.platform_billing import PlatformBillingService
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
@@ -795,3 +797,41 @@ PlatformOwnerDep = Annotated[
     CurrentUser,
     Depends(require_platform_roles(PlatformRole.PLATFORM_OWNER)),
 ]
+
+
+async def require_platform_authority(
+    user_id: uuid.UUID,
+    staff: PlatformStaffDep,
+    session: SessionDep,
+) -> CurrentUser:
+    """Platform staff, and the hierarchy checked against *this* target.
+
+    The route half of AUTHZ-01. `PlatformStaffDep` alone asks only whether the
+    caller is staff, which is why a platform admin could tombstone every
+    platform owner on the installation - the target's own standing was never
+    part of the question.
+
+    Deliberately not `PlatformOwnerDep`. Making the destructive routes
+    owner-only would fix the finding by removing the job: shutting down an
+    abusive or compromised customer account *now* is ordinary platform
+    administration, and an installation whose owner is asleep should not have to
+    wait. The distinction that actually matters is not who is calling, it is who
+    is being called about - so that is what this asks.
+
+    Runs before the route body, and the service checks again. Not belt and
+    braces for its own sake: this protects the routes it is attached to, and
+    `AccountService` protects itself against the caller that has not been
+    written yet - a second route, a worker, an operator command. The finding
+    reached HTTP precisely because the only guard lived at one of those layers
+    and the other was assumed.
+    """
+    target = await UserRepository(session).get_by_id(user_id)
+    if target is None:
+        # The same refusal the service gives, raised here so the two layers
+        # cannot disagree about what a missing account looks like.
+        raise NotFoundError("No account matches that identifier.")
+    require_platform_authority_over(actor=staff.user, target=target)
+    return staff
+
+
+PlatformAccountTargetDep = Annotated[CurrentUser, Depends(require_platform_authority)]

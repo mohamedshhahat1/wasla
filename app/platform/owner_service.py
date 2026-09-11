@@ -32,6 +32,11 @@ from app.core.logging import get_logger
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.enums import PlatformRole
 from app.db.models.user import User
+from app.platform.hierarchy import (
+    live_platform_role,
+    live_platform_staff,
+    require_surviving_platform_owner,
+)
 from app.services.audit_service import AuditTrail
 
 logger = get_logger(__name__)
@@ -88,13 +93,33 @@ class PlatformRoleService:
         return user
 
     async def owners(self) -> list[User]:
-        """Everyone currently holding the owner role."""
-        statement = select(User).where(User.platform_role == PlatformRole.PLATFORM_OWNER)
+        """Everyone who can exercise platform ownership right now.
+
+        This used to select on `platform_role` alone, and that was AUTHZ-02. A
+        tombstoned account keeps its role, so a deleted owner still counted as
+        "remaining" and `revoke`'s last-owner guard - the one thing standing
+        between an installation and having nobody who can administer it - could
+        be satisfied by an account that no longer existed. Delete one of two
+        owners, then revoke the survivor, and the guard says yes. No adversary
+        is required; that is just the order an operator does things in.
+
+        The filter now comes from `app.platform.hierarchy`, shared with the
+        account lifecycle. The defect was never a wrong `WHERE` clause - it was
+        that "is a platform owner" had two independent spellings which disagreed
+        about what a deleted account is.
+        """
+        statement = select(User).where(live_platform_role(PlatformRole.PLATFORM_OWNER))
         return list((await self._session.execute(statement)).scalars().all())
 
     async def staff(self) -> list[User]:
-        """Everyone holding any platform role, for the `list` command."""
-        statement = select(User).where(User.platform_role.is_not(None)).order_by(User.email)
+        """Everyone who currently holds any platform role, for `list`.
+
+        Same lifecycle filter, for the same reason in a smaller way: an
+        operator asking who has authority over this platform is asking about
+        today, and a roster padded with accounts deleted last year answers a
+        question nobody asked.
+        """
+        statement = select(User).where(live_platform_staff()).order_by(User.email)
         return list((await self._session.execute(statement)).scalars().all())
 
     async def grant(self, identity: str, role: PlatformRole) -> RoleChange:
@@ -105,9 +130,35 @@ class PlatformRoleService:
         the trail with acts that did not happen.
         """
         user = await self._resolve(identity)
+        if user.is_deleted:
+            # A tombstone is documented as never reusable, and the deletion path
+            # clears `platform_role` precisely so no deleted row holds authority.
+            # Granting one would put the role back on an account that can never
+            # authenticate again - an entry in the trail saying somebody was
+            # made a platform owner, and no owner at the end of it.
+            raise ValidationError(
+                f"{user.email} has been permanently deleted and cannot hold a platform role."
+            )
+        if not user.is_active:
+            # Suspended rather than gone, so this is a sequencing mistake rather
+            # than an impossibility, and the message says which order to do it
+            # in. Granting silently would leave authority that only takes effect
+            # if somebody later re-enables the account for an unrelated reason.
+            raise ValidationError(
+                f"{user.email} is disabled. Re-enable the account before granting it a role."
+            )
+
         previous = user.platform_role
         if previous is role:
             return RoleChange(user.id, user.email, previous, role)
+
+        if previous is PlatformRole.PLATFORM_OWNER:
+            # A grant is also a *demotion* when the account already owns the
+            # platform: `grant <the last owner> platform_admin` removes the last
+            # owner through a command whose name suggests it only ever adds.
+            # Same invariant, same lock - the shape of the act decides, not the
+            # subcommand it arrived under.
+            await require_surviving_platform_owner(self._session, target=user.id)
 
         user.platform_role = role
         self._audit.record(
@@ -145,12 +196,13 @@ class PlatformRoleService:
             return RoleChange(user.id, user.email, None, None)
 
         if previous is PlatformRole.PLATFORM_OWNER:
-            remaining = [row for row in await self.owners() if row.id != user.id]
-            if not remaining:
-                raise ValidationError(
-                    "This is the only platform owner. Grant the role to somebody "
-                    "else before removing it from this account."
-                )
+            # Counted and revoked inside one advisory-locked critical section.
+            # The count on its own was check-then-act: this command and a
+            # `DELETE /platform/users/{id}` against the other owner could each
+            # read "two owners, one may go" and commit, and the installation
+            # would end up with none - a race between two operators doing
+            # perfectly ordinary things at the same moment.
+            await require_surviving_platform_owner(self._session, target=user.id)
 
         user.platform_role = None
         self._audit.record(

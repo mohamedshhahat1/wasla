@@ -59,7 +59,12 @@ from app.core.security import (
 from app.core.telemetry import observe_lifecycle_event
 from app.db.models import MembershipStatus, Tenant, TenantStatus
 from app.db.models.audit import AuditAction, AuditActorKind
+from app.db.models.enums import PlatformRole
 from app.db.models.user import User
+from app.platform.hierarchy import (
+    require_platform_authority_over,
+    require_surviving_platform_owner,
+)
 from app.repositories import (
     MembershipRepository,
     TenantRepository,
@@ -168,9 +173,32 @@ class AccountService:
         Leaving them active would make a deleted person a ghost on every roster
         they were on - unable to act, because authentication refuses them first,
         but visible to colleagues as somebody who still has access.
+
+        **Two platform guards run before any of that**, and they are enforced
+        here rather than only on the route. A route dependency protects the one
+        caller wired to it; this method is a service, and the next caller - a
+        second route, a worker, an operator command - inherits nothing. The
+        route guard and this one are not redundancy for its own sake: they
+        answer to different things going wrong.
         """
         if user_id == actor.id:
             raise ValidationError("An administrator cannot delete their own account.")
+
+        target = await self._require(user_id)
+        # AUTHZ-01: an admin may not tombstone an owner. Before the target is
+        # read at all, because the whole defect was acting on a target whose
+        # own standing was never looked at.
+        require_platform_authority_over(actor=actor, target=target)
+        if target.platform_role is PlatformRole.PLATFORM_OWNER:
+            # AUTHZ-02: and no owner, however senior the caller, may be the last
+            # one. Takes the advisory lock, so the count and the `UPDATE` below
+            # are one critical section and a simultaneous deletion of the other
+            # owner cannot slip between them.
+            await require_surviving_platform_owner(self._session, target=user_id)
+
+        # Read before the `UPDATE` clears it; the audit entry is where this
+        # fact survives.
+        previous_platform_role = target.platform_role
 
         statement = (
             update(User)
@@ -179,6 +207,15 @@ class AccountService:
                 deleted_at=datetime.now(UTC),
                 is_active=False,
                 token_version=User.token_version + 1,
+                # A tombstone holds no authority, so it should not be recorded
+                # as holding a role (§7 of the remediation brief). The history
+                # is not lost - the role it held goes into the audit entry
+                # below, which is where a question about who used to have
+                # authority belongs. Every query here filters on lifecycle
+                # anyway, so this is the second lock on the same door: it makes
+                # the *data* true rather than only the readers careful, and it
+                # keeps tombstones written before this change readable.
+                platform_role=None,
             )
             .returning(User)
         )
@@ -213,6 +250,13 @@ class AccountService:
                 # to go and fix them, and a number tells them nothing about
                 # where to look. Empty in the ordinary case.
                 "orphaned_workspaces": orphaned,
+                # Null for almost every deletion, and the reason it is recorded
+                # at all is the deletions where it is not: the tombstone no
+                # longer says that this account once held authority over the
+                # whole platform, so the trail has to.
+                "previous_platform_role": (
+                    previous_platform_role.value if previous_platform_role else None
+                ),
             },
         )
         if orphaned:
@@ -574,6 +618,17 @@ class AccountService:
             # Locking yourself out of the platform is not a thing to do by
             # accident, and there may be no other administrator to undo it.
             raise ValidationError("An administrator cannot disable their own account.")
+
+        # AUTHZ-01, and it applies here as much as to `delete`. Suspension is
+        # reversible for the *account* and not for the *installation*: an admin
+        # who suspends every platform owner has taken the platform away from
+        # the only people who could give it back.
+        require_platform_authority_over(actor=actor, target=user)
+        if user.platform_role is PlatformRole.PLATFORM_OWNER:
+            # AUTHZ-02 again. Disabling is a supported path to zero live owners
+            # exactly as deleting is, so it takes the same lock and the same
+            # count - which is the point of there being one definition of both.
+            await require_surviving_platform_owner(self._session, target=user_id)
 
         user.is_active = False
         version = self._bump(user)

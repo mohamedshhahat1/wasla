@@ -565,3 +565,59 @@ async def test_disabling_the_final_owner_also_suspends_the_workspace(
     # weaker guarantee than the deletion path's and is worth being explicit
     # about in docs/AUTHORIZATION.md rather than silently different.
     assert tenant.status is TenantStatus.ACTIVE
+
+
+async def test_one_deletion_decides_each_workspace_on_its_own_facts(
+    http: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """A person who belongs to three workspaces in three capacities, deleted once.
+
+    The three cases above each test one workspace in isolation, which leaves the
+    interesting question unasked: the decision has to be made *per workspace*,
+    from that workspace's own remaining roster, and a single deletion touching
+    all three at once is where a global answer would show itself. Suspending
+    every workspace the account touched, or none of them, would both pass the
+    isolated tests.
+
+    Re-checked here rather than assumed because AUTHZ-01 put a new guard in
+    front of this path. The guard decides whether a *platform* account may be
+    acted on; once an ordinary customer account is through it, the orphan
+    handling must be exactly what it was.
+    """
+    staff = await _user(
+        db_session, email="platform-staff@example.com", platform_role=PlatformRole.PLATFORM_OWNER
+    )
+    target = await _user(db_session, email="busy-person@example.com")
+    colleague = await _user(db_session, email="colleague@example.com")
+
+    sole = await _workspace(db_session, slug="sole-owned", owner=target)
+    shared = await _workspace(db_session, slug="co-owned", owner=target)
+    await _join(db_session, tenant=shared, user=colleague, role=TenantRole.TENANT_OWNER)
+    guest = await _workspace(db_session, slug="merely-a-member", owner=colleague)
+    membership = await _join(db_session, tenant=guest, user=target, role=TenantRole.MEMBER)
+
+    response = await http.request(
+        "DELETE",
+        f"{API}/platform/users/{target.id}",
+        headers=await _staff_headers(http, staff.email),
+    )
+    assert response.status_code == 200, response.text
+
+    for workspace in (sole, shared, guest):
+        await db_session.refresh(workspace)
+    await db_session.refresh(membership)
+
+    assert sole.status is TenantStatus.SUSPENDED, "the orphaned workspace kept serving"
+    assert shared.status is TenantStatus.ACTIVE, "a workspace with another owner was suspended"
+    assert guest.status is TenantStatus.ACTIVE, "somebody else's workspace was suspended"
+    # The membership itself is withdrawn everywhere, which is what stops a
+    # deleted person appearing on a roster they can no longer act through.
+    assert membership.status is not MembershipStatus.ACTIVE
+
+    entry = next(
+        row
+        for row in await _entries(db_session, AuditAction.USER_DELETED)
+        if row.target_id == target.id
+    )
+    assert entry.meta["orphaned_workspaces"] == ["sole-owned"]
