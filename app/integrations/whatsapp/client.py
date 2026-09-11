@@ -8,9 +8,32 @@ definitely did not send are retried.
 | --- | --- | --- | --- |
 | 429 | yes | `RateLimitedError` | Rejected outright; nothing was sent |
 | connection error | yes | `SendNotAttemptedError` | No connection, so no request arrived |
-| 4xx | no | `SendNotAttemptedError` | Meta read it and declined; nothing delivered |
+| 401 / 403 / code 190 | no | `ProviderAuthError` | The credential is refused, not this message |
+| other 4xx | no | `SendNotAttemptedError` | Meta read it and declined; nothing delivered |
 | 5xx | no | `UncertainDeliveryError` | May have been accepted |
 | read timeout | no | `UncertainDeliveryError` | Same: the request may have landed |
+| transport failure | no | `UncertainDeliveryError` | The request left; no answer came back |
+| 2xx, no usable id | no | `UncertainDeliveryError` | Meta said it accepted the message |
+
+The last three rows were wrong, and two of them wrong in the direction that
+costs a customer a second copy of a message.
+
+A **2xx with no readable message id** was recorded as a definite failure, which
+is the one classification that licenses a new send - and a campaign or
+follow-up acting on it put the message on the customer's phone twice. A 2xx is
+Meta saying it accepted the message. That it then failed to name it is a fact
+about the response, not about the delivery (MSG-07).
+
+A **reset connection** escaped as a raw `httpx` exception, past `_attempt` and
+out of `MessagingService._dispatch` entirely, because the catch listed
+`ConnectError` and `TimeoutException` and not the parent both belong to. The
+row happened to be left in the right state; the caller got an unclassified
+error and a campaign batch stopped where it stood (MSG-08).
+
+An **invalid credential** was indistinguishable from a bad parameter, so a
+workspace whose token had been revoked burned every recipient's attempt budget
+one at a time and ended with an audience of individually-failed recipients and
+no single explanation (MSG-18).
 
 **The exception type is the answer to a question a caller has to ask.** Every
 one of these used to be `ExternalServiceError`, which left "Meta declined this"
@@ -62,6 +85,14 @@ BACKOFF_SECONDS: Final = 0.5
 TOO_MANY_REQUESTS: Final = 429
 SERVER_ERROR_FLOOR: Final = 500
 CLIENT_ERROR_FLOOR: Final = 400
+UNAUTHORIZED: Final = 401
+FORBIDDEN: Final = 403
+# Meta's own code for a credential that is expired, revoked, or was never
+# valid. Checked alongside the status because Meta answers 400 with this code
+# as readily as 401, and because a bare 403 can mean something else entirely -
+# a permission on one number rather than a dead token - so neither the status
+# nor the code is trusted on its own.
+META_AUTH_CODE: Final = 190
 MAX_REPLY_BUTTONS: Final = 3
 # How many templates one page of the registry sync asks for, and how many
 # pages it will follow. Meta caps the page size; the page *count* is ours,
@@ -130,6 +161,28 @@ class UncertainDeliveryError(ExternalServiceError):
     on anything this system generated. So this is terminal by construction: the
     one thing that must not follow it is another send.
     """
+
+
+class ProviderAuthError(SendNotAttemptedError):
+    """Meta refused the credential, so nothing was sent and nothing will be.
+
+    A subclass of `SendNotAttemptedError` because that is the truth about this
+    message - Meta declined before reading it, so nothing reached a customer
+    and the row is honestly `UNDELIVERED`. It is a *type* of its own because
+    the truth about the *workspace* is different: every other recipient will
+    fail identically until somebody reconnects the number.
+
+    Without the distinction a sweep works through its audience discovering the
+    same dead token ten thousand times, spending one attempt budget per person
+    and ending with no single thing to tell the operator (MSG-18). Campaigns
+    and follow-ups let this one out rather than filing it against a recipient,
+    which is the same shape `DependencyUnavailableError` already had for a
+    credential that is missing rather than refused.
+
+    Carries no credential material, here or in its message.
+    """
+
+    message = "WhatsApp refused this number's credentials."
 
 
 class MediaTooLargeError(ExternalServiceError):
@@ -744,6 +797,25 @@ class WhatsAppClient:
                 logger.warning("whatsapp.send_timed_out", extra={"attempts": attempt})
                 await call.record(CallOutcome.UNAVAILABLE)
                 raise UncertainDeliveryError("WhatsApp did not respond in time.") from error
+            except httpx.TransportError as error:
+                # Everything else that can go wrong on the wire, caught by the
+                # parent the two branches above belong to: a reset connection,
+                # a half-written request, a protocol violation. Routine behind
+                # a load balancer, and previously not caught at all - it left
+                # this client as a raw `httpx` exception, past `_attempt`,
+                # which catches only this package's own types (MSG-08).
+                #
+                # Placed after `ConnectError`, deliberately. That one provably
+                # never reached Meta and is the one case worth retrying; these
+                # left the process with no answer coming back, which is the
+                # same epistemic position as a read timeout and gets the same
+                # answer.
+                logger.warning(
+                    "whatsapp.send_transport_failed",
+                    extra={"attempts": attempt, "error_type": type(error).__name__},
+                )
+                await call.record(CallOutcome.UNAVAILABLE)
+                raise UncertainDeliveryError("WhatsApp did not complete the request.") from error
 
             if response.status_code == TOO_MANY_REQUESTS:
                 if attempt >= self._max_attempts:
@@ -766,21 +838,51 @@ class WhatsAppClient:
             if response.status_code >= CLIENT_ERROR_FLOOR:
                 # Meta read the request and declined it. Nothing was delivered,
                 # and that is known rather than assumed.
-                self._log_failure(response)
+                error_code = self._log_failure(response)
                 await call.record(CallOutcome.FAILURE)
+                if self._is_credential_failure(response.status_code, error_code):
+                    # Not this message's problem, and not fixable by trying the
+                    # next recipient. Raised as its own type so a sweep can
+                    # stop rather than discover it once per person (MSG-18).
+                    raise ProviderAuthError
                 raise SendNotAttemptedError("WhatsApp rejected the message.")
 
             await call.record(CallOutcome.SUCCESS)
-            return self._decode(response)
+            # Decoded here rather than by the caller, so a 2xx whose body will
+            # not yield a message id is classified while the status code is
+            # still in hand. That is the whole of MSG-07: a 2xx is Meta saying
+            # it accepted the message, and a body that fails to name it changes
+            # nothing about the customer's phone.
+            return self._decode(response, accepted=True)
+
+    @staticmethod
+    def _is_credential_failure(status_code: int, error_code: int | None) -> bool:
+        """Whether Meta is refusing the credential rather than the message.
+
+        Both halves matter. A 401 is unambiguous; a 403 is not, because Meta
+        uses it for permission problems that are about the number rather than
+        the token, and treating every 403 as a dead credential would stop a
+        campaign that should have failed one recipient. Meta's own `code 190`
+        is the authoritative signal and arrives on a 400 as readily as a 401,
+        so either the unambiguous status or the explicit code is enough, and a
+        bare 403 with no code is not.
+        """
+        if status_code == UNAUTHORIZED:
+            return True
+        return error_code == META_AUTH_CODE
 
     async def _backoff(self, attempt: int) -> None:
         await self._sleep(self._backoff_seconds * attempt)
 
-    def _log_failure(self, response: httpx.Response) -> None:
+    def _log_failure(self, response: httpx.Response) -> int | None:
         """Log Meta's own error code, but never hand its text to the caller.
 
         Provider error text can echo fragments of the request, and this client
         holds a live platform credential.
+
+        Returns the numeric code so the classification above can read it. The
+        code is a fixed vocabulary Meta publishes, not free text, which is why
+        it is safe to act on when the message beside it is not safe to repeat.
         """
         error: dict[str, Any] = {}
         try:
@@ -790,22 +892,45 @@ class WhatsAppClient:
         if isinstance(body, dict) and isinstance(body.get("error"), dict):
             error = body["error"]
 
+        code = error.get("code")
         logger.warning(
             "whatsapp.send_failed",
             extra={
                 "status": response.status_code,
-                "meta_code": error.get("code"),
+                "meta_code": code,
                 "meta_type": error.get("type"),
                 "meta_subcode": error.get("error_subcode"),
             },
         )
+        return code if isinstance(code, int) else None
 
-    def _decode(self, response: httpx.Response) -> dict[str, Any]:
+    def _decode(self, response: httpx.Response, *, accepted: bool = False) -> dict[str, Any]:
+        """Meta's body, or the right kind of failure for not having one.
+
+        `accepted` says the status code was a success, and it changes which
+        failure an unreadable body is. A 2xx means Meta took the message; a
+        body this client cannot read afterwards says nothing about whether the
+        customer got it, so the answer is "nobody knows" rather than "it
+        failed" - and "it failed" is the one answer that licenses sending it
+        again (MSG-07, ADR-093).
+
+        Outside a 2xx - a media upload response, say - an unreadable body stays
+        an ordinary external-service failure, because there the status has
+        already said the request did not succeed.
+        """
         try:
             body = response.json()
         except ValueError as error:
+            if accepted:
+                raise UncertainDeliveryError(
+                    "WhatsApp accepted the message but its answer could not be read."
+                ) from error
             raise ExternalServiceError("WhatsApp returned an unreadable response.") from error
         if not isinstance(body, dict):
+            if accepted:
+                raise UncertainDeliveryError(
+                    "WhatsApp accepted the message but its answer could not be read."
+                )
             raise ExternalServiceError("WhatsApp returned an unexpected response.")
         return body
 
@@ -815,8 +940,11 @@ class WhatsAppClient:
             message_id = messages[0].get("id")
             if isinstance(message_id, str) and message_id:
                 return message_id
-        # Accepted but unidentifiable is not usable: statuses arrive keyed on id.
-        raise ExternalServiceError("WhatsApp accepted the message without an identifier.")
+        # Accepted but unidentifiable. Not usable - statuses arrive keyed on
+        # the id - but not a failure either: Meta answered 2xx, which is Meta
+        # saying it took the message. Recorded as unknown, never as failed, so
+        # nothing upstream reads it as permission to send a second copy.
+        raise UncertainDeliveryError("WhatsApp accepted the message without an identifier.")
 
     def _recipient(self, body: dict[str, Any]) -> str | None:
         contacts = body.get("contacts")

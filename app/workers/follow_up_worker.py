@@ -28,12 +28,14 @@ import asyncio
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.db.session import Database
+from app.integrations.whatsapp.client import ProviderAuthError
 from app.repositories.follow_up_repository import DEFAULT_CLAIM_LIMIT, DueFollowUpClaim
 from app.services.follow_up_service import FollowUpService
 from app.services.messaging_service import MessagingService
@@ -55,6 +57,12 @@ CLAIM_LEASE_SECONDS = 300.0
 # inline so a test can drive the sweep without a WhatsApp account, the same way
 # AgentWorker takes its tool registry.
 MessagingFactory = Callable[[AsyncSession, uuid.UUID], MessagingService]
+
+# What `_dispatch_one` returns when Meta refused the workspace's credential.
+# A sentinel rather than a third boolean, because the caller has to tell it
+# apart from "this row did nothing" - one means skip the rest of this
+# workspace, the other means carry on.
+_CREDENTIAL_REFUSED: Final = object()
 
 
 class FollowUpWorker:
@@ -137,14 +145,35 @@ class FollowUpWorker:
         if not identifiers:
             return 0
 
+        # Workspaces whose WhatsApp credential Meta refused during this sweep.
+        # Once a number's token is dead every nudge queued against it fails
+        # identically, so the rest of this pass steps over them rather than
+        # asking Meta the same question once per customer (MSG-18). Scoped to
+        # one sweep: the next one asks again, which is how a reconnected number
+        # starts working without anybody restarting the worker.
+        refused: set[uuid.UUID] = set()
+
         for follow_up_id, tenant_id in identifiers:
-            if await self._dispatch_one(follow_up_id, tenant_id):
+            if tenant_id in refused:
+                continue
+            outcome = await self._dispatch_one(follow_up_id, tenant_id)
+            if outcome is _CREDENTIAL_REFUSED:
+                refused.add(tenant_id)
+                continue
+            if outcome:
                 handled += 1
 
-        logger.info("follow_up.sweep_completed", extra={"handled": handled})
+        logger.info(
+            "follow_up.sweep_completed",
+            extra={"handled": handled, "workspaces_refused": len(refused)},
+        )
         return handled
 
-    async def _dispatch_one(self, follow_up_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
+    async def _dispatch_one(
+        self,
+        follow_up_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+    ) -> bool | object:
         """One follow-up, in a transaction of its own. Returns whether it ran.
 
         Re-read under a row lock rather than carried over from the claim: the
@@ -172,6 +201,19 @@ class FollowUpWorker:
             )
             try:
                 outcome = await service.dispatch(follow_up)
+            except ProviderAuthError:
+                # Not this row's fault and not fixable by trying the next one.
+                # The transaction rolls back, so the follow-up keeps its
+                # claim's lease and becomes due again once the lease elapses -
+                # by which time somebody may have reconnected the number.
+                logger.error(
+                    "follow_up.credential_refused",
+                    extra={
+                        "event": "follow_up.credential_refused",
+                        "follow_up_id": str(follow_up_id),
+                    },
+                )
+                return _CREDENTIAL_REFUSED
             except Exception:
                 # Contained to the one follow-up. A single broken row must not
                 # strand every other workspace's nudges behind it.

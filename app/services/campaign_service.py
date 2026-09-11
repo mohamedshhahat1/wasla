@@ -59,6 +59,7 @@ from app.db.models.campaign import (
 from app.db.models.conversation import Contact, Message, MessageStatus
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
+from app.integrations.whatsapp.client import ProviderAuthError
 from app.repositories.campaign_repository import (
     DEFAULT_RECIPIENT_BATCH,
     AudienceFilter,
@@ -469,12 +470,19 @@ class CampaignService:
         for recipient in claimed:
             try:
                 outcome = await self._deliver(campaign, recipient, messaging=messaging, now=moment)
-            except DependencyUnavailableError as error:
-                # A missing platform credential, which is neither this
-                # recipient's problem nor fixable by trying the next one. Left
-                # as a per-recipient failure it would loop forever without ever
-                # exhausting anyone's attempts, staging a message row per
-                # recipient per sweep on a deployment that cannot send at all.
+            except (DependencyUnavailableError, ProviderAuthError) as error:
+                # A credential that is missing, or one Meta refuses. Neither is
+                # this recipient's problem and neither is fixable by trying the
+                # next one. Left as a per-recipient failure the first would
+                # loop forever without ever exhausting anyone's attempts,
+                # staging a message row per recipient per sweep on a deployment
+                # that cannot send at all; the second would burn the whole
+                # audience's attempts one person at a time (MSG-18).
+                #
+                # The recipient this happened to keeps its claim and is left
+                # pending. The campaign has stopped, so nothing will pick it up
+                # until somebody restarts the campaign - which is the point at
+                # which the credential has been fixed.
                 return self._fail(campaign, str(error))
             if outcome is RecipientStatus.SENT:
                 sent += 1
@@ -586,6 +594,13 @@ class CampaignService:
                 sent_by_id=campaign.created_by_id,
                 link=link,
             )
+        except ProviderAuthError:
+            # Let out rather than filed against this recipient. The credential
+            # is refused for the whole number, so working through the audience
+            # would spend one attempt budget per person discovering the same
+            # dead token and end with no single thing to tell anybody
+            # (MSG-18). `dispatch_batch` fails the campaign once instead.
+            raise
         except (ExternalServiceError, RateLimitedError, ValidationError) as error:
             return self._fail_recipient(recipient, str(error))
 

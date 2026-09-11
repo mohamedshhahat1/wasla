@@ -38,6 +38,7 @@ from app.db.models.conversation import (
 from app.db.models.media import MediaStatus, MessageMedia
 from app.db.models.sentiment import SentimentLabel
 from app.integrations.openai.types import AgentReply, TokenUsage, ToolCall
+from app.services.messaging_service import WHATSAPP_TEXT_MAX_CHARS
 from app.services.sentiment_service import SentimentOutcome
 from tests.fakes import as_embeddings, as_http_client, as_responses, as_sentiment, as_session
 
@@ -383,6 +384,28 @@ async def test_a_plain_reply_is_returned_for_sending(monkeypatch: pytest.MonkeyP
     assert outcome.rounds == 1
 
 
+async def test_every_agent_is_told_what_whatsapp_will_carry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The channel's limit is appended to whatever the workspace wrote.
+
+    A workspace cannot be expected to know Meta's body limit, and one that
+    deleted the sentence would get the refusal back. Guidance rather than a
+    guarantee - tokens are not characters, so no generation budget can bound a
+    length in characters - which is why `MessagingService.send_text` refuses an
+    over-length reply outright (MSG-25).
+    """
+    client = StubClient([_reply(text="Hello.")])
+    agent = _agent(model="gpt-4.1", system_prompt="Be brief.", temperature=0.1)
+    orchestrator = _build(monkeypatch, client=as_http_client(client), agent=agent)
+
+    await orchestrator.answer(conversation_id=CONVERSATION)
+
+    instructions = client.calls[0]["instructions"]
+    assert str(WHATSAPP_TEXT_MAX_CHARS) in instructions
+    assert "WhatsApp" in instructions
+
+
 async def test_the_agent_configuration_reaches_the_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -394,7 +417,9 @@ async def test_the_agent_configuration_reaches_the_provider(
 
     call = client.calls[0]
     assert call["model"] == "gpt-4.1"
-    assert call["instructions"] == "Be brief."
+    # The workspace's own prompt leads, so an agent's personality is not
+    # introduced by a paragraph about provider limits.
+    assert call["instructions"].startswith("Be brief.")
     assert call["temperature"] == 0.1
     assert [turn.text for turn in call["turns"]] == ["hello"]
 

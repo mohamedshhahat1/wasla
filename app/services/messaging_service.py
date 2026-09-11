@@ -57,6 +57,7 @@ from app.db.models.usage import UsageEventType
 from app.db.models.whatsapp import WhatsAppAccount
 from app.db.session import released
 from app.integrations.whatsapp.client import (
+    ProviderAuthError,
     SentMessage,
     UncertainDeliveryError,
     WhatsAppClient,
@@ -68,13 +69,26 @@ from app.repositories.conversation_repository import (
     MessageRepository,
 )
 from app.repositories.media_repository import MediaRepository
+from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.credential_service import CredentialService
 from app.services.entitlement_service import EntitlementService
 from app.services.media_service import content_hash as media_content_hash
+from app.services.template_service import refusal_reason_for
 from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
+
+# Meta's own cap on a text message body. One constant, imported by the request
+# schema rather than restated there, because two copies of a provider's limit
+# drift and the one that drifts low silently refuses valid messages while the
+# one that drifts high sends messages the provider rejects.
+WHATSAPP_TEXT_MAX_CHARS: Final = 4_096
+
+# What a message records when Meta refused the number's credential. A fixed
+# sentence: the failure reason is returned by the API and read by a person, and
+# nothing about a credential belongs in either.
+CREDENTIAL_REFUSED = "WhatsApp refused this number's credentials."
 
 # Meta's rule: a business may send free-form messages for 24 hours after the
 # customer's last message. Outside it, only approved templates are accepted.
@@ -140,6 +154,22 @@ MEDIA_KINDS: Final[dict[str, MessageKind]] = {
 SAFE_FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,99}$")
 
 
+def _require_sendable_text(body: str) -> None:
+    """Refuse a body Meta will not accept, before anything is staged.
+
+    Before the send intent rather than after, so a refused reply costs no row
+    and no provider call. The caller sees a validation failure, which for the
+    agent path becomes a recorded, alertable job failure rather than a silent
+    message the customer never receives.
+    """
+    if not body:
+        raise ValidationError("A message needs something to say.")
+    if len(body) > WHATSAPP_TEXT_MAX_CHARS:
+        raise ValidationError(
+            f"A WhatsApp message may be at most {WHATSAPP_TEXT_MAX_CHARS} characters."
+        )
+
+
 def _whatsapp_kind(kind: MediaClass) -> str:
     """Which of Meta's four attachment kinds a detected class is sent as.
 
@@ -192,6 +222,9 @@ class MessagingService:
         self._http = http
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._contacts = ContactRepository(session, tenant_id=tenant_id)
+        # The registry every template send is measured against, so the check
+        # lives at the choke point rather than in each caller (MSG-10).
+        self._templates = WhatsAppTemplateRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._accounts = WhatsAppAccountRepository(session, tenant_id=tenant_id)
         self._media = MediaRepository(session, tenant_id=tenant_id)
@@ -213,6 +246,25 @@ class MessagingService:
         sent_by_id: uuid.UUID | None = None,
         link: LinkCall | None = None,
     ) -> Message:
+        """Send free text, refusing anything WhatsApp will not carry.
+
+        The length check is here rather than only in the request schema, and
+        that is the point of it. The API schema caps `body` at Meta's own
+        limit, but the agent reply path does not go through a request schema -
+        so an agent configured with a large output budget composed a reply of
+        nine thousand characters, it was sent whole, Meta refused it with a
+        400, and the customer received nothing at all while the workspace had
+        already paid for the inference (MSG-25).
+
+        Refused rather than truncated or split. Truncating puts words in a
+        business's mouth and cuts them off mid-sentence; splitting reintroduces
+        chunk ordering, partial failure and duplicate chunks, none of which
+        this system currently has to reason about because one logical message
+        is one provider message. Refusing costs one reply and produces a
+        recorded, alertable failure, which is the smallest correct answer.
+        """
+        _require_sendable_text(body)
+
         async def send(client: WhatsAppClient, phone_number_id: str, to: str) -> SentMessage:
             return await client.send_text(
                 phone_number_id=phone_number_id,
@@ -241,6 +293,32 @@ class MessagingService:
         sent_by_id: uuid.UUID | None = None,
         link: LinkCall | None = None,
     ) -> Message:
+        """Send an approved template, which is valid outside the service window.
+
+        The registry is consulted here so that every caller inherits it. It was
+        checked by the campaign and follow-up services and by nothing else, so
+        `POST /conversations/{id}/messages/template` could send a template the
+        registry records as `PAUSED`, `REJECTED` or `DISABLED` (MSG-10). Meta
+        refuses those, so no policy violation reaches a customer - but the
+        account accrues exactly the rejected-template attempts the automated
+        paths are careful to avoid, and those attempts are what costs a
+        workspace its number.
+
+        A template the registry has never heard of is still allowed through.
+        That asymmetry is deliberate and is argued in `refusal_reason_for`: a
+        workspace that has not synced cannot be told apart from one whose
+        template does not exist, and refusing both would lose every
+        template-bearing message the first workspace has. Campaigns keep their
+        stricter rule - the template must exist locally and be approved - on
+        top of this one, because setting a campaign up is a deliberate act that
+        can afford to require a sync first.
+        """
+        refusal = refusal_reason_for(
+            await self._templates.find_anywhere(name=name, language=language)
+        )
+        if refusal is not None:
+            raise ValidationError(refusal)
+
         async def send(client: WhatsAppClient, phone_number_id: str, to: str) -> SentMessage:
             return await client.send_template(
                 phone_number_id=phone_number_id,
@@ -599,6 +677,23 @@ class MessagingService:
             )
             await self._session.flush()
             return message
+
+        if isinstance(outcome, ProviderAuthError):
+            # Nothing was delivered, so the row is recorded honestly as
+            # undelivered - and then the failure is let out, because it is not
+            # a fact about this message. Every other recipient this workspace
+            # has queued fails the same way until somebody reconnects the
+            # number, and a sweep that swallowed this would discover that once
+            # per person (MSG-18).
+            await self._undelivered(message, reason=CREDENTIAL_REFUSED)
+            logger.error(
+                "whatsapp.credential_refused",
+                extra={
+                    "event": "whatsapp.credential_refused",
+                    "account_id": str(account.id),
+                },
+            )
+            raise outcome
 
         if isinstance(outcome, Exception):
             return await self._undelivered(message, reason=str(outcome))

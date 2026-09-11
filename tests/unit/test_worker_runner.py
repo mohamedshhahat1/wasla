@@ -17,6 +17,7 @@ from app.workers.ai_worker import AgentWorker
 from app.workers.billing_worker import BillingWorker
 from app.workers.campaign_worker import CampaignWorker
 from app.workers.follow_up_worker import FollowUpWorker
+from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_worker import MediaWorker
 from app.workers.purge_worker import PurgeWorker
@@ -145,6 +146,11 @@ def test_each_kind_builds_its_own_worker(settings: Settings) -> None:
         # processes were holding when they died, so a deployment that runs it
         # nowhere has no crash recovery at all (ADR-074).
         RecoveryWorker,
+        # Inbound recovery is present for the same reason under a different
+        # failure: it finishes inbound events whose agent or media handoff
+        # never reached Redis, so a deployment running it nowhere answers 200
+        # to customer messages nothing will ever pick up (ADR-102).
+        InboundRecoveryWorker,
         # Retention is present by the same rule: a deployment that had to name
         # it is one where forgetting to is a media store that grows for ever
         # with nothing to say so. It removes nothing until MEDIA_RETENTION_DAYS

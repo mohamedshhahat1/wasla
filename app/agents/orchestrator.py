@@ -38,6 +38,7 @@ from app.integrations.openai.types import TokenUsage, ToolCall, ToolResult, Turn
 from app.repositories.agent_repository import AgentRepository, AgentToolRepository
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
 from app.repositories.media_repository import MediaRepository
+from app.services.messaging_service import WHATSAPP_TEXT_MAX_CHARS
 from app.services.sentiment_service import SentimentService
 
 logger = get_logger(__name__)
@@ -73,6 +74,35 @@ class AgentOutcome:
     @property
     def should_send(self) -> bool:
         return bool(self.reply) and not self.handed_off
+
+
+# What every agent is told about the channel it is answering on, appended to
+# whatever the workspace wrote. Two reasons it is here rather than in the
+# workspace's own prompt: a workspace cannot be relied on to know Meta's limit,
+# and a workspace that deleted the sentence would get the failure back.
+#
+# Guidance, not a guarantee. A model asked for brevity usually obliges and
+# sometimes does not, and tokens are not characters - a budget in tokens cannot
+# bound a length in characters, least of all across languages. So this reduces
+# how often the reply is refused; `MessagingService.send_text` is what makes
+# refusing safe (MSG-25).
+_CHANNEL_INSTRUCTIONS = (
+    "\n\nYou are replying over WhatsApp. Keep every reply under "
+    f"{WHATSAPP_TEXT_MAX_CHARS} characters - WhatsApp will not deliver a longer "
+    "one, and it will not be split for you. Prefer several short paragraphs to "
+    "one long message, and offer to go into detail rather than doing it "
+    "unasked."
+)
+
+
+def _reply_instructions(system_prompt: str) -> str:
+    """The workspace's prompt plus what it cannot be expected to know.
+
+    Appended rather than prepended so the workspace's own instructions lead,
+    and so an agent's personality is not introduced by a paragraph about
+    provider limits.
+    """
+    return f"{system_prompt}{_CHANNEL_INSTRUCTIONS}"
 
 
 def _nothing(
@@ -252,7 +282,7 @@ class AgentOrchestrator:
                 rounds = round_number
                 reply = await self._client.respond(
                     model=resolved.model,
-                    instructions=resolved.system_prompt,
+                    instructions=_reply_instructions(resolved.system_prompt),
                     turns=turns,
                     tools=specs,
                     tool_results=results,
