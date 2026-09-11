@@ -191,8 +191,10 @@ RELATIONS = {
     ),
     "messages -> conversations": (
         "INSERT INTO messages "
-        "(id, tenant_id, conversation_id, direction, kind, status, created_at, updated_at) "
-        "VALUES (:id, :tenant_id, :parent_id, 'inbound', 'text', 'pending', now(), now())",
+        "(id, tenant_id, conversation_id, direction, kind, status, origin, "
+        " created_at, updated_at) "
+        "VALUES (:id, :tenant_id, :parent_id, 'inbound', 'text', 'pending', 'customer', "
+        " now(), now())",
         "conversation_id",
     ),
     "documents -> knowledge_bases": (

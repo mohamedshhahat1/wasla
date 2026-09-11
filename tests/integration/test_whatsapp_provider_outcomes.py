@@ -46,6 +46,7 @@ from app.db.models.conversation import (
     Conversation,
     ConversationStatus,
     MessageDeliveryState,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.tenant import Tenant
@@ -219,6 +220,7 @@ async def test_a_2xx_without_a_usable_id_stays_unresolved_rather_than_failed(
         message = await _messaging(db_session, tenant, http).send_text(
             conversation_id=conversation.id,
             body=f"hello ({label})",
+            origin=MessageOrigin.HUMAN,
         )
 
     assert fake.calls == 1
@@ -250,6 +252,7 @@ async def test_a_2xx_with_an_unreadable_body_is_also_unresolved(
         message = await _messaging(db_session, tenant, http).send_text(
             conversation_id=conversation.id,
             body="hello",
+            origin=MessageOrigin.HUMAN,
         )
 
     assert fake.calls == 1
@@ -274,6 +277,7 @@ async def test_a_connection_reset_mid_response_is_unresolved_not_an_escape(
         message = await _messaging(db_session, tenant, http).send_text(
             conversation_id=conversation.id,
             body="hello",
+            origin=MessageOrigin.HUMAN,
         )
 
     # Not retried: the request may have reached Meta, so a second attempt is
@@ -299,6 +303,7 @@ async def test_a_5xx_is_still_unresolved(
         message = await _messaging(db_session, tenant, http).send_text(
             conversation_id=conversation.id,
             body="hello",
+            origin=MessageOrigin.HUMAN,
         )
 
     assert fake.calls == 1
@@ -324,6 +329,7 @@ async def test_an_ordinary_rejection_is_recorded_as_undelivered(
         message = await _messaging(db_session, tenant, http).send_text(
             conversation_id=conversation.id,
             body="hello",
+            origin=MessageOrigin.HUMAN,
         )
 
     assert fake.calls == 1
@@ -368,6 +374,7 @@ async def test_a_refused_credential_is_its_own_failure(
             await _messaging(db_session, tenant, http).send_text(
                 conversation_id=conversation.id,
                 body="hello",
+                origin=MessageOrigin.HUMAN,
             )
 
     assert fake.calls == 1
@@ -392,6 +399,7 @@ async def test_a_bare_403_is_not_treated_as_a_dead_credential(
         message = await _messaging(db_session, tenant, http).send_text(
             conversation_id=conversation.id,
             body="hello",
+            origin=MessageOrigin.HUMAN,
         )
 
     assert message.status is MessageStatus.FAILED
@@ -418,6 +426,7 @@ async def test_an_over_long_reply_never_reaches_the_provider(
             await _messaging(db_session, tenant, http).send_text(
                 conversation_id=conversation.id,
                 body="x" * (WHATSAPP_TEXT_MAX_CHARS + 1),
+                origin=MessageOrigin.AGENT,
             )
 
     assert fake.calls == 0
@@ -441,6 +450,7 @@ async def test_a_reply_at_exactly_the_limit_is_sent(
         message = await _messaging(db_session, tenant, http).send_text(
             conversation_id=conversation.id,
             body="x" * WHATSAPP_TEXT_MAX_CHARS,
+            origin=MessageOrigin.AGENT,
         )
 
     assert fake.calls == 1

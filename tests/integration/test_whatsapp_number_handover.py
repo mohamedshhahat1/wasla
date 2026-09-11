@@ -290,7 +290,7 @@ async def test_a_slightly_early_message_on_a_number_that_never_moved_is_still_de
     wamid = f"wamid.{uuid.uuid4().hex}"
     payload = _inbound(wamid, at=NOW - timedelta(hours=2), body="sent just before the claim")
     entry = payload["entry"][0]  # type: ignore[index]
-    entry["changes"][0]["value"]["metadata"]["phone_number_id"] = "PN-NEVER-MOVED"  # type: ignore[index]
+    entry["changes"][0]["value"]["metadata"]["phone_number_id"] = "PN-NEVER-MOVED"
 
     outcome = await _ingest(db_session, payload)
 

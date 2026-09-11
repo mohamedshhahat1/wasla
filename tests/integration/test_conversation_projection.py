@@ -15,6 +15,7 @@ from app.db.models.conversation import (
     ConversationStatus,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.tenant import Tenant
@@ -253,6 +254,7 @@ async def test_a_late_status_never_moves_a_message_backwards(db_session: AsyncSe
         conversation_id=conversation.id,
         kind=MessageKind.TEXT,
         body="On its way",
+        origin=MessageOrigin.HUMAN,
     )
     await db_session.flush()
     await messages.mark_sent(outbound, wa_message_id=WAMID_OUT, sent_at=datetime.now(UTC))

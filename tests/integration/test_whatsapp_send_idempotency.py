@@ -32,8 +32,9 @@ import contextlib
 import json
 import socket
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime, timedelta
+from typing import Self
 
 import httpx
 import pytest
@@ -82,7 +83,7 @@ class CountingGraph:
         self.port = _free_port()
         self._server: asyncio.AbstractServer | None = None
 
-    async def __aenter__(self) -> CountingGraph:
+    async def __aenter__(self) -> Self:
         self._server = await asyncio.start_server(self._handle, host="127.0.0.1", port=self.port)
         return self
 
@@ -126,7 +127,7 @@ async def _graph(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[CountingGraph
 class RefusingGraph(CountingGraph):
     """Meta declining, with a specific error envelope and a call count."""
 
-    def __init__(self, status: int, body: dict[str, object]) -> None:
+    def __init__(self, status: int, body: Mapping[str, object]) -> None:
         super().__init__()
         self._status = status
         self._body = body
@@ -154,7 +155,7 @@ class RefusingGraph(CountingGraph):
 async def _refusing_graph(
     monkeypatch: pytest.MonkeyPatch,
     status: int,
-    body: dict[str, object],
+    body: Mapping[str, object],
 ) -> AsyncIterator[RefusingGraph]:
     async with RefusingGraph(status, body) as fake:
         monkeypatch.setattr(client_module, "GRAPH_BASE_URL", f"http://127.0.0.1:{fake.port}")
@@ -244,10 +245,16 @@ async def test_a_repeated_send_with_one_key_reaches_the_customer_once(
     async with _graph(monkeypatch) as fake:
         service = _messaging(db_session, tenant, http)
         first = await service.send_text(
-            conversation_id=conversation.id, body="are you there?", idempotency_key=key
+            conversation_id=conversation.id,
+            body="are you there?",
+            idempotency_key=key,
+            origin=MessageOrigin.HUMAN,
         )
         second = await service.send_text(
-            conversation_id=conversation.id, body="are you there?", idempotency_key=key
+            conversation_id=conversation.id,
+            body="are you there?",
+            idempotency_key=key,
+            origin=MessageOrigin.HUMAN,
         )
 
     assert fake.calls == 1
@@ -274,8 +281,12 @@ async def test_two_sends_of_the_same_words_without_a_key_are_two_messages(
 
     async with _graph(monkeypatch) as fake:
         service = _messaging(db_session, tenant, http)
-        await service.send_text(conversation_id=conversation.id, body="are you there?")
-        await service.send_text(conversation_id=conversation.id, body="are you there?")
+        await service.send_text(
+            conversation_id=conversation.id, body="are you there?", origin=MessageOrigin.HUMAN
+        )
+        await service.send_text(
+            conversation_id=conversation.id, body="are you there?", origin=MessageOrigin.HUMAN
+        )
 
     assert fake.calls == 2
     assert await _outbound_count(db_session, tenant) == 2
@@ -295,11 +306,13 @@ async def test_different_keys_for_the_same_words_are_two_messages(
             conversation_id=conversation.id,
             body="are you there?",
             idempotency_key=f"key-{uuid.uuid4().hex}",
+            origin=MessageOrigin.HUMAN,
         )
         await service.send_text(
             conversation_id=conversation.id,
             body="are you there?",
             idempotency_key=f"key-{uuid.uuid4().hex}",
+            origin=MessageOrigin.HUMAN,
         )
 
     assert fake.calls == 2
@@ -323,11 +336,17 @@ async def test_reusing_a_key_for_different_words_is_refused(
     async with _graph(monkeypatch) as fake:
         service = _messaging(db_session, tenant, http)
         await service.send_text(
-            conversation_id=conversation.id, body="first thing", idempotency_key=key
+            conversation_id=conversation.id,
+            body="first thing",
+            idempotency_key=key,
+            origin=MessageOrigin.HUMAN,
         )
         with pytest.raises(ConflictError):
             await service.send_text(
-                conversation_id=conversation.id, body="something else", idempotency_key=key
+                conversation_id=conversation.id,
+                body="something else",
+                idempotency_key=key,
+                origin=MessageOrigin.HUMAN,
             )
 
     assert fake.calls == 1
@@ -350,10 +369,16 @@ async def test_two_keys_in_two_workspaces_do_not_collide(
 
     async with _graph(monkeypatch) as fake:
         await _messaging(db_session, first_tenant, http).send_text(
-            conversation_id=first_conversation.id, body="hello", idempotency_key=key
+            conversation_id=first_conversation.id,
+            body="hello",
+            idempotency_key=key,
+            origin=MessageOrigin.HUMAN,
         )
         await _messaging(db_session, second_tenant, http).send_text(
-            conversation_id=second_conversation.id, body="hello", idempotency_key=key
+            conversation_id=second_conversation.id,
+            body="hello",
+            idempotency_key=key,
+            origin=MessageOrigin.HUMAN,
         )
 
     assert fake.calls == 2
@@ -410,6 +435,7 @@ async def test_concurrent_submissions_of_one_key_send_once(
                     conversation_id=conversation_id,
                     body="are you there?",
                     idempotency_key=key,
+                    origin=MessageOrigin.HUMAN,
                 )
                 await session.commit()
                 return message.id
@@ -546,6 +572,7 @@ async def test_a_manual_send_of_a_withdrawn_template_is_refused(
                 conversation_id=conversation.id,
                 name=template.name,
                 language=template.language,
+                origin=MessageOrigin.HUMAN,
             )
 
     # Refused before the network, so the attempt costs the account nothing.
@@ -579,6 +606,7 @@ async def test_metas_refusal_of_a_template_is_written_back_to_the_registry(
             conversation_id=conversation.id,
             name=template.name,
             language=template.language,
+            origin=MessageOrigin.HUMAN,
         )
 
     assert fake.calls == 1
@@ -599,6 +627,7 @@ async def test_metas_refusal_of_a_template_is_written_back_to_the_registry(
                 conversation_id=conversation.id,
                 name=template.name,
                 language=template.language,
+                origin=MessageOrigin.HUMAN,
             )
     assert second.calls == 0
 
@@ -623,6 +652,7 @@ async def test_an_ambiguous_refusal_leaves_the_registry_alone(
             conversation_id=conversation.id,
             name=template.name,
             language=template.language,
+            origin=MessageOrigin.HUMAN,
         )
 
     await db_session.refresh(template)
@@ -649,6 +679,7 @@ async def test_a_refusal_does_not_invent_a_registry_row(
             conversation_id=conversation.id,
             name="never_synced",
             language="en",
+            origin=MessageOrigin.HUMAN,
         )
 
     rows = (
@@ -677,6 +708,7 @@ async def test_an_approved_template_still_sends(
             conversation_id=conversation.id,
             name=template.name,
             language=template.language,
+            origin=MessageOrigin.HUMAN,
         )
 
     assert fake.calls == 1
@@ -703,6 +735,7 @@ async def test_a_template_the_registry_has_never_heard_of_is_allowed(
             conversation_id=conversation.id,
             name="never_synced",
             language="en",
+            origin=MessageOrigin.HUMAN,
         )
 
     assert fake.calls == 1

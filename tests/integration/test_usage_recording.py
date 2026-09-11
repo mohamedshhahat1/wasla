@@ -265,7 +265,9 @@ async def test_a_sent_message_is_metered(
     conversation = await _conversation(db_session, tenant, account)
 
     service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
-    await service.send_text(conversation_id=conversation.id, body="On its way.")
+    await service.send_text(
+        conversation_id=conversation.id, body="On its way.", origin=MessageOrigin.HUMAN
+    )
     await db_session.flush()
 
     totals = await _totals(db_session, tenant)
@@ -285,7 +287,9 @@ async def test_a_refused_send_is_not_metered(
     conversation = await _conversation(db_session, tenant, account)
 
     service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
-    message = await service.send_text(conversation_id=conversation.id, body="On its way.")
+    message = await service.send_text(
+        conversation_id=conversation.id, body="On its way.", origin=MessageOrigin.HUMAN
+    )
     await db_session.flush()
 
     assert message.status is MessageStatus.FAILED
@@ -727,7 +731,9 @@ async def test_metering_stays_inside_the_workspace_that_consumed_it(
     conversation = await _conversation(db_session, acme, account)
 
     messaging = MessagingService(session=db_session, settings=settings, tenant_id=acme.id)
-    await messaging.send_text(conversation_id=conversation.id, body="Hello again.")
+    await messaging.send_text(
+        conversation_id=conversation.id, body="Hello again.", origin=MessageOrigin.HUMAN
+    )
     await db_session.flush()
 
     assert await _totals(db_session, rival) == {}
@@ -742,7 +748,9 @@ async def test_a_window_that_ended_before_the_work_reports_nothing(
     conversation = await _conversation(db_session, tenant, account)
 
     messaging = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
-    await messaging.send_text(conversation_id=conversation.id, body="Hello again.")
+    await messaging.send_text(
+        conversation_id=conversation.id, body="Hello again.", origin=MessageOrigin.HUMAN
+    )
     await db_session.flush()
 
     yesterday = datetime.now(UTC) - timedelta(days=1)

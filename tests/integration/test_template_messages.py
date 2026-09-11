@@ -25,6 +25,7 @@ from app.db.models.conversation import (
     Conversation,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.tenant import Tenant
@@ -131,6 +132,7 @@ async def test_a_template_send_is_recorded_as_a_template(
         conversation_id=conversation.id,
         name=TEMPLATE_NAME,
         language=TEMPLATE_LANGUAGE,
+        origin=MessageOrigin.HUMAN,
     )
 
     assert message.kind is MessageKind.TEMPLATE
@@ -154,6 +156,7 @@ async def test_the_body_stays_empty_because_meta_renders_the_text(
         conversation_id=conversation.id,
         name=TEMPLATE_NAME,
         language=TEMPLATE_LANGUAGE,
+        origin=MessageOrigin.HUMAN,
     )
 
     # Recording a guess at the wording would put words in the transcript that
@@ -174,6 +177,7 @@ async def test_the_template_reaches_meta_in_the_cloud_api_shape(
         conversation_id=conversation.id,
         name=TEMPLATE_NAME,
         language=TEMPLATE_LANGUAGE,
+        origin=MessageOrigin.HUMAN,
     )
 
     assert len(meta.requests) == 1
@@ -196,13 +200,16 @@ async def test_free_text_outside_the_window_is_refused_where_a_template_is_not(
     service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
 
     with pytest.raises(ValidationError):
-        await service.send_text(conversation_id=conversation.id, body="are you still there?")
+        await service.send_text(
+            conversation_id=conversation.id, body="are you still there?", origin=MessageOrigin.HUMAN
+        )
 
     # The same conversation accepts a template, which is the whole distinction.
     message = await service.send_template(
         conversation_id=conversation.id,
         name=TEMPLATE_NAME,
         language=TEMPLATE_LANGUAGE,
+        origin=MessageOrigin.HUMAN,
     )
     assert message.status is MessageStatus.SENT
 
@@ -213,7 +220,9 @@ async def test_a_text_send_leaves_the_template_columns_empty(
     tenant, conversation = await _conversation(db_session, last_inbound_at=datetime.now(UTC))
     service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
 
-    message = await service.send_text(conversation_id=conversation.id, body="hello")
+    message = await service.send_text(
+        conversation_id=conversation.id, body="hello", origin=MessageOrigin.HUMAN
+    )
 
     assert message.kind is MessageKind.TEXT
     assert message.template_name is None

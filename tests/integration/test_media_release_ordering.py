@@ -594,7 +594,14 @@ async def test_a_human_takeover_while_a_file_is_read_stops_the_reply(
         asked.append(keywords)
         raise ExternalServiceError("no provider is reachable from this file")
 
-    async def send(self: object, *, conversation_id: uuid.UUID, body: str) -> None:
+    async def send(
+        self: object,
+        *,
+        conversation_id: uuid.UUID,
+        body: str,
+        origin: MessageOrigin,
+        **keywords: object,
+    ) -> None:
         sent.append(body)
 
     monkeypatch.setattr(ResponsesClient, "respond", respond)

@@ -34,9 +34,9 @@ import hmac
 import json
 import socket
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -314,7 +314,7 @@ async def test_the_same_message_delivered_together_lands_once_and_answers_200(
         # only the rows is the difference between "the database is consistent"
         # and "the customer is answered once", and the second is the one a
         # customer notices.
-        assert await agent_queue.llen(AGENT_QUEUE_KEY) == 1
+        assert await cast("Awaitable[int]", agent_queue.llen(AGENT_QUEUE_KEY)) == 1
     finally:
         await _forget(scratch_engine, tenant_id)
 
@@ -369,7 +369,7 @@ async def test_distinct_first_messages_from_one_customer_build_one_conversation(
         # `1` would be suppressing real customer messages, and a change that
         # made the duplicate-delivery test above anything but `1` would be
         # answering one message twice.
-        assert await agent_queue.llen(AGENT_QUEUE_KEY) == fan_out
+        assert await cast("Awaitable[int]", agent_queue.llen(AGENT_QUEUE_KEY)) == fan_out
     finally:
         await _forget(scratch_engine, tenant_id)
 
@@ -407,6 +407,6 @@ async def test_the_same_status_delivered_eight_times_moves_one_timestamp(
         # one would put a row in a customer's transcript that no customer ever
         # received.
         assert counts["conversations"] == 0
-        assert await agent_queue.llen(AGENT_QUEUE_KEY) == 0
+        assert await cast("Awaitable[int]", agent_queue.llen(AGENT_QUEUE_KEY)) == 0
     finally:
         await _forget(scratch_engine, tenant_id)

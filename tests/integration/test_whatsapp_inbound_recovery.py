@@ -29,8 +29,9 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import pytest
 from redis.asyncio import Redis
@@ -54,6 +55,17 @@ from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.queue import QUEUE_NAMESPACE, AgentQueue
 
 pytestmark = pytest.mark.integration
+
+
+async def _queued(redis: Redis, key: str) -> int:
+    """How many jobs are waiting on `key`.
+
+    redis-py types every command as sync-or-async because one class backs both
+    clients, so `llen` alone is `Awaitable[int] | int`. The same narrowing the
+    queue itself does in `app.workers.queue._command`.
+    """
+    return await cast("Awaitable[int]", redis.llen(key))
+
 
 REDIS_URL = "redis://localhost:6379/12"
 # A port nothing is listening on. The client built against it raises
@@ -176,7 +188,7 @@ async def test_a_message_stored_while_redis_is_down_is_marked_as_still_owing(
     state, error = await _event_state(db_session, wamid)
     assert state == WhatsAppEventState.RECEIVED.value
     assert error == "agent_enqueue_failed"
-    assert await live_redis.llen(PENDING) == 0
+    assert await _queued(live_redis, PENDING) == 0
     assert account.tenant_id == message.tenant_id
 
 
@@ -202,7 +214,7 @@ async def test_a_healthy_delivery_marks_the_event_finished(
     state, error = await _event_state(db_session, wamid)
     assert state == WhatsAppEventState.PROCESSED.value
     assert error is None
-    assert await live_redis.llen(PENDING) == 1
+    assert await _queued(live_redis, PENDING) == 1
 
 
 async def test_a_redelivery_does_not_re_project_and_does_not_re_queue(
@@ -241,7 +253,7 @@ async def test_a_redelivery_does_not_re_project_and_does_not_re_queue(
     assert len(messages) == 1
     state, _ = await _event_state(db_session, wamid)
     assert state == WhatsAppEventState.RECEIVED.value
-    assert await live_redis.llen(PENDING) == 0
+    assert await _queued(live_redis, PENDING) == 0
 
 
 @pytest.fixture
@@ -299,13 +311,13 @@ async def test_the_sweeper_queues_the_turn_the_outage_lost_and_only_once(
         await session.commit()
 
     try:
-        assert await live_redis.llen(PENDING) == 0
+        assert await _queued(live_redis, PENDING) == 0
 
         first = await _worker(recovery_database).run_once()
         assert first.claimed == 1
         assert first.agent_jobs == 1
         assert first.completed == 1
-        assert await live_redis.llen(PENDING) == 1
+        assert await _queued(live_redis, PENDING) == 1
 
         async with recovery_database.session() as session:
             state, error = await _event_state(session, wamid)
@@ -316,7 +328,7 @@ async def test_the_sweeper_queues_the_turn_the_outage_lost_and_only_once(
         # the customer is not answered a second time.
         second = await _worker(recovery_database).run_once()
         assert second.claimed == 0
-        assert await live_redis.llen(PENDING) == 1
+        assert await _queued(live_redis, PENDING) == 1
     finally:
         await _cleanup(recovery_database, tenant_id)
 
@@ -348,7 +360,7 @@ async def test_two_sweepers_running_together_queue_one_turn_between_them(
         )
         assert sorted(outcome.claimed for outcome in outcomes) == [0, 1]
         assert sum(outcome.agent_jobs for outcome in outcomes) == 1
-        assert await live_redis.llen(PENDING) == 1
+        assert await _queued(live_redis, PENDING) == 1
     finally:
         await _cleanup(recovery_database, tenant_id)
 
@@ -469,7 +481,7 @@ async def test_a_message_wasla_cannot_read_costs_no_inference(
 
     assert outcome.stored == 1
     assert outcome.queued == 0
-    assert await live_redis.llen(PENDING) == 0
+    assert await _queued(live_redis, PENDING) == 0
 
     message = (
         await db_session.execute(select(Message).where(Message.wa_message_id == wamid))
@@ -502,7 +514,7 @@ async def test_an_ordinary_text_message_still_gets_its_turn(
     await db_session.flush()
 
     assert outcome.queued == 1
-    assert await live_redis.llen(PENDING) == 1
+    assert await _queued(live_redis, PENDING) == 1
 
 
 async def test_a_status_event_owes_nothing_and_is_finished_immediately(
@@ -551,7 +563,7 @@ async def test_a_status_event_owes_nothing_and_is_finished_immediately(
     assert state == WhatsAppEventState.PROCESSED.value
     assert error is None
     # Nothing to answer, so nothing was queued and no placeholder was invented.
-    assert await live_redis.llen(PENDING) == 0
+    assert await _queued(live_redis, PENDING) == 0
     assert (
         await db_session.execute(select(Conversation).where(Conversation.contact_id.isnot(None)))
     ).scalars().all() == []

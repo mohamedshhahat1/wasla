@@ -418,6 +418,7 @@ async def test_an_attachment_is_uploaded_then_sent_and_recorded(
         filename="quote.pdf",
         caption="here is the quote",
         storage=LocalMediaStorage(tmp_path),
+        origin=MessageOrigin.HUMAN,
     )
 
     assert message.status is MessageStatus.SENT
@@ -471,6 +472,7 @@ async def test_a_hostile_filename_is_replaced_before_it_reaches_meta(
         content=b"%PDF-1.4",
         mime_type="application/pdf",
         filename="../../etc/passwd",
+        origin=MessageOrigin.HUMAN,
     )
 
     assert whatsapp.uploads[0]["filename"] == "attachment.pdf"
@@ -492,6 +494,7 @@ async def test_an_attachment_outside_the_service_window_is_refused(
             conversation_id=conversation.id,
             content=b"x",
             mime_type="image/png",
+            origin=MessageOrigin.HUMAN,
         )
 
 
@@ -513,6 +516,7 @@ async def test_a_type_meta_will_not_accept_is_refused(
             conversation_id=conversation.id,
             content=b"PK",
             mime_type="application/zip",
+            origin=MessageOrigin.HUMAN,
         )
 
 

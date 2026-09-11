@@ -296,7 +296,14 @@ async def test_an_agent_job_succeeds_once_its_creator_commits(
             model="stub",
         )
 
-    async def send(self: object, *, conversation_id: uuid.UUID, body: str) -> None:
+    async def send(
+        self: object,
+        *,
+        conversation_id: uuid.UUID,
+        body: str,
+        origin: MessageOrigin,
+        **keywords: object,
+    ) -> None:
         sent.append(body)
 
     monkeypatch.setattr(AgentOrchestrator, "answer", compose)

@@ -51,6 +51,7 @@ from app.db.models.conversation import (
     Message,
     MessageDeliveryState,
     MessageDirection,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.follow_up import FollowUp, FollowUpStatus
@@ -257,7 +258,9 @@ async def test_outbound_send_intent_is_committed_before_meta_call(
     async def send() -> None:
         async with one_connection.session() as session:
             service = _messaging(session, tenant_id=tenant_id, provider=provider)
-            await service.send_text(conversation_id=conversation_id, body="Parked.")
+            await service.send_text(
+                conversation_id=conversation_id, body="Parked.", origin=MessageOrigin.HUMAN
+            )
 
     running = asyncio.create_task(send())
     try:
@@ -294,7 +297,9 @@ async def test_meta_wait_holds_no_database_connection(
     async def send() -> None:
         async with one_connection.session() as session:
             service = _messaging(session, tenant_id=tenant_id, provider=provider)
-            await service.send_text(conversation_id=conversation_id, body="Parked.")
+            await service.send_text(
+                conversation_id=conversation_id, body="Parked.", origin=MessageOrigin.HUMAN
+            )
 
     running = asyncio.create_task(send())
     try:
@@ -320,7 +325,9 @@ async def test_meta_success_then_process_crash_leaves_recoverable_send_state(
 
     session = one_connection.session_factory()
     service = _messaging(session, tenant_id=tenant_id, provider=provider)
-    await service.send_text(conversation_id=conversation_id, body="Your order shipped.")
+    await service.send_text(
+        conversation_id=conversation_id, body="Your order shipped.", origin=MessageOrigin.HUMAN
+    )
     await session.rollback()
     await session.close()
 
@@ -375,7 +382,9 @@ async def test_an_unknown_outcome_is_not_recorded_as_a_failure(
 
     async with one_connection.session() as session:
         service = _messaging(session, tenant_id=tenant_id, provider=provider)
-        message = await service.send_text(conversation_id=conversation_id, body="Hello.")
+        message = await service.send_text(
+            conversation_id=conversation_id, body="Hello.", origin=MessageOrigin.HUMAN
+        )
         assert message.delivery_state is state
 
     (row,) = await _outbound(one_connection, conversation_id)
@@ -496,6 +505,7 @@ async def test_template_send_preserves_same_delivery_protocol(
                 conversation_id=conversation_id,
                 name="order_update",
                 language="en",
+                origin=MessageOrigin.HUMAN,
             )
 
     running = asyncio.create_task(send())
@@ -530,6 +540,7 @@ async def test_outbound_media_send_preserves_same_delivery_protocol(
                 content=PIXEL,
                 mime_type="image/png",
                 caption="Here it is.",
+                origin=MessageOrigin.HUMAN,
             )
 
     running = asyncio.create_task(send())
@@ -567,6 +578,7 @@ async def test_a_failed_upload_is_an_undelivered_send_rather_than_an_unknown(
             conversation_id=conversation_id,
             content=PIXEL,
             mime_type="image/png",
+            origin=MessageOrigin.HUMAN,
         )
 
     assert provider.sends == 0

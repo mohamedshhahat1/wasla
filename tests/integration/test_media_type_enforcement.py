@@ -192,6 +192,7 @@ async def test_a_spoofed_upload_is_refused_and_nothing_is_sent(
             content=content,
             mime_type=claimed,
             filename="photo.jpg",
+            origin=MessageOrigin.HUMAN,
         )
 
     assert meta.requests == [], f"{label}: a refused file still reached Meta"
@@ -216,6 +217,7 @@ async def test_the_filename_extension_decides_nothing(
         mime_type=None,
         filename="photo.jpg",
         storage=LocalMediaStorage(tmp_path),
+        origin=MessageOrigin.HUMAN,
     )
 
     assert message.kind is MessageKind.DOCUMENT
@@ -236,6 +238,7 @@ async def test_an_extension_cannot_rescue_a_contradicted_claim(
             content=PDF,
             mime_type="image/jpeg",
             filename="photo.jpg",
+            origin=MessageOrigin.HUMAN,
         )
 
     assert meta.requests == []
@@ -253,6 +256,7 @@ async def test_a_genuine_image_is_still_sent(
         mime_type="image/png",
         filename="sofa.png",
         storage=LocalMediaStorage(tmp_path),
+        origin=MessageOrigin.HUMAN,
     )
 
     assert message.kind is MessageKind.IMAGE
@@ -276,6 +280,7 @@ async def test_meta_is_told_the_canonical_type_not_the_callers(
         mime_type="IMAGE/PNG; charset=binary",
         filename="sofa.png",
         storage=LocalMediaStorage(tmp_path),
+        origin=MessageOrigin.HUMAN,
     )
 
     body = meta.upload.content
@@ -297,6 +302,7 @@ async def test_the_stored_row_carries_the_detected_type(
         mime_type=None,
         filename="sofa.png",
         storage=LocalMediaStorage(tmp_path),
+        origin=MessageOrigin.HUMAN,
     )
     await db_session.flush()
 
@@ -328,6 +334,7 @@ async def test_an_outbound_attachment_names_its_object_before_writing_it(
         mime_type="image/png",
         filename="sofa.png",
         storage=storage,
+        origin=MessageOrigin.HUMAN,
     )
     await db_session.flush()
 
@@ -365,6 +372,7 @@ async def test_an_outbound_write_the_store_refused_stays_recoverable(
         mime_type="image/png",
         filename="sofa.png",
         storage=Refusing(tmp_path),
+        origin=MessageOrigin.HUMAN,
     )
     await db_session.flush()
 
