@@ -54,6 +54,15 @@ OutputTokens = Annotated[int, Field(ge=1, le=MAX_OUTPUT_TOKENS)]
 class AgentCreate(BaseModel):
     """A new agent. It starts as a draft whatever else is sent."""
 
+    # An undeclared field is a 422, not a shrug. Nothing here reads `tenant_id`
+    # from a body - the workspace comes from the signed token by way of
+    # `ActiveWorkspaceDep`, and the route copies the declared fields one at a
+    # time - so a `"tenant_id": "<somebody else>"` was already inert. Refusing
+    # it says so out loud instead of accepting and discarding, which is the
+    # difference between a contract and a coincidence, and it is what the rest
+    # of this package already does.
+    model_config = ConfigDict(extra="forbid")
+
     name: AgentName
     system_prompt: Prompt
     description: Description | None = None
@@ -79,6 +88,8 @@ class AgentUpdate(BaseModel):
     off. Pydantic records which fields arrived, so `was_sent` reads that rather
     than inventing a sentinel value in the wire format.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: AgentName | None = None
     system_prompt: Prompt | None = None
@@ -117,6 +128,8 @@ class AgentRead(BaseModel):
 
 class ToolGrantRequest(BaseModel):
     """Granting a tool to an agent, or changing an existing grant."""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: ToolName
     enabled: bool = True
