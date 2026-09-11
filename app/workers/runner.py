@@ -42,6 +42,7 @@ from app.workers.heartbeat import (
     Heartbeat,
     all_alive,
 )
+from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_worker import MediaWorker
 from app.workers.purge_worker import PurgeWorker
@@ -67,6 +68,12 @@ RETENTION: Final = "retention"
 # purpose is to delete things.
 PURGE: Final = "purge"
 UPLOADS: Final = "uploads"
+# The sweep that finishes inbound events whose agent or media handoff never
+# reached Redis. Named apart from `recovery`, which reclaims expired *queue*
+# reservations: this one recovers work that never got as far as a reservation,
+# and a deployment running neither has two different silent failures rather
+# than one (ADR-102).
+INBOUND_RECOVERY: Final = "inbound_recovery"
 # Media comes before agent deliberately. It is the order the work flows in -
 # a file is read, then answered - and the order the log lines appear in at
 # startup, which is worth having match. Billing and email come last: billing
@@ -99,6 +106,7 @@ ALL_KINDS: Final = (
     BILLING,
     EMAIL,
     RECOVERY,
+    INBOUND_RECOVERY,
     RETENTION,
     PURGE,
     UPLOADS,
@@ -180,6 +188,8 @@ def build_workers(
             workers.append(EmailWorker(database=database, settings=settings))
         elif kind == RECOVERY:
             workers.append(RecoveryWorker(redis=redis, settings=settings))
+        elif kind == INBOUND_RECOVERY:
+            workers.append(InboundRecoveryWorker(database=database, redis=redis, settings=settings))
         elif kind == RETENTION:
             workers.append(RetentionWorker(database=database, settings=settings))
         elif kind == PURGE:
