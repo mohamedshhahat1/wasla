@@ -38,6 +38,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.sentiment import ConversationPriority
@@ -83,6 +84,9 @@ def _message(**overrides: Any) -> Message:
         "kind": MessageKind.TEXT,
         "status": MessageStatus.SENT,
         "body": "hello",
+        # Set explicitly for the same reason `priority` is above: the
+        # column is NOT NULL and this row is never inserted.
+        "origin": MessageOrigin.AGENT,
         "created_at": MOMENT,
         "updated_at": MOMENT,
     }

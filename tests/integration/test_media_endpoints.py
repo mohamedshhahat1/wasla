@@ -109,6 +109,7 @@ class StubMessaging:
             kind=MessageKind.DOCUMENT,
             status=MessageStatus.SENT,
             body=kwargs.get("caption"),
+            origin=kwargs["origin"],
             # Filled by the database in real life; supplied here because these
             # rows never reach one.
             created_at=NOW,

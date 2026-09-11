@@ -85,6 +85,7 @@ class StubMessaging:
         components: Sequence[Any] | None = None,
         sent_by_id: uuid.UUID | None = None,
         link: Callable[[Message], None] | None = None,
+        origin: MessageOrigin,
     ) -> Message:
         """The real protocol's shape, minus the commits (ADR-093).
 
@@ -119,7 +120,7 @@ class StubMessaging:
             failure_reason="Meta said no." if rejected else None,
             template_name=name,
             template_language=language,
-            origin=MessageOrigin.AGENT,
+            origin=origin,
         )
         self._session.add(message)
         await self._session.flush()

@@ -170,6 +170,7 @@ class StubMessaging:
         language: str,
         components: Sequence[Any] | None = None,
         link: Callable[[Message], None] | None = None,
+        **kwargs: Any,
     ) -> Message:
         if self.outcome == "raise":
             raise ExternalServiceError("The network went away.")
