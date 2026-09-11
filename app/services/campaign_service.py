@@ -468,6 +468,32 @@ class CampaignService:
 
         sent = failed = skipped = 0
         for recipient in claimed:
+            if await self._campaigns.is_cancelled(campaign.id):
+                # A cancel landing mid-batch now stops at the next recipient
+                # rather than after the whole claimed batch (MSG-22). Bounded
+                # improvement, not a redesign: what was already sent stays
+                # sent, which is the documented intent and the only honest
+                # answer once a message has reached a customer.
+                #
+                # Read from the database rather than off `campaign`, because
+                # `cancel()` runs in a different transaction and this object is
+                # a snapshot taken before the batch began. One indexed scalar
+                # per recipient, against a Graph API call - which is why it is
+                # affordable here and would not be in a tighter loop.
+                #
+                # Deliberately not a locked read. The send commits part-way
+                # through, so a lock taken here would be dropped at the first
+                # send and would buy nothing, and holding one across a provider
+                # call is the trade ADR-093 exists to refuse.
+                logger.info(
+                    "campaign.batch_stopped_by_cancel",
+                    extra={
+                        "event": "campaign.batch_stopped_by_cancel",
+                        "campaign_id": str(campaign.id),
+                        "sent": sent,
+                    },
+                )
+                break
             try:
                 outcome = await self._deliver(campaign, recipient, messaging=messaging, now=moment)
             except (DependencyUnavailableError, ProviderAuthError) as error:

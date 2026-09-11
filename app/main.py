@@ -27,6 +27,7 @@ from app.core.telemetry import set_counter_sink
 from app.core.tracing import API_SERVICE_NAME, configure_tracing, shutdown_tracing
 from app.db.session import Database
 from app.integrations.email import require_delivery_verification
+from app.integrations.whatsapp.versions import api_version_warning
 
 logger = get_logger(__name__)
 
@@ -53,6 +54,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "version": __version__,
         },
     )
+    # Warned about at start-up rather than discovered when sends begin failing.
+    # Read from a table this repository maintains, never fetched: booting must
+    # not depend on a third party's website being up and parseable (MSG-21).
+    expiry = api_version_warning(settings.meta_api_version)
+    if expiry is not None:
+        logger.warning(
+            "whatsapp.api_version_expiring",
+            extra={
+                "event": "whatsapp.api_version_expiring",
+                "meta_api_version": settings.meta_api_version,
+                "detail": expiry,
+            },
+        )
     try:
         yield
     finally:

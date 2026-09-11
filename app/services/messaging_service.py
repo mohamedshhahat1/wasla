@@ -60,10 +60,12 @@ from app.db.models.conversation import (
 from app.db.models.media import MediaStatus, MediaStorageState
 from app.db.models.usage import UsageEventType
 from app.db.models.whatsapp import WhatsAppAccount
+from app.db.models.whatsapp_template import TemplateStatus
 from app.db.session import released
 from app.integrations.whatsapp.client import (
     ProviderAuthError,
     SentMessage,
+    TemplateWithdrawnError,
     UncertainDeliveryError,
     WhatsAppClient,
     build_http_client,
@@ -773,6 +775,20 @@ class MessagingService:
             await self._session.flush()
             return message
 
+        if isinstance(outcome, TemplateWithdrawnError) and template_name and template_language:
+            # Recorded before the row is, because the registry fact outlives
+            # this send. Every later follow-up and campaign using this template
+            # is now refused by `refusal_reason_for` without asking Meta, which
+            # is the difference between one rejection and one per recipient
+            # (MSG-24). The send itself is an ordinary undelivered one: Meta
+            # declined it before reading it, so nothing reached the customer.
+            await self._withdraw_template(
+                name=template_name,
+                language=template_language,
+                code=outcome.code,
+            )
+            return await self._undelivered(message, reason=str(outcome))
+
         if isinstance(outcome, ProviderAuthError):
             # Nothing was delivered, so the row is recorded honestly as
             # undelivered - and then the failure is let out, because it is not
@@ -811,6 +827,34 @@ class MessagingService:
         )
         await self._session.flush()
         return message
+
+    async def _withdraw_template(self, *, name: str, language: str, code: int) -> None:
+        """Write Meta's refusal back onto the registry row, if we hold one.
+
+        Only a template the registry already knows is updated. Creating a row
+        for one it has never heard of would turn a single refusal into a
+        permanent local block on a name this workspace may never have synced,
+        and "unknown" is deliberately allowed to send (`refusal_reason_for`).
+
+        `PAUSED` rather than `REJECTED` or `DISABLED`, whatever the code:
+        pausing is the reversible state, and a sync is what establishes which
+        of the three Meta actually means. Overstating the refusal would make a
+        template that Meta un-pauses look permanently dead until somebody
+        noticed.
+        """
+        template = await self._templates.find_anywhere(name=name, language=language)
+        if template is None:
+            return
+        template.status = TemplateStatus.PAUSED
+        template.rejection_reason = f"WhatsApp refused this template (code {code})."
+        logger.warning(
+            "whatsapp.template_withdrawn",
+            extra={
+                "event": "whatsapp.template_withdrawn",
+                "template_id": str(template.id),
+                "meta_code": code,
+            },
+        )
 
     async def _undelivered(self, message: Message, *, reason: str) -> Message:
         """Nothing was delivered, and that is known rather than assumed.

@@ -50,6 +50,7 @@ retried there, timeouts and 5xx included.
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Final, Literal
@@ -71,6 +72,29 @@ logger = get_logger(__name__)
 # Followed by hand so each hop can be validated; see `_get`.
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
+# Meta's error codes that name the *template* rather than the request, mapped
+# onto what the local registry should then record. Used to write a rejection
+# back so every later send does not rediscover the same withdrawal one customer
+# at a time (MSG-24).
+#
+# Deliberately a small, explicit table. A code that is not here leaves the
+# registry alone, because marking a template invalid on an ambiguous error
+# would take a working template away from a workspace on the strength of a
+# guess - and getting it back needs a manual sync.
+#
+# 132000-132015 are Meta's template errors; only the ones whose meaning is
+# unambiguously "this template may not be sent" are listed.
+TEMPLATE_WITHDRAWN_CODES: Final[frozenset[int]] = frozenset(
+    {
+        # The template does not exist, or was deleted.
+        132001,
+        # Paused because of quality feedback.
+        132015,
+        # Disabled after repeated pausing.
+        132016,
+    }
+)
+
 # The two operations this client is counted under. Short constants, never
 # anything derived from a request - a metric label domain has to be fixed at
 # the point it is written, not at the point somebody sends a message.
@@ -82,6 +106,16 @@ MESSAGING_PRODUCT: Final = "whatsapp"
 REQUEST_TIMEOUT_SECONDS: Final = 10.0
 MAX_ATTEMPTS: Final = 3
 BACKOFF_SECONDS: Final = 0.5
+# How much random extra wait each backoff may add, as a fraction of the base.
+# Additive only: a jittered retry may arrive later than the floor and never
+# earlier. Without it, several replicas throttled at the same instant retry in
+# lockstep and arrive together, which is what turns a brief throttle into a
+# sustained one.
+RETRY_JITTER: Final = 0.5
+# The longest this client will wait because a provider header asked it to. The
+# send path holds no database connection, but it does hold a worker, and a
+# header is not something to let park one indefinitely.
+MAX_RETRY_AFTER_SECONDS: Final = 30.0
 TOO_MANY_REQUESTS: Final = 429
 SERVER_ERROR_FLOOR: Final = 500
 CLIENT_ERROR_FLOOR: Final = 400
@@ -141,6 +175,28 @@ class _Hop:
     redirect_to: str | None
 
 
+def _retry_after(response: httpx.Response) -> float | None:
+    """How long Meta asked this client to wait, if it said.
+
+    Only the delta-seconds form is read. The HTTP-date form is permitted by the
+    specification and is not what Meta sends here, and a date parser on this
+    path would be more code than the case is worth - an absent or unreadable
+    header simply falls back to the client's own backoff, which is the
+    behaviour this had before.
+
+    A negative or absurd value is refused rather than clamped to zero, because
+    "wait no time at all" is not something a rate limiter would mean.
+    """
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        seconds = float(raw.strip())
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None
+
+
 class SendNotAttemptedError(ExternalServiceError):
     """The request provably never reached Meta.
 
@@ -161,6 +217,26 @@ class UncertainDeliveryError(ExternalServiceError):
     on anything this system generated. So this is terminal by construction: the
     one thing that must not follow it is another send.
     """
+
+
+class TemplateWithdrawnError(SendNotAttemptedError):
+    """Meta refused this template, not this message.
+
+    Nothing was delivered, so the row is honestly `UNDELIVERED` - but the fact
+    is about the template and outlives the send. The caller records it against
+    the registry, so the next follow-up or campaign using the same template is
+    refused locally instead of discovering the same withdrawal one customer at
+    a time (MSG-24).
+
+    Carries Meta's own code so the caller can record *why* without this client
+    knowing anything about the registry.
+    """
+
+    message = "WhatsApp has withdrawn this template."
+
+    def __init__(self, *, code: int) -> None:
+        super().__init__(self.message)
+        self.code = code
 
 
 class ProviderAuthError(SendNotAttemptedError):
@@ -239,6 +315,7 @@ class WhatsAppClient:
         max_attempts: int = MAX_ATTEMPTS,
         backoff_seconds: float = BACKOFF_SECONDS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        jitter: Callable[[], float] | None = None,
     ) -> None:
         if not access_token:
             # An absent platform credential is our misconfiguration, not the
@@ -250,6 +327,10 @@ class WhatsAppClient:
         self._max_attempts = max(1, max_attempts)
         self._backoff_seconds = backoff_seconds
         self._sleep = sleep
+        # Injected the same way `sleep` is, and for the same reason: the retry
+        # wait is a formula a test should be able to pin exactly, rather than
+        # one it has to patch `random` to observe.
+        self._jitter = jitter
 
     async def send_text(
         self,
@@ -822,7 +903,7 @@ class WhatsAppClient:
                     logger.warning("whatsapp.send_rate_limited", extra={"attempts": attempt})
                     await call.record(CallOutcome.RATE_LIMITED)
                     raise RateLimitedError("WhatsApp is rate limiting this account.")
-                await self._backoff(attempt)
+                await self._backoff(attempt, retry_after=_retry_after(response))
                 attempt += 1
                 continue
 
@@ -845,6 +926,11 @@ class WhatsAppClient:
                     # next recipient. Raised as its own type so a sweep can
                     # stop rather than discover it once per person (MSG-18).
                     raise ProviderAuthError
+                if error_code in TEMPLATE_WITHDRAWN_CODES:
+                    # About the template rather than this message, and worth
+                    # writing down: the caller marks the registry so the next
+                    # send of it is refused locally (MSG-24).
+                    raise TemplateWithdrawnError(code=error_code)
                 raise SendNotAttemptedError("WhatsApp rejected the message.")
 
             await call.record(CallOutcome.SUCCESS)
@@ -871,8 +957,34 @@ class WhatsAppClient:
             return True
         return error_code == META_AUTH_CODE
 
-    async def _backoff(self, attempt: int) -> None:
-        await self._sleep(self._backoff_seconds * attempt)
+    async def _backoff(self, attempt: int, *, retry_after: float | None = None) -> None:
+        """Wait before the next attempt, honouring Meta if it said how long.
+
+        Two changes from the linear wait this used to be, both of which matter
+        more with several replicas than with one (MSG-17).
+
+        **`Retry-After` is read when Meta sends it.** Retrying in half a second
+        against an account Meta has just told to wait thirty is unlikely to
+        help and may deepen the throttle. It is clamped rather than trusted:
+        the send path holds no database connection but it does hold a worker,
+        and a provider header is not something to let park one indefinitely.
+
+        **The wait is jittered.** Three replicas rate-limited together retried
+        in lockstep and arrived together, which is the shape that turns a brief
+        throttle into a sustained one. The jitter is additive and never
+        subtractive, so it can only ever make the wait longer than the floor -
+        a retry that arrives *earlier* than intended is the one thing backoff
+        must not do.
+        """
+        base = self._backoff_seconds * attempt
+        if retry_after is not None:
+            base = max(base, min(retry_after, MAX_RETRY_AFTER_SECONDS))
+        # The fraction is drawn here and the arithmetic is separate, matching
+        # `RetryPolicy.delay_for`: a test pins the formula by supplying the
+        # fraction rather than by patching `random` or watching a clock.
+        draw = self._jitter or random.random
+        fraction = draw()
+        await self._sleep(base + base * RETRY_JITTER * fraction)
 
     def _log_failure(self, response: httpx.Response) -> int | None:
         """Log Meta's own error code, but never hand its text to the caller.

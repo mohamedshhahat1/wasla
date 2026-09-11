@@ -48,7 +48,9 @@ from app.db.models.conversation import (
     Conversation,
     ConversationStatus,
     Message,
+    MessageDeliveryState,
     MessageDirection,
+    MessageStatus,
 )
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
@@ -116,6 +118,44 @@ class CountingGraph:
 @contextlib.asynccontextmanager
 async def _graph(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[CountingGraph]:
     async with CountingGraph() as fake:
+        monkeypatch.setattr(client_module, "GRAPH_BASE_URL", f"http://127.0.0.1:{fake.port}")
+        yield fake
+
+
+class RefusingGraph(CountingGraph):
+    """Meta declining, with a specific error envelope and a call count."""
+
+    def __init__(self, status: int, body: dict[str, object]) -> None:
+        super().__init__()
+        self._status = status
+        self._body = body
+
+    async def _handle(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        self.calls += 1
+        payload = json.dumps(self._body).encode()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(reader.read(65536), timeout=5)
+            writer.write(
+                f"HTTP/1.1 {self._status} X\r\nContent-Type: application/json\r\n"
+                f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode() + payload
+            )
+            await writer.drain()
+        with contextlib.suppress(Exception):
+            writer.close()
+            await writer.wait_closed()
+
+
+@contextlib.asynccontextmanager
+async def _refusing_graph(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    body: dict[str, object],
+) -> AsyncIterator[RefusingGraph]:
+    async with RefusingGraph(status, body) as fake:
         monkeypatch.setattr(client_module, "GRAPH_BASE_URL", f"http://127.0.0.1:{fake.port}")
         yield fake
 
@@ -454,6 +494,116 @@ async def test_a_manual_send_of_a_withdrawn_template_is_refused(
     # Refused before the network, so the attempt costs the account nothing.
     assert fake.calls == 0
     assert await _outbound_count(db_session, tenant) == 0
+
+
+async def test_metas_refusal_of_a_template_is_written_back_to_the_registry(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    http: httpx.AsyncClient,
+) -> None:
+    """One rejection teaches the registry, instead of one per recipient.
+
+    Sync is an administrative action nobody performs on a schedule, so a
+    template Meta pauses stays `APPROVED` locally until somebody clicks it -
+    and every follow-up and campaign using it is refused by Meta one at a time
+    in the meantime (MSG-24).
+
+    Recorded as `PAUSED` whatever the code, because pausing is the reversible
+    state and a sync is what establishes which of the three Meta actually
+    means. Overstating it would make a template Meta un-pauses look
+    permanently dead.
+    """
+    tenant, conversation, account = await _conversation(db_session)
+    template = await _template(db_session, tenant, account, status=TemplateStatus.APPROVED)
+    refusal = {"error": {"code": 132015, "type": "OAuthException", "message": "paused"}}
+
+    async with _refusing_graph(monkeypatch, 400, refusal) as fake:
+        message = await _messaging(db_session, tenant, http).send_template(
+            conversation_id=conversation.id,
+            name=template.name,
+            language=template.language,
+        )
+
+    assert fake.calls == 1
+    # Nothing was delivered, and that is known - so the send is an ordinary
+    # undelivered one rather than an unknown.
+    assert message.status is MessageStatus.FAILED
+    assert message.delivery_state is MessageDeliveryState.UNDELIVERED
+
+    await db_session.refresh(template)
+    assert template.status is TemplateStatus.PAUSED
+    assert template.rejection_reason is not None
+    assert "132015" in template.rejection_reason
+
+    # And the next send of it is refused locally, without asking Meta again.
+    async with _refusing_graph(monkeypatch, 400, refusal) as second:
+        with pytest.raises(ValidationError):
+            await _messaging(db_session, tenant, http).send_template(
+                conversation_id=conversation.id,
+                name=template.name,
+                language=template.language,
+            )
+    assert second.calls == 0
+
+
+async def test_an_ambiguous_refusal_leaves_the_registry_alone(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    http: httpx.AsyncClient,
+) -> None:
+    """Only codes that unambiguously mean "this template" are written back.
+
+    Marking a template invalid on a guess takes a working template away from a
+    workspace, and getting it back needs a manual sync. A bad parameter is
+    about this *message*, not about the template.
+    """
+    tenant, conversation, account = await _conversation(db_session)
+    template = await _template(db_session, tenant, account, status=TemplateStatus.APPROVED)
+    refusal = {"error": {"code": 131009, "type": "OAuthException", "message": "bad param"}}
+
+    async with _refusing_graph(monkeypatch, 400, refusal):
+        await _messaging(db_session, tenant, http).send_template(
+            conversation_id=conversation.id,
+            name=template.name,
+            language=template.language,
+        )
+
+    await db_session.refresh(template)
+    assert template.status is TemplateStatus.APPROVED
+    assert template.rejection_reason is None
+
+
+async def test_a_refusal_does_not_invent_a_registry_row(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    http: httpx.AsyncClient,
+) -> None:
+    """A template the registry has never heard of stays unheard of.
+
+    Creating a row from a refusal would turn one rejection into a permanent
+    local block on a name this workspace may never have synced - and "unknown"
+    is deliberately allowed to send.
+    """
+    tenant, conversation, _ = await _conversation(db_session)
+    refusal = {"error": {"code": 132015, "type": "OAuthException", "message": "paused"}}
+
+    async with _refusing_graph(monkeypatch, 400, refusal):
+        await _messaging(db_session, tenant, http).send_template(
+            conversation_id=conversation.id,
+            name="never_synced",
+            language="en",
+        )
+
+    rows = (
+        (
+            await db_session.execute(
+                select(WhatsAppTemplate).where(WhatsAppTemplate.tenant_id == tenant.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert rows == []
 
 
 async def test_an_approved_template_still_sends(

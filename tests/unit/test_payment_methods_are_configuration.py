@@ -44,6 +44,17 @@ from app.integrations.billing.paymob import PaymobProvider
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Six-digit literals that are provably not Paymob integration ids, as
+# (path, literal) pairs. Meta publishes these error codes in its own
+# documentation and the WhatsApp client reads them to tell "this template has
+# been withdrawn" apart from "this request was malformed" (MSG-24); they are
+# fixed vocabulary from another provider and cannot come from configuration.
+NOT_PAYMOB_IDS: set[tuple[str, str]] = {
+    ("app/integrations/whatsapp/client.py", "132001"),
+    ("app/integrations/whatsapp/client.py", "132015"),
+    ("app/integrations/whatsapp/client.py", "132016"),
+}
+
 BASE = {
     "_env_file": None,
     "environment": "staging",
@@ -362,12 +373,21 @@ def test_no_integration_id_is_hardcoded_anywhere_in_the_application() -> None:
 
     Six digits or more, because Paymob's ids are of that magnitude and shorter
     numbers in this codebase are timeouts and sizes.
+
+    The allowlist is per (file, literal) rather than per file, so a module that
+    legitimately holds one six-digit constant does not stop being scanned for
+    the next one. Every entry is a number published by a *different* provider,
+    which is why it is a fixed constant here and could never come from
+    `PAYMOB_INTEGRATION_IDS`.
     """
     offenders: list[str] = []
     for path in sorted((REPO_ROOT / "app").rglob("*.py")):
+        relative = str(path.relative_to(REPO_ROOT)).replace("\\", "/")
         source = _code_only(path.read_text(encoding="utf-8"))
         for match in re.finditer(r"(?<![\w.])\d{6,}(?![\w.])", source):
-            offenders.append(f"{path.relative_to(REPO_ROOT)}: {match.group(0)}")
+            if (relative, match.group(0)) in NOT_PAYMOB_IDS:
+                continue
+            offenders.append(f"{relative}: {match.group(0)}")
 
     assert not offenders, f"integration-id-shaped literals in application code: {offenders}"
 

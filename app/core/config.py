@@ -676,6 +676,8 @@ class Settings(BaseSettings):
     meta_app_secret: str | None = None
     meta_verify_token: str | None = None
     meta_access_token: str | None = None
+    # Checked against `META_API_SUNSETS` at start-up, which warns when this
+    # version is inside its final 90 days. See `api_version_warning`.
     meta_api_version: str = "v21.0"
 
     # Email (ADR-042). Off by default: a deployment that has not configured a

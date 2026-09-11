@@ -61,6 +61,14 @@ class Recorder:
 
 
 def _client(recorder: Recorder, **overrides: Any) -> WhatsAppClient:
+    """A client whose waits are exact, so a test can assert on them.
+
+    `jitter` is pinned to zero for the same reason `sleep` is recorded rather
+    than performed: the backoff is a formula, and a test of the retry *policy*
+    should not also be a test of `random`. The spread itself is pinned
+    separately, in `test_whatsapp_lifecycle_and_backoff.py`.
+    """
+    overrides.setdefault("jitter", lambda: 0.0)
     return WhatsAppClient(
         http=httpx.AsyncClient(transport=httpx.MockTransport(recorder.handler)),
         access_token=ACCESS_TOKEN,
@@ -183,6 +191,9 @@ async def test_a_connection_error_is_retried() -> None:
         access_token=ACCESS_TOKEN,
         sleep=recorder.sleep,
         backoff_seconds=0.1,
+        # Built directly rather than through `_client`, because the transport
+        # has to raise rather than answer - so the jitter is pinned here too.
+        jitter=lambda: 0.0,
     )
 
     sent = await client.send_text(phone_number_id=PHONE_NUMBER_ID, to=RECIPIENT, body="hello")

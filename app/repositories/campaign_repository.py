@@ -107,6 +107,25 @@ class CampaignRepository(TenantScopedRepository[Campaign]):
     async def get_by_id(self, campaign_id: uuid.UUID) -> Campaign | None:
         return await self._first(self._select().where(Campaign.id == campaign_id))
 
+    async def is_cancelled(self, campaign_id: uuid.UUID) -> bool:
+        """Whether this campaign has been cancelled since the batch was claimed.
+
+        A scalar read of the column rather than a refresh of the mapped object,
+        deliberately. `cancel()` runs in a different request and a different
+        transaction, so the object the sweep is holding is a snapshot taken
+        before the batch began - and a `select` returning the mapped instance
+        would hand back the attributes it was loaded with. This is the same
+        identity-map trap `AgentOrchestrator._taken_over` avoids, for the same
+        reason and by the same means.
+        """
+        status = await self.session.scalar(
+            select(Campaign.status).where(
+                Campaign.id == campaign_id,
+                self._tenant_filter(),
+            )
+        )
+        return status is CampaignStatus.CANCELLED
+
     async def require_by_id(self, campaign_id: uuid.UUID) -> Campaign:
         return await self._require(self._select().where(Campaign.id == campaign_id))
 
