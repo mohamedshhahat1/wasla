@@ -11,6 +11,14 @@ has exactly the audience this should have.
     docker compose exec worker python -m app.workers.queues status
     docker compose exec worker python -m app.workers.queues dead-letters agent
     docker compose exec worker python -m app.workers.queues replay ingestion
+    docker compose exec worker python -m app.workers.queues unprocessed-inbound
+    docker compose exec worker python -m app.workers.queues unresolved-sends
+
+The last two read the database rather than Redis, and they are here because
+this is where an operator already looks when messages are not moving. Each
+answers a question the deployment previously had no way to ask: what inbound
+did we store and never process, and what did we send that we cannot account
+for.
 
 **Replay is never automatic, and never bulk by default.** A dead-lettered job
 is one the system decided it could not finish; putting it back is a judgement
@@ -38,6 +46,10 @@ from datetime import UTC, datetime
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.redis import RedisClient
+from app.db.session import Database
+from app.repositories.conversation_repository import UnresolvedOutboundDirectory
+from app.repositories.whatsapp_repository import InboundEventSweep
+from app.workers.inbound_recovery import unprocessed_since
 from app.workers.queue import QUEUES, ReliableQueue
 
 logger = get_logger(__name__)
@@ -156,6 +168,76 @@ async def replay(redis: RedisClient, *, queue_name: str, limit: int, force: bool
     return 0
 
 
+async def unprocessed_inbound(database: Database, *, limit: int) -> int:
+    """Inbound events that were stored and never finished.
+
+    A row here is a customer message sitting in somebody's inbox that no worker
+    was ever told to answer - almost always because Redis was unavailable when
+    the webhook arrived (MSG-02). `InboundRecoveryWorker` drains these on its
+    own; this command exists so a person can see the backlog, see whether it is
+    shrinking, and see the reason each event is stuck on.
+
+    No message bodies. The workspace and conversation are enough to find the
+    conversation in the product, and printing customer text into a terminal
+    scrollback and a shell history is not something an operator asked for.
+    """
+    async with database.session() as session:
+        events = await InboundEventSweep(session).claim_unprocessed(
+            older_than=unprocessed_since(datetime.now(UTC)),
+            limit=limit,
+        )
+        if not events:
+            print("no unprocessed inbound events")  # noqa: T201
+            return 0
+        header = f"{'age':>10}  {'kind':<8}  {'workspace':<36}  {'reason':<24}  event"
+        print(header)  # noqa: T201
+        print("-" * len(header))  # noqa: T201
+        now = datetime.now(UTC)
+        for event in events:
+            age = f"{(now - event.created_at).total_seconds():.0f}s"
+            print(  # noqa: T201
+                f"{age:>10}  {event.kind.value:<8}  {event.tenant_id!s:<36}  "
+                f"{(event.error or '-'):<24}  {event.event_id}"
+            )
+    # The claim's transaction ends here without marking anything, so the rows
+    # are released exactly as they were found. Reading the backlog must not
+    # change it.
+    return 0
+
+
+async def unresolved_sends(database: Database, *, limit: int) -> int:
+    """Sends Meta may already have delivered, whose outcome is unknown.
+
+    **Nothing here may be sent again automatically, and this command will not
+    do it.** A `requested` row means the send intent was committed, Meta was
+    asked, and no usable answer came back - so the message may be on the
+    customer's phone. There is no idempotency key on Meta's send endpoint and
+    no lookup keyed on anything this system generated, which is why the state
+    is terminal by construction (ADR-093). The only thing that settles one of
+    these is a person reading the conversation.
+
+    See `docs/RUNBOOK.md` for what to do with what this prints.
+    """
+    async with database.session() as session:
+        rows = await UnresolvedOutboundDirectory(session).list_unresolved(limit=limit)
+        if not rows:
+            print("no unresolved outbound sends")  # noqa: T201
+            return 0
+        header = (
+            f"{'age':>10}  {'workspace':<36}  {'conversation':<36}  {'provider id':<24}  message"
+        )
+        print(header)  # noqa: T201
+        print("-" * len(header))  # noqa: T201
+        now = datetime.now(UTC)
+        for row in rows:
+            age = f"{(now - row.created_at).total_seconds():.0f}s"
+            print(  # noqa: T201
+                f"{age:>10}  {row.tenant_id!s:<36}  {row.conversation_id!s:<36}  "
+                f"{(row.wa_message_id or '-'):<24}  {row.id}"
+            )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app.workers.queues",
@@ -176,6 +258,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replay a queue whose jobs are not idempotent (agent)",
     )
+
+    stuck = commands.add_parser(
+        "unprocessed-inbound",
+        help="inbound events that were stored and never handed to a worker",
+    )
+    stuck.add_argument("--limit", type=int, default=50)
+
+    open_sends = commands.add_parser(
+        "unresolved-sends",
+        help="sends whose outcome WhatsApp never confirmed (never resent automatically)",
+    )
+    open_sends.add_argument("--limit", type=int, default=50)
     return parser
 
 
@@ -183,6 +277,20 @@ async def run(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     settings = get_settings()
     configure_logging(settings)
+
+    # The two database-backed commands build no Redis client and the three
+    # queue commands build no database pool, so neither half of the deployment
+    # has to be reachable to inspect the other. During the outage that produced
+    # a backlog, that is not a detail.
+    if arguments.command in {"unprocessed-inbound", "unresolved-sends"}:
+        database = Database(settings)
+        try:
+            if arguments.command == "unprocessed-inbound":
+                return await unprocessed_inbound(database, limit=arguments.limit)
+            return await unresolved_sends(database, limit=arguments.limit)
+        finally:
+            await database.dispose()
+
     redis = RedisClient(settings)
     try:
         if arguments.command == "status":

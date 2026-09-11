@@ -27,7 +27,7 @@ from app.core.config import Settings
 from app.core.dependencies import RedisDep, SessionDep, SettingsDep
 from app.core.exceptions import DependencyUnavailableError, PermissionDeniedError
 from app.core.logging import get_logger
-from app.core.telemetry import CallOutcome, Provider, record_provider_call
+from app.core.telemetry import CallOutcome, Provider, observe_auth_event, record_provider_call
 from app.integrations.whatsapp.signature import SIGNATURE_HEADER, verify_signature
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.media_queue import MediaQueue
@@ -98,7 +98,23 @@ def _require_signature(*, body: bytes, header: str | None, settings: Settings) -
         return
 
     if not verify_signature(payload=body, header=header, app_secret=app_secret):
-        logger.warning("whatsapp.invalid_signature")
+        logger.warning(
+            "whatsapp.invalid_signature",
+            extra={"event": "whatsapp.invalid_signature"},
+        )
+        # Counted as well as logged, and counted the same way the email
+        # webhook's refusals are, because the same alert shape applies: a
+        # correctly configured provider signs every callback, so the honest
+        # rate here is zero and a sustained non-zero one means either the app
+        # secret has drifted from Meta's - in which case every customer message
+        # is being dropped at the door - or somebody is posting at the
+        # endpoint. The email webhook had this alert and WhatsApp had none
+        # (MSG-12).
+        observe_auth_event(
+            event="whatsapp_webhook",
+            outcome="blocked",
+            reason="invalid_signature",
+        )
         raise PermissionDeniedError("Invalid webhook signature.")
 
 

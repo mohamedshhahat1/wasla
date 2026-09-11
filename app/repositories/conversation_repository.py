@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 
-from sqlalchemy import ColumnElement, and_, or_
+from sqlalchemy import ColumnElement, and_, func, or_, select
 
 from app.core.pagination import Cursor
 from app.db.models.conversation import (
@@ -83,6 +83,67 @@ class OutboundMessageDirectory(BaseRepository[Message]):
                 Message.tenant_id.in_(tenant_ids),
                 Message.direction == MessageDirection.OUTBOUND,
             )
+        )
+
+
+class UnresolvedOutboundDirectory(BaseRepository[Message]):
+    """Sends whose outcome nobody knows, across the whole deployment.
+
+    `docs/WHATSAPP.md` said a `requested` row "is shown to a person rather than
+    resolved by a sweep", and named `ix_messages_unresolved_delivery` as the
+    query that finds them. The index existed and was correctly partial. Nothing
+    read it - no route, no command, no metric, no runbook section - so the rows
+    accumulated invisibly and nobody could answer "did this go out?" without
+    SQL nobody had been given (MSG-11).
+
+    Deliberately *not* a resolver. `REQUESTED` means Meta may already have
+    delivered the message, and the whole reason it is terminal is that sending
+    it again is the one action that cannot be taken back. This class exists so
+    a person can find those rows and read the conversation, which is the only
+    thing that can actually settle them.
+
+    Unscoped for the same reason the inbound sweep is: a backlog of unresolved
+    sends is a platform-wide condition, and the two callers - the metrics
+    exposition and the operator command - are counting rather than answering a
+    person.
+    """
+
+    model = Message
+
+    async def backlog(self) -> tuple[int, float]:
+        """How many sends are unresolved, and how old the oldest one is.
+
+        Read together because they are alerted on together: the count says
+        whether anything is outstanding and the age says whether it is
+        outstanding because a send is in flight right now or because one broke
+        an hour ago and nobody noticed.
+
+        Scoped to `REQUESTED` alone. `CLAIMED` is the other half of the partial
+        index and means the opposite thing - provably nothing was delivered -
+        so counting it here would inflate a number whose entire meaning is "may
+        be on somebody's phone".
+        """
+        rows = await self.session.execute(
+            select(func.count(Message.id), func.min(Message.created_at)).where(
+                Message.delivery_state == MessageDeliveryState.REQUESTED
+            )
+        )
+        count, oldest = rows.one()
+        if not count or oldest is None:
+            return 0, 0.0
+        return int(count), max((datetime.now(UTC) - oldest).total_seconds(), 0.0)
+
+    async def list_unresolved(self, *, limit: int) -> list[Message]:
+        """The oldest unresolved sends, for an operator to work through.
+
+        Oldest first, because age is what makes one of these worth
+        investigating: a row a few seconds old is a send in flight.
+        """
+        return await self._all(
+            self._select()
+            .where(Message.delivery_state == MessageDeliveryState.REQUESTED)
+            .order_by(Message.created_at)
+            .limit(limit)
         )
 
 

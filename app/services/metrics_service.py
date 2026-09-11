@@ -46,8 +46,11 @@ from app.core.telemetry import (
     read_redis_histograms,
 )
 from app.db.session import Database
+from app.repositories.conversation_repository import UnresolvedOutboundDirectory
+from app.repositories.whatsapp_repository import InboundEventSweep
 from app.services.backup_status import read_backup_status
 from app.workers.heartbeat import heartbeat_key
+from app.workers.inbound_recovery import unprocessed_since
 from app.workers.queue import QUEUES, ReliableQueue
 from app.workers.runner import ALL_KINDS
 
@@ -149,7 +152,78 @@ class MetricsService:
         lines.extend(self._pool_lines())
         lines.extend(self._backup_lines(now=now))
         lines.extend(await self._consistency_lines())
+        lines.extend(await self._messaging_lines(now=now))
         return self._registry.render(extra=lines)
+
+    async def _messaging_lines(self, *, now: datetime | None) -> list[str]:
+        """The two messaging backlogs nobody could previously see.
+
+        **Inbound events still owing work.** A webhook that could not reach
+        Redis stored the message, answered `200` and told nothing to answer it,
+        and no number anywhere said how many of those there were (MSG-02). The
+        cutoff is the sweeper's own, imported rather than restated, so an
+        operator alerting on a backlog and a sweeper draining one are looking
+        at the same set - two independently chosen thresholds would make the
+        alert fire on work the sweeper considers in flight.
+
+        **Outbound sends whose outcome is unknown.** `docs/WHATSAPP.md`
+        promised these were "shown to a person"; nothing showed them to anybody
+        (MSG-11). They are deliberately never resolved automatically, which is
+        exactly why they have to be counted: a design that refuses to guess is
+        only honest if somebody is told there is something to decide.
+
+        No labels on any of the four. A tenant id here would be one time series
+        per customer, and *which* workspace is a question for the operator
+        command and the database - the alert fires on whether there is a
+        backlog at all.
+
+        Failures are swallowed and logged, like every other database-backed
+        gauge here: losing the whole scrape because one count timed out is a
+        worse outcome than losing this one, and during the outage that produced
+        the backlog it is the most likely thing to time out.
+        """
+        database = self._database
+        if database is None:
+            return []
+        moment = now or datetime.now(UTC)
+        try:
+            async with database.session() as session:
+                inbound, inbound_age = await InboundEventSweep(session).backlog(
+                    older_than=unprocessed_since(moment)
+                )
+                outbound, outbound_age = await UnresolvedOutboundDirectory(session).backlog()
+        except Exception:
+            logger.warning(
+                "metrics.messaging_read_failed",
+                extra={"event": "metrics.messaging_read_failed"},
+            )
+            return []
+
+        lines: list[str] = []
+        for name, help_text, value in (
+            (
+                "wasla_unprocessed_inbound_events",
+                "Stored inbound events whose agent or media handoff never reached a queue.",
+                float(inbound),
+            ),
+            (
+                "wasla_unprocessed_inbound_oldest_age_seconds",
+                "Age of the oldest inbound event still owing work.",
+                inbound_age,
+            ),
+            (
+                "wasla_unresolved_outbound_messages",
+                "Sends Meta may have delivered, whose outcome is unknown.",
+                float(outbound),
+            ),
+            (
+                "wasla_oldest_unresolved_outbound_age_seconds",
+                "Age of the oldest send whose outcome is unknown.",
+                outbound_age,
+            ),
+        ):
+            lines.extend(render_gauge_lines(name, help_text, [({}, value)]))
+        return lines
 
     async def _consistency_lines(self) -> list[str]:
         """Invariants counted at scrape time, so a violation is alertable.

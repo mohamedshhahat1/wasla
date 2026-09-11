@@ -240,3 +240,294 @@ tests:
               description: >-
                 Repeated callbacks are being refused before they are parsed. Check that RESEND_WEBHOOK_SECRET matches the signing secret configured at the provider - a mismatch means delivery, bounce and complaint events are being discarded, so suppression will stop working while the endpoint keeps answering. If the secret is correct, this is unsigned traffic reaching the endpoint from somewhere else.
               runbook: docs/EMAIL.md
+
+  # ==========================================================================
+  # Messaging. Every rule below is exercised twice - once under its threshold
+  # and once over it - because a rule that only ever fires has not been shown
+  # to discriminate, and a threshold nobody tested from below is a threshold
+  # that pages on ordinary traffic.
+
+  # --------------------------------------------------- inbound stopped
+  - interval: 30s
+    name: a quiet deployment with no traffic today does not page
+    input_series:
+      # Flat at zero for the whole window: nothing has ever arrived, so there
+      # is nothing to have stopped. This is the guard that keeps a new or
+      # dormant deployment off the pager.
+      - series: 'wasla_provider_requests_total{job="wasla-api", provider="whatsapp", operation="inbound_webhook", outcome="success"}'
+        values: "0+0x200"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: WhatsAppInboundStopped
+        exp_alerts: []
+
+  - interval: 30s
+    name: inbound stopping on a deployment that had traffic pages
+    input_series:
+      # Climbing for two hours, then flat. Flat means the rate decays to zero,
+      # which is exactly what "Meta stopped delivering" looks like on a
+      # counter - while the 24h increase still remembers the earlier traffic.
+      - series: 'wasla_provider_requests_total{job="wasla-api", provider="whatsapp", operation="inbound_webhook", outcome="success"}'
+        values: "0+1x240 240+0x200"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: WhatsAppInboundStopped
+        # Messages are still arriving.
+        exp_alerts: []
+      - eval_time: 180m
+        alertname: WhatsAppInboundStopped
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: messaging
+            exp_annotations:
+              summary: "No WhatsApp messages have arrived for 30 minutes"
+              description: >-
+                Inbound webhook deliveries have stopped, on a deployment that was receiving them today. Check that Meta has not disabled the subscription (App Dashboard, Webhooks), that the callback URL still resolves and still presents a valid certificate, and that the reverse proxy is forwarding POSTs to /api/v1/webhooks/whatsapp. A repeated 5xx or a repeated signature failure will make Meta disable the subscription, so check WhatsAppWebhookSignatureFailures too.
+              runbook: docs/RUNBOOK.md
+
+  # ------------------------------------------------- webhook signatures
+  - interval: 30s
+    name: one stray unsigned WhatsApp delivery is not an incident
+    input_series:
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="whatsapp_webhook", outcome="blocked", reason="invalid_signature"}'
+        values: "0+0x2 1+0x120"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WhatsAppWebhookSignatureFailures
+        exp_alerts: []
+
+  - interval: 30s
+    name: a drifted app secret pages, because every message is being dropped
+    input_series:
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="whatsapp_webhook", outcome="blocked", reason="invalid_signature"}'
+        values: "0+1x160"
+      # The email webhook's own refusals alongside, so the rule is shown to
+      # select on `event` rather than firing on any signature failure.
+      - series: 'wasla_auth_security_events_total{job="wasla-api", event="email_webhook", outcome="blocked", reason="invalid_signature"}'
+        values: "0+0x160"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WhatsAppWebhookSignatureFailures
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: WhatsAppWebhookSignatureFailures
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: messaging
+            exp_annotations:
+              summary: "WhatsApp webhook deliveries are failing signature verification"
+              description: >-
+                Deliveries are being refused before they are parsed. Check that META_APP_SECRET matches the app secret in Meta's App Dashboard - a mismatch means every customer message is being dropped with a 403, and Meta disables a subscription that keeps failing. If the secret is correct, this is unsigned traffic arriving from somewhere else.
+              runbook: docs/WHATSAPP.md
+
+  # ------------------------------------------------------- send failures
+  - interval: 30s
+    name: a few refused sends among many good ones do not alert
+    input_series:
+      # One failure for every twenty successes: customers writing outside the
+      # service window, which is ordinary and is not an incident.
+      - series: 'wasla_provider_requests_total{job="wasla-api", provider="whatsapp", operation="send_message", outcome="success"}'
+        values: "0+20x160"
+      - series: 'wasla_provider_requests_total{job="wasla-api", provider="whatsapp", operation="send_message", outcome="failure"}'
+        values: "0+1x160"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: WhatsAppSendFailureRate
+        exp_alerts: []
+
+  - interval: 30s
+    name: a revoked token fires the send failure rate
+    input_series:
+      # Nothing succeeding at all, which is what a dead credential looks like.
+      - series: 'wasla_provider_requests_total{job="wasla-api", provider="whatsapp", operation="send_message", outcome="success"}'
+        values: "0+0x160"
+      - series: 'wasla_provider_requests_total{job="wasla-api", provider="whatsapp", operation="send_message", outcome="failure"}'
+        values: "0+4x160"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WhatsAppSendFailureRate
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: WhatsAppSendFailureRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: messaging
+            exp_annotations:
+              summary: "More than a fifth of WhatsApp sends are failing"
+              description: >-
+                Replies are not reaching customers. The usual causes are a revoked or expired access token (look for whatsapp.credential_refused), a template Meta has paused since it was last synced, or Meta itself being degraded. Note that an outcome of "unavailable" means the send may have been delivered anyway - see the unresolved-sends runbook before anybody retries anything by hand.
+              runbook: docs/RUNBOOK.md
+
+  # -------------------------------------------------------- rate limiting
+  - interval: 30s
+    name: an occasional 429 is absorbed by the retry and does not alert
+    input_series:
+      - series: 'wasla_provider_requests_total{job="wasla-api", provider="whatsapp", operation="send_message", outcome="rate_limited"}'
+        values: "0+0x40 1+0x160"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: WhatsAppRateLimited
+        exp_alerts: []
+
+  - interval: 30s
+    name: sustained throttling alerts
+    input_series:
+      - series: 'wasla_provider_requests_total{job="wasla-api", provider="whatsapp", operation="send_message", outcome="rate_limited"}'
+        values: "0+3x160"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WhatsAppRateLimited
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: WhatsAppRateLimited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: messaging
+            exp_annotations:
+              summary: "WhatsApp is rate limiting outbound sends"
+              description: >-
+                Meta is refusing sends with 429. Check whether a campaign's messages_per_minute exceeds what the number's tier allows, and whether the number's quality rating has dropped - Meta lowers the throughput limit when it does.
+              runbook: docs/CAMPAIGNS.md
+
+  # ----------------------------------------------- unprocessed inbound
+  - interval: 30s
+    name: a brief backlog during a Redis restart is drained, not paged
+    input_series:
+      # Three events appear, and the recovery sweep clears them inside the
+      # `for:` window. This is the expected shape of a Redis restart and it
+      # must not wake anybody.
+      - series: 'wasla_unprocessed_inbound_events{job="wasla-api"}'
+        values: "0+0x20 3+0x10 0+0x200"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: UnprocessedInboundBacklog
+        exp_alerts: []
+
+  - interval: 30s
+    name: a backlog nothing is draining pages
+    input_series:
+      # Events accumulating and staying. Recovery is not running, or cannot
+      # reach Redis: customers have written in and nothing will answer them.
+      - series: 'wasla_unprocessed_inbound_events{job="wasla-api"}'
+        values: "0+0x10 0+1x200"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: UnprocessedInboundBacklog
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: UnprocessedInboundBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: messaging
+              job: wasla-api
+            exp_annotations:
+              summary: "Inbound WhatsApp messages are stored but unanswered"
+              description: >-
+                Customer messages were accepted and no worker was told to answer them. They are recoverable and not lost. Check that a worker process is running the inbound_recovery loop and that Redis is reachable from it; list the backlog with `python -m app.workers.queues unprocessed-inbound`.
+              runbook: docs/RUNBOOK.md
+
+  # ------------------------------------------------ unresolved outbound
+  - interval: 30s
+    name: a send in flight is not an unresolved send
+    input_series:
+      # Seconds old, which is every send while the provider call is open.
+      - series: 'wasla_oldest_unresolved_outbound_age_seconds{job="wasla-api"}'
+        values: "0+2x200"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: UnresolvedOutboundSends
+        exp_alerts: []
+
+  - interval: 30s
+    name: a send unconfirmed for an hour alerts
+    input_series:
+      # Climbing past an hour and staying there: the answer never came back.
+      - series: 'wasla_oldest_unresolved_outbound_age_seconds{job="wasla-api"}'
+        values: "3000+30x200"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: UnresolvedOutboundSends
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: UnresolvedOutboundSends
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: messaging
+              job: wasla-api
+            exp_annotations:
+              summary: "A WhatsApp send has been unresolved for over an hour"
+              description: >-
+                One or more sends were committed, asked of Meta, and never confirmed, so it is unknown whether the customer received them. These are never retried automatically - a retry is the one action that can put a second copy on somebody's phone. List them with `python -m app.workers.queues unresolved-sends` and follow the unresolved-sends procedure in the runbook.
+              runbook: docs/RUNBOOK.md
+
+  # ------------------------------------------------------------ queue lag
+  - interval: 30s
+    name: a job waiting a couple of minutes is a busy worker, not an outage
+    input_series:
+      - series: 'wasla_queue_oldest_pending_age_seconds{job="wasla-api", queue="agent"}'
+        values: "0+4x200"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: QueueJobsStuck
+        exp_alerts: []
+
+  - interval: 30s
+    name: a job nobody is consuming alerts
+    input_series:
+      - series: 'wasla_queue_oldest_pending_age_seconds{job="wasla-api", queue="agent"}'
+        values: "800+30x200"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: QueueJobsStuck
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: QueueJobsStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: messaging
+            exp_annotations:
+              summary: "Queued work has been waiting over fifteen minutes"
+              description: >-
+                A job has sat unclaimed far longer than any of these should take. Either no worker is consuming that queue - check WORKER_KINDS and that the worker container is healthy - or the workers are saturated by a backlog. On the agent queue this is a customer waiting for a reply.
+              runbook: docs/RUNBOOK.md
+
+  # ---------------------------------------------------------- dead letters
+  - interval: 30s
+    name: a dead letter queue that is not growing does not alert
+    input_series:
+      # Two records from an old incident, sitting where they were left. The
+      # rule reads the increase, so a standing depth is not an alert.
+      - series: 'wasla_queue_dead_letter_jobs{job="wasla-api", queue="agent"}'
+        values: "2+0x200"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: DeadLetterGrowth
+        exp_alerts: []
+
+  - interval: 30s
+    name: jobs being dead-lettered now alerts
+    input_series:
+      - series: 'wasla_queue_dead_letter_jobs{job="wasla-api", queue="agent"}'
+        values: "0+1x200"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DeadLetterGrowth
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: DeadLetterGrowth
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: messaging
+            exp_annotations:
+              summary: "Jobs are being dead-lettered"
+              description: >-
+                Work has stopped being retried and is waiting for a person. Inspect it with `python -m app.workers.queues dead-letters <queue>`. Replaying the agent queue is refused without --force on purpose: a turn that failed after the provider was engaged may already have sent the customer a reply.
+              runbook: docs/RUNBOOK.md
