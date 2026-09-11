@@ -23,6 +23,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.tenant import Tenant
@@ -350,6 +351,7 @@ async def test_paging_visits_every_message_exactly_once(db_session: AsyncSession
                 kind=MessageKind.TEXT,
                 status=MessageStatus.RECEIVED,
                 body=f"message {index}",
+                origin=MessageOrigin.CUSTOMER,
             )
         )
     await db_session.flush()

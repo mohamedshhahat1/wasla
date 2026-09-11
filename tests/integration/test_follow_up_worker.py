@@ -23,6 +23,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.follow_up import FollowUp, FollowUpStatus
@@ -120,6 +121,7 @@ class StubMessaging:
             direction=MessageDirection.OUTBOUND,
             kind=MessageKind.TEXT,
             status=MessageStatus.SENT,
+            origin=MessageOrigin.AGENT,
         )
         self._session.add(message)
         await self._session.flush()

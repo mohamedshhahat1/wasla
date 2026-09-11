@@ -60,6 +60,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.knowledge import Document, DocumentStatus, KnowledgeBase
@@ -192,6 +193,7 @@ async def _uncommitted_conversation(
         kind=MessageKind.TEXT,
         status=MessageStatus.DELIVERED,
         body="Do you finish apartments?",
+        origin=MessageOrigin.CUSTOMER,
     )
     session.add(message)
     await session.flush()

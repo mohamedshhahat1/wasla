@@ -25,6 +25,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.media import MediaStatus, MediaStorageState, MessageMedia
@@ -147,6 +148,7 @@ async def _attachment(
         direction=MessageDirection.INBOUND,
         kind=MessageKind.IMAGE,
         status=MessageStatus.RECEIVED,
+        origin=MessageOrigin.CUSTOMER,
     )
     session.add(message)
     await session.flush()

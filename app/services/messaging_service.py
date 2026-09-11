@@ -55,6 +55,7 @@ from app.db.models.conversation import (
     Message,
     MessageDeliveryState,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.media import MediaStatus, MediaStorageState
@@ -284,6 +285,7 @@ class MessagingService:
         sent_by_id: uuid.UUID | None = None,
         link: LinkCall | None = None,
         idempotency_key: str | None = None,
+        origin: MessageOrigin,
     ) -> Message:
         """Send free text, refusing anything WhatsApp will not carry.
 
@@ -321,6 +323,7 @@ class MessagingService:
             require_window=True,
             link=link,
             idempotency_key=idempotency_key,
+            origin=origin,
         )
 
     async def send_template(
@@ -333,6 +336,7 @@ class MessagingService:
         sent_by_id: uuid.UUID | None = None,
         link: LinkCall | None = None,
         idempotency_key: str | None = None,
+        origin: MessageOrigin,
     ) -> Message:
         """Send an approved template, which is valid outside the service window.
 
@@ -384,6 +388,7 @@ class MessagingService:
             require_window=False,
             link=link,
             idempotency_key=idempotency_key,
+            origin=origin,
         )
 
     async def send_media(
@@ -401,6 +406,7 @@ class MessagingService:
         sent_by_id: uuid.UUID | None = None,
         storage: MediaStorage | None = None,
         idempotency_key: str | None = None,
+        origin: MessageOrigin,
     ) -> Message:
         """Send a file, uploading it to Meta first.
 
@@ -511,6 +517,7 @@ class MessagingService:
             send=send,
             require_window=True,
             idempotency_key=idempotency_key,
+            origin=origin,
         )
 
         await self._record_attachment(
@@ -654,6 +661,7 @@ class MessagingService:
         prepare: PrepareCall | None = None,
         link: LinkCall | None = None,
         idempotency_key: str | None = None,
+        origin: MessageOrigin,
     ) -> Message:
         """One outbound message, under the delivery protocol in ADR-093.
 
@@ -700,6 +708,7 @@ class MessagingService:
                 template_name=template_name,
                 template_language=template_language,
                 idempotency_key=idempotency_key,
+                origin=origin,
             )
             if not claimed:
                 # A repeat of a request already handled. The caller gets the
@@ -731,6 +740,7 @@ class MessagingService:
                 sent_by_id=sent_by_id,
                 template_name=template_name,
                 template_language=template_language,
+                origin=origin,
             )
         await self._session.flush()
         if link is not None:

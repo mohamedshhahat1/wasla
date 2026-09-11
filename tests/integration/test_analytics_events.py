@@ -24,6 +24,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.sentiment import SentimentLabel
@@ -144,6 +145,7 @@ async def test_an_escalation_is_recorded_as_the_classifier_deciding(
         kind=MessageKind.TEXT,
         status=MessageStatus.RECEIVED,
         body="This is the third time I have asked.",
+        origin=MessageOrigin.CUSTOMER,
     )
     db_session.add(message)
     await db_session.flush()

@@ -51,6 +51,7 @@ from app.db.models.conversation import (
     ConversationMode,
     ConversationStatus,
     Message,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.follow_up import (
@@ -397,7 +398,13 @@ class FollowUpService:
 
         if window_open and follow_up.body:
             send = messaging.send_text(
-                conversation_id=conversation.id, body=follow_up.body, link=link
+                conversation_id=conversation.id,
+                body=follow_up.body,
+                link=link,
+                # A nudge carries no `sent_by_id`, which made it
+                # indistinguishable from an AI reply in the transcript
+                # (MSG-16).
+                origin=MessageOrigin.FOLLOW_UP,
             )
         elif follow_up.has_template:
             # Checked again here, not only at scheduling. Meta pauses a template
@@ -418,6 +425,7 @@ class FollowUpService:
                 language=str(follow_up.template_language),
                 components=follow_up.template_components,
                 link=link,
+                origin=MessageOrigin.FOLLOW_UP,
             )
         elif window_open:
             # In the window but nothing to say: a template-only follow-up whose

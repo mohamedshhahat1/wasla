@@ -20,6 +20,7 @@ from app.db.models.conversation import (
     MessageDeliveryState,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.sentiment import ConversationPriority
@@ -455,6 +456,7 @@ class MessageRepository(TenantScopedRepository[Message]):
             status=MessageStatus.RECEIVED,
             body=body,
             sent_at=sent_at,
+            origin=MessageOrigin.CUSTOMER,
         )
         return self.add(message), True
 
@@ -468,6 +470,7 @@ class MessageRepository(TenantScopedRepository[Message]):
         template_name: str | None = None,
         template_language: str | None = None,
         idempotency_key: str | None = None,
+        origin: MessageOrigin,
     ) -> Message:
         """Create the row before calling Meta.
 
@@ -497,6 +500,7 @@ class MessageRepository(TenantScopedRepository[Message]):
             template_name=template_name,
             template_language=template_language,
             idempotency_key=idempotency_key,
+            origin=origin,
         )
         return self.add(message)
 
@@ -514,6 +518,7 @@ class MessageRepository(TenantScopedRepository[Message]):
         template_name: str | None,
         template_language: str | None,
         idempotency_key: str,
+        origin: MessageOrigin,
     ) -> tuple[Message, bool]:
         """Stage a send under this key, or hand back the one already staged.
 
@@ -546,6 +551,7 @@ class MessageRepository(TenantScopedRepository[Message]):
             template_name=template_name,
             template_language=template_language,
             idempotency_key=idempotency_key,
+            origin=origin,
         )
         try:
             async with self.session.begin_nested():

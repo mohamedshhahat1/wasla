@@ -80,6 +80,40 @@ class MessageKind(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
+class MessageOrigin(StrEnum):
+    """What produced this line in the transcript.
+
+    Attribution used to be inferred from `sent_by_id`, and the inference was
+    wrong twice: a campaign carries its creator, so it read as a human reply,
+    and a follow-up carries nobody, so it read as an AI reply (MSG-16). It was
+    recoverable by joining `campaign_recipients` or `follow_ups` on
+    `message_id` - but not by reading the transcript, which is what an auditor,
+    an analytics query and a colleague scrolling the inbox all actually do.
+
+    Total over every message, inbound included, so one column answers the
+    question for any row rather than answering it only where a caller
+    remembered to set it. `CUSTOMER` is the inbound value; `direction` still
+    says which way it went, and this says who caused it.
+
+    The set is open at the end on purpose. WhatsApp Coexistence lets the
+    Business App originate messages on a number Wasla also holds, and those are
+    neither `HUMAN` (no Wasla user sent them) nor `AGENT`. A `BUSINESS_APP`
+    member slots in beside these when that work happens; adding an enum label
+    is an `ALTER TYPE`, which is why having the column at all is the part worth
+    doing now.
+    """
+
+    CUSTOMER = "customer"
+    HUMAN = "human"
+    AGENT = "agent"
+    CAMPAIGN = "campaign"
+    FOLLOW_UP = "follow_up"
+    # Not produced by anything today. Reserved for a message the platform sends
+    # on its own behalf rather than on a workspace's - a service notice - so
+    # that when one exists it is not filed as somebody's reply.
+    SYSTEM = "system"
+
+
 class MessageStatus(StrEnum):
     """Delivery state, advanced by webhook status events.
 
@@ -127,6 +161,7 @@ CONVERSATION_STATUS_TYPE = _enum_type(ConversationStatus, name="conversation_sta
 CONVERSATION_MODE_TYPE = _enum_type(ConversationMode, name="conversation_mode")
 MESSAGE_DIRECTION_TYPE = _enum_type(MessageDirection, name="message_direction")
 MESSAGE_KIND_TYPE = _enum_type(MessageKind, name="message_kind")
+MESSAGE_ORIGIN_TYPE = _enum_type(MessageOrigin, name="message_origin")
 MESSAGE_STATUS_TYPE = _enum_type(MessageStatus, name="message_status")
 MESSAGE_DELIVERY_STATE_TYPE = _enum_type(MessageDeliveryState, name="message_delivery_state")
 
@@ -392,6 +427,11 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         String(MAX_IDEMPOTENCY_KEY_LENGTH),
         nullable=True,
     )
+    # What produced this message. Set explicitly at every creation site rather
+    # than defaulted, because a default is what an unlabelled campaign send
+    # would silently inherit - and inheriting the wrong attribution is the
+    # defect this column exists to remove (MSG-16).
+    origin: Mapped[MessageOrigin] = mapped_column(MESSAGE_ORIGIN_TYPE, nullable=False)
 
     @property
     def delivery_uncertain(self) -> bool:

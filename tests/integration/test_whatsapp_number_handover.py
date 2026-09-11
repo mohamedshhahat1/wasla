@@ -39,7 +39,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models.conversation import Contact, Message, MessageDirection, MessageStatus
+from app.db.models.conversation import (
+    Contact,
+    Message,
+    MessageDirection,
+    MessageOrigin,
+    MessageStatus,
+)
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import (
     WhatsAppAccount,
@@ -322,6 +328,7 @@ async def test_a_late_status_reconciles_the_message_its_old_owner_sent(
         wa_message_id=wamid,
         status=MessageStatus.SENT,
         sent_at=DURING_A,
+        origin=MessageOrigin.AGENT,
     )
     db_session.add(outbound)
     await db_session.flush()

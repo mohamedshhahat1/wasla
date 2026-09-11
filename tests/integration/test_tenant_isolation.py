@@ -65,6 +65,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.enums import InvitationStatus, TenantStatus
@@ -188,6 +189,7 @@ async def _seed(session: AsyncSession, settings: Settings, *, slug: str) -> Work
         # The canary. If any response body ever contains this string for the
         # wrong workspace, isolation has failed regardless of status code.
         body=f"SECRET-{slug.upper()}",
+        origin=MessageOrigin.CUSTOMER,
     )
     document = Document(
         tenant_id=tenant.id,

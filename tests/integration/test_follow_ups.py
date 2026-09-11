@@ -30,6 +30,7 @@ from app.db.models.conversation import (
     MessageDeliveryState,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.follow_up import MAX_ATTEMPTS, FollowUp, FollowUpStatus
@@ -140,6 +141,7 @@ class StubMessaging:
                 else MessageDeliveryState.UNDELIVERED if rejected else MessageDeliveryState.SENT
             ),
             failure_reason="Meta said no." if rejected else None,
+            origin=MessageOrigin.AGENT,
         )
         self._session.add(message)
         await self._session.flush()

@@ -8,7 +8,13 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from app.agents.memory import build_window, estimate_tokens
-from app.db.models.conversation import Message, MessageDirection, MessageKind, MessageStatus
+from app.db.models.conversation import (
+    Message,
+    MessageDirection,
+    MessageKind,
+    MessageOrigin,
+    MessageStatus,
+)
 from app.db.models.media import MediaStatus, MessageMedia
 
 BASE_TIME = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
@@ -26,6 +32,9 @@ def _message(
     return Message(
         id=uuid.uuid4(),
         direction=direction,
+        origin=(
+            MessageOrigin.CUSTOMER if direction is MessageDirection.INBOUND else MessageOrigin.AGENT
+        ),
         kind=kind,
         status=status,
         body=body,

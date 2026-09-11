@@ -43,6 +43,7 @@ from app.db.models.conversation import (
     MessageDeliveryState,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.lead import Lead, LeadSource, LeadStatus
@@ -118,6 +119,7 @@ class StubMessaging:
             failure_reason="Meta said no." if rejected else None,
             template_name=name,
             template_language=language,
+            origin=MessageOrigin.AGENT,
         )
         self._session.add(message)
         await self._session.flush()

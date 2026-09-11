@@ -23,6 +23,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.sentiment import ConversationPriority, SentimentLabel
@@ -108,6 +109,10 @@ class MessageRead(BaseModel):
     direction: MessageDirection
     kind: MessageKind
     status: MessageStatus
+    # What produced this line. Exposed because it is the question a reader of
+    # the transcript has, and because inferring it from `sent_by_id` gets
+    # campaigns and follow-ups wrong (MSG-16).
+    origin: MessageOrigin
     body: str | None
     # Set on template messages only, so a client can render which template went
     # out in place of the text it has no copy of.
@@ -129,6 +134,7 @@ class MessageRead(BaseModel):
             direction=message.direction,
             kind=message.kind,
             status=message.status,
+            origin=message.origin,
             body=message.body,
             template_name=message.template_name,
             template_language=message.template_language,

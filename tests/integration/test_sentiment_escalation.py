@@ -25,6 +25,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.sentiment import (
@@ -120,6 +121,7 @@ async def _said(
         kind=MessageKind.TEXT,
         status=MessageStatus.RECEIVED,
         body=body,
+        origin=MessageOrigin.CUSTOMER,
     )
     if at is not None:
         message.created_at = at

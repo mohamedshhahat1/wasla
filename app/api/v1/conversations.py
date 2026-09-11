@@ -27,6 +27,7 @@ from app.api.route import CommittingRoute
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.media_types import CANONICAL_TYPES
 from app.core.pagination import MAX_CURSOR_LENGTH
+from app.db.models.conversation import MessageOrigin
 from app.db.models.invoice import MAX_IDEMPOTENCY_KEY_LENGTH
 from app.db.models.sentiment import ConversationPriority
 from app.schemas.conversation import (
@@ -189,6 +190,7 @@ async def send_text(
         preview_url=payload.preview_url,
         sent_by_id=workspace.user.id,
         idempotency_key=idempotency_key,
+        origin=MessageOrigin.HUMAN,
     )
     return MessageRead.from_model(message)
 
@@ -221,6 +223,7 @@ async def send_template(
         components=payload.components,
         sent_by_id=workspace.user.id,
         idempotency_key=idempotency_key,
+        origin=MessageOrigin.HUMAN,
     )
     return MessageRead.from_model(message)
 
@@ -255,6 +258,7 @@ async def send_media(
     message = await messaging.send_media(
         conversation_id=conversation_id,
         idempotency_key=idempotency_key,
+        origin=MessageOrigin.HUMAN,
         content=content,
         # `content_type` is what the browser claimed, and it is treated as a
         # hint from here. The service resolves the real type from the file's

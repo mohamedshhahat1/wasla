@@ -37,6 +37,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.tenant import Tenant
@@ -91,6 +92,7 @@ class StubMessaging:
             status=MessageStatus.SENT,
             template_name=name,
             template_language=language,
+            origin=MessageOrigin.AGENT,
         )
         self._session.add(message)
         await self._session.flush()

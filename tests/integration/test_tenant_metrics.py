@@ -28,6 +28,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.lead import Lead, LeadSource, LeadStatus
@@ -118,6 +119,7 @@ def _message(
         tenant_id=tenant.id,
         conversation_id=conversation.id,
         direction=MessageDirection.INBOUND if inbound else MessageDirection.OUTBOUND,
+        origin=MessageOrigin.CUSTOMER if inbound else MessageOrigin.AGENT,
         kind=MessageKind.TEXT,
         status=(
             status

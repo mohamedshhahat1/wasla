@@ -35,6 +35,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.enums import TenantRole
@@ -454,6 +455,7 @@ async def _attachment(
         direction=MessageDirection.INBOUND,
         kind=MessageKind.AUDIO if is_voice else MessageKind.IMAGE,
         status=MessageStatus.RECEIVED,
+        origin=MessageOrigin.CUSTOMER,
     )
     session.add(message)
     await session.flush()

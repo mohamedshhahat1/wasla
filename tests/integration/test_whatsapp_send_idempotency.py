@@ -50,6 +50,7 @@ from app.db.models.conversation import (
     Message,
     MessageDeliveryState,
     MessageDirection,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.tenant import Tenant
@@ -439,6 +440,62 @@ async def test_concurrent_submissions_of_one_key_send_once(
                 await cleanup.delete(tenant_row)
             await cleanup.commit()
         await engine.dispose()
+
+
+async def test_a_human_reply_is_recorded_as_a_human_reply(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    http: httpx.AsyncClient,
+) -> None:
+    """The transcript says what produced each line, rather than implying it.
+
+    `sent_by_id` was the only evidence, and it gets two of the four producers
+    wrong: a campaign carries its creator and read as a human reply, and a
+    follow-up carries nobody and read as an AI reply (MSG-16). This and the
+    campaign and follow-up tests elsewhere pin all four.
+    """
+    tenant, conversation, _ = await _conversation(db_session)
+
+    async with _graph(monkeypatch):
+        message = await _messaging(db_session, tenant, http).send_text(
+            conversation_id=conversation.id,
+            body="hello",
+            sent_by_id=None,
+            origin=MessageOrigin.HUMAN,
+        )
+
+    assert message.origin is MessageOrigin.HUMAN
+
+
+async def test_an_agent_reply_is_recorded_as_an_agent_reply(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    http: httpx.AsyncClient,
+) -> None:
+    """Both of these carry no `sent_by_id`, so only the column tells them apart.
+
+    A follow-up and an AI reply were indistinguishable in the transcript, and
+    they are different things: one answers what a customer just said, the other
+    arrives because they stopped saying anything.
+    """
+    tenant, conversation, _ = await _conversation(db_session)
+
+    async with _graph(monkeypatch):
+        agent_reply = await _messaging(db_session, tenant, http).send_text(
+            conversation_id=conversation.id,
+            body="an answer",
+            origin=MessageOrigin.AGENT,
+        )
+        nudge = await _messaging(db_session, tenant, http).send_text(
+            conversation_id=conversation.id,
+            body="still there?",
+            origin=MessageOrigin.FOLLOW_UP,
+        )
+
+    assert agent_reply.sent_by_id is None
+    assert nudge.sent_by_id is None
+    assert agent_reply.origin is MessageOrigin.AGENT
+    assert nudge.origin is MessageOrigin.FOLLOW_UP
 
 
 async def _template(

@@ -28,7 +28,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.media_types import MediaTypeError
 from app.core.storage import LocalMediaStorage
-from app.db.models.conversation import Contact, Conversation, MessageKind, MessageStatus
+from app.db.models.conversation import (
+    Contact,
+    Conversation,
+    MessageKind,
+    MessageOrigin,
+    MessageStatus,
+)
 from app.db.models.media import MediaStatus, MediaStorageState, MessageMedia
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
@@ -421,6 +427,7 @@ async def _attachment(
         direction=MessageDirection.INBOUND,
         kind=MessageKind.IMAGE,
         status=MessageStatus.DELIVERED,
+        origin=MessageOrigin.CUSTOMER,
     )
     session.add(message)
     await session.flush()

@@ -47,6 +47,7 @@ from app.core.redis import RedisClient
 from app.core.tracing import JOB_OUTCOME
 from app.db.models.agent import Agent
 from app.db.models.billing import LimitKey
+from app.db.models.conversation import MessageOrigin
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.db.models.usage import UsageEventType
 from app.db.session import Database
@@ -423,4 +424,8 @@ class AgentWorker:
                 settings=self._settings,
                 tenant_id=job.tenant_id,
             )
-            await messaging.send_text(conversation_id=job.conversation_id, body=reply)
+            await messaging.send_text(
+                conversation_id=job.conversation_id,
+                body=reply,
+                origin=MessageOrigin.AGENT,
+            )

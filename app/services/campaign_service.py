@@ -56,7 +56,7 @@ from app.db.models.campaign import (
     OptOutSource,
     RecipientStatus,
 )
-from app.db.models.conversation import Contact, Message, MessageStatus
+from app.db.models.conversation import Contact, Message, MessageOrigin, MessageStatus
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
 from app.integrations.whatsapp.client import ProviderAuthError
@@ -619,6 +619,11 @@ class CampaignService:
                 components=_components(campaign.variables),
                 sent_by_id=campaign.created_by_id,
                 link=link,
+                # Recorded as a campaign rather than inferred from
+                # `sent_by_id`, which names the person who *set the campaign
+                # up* and made every broadcast read as their own reply
+                # (MSG-16).
+                origin=MessageOrigin.CAMPAIGN,
             )
         except ProviderAuthError:
             # Let out rather than filed against this recipient. The credential

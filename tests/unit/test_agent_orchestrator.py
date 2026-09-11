@@ -33,6 +33,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.media import MediaStatus, MessageMedia
@@ -775,6 +776,7 @@ async def test_an_image_description_reaches_the_model(monkeypatch: pytest.Monkey
         kind=MessageKind.IMAGE,
         body="how much?",
         created_at=SENT_AT,
+        origin=MessageOrigin.CUSTOMER,
     )
     attachment = MessageMedia(
         id=uuid.uuid4(),

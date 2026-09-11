@@ -229,6 +229,24 @@ def test_the_billing_subsystem_the_documentation_describes_is_importable() -> No
         # onboarding, but AUTH.md went on saying a Google account waits to be
         # invited - which is advice that strands the person who follows it.
         ("google onboarding", "has no workspace until it is invited to one"),
+        # MSG-02. The runbook told an operator that conversations stored
+        # during a Redis outage "wait for a person until somebody requeues
+        # them", and there was no mechanism by which anybody could - no
+        # command, no query, no state to filter on. The remedy exists now
+        # (ADR-102); the sentence promising a remedy that did not must not
+        # come back in any form.
+        ("inbound recovery", "wait for a person until somebody requeues them"),
+        # MSG-11. docs/WHATSAPP.md said an unresolved send "is shown to a
+        # person rather than resolved by a sweep" and named the index that
+        # finds them. The index existed and nothing read it. There is a gauge,
+        # an alert and a command now, and the claim is only true because of
+        # them.
+        ("unresolved sends", "on a healthy deployment it returns nothing"),
+        # MSG-20. The client has send_buttons, send_list and send_location and
+        # nothing calls any of them, so listing them under what the client
+        # "covers" invited a reader to infer a product capability that does
+        # not exist.
+        ("interactive messaging", "location, reply buttons, lists, templates, read receipts"),
     ],
 )
 def test_a_corrected_claim_has_not_come_back(subject: str, phrase: str) -> None:

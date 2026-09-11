@@ -58,6 +58,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.invoice import Invoice, InvoiceStatus, Payment
@@ -216,6 +217,7 @@ async def workspace(
                     kind=MessageKind.TEXT,
                     status=MessageStatus.DELIVERED,
                     body=f"How much does finishing cost? ({index})",
+                    origin=MessageOrigin.CUSTOMER,
                 )
             )
             conversations.append(conversation.id)

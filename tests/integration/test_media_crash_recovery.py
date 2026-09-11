@@ -45,6 +45,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageKind,
+    MessageOrigin,
     MessageStatus,
 )
 from app.db.models.media import MediaStatus, MediaStorageState, MessageMedia
@@ -114,6 +115,7 @@ async def _seed(session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID]:
         direction=MessageDirection.INBOUND,
         kind=MessageKind.IMAGE,
         status=MessageStatus.DELIVERED,
+        origin=MessageOrigin.CUSTOMER,
     )
     session.add(message)
     await session.flush()
