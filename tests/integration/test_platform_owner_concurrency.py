@@ -234,27 +234,25 @@ class _Handoff:
                 "mutation are not one critical section"
             )
         trailing = asyncio.create_task(second())
-        # Long enough for the trailing contender to authenticate and reach the
-        # lock it cannot have. Its result is asserted either way, so a slow
-        # machine loses no coverage - it only weakens the guarantee that the
-        # trailing request was already queued when the leader committed.
+        # Long enough for the trailing contender to reach the lock it cannot
+        # have. Both contenders authenticated before the race began, so nothing
+        # in this window can fail for want of a credential - the only thing the
+        # delay buys is the guarantee that the trailing request was already
+        # queued when the leader committed, and its result is asserted either
+        # way.
         await asyncio.sleep(0.5)
         self.release.set()
         return list(await asyncio.gather(leading, trailing))
 
 
-async def _http_delete(database_url: str, redis: _Redis, *, actor: str, target: uuid.UUID) -> str:
-    async with _client(database_url, redis) as client:
-        headers = await _bearer(client, actor)
-        response = await client.request("DELETE", f"{API}/platform/users/{target}", headers=headers)
-        return f"delete:{response.status_code}"
+async def _http_delete(client: AsyncClient, headers: dict[str, str], *, target: uuid.UUID) -> str:
+    response = await client.request("DELETE", f"{API}/platform/users/{target}", headers=headers)
+    return f"delete:{response.status_code}"
 
 
-async def _http_disable(database_url: str, redis: _Redis, *, actor: str, target: uuid.UUID) -> str:
-    async with _client(database_url, redis) as client:
-        headers = await _bearer(client, actor)
-        response = await client.post(f"{API}/platform/users/{target}/disable", headers=headers)
-        return f"disable:{response.status_code}"
+async def _http_disable(client: AsyncClient, headers: dict[str, str], *, target: uuid.UUID) -> str:
+    response = await client.post(f"{API}/platform/users/{target}/disable", headers=headers)
+    return f"disable:{response.status_code}"
 
 
 async def _cli_revoke(maker: async_sessionmaker[AsyncSession], *, target: str) -> str:
@@ -325,44 +323,48 @@ async def test_no_race_between_two_removals_can_empty_the_platform(
 
             assert await _live_owners(maker) == 2
 
-            contenders: dict[str, tuple[Callable[[], Any], Callable[[], Any]]] = {
-                # A and B each remove the other. Both authenticate before the
-                # leader commits, so the trailing request is one the server has
-                # already admitted - and it is the *guard* that refuses it, not
-                # the revoked token, which is what makes this a test of the
-                # invariant rather than of authentication.
-                "delete x delete": (
-                    lambda: _http_delete(
-                        prepared_database, redis, actor=emails[0], target=second_id
+            # Both contenders sign in **before** the race, and the ordering is
+            # load-bearing twice over. It is what makes the trailing request one
+            # the server has already admitted, so the guard is what refuses it
+            # rather than a revoked token - the difference between testing the
+            # invariant and testing authentication. And it is what stops the
+            # test flaking: a login inside the raced coroutine has to finish
+            # within the hand-off window, which it does on an idle machine and
+            # does not under a full suite, whereupon the leader's commit has
+            # already killed the trailing actor's credential.
+            async with (
+                _client(prepared_database, redis) as first_client,
+                _client(prepared_database, redis) as second_client,
+            ):
+                first_headers = await _bearer(first_client, emails[0])
+                second_headers = await _bearer(second_client, emails[1])
+
+                contenders: dict[str, tuple[Callable[[], Any], Callable[[], Any]]] = {
+                    # A and B each remove the other.
+                    "delete x delete": (
+                        lambda: _http_delete(first_client, first_headers, target=second_id),
+                        lambda: _http_delete(second_client, second_headers, target=first_id),
                     ),
-                    lambda: _http_delete(
-                        prepared_database, redis, actor=emails[1], target=first_id
+                    "delete x revoke": (
+                        lambda: _http_delete(first_client, first_headers, target=second_id),
+                        lambda: _cli_revoke(maker, target=emails[0]),
                     ),
-                ),
-                "delete x revoke": (
-                    lambda: _http_delete(
-                        prepared_database, redis, actor=emails[0], target=second_id
+                    "disable x revoke": (
+                        lambda: _http_disable(first_client, first_headers, target=second_id),
+                        lambda: _cli_revoke(maker, target=emails[0]),
                     ),
-                    lambda: _cli_revoke(maker, target=emails[0]),
-                ),
-                "disable x revoke": (
-                    lambda: _http_disable(
-                        prepared_database, redis, actor=emails[0], target=second_id
+                    "revoke x revoke": (
+                        lambda: _cli_revoke(maker, target=emails[0]),
+                        lambda: _cli_revoke(maker, target=emails[1]),
                     ),
-                    lambda: _cli_revoke(maker, target=emails[0]),
-                ),
-                "revoke x revoke": (
-                    lambda: _cli_revoke(maker, target=emails[0]),
-                    lambda: _cli_revoke(maker, target=emails[1]),
-                ),
-                "revoke x demote": (
-                    lambda: _cli_revoke(maker, target=emails[0]),
-                    lambda: _cli_demote(maker, target=emails[1]),
-                ),
-            }
-            leading, trailing = contenders[race]
-            handoff.install(monkeypatch)
-            outcomes = await handoff.run(leading, trailing)
+                    "revoke x demote": (
+                        lambda: _cli_revoke(maker, target=emails[0]),
+                        lambda: _cli_demote(maker, target=emails[1]),
+                    ),
+                }
+                leading, trailing = contenders[race]
+                handoff.install(monkeypatch)
+                outcomes = await handoff.run(leading, trailing)
 
             remaining = await _live_owners(maker)
             assert remaining >= 1, f"{race} emptied the platform: {outcomes}"
