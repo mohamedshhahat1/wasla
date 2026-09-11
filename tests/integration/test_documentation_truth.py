@@ -225,6 +225,10 @@ def test_the_billing_subsystem_the_documentation_describes_is_importable() -> No
             "member removal",
             "is a different operation against a different object, and does not exist yet",
         ),
+        # AUTH-07. `POST /workspaces` shipped and unblocked Google-first
+        # onboarding, but AUTH.md went on saying a Google account waits to be
+        # invited - which is advice that strands the person who follows it.
+        ("google onboarding", "has no workspace until it is invited to one"),
     ],
 )
 def test_a_corrected_claim_has_not_come_back(subject: str, phrase: str) -> None:

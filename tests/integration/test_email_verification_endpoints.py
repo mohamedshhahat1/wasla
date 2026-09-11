@@ -868,3 +868,54 @@ async def test_an_unverified_account_can_recover_but_not_use_workspace_features(
     assert resend.status_code == 202
     assert business.status_code == 403
     assert business.json()["error"]["code"] == "email_verification_required"
+
+
+async def test_the_route_documents_the_status_it_actually_returns(
+    http: AsyncClient,
+    db_session: AsyncSession,
+    verification_settings: Settings,
+) -> None:
+    """The docstring is published API documentation, and it said 400.
+
+    `verify_email_address`'s docstring is what FastAPI renders into the OpenAPI
+    description, so it is the contract a client is written against. It claimed
+    every rejection "leaves as the same 400" for two phases while the handler
+    raised `ValidationError`, which this application maps to 422 - so a client
+    branching on 400 would have treated a wrong code as a transport failure.
+
+    The status is taken from a live refusal rather than written down here, so
+    this test cannot itself drift: it fails if the route starts returning
+    something else *or* if the prose starts claiming something else.
+    """
+    user = await _account(db_session, "documented@acme-example.com")
+    refused = await http.post(
+        VERIFY,
+        json={"code": "111111"},
+        headers=_bearer(user, verification_settings),
+    )
+
+    documentation = _verify_route().description or ""
+    assert str(refused.status_code) in documentation, (
+        f"the route answers {refused.status_code} and its documentation never says so:\n"
+        f"{documentation}"
+    )
+
+    # And says nothing else. Naming two client-error statuses is the same
+    # defect wearing a hedge, and "400" is the specific one that was wrong.
+    stale = {"400", "401", "403", "404", "409", "429"} - {str(refused.status_code)}
+    claimed = sorted(status for status in stale if status in documentation)
+    assert claimed == [], f"the documentation also claims {claimed}, which it cannot return"
+
+
+def _verify_route() -> APIRoute:
+    """The verification route object, walked the way `_api_routes` walks them.
+
+    Through the deferred-inclusion wrappers for the same reason that helper
+    exists: a flat scan of `api_router.routes` matches nothing and would make
+    this test pass by finding no documentation to disagree with.
+    """
+    path = VERIFY.removeprefix(API)
+    for route in _api_routes(api_router.routes):
+        if route.path == path:
+            return route
+    raise AssertionError("the verification route is not mounted; this test is looking wrong")

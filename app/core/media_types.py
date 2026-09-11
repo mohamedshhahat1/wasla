@@ -76,7 +76,7 @@ class MediaClass(StrEnum):
 class MediaTypeError(ValidationError):
     """The bytes are not a supported type, or are not the type that was claimed.
 
-    A `ValidationError`, so it becomes a 400 through the existing handler rather
+    A `ValidationError`, so it becomes a 422 through the existing handler rather
     than a new status. The message says what was refused and never what was
     seen: echoing a header or a byte prefix back to whoever supplied it turns an
     error response into a probe of the detector.

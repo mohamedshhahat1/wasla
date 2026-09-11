@@ -535,12 +535,17 @@ class GoogleAuthService:
         third-party address may authenticate by stable subject but remains in
         Wasla's limited onboarding state until its emailed code is confirmed.
 
-        No workspace is created. `register` needs a name and a slug that Google
-        does not supply, and inventing one from a display name is a trap:
-        `SLUG_PATTERN` is strict ASCII and a great many real names are not. The
-        honest consequence is disclosed in ADR-047 - such an account holds a
-        valid session but cannot open any workspace-scoped endpoint until it is
-        invited somewhere.
+        No workspace is created here. `register` needs a name and a slug that
+        Google does not supply, and inventing one from a display name is a trap:
+        `SLUG_PATTERN` is strict ASCII and a great many real names are not
+        (ADR-047). So the session comes back with `active_workspace: null`.
+
+        That is a starting state, not a dead end. `POST /api/v1/workspaces`
+        takes the business name and slug the client asks for, and makes the
+        caller the owner of what it creates - so a verified Google account
+        opens its own workspace rather than waiting to be invited to somebody
+        else's. Verification is the gate on that route, which a Gmail or
+        matching-`hd` account passes at enrolment on the line below.
         """
         try:
             user = await self._users.create(

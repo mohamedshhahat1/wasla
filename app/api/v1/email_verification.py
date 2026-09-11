@@ -138,6 +138,11 @@ async def send_verification_code(
     return VerificationSendResponse(message=message)
 
 
+# The refusal is a `ValidationError`, which `register_exception_handlers` maps
+# to 422. The docstring below said 400 for two phases while the handler said
+# otherwise - a client branching on the documented status would have read a
+# wrong code as a transport failure. `test_the_route_documents_the_status_it_
+# actually_returns` now drives a real refusal and holds the prose against it.
 @router.post(
     "/verify",
     response_model=VerificationConfirmResponse,
@@ -152,8 +157,12 @@ async def verify_email_address(
     """Spend a code against the authenticated account.
 
     Every rejection - wrong, expired, exhausted, superseded, malformed, never
-    issued - leaves as the same 400 with the same message. Which condition
+    issued - leaves as the same **422** with the same message. Which condition
     failed is in the audit trail and never in the response.
+
+    A code that breaks the schema's own length bound is refused by request
+    validation, which answers the same status, so the paths that are
+    indistinguishable by design stay indistinguishable in the status line too.
     """
     outcome = await service.confirm(user=current_user.user, submitted=payload.code)
     return VerificationConfirmResponse(verified_at=outcome.verified_at)
