@@ -22,13 +22,14 @@ it is allowed to act on - otherwise a route that refuses everybody would pass.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from fastapi.routing import APIRoute, _IncludedRouter
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -432,3 +433,76 @@ async def test_a_refused_hierarchy_attempt_changes_nothing_and_is_not_audited_as
         .all()
     )
     assert list(entries) == []
+
+
+# The §32 route policy, as code. Every platform route, and which guard it must
+# resolve. A route added to this router without an entry fails the test below.
+PLATFORM_ROUTE_POLICY = {
+    ("GET", "/platform/overview"): "staff",
+    ("GET", "/platform/tenants"): "staff",
+    ("GET", "/platform/audit-logs"): "staff",
+    ("POST", "/platform/invoices/{invoice_id}/payments"): "staff",
+    ("POST", "/platform/invoices/{invoice_id}/void"): "staff",
+    ("POST", "/platform/tenants/{tenant_id}/suspend"): "staff",
+    ("POST", "/platform/tenants/{tenant_id}/restore"): "staff",
+    ("POST", "/platform/tenants/{tenant_id}/ownership"): "staff",
+    ("POST", "/platform/users/{user_id}/enable"): "staff",
+    # The two that end an account's authority, and the only two that ask what
+    # the target is.
+    ("POST", "/platform/users/{user_id}/disable"): "target-aware",
+    ("DELETE", "/platform/users/{user_id}"): "target-aware",
+}
+
+
+def _resolved(dependant: Any, seen: set[str] | None = None) -> set[str]:
+    seen = seen if seen is not None else set()
+    for sub in dependant.dependencies:
+        call = getattr(sub, "call", None)
+        if call is not None:
+            seen.add(getattr(call, "__name__", type(call).__name__))
+        _resolved(sub, seen)
+    return seen
+
+
+def _platform_routes(routes: Sequence[Any]) -> Iterator[APIRoute]:
+    for route in routes:
+        if isinstance(route, APIRoute):
+            if route.path.startswith("/platform/"):
+                yield route
+        elif isinstance(route, _IncludedRouter):
+            yield from _platform_routes(route.original_router.routes)
+        elif hasattr(route, "routes"):
+            yield from _platform_routes(route.routes)
+
+
+def test_each_platform_route_carries_the_guard_the_policy_says() -> None:
+    """The hierarchy is a property of the route table, asserted as one.
+
+    Without this the route-level guard has no detector: removing
+    `PlatformAccountTargetDep` from `delete` and `disable` leaves every
+    behavioural test above green, because `AccountService` enforces the same
+    rule independently and answers the same `403`. That redundancy is the
+    design - a service inherits nothing from a route guard - and it is exactly
+    what makes the two layers invisible to each other's tests.
+
+    Read from the resolved dependency graph rather than the decorators, because
+    a guard can sit on the router instead of the route and an included router
+    defers behind `_IncludedRouter`. The only honest question is what FastAPI
+    resolves for this path.
+
+    The other direction matters as much: nine routes must *not* be target-aware.
+    Fixing AUTHZ-01 by putting the whole router behind an owner-only dependency
+    would have passed every refusal test in this file and broken the product.
+    """
+    application = create_app(Settings(_env_file=None, environment="test"))
+    actual: dict[tuple[str, str], str] = {}
+    for route in _platform_routes(application.routes):
+        names = _resolved(route.dependant)
+        assert (
+            "require_platform_roles" in names or "guard" in names
+        ), f"{route.path} resolves no platform guard at all: {sorted(names)}"
+        kind = "target-aware" if "require_platform_authority" in names else "staff"
+        for method in sorted((route.methods or set()) - {"HEAD", "OPTIONS"}):
+            actual[(method, route.path)] = kind
+
+    assert actual == PLATFORM_ROUTE_POLICY
