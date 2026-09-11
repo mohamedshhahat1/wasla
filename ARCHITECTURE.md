@@ -15,7 +15,7 @@ Technical source of truth for the current system architecture. Every section car
 
 Wasla is an API-first, multi-tenant backend. A business (tenant) connects one or more WhatsApp Business phone numbers. Inbound customer messages arrive as Meta webhooks, are resolved to a tenant, persisted, and queued for asynchronous AI processing. An agent orchestrator loads the conversation, retrieves tenant-scoped knowledge, calls the OpenAI Responses API with a controlled tool set, and replies through the WhatsApp Cloud API.
 
-The whole of that pipeline is built, and a worker process runs the eleven loops that feed it — media, agent, ingestion, follow-up, campaign, billing, email, recovery, retention, purge and uploads, selected by `WORKER_KINDS`. Everything it does is metered in the transaction that did it, reported back through tenant and platform analytics, and bounded by the plan the workspace is on. Money changes hands too: a workspace buys a plan through a hosted Paymob checkout, the settlement arrives on a signed callback, and refunds, saved cards, automatic renewals and dunning follow from there.
+The whole of that pipeline is built, and a worker process runs the twelve loops that feed it — media, agent, ingestion, follow-up, campaign, billing, email, recovery, inbound_recovery, retention, purge and uploads, selected by `WORKER_KINDS`. Everything it does is metered in the transaction that did it, reported back through tenant and platform analytics, and bounded by the plan the workspace is on. Money changes hands too: a workspace buys a plan through a hosted Paymob checkout, the settlement arrives on a signed callback, and refunds, saved cards, automatic renewals and dunning follow from there.
 
 ```
 WhatsApp
@@ -109,10 +109,10 @@ Stack traces are never exposed in production responses. Cross-tenant access is r
 
 1. `GET /api/v1/webhooks/whatsapp` verifies the Meta challenge token with a constant-time comparison. **Implemented**
 2. `POST /api/v1/webhooks/whatsapp` verifies the `X-Hub-Signature-256` signature over the payload. **Implemented**
-3. The payload is parsed; `phone_number_id` resolves the WhatsApp account and therefore the tenant. The tenant is never inferred from the customer phone number. **Implemented**
+3. The payload is parsed; `phone_number_id` plus the event's own timestamp resolve which workspace **held that number when the event happened** (ADR-101). The tenant is never inferred from the customer phone number, and never from who holds the number now. **Implemented**
 4. Message and status events are persisted idempotently, keyed on the WhatsApp message/event ID (ADR-011). **Implemented**
 5. The contact, conversation and message are created or updated from the stored event. **Implemented**
-6. One job per conversation that received a message is enqueued to Redis, and the endpoint returns. **Implemented**
+6. One job per conversation that received a message is enqueued to Redis, the event is marked with whether that handoff landed (ADR-102), and the endpoint returns. **Implemented**
 
 No AI or media processing happens inside the webhook request.
 
@@ -120,14 +120,16 @@ Four properties of the endpoint are deliberate and should not be "tidied" later:
 
 - **The signature is computed over the raw request body**, before parsing. Verifying a re-serialised payload would verify Wasla's own serialisation rather than the bytes Meta signed.
 - **Anything unactionable still answers 200.** Meta retries non-2xx deliveries and eventually disables the subscription, so returning an error for a payload that will never become valid — an unparseable body, an unknown `phone_number_id`, a disabled account — turns one bad message into an outage. Only a failed signature answers 403.
-- **`phone_number_id` is unique platform-wide**, not per workspace, which is what makes step 3 trustworthy: a number can never resolve to two tenants.
-- **A queue failure is logged and swallowed.** The messages are already stored, so failing the delivery would make Meta resend traffic that landed, to fix a problem retrying cannot fix.
+- **`phone_number_id` is unique among live claims**, not per workspace, which is what makes step 3 trustworthy for current traffic: a number can never be held by two workspaces at once. What makes it trustworthy for *late* traffic is the tenure interval on the account row — Meta retries for up to seven days, so an event arriving after a number has changed hands must be attributed to who held it then, or dropped (ADR-101).
+- **A queue failure is logged and swallowed.** The messages are already stored, so failing the delivery would make Meta resend traffic that landed, to fix a problem retrying cannot fix. The event is left saying it still owes work, and `InboundRecoveryWorker` finishes it (ADR-102) — swallowing the failure is only defensible with that half in place.
 
 ### 5.1 Outbound
 
-**Status: Implemented** — text, media, location, reply buttons, lists, templates and read receipts, behind `app/integrations/whatsapp/client.py`.
+**Status: Implemented** — text, media, templates and read receipts, behind `app/integrations/whatsapp/client.py`. The client also has `send_location`, `send_buttons` and `send_list`, which nothing calls: interactive messaging is not a product capability, and `docs/WHATSAPP.md` says so rather than letting a reader infer one from a method list.
 
-Retries are deliberately narrow: HTTP 429 and connection errors only, never 5xx and never read timeouts, because the Meta send endpoint accepts no idempotency key and an ambiguous retry duplicates a message in a real customer's chat (ADR-010). Sending uses the platform Meta credential; the account row stores no token (ADR-009).
+Retries are deliberately narrow: HTTP 429 and connection errors only, never 5xx and never read timeouts, because the Meta send endpoint accepts no idempotency key and an ambiguous retry duplicates a message in a real customer's chat (ADR-010). A `2xx` whose body carries no message id is an *unknown* rather than a failure, for the same reason: a `2xx` is Meta saying it accepted the message, and recording that as failed is the one classification that licenses a second send. Sending uses the workspace's own encrypted credential where it has one and the platform credential otherwise (ADR-034).
+
+Because the send endpoint has no idempotency key, callers supply the missing structure themselves: a campaign recipient and a follow-up through their `link`-and-abandon invariant (ADR-093), an agent turn through the queue's engagement barrier (ADR-074), and the manual API through an explicit `Idempotency-Key` header (ADR-103).
 
 A send writes its message row before calling Meta and records a rejection on that row rather than raising, so an attempt always survives as evidence; the API therefore answers `201` with a `failed` status instead of an error code (ADR-013).
 
@@ -474,6 +476,13 @@ on it, and one whose process died is reclaimable within a couple of minutes
 rather than one worst-case-job-duration. The `recovery` loop reclaims what has
 expired; `LREM` returning 1 for exactly one caller is the whole of the mutual
 exclusion, so running it in every replica is expected rather than hazardous.
+
+**`inbound_recovery` is a different loop for a different failure**, and the two
+are named apart deliberately. `recovery` reclaims jobs a dead worker was
+*holding*; `inbound_recovery` finishes inbound events whose agent or media
+handoff never reached Redis at all, so there was never a reservation to reclaim
+(ADR-102). A deployment running neither has two distinct silent failures, and a
+single name would let an operator believe one loop covered both.
 
 **What it does with a reclaimed job depends on how far the job got.** The
 reservation carries a stage, and the agent worker writes `engaged` to Redis

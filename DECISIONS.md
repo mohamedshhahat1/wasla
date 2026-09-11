@@ -5276,3 +5276,251 @@ would pass. A last test runs the migration's own six counting queries against a
 populated schema, so the code that guards a deployment at three in the morning
 has been executed at least once.
 
+---
+
+## ADR-101 — Inbound Is Attributed To Who Held The Number, Not Who Holds It
+
+**Context.** The workspace behind an inbound WhatsApp event was resolved from
+the *current* live claim on `metadata.phone_number_id`. That is the right
+answer for current traffic and the wrong answer for an event that has been in
+flight, and Meta retries an undelivered webhook **for up to seven days**.
+
+So for a week after a number changes hands, a delivery can arrive carrying a
+message the previous owner's customer sent — and it was projected into the new
+owner's workspace. Body, customer phone number and profile name became a
+`Message`, a `Contact` and a `Conversation` readable by any member of a
+business that had never spoken to that person, and their agent was queued to
+answer it. An audit reproduced it end to end.
+
+Both businesses had proved control of the number to Meta. Neither did anything
+wrong, and nothing about the event looks unusual, which is what makes it worse
+than an attack: there is no misuse to detect and no party to hold responsible.
+
+The same resolution silently dropped the *releasing* workspace's delivery
+statuses. A status for a message A sent arrives, resolves to B, looks the
+message up inside B, finds nothing, and logs — so every message A had in flight
+at release time stayed `sent` with a null `delivered_at` for ever.
+
+**Decision. A number's claim is a tenure interval, and routing asks which
+interval contains the event.**
+
+`whatsapp_accounts` gains `ownership_started_at`, set at claim time, which with
+the existing `released_at` makes the half-open interval
+`[ownership_started_at, released_at)`. Half-open because a release and the next
+claim can share a timestamp when a number moves quickly, and a closed interval
+would make that instant belong to two workspaces at once — the one answer this
+must never give.
+
+A column of its own rather than reusing `created_at`. The two coincide today
+because `WhatsAppAccountRepository.connect` is this table's only writer and sets
+both in one statement — but that is a fact about one call site, not an
+invariant, and attributing a customer's message to a business is not a decision
+to rest on a generic audit timestamp continuing to mean something specific.
+
+**The property being protected is cross-workspace disclosure, not chronology,**
+and that distinction decides the case a pure interval test gets wrong. A
+provider timestamp can legitimately precede the claim it belongs to: clocks
+drift, and Meta can hold a message sent moments before a claim committed.
+Refusing those would drop real customer messages on numbers that have never
+been handed over — which is most of them. So:
+
+| Event timestamp | Resolved to |
+| --- | --- |
+| Inside a claim's tenure | That workspace |
+| Outside every tenure, one workspace has ever held the number | That workspace |
+| Outside every tenure, more than one has | **Nobody**; dropped and counted |
+| Inside two tenures at once | **Nobody**; logged as a data-integrity error |
+
+Row two is safe precisely because there is no other workspace the message could
+belong to. Row three is where the finding lived, and dropping is the right
+answer: losing a stray message costs one conversation, and handing it to a
+stranger cannot be undone.
+
+**Never fall back to the current owner.** That sentence is the ADR.
+
+**A delivery status is resolved differently, because its identity is
+different.** A status is a fact about a message that already exists, and that
+message carries its own workspace — so it is resolved by `wa_message_id` first,
+across the workspaces that have ever held the number, and the workspace comes
+from whichever message matched. Resolving by number and *then* searching inside
+one workspace is exactly the step that dropped the previous owner's statuses.
+
+That lookup is unscoped, so it is fenced three ways: the candidate workspaces
+come from `holders_of` and are therefore exactly the ones that have held the
+number Meta is reporting on; an empty candidate set matches nothing rather than
+searching the platform; and no API route reaches the class, which is
+constructed only by the ingestion service and the inbound sweeper.
+
+**Consequences.**
+
+The live claim remains the fast path, and for a number that has never moved it
+is the only query made — the history walk runs only for an event that predates
+the live claim, which is the one case where the two answers differ.
+
+An event on a number the workspace has since **released** is recorded in that
+workspace, so its conversation history stays intact, and is deliberately not
+answered: the workspace cannot send through a claim it no longer holds, so an
+agent turn could only end in a refusal after paying for an inference.
+
+`IngestionOutcome.unowned` counts what was dropped, apart from
+`unknown_accounts`, because "not our number" and "our number, but not then, and
+we will not guess" are different operational conditions.
+
+**What is proved rather than argued.**
+`tests/integration/test_whatsapp_number_handover.py` builds a real handover
+with a gap in it and drives every row of the table above, including the two
+negative controls that stop "never route to the new owner" from being satisfied
+by dropping everything: current traffic still routes currently, and a slightly
+early message on a number only one workspace has ever held is still delivered.
+A mutation replacing the resolver with a current-owner lookup is killed by it.
+
+---
+
+## ADR-102 — A Stored Inbound Event Says Whether It Still Owes Work
+
+**Context.** A webhook that cannot reach Redis stores the message, swallows the
+enqueue failure, and answers `200`. Answering `200` is correct and stays
+correct: a non-2xx makes Meta retry the whole delivery and eventually disable
+the subscription, so a Redis outage must not become a webhook outage.
+
+What was missing was the other half of that trade. The message sat in the inbox
+looking exactly like any other; `whatsapp_events.state` was written once at
+insert and never advanced, so `PROCESSED` and `FAILED` were unreachable from
+any code path and every event ever stored read `received`; deduplication
+discarded Meta's later redelivery without re-queueing anything; and no query,
+metric or command could find any of it afterwards. `docs/RUNBOOK.md` told an
+operator those conversations "wait for a person until somebody requeues them",
+and there was no mechanism by which anybody could.
+
+So a customer wrote in during an outage and was never answered, nobody knew how
+many, and the documented remedy did not exist.
+
+**Decision. `state` means what its name says, and a sweeper finishes what it
+finds owing.**
+
+| State | Meaning |
+| --- | --- |
+| `received` | Stored, and something it needed has not happened. |
+| `processed` | Projected, **and** every handoff it needed was accepted by a queue. |
+| `failed` | Permanently unprocessable. An operator's problem, not a sweeper's. |
+
+`processed` deliberately does not mean "a row exists". A message stored with no
+agent turn queued is the failure this whole record is about, and a state that
+could not tell it apart from an answered message would be decoration.
+
+`InboundRecoveryWorker` claims `received` events older than a grace period and
+finishes them.
+
+**Recovery re-derives; it does not replay.** Replaying a stored webhook as if
+it were new would re-project the message, re-cancel its follow-ups and re-meter
+the delivery. Each claimed event is instead asked what it is still missing — is
+the message there, does its file still need reading, does its conversation
+still need a turn — and only that is supplied. Which is why running it twice
+produces one agent turn: the second pass finds the work already done.
+
+**A redelivery is not a recovery mechanism.** Meta's retry of an already-stored
+event stops at the duplicate check whatever state that event is in. The
+tempting alternative — let a redelivery re-enqueue what the first delivery
+could not — would be two paths racing to queue one turn, and the loser is
+whichever the sweeper also picks up. Recovery has one owner.
+
+**Two sweepers are expected and safe.** Events are claimed `FOR UPDATE SKIP
+LOCKED` and marked in the same transaction that holds the lock. That matters
+more here than anywhere else in the worker set: what is being recovered ends in
+a message to somebody's customer, and recovering it twice is the duplicate
+reply the whole delivery design exists to prevent.
+
+**Consequences.**
+
+The job is published before the transaction commits, which leaves the same
+narrow window the inbound path already accepts: a commit that then fails leaves
+a job whose event is still owing, and a later sweep publishes a second. The
+alternative — commit first, publish after — turns a crash into permanent
+silence, which is the failure this worker exists to remove. ADR-089 made that
+trade on the webhook path and this follows it rather than inventing a second
+answer.
+
+`inbound_recovery` is a worker kind of its own rather than folded into
+`recovery`. That one reclaims expired queue *reservations*; this one recovers
+work that never got as far as a reservation. A deployment running neither has
+two different silent failures, and naming them apart is what lets an operator
+tell which one they are missing.
+
+Events that owe nothing are `processed` immediately — a delivery status, a
+message type Wasla cannot read, a message on a released number — because an
+event the sweeper picks up on every pass is a backlog gauge that never reaches
+zero.
+
+`wasla_unprocessed_inbound_events` and `queues unprocessed-inbound` are the
+operator's half. A design that recovers silently is only trustworthy if
+somebody can see it recovering.
+
+**What is proved rather than argued.**
+`tests/integration/test_whatsapp_inbound_recovery.py` drives a real Redis
+outage with a client pointed at a closed port — a mock that raises `RedisError`
+would be a test of the mock — and asserts the message lands, the event owes
+work with a bounded reason, the redelivery does not re-project, the sweep
+queues exactly one turn, and a second sweep queues none. Two mutations are
+killed by it: marking an event processed despite a refused enqueue, and making
+the claim non-atomic.
+
+---
+
+## ADR-103 — A Caller Says Which Sends Are The Same Send
+
+**Context.** The outbound API took nothing that could tell a repeat from a
+second message, so a double-clicked button, a retried mobile request or a proxy
+replay put two copies on a customer's phone. Meta's send endpoint offers no
+idempotency key either, so it cannot be delegated.
+
+Everything else in the outbound path was already protected against duplicates
+by construction — a campaign recipient and a follow-up by their `link`-and-
+abandon invariant (ADR-093), an agent turn by the queue's engagement barrier
+(ADR-074). The manual API was the one producer with no such structure, because
+the thing being repeated is an HTTP request rather than a job.
+
+**Decision. An explicit `Idempotency-Key` header, scoped to the workspace, and
+no content-based deduplication of any kind.**
+
+Sending the same words twice is something people legitimately do: "are you
+there?" twice is two messages. A window that suppressed a duplicate body would
+silently swallow real intent — and a swallowed message is worse than a visible
+duplicate, because the customer and the colleague can both see a duplicate and
+neither can see an absence. The caller says which requests are the same
+request, and nothing else does.
+
+`UNIQUE(tenant_id, idempotency_key)`, mirroring `payments`. Keys are generated
+by clients, so a global constraint would let one workspace's chosen key
+suppress another workspace's message — a cross-tenant defect wearing an
+idempotency hat.
+
+**The constraint is the guarantee; the read is the fast path.** Two
+simultaneous submissions of one key both miss the read, and the loser's insert
+is wrapped in a savepoint so its failure does not poison the surrounding
+transaction — without that the request could not produce a response at all —
+and then re-reads the winner's row.
+
+**A key reused for different content answers `409`.** Silently returning the
+earlier message is the worst option available: it would tell a caller their new
+message was sent when it was not. The comparison is on what the customer would
+see and deliberately excludes `sent_by_id`, so the same key retried after a
+token refresh is still the same send.
+
+**Consequences.**
+
+An attachment send short-circuits before doing any work rather than leaving the
+replay to the dispatch, because it has work either side of it: the file is
+re-read and the storage allowance re-charged on the way in, and the attachment
+recorded on the way out.
+
+The key is optional. A caller that sends none behaves exactly as before, which
+keeps the header a protection a client opts into rather than a contract change.
+
+**What is proved rather than argued.**
+`tests/integration/test_whatsapp_send_idempotency.py` counts provider calls
+against a real socket, so "one message" means one connection was accepted. The
+concurrent case uses two transactions on two connections, because a sequential
+test passes with no constraint at all, and the deliberate mutation that removes
+the atomic claim is killed by it. The test that two keyless sends of identical
+words produce two messages is as important as the deduplication tests: it is
+where the decision not to infer is written down.

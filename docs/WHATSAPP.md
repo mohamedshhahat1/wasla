@@ -98,7 +98,24 @@ Meta retries any non-2xx response and eventually disables a subscription that ke
 
 ## Tenant resolution
 
-The workspace is resolved from `metadata.phone_number_id` and never from the customer's phone number, which the sender controls. `phone_number_id` is unique platform-wide, so a number can never map to two workspaces. The lookup is the one deliberately unscoped query in this subsystem — the workspace is what is being discovered — and is isolated in `WhatsAppAccountDirectory`, which holds that single method.
+The workspace is resolved from `metadata.phone_number_id` and never from the customer's phone number, which the sender controls. `phone_number_id` is unique among *live* claims, so a number can never map to two workspaces at once. The lookup is the one deliberately unscoped query in this subsystem — the workspace is what is being discovered — and is isolated in `WhatsAppAccountDirectory`.
+
+**The question is who held the number when the event happened, not who holds it now** ([ADR-101](../DECISIONS.md)). Meta retries an undelivered webhook for up to seven days, so for a week after a number changes hands a delivery can arrive carrying a message the *previous* owner's customer sent. Resolving to the current holder put that message, the customer's phone number and their profile name into a stranger's inbox — with both businesses having proved ownership of the number to Meta, so neither did anything wrong.
+
+`whatsapp_accounts` therefore carries a tenure interval: `ownership_started_at` (set at claim time) and `released_at` (set when the workspace gives the number up). `owner_at` answers the routing question against it:
+
+| Event timestamp | Resolved to |
+| --- | --- |
+| Inside a claim's `[ownership_started_at, released_at)` | That workspace |
+| Outside every claim, and one workspace has ever held the number | That workspace |
+| Outside every claim, and more than one workspace has held it | **Nobody.** Dropped and counted as `unowned` |
+| Inside two claims at once | **Nobody.** A data-integrity error, logged and counted |
+
+The second row is the one worth reading twice. **The property being protected is cross-workspace disclosure, not chronology.** A provider timestamp can legitimately precede the claim it belongs to — clocks drift, and Meta can hold a message sent moments before a claim committed — so refusing those would drop real customer messages on a number nobody has ever handed over. Once a second workspace appears in the number's history that reasoning is gone, and an unattributable event is dropped rather than guessed at: losing a stray message costs one conversation, and handing it to a stranger cannot be undone.
+
+The live claim is still the fast path and, for a number that has never moved, the only query made. A **delivery status** is resolved differently again — see *Status reconciliation* below.
+
+An event on a number the workspace has since **released** is still recorded, in that workspace, so its conversation history stays intact. It is not answered: the workspace cannot send through a claim it no longer holds, so an agent turn could only end in a refusal after paying for an inference.
 
 An account row carries the workspace's own Meta token, encrypted (ADR-034, superseding ADR-009). A token in a plain column would put a live sending capability in every database dump, so the column is AES-256-GCM with the tenant id as additional authenticated data — a ciphertext lifted into another workspace's row will not decrypt. A workspace that has supplied one sends as itself; one that has not sends through the platform credential from configuration.
 
@@ -112,11 +129,37 @@ Events are stored in `whatsapp_events` under `UNIQUE(tenant_id, event_id)`, so a
 
 Status events compose their key as `{message_id}:{status}`, because Meta reports `sent`, `delivered` and `read` for the same message under the same id; keying on the id alone would keep the first status and discard the rest.
 
-The uniqueness constraint, not the preceding read, is the guarantee. Two simultaneous deliveries of one event both miss the read; the database rejects the loser, Meta retries, and the retry finds the row.
+The uniqueness constraint, not the preceding read, is the guarantee — and the insert says so: `ON CONFLICT DO NOTHING` makes a delivery that loses the race read back the winner rather than raise. Before that, the loser turned the constraint into a `500`, which is an internal error for a situation that is neither internal nor an error, on an endpoint whose failure rate Meta watches. The same savepoint-and-re-read pattern covers the contact and conversation identity races, so a burst of a customer's first messages converges without a single non-2xx.
+
+### Event state, and what "accepted" guarantees
+
+A `200` guarantees the event is **stored**. Whether it has been **processed** is a separate fact, and `whatsapp_events.state` is where it lives ([ADR-102](../DECISIONS.md)):
+
+| State | Meaning |
+| --- | --- |
+| `received` | Stored, and something it needed has not happened yet. |
+| `processed` | Projected, *and* every handoff it needed was accepted by a queue. |
+| `failed` | Permanently unprocessable. An operator's problem, not a sweeper's. |
+
+`processed` deliberately does not mean "a row exists". When Redis is unavailable the webhook stores the message, swallows the enqueue failure and still answers `200` — which is right, because a non-2xx would make Meta retry the whole delivery and eventually disable the subscription. The event then stays `received` carrying a bounded reason (`agent_enqueue_failed`, `media_enqueue_failed`), and `InboundRecoveryWorker` finishes it later.
+
+**A redelivery is not a recovery mechanism.** Meta's retry of an event that is already stored stops at the duplicate check whatever state that event is in. Recovery has a single owner — the sweeper — because two paths racing to queue one agent turn is two replies to one customer message.
+
+Events that owe nothing are `processed` immediately: a delivery status, a message type Wasla cannot read, and a message on a number the workspace has released.
+
+To see the backlog:
+
+```
+python -m app.workers.queues unprocessed-inbound
+```
+
+and `wasla_unprocessed_inbound_events` alerts on it.
 
 ## Outbound client
 
-`WhatsAppClient` covers text, media (by uploaded id — Wasla never sends by link), location, reply buttons, lists, templates, read receipts, and the two-step media fetch for inbound files. Reads take the opposite retry policy to sends: fetching a file twice costs a request and changes nothing anyone can see, so timeouts and 5xx are retried there where a send must never retry them. An outbound template is stored as a `template` message carrying the name and language it was sent with and no body, since Meta renders the wording from its approved copy and Wasla never sees it. The HTTP client, sleep function and attempt budget are injected, so retry behaviour is tested against `httpx.MockTransport` with no network and no real waiting.
+`WhatsAppClient` has methods for text, media (by uploaded id — Wasla never sends by link), templates, read receipts, location, reply buttons, lists, and the two-step media fetch for inbound files.
+
+**Client support is not product support**, and the difference matters when reading that list. Text, media and templates are shipped: there are routes, services and agent paths that reach them. `send_location`, `send_buttons` and `send_list` are called by nothing — no route, no service, no agent tool — so interactive messaging is not a capability this product has, and the inbound side matches: a button or list reply is stored as an `interactive` message whose reply id is kept only in the raw event. Building it out means carrying `interactive.*_reply.id` — never the title, which is display text a customer never chose — into a column of its own. See *Not supported* below. Reads take the opposite retry policy to sends: fetching a file twice costs a request and changes nothing anyone can see, so timeouts and 5xx are retried there where a send must never retry them. An outbound template is stored as a `template` message carrying the name and language it was sent with and no body, since Meta renders the wording from its approved copy and Wasla never sees it. The HTTP client, sleep function and attempt budget are injected, so retry behaviour is tested against `httpx.MockTransport` with no network and no real waiting.
 
 ### Retry policy
 
@@ -126,13 +169,21 @@ The Cloud API send endpoint accepts **no idempotency key**, so a retry can dupli
 | --- | --- | --- | --- |
 | `429` | Yes, with backoff | `RateLimitedError` | Yes — rejected outright, nothing was sent |
 | Connection error | Yes, with backoff | `SendNotAttemptedError` | Yes — no connection, so no request arrived |
-| `4xx` | No | `SendNotAttemptedError` | Yes — Meta read it and declined; nothing was delivered |
+| `401`/`403`/Meta `code 190` | No | `ProviderAuthError` | Yes for this message — but the credential is refused for the whole number |
+| Meta template codes | No | `TemplateWithdrawnError` | Yes for this message — the template is marked `paused` locally |
+| Other `4xx` | No | `SendNotAttemptedError` | Yes — Meta read it and declined; nothing was delivered |
 | `5xx` | No | `UncertainDeliveryError` | **No** — may have been accepted |
 | Read timeout | No | `UncertainDeliveryError` | **No** — the request may have landed |
+| Transport failure (reset, protocol) | No | `UncertainDeliveryError` | **No** — the request left; no answer came back |
+| `2xx` with no usable message id | No | `UncertainDeliveryError` | **No** — a `2xx` is Meta saying it accepted the message |
+
+The last row is the one most easily got backwards, and getting it backwards costs a customer a second copy of a message. A `2xx` whose body carries no message id used to be recorded as a definite failure — the one classification that licenses a new send. It is now an unknown. The id is still needed (delivery statuses arrive keyed on it), so such a message cannot be tracked; but "we cannot track it" and "it was not delivered" are different statements and only the first is true.
+
+`ProviderAuthError` and `TemplateWithdrawnError` are both subclasses of `SendNotAttemptedError`, because the truth about *this message* is that nothing was delivered. They are separate types because the truth about the *workspace* is different, and a sweep needs to act on it: a campaign stops on the first refused credential rather than burning one attempt budget per recipient, and a refused template is written back to the registry so the next send is refused locally.
+
+`429` honours `Retry-After` when Meta sends it, clamped so a provider header cannot park a worker indefinitely, and every backoff is jittered — additively, because a retry landing *earlier* than the backoff intended is the one thing backoff must not do.
 
 Meta's error `code`, `type` and `error_subcode` are logged; the message raised to callers is our own, because provider error text can echo fragments of a request and this client holds a live platform credential.
-
-A message accepted without an identifier is treated as an error: delivery statuses arrive keyed on that id, so a message that cannot be identified cannot be tracked.
 
 ## Delivery protocol
 
@@ -159,9 +210,71 @@ The row used to be flushed before the call and committed after it, which is not 
 
 It is NULL on every inbound message.
 
-**There is no reconciler for `requested`, and that is a fact about Meta.** The send endpoint takes no idempotency key and offers no lookup keyed on anything Wasla holds before Meta answers, so an unanswered request cannot be asked about. A `requested` row is shown to a person rather than resolved by a sweep; `ix_messages_unresolved_delivery` is the query that finds them, and on a healthy deployment it returns nothing.
+**There is no reconciler for `requested`, and that is a fact about Meta.** The send endpoint takes no idempotency key and offers no lookup keyed on anything Wasla holds before Meta answers, so an unanswered request cannot be asked about. A `requested` row is shown to a person rather than resolved by a sweep, and these are the three things that show it to them:
+
+```
+python -m app.workers.queues unresolved-sends
+```
+
+`wasla_unresolved_outbound_messages` counts them and `wasla_oldest_unresolved_outbound_age_seconds` says whether the oldest is a send in flight or one that broke an hour ago; `UnresolvedOutboundSends` alerts on the second. `docs/RUNBOOK.md` has the procedure. On a healthy deployment all three read zero, and none of them resends anything — a design that refuses to guess is only honest if somebody is told there is something to decide.
 
 A follow-up or a campaign recipient whose send ended `requested` is recorded as failed with "WhatsApp did not confirm this message, so it was not sent again", and is never retried. An explicit rejection is different: nothing was delivered, so the existing retry policy applies unchanged.
+
+## Status reconciliation
+
+A delivery status identifies itself by the **provider message id**, not by the number it arrived on — and that difference is the whole design. Resolving the workspace from the number and *then* looking the message up inside it finds nothing once the number has changed hands, so every message the previous owner had in flight at release time stayed `sent` with a null `delivered_at` for ever.
+
+So a status is resolved by `wa_message_id` first, across the workspaces that have ever held that number, and the workspace comes from the message that matched. The lookup is fenced three ways: the candidate set comes from `holders_of`, so an id Meta invented reaches nothing; an empty candidate set matches nothing rather than searching the platform; and no API route can reach the class — it is constructed by the ingestion service and the inbound sweeper, both of which are answering Meta rather than a person.
+
+A status naming no message Wasla sent is ordinary traffic — a template sent from Meta's own console, or a number's history before it was connected — and is acknowledged with no placeholder row.
+
+### Monotonicity
+
+The projection never moves a message backwards, and `failed` is ranked rather than absolute:
+
+```
+pending  <  sent  <  failed  <  delivered  <  read
+```
+
+`failed` beats `sent`, because a send Meta accepted and then could not deliver did fail. It loses to `delivered` and `read`, because those are reports that the message *arrived* — and the two contradictions the old unconditional `failed` made reachable were a message the customer demonstrably read being downgraded, and a row carrying `failed` beside a non-null `delivered_at`. The report is not discarded either way: `failure_reason` records that Meta said it failed, so the disagreement is visible on the row.
+
+Every timestamp is written once, so a redelivered status moves nothing.
+
+## Manual send idempotency
+
+`POST /conversations/{id}/messages`, `…/messages/template` and `…/messages/media` accept an `Idempotency-Key` header. Repeating a request with the same key returns the original message and does not ask Meta a second time.
+
+**Explicit, and never inferred.** Sending the same words twice is something people legitimately do — "are you there?" twice is two messages — so suppressing a duplicate body within a time window would silently swallow real intent, and a swallowed message is worse than a visible duplicate because nobody can see it happen. The key says which requests are the same request, and nothing else does.
+
+Scoped to the workspace (`UNIQUE(tenant_id, idempotency_key)`), because keys are generated by clients and a global constraint would let one workspace's chosen key suppress another's message. Reusing a key for *different* content answers `409` rather than returning the earlier message, which would tell a caller their new message was sent when it was not.
+
+Nothing else carries a key. A campaign recipient and a follow-up are protected by their own `link`-and-abandon invariant ([ADR-093](../DECISIONS.md)), and an agent turn by the queue's engagement barrier ([ADR-074](../DECISIONS.md)).
+
+## Message origin
+
+`messages.origin` records what produced each line of the transcript: `customer`, `human`, `agent`, `campaign`, `follow_up`, `system`. It exists because inferring it from `sent_by_id` is wrong twice — a campaign carries its creator, so every broadcast read as that person's reply, and a follow-up carries nobody, so every nudge read as an AI reply. Both were recoverable by joining `campaign_recipients` or `follow_ups`, and neither was recoverable by reading the transcript, which is what an auditor, an analytics query and a colleague all actually do.
+
+Set explicitly at every creation site rather than defaulted: a default is what an unlabelled send would silently inherit, and inheriting the wrong attribution is the defect the column removes.
+
+The set is open at the end on purpose. WhatsApp Coexistence lets the Business App originate messages on a number Wasla also holds, and those are neither `human` nor `agent`; a `business_app` member slots in beside these when that work happens. Having the column at all is the part worth doing now — adding a label later is an `ALTER TYPE`.
+
+## Not supported
+
+Stated here so a reader does not infer a capability from a client method:
+
+- **Interactive messaging.** `send_buttons`, `send_list` and `send_location` exist on the client and are called by nothing. Inbound button and list replies are stored as `interactive` messages and their reply ids survive only in the raw event.
+- **Outbound chunking.** One logical message is one provider message. A reply over WhatsApp's 4096-character body limit is refused by `MessagingService.send_text` rather than truncated (which puts words in a business's mouth) or split (which reintroduces chunk ordering, partial failure and duplicate chunks). Agents are told the limit in their instructions, which reduces how often the refusal is reached without pretending a token budget can bound a character count.
+- **Message edit, delete and revoke.**
+- **Reactions as first-class.** A reaction is stored as an `unsupported` message and deliberately does not trigger an agent turn: it has no content to answer, and doing so cost one billed inference and possibly one reply to nothing.
+- **Coexistence.** See *Message origin* for the one piece of groundwork that is in place.
+
+## Graph API version
+
+`META_API_VERSION` is `v21.0`, which Meta retires on **2027-01-21** (Graph API changelog, read 2026-09-11). Start-up warns inside the final ninety days, from a table this repository maintains by hand in `app/integrations/whatsapp/versions.py`.
+
+**Maintaining it by hand is the design.** Fetching the changelog at boot would make starting the application depend on a third party's website being up and parseable, which is a worse failure than the one being prevented. So: when a version is added or retired, update `META_API_SUNSETS`. A version the table has never heard of warns too, because silence would make a typo look like an endorsement.
+
+Moving version is planned work rather than a config change: re-verify the send payloads, the media fetch and the error envelope against the new version before deploying it.
 
 ## What the webhook does not do
 

@@ -50,17 +50,28 @@ customers.
 | `wasla_db_pool_*` | gauge | `process_role` | Connection pool depth. |
 | `wasla_jobs_total`, `wasla_job_failures_total` | counter | `queue`, `outcome` / `category` | Worker throughput and failures. |
 | `wasla_provider_requests_total` | counter | `provider`, `operation`, `outcome` | External calls. |
+| `wasla_queue_*` | gauge | `queue` | Pending, in-flight, delayed, dead-lettered, expired reservations, and the age of the oldest waiting job. |
+| `wasla_unprocessed_inbound_events` | gauge | — | **A state invariant**: inbound stored whose agent or media handoff never reached a queue. Should be zero. |
+| `wasla_unprocessed_inbound_oldest_age_seconds` | gauge | — | Whether that backlog is being drained or is stuck. |
+| `wasla_unresolved_outbound_messages` | gauge | — | **A state invariant**: sends Meta may have delivered, whose outcome is unknown. |
+| `wasla_oldest_unresolved_outbound_age_seconds` | gauge | — | Whether the oldest is a send in flight or one that broke an hour ago. |
 
-`wasla_orphaned_workspaces` is worth singling out. Every other metric here
-counts an *event* — a path somebody instrumented was taken. This one runs a
-query and counts a *state*, so it notices an invariant violation however it was
-produced, including by a defect nobody anticipated and including by somebody's
-SQL. That is the difference between "the code we wrote reported a problem" and
-"the world has a problem".
+`wasla_orphaned_workspaces` is worth singling out, and the two messaging
+gauges beside it are the same shape. Every other metric here counts an *event* —
+a path somebody instrumented was taken. These run a query and count a *state*,
+so they notice an invariant violation however it was produced, including by a
+defect nobody anticipated and including by somebody's SQL. That is the
+difference between "the code we wrote reported a problem" and "the world has a
+problem".
+
+The two messaging gauges share their cutoff with the code that acts on them:
+`wasla_unprocessed_inbound_events` uses `InboundRecoveryWorker`'s own grace
+period, imported rather than restated, so an operator alerting on a backlog and
+a sweeper draining one are looking at the same set of events.
 
 ## Alert rules
 
-`deploy/monitoring/alerts.yml`. Eight rules in two groups.
+`deploy/monitoring/alerts.yml`, in three groups.
 
 | Alert | Fires when | Severity |
 |---|---|---|
@@ -73,12 +84,49 @@ SQL. That is the difference between "the code we wrote reported a problem" and
 | `ApplicationUnhandledErrors` | Unhandled exceptions above a low rate | warning |
 | `ScrapeTargetDown` | Prometheus cannot reach the API for 5m | critical |
 
-**`ScrapeTargetDown` is what makes the other seven mean anything.** Without it,
+### Messaging
+
+Added after an audit found that *nothing in this file concerned WhatsApp* —
+although every metric below already existed and was already scraped. The
+asymmetry with the email webhook, which did have an alert, is what marked it as
+an oversight rather than a decision.
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `WhatsAppInboundStopped` | No inbound webhook for 30m, on a deployment that had traffic today | critical |
+| `WhatsAppWebhookSignatureFailures` | Sustained signature refusals | critical |
+| `WhatsAppSendFailureRate` | >20% of sends failing for 15m | warning |
+| `WhatsAppRateLimited` | Sustained 429s from Meta | warning |
+| `UnprocessedInboundBacklog` | Stored inbound still owing work for 15m | critical |
+| `UnresolvedOutboundSends` | A send unconfirmed for over an hour | warning |
+| `QueueJobsStuck` | The oldest unclaimed job is over 15m old | warning |
+| `DeadLetterGrowth` | Jobs are being dead-lettered | warning |
+
+**`WhatsAppInboundStopped` is the one with no other symptom.** If Meta disables
+the subscription, everything looks healthy from inside: no errors, no queue
+depth, no failed jobs, just an inbox that quietly stops filling. It is guarded
+on the deployment having received traffic in the last 24 hours, which is the
+honest version of "during business hours" for a product that does not know its
+customers' hours — a new or dormant deployment does not page on an empty night.
+
+`UnresolvedOutboundSends` fires on the *age* of the oldest unresolved send
+rather than on existence, because a handful of rows seconds old is every send
+currently in flight. What it is reporting is deliberately never fixed
+automatically: see the runbook, and [ADR-093](../DECISIONS.md) for why a retry
+is the one action that cannot be taken back.
+
+**`ScrapeTargetDown` is what makes every other rule mean anything.** Without it,
 "no alerts firing" and "nothing being scraped" look identical from the outside —
 which is precisely the state this whole document exists to get out of. It also
 inhibits the rest: when the scraper cannot reach the application, every other
 rule is evaluating absent data, and suppressing them keeps the one actionable
 alert from being buried under the alerts it caused.
+
+**Every rule is tested twice** — once under its threshold and once over it.
+A rule only ever shown firing has not been shown to discriminate, and a
+threshold nobody tested from below is a threshold that pages on ordinary
+traffic. `promtool test rules deploy/monitoring/tests/alerts_test.yml` runs
+them, and CI runs it.
 
 Every `for:` duration is deliberately non-zero. A single 5xx during a deploy is
 not an incident, and a rule that pages on one teaches people to ignore the

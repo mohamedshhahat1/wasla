@@ -30,6 +30,18 @@ There is an asymmetry here that is easy to lose in a later edit.
 
 Campaigns apply a stricter rule of their own: the template must exist in the registry and be approved. A campaign is a new thing a workspace sets up deliberately, so requiring a sync first costs it one click rather than a regression.
 
+### Keeping the registry current
+
+Sync is an administrative action and nothing performs it on a schedule, so a template Meta pauses stays `APPROVED` locally until somebody clicks it — and every campaign and follow-up using it is refused by Meta one at a time in the meantime.
+
+A refusal is now written back. When Meta declines a send with one of its template error codes, the local row is marked `PAUSED` with the code recorded, so the next send is refused locally without asking. Three deliberate narrownesses:
+
+- Only codes that unambiguously mean *this template may not be sent* are acted on. Marking a template invalid on an ambiguous error takes a working template away from a workspace, and getting it back needs a manual sync.
+- It is recorded as `PAUSED` whatever the code, because pausing is the reversible state and a sync is what establishes which of the three Meta actually means.
+- A template the registry has never heard of does not get a row invented for it. That would turn one refusal into a permanent local block on a name the workspace may never have synced.
+
+Periodic background sync is **not** implemented. The write-back covers the case that costs a workspace its number — sending a template Meta has withdrawn, repeatedly — and a sweep across every account's templates is a third-party call budget nobody has needed yet.
+
 ## Who a campaign can reach
 
 **Only people who already have a conversation with this business on the sending number.** There is no route that uploads phone numbers, imports a list, or otherwise creates a recipient who is not already a contact of the workspace ([ADR-025](../DECISIONS.md)).
@@ -96,6 +108,10 @@ It can also be **cancelled**, which a completed or already-cancelled campaign ca
 
 A missing platform credential fails the campaign rather than each recipient in turn. The client refuses to be built without a token, so no attempt is made and nothing increments; treating it per-recipient would retry forever without exhausting anyone's attempts, staging a message row per recipient per sweep on a deployment that cannot send at all.
 
+**A credential Meta *refuses* is handled the same way**, and used not to be. A `401`, `403` or Meta's own `code 190` means the number's token is expired or revoked, which is true of every recipient in the audience — so the campaign stops once with a clear reason rather than burning one attempt budget per person discovering the same dead token, and ending with ten thousand individually-failed recipients and no single explanation.
+
+**Cancelling stops the claimed batch too**, at the next recipient. The status is re-read from the database once per recipient rather than off the campaign object, because `cancel()` runs in a different request and a different transaction. What was already sent stays sent — the only honest answer once a message has reached somebody's phone. The re-read is deliberately not locked: the send commits part-way through, so a lock taken there would be dropped at the first send and would buy nothing, and holding one across a Graph API call is the trade [ADR-093](../DECISIONS.md) exists to refuse.
+
 ## Marketing opt-out
 
 Recorded on the contact as a timestamp and a source, not a boolean. "Since when" is the question a dispute about a marketing message actually turns on, and a colleague's note is not the same fact as a customer's own refusal.
@@ -110,7 +126,22 @@ The asymmetry sets the boundary. A false positive stops marketing to somebody wh
 
 Arabic is folded for keyboard variation — the hamza-bearing alefs, alef maksura, teh marbuta and the diacritics — so which spelling a customer's phone produces does not decide whether they are left alone.
 
+### What opt-out covers, and what it does not
+
+The rule is applied unevenly on purpose, and the line is whether the customer asked for the message:
+
+| Path | Honours opt-out | Why |
+| --- | --- | --- |
+| Campaign | **Yes**, re-checked at delivery | Unsolicited, automated, and to a list |
+| Follow-up | **Yes**, re-checked at dispatch | Unsolicited and automated; nobody asked for it, and it arrives *because* the conversation went quiet |
+| AI reply | No | Answering a question the customer just asked |
+| Manual human reply | No | A colleague replying in a live conversation |
+
 **It does not silence the agent.** Someone refusing marketing is not refusing an answer, and deciding otherwise from one word would leave people talking to nobody.
+
+The follow-up row is the one that was decided rather than inherited. A follow-up sits between a campaign and a reply — conversational in tone, but unsolicited in fact — and it is filed with the campaign, because a nudge is not a reply to anything the customer said. It is re-read at dispatch rather than trusted from scheduling, exactly as the campaign sweep re-reads it: hours pass between a nudge being scheduled and being due, and somebody who says STOP in that gap must not receive it.
+
+A follow-up refused this way is `SKIPPED`, not failed. Consent does not come back on its own, so retrying would queue a message that can never legally go out.
 
 **It does not read sentences.** "please take me off your list" is not recognised. That is an accepted limit rather than an oversight: the alternative is a model call on every inbound message to decide something a person can record in one click.
 

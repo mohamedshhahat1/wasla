@@ -36,18 +36,73 @@ Check `/health/ready`. It names each dependency and how long it took.
 ```
 
 - **postgresql down** — the database is unreachable or refusing connections. Check the container, then connection limits: each API replica holds a pool, and a worker mid-inference holds a connection for the length of that call ([ARCHITECTURE.md §14](../ARCHITECTURE.md)).
-- **redis down** — the API keeps serving. Rate limiting fails **open** (requests are allowed), refresh-token revocation cannot be checked, and no new background jobs can be enqueued. Inbound messages are still stored: the webhook logs `agent.enqueue_failed` and returns 200 so Meta does not retry. Those conversations wait for a person until somebody requeues them.
+- **redis down** — the API keeps serving. Rate limiting fails **open** (requests are allowed), refresh-token revocation cannot be checked, and no new background jobs can be enqueued. Inbound messages are still stored: the webhook logs `agent.enqueue_failed` and returns 200 so Meta does not retry. Each such event stays `received` in `whatsapp_events` with a bounded reason, and `InboundRecoveryWorker` finishes them once Redis is back — see *Inbound stored but never answered*. Nothing is lost and nothing needs a person, but check that the backlog actually drains.
 
 ### Customers' messages are not arriving
 
 The webhook is the one path that must never be refused. Work backwards:
 
 1. **Is Meta still delivering?** Check the Meta app dashboard for a disabled subscription. Meta disables a webhook that keeps failing — the most likely cause is a run of non-2xx responses.
-2. **Signature failures?** `grep whatsapp.signature_invalid`. A rotated `META_APP_SECRET` that reached only some replicas looks exactly like this.
+2. **Signature failures?** `grep whatsapp.invalid_signature`. A rotated `META_APP_SECRET` that reached only some replicas looks exactly like this.
 3. **Unknown number?** `grep whatsapp.unknown_phone_number_id`. The number is not connected to any workspace, or was disconnected. Not an error Meta can fix by retrying.
-4. **Stored but unanswered?** Rows in `whatsapp_events` but silence from the agent means the queue, not the webhook — see below.
+4. **Signature failures, counted?** `WhatsAppWebhookSignatureFailures` fires on a sustained rate. A drifted `META_APP_SECRET` drops every customer message with a 403 while the endpoint keeps answering, and enough of those makes Meta disable the subscription for every workspace on the deployment.
+5. **Stored but unanswered?** Rows in `whatsapp_events` but silence from the agent means the queue, not the webhook. `python -m app.workers.queues unprocessed-inbound` lists them — see below.
 
 Nothing rate-limits this path and nothing times it out ([ADR-032](../DECISIONS.md)). If you are considering adding either, read that record first.
+
+### Inbound stored but never answered
+
+**Alert:** `UnprocessedInboundBacklog`. **Metric:** `wasla_unprocessed_inbound_events`.
+
+A customer wrote in, the message was accepted and stored, and no worker was told to answer it. Almost always Redis was unavailable at the moment the webhook arrived: swallowing that failure is deliberate, because a non-2xx would make Meta retry the whole delivery and eventually disable the subscription ([ADR-102](../DECISIONS.md)).
+
+**Nothing is lost.** The message is in the inbox and in `whatsapp_events` with `state = 'received'`, and `InboundRecoveryWorker` re-derives what is missing and supplies it. A brief spike during a Redis restart is expected; the alert's `for:` window covers it.
+
+```
+docker compose exec worker python -m app.workers.queues unprocessed-inbound
+```
+
+Each row shows its age, kind, workspace, the reason it is stuck, and the provider event id. No message bodies: the workspace and conversation are enough to find the conversation in the product, and customer text does not belong in a shell history.
+
+If the backlog is **not** shrinking:
+
+1. Is a worker running the `inbound_recovery` loop? Check `WORKER_KINDS` — it is in the default set, so an explicit list that omits it is the usual cause.
+2. Can that worker reach Redis? The reason column will read `agent_enqueue_failed` or `media_enqueue_failed`, which is the sweeper trying and being refused.
+3. Anything marked `failed` is out of the sweeper's hands and into yours. `projection_missing` should be unreachable — the event and its projection commit together — so it means something wrote an event row directly.
+
+**Do not replay the webhook.** Recovery re-derives rather than replays for a reason: replaying would re-project the message, re-cancel its follow-ups and re-meter the delivery. Running the sweeper twice is safe; feeding Meta's payload back in is not.
+
+### A send WhatsApp never confirmed
+
+**Alert:** `UnresolvedOutboundSends`. **Metric:** `wasla_unresolved_outbound_messages`.
+
+A message was committed, Meta was asked to deliver it, and no usable answer came back — a 5xx, a read timeout, a reset connection, or a `2xx` with no message id. **It may be on the customer's phone.**
+
+```
+docker compose exec worker python -m app.workers.queues unresolved-sends
+```
+
+**Do not send it again, and do not clear the row by hand.** This is the same rule as an unresolved payment and for the same reason: the send endpoint takes no idempotency key and offers no lookup keyed on anything Wasla holds before Meta answers, so nothing can ask Meta what became of the request ([ADR-093](../DECISIONS.md)). A retry is the one action that can put a second copy on somebody's phone, and it cannot be taken back.
+
+What can settle one:
+
+1. **Read the conversation.** If the customer replied to the message, it arrived. If the next thing in the thread is them asking again, it probably did not.
+2. **Check Meta's own delivery reporting** for the number, if the workspace has access to it.
+3. **Ask the workspace.** A colleague who was in the conversation usually knows.
+
+Then, if the message genuinely did not arrive, **send a new one** through the product. Do not edit `delivery_state`: the row is the record that a send was attempted and its outcome was never established, and that record is what makes the next investigation possible.
+
+A handful of rows seconds old is every send currently in flight and is not an incident — the alert fires on the *age* of the oldest, not on existence.
+
+### WhatsApp is refusing this workspace's credential
+
+**Log:** `whatsapp.credential_refused`. **Alert:** `WhatsAppSendFailureRate`.
+
+Meta answered `401`, `403` or its own `code 190`: the number's access token is expired, revoked, or was never valid. Nothing was delivered.
+
+This is deliberately not a per-message failure. A campaign stops on the first one rather than burning one attempt budget per recipient, and the follow-up sweep skips the rest of that workspace's nudges for the pass — so the symptom is a campaign that stopped early, not ten thousand individually-failed recipients.
+
+Reconnect the number in the workspace's WhatsApp settings, which re-runs the ownership check and stores a fresh credential. Follow-ups resume on the next sweep by themselves; a stopped campaign has to be restarted, which is the right point to confirm the credential works.
 
 ### Queue not draining
 
@@ -844,8 +899,17 @@ that are more specific than a counter can be.
 
 | Event | Means | Urgency |
 | --- | --- | --- |
-| `whatsapp.signature_invalid` | Rotated secret, or somebody probing | High if sustained |
-| `agent.enqueue_failed` | Redis unreachable; messages stored but unanswered | High |
+| `whatsapp.invalid_signature` | Rotated secret, or somebody probing. Counted too — `WhatsAppWebhookSignatureFailures` | High if sustained |
+| `agent.enqueue_failed` | Redis unreachable; messages stored but unanswered. Recoverable — see *Inbound stored but never answered* | High |
+| `whatsapp.event_without_owner` | An event on a number no workspace held at that instant. Dropped rather than misrouted | Medium if sustained |
+| `whatsapp.ambiguous_number_ownership` | Two claims on one number overlap. A data-integrity repair, not a routing decision | High |
+| `whatsapp.credential_refused` | Meta rejected a number's token; that workspace cannot send | High |
+| `whatsapp.outbound_uncertain` | A send Meta never confirmed. **Never resend automatically** | Medium, High as a rate |
+| `whatsapp.template_withdrawn` | Meta refused a template; the local registry has been marked | Medium |
+| `whatsapp.payload_rejected_by_database` | A delivery PostgreSQL cannot store. Acknowledged rather than retried for ever | High if sustained |
+| `whatsapp.api_version_expiring` | `META_API_VERSION` is inside its last 90 days | Plan it now |
+| `inbound_recovery.swept` | The sweeper finished work a queue outage lost | Informational; High if it never stops |
+| `follow_up.cancelled_on_handoff` | A colleague took a conversation over, so its nudge was cancelled | Informational |
 | `billing.ai_allowance_exhausted` | A workspace is out of AI requests | Commercial, not operational |
 | `ratelimit.unavailable` | Redis down; limiting is failing open | High |
 | `credential.decryption_failed` | A stored credential is unreadable — check key configuration | High |
