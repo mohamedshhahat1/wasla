@@ -39,7 +39,12 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.exceptions import ExternalServiceError, RateLimitedError, ValidationError
+from app.core.exceptions import (
+    ConflictError,
+    ExternalServiceError,
+    RateLimitedError,
+    ValidationError,
+)
 from app.core.logging import get_logger
 from app.core.media_types import SNIFF_BYTES, MediaClass
 from app.core.media_types import resolve as resolve_media_type
@@ -154,6 +159,37 @@ MEDIA_KINDS: Final[dict[str, MessageKind]] = {
 SAFE_FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,99}$")
 
 
+def _require_same_request(
+    message: Message,
+    *,
+    conversation_id: uuid.UUID,
+    kind: MessageKind,
+    body: str | None,
+    template_name: str | None,
+    template_language: str | None,
+) -> None:
+    """Refuse a key that is being reused for a different message.
+
+    Replaying a key must return what it produced the first time. Reusing one
+    for different content is a caller bug - usually a key generated once and
+    then held across an edit - and silently returning the *old* message would
+    tell them their new one was sent when it was not. A conflict says so.
+
+    Compared on what the customer would see, not on every field: `sent_by_id`
+    is deliberately absent, because the same key retried by the same client
+    after a token refresh is still the same send.
+    """
+    same = (
+        message.conversation_id == conversation_id
+        and message.kind is kind
+        and message.body == body
+        and message.template_name == template_name
+        and message.template_language == template_language
+    )
+    if not same:
+        raise ConflictError("That idempotency key was already used for a different message.")
+
+
 def _require_sendable_text(body: str) -> None:
     """Refuse a body Meta will not accept, before anything is staged.
 
@@ -245,6 +281,7 @@ class MessagingService:
         preview_url: bool = False,
         sent_by_id: uuid.UUID | None = None,
         link: LinkCall | None = None,
+        idempotency_key: str | None = None,
     ) -> Message:
         """Send free text, refusing anything WhatsApp will not carry.
 
@@ -281,6 +318,7 @@ class MessagingService:
             send=send,
             require_window=True,
             link=link,
+            idempotency_key=idempotency_key,
         )
 
     async def send_template(
@@ -292,6 +330,7 @@ class MessagingService:
         components: list[dict[str, Any]] | None = None,
         sent_by_id: uuid.UUID | None = None,
         link: LinkCall | None = None,
+        idempotency_key: str | None = None,
     ) -> Message:
         """Send an approved template, which is valid outside the service window.
 
@@ -342,6 +381,7 @@ class MessagingService:
             # Templates are the sanctioned way out of the service window.
             require_window=False,
             link=link,
+            idempotency_key=idempotency_key,
         )
 
     async def send_media(
@@ -358,6 +398,7 @@ class MessagingService:
         caption: str | None = None,
         sent_by_id: uuid.UUID | None = None,
         storage: MediaStorage | None = None,
+        idempotency_key: str | None = None,
     ) -> Message:
         """Send a file, uploading it to Meta first.
 
@@ -380,6 +421,25 @@ class MessagingService:
         Meta is told, what is stored, what is served back - uses the canonical
         type that came out of that check and never the caller's string.
         """
+        if idempotency_key is not None:
+            # Checked here rather than left to `_dispatch`, which would catch
+            # the replay but only after this method had re-read the file and
+            # re-charged the storage allowance - and would then go on to record
+            # the attachment a second time. An attachment send has work either
+            # side of the dispatch, so the replay has to short-circuit the
+            # whole method (MSG-15).
+            replayed = await self._messages.get_by_idempotency_key(idempotency_key)
+            if replayed is not None:
+                _require_same_request(
+                    replayed,
+                    conversation_id=conversation_id,
+                    kind=replayed.kind,
+                    body=caption,
+                    template_name=None,
+                    template_language=None,
+                )
+                return replayed
+
         detected = resolve_media_type(claimed=mime_type, prefix=content[:SNIFF_BYTES])
         canonical = detected.mime_type
         family = _whatsapp_kind(detected.kind)
@@ -448,6 +508,7 @@ class MessagingService:
             prepare=prepare,
             send=send,
             require_window=True,
+            idempotency_key=idempotency_key,
         )
 
         await self._record_attachment(
@@ -590,6 +651,7 @@ class MessagingService:
         template_language: str | None = None,
         prepare: PrepareCall | None = None,
         link: LinkCall | None = None,
+        idempotency_key: str | None = None,
     ) -> Message:
         """One outbound message, under the delivery protocol in ADR-093.
 
@@ -627,14 +689,47 @@ class MessagingService:
             raise ValidationError("This WhatsApp number is disabled.")
         contact = await self._contacts.require_by_id(conversation.contact_id)
 
-        message = await self._messages.stage_outbound(
-            conversation_id=conversation_id,
-            kind=kind,
-            body=body,
-            sent_by_id=sent_by_id,
-            template_name=template_name,
-            template_language=template_language,
-        )
+        if idempotency_key is not None:
+            message, claimed = await self._messages.claim_idempotency_key(
+                conversation_id=conversation_id,
+                kind=kind,
+                body=body,
+                sent_by_id=sent_by_id,
+                template_name=template_name,
+                template_language=template_language,
+                idempotency_key=idempotency_key,
+            )
+            if not claimed:
+                # A repeat of a request already handled. The caller gets the
+                # original message back and Meta is not asked a second time -
+                # which is the entire point, because Meta's send endpoint has
+                # no idempotency key of its own and a second call is a second
+                # notification on somebody's phone (MSG-15).
+                _require_same_request(
+                    message,
+                    conversation_id=conversation_id,
+                    kind=kind,
+                    body=body,
+                    template_name=template_name,
+                    template_language=template_language,
+                )
+                logger.info(
+                    "whatsapp.outbound_replayed",
+                    extra={
+                        "event": "whatsapp.outbound_replayed",
+                        "conversation_id": str(conversation_id),
+                    },
+                )
+                return message
+        else:
+            message = await self._messages.stage_outbound(
+                conversation_id=conversation_id,
+                kind=kind,
+                body=body,
+                sent_by_id=sent_by_id,
+                template_name=template_name,
+                template_language=template_language,
+            )
         await self._session.flush()
         if link is not None:
             link(message)

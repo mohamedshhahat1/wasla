@@ -7,7 +7,9 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy import ColumnElement, and_, func, or_, select
+from sqlalchemy.exc import IntegrityError
 
+from app.core.exceptions import ConflictError
 from app.core.pagination import Cursor
 from app.db.models.conversation import (
     Contact,
@@ -22,6 +24,16 @@ from app.db.models.conversation import (
 )
 from app.db.models.sentiment import ConversationPriority
 from app.repositories.base import BaseRepository, TenantScopedRepository
+
+# The constraint the idempotency claim races on. Named so the conflict handler
+# can recognise it: any *other* integrity failure on that insert is a bug.
+IDEMPOTENCY_CONSTRAINT = "uq_messages_tenant_id_idempotency_key"
+
+# The two identity constraints inbound projection races on. Named so each
+# conflict handler recognises its own: any other integrity failure on those
+# inserts is a bug rather than a burst of traffic.
+CONTACT_IDENTITY_CONSTRAINT = "uq_contacts_tenant_id_wa_id"
+CONVERSATION_IDENTITY_CONSTRAINT = "uq_conversations_tenant_id_contact_id_account_id"
 
 
 def _after_nullable(model: type[Conversation], after: Cursor) -> ColumnElement[bool]:
@@ -176,17 +188,29 @@ class ContactRepository(TenantScopedRepository[Contact]):
         Meta sends the profile name with inbound traffic and customers change
         it, so the stored name is refreshed when a newer one arrives. An absent
         name never erases a known one.
+
+        The read is the fast path; `UNIQUE(tenant_id, wa_id)` is the guarantee.
+        A customer's first two messages can arrive in one burst, and before
+        this handler both deliveries missed the read, both inserted, and the
+        loser's `IntegrityError` became a 500 (MSG-09). The savepoint is what
+        makes the loss recoverable: without it the failed insert poisons the
+        surrounding transaction and the request cannot even answer.
         """
         contact = await self.get_by_wa_id(wa_id)
         if contact is None:
-            return self.add(
-                Contact(
-                    tenant_id=self.tenant_id,
-                    wa_id=wa_id,
-                    display_name=display_name,
-                    last_seen_at=last_seen_at,
-                )
+            contact = await self._insert_contact(
+                wa_id=wa_id,
+                display_name=display_name,
+                last_seen_at=last_seen_at,
             )
+            if contact is not None:
+                return contact
+            # Somebody else created it between the read and the insert. Their
+            # row is the one that exists, so fall through and refresh it as if
+            # the read had found it - which for this customer it now has.
+            contact = await self.get_by_wa_id(wa_id)
+            if contact is None:  # pragma: no cover - the conflict proves a row
+                raise ConflictError("That contact could not be stored.")
 
         if display_name is not None:
             contact.display_name = display_name
@@ -194,6 +218,35 @@ class ContactRepository(TenantScopedRepository[Contact]):
             contact.last_seen_at is None or last_seen_at > contact.last_seen_at
         ):
             contact.last_seen_at = last_seen_at
+        return contact
+
+    async def _insert_contact(
+        self,
+        *,
+        wa_id: str,
+        display_name: str | None,
+        last_seen_at: datetime | None,
+    ) -> Contact | None:
+        """Insert, or None if another delivery got there first.
+
+        The savepoint scopes the failure to this statement. Any integrity
+        failure that is not the identity constraint is re-raised, because a
+        duplicate `wa_id` is a race and anything else here is a bug.
+        """
+        contact = Contact(
+            tenant_id=self.tenant_id,
+            wa_id=wa_id,
+            display_name=display_name,
+            last_seen_at=last_seen_at,
+        )
+        try:
+            async with self.session.begin_nested():
+                self.session.add(contact)
+                await self.session.flush()
+        except IntegrityError as error:
+            if CONTACT_IDENTITY_CONSTRAINT not in str(error.orig):
+                raise
+            return None
         return contact
 
 
@@ -233,7 +286,16 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         """Returns the conversation and whether it was created.
 
         As with event storage, the read is the fast path and
-        `UNIQUE(tenant_id, contact_id, account_id)` is the guarantee.
+        `UNIQUE(tenant_id, contact_id, account_id)` is the guarantee - and the
+        guarantee now answers rather than raising. Two of a customer's first
+        messages arriving together both missed the read and both inserted, and
+        the loser turned the constraint into a 500 (MSG-09). The invariants
+        were never in doubt; the response was.
+
+        The savepoint keeps the failed insert from poisoning the surrounding
+        transaction, which is what would otherwise leave the request unable to
+        produce any answer at all. The same shape
+        `WhatsAppAccountRepository.connect` uses for the number-claim race.
         """
         existing = await self.get_for_contact(contact_id=contact_id, account_id=account_id)
         if existing is not None:
@@ -246,7 +308,18 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
             status=ConversationStatus.OPEN,
             mode=ConversationMode.AI,
         )
-        return self.add(conversation), True
+        try:
+            async with self.session.begin_nested():
+                self.session.add(conversation)
+                await self.session.flush()
+        except IntegrityError as error:
+            if CONVERSATION_IDENTITY_CONSTRAINT not in str(error.orig):
+                raise
+            winner = await self.get_for_contact(contact_id=contact_id, account_id=account_id)
+            if winner is None:  # pragma: no cover - the conflict proves a row
+                raise
+            return winner, False
+        return conversation, True
 
     async def list_open(
         self,
@@ -394,6 +467,7 @@ class MessageRepository(TenantScopedRepository[Message]):
         sent_by_id: uuid.UUID | None = None,
         template_name: str | None = None,
         template_language: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Message:
         """Create the row before calling Meta.
 
@@ -405,6 +479,11 @@ class MessageRepository(TenantScopedRepository[Message]):
         asked for anything, and the state is what says so. A caller reading it
         knows the message has not been delivered and cannot have been
         (ADR-093).
+
+        The idempotency key is written *here*, in the same statement that
+        claims the send, which is what makes it a claim rather than a note. A
+        second request carrying the same key loses at this insert and reads the
+        first request's row back rather than asking Meta again (MSG-15).
         """
         message = Message(
             tenant_id=self.tenant_id,
@@ -417,8 +496,69 @@ class MessageRepository(TenantScopedRepository[Message]):
             sent_by_id=sent_by_id,
             template_name=template_name,
             template_language=template_language,
+            idempotency_key=idempotency_key,
         )
         return self.add(message)
+
+    async def get_by_idempotency_key(self, key: str) -> Message | None:
+        """The message a previous request with this key produced, if any."""
+        return await self._first(self._select().where(Message.idempotency_key == key))
+
+    async def claim_idempotency_key(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        kind: MessageKind,
+        body: str | None,
+        sent_by_id: uuid.UUID | None,
+        template_name: str | None,
+        template_language: str | None,
+        idempotency_key: str,
+    ) -> tuple[Message, bool]:
+        """Stage a send under this key, or hand back the one already staged.
+
+        Returns the message and whether this call created it.
+
+        The savepoint is the mechanism, and it is the same one
+        `WhatsAppAccountRepository.connect` uses for the number-claim race. Two
+        simultaneous submissions of one key both miss the read and both insert;
+        the loser's `IntegrityError` would otherwise poison the surrounding
+        transaction, leaving the request unable even to produce a response
+        body. Wrapped in a savepoint, only the failed insert unwinds and the
+        caller can re-read the row that won.
+
+        Any integrity failure that is *not* this constraint is re-raised. A
+        duplicate key is a race; anything else on this insert is a bug.
+        """
+        existing = await self.get_by_idempotency_key(idempotency_key)
+        if existing is not None:
+            return existing, False
+
+        message = Message(
+            tenant_id=self.tenant_id,
+            conversation_id=conversation_id,
+            direction=MessageDirection.OUTBOUND,
+            kind=kind,
+            status=MessageStatus.PENDING,
+            delivery_state=MessageDeliveryState.CLAIMED,
+            body=body,
+            sent_by_id=sent_by_id,
+            template_name=template_name,
+            template_language=template_language,
+            idempotency_key=idempotency_key,
+        )
+        try:
+            async with self.session.begin_nested():
+                self.session.add(message)
+                await self.session.flush()
+        except IntegrityError as error:
+            if IDEMPOTENCY_CONSTRAINT not in str(error.orig):
+                raise
+            winner = await self.get_by_idempotency_key(idempotency_key)
+            if winner is None:  # pragma: no cover - the conflict proves a row
+                raise
+            return winner, False
+        return message, True
 
     async def mark_sent(
         self,

@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, Query, Response, UploadFile, status
+from fastapi import APIRouter, File, Form, Header, Query, Response, UploadFile, status
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
@@ -27,6 +27,7 @@ from app.api.route import CommittingRoute
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.media_types import CANONICAL_TYPES
 from app.core.pagination import MAX_CURSOR_LENGTH
+from app.db.models.invoice import MAX_IDEMPOTENCY_KEY_LENGTH
 from app.db.models.sentiment import ConversationPriority
 from app.schemas.conversation import (
     AssignmentRequest,
@@ -39,6 +40,27 @@ from app.schemas.conversation import (
     SendTextRequest,
 )
 from app.services.media_retention_service import purge_reason
+
+# The header a caller sends to say "this is the same request as before", so a
+# double-clicked button or a retried mobile request produces one message rather
+# than two. Opaque and client-generated: Wasla never infers one, because
+# sending the same words twice is something people legitimately do and
+# suppressing a duplicate body would swallow real intent (MSG-15).
+#
+# Scoped to the workspace, and a key reused for *different* content answers 409
+# rather than silently returning the earlier message.
+IdempotencyKeyHeader = Annotated[
+    str | None,
+    Header(
+        alias="Idempotency-Key",
+        max_length=MAX_IDEMPOTENCY_KEY_LENGTH,
+        description=(
+            "An opaque key of your own. Repeating a request with the same key "
+            "returns the original message instead of sending a second one."
+        ),
+    ),
+]
+
 
 router = APIRouter(route_class=CommittingRoute, prefix="/conversations", tags=["conversations"])
 
@@ -151,17 +173,22 @@ async def send_text(
     payload: SendTextRequest,
     workspace: ActiveWorkspaceDep,
     messaging: MessagingServiceDep,
+    idempotency_key: IdempotencyKeyHeader = None,
 ) -> MessageRead:
     """Send free text, allowed only inside the 24-hour service window.
 
     Answers 201 even when Meta rejects the message: the attempt is recorded, and
     the returned status says whether it was sent or failed.
+
+    Send `Idempotency-Key` to make a retry safe. Without one, a double-clicked
+    button or a replayed request is two messages on the customer's phone.
     """
     message = await messaging.send_text(
         conversation_id=conversation_id,
         body=payload.body,
         preview_url=payload.preview_url,
         sent_by_id=workspace.user.id,
+        idempotency_key=idempotency_key,
     )
     return MessageRead.from_model(message)
 
@@ -176,14 +203,24 @@ async def send_template(
     payload: SendTemplateRequest,
     workspace: ActiveWorkspaceDep,
     messaging: MessagingServiceDep,
+    idempotency_key: IdempotencyKeyHeader = None,
 ) -> MessageRead:
-    """Send an approved template, which is valid outside the service window."""
+    """Send an approved template, which is valid outside the service window.
+
+    Refused with 422 when the local registry records the template as paused,
+    rejected or disabled. A template the registry has never heard of is allowed
+    through, because a workspace that has not synced cannot be told apart from
+    one whose template does not exist.
+
+    Send `Idempotency-Key` to make a retry safe.
+    """
     message = await messaging.send_template(
         conversation_id=conversation_id,
         name=payload.name,
         language=payload.language,
         components=payload.components,
         sent_by_id=workspace.user.id,
+        idempotency_key=idempotency_key,
     )
     return MessageRead.from_model(message)
 
@@ -200,6 +237,7 @@ async def send_media(
     storage: MediaStorageDep,
     file: Annotated[UploadFile, File()],
     caption: Annotated[str | None, Form(max_length=MAX_CAPTION_LENGTH)] = None,
+    idempotency_key: IdempotencyKeyHeader = None,
 ) -> MessageRead:
     """Send an attachment, which Meta receives as an upload rather than a link.
 
@@ -216,6 +254,7 @@ async def send_media(
 
     message = await messaging.send_media(
         conversation_id=conversation_id,
+        idempotency_key=idempotency_key,
         content=content,
         # `content_type` is what the browser claimed, and it is treated as a
         # hint from here. The service resolves the real type from the file's
