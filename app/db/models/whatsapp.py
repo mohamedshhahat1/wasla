@@ -96,6 +96,11 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
             postgresql_where=text("released_at IS NULL"),
         ),
         Index("ix_whatsapp_accounts_tenant_id", "tenant_id"),
+        # The target of the composite foreign key that pins a conversation to
+        # an account in its own workspace (ADR-100). Not a new uniqueness claim
+        # - `id` is already the primary key - but a composite foreign key can
+        # only reference a uniquely constrained set of columns.
+        UniqueConstraint("tenant_id", "id", name="uq_whatsapp_accounts_tenant_id_id"),
     )
 
     phone_number_id: Mapped[str] = mapped_column(String(64), nullable=False)

@@ -95,10 +95,21 @@ def test_every_knowledge_table_carries_its_own_tenant_column() -> None:
 
 
 def test_tenant_foreign_keys_cascade() -> None:
+    """`tenant_id` points at `tenants` and dies with it.
+
+    Selected by target rather than unpacked as the only key, because since
+    migration 0053 it is not the only one: `tenant_id` is also the first column
+    of the composite keys that pin a document to a knowledge base and a chunk to
+    both (ADR-100). Asking "the foreign key on this column" would have been an
+    accurate question before those existed and is an ambiguous one now, so the
+    test asks the question it actually means.
+    """
     for table in (KnowledgeBase.__table__, Document.__table__, DocumentChunk.__table__):
-        (foreign_key,) = table.c.tenant_id.foreign_keys
-        assert foreign_key.column.table.name == "tenants"
-        assert foreign_key.ondelete == "CASCADE"
+        to_tenants = [
+            key for key in table.c.tenant_id.foreign_keys if key.column.table.name == "tenants"
+        ]
+        assert len(to_tenants) == 1, table.name
+        assert to_tenants[0].ondelete == "CASCADE"
 
 
 def test_chunks_die_with_their_document_and_their_knowledge_base() -> None:

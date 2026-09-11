@@ -20,6 +20,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     String,
     Text,
@@ -147,6 +148,11 @@ class Contact(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # Restated, not inherited: see TenantScopedMixin.
     __table_args__ = (
         UniqueConstraint("tenant_id", "wa_id", name="uq_contacts_tenant_id_wa_id"),
+        # Redundant as a uniqueness claim - `id` is the primary key, so
+        # `(tenant_id, id)` cannot repeat - and required as a *target*: a
+        # composite foreign key can only reference a uniquely constrained set of
+        # columns. `conversations` points here through one (ADR-100).
+        UniqueConstraint("tenant_id", "id", name="uq_contacts_tenant_id_id"),
         Index("ix_contacts_tenant_id", "tenant_id"),
     )
 
@@ -203,18 +209,30 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         # alone finds the workspace and then discards most of what it read
         # by filter, which costs more the longer a workspace has existed.
         Index("ix_conversations_tenant_id_created_at", "tenant_id", "created_at"),
+        # The contact and the account this conversation is with must belong to
+        # the same workspace it does, and the database is what says so
+        # (ADR-100). A plain `contact_id -> contacts.id` accepts a conversation
+        # in tenant A against tenant B's contact; no API path builds one -
+        # ingestion derives every id from one resolved account inside one
+        # tenant-scoped service - but "no path does this" is a property of
+        # today's code, and this is a property of the schema.
+        ForeignKeyConstraint(
+            ["tenant_id", "contact_id"],
+            ["contacts.tenant_id", "contacts.id"],
+            name="fk_conversations_tenant_contact",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "account_id"],
+            ["whatsapp_accounts.tenant_id", "whatsapp_accounts.id"],
+            name="fk_conversations_tenant_account",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_conversations_tenant_id_id"),
     )
 
-    contact_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("contacts.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("whatsapp_accounts.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    contact_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     status: Mapped[ConversationStatus] = mapped_column(
         CONVERSATION_STATUS_TYPE,
         nullable=False,
@@ -304,13 +322,16 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             "created_at",
             postgresql_where=text("delivery_state IN ('claimed', 'requested')"),
         ),
+        # A message belongs to a conversation in its own workspace (ADR-100).
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"],
+            ["conversations.tenant_id", "conversations.id"],
+            name="fk_messages_tenant_conversation",
+            ondelete="CASCADE",
+        ),
     )
 
-    conversation_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("conversations.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     wa_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     direction: Mapped[MessageDirection] = mapped_column(MESSAGE_DIRECTION_TYPE, nullable=False)
     kind: Mapped[MessageKind] = mapped_column(

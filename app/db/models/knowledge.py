@@ -23,7 +23,7 @@ from typing import Final
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     DateTime,
-    ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -84,6 +84,10 @@ class KnowledgeBase(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
     # Restated, not inherited: see TenantScopedMixin.
     __table_args__ = (
         UniqueConstraint("tenant_id", "name", name="uq_knowledge_bases_tenant_id_name"),
+        # The target of the composite foreign keys from `documents` and
+        # `document_chunks` (ADR-100). See `Contact` for why a redundant-looking
+        # unique constraint is load-bearing.
+        UniqueConstraint("tenant_id", "id", name="uq_knowledge_bases_tenant_id_id"),
         Index("ix_knowledge_bases_tenant_id", "tenant_id"),
     )
 
@@ -115,11 +119,19 @@ class Document(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         Index("ix_documents_tenant_id", "tenant_id"),
         Index("ix_documents_tenant_id_status", "tenant_id", "status"),
         Index("ix_documents_knowledge_base_id", "knowledge_base_id"),
+        # A document belongs to a knowledge base in its own workspace, enforced
+        # by PostgreSQL rather than by every writer remembering (ADR-100).
+        ForeignKeyConstraint(
+            ["tenant_id", "knowledge_base_id"],
+            ["knowledge_bases.tenant_id", "knowledge_bases.id"],
+            name="fk_documents_tenant_knowledge_base",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_documents_tenant_id_id"),
     )
 
     knowledge_base_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("knowledge_bases.id", ondelete="CASCADE"),
         nullable=False,
     )
     title: Mapped[str] = mapped_column(String(300), nullable=False)
@@ -202,18 +214,27 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
             postgresql_using="hnsw",
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
+        # Both parents pinned, not one. This is the table a retrieval reads, so
+        # a row here claiming a foreign parent is the shape of a cross-tenant
+        # answer - and `KnowledgeRepository.search` filters chunks by
+        # `knowledge_base_id` directly, which makes that column a scoping field
+        # in its own right rather than a denormalised convenience (ADR-100).
+        ForeignKeyConstraint(
+            ["tenant_id", "document_id"],
+            ["documents.tenant_id", "documents.id"],
+            name="fk_document_chunks_tenant_document",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "knowledge_base_id"],
+            ["knowledge_bases.tenant_id", "knowledge_bases.id"],
+            name="fk_document_chunks_tenant_knowledge_base",
+            ondelete="CASCADE",
+        ),
     )
 
-    document_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("documents.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("knowledge_bases.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     # Position within the document, so retrieved passages can be cited in order
     # and a chunk can be re-read in context.
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
