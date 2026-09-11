@@ -8,6 +8,7 @@ PostgreSQL, Redis, Meta or OpenAI credentials.
 from __future__ import annotations
 
 import os
+import pathlib
 
 # Set before anything imports `app`, and that ordering is load-bearing.
 # `app/main.py` builds a `Settings` at module scope, and the settings validator
@@ -26,12 +27,33 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
+import app
 from app.api.dependencies import get_entitlement_service
 from app.core.config import Settings
 from app.core.exceptions import DependencyUnavailableError
 from app.db.models.billing import LimitKey
 from app.main import create_app
 from app.services.entitlement_service import Entitlement
+
+# The suite must test the checkout it lives in, and until AUTHZ-07 was fixed it
+# could silently not. An editable install left behind by an older clone pointed
+# `app` at a different directory entirely, so a pytest started from anywhere but
+# the repository root imported *that* tree - and an audit reading it reported a
+# route matrix of 98 routes for a checkout that has 138. Nothing failed; the
+# numbers were simply about somewhere else.
+#
+# Checked at collection, because by here the imports above have already bound
+# whichever `app` was going to win. Derived from this file's own location rather
+# than written down: a hardcoded path is the same bug wearing a different hat,
+# passing on the machine it was written on and misleading everywhere else.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_APP_ROOT = pathlib.Path(app.__file__).resolve()
+if _REPO_ROOT not in _APP_ROOT.parents:  # pragma: no cover - an environment fault
+    raise RuntimeError(
+        f"tests import `app` from {_APP_ROOT}, which is outside this checkout "
+        f"({_REPO_ROOT}). A stale editable install is shadowing the working tree; "
+        f"reinstall with `pip install -e .` from {_REPO_ROOT}."
+    )
 
 
 class FakeRedisCommands:
