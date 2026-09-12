@@ -14,6 +14,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable, Set
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Final
 
 from sqlalchemy import select
@@ -122,6 +123,60 @@ def _nothing(
     )
 
 
+class TurnRefusal(StrEnum):
+    """Why a turn will not reach a provider, decided before anything is spent."""
+
+    HUMAN_OWNS_CONVERSATION = "human_mode"
+    NO_ANSWERING_AGENT = "no_answering_agent"
+
+
+@dataclass(frozen=True, slots=True)
+class TurnPlan:
+    """Which agent answers a turn, or why none will."""
+
+    agent: Agent | None
+    refusal: TurnRefusal | None = None
+
+
+async def plan_turn(
+    *,
+    conversations: ConversationRepository,
+    agents: AgentRepository,
+    conversation_id: uuid.UUID,
+    agent: Agent | None,
+) -> TurnPlan:
+    """Decide whether this turn may spend anything, and who answers it.
+
+    Asked by the worker *before* a turn is charged or engaged (AI-02): a
+    conversation a person owns, or a workspace with no agent allowed to answer,
+    costs the customer no AI turn and the platform no provider call. Asked again
+    by `AgentOrchestrator.answer`, so no caller can skip it.
+
+    Only reads, so it is safe on either side of the engagement barrier and safe
+    to repeat. It is not a promise about later: the mode is read again before a
+    reply is offered, because an inference is long enough for it to change.
+    """
+    conversation = await conversations.require_by_id(conversation_id)
+    if conversation.mode is ConversationMode.HUMAN:
+        logger.info(
+            "agent.skipped_human_mode",
+            extra={"conversation_id": str(conversation_id)},
+        )
+        return TurnPlan(agent=None, refusal=TurnRefusal.HUMAN_OWNS_CONVERSATION)
+
+    resolved = agent if agent is not None else await agents.get_answering_default()
+    if resolved is None:
+        logger.warning(
+            "agent.no_active_default",
+            extra={"conversation_id": str(conversation_id)},
+        )
+        return TurnPlan(agent=None, refusal=TurnRefusal.NO_ANSWERING_AGENT)
+    if not resolved.is_answering:
+        logger.info("agent.not_active", extra={"agent_id": str(resolved.id)})
+        return TurnPlan(agent=resolved, refusal=TurnRefusal.NO_ANSWERING_AGENT)
+    return TurnPlan(agent=resolved)
+
+
 class AgentOrchestrator:
     """Runs one agent turn for one conversation in one workspace."""
 
@@ -135,7 +190,7 @@ class AgentOrchestrator:
         max_rounds: int = MAX_ROUNDS,
         embeddings: EmbeddingsClient | None = None,
         sentiment: SentimentService | None = None,
-        reserve_round: Callable[[], Awaitable[bool]] | None = None,
+        meter_round: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
@@ -147,11 +202,13 @@ class AgentOrchestrator:
         # no assessment, and a deployment without a provider still answers. The
         # worker always supplies one, which is the path customers arrive on.
         self._sentiment = sentiment
-        # Called before each provider round to take one AI request from the
-        # workspace's allowance. Optional so a unit test can drive the loop
-        # without a database; the worker always supplies one, which is the path
-        # customers arrive on.
-        self._reserve_round = reserve_round
+        # Called before each provider round, with the model about to be called,
+        # to record the request it is about to make. Cost accounting and never a
+        # refusal: the customer's allowance is one turn, reserved by the worker
+        # before the turn engaged (AI-02), so nothing inside this loop can run
+        # out of it. Optional so a unit test can drive the loop without a
+        # database; the worker always supplies one.
+        self._meter_round = meter_round
         self._registry = registry if registry is not None else build_default_registry()
         self._max_rounds = max(1, max_rounds)
         self._agents = AgentRepository(session, tenant_id=tenant_id)
@@ -172,25 +229,16 @@ class AgentOrchestrator:
         do: no configured agent, a conversation a human owns, or no history are
         all ordinary states, not failures.
         """
-        conversation = await self._conversations.require_by_id(conversation_id)
-        if conversation.mode is ConversationMode.HUMAN:
-            # Checked here rather than in the worker so no caller can skip it.
-            logger.info(
-                "agent.skipped_human_mode",
-                extra={"conversation_id": str(conversation_id)},
-            )
-            return _nothing()
-
-        resolved = agent if agent is not None else await self._agents.get_answering_default()
-        if resolved is None:
-            logger.warning(
-                "agent.no_active_default",
-                extra={"tenant_id": str(self._tenant_id)},
-            )
-            return _nothing()
-        if not resolved.is_answering:
-            logger.info("agent.not_active", extra={"agent_id": str(resolved.id)})
-            return _nothing(agent_id=resolved.id)
+        # Asked here as well as by the worker, so no caller can skip it.
+        plan = await plan_turn(
+            conversations=self._conversations,
+            agents=self._agents,
+            conversation_id=conversation_id,
+            agent=agent,
+        )
+        if plan.agent is None or plan.refusal is not None:
+            return _nothing(agent_id=plan.agent.id if plan.agent is not None else None)
+        resolved = plan.agent
 
         if self._sentiment is not None:
             # Before a word is composed, not after. An escalation that arrives
@@ -248,11 +296,11 @@ class AgentOrchestrator:
             # The turn's connection goes back to the pool here, and stays
             # there for both the reservation and the inference (ADR-080).
             #
-            # The reservation is inside the block, not before it, and that
-            # ordering is the difference between working and deadlocking on a
-            # small pool: `reserve_round` takes a *second* session, so asking
-            # for it while this one still holds a connection needs two at once
-            # from a pool that may only have one.
+            # The meter is inside the block, not before it, and that ordering is
+            # the difference between working and deadlocking on a small pool:
+            # `meter_round` takes a *second* session, so asking for it while
+            # this one still holds a connection needs two at once from a pool
+            # that may only have one.
             #
             # `released` commits, and at this line that is what should happen.
             # On the first round nothing is staged - the phase above only read,
@@ -262,23 +310,11 @@ class AgentOrchestrator:
             # half-written anything. A handoff is never caught mid-commit here,
             # because a handoff breaks the loop rather than taking a round.
             async with released(self._session):
-                if self._reserve_round is not None and not await self._reserve_round():
-                    # The allowance ran out mid-turn, which a first-round check
-                    # cannot rule out: another worker may have spent the last
-                    # request while this turn was thinking. Whatever has been
-                    # said so far is still worth sending, so this breaks rather
-                    # than raising - the customer gets a shorter answer instead
-                    # of silence, and the workspace is not billed for a call
-                    # that was never made.
-                    logger.warning(
-                        "agent.allowance_exhausted_mid_turn",
-                        extra={
-                            "event": "agent.allowance_exhausted_mid_turn",
-                            "conversation_id": str(conversation_id),
-                            "round": round_number,
-                        },
-                    )
-                    break
+                if self._meter_round is not None:
+                    # Before the call, so a request that was made is never left
+                    # unrecorded; a crash between the two records one that was
+                    # not, which is the cheaper mistake to make in a cost ledger.
+                    await self._meter_round(resolved.model)
                 rounds = round_number
                 reply = await self._client.respond(
                     model=resolved.model,

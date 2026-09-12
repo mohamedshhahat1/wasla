@@ -680,14 +680,14 @@ class _NullRedis:
 
 
 async def _plan_with_ai_limit(session: AsyncSession, *, tenant: Tenant, limit: int) -> None:
-    """A workspace on a plan that permits exactly `limit` AI requests."""
+    """A workspace on a plan that permits exactly `limit` AI turns."""
     plan = Plan(
         code=f"cap-{uuid.uuid4().hex[:8]}",
         name="Capped",
         price=Decimal("10.00"),
         currency="EGP",
         interval=BillingInterval.MONTHLY,
-        limits={LimitKey.PERIOD_AI_REQUESTS.value: limit},
+        limits={LimitKey.PERIOD_AI_TURNS.value: limit},
     )
     session.add(plan)
     await session.flush()
@@ -714,10 +714,10 @@ async def test_a_round_is_reserved_before_each_provider_call(
     await _plan_with_ai_limit(db_session, tenant=tenant, limit=5)
     service = EntitlementService(db_session, tenant_id=tenant.id)
 
-    first = await service.consume(LimitKey.PERIOD_AI_REQUESTS, event_type=UsageEventType.AI_REQUEST)
+    first = await service.consume(LimitKey.PERIOD_AI_TURNS, event_type=UsageEventType.AI_TURN)
 
     assert first.allowed
-    assert await _ai_requests_used(db_session, tenant) == 1
+    assert await _ai_turns_used(db_session, tenant) == 1
 
 
 async def test_a_reservation_past_the_limit_records_nothing(
@@ -729,14 +729,12 @@ async def test_a_reservation_past_the_limit_records_nothing(
     service = EntitlementService(db_session, tenant_id=tenant.id)
 
     assert (
-        await service.consume(LimitKey.PERIOD_AI_REQUESTS, event_type=UsageEventType.AI_REQUEST)
+        await service.consume(LimitKey.PERIOD_AI_TURNS, event_type=UsageEventType.AI_TURN)
     ).allowed
-    refused = await service.consume(
-        LimitKey.PERIOD_AI_REQUESTS, event_type=UsageEventType.AI_REQUEST
-    )
+    refused = await service.consume(LimitKey.PERIOD_AI_TURNS, event_type=UsageEventType.AI_TURN)
 
     assert not refused.allowed
-    assert await _ai_requests_used(db_session, tenant) == 1
+    assert await _ai_turns_used(db_session, tenant) == 1
 
 
 async def test_a_resource_limit_cannot_be_consumed(db_session: AsyncSession) -> None:
@@ -745,7 +743,7 @@ async def test_a_resource_limit_cannot_be_consumed(db_session: AsyncSession) -> 
     service = EntitlementService(db_session, tenant_id=tenant.id)
 
     with pytest.raises(ValueError):
-        await service.consume(LimitKey.AGENTS, event_type=UsageEventType.AI_REQUEST)
+        await service.consume(LimitKey.AGENTS, event_type=UsageEventType.AI_TURN)
 
 
 async def test_the_meter_must_belong_to_the_limit(db_session: AsyncSession) -> None:
@@ -755,7 +753,7 @@ async def test_the_meter_must_belong_to_the_limit(db_session: AsyncSession) -> N
 
     with pytest.raises(ValueError):
         await service.consume(
-            LimitKey.PERIOD_AI_REQUESTS, event_type=UsageEventType.WHATSAPP_MESSAGE_SENT
+            LimitKey.PERIOD_AI_TURNS, event_type=UsageEventType.WHATSAPP_MESSAGE_SENT
         )
 
 
@@ -791,7 +789,7 @@ async def test_concurrent_reservations_cannot_oversell_the_allowance(
                 price=Decimal("10.00"),
                 currency="EGP",
                 interval=BillingInterval.MONTHLY,
-                limits={LimitKey.PERIOD_AI_REQUESTS.value: limit},
+                limits={LimitKey.PERIOD_AI_TURNS.value: limit},
             )
             setup.add_all([tenant, plan])
             await setup.flush()
@@ -812,7 +810,7 @@ async def test_concurrent_reservations_cannot_oversell_the_allowance(
             async with factory() as session:
                 service = EntitlementService(session, tenant_id=tenant_id)
                 outcome = await service.consume(
-                    LimitKey.PERIOD_AI_REQUESTS, event_type=UsageEventType.AI_REQUEST
+                    LimitKey.PERIOD_AI_TURNS, event_type=UsageEventType.AI_TURN
                 )
                 await session.commit()
                 return outcome.allowed
@@ -823,7 +821,7 @@ async def test_concurrent_reservations_cannot_oversell_the_allowance(
             recorded = await connection.scalar(
                 text(
                     "SELECT COALESCE(SUM(quantity), 0) FROM usage_events "
-                    "WHERE tenant_id = :tenant_id AND event_type = 'ai_request'"
+                    "WHERE tenant_id = :tenant_id AND event_type = 'ai_turn'"
                 ),
                 {"tenant_id": tenant_id},
             )
@@ -843,11 +841,11 @@ async def test_concurrent_reservations_cannot_oversell_the_allowance(
         await engine.dispose()
 
 
-async def _ai_requests_used(session: AsyncSession, tenant: Tenant) -> int:
+async def _ai_turns_used(session: AsyncSession, tenant: Tenant) -> int:
     total = await session.scalar(
         select(func.coalesce(func.sum(UsageEvent.quantity), 0)).where(
             UsageEvent.tenant_id == tenant.id,
-            UsageEvent.event_type == UsageEventType.AI_REQUEST,
+            UsageEvent.event_type == UsageEventType.AI_TURN,
         )
     )
     return int(total or 0)

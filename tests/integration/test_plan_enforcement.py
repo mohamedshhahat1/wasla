@@ -13,14 +13,12 @@ refuses.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -31,8 +29,6 @@ from app.core.exceptions import PlanLimitExceededError
 from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.db.models.billing import LimitKey
 from app.services.entitlement_service import Entitlement
-from tests.fake_queue_redis import FakeQueueRedis
-from tests.fakes import as_database, as_redis_client
 
 pytestmark = pytest.mark.integration
 
@@ -213,67 +209,8 @@ async def test_a_customers_message_is_never_refused_for_a_billing_reason(
 
 
 # ------------------------------------------------------------- the AI worker
-
-
-class SessionHandle:
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-
-    @asynccontextmanager
-    async def session(self) -> AsyncIterator[AsyncSession]:
-        yield self._session
-
-
-class FakeRedis:
-    @property
-    def client(self) -> FakeQueueRedis:
-        return FakeQueueRedis()
-
-
-async def test_an_exhausted_ai_allowance_stops_the_turn_without_failing_the_job(
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A workspace out of AI requests has a billing problem; its customer has a
-    question. Raising here would dead-letter the job and lose the second."""
-    from app.core.config import Settings
-    from app.db.models.tenant import Tenant as TenantModel
-    from app.workers import ai_worker as worker_module
-    from app.workers.ai_worker import _TurnProgress
-    from app.workers.queue import AgentJob
-
-    tenant = TenantModel(name="Acme", slug="acme")
-    db_session.add(tenant)
-    await db_session.flush()
-
-    refused = ExhaustedEntitlements()
-    monkeypatch.setattr(worker_module, "EntitlementService", lambda *a, **k: refused)
-
-    def _never(**kwargs: object) -> None:
-        raise AssertionError("The turn should not have been composed.")
-
-    monkeypatch.setattr(worker_module, "AgentOrchestrator", _never)
-
-    settings = Settings(
-        _env_file=None,
-        environment="test",
-        log_format="console",
-        log_level="WARNING",
-        cors_origins=[],
-        openai_api_key="test-key",
-    )
-    worker = worker_module.AgentWorker(
-        database=as_database(SessionHandle(db_session)),
-        redis=as_redis_client(FakeRedis()),
-        settings=settings,
-    )
-
-    # Returns rather than raises: the job is released, not dead-lettered.
-    progress = _TurnProgress()
-    await worker._handle(AgentJob(tenant_id=tenant.id, conversation_id=uuid.uuid4()), progress)
-
-    # And it never reached the provider, so had it failed instead of returning
-    # it would still have been retryable (ADR-068). A workspace out of allowance
-    # is a billing problem, not a reason to burn a retry budget.
-    assert progress.engaged is False
-    assert refused.asked == [LimitKey.PERIOD_AI_REQUESTS]
+#
+# A workspace out of AI turns is no longer asked about with a fake entitlement
+# here. The worker now charges a turn in the same transaction that engages it
+# and hands a refused turn to a person, and that is pinned against the real
+# worker, PostgreSQL and Redis in tests/integration/test_ai_metering.py.

@@ -48,6 +48,11 @@ class UsageEventType(StrEnum):
     WHATSAPP_MESSAGE_RECEIVED = "whatsapp_message_received"
     WHATSAPP_MESSAGE_SENT = "whatsapp_message_sent"
     AI_REQUEST = "ai_request"
+    # One customer turn an agent took on, however many provider calls it made
+    # - the unit a plan's AI allowance counts (AI-02). `AI_REQUEST` beside it
+    # is every provider call, recorded for cost; the two answer different
+    # questions and neither is ever derived from the other.
+    AI_TURN = "ai_turn"
     # Ruff reads a member named *_TOKEN as a credential. These are units of
     # language-model billing.
     AI_INPUT_TOKEN = "ai_input_token"  # noqa: S105
@@ -87,6 +92,7 @@ EVENT_UNITS: Final[dict[UsageEventType, UsageUnit]] = {
     UsageEventType.WHATSAPP_MESSAGE_RECEIVED: UsageUnit.COUNT,
     UsageEventType.WHATSAPP_MESSAGE_SENT: UsageUnit.COUNT,
     UsageEventType.AI_REQUEST: UsageUnit.COUNT,
+    UsageEventType.AI_TURN: UsageUnit.COUNT,
     UsageEventType.AI_INPUT_TOKEN: UsageUnit.TOKEN,
     UsageEventType.AI_OUTPUT_TOKEN: UsageUnit.TOKEN,
     UsageEventType.RAG_QUERY: UsageUnit.COUNT,

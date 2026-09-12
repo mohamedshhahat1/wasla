@@ -95,7 +95,12 @@ class LimitKey(StrEnum):
     KNOWLEDGE_DOCUMENTS = "knowledge_documents"
     STORAGE_BYTES = "storage_bytes"
     PERIOD_MESSAGES = "period_messages"
-    PERIOD_AI_REQUESTS = "period_ai_requests"
+    # Customer turns an agent answered in the billing period - what a plan's AI
+    # allowance sells (AI-02). Deliberately not provider requests: one turn is a
+    # classification plus one to three inference rounds, and a limit written in
+    # requests let an implementation detail spend a customer's allowance, so
+    # the last unit of every period went on a classification nobody saw.
+    PERIOD_AI_TURNS = "period_ai_turns"
     PERIOD_CAMPAIGN_MESSAGES = "period_campaign_messages"
 
 

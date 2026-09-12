@@ -39,7 +39,7 @@ from app.repositories.media_repository import MediaRepository
 from app.repositories.sentiment_repository import SentimentRepository
 from app.services.analytics_service import AnalyticsRecorder
 from app.services.sentiment_reader import SentimentAnalyzer, SentimentReading
-from app.services.usage_service import UsageRecorder
+from app.services.usage_service import AI_PURPOSE_SENTIMENT, UsageRecorder
 
 logger = get_logger(__name__)
 
@@ -162,11 +162,16 @@ class SentimentService:
         # this call: an assessment is a provider request of its own, on a model
         # of its own, and folding it into the agent turn's figures would hide a
         # cost from the workspace paying it.
+        #
+        # Cost, and only cost (AI-02). The customer's allowance is one turn,
+        # reserved by the worker before this runs; a classification is part of
+        # that turn and must never be able to spend the allowance itself.
         self._usage.ai_request(
             input_tokens=reading.usage.input_tokens,
             output_tokens=reading.usage.output_tokens,
             model=reading.model,
             conversation_id=conversation_id,
+            purpose=AI_PURPOSE_SENTIMENT,
         )
 
         escalated = self._should_escalate(reading, threshold=escalation_sentiment)

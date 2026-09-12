@@ -28,7 +28,7 @@ A plan is a row in `plans`: a stable `code`, a name, a price in `Numeric` (never
 | `knowledge_documents` | Documents |
 | `storage_bytes` | Bytes held in the object store, summed over attachments that still name one |
 | `period_messages` | Messages sent **and** received in the billing period |
-| `period_ai_requests` | Provider calls in the billing period |
+| `period_ai_turns` | Customer turns an agent took on in the billing period — one per answered customer message, however many provider calls it took (AI-02) |
 | `period_campaign_messages` | Campaign messages in the billing period |
 
 The first five measure what exists now; a workspace over one stays over it until something is deleted, because downgrading a plan should stop somebody adding more rather than delete their work. The last three count `usage_events` since `current_period_start`, which is what makes "1,000 messages a month" reset.
@@ -249,7 +249,7 @@ Limits are never compared inline. `EntitlementService` is the only thing that re
 | --- | --- |
 | Creating an agent, connecting a number, inviting a colleague, submitting a document | **402**, from a dependency in the route signature |
 | Scheduling a campaign | **402** for the whole audience at once, in the service, before a single message goes out |
-| An agent turn with no AI requests left | The worker returns without composing; the job is released, not dead-lettered |
+| An agent turn with no AI turns left | No provider is called; the conversation is handed to a person with reason `AI_QUOTA_EXHAUSTED`, the turn is completed, and the job is released, not dead-lettered |
 | A customer's inbound message | **Never refused.** No check exists on that path at all |
 | Any read, including usage and entitlements | Never refused |
 | A person's own reply | Never refused |

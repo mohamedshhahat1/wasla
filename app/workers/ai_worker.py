@@ -7,9 +7,9 @@ stores the message and enqueues; this reads the queue.
 
 **The provider is called with no database connection held** (ADR-080). One
 session spans the turn, but `AgentOrchestrator` commits it and hands the
-connection back before each inference and before each per-round reservation, so
-a turn waiting on OpenAI is not a turn occupying a slot in the pool. That is
-what stops the effective concurrency of an agent turn being
+connection back before each inference and before each per-round meter, so a
+turn waiting on OpenAI is not a turn occupying a slot in the pool. That is what
+stops the effective concurrency of an agent turn being
 `pool_size + max_overflow` instead of the queue depth.
 
 What that costs, stated rather than hidden: the turn is no longer one
@@ -22,32 +22,43 @@ stale after it, so the orchestrator re-reads the conversation mode before it
 offers a reply. A handoff cannot be caught half-committed, because a handoff
 ends the loop rather than taking another round.
 
+**What a customer's plan pays for is a turn, not a provider call** (AI-02). One
+turn is a sentiment classification and one to three inference rounds. The
+allowance is `PERIOD_AI_TURNS`, reserved exactly once, in the same transaction
+that engages the turn - so a duplicate job that lost the claim spends nothing,
+and a reservation that could not engage is rolled back rather than charged for a
+turn somebody else is running. Every provider call is still recorded as
+`AI_REQUEST` with its tokens, because that is what the platform pays for; it is
+cost accounting and nothing checks it against a limit.
+
 **Why this queue retries less than the others.** An agent turn is not
 idempotent. It reserves an allowance, it may call tools that write rows, and
-it ends by sending a customer a WhatsApp message that carries no idempotency
-key - so running it twice is a second answer to one question, which is worse
-for the customer than no answer at all. What *is* safe to repeat is everything
-before the provider is engaged: loading the workspace, reading the allowance,
-looking up the agent. Those touch nothing outside a transaction that rolls
-back. `_TurnProgress` marks the moment that stops being true, and the moment
-it is marked this worker's retry policy becomes `NO_RETRY` (ADR-068).
+it ends by sending a customer a WhatsApp message - so running it twice is a
+second answer to one question, which is worse for the customer than no answer
+at all. What *is* safe to repeat is everything before the provider is engaged:
+loading the workspace, reading the conversation, looking up the agent. Those
+touch nothing outside a transaction that rolls back. `_TurnProgress` marks the
+moment that stops being true, and the moment it is marked this worker's retry
+policy becomes `NO_RETRY` (ADR-068).
 """
 
 from __future__ import annotations
 
 import asyncio
-import uuid
 from collections.abc import Awaitable, Callable
+from enum import StrEnum
+from typing import Final
 
-from app.agents.orchestrator import AgentOrchestrator
+from app.agents.orchestrator import AgentOrchestrator, plan_turn
 from app.agents.registry import ToolRegistry
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
 from app.core.tracing import JOB_OUTCOME
 from app.db.models.agent import Agent
+from app.db.models.analytics import AnalyticsSource
 from app.db.models.billing import LimitKey
-from app.db.models.conversation import MessageOrigin
+from app.db.models.conversation import ConversationMode, MessageOrigin
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.db.models.usage import UsageEventType
 from app.db.session import Database
@@ -57,10 +68,11 @@ from app.repositories.agent_repository import AgentRepository
 from app.repositories.agent_turn_repository import AgentTurnRepository
 from app.repositories.conversation_repository import ConversationRepository
 from app.services.entitlement_service import EntitlementService
+from app.services.inbox_service import InboxService
 from app.services.messaging_service import MessagingService
 from app.services.sentiment_reader import SentimentAnalyzer
 from app.services.sentiment_service import SentimentService
-from app.services.usage_service import UsageRecorder
+from app.services.usage_service import AI_PURPOSE_AGENT, UsageRecorder
 from app.workers.dispatch import (
     SUCCEEDED,
     JobIdentity,
@@ -91,6 +103,16 @@ RETRY_DELAY_SECONDS = 5.0
 # records. Short and fixed, because it is a metric label.
 JOB_TYPE = "agent"
 
+# What a colleague reads on a conversation the plan would not let an agent
+# answer. Led by a fixed code so an inbox filter or a support script can find
+# these without parsing prose; written for the business, never sent to the
+# customer, who is owed an answer rather than an explanation of somebody's
+# billing (AI-02). Conversation.handoff_reason is String(200).
+QUOTA_HANDOFF_REASON: Final = (
+    "AI_QUOTA_EXHAUSTED: this workspace's AI turn allowance for the billing period "
+    "is used up, so a person needs to answer."
+)
+
 # Deliberately shorter than the idempotent queues': the only failures this
 # policy can ever see are the ones raised before a turn engaged the provider,
 # and those are infrastructure blips that either clear in seconds or are not
@@ -107,6 +129,18 @@ AGENT_RETRY = RetryPolicy(
     # gets, and it carries no such door.
     first_attempt_transient=FIRST_ATTEMPT_TRANSIENT,
 )
+
+
+class _Reservation(StrEnum):
+    """What taking a turn's allowance concluded."""
+
+    #: Charged, and the turn is engaged. The provider may now be called.
+    RESERVED = "reserved"
+    #: The plan has no turn left. Nothing was charged and nothing engaged.
+    REFUSED = "refused"
+    #: Charged and then rolled back, because the turn was no longer ours to
+    #: engage. Somebody else is running it; this attempt does nothing.
+    LOST = "lost"
 
 
 class _TurnProgress:
@@ -254,46 +288,43 @@ class AgentWorker:
         await record_success(job_type=JOB_TYPE)
         return SUCCEEDED
 
-    def _reservation(self, tenant_id: uuid.UUID) -> Callable[[], Awaitable[bool]]:
-        """One AI request, taken atomically, in a transaction of its own.
+    def _round_meter(self, job: AgentJob) -> Callable[[str], Awaitable[None]]:
+        """Record one provider request, in a transaction of its own, before it is made.
 
-        A transaction of its own because `consume` holds an advisory lock until
-        its transaction ends, and the turn's own transaction stays open for the
-        length of an inference. Reserving on that session would hold a
-        workspace's lock across a provider call and serialise every
-        conversation that workspace is having.
+        Cost accounting and not entitlement (AI-02): nothing here can refuse,
+        because the customer's allowance was one turn and it was reserved
+        before the turn engaged. A transaction of its own because the turn's
+        session has just handed its connection back for the inference, and a
+        write on it would check one straight out again (ADR-080).
 
-        The reservation therefore commits before the provider is called, which
-        is the safe direction: a crash between reserving and calling bills a
-        request that did not happen, and the alternative bills nothing for one
-        that did.
+        Committed before the call, which is the safe direction for a cost
+        ledger: a crash between recording and calling records a request that
+        did not happen, and the alternative records nothing for one that did.
         """
 
-        async def reserve() -> bool:
-            async with self._database.session() as reservation:
-                entitlements = EntitlementService(
-                    reservation,
-                    tenant_id=tenant_id,
-                    default_plan_code=self._settings.default_plan_code,
+        async def meter(model: str) -> None:
+            async with self._database.session() as metering:
+                UsageRecorder(metering, tenant_id=job.tenant_id).ai_request(
+                    input_tokens=0,
+                    output_tokens=0,
+                    requests=1,
+                    model=model,
+                    conversation_id=job.conversation_id,
+                    purpose=AI_PURPOSE_AGENT,
                 )
-                outcome = await entitlements.consume(
-                    LimitKey.PERIOD_AI_REQUESTS,
-                    event_type=UsageEventType.AI_REQUEST,
-                )
-                return outcome.allowed
 
-        return reserve
+        return meter
 
     async def _claim_turn(self, job: AgentJob) -> bool:
         """Take ownership of this logical turn, or report that somebody has it.
 
         A transaction of its own, and committed here rather than with the rest
-        of the turn, for the same reason the allowance reservation is: the
-        turn's own session stays open across an inference, and a claim that
-        commits only at the end of the turn is a claim that is invisible to the
-        duplicate arriving while the inference runs. Committing first is also
-        the safe direction - a crash between claiming and engaging leaves a
-        `CLAIMED` row whose lease expires, and the next attempt adopts it.
+        of the turn: the turn's own session stays open across an inference, and
+        a claim that commits only at the end of the turn is a claim that is
+        invisible to the duplicate arriving while the inference runs.
+        Committing first is also the safe direction - a crash between claiming
+        and engaging leaves a `CLAIMED` row whose lease expires, and the next
+        attempt adopts it.
 
         A job carrying no trigger proceeds. That is a job an older build
         enqueued, and refusing it would leave a customer unanswered in order to
@@ -326,27 +357,101 @@ class AgentWorker:
             )
         return owned
 
-    async def _engage_turn(self, job: AgentJob) -> None:
-        """Record durably that this turn is about to reach a provider.
+    async def _reserve_turn(self, job: AgentJob) -> _Reservation:
+        """Charge this turn to the plan and engage it, as one transaction.
 
-        The business-level counterpart of `mark_engaged` on the reservation, and
-        it is written for the same reason: after this, no other attempt may run
-        this turn, whatever becomes of the process holding it.
+        One transaction because the two facts must not disagree (AI-02). A
+        charge without the engagement is a customer billed for a turn that
+        another attempt will run and bill again; an engagement without the
+        charge is a turn the plan never paid for. Together, the point of no
+        return and the charge are the same commit.
+
+        The allowance is taken under `consume`'s advisory lock, so N workers
+        racing an allowance of N get exactly N reservations - and the lock is
+        released when this short transaction ends, not held across an
+        inference. A turn that turns out not to be ours to engage rolls its
+        charge back; a trigger-less legacy job has no turn row to engage and
+        is charged on its own.
         """
-        if job.trigger_message_id is None:
-            return
-        async with self._database.session() as marking:
-            await AgentTurnRepository(marking, tenant_id=job.tenant_id).engage(
+        async with self._database.session() as reservation:
+            entitlements = EntitlementService(
+                reservation,
+                tenant_id=job.tenant_id,
+                default_plan_code=self._settings.default_plan_code,
+            )
+            allowance = await entitlements.consume(
+                LimitKey.PERIOD_AI_TURNS,
+                event_type=UsageEventType.AI_TURN,
+                meta={"conversation_id": str(job.conversation_id)},
+            )
+            if not allowance.allowed:
+                return _Reservation.REFUSED
+            if job.trigger_message_id is None:
+                return _Reservation.RESERVED
+            engaged = await AgentTurnRepository(reservation, tenant_id=job.tenant_id).engage(
                 trigger_message_id=job.trigger_message_id
             )
+            if not engaged:
+                await reservation.rollback()
+                logger.info(
+                    "agent.turn_engaged_elsewhere",
+                    extra={
+                        "event": "agent.turn_engaged_elsewhere",
+                        "conversation_id": str(job.conversation_id),
+                        "trigger_message_id": str(job.trigger_message_id),
+                    },
+                )
+                return _Reservation.LOST
+            return _Reservation.RESERVED
+
+    async def _quota_blocked(self, job: AgentJob) -> None:
+        """Hand a turn the plan will not pay for to a person, and finish it.
+
+        Not silent (AI-02). This used to return with nothing written: no reply,
+        no handoff, no durable trace, the customer waiting on nobody. Now the
+        conversation goes to the inbox with a reason a colleague can act on,
+        and the analytics handoff records that the platform - not an agent, not
+        a person - decided it.
+
+        Not raised either (ADR-030): a workspace out of allowance has a billing
+        problem and its customer has a question, and dead-lettering the job
+        would lose the second over the first. The customer is not told about
+        the business's plan.
+
+        A colleague who took the conversation over since the turn was planned
+        keeps their own reason; only an AI-owned conversation is handed over.
+        """
+        async with self._database.session() as blocked:
+            conversation = await ConversationRepository(
+                blocked, tenant_id=job.tenant_id
+            ).require_by_id(job.conversation_id)
+            if conversation.mode is ConversationMode.AI:
+                await InboxService(session=blocked, tenant_id=job.tenant_id).set_mode(
+                    conversation_id=job.conversation_id,
+                    mode=ConversationMode.HUMAN,
+                    handoff_reason=QUOTA_HANDOFF_REASON,
+                    source=AnalyticsSource.SYSTEM,
+                )
+            if job.trigger_message_id is not None:
+                await AgentTurnRepository(blocked, tenant_id=job.tenant_id).complete(
+                    trigger_message_id=job.trigger_message_id
+                )
+        logger.warning(
+            "billing.ai_allowance_exhausted",
+            extra={
+                "event": "billing.ai_allowance_exhausted",
+                "tenant_id": str(job.tenant_id),
+                "conversation_id": str(job.conversation_id),
+            },
+        )
 
     async def _complete_turn(self, job: AgentJob) -> None:
         """Record that the turn ran to its end.
 
-        Every end counts: a reply sent, a handoff, a workspace out of allowance,
-        or nothing worth saying. All of them mean the customer's message has
-        been dealt with, and a turn left `CLAIMED` after one of them would be a
-        turn a later duplicate could adopt.
+        Every end counts: a reply sent, a handoff, a conversation a person
+        owns, or nothing worth saying. All of them mean the customer's message
+        has been dealt with, and a turn left `CLAIMED` after one of them would
+        be a turn a later duplicate could adopt.
         """
         if job.trigger_message_id is None:
             return
@@ -369,42 +474,11 @@ class AgentWorker:
 
     async def _handle(self, job: AgentJob, progress: _TurnProgress) -> None:
         async with self._database.session() as session:
-            entitlements = EntitlementService(
-                session,
-                tenant_id=job.tenant_id,
-                default_plan_code=self._settings.default_plan_code,
-            )
-            # Asked for the balance rather than a yes/no (ADR-054), because the answer
-            # decides how many provider calls this turn may make. One agent
-            # turn is up to `MAX_ROUNDS` calls and each is metered as a
-            # request, so a turn that only checked "may I make one?" could
-            # knowingly spend three - which is a workspace being billed past a
-            # limit the system had already read.
-            # A cheap early exit only. The real enforcement is the per-round
-            # reservation below, which is what holds under concurrency; this
-            # just avoids building an HTTP client for a workspace that is
-            # plainly out of allowance.
-            allowance = await entitlements.check(LimitKey.PERIOD_AI_REQUESTS, additional=1)
-            if not allowance.allowed:
-                # Checked, and *not* raised. A workspace out of AI requests has
-                # a billing problem; its customer has a question. The message is
-                # already stored and the conversation is waiting for a person,
-                # which is the honest outcome - failing the job would dead-letter
-                # it and lose that (ADR-030).
-                logger.warning(
-                    "billing.ai_allowance_exhausted",
-                    extra={
-                        "event": "billing.ai_allowance_exhausted",
-                        "tenant_id": str(job.tenant_id),
-                        "conversation_id": str(job.conversation_id),
-                    },
-                )
-                return
-
             agent: Agent | None = None
             if job.agent_id is not None:
-                agents = AgentRepository(session, tenant_id=job.tenant_id)
-                agent = await agents.get_by_id(job.agent_id)
+                agent = await AgentRepository(session, tenant_id=job.tenant_id).get_by_id(
+                    job.agent_id
+                )
                 if agent is None:
                     # Retired, or from another workspace. The workspace default
                     # still applies, so the customer is not left unanswered.
@@ -413,44 +487,57 @@ class AgentWorker:
                         extra={"agent_id": str(job.agent_id)},
                     )
 
-            # Asked here, before the mark below, and that placement is the
-            # whole of the fix for the enqueue-before-commit race (ADR-089).
-            #
-            # The orchestrator loads this conversation too, and refuses a
-            # missing one identically - but it does so *after* the turn has
-            # been marked engaged, at which point the only honest policy is
-            # `NO_RETRY` and a conversation that was merely mid-commit was
-            # dead-lettered on attempt one. A read costs one indexed lookup,
-            # touches nothing outside this transaction and is safe to repeat,
-            # so it belongs on the same side of the line as loading the
-            # workspace and reading the allowance.
-            #
-            # The orchestrator keeps its own lookup. This one decides whether
-            # a retry is safe; that one decides what to say, and a caller that
-            # skipped it would be answering a conversation it had not read.
-            await ConversationRepository(session, tenant_id=job.tenant_id).require_by_id(
-                job.conversation_id
-            )
+            conversations = ConversationRepository(session, tenant_id=job.tenant_id)
+            # Asked here, before anything is claimed, charged or engaged, and
+            # that placement is the whole of the fix for the enqueue-before-
+            # commit race (ADR-089). The orchestrator refuses a missing
+            # conversation identically - but only after the turn has engaged,
+            # at which point the only honest policy is `NO_RETRY` and a
+            # conversation that was merely mid-commit was dead-lettered on
+            # attempt one. A read costs one indexed lookup and is safe to
+            # repeat, so it belongs on the retryable side of the line.
+            await conversations.require_by_id(job.conversation_id)
 
-            # The business-level half of the same question the queue barrier
-            # below asks about the envelope: is this turn already somebody
-            # else's? Two envelopes naming one inbound message are one turn, and
-            # this is where the second one finds that out - before the sentiment
-            # call, before the inference, before any tool runs, because a key on
-            # the send alone would stop the second reply and still bill the
+            # The business-level half of the question the queue barrier asks
+            # about the envelope: is this turn already somebody else's? Two
+            # envelopes naming one inbound message are one turn, and this is
+            # where the second finds that out - before the charge, the
+            # sentiment call, the inference or any tool, because a key on the
+            # send alone would stop the second reply and still bill the
             # workspace for the second turn that produced it (WQ-01).
-            #
-            # Its own transaction, committed before the provider is reached, so
-            # nothing holds a row lock across an inference (ADR-080).
             if not await self._claim_turn(job):
                 return
 
-            # Past this line the turn can reserve an allowance, call the
-            # provider and send a customer a message, none of which a second
-            # attempt could tell had already happened. Awaited rather than
-            # assigned because it also persists the fact, so a worker that dies
-            # after this point is not mistaken for one that died before it.
-            await self._engage_turn(job)
+            # Before the charge, not after it: a conversation a person owns or
+            # a workspace with no agent allowed to answer is a turn the AI will
+            # not take, and it costs the customer nothing (AI-02).
+            plan = await plan_turn(
+                conversations=conversations,
+                agents=AgentRepository(session, tenant_id=job.tenant_id),
+                conversation_id=job.conversation_id,
+                agent=agent,
+            )
+            if plan.refusal is not None:
+                await self._complete_turn(job)
+                return
+
+            # The reservation takes a session of its own. Handing this one's
+            # connection back first means the turn never needs two at once from
+            # a pool that may only have one (ADR-080).
+            await session.commit()
+            reservation = await self._reserve_turn(job)
+            if reservation is _Reservation.LOST:
+                return
+            if reservation is _Reservation.REFUSED:
+                await self._quota_blocked(job)
+                return
+
+            # Past this line the turn is charged and engaged: it can call the
+            # provider, run tools and send a customer a message, none of which
+            # a second attempt could tell had already happened. Awaited rather
+            # than assigned because it also persists the fact on the queue, so
+            # a worker that dies after this point is not mistaken for one that
+            # died before it.
             await progress.engage()
             async with build_http_client() as http:
                 api_key = self._settings.openai_api_key or ""
@@ -480,13 +567,13 @@ class AgentWorker:
                     tenant_id=job.tenant_id,
                     client=client,
                     registry=self._registry,
-                    reserve_round=self._reservation(job.tenant_id),
+                    meter_round=self._round_meter(job),
                     embeddings=embeddings,
                     sentiment=sentiment,
                 )
                 outcome = await orchestrator.answer(
                     conversation_id=job.conversation_id,
-                    agent=agent,
+                    agent=plan.agent,
                 )
 
             # Metered before the reply is sent, and outside the branch that
@@ -498,16 +585,16 @@ class AgentWorker:
                 input_tokens=outcome.usage.input_tokens,
                 output_tokens=outcome.usage.output_tokens,
                 # Zero, and deliberately: the request meter is written by the
-                # per-round reservation before each provider call, so counting
-                # them again here would bill every turn twice. Tokens are not
-                # reservable - they are only known after the call - so they are
-                # still recorded here.
+                # per-round meter before each provider call, so counting them
+                # again here would record every call twice. Tokens are only
+                # known after the call, so they are recorded here.
                 requests=0,
                 # From the outcome, not from `agent`: a job naming no agent
                 # is answered by the workspace default, and that is the
                 # model the tokens were spent on.
                 model=outcome.model,
                 conversation_id=job.conversation_id,
+                purpose=AI_PURPOSE_AGENT,
             )
 
             reply = outcome.reply

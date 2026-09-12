@@ -44,6 +44,13 @@ DEFAULT_WINDOW: Final = timedelta(days=30)
 # forever is a query nobody meant to run.
 MAX_WINDOW: Final = timedelta(days=366)
 
+# What an AI provider request was for, carried in `usage_events.meta`. A closed
+# vocabulary rather than a meter each: both are the same cost to the platform
+# and the same unit, and an operator asking "how much of the spend is the
+# classifier?" reads it from here without a second event type to sum.
+AI_PURPOSE_AGENT: Final = "agent"
+AI_PURPOSE_SENTIMENT: Final = "sentiment"
+
 
 @dataclass(frozen=True, slots=True)
 class UsageWindow:
@@ -95,6 +102,9 @@ class UsageSummary:
     window: UsageWindow
     messages_received: int = 0
     messages_sent: int = 0
+    # Customer turns, which is what a plan limits; `ai_requests` is provider
+    # calls, which is what the platform pays for (AI-02).
+    ai_turns: int = 0
     ai_requests: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -121,6 +131,7 @@ _SUMMARY_FIELDS: Final[dict[UsageEventType, str]] = {
     UsageEventType.WHATSAPP_MESSAGE_RECEIVED: "messages_received",
     UsageEventType.WHATSAPP_MESSAGE_SENT: "messages_sent",
     UsageEventType.AI_REQUEST: "ai_requests",
+    UsageEventType.AI_TURN: "ai_turns",
     UsageEventType.AI_INPUT_TOKEN: "input_tokens",
     UsageEventType.AI_OUTPUT_TOKEN: "output_tokens",
     UsageEventType.RAG_QUERY: "rag_queries",
@@ -194,8 +205,14 @@ class UsageRecorder:
         model: str | None = None,
         conversation_id: uuid.UUID | None = None,
         occurred_at: datetime | None = None,
+        purpose: str | None = None,
     ) -> None:
         """Stage the request and its two token counts together.
+
+        These are provider cost, not the customer's allowance (AI-02): a plan
+        counts `AI_TURN`, reserved once per turn by the agent worker, and
+        nothing here is ever checked against a limit. `purpose` says which
+        call this was - `AI_PURPOSE_AGENT` or `AI_PURPOSE_SENTIMENT`.
 
         Three rows rather than one with two extra columns. Tokens are priced
         separately from requests and from each other, so each is its own meter;
@@ -216,6 +233,8 @@ class UsageRecorder:
             meta["model"] = model
         if conversation_id is not None:
             meta["conversation_id"] = str(conversation_id)
+        if purpose is not None:
+            meta["purpose"] = purpose
         line = meta or None
 
         self.record(

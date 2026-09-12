@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.orchestrator import AgentOutcome
 from app.core.config import Settings
 from app.core.storage import LocalMediaStorage
-from app.db.models.agent import Agent
+from app.db.models.agent import Agent, AgentStatus
 from app.db.models.campaign import Campaign, CampaignRecipient, CampaignStatus
 from app.db.models.conversation import (
     Contact,
@@ -171,6 +171,26 @@ async def _conversation(
     session.add(conversation)
     await session.flush()
     return conversation
+
+
+async def _answering_agent(session: AsyncSession, tenant: Tenant) -> Agent:
+    """An agent allowed to answer, which a turn now checks for before it is charged.
+
+    A workspace with no answering agent costs its customer no AI turn and never
+    engages a provider (AI-02), so a test about what an engaged turn meters has
+    to have somebody to answer it.
+    """
+    agent = Agent(
+        tenant_id=tenant.id,
+        name="Helper",
+        is_default=True,
+        status=AgentStatus.ACTIVE,
+        model="gpt-5.1",
+        system_prompt="Answer briefly.",
+    )
+    session.add(agent)
+    await session.flush()
+    return agent
 
 
 def _inbound(*, message_id: str = "wamid.in", text: str = "Hello") -> dict[str, Any]:
@@ -662,6 +682,7 @@ async def test_an_agent_turn_meters_its_provider_calls_and_tokens(
     tenant = await _tenant(db_session)
     account = await _account(db_session, tenant)
     conversation = await _conversation(db_session, tenant, account)
+    await _answering_agent(db_session, tenant)
 
     # Two tool rounds are two provider calls, and the tokens are their sum.
     worker = _worker(monkeypatch, db_session, settings, _outcome(reply="Certainly.", rounds=2))
@@ -680,12 +701,13 @@ async def test_an_agent_turn_meters_its_provider_calls_and_tokens(
     assert totals[UsageEventType.AI_OUTPUT_TOKEN] == 60
     # The reply went out, so it is counted too.
     assert totals[UsageEventType.WHATSAPP_MESSAGE_SENT] == 1
-    # The *request* meter is no longer written here. It is taken per round by
-    # the reservation the orchestrator calls before each provider call, so that
-    # two workers cannot both spend the last permitted request. This stub
-    # orchestrator makes no provider calls and so reserves nothing; the real
-    # accounting is proved in `test_ai_security.py`.
+    # The *request* meter is not written here: it is recorded per round by the
+    # meter the orchestrator calls before each provider call, and this stub makes
+    # no provider calls. What the worker does write is the one customer turn it
+    # charged before engaging (AI-02). Per-call accounting against the real
+    # orchestrator is pinned in `test_ai_metering.py`.
     assert UsageEventType.AI_REQUEST not in totals
+    assert totals[UsageEventType.AI_TURN] == 1
 
 
 async def test_a_turn_that_says_nothing_is_still_metered(
@@ -701,6 +723,7 @@ async def test_a_turn_that_says_nothing_is_still_metered(
     tenant = await _tenant(db_session)
     account = await _account(db_session, tenant)
     conversation = await _conversation(db_session, tenant, account)
+    await _answering_agent(db_session, tenant)
 
     worker = _worker(monkeypatch, db_session, settings, _outcome(handed_off=True))
     progress = _TurnProgress()
@@ -713,7 +736,7 @@ async def test_a_turn_that_says_nothing_is_still_metered(
     totals = await _totals(db_session, tenant)
     # Tokens are metered whether or not the turn produced words - a handoff
     # cost the same inference as an answer. The request meter belongs to the
-    # reservation now; see the note above.
+    # per-round meter; see the note above.
     assert totals[UsageEventType.AI_INPUT_TOKEN] > 0
     assert UsageEventType.WHATSAPP_MESSAGE_SENT not in totals
 

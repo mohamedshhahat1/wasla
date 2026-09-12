@@ -473,13 +473,13 @@ async def test_a_release_makes_the_turns_work_committed_rather_than_pending(
 async def test_the_allowance_is_resolved_again_for_every_round(
     one_connection: Database, workspace: Workspace
 ) -> None:
-    """A plan that changes mid-turn is seen by the next round, not cached.
+    """A plan that changes between reservations is seen by the next one, not cached.
 
-    The reservation is what enforces the AI-request limit, and moving the
-    provider call out of the transaction only stays safe if each round still
-    asks the database rather than a value read before the first inference. So
-    this suspends the subscription between two reservations and asserts the
-    second one resolved the change.
+    The reservation is what enforces the AI-turn limit, and moving the provider
+    call out of the transaction only stays safe if each reservation still asks
+    the database rather than a value read earlier. So this suspends the
+    subscription between two reservations and asserts the second one resolved
+    the change.
 
     The *policy* it asserts is the existing one and is deliberately not a
     lockout: a subscription that has stopped serving falls back to the default
@@ -498,7 +498,7 @@ async def test_the_allowance_is_resolved_again_for_every_round(
             price=Decimal("10.00"),
             currency="EGP",
             interval=BillingInterval.MONTHLY,
-            limits={LimitKey.PERIOD_AI_REQUESTS.value: 100},
+            limits={LimitKey.PERIOD_AI_TURNS.value: 100},
         )
         free = Plan(
             code=f"free-{uuid.uuid4().hex[:8]}",
@@ -506,7 +506,7 @@ async def test_the_allowance_is_resolved_again_for_every_round(
             price=Decimal("0.00"),
             currency="EGP",
             interval=BillingInterval.MONTHLY,
-            limits={LimitKey.PERIOD_AI_REQUESTS.value: 0},
+            limits={LimitKey.PERIOD_AI_TURNS.value: 0},
         )
         session.add_all([paid, free])
         await session.flush()
@@ -530,8 +530,8 @@ async def test_the_allowance_is_resolved_again_for_every_round(
                 default_plan_code=free_code,
             )
             outcome = await entitlements.consume(
-                LimitKey.PERIOD_AI_REQUESTS,
-                event_type=UsageEventType.AI_REQUEST,
+                LimitKey.PERIOD_AI_TURNS,
+                event_type=UsageEventType.AI_TURN,
             )
             await reservation.commit()
             return outcome.allowed
@@ -561,28 +561,26 @@ async def test_the_allowance_is_resolved_again_for_every_round(
         await session.commit()
 
 
-async def test_a_reservation_can_be_taken_while_a_provider_call_is_in_flight(
+async def test_a_round_can_be_metered_while_a_provider_call_is_in_flight(
     one_connection: Database,
     workspace: Workspace,
 ) -> None:
     """The deadlock this ordering exists to avoid.
 
-    `reserve_round` needs a session of its own, because `consume` holds an
-    advisory lock until its transaction ends and holding that across an
-    inference would serialise every conversation in the workspace. Two sessions
-    at once needs two connections - unless the turn has given its own back,
-    which is why the reservation sits inside the released block rather than
-    before it.
+    `meter_round` needs a session of its own, because the turn's session has
+    just handed its connection back for the inference and a write on it would
+    check one straight out again. Two sessions at once needs two connections -
+    unless the turn has given its own back, which is why the meter sits inside
+    the released block rather than before it.
     """
     factory = one_connection.session_factory
     provider = BlockingProvider()
     reserved: list[bool] = []
 
-    async def reserve() -> bool:
+    async def reserve(_model: str) -> None:
         async with factory() as reservation:
             await reservation.execute(text("SELECT 1"))
             reserved.append(True)
-            return True
 
     async def turn() -> AgentOutcome:
         async with factory() as session:
@@ -591,7 +589,7 @@ async def test_a_reservation_can_be_taken_while_a_provider_call_is_in_flight(
                 tenant_id=workspace["tenant_id"],
                 client=as_responses(provider),
                 registry=ToolRegistry(),
-                reserve_round=reserve,
+                meter_round=reserve,
             )
             outcome = await orchestrator.answer(conversation_id=workspace["conversations"][0])
             await session.commit()

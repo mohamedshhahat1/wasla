@@ -31,7 +31,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,7 +67,11 @@ PERIOD_METERS: Final[dict[LimitKey, tuple[UsageEventType, ...]]] = {
         UsageEventType.WHATSAPP_MESSAGE_SENT,
         UsageEventType.WHATSAPP_MESSAGE_RECEIVED,
     ),
-    LimitKey.PERIOD_AI_REQUESTS: (UsageEventType.AI_REQUEST,),
+    # Turns, never provider requests (AI-02). `AI_REQUEST` is still recorded for
+    # every call a turn makes - sentiment, each inference round - because that
+    # is what the platform pays for; it is cost accounting, and it is not what
+    # the customer bought.
+    LimitKey.PERIOD_AI_TURNS: (UsageEventType.AI_TURN,),
     LimitKey.PERIOD_CAMPAIGN_MESSAGES: (UsageEventType.CAMPAIGN_MESSAGE,),
 }
 
@@ -249,8 +253,13 @@ class EntitlementService:
         *,
         event_type: UsageEventType,
         amount: int = 1,
+        meta: dict[str, Any] | None = None,
     ) -> Entitlement:
         """Reserve `amount` against a limit and record it, atomically.
+
+        `meta` is written onto the usage row, so a reservation can say what it
+        was taken for - which conversation an AI turn answered - without a
+        second row to reconcile.
 
         The primitive every limit should use before doing something the plan
         pays for. :meth:`check` and :meth:`require` answer a question; this one
@@ -316,7 +325,9 @@ class EntitlementService:
         # be fed by more than one meter - `PERIOD_MESSAGES` counts sent *and*
         # received - and incrementing all of them for one event would bill a
         # workspace twice for a message it only sent once.
-        UsageRecorder(self._session, tenant_id=self._tenant_id).record(event_type, quantity=amount)
+        UsageRecorder(self._session, tenant_id=self._tenant_id).record(
+            event_type, quantity=amount, meta=meta
+        )
         # Flushed inside the lock so the next holder's count sees it. Without
         # this the row would still be pending in this session and the whole
         # exercise would serialise nothing.

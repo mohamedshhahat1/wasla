@@ -189,20 +189,20 @@ async def test_a_draft_agent_still_occupies_a_slot(db_session: AsyncSession) -> 
 
 async def test_a_period_limit_counts_usage_inside_the_period(db_session: AsyncSession) -> None:
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, {LimitKey.PERIOD_AI_REQUESTS: 100})
+    plan = await _plan(db_session, {LimitKey.PERIOD_AI_TURNS: 100})
     await _subscribe(db_session, tenant, plan)
 
     recorder = UsageRecorder(db_session, tenant_id=tenant.id)
-    recorder.record(UsageEventType.AI_REQUEST, quantity=30, occurred_at=NOW)
+    recorder.record(UsageEventType.AI_TURN, quantity=30, occurred_at=NOW)
     # Before this period began: last month's spending is not this month's.
     recorder.record(
-        UsageEventType.AI_REQUEST,
+        UsageEventType.AI_TURN,
         quantity=999,
         occurred_at=PERIOD_START - timedelta(days=1),
     )
     await db_session.flush()
 
-    entitlement = await _service(db_session, tenant).check(LimitKey.PERIOD_AI_REQUESTS)
+    entitlement = await _service(db_session, tenant).check(LimitKey.PERIOD_AI_TURNS)
     assert entitlement.used == 30
     assert entitlement.remaining == 70
 
@@ -307,18 +307,18 @@ async def test_another_workspaces_usage_is_not_charged_to_this_one(
 ) -> None:
     acme = await _tenant(db_session, "acme")
     rival = await _tenant(db_session, "rival")
-    plan = await _plan(db_session, {LimitKey.PERIOD_AI_REQUESTS: 10})
+    plan = await _plan(db_session, {LimitKey.PERIOD_AI_TURNS: 10})
     await _subscribe(db_session, acme, plan)
     await _subscribe(db_session, rival, plan)
 
     UsageRecorder(db_session, tenant_id=rival.id).record(
-        UsageEventType.AI_REQUEST,
+        UsageEventType.AI_TURN,
         quantity=50,
         occurred_at=NOW,
     )
     await db_session.flush()
 
-    entitlement = await _service(db_session, acme).check(LimitKey.PERIOD_AI_REQUESTS)
+    entitlement = await _service(db_session, acme).check(LimitKey.PERIOD_AI_TURNS)
     assert entitlement.used == 0
     assert entitlement.allowed is True
 

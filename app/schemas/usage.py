@@ -58,6 +58,9 @@ class UsageCounters(BaseModel):
 
     messages_received: int
     messages_sent: int
+    # What the plan's AI allowance counts. `ai_requests` beside it is every
+    # provider call those turns made, which is cost rather than entitlement.
+    ai_turns: int
     ai_requests: int
     input_tokens: int
     output_tokens: int
@@ -86,6 +89,7 @@ class UsageSummaryRead(BaseModel):
             counters=UsageCounters(
                 messages_received=summary.messages_received,
                 messages_sent=summary.messages_sent,
+                ai_turns=summary.ai_turns,
                 ai_requests=summary.ai_requests,
                 input_tokens=summary.input_tokens,
                 output_tokens=summary.output_tokens,
