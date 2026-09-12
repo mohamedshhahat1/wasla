@@ -150,9 +150,16 @@ pytest                 # unit and integration tests
 pytest --cov=app       # with coverage
 ruff check .
 black --check .
-mypy app
+mypy app tests         # the scope CI checks; `mypy app` alone hides test-only errors
 pre-commit install     # run the same gates on every commit
 ```
+
+The MyPy scope is `app tests` because that is what `.github/workflows/ci.yml`
+runs, and the two drifting apart is worse than either scope being wrong: a
+`tests/` error is invisible locally and then fails the pipeline. The
+`mirrors-mypy` pre-commit hook is narrower than both — it pins its own MyPy and
+checks only `^app/` — so a green commit hook is not evidence that CI will pass.
+Run the command above before pushing.
 
 The suite injects fake infrastructure, so no Redis, OpenAI or Meta credentials are required to run it. Tests that need a database skip unless `TEST_DATABASE_URL` (or `DATABASE_URL`) points at PostgreSQL with `pgvector`; `docker compose up -d postgres` is enough to make them run — and they are worth running, since the isolation and retrieval guarantees are only meaningful against a real database.
 

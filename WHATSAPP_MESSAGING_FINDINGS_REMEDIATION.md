@@ -827,7 +827,7 @@ The two dimensions still below 9 are deliberate. Message ordering is an open pro
 
 **No real Meta verification was possible.** The provider contract was re-checked against Meta's own documentation today — the Graph API changelog confirms v21.0 is supported until 2027-01-21, as the audit reported — but no message has been sent to a real WhatsApp account through this code. §26 lists what a test WABA would settle, and the template error-code table is the item most worth confirming, because it is the one place this work acts on codes it has not observed.
 
-**And the suite is not green at HEAD.** Thirty billing tests fail on a clean worktree of the audited revision, from a test-isolation defect that has nothing to do with messaging and has not been touched. Every messaging test passes and this work adds no failures, but "the full suite is green" is not a sentence anybody can currently say about this repository, and saying it would be the kind of claim the audit was written to prevent.
+**And the suite is not green at HEAD.** 165 billing tests fail on a clean worktree of the audited revision, from a test-isolation defect that has nothing to do with messaging and has not been touched. Every messaging test passes and this work adds no failures, but "the full suite is green" is not a sentence anybody can currently say about this repository, and saying it would be the kind of claim the audit was written to prevent.
 
 **Would I trust Wasla today to carry real customer WhatsApp traffic without silent loss or duplicate customer-visible sends?**
 
