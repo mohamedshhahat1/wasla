@@ -8,18 +8,38 @@ this package, so a provider change is absorbed here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Self
+from typing import Any, Final, Literal, Self
+
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 Role = Literal["system", "user", "assistant"]
 
+#: The largest token count one provider call can plausibly report (AI-11). The
+#: biggest context any model this product uses offers is about a million tokens,
+#: and output is capped far below that; a figure past two million is a provider,
+#: proxy or parser gone wrong. It is refused here, at the boundary, because the
+#: first place it would otherwise fail is a `BIGINT` usage column in the
+#: transaction that commits a customer's reply - leaving the reply unsent and the
+#: turn stranded.
+MAX_REPORTED_TOKENS: Final = 2_000_000
 
-def _int(value: object) -> int:
-    """Coerce a provider-reported count to an int, defaulting to zero.
+_USAGE_FIELDS: Final = ("input_tokens", "output_tokens", "total_tokens")
 
-    Usage accounting must never be the reason a reply fails, so an absent or
-    malformed count is recorded as zero rather than raised.
+
+def _count(value: object) -> int | None:
+    """A provider-reported count this system can bill, or None if it is not one.
+
+    Booleans are refused although Python counts them as ints, and so are
+    negatives and anything past `MAX_REPORTED_TOKENS`. None means "not a usable
+    count"; the caller decides what that becomes.
     """
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 0 or value > MAX_REPORTED_TOKENS:
+        return None
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,12 +186,30 @@ class TokenUsage:
 
     @classmethod
     def from_payload(cls, payload: object) -> Self:
+        """Read the provider's `usage` object, validated at the boundary (AI-11).
+
+        Usage accounting must never be the reason a reply fails, so an absent,
+        malformed or implausible count becomes zero rather than raising. An
+        absent one is ordinary; one that is present and unusable is logged by
+        field name, never by value, so a provider sending nonsense is visible.
+        """
         if not isinstance(payload, dict):
             return cls(input_tokens=0, output_tokens=0, total_tokens=0)
+        counts = {field: _count(payload.get(field)) for field in _USAGE_FIELDS}
+        refused = [
+            field
+            for field in _USAGE_FIELDS
+            if payload.get(field) is not None and counts[field] is None
+        ]
+        if refused:
+            logger.warning(
+                "openai.usage_implausible",
+                extra={"event": "openai.usage_implausible", "fields": refused},
+            )
         return cls(
-            input_tokens=_int(payload.get("input_tokens")),
-            output_tokens=_int(payload.get("output_tokens")),
-            total_tokens=_int(payload.get("total_tokens")),
+            input_tokens=counts["input_tokens"] or 0,
+            output_tokens=counts["output_tokens"] or 0,
+            total_tokens=counts["total_tokens"] or 0,
         )
 
 
@@ -188,7 +226,12 @@ class AgentReply:
     tool_calls: tuple[ToolCall, ...]
     usage: TokenUsage
     response_id: str | None
-    raw: dict[str, Any]
+    # The provider's own `usage` object and nothing more (AI-12). This used to
+    # be the whole response body, held for the turn's lifetime with no reader -
+    # a full customer conversation one careless log line away from a log. Kept
+    # narrow for the one reader it has: the real-provider contract test proving
+    # the fields the meter reads are really there.
+    usage_payload: dict[str, Any] | None = None
 
     @property
     def wants_tools(self) -> bool:

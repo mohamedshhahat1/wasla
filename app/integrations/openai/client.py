@@ -15,6 +15,18 @@ a correctness question there.
 | transport error | yes | Connect, timeout or protocol; a duplicate is invisible |
 | 5xx | yes | Same trade: cost, not customer-visible duplication |
 | other 4xx | no | Our request is wrong; repeating it will not help |
+| unreadable or oversized 200 | no | The same request would get the same answer |
+
+**How long to wait** (AI-10). A provider that says when to come back in
+`Retry-After` - as seconds or as an HTTP date - is believed, up to a cap; a hint
+longer than the cap ends the retries rather than being ignored, because
+retrying sooner than asked only spends an attempt on a guaranteed refusal.
+Without a hint the backoff grows with the attempt and is jittered, so workers
+that met one rate limit together do not all retry in the same instant.
+
+**How much to read** (AI-14). The body is streamed and read up to a byte limit.
+A success body over it is refused rather than held whole; an error body is only
+ever read for its code, so it is truncated instead.
 
 Requests set `store: false` and never use `previous_response_id`. Conversation
 memory is assembled from the workspace's own database, so provider-side state
@@ -25,7 +37,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import random
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, Final
 
 import httpx
@@ -70,13 +86,28 @@ REQUEST_TIMEOUT_SECONDS: Final = 60.0
 FALLBACK_MAX_OUTPUT_TOKENS: Final = 2_048
 MAX_ATTEMPTS: Final = 3
 BACKOFF_SECONDS: Final = 1.0
+# The longest `Retry-After` this client will honour (AI-10). Three attempts of
+# sixty seconds already bound a call at three minutes; a provider asking for
+# more than half a minute is saying "not soon", and the honest answer is to stop
+# and let the turn fail visibly rather than hold a worker for it.
+MAX_RETRY_AFTER_SECONDS: Final = 30.0
+# The most of one response body this client will read (AI-14). A reply at the
+# default output ceiling is a few kilobytes, and a tool-calling reply is smaller;
+# a megabyte is generous by two orders of magnitude and still refuses the
+# multi-megabyte body a misbehaving provider or proxy could otherwise make every
+# worker hold in memory at once.
+MAX_RESPONSE_BYTES: Final = 1_048_576
 TOO_MANY_REQUESTS: Final = 429
 SERVER_ERROR_FLOOR: Final = 500
 CLIENT_ERROR_FLOOR: Final = 400
 
 
+class _ResponseTooLargeError(Exception):
+    """A success body past the byte limit. Internal; surfaced as a refusal."""
+
+
 def _attempt_outcome(status: int) -> CallOutcome:
-    """The closed outcome domain for one HTTP answer."""
+    """The closed outcome domain for one non-success HTTP answer."""
     if status == TOO_MANY_REQUESTS:
         return CallOutcome.RATE_LIMITED
     if status >= SERVER_ERROR_FLOOR:
@@ -84,6 +115,54 @@ def _attempt_outcome(status: int) -> CallOutcome:
     if status >= CLIENT_ERROR_FLOOR:
         return CallOutcome.FAILURE
     return CallOutcome.SUCCESS
+
+
+def retry_after_seconds(value: str | None, *, now: datetime | None = None) -> float | None:
+    """How long a `Retry-After` header asks the client to wait, or None.
+
+    Both forms RFC 9110 allows: a number of seconds, and an HTTP date. Anything
+    else - negative, not finite, unparseable - is treated as no hint at all
+    rather than guessed at, and a date already past means "now".
+    """
+    if value is None or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            moment = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+        return max((moment - (now or datetime.now(UTC))).total_seconds(), 0.0)
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return seconds
+
+
+async def _read_bounded(response: httpx.Response, *, limit: int, refuse: bool) -> bytes:
+    """Read at most `limit` bytes of a streamed body.
+
+    `refuse` raises past the limit - for a success body, which is only useful
+    whole. Otherwise the body is cut at the limit - for an error body, which is
+    only ever read for its code.
+    """
+    declared = response.headers.get("content-length", "")
+    if refuse and declared.isdigit() and int(declared) > limit:
+        raise _ResponseTooLargeError
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in response.aiter_bytes():
+        if size + len(chunk) > limit:
+            if refuse:
+                raise _ResponseTooLargeError
+            chunks.append(chunk[: limit - size])
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
 
 
 def build_http_client(*, seconds: float = REQUEST_TIMEOUT_SECONDS) -> httpx.AsyncClient:
@@ -103,8 +182,8 @@ def build_http_client(*, seconds: float = REQUEST_TIMEOUT_SECONDS) -> httpx.Asyn
 class ResponsesClient:
     """Calls the Responses API and returns our own reply type.
 
-    The HTTP client, sleep function and attempt budget are injected so retry
-    behaviour is testable without a network or a real wait.
+    The HTTP client, sleep function, jitter source and attempt budget are
+    injected so retry behaviour is testable without a network or a real wait.
     """
 
     def __init__(
@@ -116,6 +195,8 @@ class ResponsesClient:
         max_attempts: int = MAX_ATTEMPTS,
         backoff_seconds: float = BACKOFF_SECONDS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        jitter: Callable[[], float] = random.random,
+        max_response_bytes: int = MAX_RESPONSE_BYTES,
     ) -> None:
         if not api_key:
             # Our misconfiguration, not the caller's mistake.
@@ -126,6 +207,8 @@ class ResponsesClient:
         self._max_attempts = max(1, max_attempts)
         self._backoff_seconds = backoff_seconds
         self._sleep = sleep
+        self._jitter = jitter
+        self._max_response_bytes = max(1, max_response_bytes)
 
     async def respond(
         self,
@@ -182,12 +265,12 @@ class ResponsesClient:
         return self._reply(body)
 
     async def _post(self, payload: dict[str, Any], *, operation: str) -> dict[str, Any]:
-        # One inference attempt, observed here rather than in the worker
-        # because this is where the outcome is already distinguished: a 429, a
-        # 5xx and a refused request are three different operational problems
-        # and only this loop can tell them apart. Token *spend* is not counted
-        # here - it is already metered into `usage_events`, and a second tally
-        # would be a second number to reconcile.
+        # One inference, observed here rather than in the worker because this
+        # is where the outcome is already distinguished: a 429, a 5xx and a
+        # refused request are three different operational problems and only
+        # this loop can tell them apart. Token *spend* is not counted here - it
+        # is already metered into `usage_events`, and a second tally would be a
+        # second number to reconcile.
         #
         # The clock starts here rather than around the HTTP call below, so the
         # duration covers the retries too: what the agent turn waited on is
@@ -203,7 +286,16 @@ class ResponsesClient:
         attempt = 1
         while True:
             try:
-                response = await self._http.post(url, json=payload, headers=headers)
+                async with self._http.stream(
+                    "POST", url, json=payload, headers=headers
+                ) as response:
+                    status = response.status_code
+                    hint = retry_after_seconds(response.headers.get("retry-after"))
+                    content = await _read_bounded(
+                        response,
+                        limit=self._max_response_bytes,
+                        refuse=status < CLIENT_ERROR_FLOOR,
+                    )
             except httpx.TransportError as error:
                 # Connect, timeout and protocol failures alike: retrying can at
                 # worst duplicate an inference, which no customer ever sees.
@@ -212,50 +304,92 @@ class ResponsesClient:
                     logger.warning("openai.unreachable", extra={"attempts": attempt})
                     await call.record(CallOutcome.UNAVAILABLE)
                     raise ExternalServiceError("The AI provider could not be reached.") from error
-                await self._backoff(attempt)
+                await self._sleep(self._backoff(attempt))
                 attempt += 1
                 continue
+            except _ResponseTooLargeError:
+                # Refused, not retried: the same request would produce the same
+                # body. Never read whole, never logged.
+                await call.attempt(CallOutcome.FAILURE)
+                logger.warning(
+                    "openai.response_too_large",
+                    extra={"attempts": attempt, "limit_bytes": self._max_response_bytes},
+                )
+                await call.record(CallOutcome.FAILURE)
+                raise ExternalServiceError(
+                    "The AI provider returned a response too large to read."
+                ) from None
 
-            # Every attempt, not only the last (AI-09): a call that succeeds on
-            # its third try is recorded as a success once and as two throttled
-            # attempts here, so absorbed throttling is still visible.
-            await call.attempt(_attempt_outcome(response.status_code))
-            retryable = (
-                response.status_code == TOO_MANY_REQUESTS
-                or response.status_code >= SERVER_ERROR_FLOOR
-            )
-            if retryable:
-                if attempt >= self._max_attempts:
-                    self._log_failure(response, attempts=attempt)
-                    if response.status_code == TOO_MANY_REQUESTS:
-                        await call.record(CallOutcome.RATE_LIMITED)
-                        raise RateLimitedError("The AI provider is rate limiting this account.")
-                    await call.record(CallOutcome.UNAVAILABLE)
-                    raise ExternalServiceError("The AI provider is unavailable.")
-                await self._backoff(attempt)
-                attempt += 1
-                continue
+            if status < CLIENT_ERROR_FLOOR:
+                try:
+                    body = self._decode(content)
+                except ExternalServiceError:
+                    await call.attempt(CallOutcome.FAILURE)
+                    await call.record(CallOutcome.FAILURE)
+                    raise
+                # Every attempt, not only the last (AI-09): a call that succeeds
+                # on its third try is a success once and two throttled attempts.
+                await call.attempt(CallOutcome.SUCCESS)
+                await call.record(CallOutcome.SUCCESS)
+                return body
 
-            if response.status_code >= CLIENT_ERROR_FLOOR:
-                self._log_failure(response, attempts=attempt)
+            await call.attempt(_attempt_outcome(status))
+            retryable = status == TOO_MANY_REQUESTS or status >= SERVER_ERROR_FLOOR
+            if not retryable:
+                self._log_failure(status, content, attempts=attempt)
                 await call.record(CallOutcome.FAILURE)
                 raise ExternalServiceError("The AI provider rejected the request.")
 
-            await call.record(CallOutcome.SUCCESS)
-            return self._decode(response)
+            delay = self._delay(attempt, hint)
+            if attempt >= self._max_attempts or delay is None:
+                self._log_failure(status, content, attempts=attempt, retry_after=hint)
+                if status == TOO_MANY_REQUESTS:
+                    await call.record(CallOutcome.RATE_LIMITED)
+                    raise RateLimitedError("The AI provider is rate limiting this account.")
+                await call.record(CallOutcome.UNAVAILABLE)
+                raise ExternalServiceError("The AI provider is unavailable.")
+            await self._sleep(delay)
+            attempt += 1
 
-    async def _backoff(self, attempt: int) -> None:
-        await self._sleep(self._backoff_seconds * attempt)
+    def _delay(self, attempt: int, hint: float | None) -> float | None:
+        """How long to wait before the next attempt, or None to stop retrying.
 
-    def _log_failure(self, response: httpx.Response, *, attempts: int) -> None:
+        A provider hint within the cap is honoured as given. One beyond it ends
+        the retries: waiting less than asked spends an attempt on a refusal, and
+        waiting as long as asked holds a worker for it.
+        """
+        if hint is not None:
+            return hint if hint <= MAX_RETRY_AFTER_SECONDS else None
+        return self._backoff(attempt)
+
+    def _backoff(self, attempt: int) -> float:
+        """Linear backoff with equal jitter: half fixed, half random.
+
+        The fixed half keeps a floor under the wait, so a retry is never
+        immediate; the random half spreads workers that failed together, which
+        is the synchronised burst an unjittered schedule turns a brief throttle
+        into (AI-10).
+        """
+        computed = self._backoff_seconds * attempt
+        return computed / 2 + min(max(self._jitter(), 0.0), 1.0) * computed / 2
+
+    def _log_failure(
+        self,
+        status: int,
+        content: bytes,
+        *,
+        attempts: int,
+        retry_after: float | None = None,
+    ) -> None:
         """Log the provider's error code, never its prose.
 
         Provider error text can echo the request, and a request here contains a
-        customer conversation.
+        customer conversation - and the provider's own message for a bad key
+        quotes the key back. So only fields from a closed vocabulary leave.
         """
         error: dict[str, Any] = {}
         try:
-            body = response.json()
+            body = json.loads(content) if content else {}
         except ValueError:
             body = {}
         if isinstance(body, dict) and isinstance(body.get("error"), dict):
@@ -264,16 +398,17 @@ class ResponsesClient:
         logger.warning(
             "openai.request_failed",
             extra={
-                "status": response.status_code,
+                "status": status,
                 "attempts": attempts,
                 "provider_code": error.get("code"),
                 "provider_type": error.get("type"),
+                "retry_after_seconds": retry_after,
             },
         )
 
-    def _decode(self, response: httpx.Response) -> dict[str, Any]:
+    def _decode(self, content: bytes) -> dict[str, Any]:
         try:
-            body = response.json()
+            body = json.loads(content)
         except ValueError as error:
             raise ExternalServiceError(
                 "The AI provider returned an unreadable response."
@@ -297,12 +432,13 @@ class ResponsesClient:
 
         text = "".join(text_parts).strip()
         response_id = body.get("id")
+        usage = body.get("usage")
         return AgentReply(
             text=text or None,
             tool_calls=tuple(calls),
-            usage=TokenUsage.from_payload(body.get("usage")),
+            usage=TokenUsage.from_payload(usage),
             response_id=response_id if isinstance(response_id, str) else None,
-            raw=body,
+            usage_payload=usage if isinstance(usage, dict) else None,
         )
 
     def _items(self, body: dict[str, Any]) -> list[dict[str, Any]]:

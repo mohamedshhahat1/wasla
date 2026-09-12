@@ -7,7 +7,12 @@ assert on what an agent would actually see.
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from app.agents.memory import build_window, estimate_tokens
+from app.agents.memory import (
+    MAX_TURN_CHARACTERS,
+    TRUNCATION_NOTICE,
+    build_window,
+    estimate_tokens,
+)
 from app.db.models.conversation import (
     Message,
     MessageDirection,
@@ -176,6 +181,33 @@ def test_the_newest_message_survives_a_budget_too_small_to_hold_it() -> None:
     )
 
     assert len(window.turns) == 1
+
+
+def test_a_single_enormous_message_is_bounded_and_keeps_its_ending() -> None:
+    """The newest message is admitted whatever its cost - but not whatever its size (AI-14).
+
+    Half a million characters used to reach the provider whole. The question a
+    customer asks after pasting a long document is at the end, so the ending is
+    what must survive.
+    """
+    text = "OPENING " + "x" * 500_000 + " WHAT DOES THIS COST?"
+
+    window = build_window([_message(body=text)], message_limit=10, token_budget=4_000)
+
+    (turn,) = window.turns
+    assert len(text) > MAX_TURN_CHARACTERS  # non-vacuity: this genuinely overflows
+    assert len(turn.text) <= MAX_TURN_CHARACTERS
+    assert turn.text.startswith("OPENING ")
+    assert turn.text.endswith(" WHAT DOES THIS COST?")
+    assert TRUNCATION_NOTICE in turn.text
+
+
+def test_a_message_within_the_ceiling_is_untouched() -> None:
+    text = "y" * (MAX_TURN_CHARACTERS - 1)
+
+    window = build_window([_message(body=text)], message_limit=10, token_budget=100_000)
+
+    assert window.turns[0].text == text
 
 
 def test_failed_outbound_messages_are_not_shown_to_the_model() -> None:

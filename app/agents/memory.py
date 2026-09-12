@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import ceil
 from typing import Final
 
@@ -33,6 +33,24 @@ from app.integrations.openai.types import Turn
 
 CHARACTERS_PER_TOKEN: Final = 4.0
 NON_ASCII_CHARACTERS_PER_TOKEN: Final = 2.0
+
+#: The most any one message may put into a prompt, in characters (AI-14).
+#:
+#: History is already bounded by count and by token budget - but the newest
+#: message is admitted whatever it costs, because an agent with no context cannot
+#: answer, and that exception had no ceiling: a 500,000-character transcript went
+#: to the provider whole. This is the ceiling. The smallest context among the
+#: models this product allows is 128,000 tokens; 100,000 characters is at most
+#: 50,000 tokens even at the pessimistic Arabic estimate, which leaves room for a
+#: 20,000-character system prompt, the rest of the window, tool schemas and the
+#: output ceiling.
+MAX_TURN_CHARACTERS: Final = 100_000
+
+#: What replaces the middle of a message too long to send whole. Said to the
+#: model plainly, so it never believes it read the complete message.
+TRUNCATION_NOTICE: Final = (
+    "\n\n[The middle of this message was left out because it was too long to include.]\n\n"
+)
 
 
 def estimate_tokens(text: str) -> int:
@@ -100,6 +118,7 @@ def build_window(
         turn = _turn(message, attachments)
         if turn is None:
             continue
+        turn = _bounded(turn)
 
         cost = estimate_tokens(turn.text)
         over_count = len(turns) >= message_limit
@@ -117,6 +136,22 @@ def build_window(
 
     turns.reverse()
     return MemoryWindow(turns=tuple(turns), estimated_tokens=spent, dropped=dropped)
+
+
+def _bounded(turn: Turn) -> Turn:
+    """The turn, with its middle left out if it is past `MAX_TURN_CHARACTERS`.
+
+    Head and tail rather than head alone: a long transcript or pasted document is
+    usually followed by the customer's actual question, and cutting from the end
+    would keep the preamble and drop the part to be answered. Two thirds to the
+    head, one to the tail, and the notice between them so the model knows.
+    """
+    if len(turn.text) <= MAX_TURN_CHARACTERS:
+        return turn
+    keep = MAX_TURN_CHARACTERS - len(TRUNCATION_NOTICE)
+    head = keep * 2 // 3
+    tail = keep - head
+    return replace(turn, text=turn.text[:head] + TRUNCATION_NOTICE + turn.text[-tail:])
 
 
 def _turn(

@@ -28,7 +28,7 @@ from app.agents.registry import (
     build_default_registry,
 )
 from app.core.exceptions import ConflictError
-from app.db.models.agent import Agent, AgentStatus
+from app.db.models.agent import DEFAULT_MAX_OUTPUT_TOKENS, Agent, AgentStatus
 from app.db.models.conversation import (
     Conversation,
     ConversationMode,
@@ -265,7 +265,6 @@ def _reply(
             total_tokens=tokens * 2,
         ),
         response_id="resp_1",
-        raw={},
     )
 
 
@@ -333,7 +332,7 @@ def _build(
         max_rounds=max_rounds,
         embeddings=as_embeddings(embeddings),
         sentiment=as_sentiment(sentiment) if sentiment is not None else None,
-        **({"output_ceiling": output_ceiling} if output_ceiling is not None else {}),
+        output_ceiling=output_ceiling if output_ceiling is not None else DEFAULT_MAX_OUTPUT_TOKENS,
     )
 
 

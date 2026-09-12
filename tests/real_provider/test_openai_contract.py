@@ -94,7 +94,7 @@ async def test_the_usage_fields_the_meter_reads_are_really_there(client: Respons
         max_output_tokens=16,
     )
 
-    raw = reply.raw.get("usage")
+    raw = reply.usage_payload or {}
     assert isinstance(raw, dict)
     assert {"input_tokens", "output_tokens", "total_tokens"} <= set(raw)
 

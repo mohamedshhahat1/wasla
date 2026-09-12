@@ -128,7 +128,6 @@ class BlockingProvider:
             tool_calls=(),
             usage=TokenUsage(input_tokens=7, output_tokens=11, total_tokens=18),
             response_id="resp_blocking",
-            raw={},
         )
 
 
