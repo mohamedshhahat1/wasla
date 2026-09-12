@@ -84,9 +84,23 @@ from app.db.models import Base
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
-# TEST_DATABASE_URL wins so a developer can point these at a scratch database
-# without touching the one their application uses.
-URL_VARIABLES = ("TEST_DATABASE_URL", "DATABASE_URL")
+# The *only* variable that may point these tests at a database. There is no
+# fallback to `DATABASE_URL`, deliberately and permanently.
+#
+# `prepared_database` begins with `DROP SCHEMA public CASCADE`, which is correct
+# - it is the only way to clear an `alembic_version` and an enum whose labels
+# have drifted, which is the whole point of the migration-built strategy. A
+# fallback to `DATABASE_URL` pointed that at whichever database the developer
+# had exported for something else, so exporting a variable for a script and then
+# running `pytest` in the same shell destroyed that database's schema. The
+# fallback was convenient and the drop is correct; the combination was not
+# (WQ-12).
+#
+# Naming a dedicated database is now the whole contract, and it is checked
+# before anything connects: `DATABASE_URL` alone can never authorise a
+# destructive reset, whatever it is set to.
+URL_VARIABLE = "TEST_DATABASE_URL"
+APPLICATION_URL_VARIABLE = "DATABASE_URL"
 REQUIRED_EXTENSIONS = ("pgcrypto", "vector")
 
 # How the schema under test is built. See the module docstring.
@@ -118,17 +132,48 @@ def built_from_migrations() -> bool:
 
 @pytest.fixture(scope="session")
 def database_url() -> str:
+    """The dedicated database these tests may destroy, or a refusal.
+
+    Three outcomes, and the middle one is the finding. Neither variable set is
+    an ordinary machine without PostgreSQL, and skipping is right - the unit
+    suite has to stay usable. `TEST_DATABASE_URL` set is the supported way to
+    run these. `DATABASE_URL` set *on its own* used to be taken as permission,
+    and is now a hard failure: the next thing that would happen is
+    `DROP SCHEMA public CASCADE` against somebody's working copy.
+
+    The refusal happens here, before `prepared_database` builds an engine, so
+    nothing has connected to anything when it fires.
+    """
     security_run = os.environ.get("WASLA_SECURITY_TESTS") == "1"
-    if security_run and not os.environ.get("TEST_DATABASE_URL"):
+    configured = os.environ.get(URL_VARIABLE)
+
+    if security_run and not configured:
         pytest.fail(
-            "WASLA_SECURITY_TESTS=1 requires an explicit TEST_DATABASE_URL; "
+            f"WASLA_SECURITY_TESTS=1 requires an explicit {URL_VARIABLE}; "
             "critical database security coverage may not be skipped."
         )
-    for variable in URL_VARIABLES:
-        value = os.environ.get(variable)
-        if value:
-            return value
-    pytest.skip("No PostgreSQL URL configured; set TEST_DATABASE_URL to run these tests.")
+
+    if not configured:
+        if os.environ.get(APPLICATION_URL_VARIABLE):
+            pytest.fail(
+                f"{APPLICATION_URL_VARIABLE} is set and {URL_VARIABLE} is not.\n"
+                "These tests begin by dropping the public schema of whichever "
+                f"database they are given, so {APPLICATION_URL_VARIABLE} is never "
+                "taken as permission to do that - it is usually the database an "
+                "application is running against.\n"
+                "Create a database for testing and name it explicitly, e.g.\n"
+                f"  {URL_VARIABLE}=postgresql+asyncpg://user:pass@host:5432/wasla_test"
+            )
+        pytest.skip(f"No PostgreSQL URL configured; set {URL_VARIABLE} to run these tests.")
+
+    # No second rule beyond this, and the absence is deliberate. A suffix
+    # requirement would refuse CI's own `wasla_migrations`, which is the run
+    # that matters most; a "the two variables must differ" rule would refuse it
+    # too, because CI points pytest and Alembic at one database on purpose so
+    # the migration step runs against what the tests left. What was actually
+    # dangerous was a database nobody named being destroyed, and naming one is
+    # now the whole contract.
+    return configured
 
 
 async def _reset_public_schema(url: str) -> None:

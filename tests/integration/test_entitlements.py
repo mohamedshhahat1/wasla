@@ -35,6 +35,8 @@ from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
 from app.services.entitlement_service import EntitlementService
 from app.services.usage_service import UsageRecorder
+from tests.integration.conftest import built_from_migrations
+from tests.integration.plan_catalogue import own_plan
 
 pytestmark = pytest.mark.integration
 
@@ -56,17 +58,13 @@ async def _plan(
     *,
     code: str = "test",
 ) -> Plan:
-    plan = Plan(
+    return await own_plan(
+        session,
         code=code,
-        name=code.title(),
         price=Decimal("10.00"),
-        currency="EGP",
         interval=BillingInterval.MONTHLY,
         limits={key.value: value for key, value in (limits or {}).items()},
     )
-    session.add(plan)
-    await session.flush()
-    return plan
 
 
 async def _subscribe(
@@ -340,10 +338,26 @@ async def test_another_workspaces_agents_do_not_fill_this_ones_slots(
 # ---------------------------------------------------------------- catalogue
 
 
-async def test_the_seeded_catalogue_is_not_visible_to_this_suite(db_session: AsyncSession) -> None:
-    """The schema here is built from the models, so migration 0016's seed rows
-    are absent. Recorded so the next reader does not hunt for them."""
-    assert await PlanRepository(db_session).list_plans() == []
+async def test_which_catalogue_this_suite_sees_depends_on_the_schema_build(
+    db_session: AsyncSession,
+) -> None:
+    """Stated for both builds, because it used to be stated for one.
+
+    A model-built schema starts with an empty `plans` table; a migration-built
+    one carries migration 0016's seeded catalogue, which is what a deployment
+    has. This suite used to assert the first unconditionally and therefore could
+    only ever run against a schema no deployment uses - one of the reasons the
+    whole billing family had never been executed against production's catalogue
+    (WQ-04).
+
+    Nothing else in this file asserts on the catalogue as a whole any more. Each
+    test owns the codes it names, through `own_plan`, and asks about those.
+    """
+    listed = {plan.code for plan in await PlanRepository(db_session).list_plans()}
+    if built_from_migrations():
+        assert {"starter", "pro", "business"} <= listed
+    else:
+        assert listed == set()
 
 
 async def test_a_private_plan_is_not_listed(db_session: AsyncSession) -> None:
@@ -352,8 +366,13 @@ async def test_a_private_plan_is_not_listed(db_session: AsyncSession) -> None:
     bespoke.is_public = False
     await db_session.flush()
 
-    codes = [plan.code for plan in await PlanRepository(db_session).list_plans()]
-    assert codes == ["public"]
+    # Scoped to the two codes this test owns rather than to the whole listing:
+    # a migration-built schema also carries the seeded catalogue, and asserting
+    # on everything would make this test about the seed instead of about
+    # `is_public`.
+    codes = {plan.code for plan in await PlanRepository(db_session).list_plans()}
+    assert "public" in codes
+    assert "bespoke" not in codes
 
 
 async def test_a_retired_plan_is_kept_but_not_offered(db_session: AsyncSession) -> None:
@@ -364,7 +383,7 @@ async def test_a_retired_plan_is_kept_but_not_offered(db_session: AsyncSession) 
     await db_session.flush()
 
     repository = PlanRepository(db_session)
-    assert await repository.list_plans() == []
+    assert "old" not in {plan.code for plan in await repository.list_plans()}
     assert await repository.get_by_code("old") is not None
 
 

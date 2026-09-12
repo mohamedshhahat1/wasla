@@ -49,6 +49,7 @@ from app.db.models.tenant import Tenant
 from app.integrations.billing.paymob import PaymobProvider, hmac_signature
 from app.services.checkout_service import APPLIED, DUPLICATE, CheckoutService
 from app.services.entitlement_service import EntitlementService
+from tests.integration.plan_catalogue import own_plan
 
 pytestmark = pytest.mark.integration
 
@@ -94,26 +95,23 @@ async def _catalogue(session: AsyncSession) -> dict[str, Plan]:
         PAID_PLAN: ("Pro", "99.00", PAID_AGENTS),
         OTHER_PAID_PLAN: ("Business", "249.00", OTHER_PAID_AGENTS),
     }
-    plans = {
-        plan.code: plan
-        for plan in (await session.execute(select(Plan))).scalars().all()
-        if plan.code in wanted
-    }
-    for code, (name, price, agents) in wanted.items():
-        if code in plans:
-            continue
-        plan = Plan(
+    # Taking the row rather than skipping it. Skipping is what made this
+    # module read the migration's seeded `pro` - limits and all - and then
+    # assert `PAID_AGENTS`, which is 20 and never was what the seed holds. The
+    # catalogue is platform-wide, so a second workspace in the same test shares
+    # these rows; each test's transaction is rolled back, so the seeded row is
+    # never left modified for the next one.
+    return {
+        code: await own_plan(
+            session,
             code=code,
             name=name,
             price=Decimal(price),
-            currency="EGP",
             interval=BillingInterval.MONTHLY,
             limits={LimitKey.AGENTS.value: agents},
         )
-        session.add(plan)
-        plans[code] = plan
-    await session.flush()
-    return plans
+        for code, (name, price, agents) in wanted.items()
+    }
 
 
 async def _workspace(

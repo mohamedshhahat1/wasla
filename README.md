@@ -161,7 +161,30 @@ runs, and the two drifting apart is worse than either scope being wrong: a
 checks only `^app/` — so a green commit hook is not evidence that CI will pass.
 Run the command above before pushing.
 
-The suite injects fake infrastructure, so no Redis, OpenAI or Meta credentials are required to run it. Tests that need a database skip unless `TEST_DATABASE_URL` (or `DATABASE_URL`) points at PostgreSQL with `pgvector`; `docker compose up -d postgres` is enough to make them run — and they are worth running, since the isolation and retrieval guarantees are only meaningful against a real database.
+The suite injects fake infrastructure, so no Redis, OpenAI or Meta credentials are required to run it.
+
+**Database-backed tests need `TEST_DATABASE_URL`, and nothing else will do.** They begin by dropping the public schema of whichever database they are given — the only way to clear an `alembic_version` and an enum whose labels have drifted — so the database has to be one named on purpose for testing. `DATABASE_URL` used to be accepted as a fallback, which meant exporting it for a script and then running `pytest` in the same shell destroyed that database's schema; it is now refused before anything connects. With neither variable set the tests skip, so the unit suite stays usable on a machine without PostgreSQL.
+
+```bash
+createdb wasla_test        # or: docker compose up -d postgres, then create it
+export TEST_DATABASE_URL=postgresql+asyncpg://wasla:wasla@localhost:5432/wasla_test
+pytest
+```
+
+They are worth running: the isolation and retrieval guarantees are only meaningful against a real database.
+
+**Two schema builds, and they are different gates.** `WASLA_TEST_SCHEMA` chooses how the schema under test is built:
+
+| Value | Built by | What it proves |
+| --- | --- | --- |
+| `models` (default) | `Base.metadata.create_all` | Fast. Agrees with the models *by construction*, so it cannot catch a migration that never added an enum label or a seeded row. |
+| `migrations` | `alembic upgrade head` | The schema a deployment actually has, seeded catalogue included. |
+
+A result is only meaningful alongside the build that produced it. "The suite is green" has meant two different things in two different reports here, and untangling that cost an audit real time — so report the schema mode beside every number.
+
+```bash
+WASLA_TEST_SCHEMA=migrations pytest tests/integration
+```
 
 The media suites want an object store the same way: they skip unless `TEST_S3_ENDPOINT_URL`, `TEST_S3_BUCKET`, `TEST_S3_ACCESS_KEY_ID` and `TEST_S3_SECRET_ACCESS_KEY` point at one, and `docker compose --profile objectstore up -d minio` is enough. Run them: what they prove is that the SigV4 signing in `app/core/object_store.py` satisfies a real store, and mocking an SDK call cannot establish that — a signature is either accepted or it is a 403. CI runs them against MinIO and fails if it finds them skipped.
 

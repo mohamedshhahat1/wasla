@@ -55,6 +55,7 @@ from app.services.checkout_service import (
     StartedCheckout,
 )
 from tests.fakes import as_table
+from tests.integration.plan_catalogue import own_plan
 
 pytestmark = pytest.mark.integration
 
@@ -117,18 +118,15 @@ async def _plan(
     currency: str = "EGP",
     is_public: bool = True,
 ) -> Plan:
-    plan = Plan(
+    return await own_plan(
+        session,
         code=code,
-        name=code.title(),
         price=Decimal(price),
         currency=currency,
         interval=BillingInterval.MONTHLY,
         is_public=is_public,
         limits={LimitKey.AGENTS.value: 5},
     )
-    session.add(plan)
-    await session.flush()
-    return plan
 
 
 def _service(

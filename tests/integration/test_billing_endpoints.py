@@ -39,6 +39,7 @@ from app.db.models.billing import (
 )
 from app.services.entitlement_service import Entitlement
 from app.services.subscription_service import SubscriptionService
+from tests.integration.plan_catalogue import own_plan
 
 pytestmark = pytest.mark.integration
 
@@ -64,19 +65,15 @@ async def _plan(
     is_public: bool = True,
     price: str = "99.00",
 ) -> Plan:
-    plan = Plan(
+    return await own_plan(
+        session,
         code=code,
-        name=code.title(),
         price=Decimal(price),
-        currency="EGP",
         interval=BillingInterval.MONTHLY,
         trial_days=trial_days,
         is_public=is_public,
         limits={key.value: value for key, value in (limits or {}).items()},
     )
-    session.add(plan)
-    await session.flush()
-    return plan
 
 
 # ------------------------------------------------------------------- service

@@ -537,7 +537,11 @@ def test_the_environment_agrees_this_is_worth_testing() -> None:
 
     `prepared_database` skips without PostgreSQL and `redis` skips without
     Redis, which is correct locally and would be a silent hole in CI. CI's
-    skip policy is what catches that, and this states the two variables it
-    depends on so the reason is findable from here.
+    skip policy is what catches that, and this states the variable it depends
+    on so the reason is findable from here.
+
+    `DATABASE_URL` is deliberately not accepted as an alternative any more.
+    These fixtures drop the public schema of whatever they are given, so the
+    database has to be named on purpose (WQ-12).
     """
-    assert os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    assert os.environ.get("TEST_DATABASE_URL")

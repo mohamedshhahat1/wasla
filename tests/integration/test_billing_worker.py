@@ -44,6 +44,7 @@ from app.services.auth_service import AuthService
 from app.services.subscription_service import SubscriptionService
 from app.workers.billing_worker import BillingWorker
 from tests.fakes import as_database, as_redis_client
+from tests.integration.plan_catalogue import own_plan
 
 pytestmark = pytest.mark.integration
 
@@ -99,18 +100,14 @@ async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
 
 
 async def _plan(session: AsyncSession, *, code: str = "pro", trial_days: int = 0) -> Plan:
-    plan = Plan(
+    return await own_plan(
+        session,
         code=code,
-        name=code.title(),
         price=Decimal("99.00"),
-        currency="EGP",
         interval=BillingInterval.MONTHLY,
         trial_days=trial_days,
         limits={},
     )
-    session.add(plan)
-    await session.flush()
-    return plan
 
 
 async def _subscription(

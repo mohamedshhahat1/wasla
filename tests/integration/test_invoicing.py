@@ -29,6 +29,7 @@ from app.repositories.billing_repository import SubscriptionRepository
 from app.repositories.invoice_repository import PlatformInvoiceRepository
 from app.services.invoice_service import InvoiceService
 from app.services.usage_service import UsageRecorder
+from tests.integration.plan_catalogue import own_plan
 
 pytestmark = pytest.mark.integration
 
@@ -84,17 +85,13 @@ async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
 
 
 async def _plan(session: AsyncSession, *, code: str = "pro", price: str = "99.00") -> Plan:
-    plan = Plan(
+    return await own_plan(
+        session,
         code=code,
-        name=code.title(),
         price=Decimal(price),
-        currency="EGP",
         interval=BillingInterval.MONTHLY,
         limits={},
     )
-    session.add(plan)
-    await session.flush()
-    return plan
 
 
 async def _subscription(session: AsyncSession, tenant: Tenant, plan: Plan) -> Subscription:

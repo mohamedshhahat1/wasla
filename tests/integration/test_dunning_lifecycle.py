@@ -75,6 +75,7 @@ from app.repositories.invoice_repository import InvoiceRepository
 from app.services.entitlement_service import EntitlementService
 from app.workers.billing_worker import BillingWorker
 from tests.conftest import AllowingEntitlements
+from tests.integration.plan_catalogue import own_plan
 
 pytestmark = pytest.mark.integration
 
@@ -253,18 +254,14 @@ async def _owner(session: AsyncSession, tenant: Tenant) -> User:
 
 
 async def _plan(session: AsyncSession, *, code: str, price: str, agents: int) -> Plan:
-    plan = Plan(
+    return await own_plan(
+        session,
         code=code,
-        name=code.title(),
         price=Decimal(price),
-        currency="EGP",
         interval=BillingInterval.MONTHLY,
         trial_days=0,
         limits={LimitKey.AGENTS.value: agents},
     )
-    session.add(plan)
-    await session.flush()
-    return plan
 
 
 async def _paid_plan(session: AsyncSession) -> Plan:

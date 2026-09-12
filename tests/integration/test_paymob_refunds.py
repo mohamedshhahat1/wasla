@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.db.models.audit import AuditAction, AuditLog
-from app.db.models.billing import BillingInterval, LimitKey, Plan
+from app.db.models.billing import BillingInterval, LimitKey
 from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.payment_event import PaymentEvent
 from app.db.models.tenant import Tenant
@@ -48,6 +48,7 @@ from app.services.checkout_service import (
     CheckoutService,
 )
 from app.services.refund_service import RefundService
+from tests.integration.plan_catalogue import own_plan
 
 pytestmark = pytest.mark.integration
 
@@ -111,7 +112,8 @@ async def _paid(
     """An invoice that has been collected, as a settled checkout leaves it."""
     from datetime import UTC, datetime
 
-    plan = Plan(
+    await own_plan(
+        session,
         code="pro",
         name="Pro",
         price=Decimal(amount),
@@ -119,7 +121,6 @@ async def _paid(
         interval=BillingInterval.MONTHLY,
         limits={LimitKey.AGENTS.value: 5},
     )
-    session.add(plan)
     moment = datetime(2026, 8, 1, tzinfo=UTC)
     invoice = Invoice(
         tenant_id=tenant.id,
