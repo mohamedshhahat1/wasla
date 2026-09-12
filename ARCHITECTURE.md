@@ -438,13 +438,15 @@ Opt-out lives in the base population of `AudienceRepository` rather than as a fi
 
 ## 14. Background jobs and Redis usage
 
-**Status: Implemented** — the Redis client, its health probe, the refresh-token denylist, the agent, ingestion and media job queues with leased reservations and crash recovery, and the AI, ingestion, follow-up, media, campaign, billing, email and recovery workers, all run by one worker process.
+**Status: Implemented** — the Redis client, its health probe, the refresh-token denylist, the agent, ingestion and media job queues with leased reservations and crash recovery, and thirteen worker kinds, all run by one worker process.
 
-All eight workers run in **one container**, concurrently in one event loop, selected by `WORKER_KINDS` (empty means all). Each is I/O-bound — waiting on Redis, PostgreSQL, OpenAI or Meta — so they interleave rather than compete, and one process is markedly simpler to deploy and watch than six. Splitting them apart later is an environment variable, not another image; `campaign` is the one that most often wants a replica of its own, because a workspace mid-broadcast is bandwidth against Meta rather than inference.
+All thirteen worker kinds run in **one container**, concurrently in one event loop, selected by `WORKER_KINDS` (empty means all). Each is I/O-bound — waiting on Redis, PostgreSQL, OpenAI or Meta — so they interleave rather than compete, and one process is markedly simpler to deploy and watch than thirteen. Splitting them apart later is an environment variable, not another image; `campaign` is the one that most often wants a replica of its own, because a workspace mid-broadcast is bandwidth against Meta rather than inference.
 
 Each loop publishes a heartbeat to Redis — one key per kind, short expiry, refreshed on a timer — and the container's health check (`scripts/entrypoint.sh worker-health`) exits non-zero unless every loop this container is configured to run has beaten recently. Before this the image's HEALTHCHECK curled the API's liveness endpoint, which a process serving no HTTP could never answer, so the worker reported unhealthy for its entire life; both compose files disabled it rather than fake it.
 
 What the heartbeat proves is that the process is up and its event loop is scheduling: the beat is an ordinary task, so a crash, a hang or a blocking call in async code stops it. What it does not prove is that any loop is making progress — a worker waiting on a query that never returns keeps beating. Queue depth, the age of the oldest waiting job and the count of expired reservations are what answer that, and they are published beside it.
+
+The heartbeat is also **alerted on**, which it was not until recently. It is the only signal that can say a worker kind has stopped: workers serve no HTTP and are deliberately not a scrape target, so `ScrapeTargetDown` cannot see them, and every other rule fires on a symptom that needs work to be waiting. `WorkerLoopNotBeating` reads it per kind, and the exposition publishes a zero for a kind that has never beaten — so a loop nobody deployed is a zero rather than an absent series. The worst case it covers is `recovery`: when that stops, the deployment has no crash recovery at all while every queue keeps draining normally (WQ-05).
 
 SIGTERM asks each loop to stop and each finishes the job in its hand before returning, so a deploy does not dead-letter work that was about to succeed. The production compose gives the worker a longer `stop_grace_period` than the API: a worker mid-inference holds an HTTP call, and the reply and usage it will write afterwards are worth the wait.
 
@@ -496,7 +498,58 @@ are recovered at any stage.
 A crash spends an attempt, so a job that kills a worker every time exhausts its
 budget rather than looping for ever.
 
-Two gaps are known and recorded rather than implied away. Nothing reaps the in-flight list, so a job abandoned by a killed worker stalls until an operator moves it; and requeueing an *agent* job is an operator decision, because re-running one produces a second reply to the customer. Ingestion and media jobs are genuinely idempotent — a stored file is not fetched again and a read one is not read again — so requeueing those is safe.
+### One customer message, one turn
+
+The queue delivers at least once, deliberately: a producer that published and then failed to
+commit leaves a job behind, and `InboundRecoveryWorker` re-derives the same work from the durable
+event rather than leaving a customer unanswered. What neither can say is whether two envelopes
+naming one conversation are two customers speaking or one customer's message arriving twice, and
+the answer used to be two of everything — two sentiment calls, two inferences, two tool loops, two
+replies on the phone, and a workspace billed for all of it (WQ-01).
+
+`agent_turns` is that identity. A turn is keyed on the inbound message it answers — not the
+conversation, because two messages are two turns and both are owed an answer — and every producer
+derives the key from the same row, so the webhook's job and the sweeper's job for one message are
+one turn. `UNIQUE(tenant_id, trigger_message_id)` decides it.
+
+The claim happens **before** the sentiment call, not at the send. An idempotency key on the reply
+alone would stop the second message and still pay for the second turn that produced it; the
+deterministic `agent-turn:<message>` key is kept as well, as the second line. Its three states
+draw the same distinction the reservation stages do: `claimed` carries a lease, because nothing
+has left the process and a worker that died before reaching a provider must hand its turn on;
+`engaged` carries none and is refused for ever.
+
+### What is recoverable, and what an operator decides
+
+Every producer whose Redis publish can fail now has something that re-derives the work from
+durable state. `inbound_recovery` covers agent and media work from `whatsapp_events`;
+`ingestion_recovery` covers documents from their own `pending` row, which was the one committed
+customer action that could require a job and then lose it permanently (WQ-03). That is also what
+makes `appendfsync everysec` an acceptable trade rather than a gap — see below.
+
+Requeueing an *agent* job remains an operator decision, because re-running one can produce a
+second reply. Ingestion and media jobs are genuinely idempotent — a stored file is not fetched
+again and a read one is not read again — so replaying those is safe. An `uncertain_delivery`
+record is never replayed by default on any queue, `--force` included: it means the customer may
+already have that reply, and recovering ordinary provider failures must not take it along (WQ-06).
+
+### Two decisions taken deliberately, not defects
+
+**Global FIFO, with no per-tenant fairness.** One workspace enqueuing a thousand turns puts every
+other workspace behind all of them: measured at 1,001 jobs, the quiet workspace was served at
+position 1,001. At real inference speed that is roughly an hour of delay for somebody else's
+customer. This is a product judgement rather than a reliability defect, and it is left as it is
+(WQ-09): plan limits bound how large a backlog can get, and `wasla_queue_oldest_pending_age_seconds`
+makes it visible. The first step if it ever bites is a **per-tenant concurrency cap** rather than a
+fairness scheduler — far less machinery, and it addresses the actual harm, which is one workspace
+occupying every worker at once.
+
+**`appendfsync everysec` on the queue store.** An unclean *host* crash can lose up to a second of
+Redis writes; a container restart flushes and loses nothing, which was measured. `always` would
+close that window at a throughput cost on every single write, and it is not worth paying: all
+three queues are re-derivable from durable database state now, so the second that could be lost
+converges rather than disappearing (WQ-10). The decision depends on the recovery sweepers
+existing — before `ingestion_recovery`, ingestion was genuinely exposed here.
 
 ## 15. Database architecture
 
