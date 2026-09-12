@@ -43,6 +43,12 @@ MAX_SAFE_AI_WHATSAPP_REPLY_CHARS: Final = 3_800
 ARABIC_CONTINUATION: Final = "لو حابب أكمل لك باقي التفاصيل قولي."
 ENGLISH_CONTINUATION: Final = "Let me know if you would like me to continue with the rest."
 
+# Sent when the model answered with no words at all, alongside a handoff.
+ARABIC_FALLBACK: Final = "شكرا لرسالتك. حد من فريقنا هيتواصل معاك في أقرب وقت."
+ENGLISH_FALLBACK: Final = (
+    "Thanks for your message. A member of our team will get back to you shortly."
+)
+
 # A sentence end is punctuation followed by whitespace, so the dot inside a URL,
 # a decimal or a domain name is not mistaken for one.
 _SENTENCE_END: Final = re.compile(r"[.!?\u061f\u06d4\u2026](?=\s)")
@@ -84,12 +90,27 @@ def prepare_channel_reply(text: str) -> ChannelReply:
     return ChannelReply(text=bounded, truncated=True, original_length=len(body))
 
 
+def fallback_reply(customer_text: str) -> str:
+    """What the customer is told when the model produced no reply at all (PD-3).
+
+    Neutral on purpose: it promises a person, because the worker hands the
+    conversation to one in the same breath, and it says nothing about why - a
+    customer is owed an answer, not a description of somebody's AI provider. In
+    the language the customer wrote in, since there is no reply to take it from.
+    """
+    return ARABIC_FALLBACK if _mostly_arabic(customer_text) else ENGLISH_FALLBACK
+
+
 def _continuation(text: str) -> str:
     """The offer to continue, in whichever script most of the reply is written in."""
+    return ARABIC_CONTINUATION if _mostly_arabic(text) else ENGLISH_CONTINUATION
+
+
+def _mostly_arabic(text: str) -> bool:
     sample = text[:MAX_SAFE_AI_WHATSAPP_REPLY_CHARS]
     arabic = sum(1 for character in sample if _is_arabic(character))
     latin = sum(1 for character in sample if character.isascii() and character.isalpha())
-    return ARABIC_CONTINUATION if arabic > latin else ENGLISH_CONTINUATION
+    return arabic > latin
 
 
 def _is_arabic(character: str) -> bool:

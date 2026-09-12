@@ -49,10 +49,12 @@ from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from typing import Final
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.agents.lifecycle import refusal_now
 from app.agents.orchestrator import AgentOrchestrator, plan_turn
 from app.agents.registry import ToolRegistry
-from app.agents.reply import prepare_channel_reply
+from app.agents.reply import fallback_reply, prepare_channel_reply
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
@@ -69,7 +71,7 @@ from app.integrations.openai.client import ResponsesClient, build_http_client
 from app.integrations.openai.embeddings import EmbeddingsClient
 from app.repositories.agent_repository import AgentRepository
 from app.repositories.agent_turn_repository import AgentTurnRepository
-from app.repositories.conversation_repository import ConversationRepository
+from app.repositories.conversation_repository import ConversationRepository, MessageRepository
 from app.services.entitlement_service import EntitlementService
 from app.services.inbox_service import InboxService
 from app.services.messaging_service import MessagingService
@@ -114,6 +116,13 @@ JOB_TYPE = "agent"
 QUOTA_HANDOFF_REASON: Final = (
     "AI_QUOTA_EXHAUSTED: this workspace's AI turn allowance for the billing period "
     "is used up, so a person needs to answer."
+)
+
+# What a colleague reads when the model answered with no words at all. The
+# customer has been told a person will follow up; this says why one must.
+EMPTY_RESPONSE_HANDOFF_REASON: Final = (
+    "AI_EMPTY_RESPONSE: the AI produced no reply, so the customer was told a colleague "
+    "will follow up."
 )
 
 # Deliberately shorter than the idempotent queues': the only failures this
@@ -639,13 +648,12 @@ class AgentWorker:
             await session.commit()
 
             reply = outcome.reply
-            if not reply:
+            ending = outcome.effective_outcome
+            if not reply and ending is not TurnOutcome.EMPTY_RESPONSE:
                 # Nothing to send - and never an unexplained nothing. A handoff,
-                # an escalation, a colleague who took over mid-turn or a model
-                # that produced no words is each recorded as what it was.
-                await self._complete_turn(
-                    job, outcome.effective_outcome, response_id=outcome.response_id
-                )
+                # an escalation or a colleague who took over mid-turn is each
+                # recorded as what it was.
+                await self._complete_turn(job, ending, response_id=outcome.response_id)
                 return
 
             # Everything a reply depends on, read again now, as columns (AI-06,
@@ -679,15 +687,60 @@ class AgentWorker:
                 settings=self._settings,
                 tenant_id=job.tenant_id,
             )
-            await messaging.send_text(
-                conversation_id=job.conversation_id,
-                # One message within WhatsApp's limit, shortened at a sentence
-                # with an offer to continue if the model ran long (AI-05).
-                body=prepare_channel_reply(reply).text,
-                origin=MessageOrigin.AGENT,
-                # Deterministic, and derived from the message being answered
-                # rather than generated here, so the same turn produces the same
-                # key however many times it is published (WQ-01).
-                idempotency_key=self._reply_key(job),
-            )
-        await self._complete_turn(job, TurnOutcome.REPLIED, response_id=outcome.response_id)
+            if reply:
+                await messaging.send_text(
+                    conversation_id=job.conversation_id,
+                    # One message within WhatsApp's limit, shortened at a sentence
+                    # with an offer to continue if the model ran long (AI-05).
+                    body=prepare_channel_reply(reply).text,
+                    origin=MessageOrigin.AGENT,
+                    # Deterministic, and derived from the message being answered
+                    # rather than generated here, so the same turn produces the
+                    # same key however many times it is published (WQ-01).
+                    idempotency_key=self._reply_key(job),
+                )
+                final = TurnOutcome.REPLIED
+            else:
+                await self._answer_emptiness(messaging, session, job)
+                final = TurnOutcome.EMPTY_RESPONSE
+        await self._complete_turn(job, final, response_id=outcome.response_id)
+
+    async def _answer_emptiness(
+        self,
+        messaging: MessagingService,
+        session: AsyncSession,
+        job: AgentJob,
+    ) -> None:
+        """A model that answered with nothing is not a turn that succeeded (PD-3).
+
+        It used to complete as though it had: no reply, no handoff, no signal, a
+        customer ignored and every alert green - a provider that began returning
+        refusal parts instead of text would have silenced every customer on the
+        platform at once. Now the customer is told, in their own language, that
+        a colleague will follow up, and a colleague is actually asked to: the
+        conversation is handed over with a reason that says the AI produced
+        nothing. Same idempotency key as a reply would carry, so a repeated turn
+        cannot send it twice.
+        """
+        latest = await MessageRepository(session, tenant_id=job.tenant_id).latest_inbound(
+            job.conversation_id
+        )
+        await messaging.send_text(
+            conversation_id=job.conversation_id,
+            body=fallback_reply((latest.body if latest is not None else None) or ""),
+            origin=MessageOrigin.AGENT,
+            idempotency_key=self._reply_key(job),
+        )
+        await InboxService(session=session, tenant_id=job.tenant_id).set_mode(
+            conversation_id=job.conversation_id,
+            mode=ConversationMode.HUMAN,
+            handoff_reason=EMPTY_RESPONSE_HANDOFF_REASON,
+            source=AnalyticsSource.SYSTEM,
+        )
+        logger.warning(
+            "agent.empty_response",
+            extra={
+                "event": "agent.empty_response",
+                "conversation_id": str(job.conversation_id),
+            },
+        )

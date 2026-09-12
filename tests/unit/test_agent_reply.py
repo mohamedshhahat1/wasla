@@ -10,8 +10,11 @@ import unicodedata
 
 from app.agents.reply import (
     ARABIC_CONTINUATION,
+    ARABIC_FALLBACK,
     ENGLISH_CONTINUATION,
+    ENGLISH_FALLBACK,
     MAX_SAFE_AI_WHATSAPP_REPLY_CHARS,
+    fallback_reply,
     prepare_channel_reply,
 )
 from app.core.config import Settings
@@ -134,3 +137,21 @@ def test_the_same_reply_is_always_shortened_the_same_way() -> None:
 def test_the_backfilled_agent_ceiling_matches_the_deployment_default() -> None:
     """Migration 0060 and the model default restate a configured number; pin it."""
     assert Settings.model_fields["openai_max_output_tokens"].default == DEFAULT_MAX_OUTPUT_TOKENS
+
+
+def test_a_customer_writing_arabic_is_told_in_arabic_that_a_colleague_will_follow_up() -> None:
+    assert fallback_reply("عايز اعرف الأسعار لو سمحت") == ARABIC_FALLBACK
+
+
+def test_a_customer_writing_english_is_told_in_english() -> None:
+    assert fallback_reply("Do you finish apartments?") == ENGLISH_FALLBACK
+
+
+def test_a_mixed_message_follows_the_script_most_of_it_is_in() -> None:
+    assert fallback_reply("عايز اعرف سعر تشطيب الشقة 150 متر please") == ARABIC_FALLBACK
+
+
+def test_a_message_with_no_words_is_answered_in_english() -> None:
+    assert fallback_reply("") == ENGLISH_FALLBACK
+    assert len(ARABIC_FALLBACK) < 200
+    assert len(ENGLISH_FALLBACK) < 200
