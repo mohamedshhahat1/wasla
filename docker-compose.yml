@@ -130,7 +130,7 @@ services:
   # container running for nothing. Bring it up deliberately:
   #
   #   docker compose --profile objectstore up -d minio
-  #   docker run --rm --network host --entrypoint sh minio/mc:latest -c \
+  #   docker run --rm --network host --entrypoint sh quay.io/minio/mc:latest -c \
   #     "mc alias set local http://localhost:9100 wasla-media wasla-media-secret && \
   #      mc mb --ignore-existing local/wasla-media"
   #
@@ -141,7 +141,7 @@ services:
   # in, and are therefore not secrets. Nothing in this stack is reachable from
   # outside the host.
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     profiles: ["objectstore"]
     environment:
       MINIO_ROOT_USER: wasla-media

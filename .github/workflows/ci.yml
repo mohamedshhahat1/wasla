@@ -119,13 +119,13 @@ jobs:
           docker run -d --name minio -p 9100:9000 \
             -e MINIO_ROOT_USER=wasla-media \
             -e MINIO_ROOT_PASSWORD=wasla-media-secret \
-            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
           for _ in $(seq 1 30); do
             curl -sf http://localhost:9100/minio/health/live && break
             sleep 2
           done
           curl -sf http://localhost:9100/minio/health/live
-          docker run --rm --network host --entrypoint sh minio/mc:RELEASE.2025-04-16T18-13-26Z -c \
+          docker run --rm --network host --entrypoint sh quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z -c \
             "mc alias set ci http://localhost:9100 wasla-media wasla-media-secret && \
              mc mb --ignore-existing ci/wasla-media"
 
