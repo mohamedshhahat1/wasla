@@ -194,6 +194,63 @@ class FakeQueueRedis:
         self.strings.clear()
         return True
 
+    def register_script(self, source: str) -> FakeScript:
+        """A callable standing in for a server-side script.
+
+        Emulated rather than interpreted, for the same reason every other
+        command here is: this file keeps real state so the semantics the
+        production code relies on are the semantics under test, and a Lua
+        interpreter would be a much larger thing to keep true than four
+        operations applied together.
+
+        What it must preserve is the property the script exists for -
+        all-or-nothing - and it does: nothing here awaits, so no other
+        coroutine can observe a half-applied transition. The *real* script is
+        exercised against a real Redis in
+        `tests/integration/test_dead_letter_atomicity.py`, which is where an
+        error in the Lua itself would be caught.
+        """
+        return FakeScript(self, source)
+
+
+class FakeScript:
+    """The scripts the queues register, applied against the fake's own state.
+
+    Which transition this is comes from the source, because the two differ only
+    in their last step - a record pushed onto a list, or an envelope scored into
+    a sorted set - and everything before that is identical.
+    """
+
+    def __init__(self, redis: FakeQueueRedis, source: str) -> None:
+        self._redis = redis
+        self._source = source
+
+    async def __call__(self, *, keys: list[str], args: list[Any]) -> int:
+        inflight, reservations, destination = keys
+        raw, payload, third = args[0], args[1], args[2]
+
+        entries = self._redis.lists.get(inflight)
+        if not entries or raw not in entries:
+            # `LREM` removed nothing: somebody else owns this entry, and the
+            # early return is what makes the outcome exactly-once.
+            return 0
+        entries.remove(raw)
+
+        fields = self._redis.strings.get(reservations)
+        if fields:
+            fields.pop(raw, None)
+
+        if "ZADD" in self._source:
+            self._redis.zsets.setdefault(destination, {})[payload] = float(third)
+            return 1
+
+        records = self._redis.lists.setdefault(destination, [])
+        records.append(payload)
+        limit = int(third)
+        if limit and len(records) > limit:
+            del records[: len(records) - limit]
+        return 1
+
 
 class FailingRedis(FakeQueueRedis):
     """Refuses whichever commands a test names, to prove nothing depends on them.

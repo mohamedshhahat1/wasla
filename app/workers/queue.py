@@ -124,6 +124,51 @@ RECOVERY_SCAN_LIMIT: Final = 128
 DEAD_LETTER_LIMIT: Final = 1_000
 
 
+# The terminal transition, as one atomic server-side operation (WQ-13).
+#
+# `LREM ... 1 ...` is the claim, exactly as it is everywhere else in this
+# module: it returns how many entries it removed, so exactly one caller can ever
+# get a 1 for a given entry. Returning early on 0 is what keeps the record
+# exactly-once - a second call for the same reservation writes nothing.
+#
+# The trim keeps the *newest* records: an incident is diagnosed from what just
+# happened, and a negative-index trim needs no length read so it cannot race a
+# concurrent push the way read-then-trim would.
+#
+# A script either runs to completion or does not run at all, so a Redis failure
+# around this leaves the entry in flight and recoverable rather than leaving a
+# job terminal with its evidence missing.
+DEAD_LETTER_SCRIPT: Final = """
+local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
+if removed == 0 then
+  return 0
+end
+redis.call('HDEL', KEYS[2], ARGV[1])
+redis.call('RPUSH', KEYS[3], ARGV[2])
+redis.call('LTRIM', KEYS[3], -tonumber(ARGV[3]), -1)
+return 1
+"""
+
+
+# The retry transition, as one atomic server-side operation.
+#
+# The same shape as the dead-letter script above and for a sharper reason. The
+# claim and the reschedule used to be two round trips, and a Redis failure
+# between them took the entry off the in-flight list without putting it in the
+# delayed set - so the job was not merely missing its evidence, it was gone. One
+# script means either the job moves to `delayed`, or it stays in flight where a
+# reaper will find it.
+RETRY_SCRIPT: Final = """
+local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
+if removed == 0 then
+  return 0
+end
+redis.call('HDEL', KEYS[2], ARGV[1])
+redis.call('ZADD', KEYS[3], tonumber(ARGV[3]), ARGV[2])
+return 1
+"""
+
+
 async def _command[T](result: Awaitable[T] | T) -> T:
     """Await a redis-py command result.
 
@@ -474,6 +519,12 @@ class ReliableQueue:
         # memory deliberately: it is a property of this process's liveness, and
         # a process that dies should stop renewing.
         self._held: set[str] = set()
+        # Registered once per queue instance. redis-py caches the SHA and
+        # falls back to a full EVAL when the server has forgotten it, so a
+        # Redis restart between registration and use costs one extra round
+        # trip rather than an error.
+        self._dead_letter_script = redis.register_script(DEAD_LETTER_SCRIPT)
+        self._retry_script = redis.register_script(RETRY_SCRIPT)
 
     @property
     def namespace(self) -> str:
@@ -663,24 +714,40 @@ class ReliableQueue:
         the worker still holding the job may reschedule it, so a second call
         for the same reservation adds nothing.
         """
-        if not await self._claim_inflight(raw):
-            return False
-        await self._forget_reservation(raw)
-        await self._schedule(envelope, category=category, delay_seconds=delay_seconds, now=now)
-        return True
+        return await self._schedule(
+            raw, envelope, category=category, delay_seconds=delay_seconds, now=now
+        )
 
     async def _schedule(
         self,
+        raw: str,
         envelope: JobEnvelope,
         *,
         category: FailureCategory,
         delay_seconds: float,
         now: datetime | None = None,
-    ) -> None:
+    ) -> bool:
+        """Move one in-flight entry to the delayed set, or answer False.
+
+        Claim, reservation delete and reschedule in one script. Two round trips
+        left a window in which the entry had been removed from the in-flight
+        list and had not yet reached the delayed set, which loses the job
+        outright rather than merely losing a record - the sharper version of
+        WQ-13, on the path a healthy retry takes.
+        """
         moment = now or datetime.now(UTC)
         follow_up = envelope.next_attempt(category=category, now=moment)
         due_at = moment.timestamp() + max(0.0, delay_seconds)
-        await _command(self._redis.zadd(self._delayed, {follow_up.encode(): due_at}))
+        taken = await _command(
+            self._retry_script(
+                keys=[self._inflight, self._reservations, self._delayed],
+                args=[raw, follow_up.encode(), due_at],
+            )
+        )
+        claimed = bool(taken)
+        if claimed:
+            self._held.discard(raw)
+        return claimed
 
     async def dead_letter(self, raw: str, record: DeadLetterRecord) -> bool:
         """Record a terminal failure. Returns whether this call was the one.
@@ -691,19 +758,34 @@ class ReliableQueue:
         finds nothing and the second record is never pushed. Without that check
         a retry of the dead-letter path itself — a `dead_letter` that raised on
         the `rpush`, say — would double every entry an operator counts.
-        """
-        if not await self._claim_inflight(raw):
-            return False
-        await self._forget_reservation(raw)
-        await self._record_dead_letter(record)
-        return True
 
-    async def _record_dead_letter(self, record: DeadLetterRecord) -> None:
-        await _command(self._redis.rpush(self._failed, record.encode()))
-        # Newest kept. A negative-index trim is one command and needs no length
-        # read, so it cannot race with a concurrent push the way read-then-trim
-        # would.
-        await _command(self._redis.ltrim(self._failed, -DEAD_LETTER_LIMIT, -1))
+        **One script, because the ordering had a cost.** The four effects here
+        are a claim, a reservation delete, a record push and a trim, and they
+        used to be four round trips in that order. The order was deliberate and
+        right - claiming first is what makes the record exactly-once, and
+        recording first would double-count - but it left a window: a Redis
+        failure after the claim and before the push made the job terminal and
+        the evidence missing, so `wasla_queue_dead_letter_jobs` under-counted by
+        one and the operator had only a log line (WQ-13).
+
+        Sending them as one server-side script closes it without reordering
+        anything. Either the whole transition happens, or none of it does and
+        the entry is still in flight for a reaper to find - which is the same
+        pair of outcomes every other transition in this module already offers.
+        """
+        kept = await _command(
+            self._dead_letter_script(
+                keys=[self._inflight, self._reservations, self._failed],
+                args=[raw, record.encode(), DEAD_LETTER_LIMIT],
+            )
+        )
+        claimed = bool(kept)
+        if claimed:
+            # Only on success: a caller that lost the claim never held the entry
+            # in the first place, and discarding it here would let a lease
+            # renewal stop covering a job this process is still working on.
+            self._held.discard(raw)
+        return claimed
 
     # ------------------------------------------------------------- recovery
 
@@ -823,27 +905,32 @@ class ReliableQueue:
                 and policy.should_retry(category, attempt=envelope.attempt)
             )
 
-            if not await self._claim_inflight(raw):
-                # Another reaper got there first. Nothing to undo: it has not
-                # been requeued or recorded by us, and it will be by them.
-                continue
-            await self._forget_reservation(raw)
-
+            # The claim now lives inside whichever transition this is, because
+            # each of them is one atomic script and the claim is its first
+            # statement. A reaper that lost the race is told by the script
+            # answering 0, exactly as it used to be told by `LREM` answering 0.
+            action: Literal["requeued", "quarantined"]
             if requeue:
-                await self._schedule(
+                if not await self._schedule(
+                    raw,
                     envelope,
                     category=category,
                     delay_seconds=policy.delay_for(envelope.attempt, jitter=jitter),
                     now=moment,
-                )
-                action: Literal["requeued", "quarantined"] = "requeued"
+                ):
+                    # Another reaper got there first. Nothing to undo: it has
+                    # not been requeued or recorded by us, and it will be by
+                    # them.
+                    continue
+                action = "requeued"
             else:
                 # Identified here rather than left in the opaque body, because
                 # the runbook step for a quarantined turn is "open the
                 # conversation" - and an operator should not have to parse a
                 # nested JSON string to find out which one.
                 tenant, subject = self.identify(envelope.body)
-                await self._record_dead_letter(
+                if not await self.dead_letter(
+                    raw,
                     DeadLetterRecord(
                         queue=self._namespace,
                         job_type=self.label,
@@ -856,8 +943,9 @@ class ReliableQueue:
                         last_attempted_at=reservation.reserved_at,
                         dead_lettered_at=moment,
                         body=envelope.body,
-                    )
-                )
+                    ),
+                ):
+                    continue
                 action = "quarantined"
 
             outcomes.append(

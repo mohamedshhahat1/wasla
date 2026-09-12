@@ -13,8 +13,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from app.workers.ai_worker import AGENT_RETRY
 from app.workers.queue import (
     DEAD_LETTER_LIMIT,
+    DEFAULT_VISIBILITY_TIMEOUT_SECONDS,
     AgentJob,
     AgentQueue,
     DeadLetterRecord,
@@ -458,3 +460,85 @@ async def test_the_oldest_pending_age_measures_the_head_of_the_queue() -> None:
 async def test_an_empty_queue_has_no_oldest_age_rather_than_a_zero_one() -> None:
     """Zero would read as "nothing is waiting long", which is a different claim."""
     assert await AgentQueue(as_redis(FakeQueueRedis())).oldest_pending_age_seconds(now=NOW) is None
+
+
+# ----------------------------- byte-identical reservations fail safe, WQ-08
+
+
+async def test_two_byte_identical_payloads_share_one_reservation_record() -> None:
+    """The structural property, stated rather than discovered again.
+
+    The reservation hash is keyed by the exact payload, so two in-flight copies
+    of identical bytes share one record. Everything that follows from that is
+    recorded here because it is a property of the data structure rather than a
+    guarded invariant, and a future change that made it reachable should fail a
+    test rather than surprise somebody (WQ-08).
+
+    It is nearly unreachable today: `JobEnvelope.wrap` stamps `enqueued_at` at
+    microsecond resolution, so two publications of one job differ. This test
+    forces the collision by pinning that clock, which is the only way to reach
+    it at all.
+    """
+    redis = FakeQueueRedis()
+    queue = AgentQueue(as_redis(redis), namespace="agent:jobs")
+
+    body = AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION).encode()
+    await queue.enqueue_body(body, now=NOW)
+    await queue.enqueue_body(body, now=NOW)
+
+    first = await queue.reserve(wait_seconds=1, now=NOW)
+    second = await queue.reserve(wait_seconds=1, now=NOW)
+    assert first == second, "the collision under test needs the two to be identical bytes"
+
+    assert await queue.inflight_depth() == 2
+    assert len(redis.strings[f"{INFLIGHT[: -len(":inflight")]}:reservations"]) == 1
+
+
+async def test_the_orphan_of_a_shared_reservation_is_never_silently_repeated() -> None:
+    """Why WQ-08 is closed by design rather than fixed.
+
+    Releasing one copy removes the shared reservation, orphaning the other: an
+    in-flight entry with no reservation record. That is not a new state - it is
+    the same `UNKNOWN` stage a worker that died between `BLMOVE` and `HSET`
+    leaves - and recovery already has an answer for it. On a queue that is not
+    idempotent the answer is quarantine, so the orphan becomes a dead letter an
+    operator reads rather than a second reply on a customer's phone.
+
+    Every consequence of the collision therefore fails in the safe direction,
+    which is why this is recorded and not redesigned. Since WQ-01 there is a
+    second line under it as well: two envelopes for one customer message are one
+    logical turn, so even a repeat that got past here would find the turn owned.
+    """
+    redis = FakeQueueRedis()
+    queue = AgentQueue(as_redis(redis), namespace="agent:jobs")
+
+    body = AgentJob(tenant_id=TENANT, conversation_id=CONVERSATION).encode()
+    await queue.enqueue_body(body, now=NOW)
+    await queue.enqueue_body(body, now=NOW)
+    raw = await queue.reserve(wait_seconds=1, now=NOW)
+    await queue.reserve(wait_seconds=1, now=NOW)
+    assert raw is not None
+
+    # One copy finishes, taking the shared reservation with it.
+    assert await queue.release(raw) is True
+    assert await queue.inflight_depth() == 1
+    assert redis.strings.get(f"{INFLIGHT[: -len(":inflight")]}:reservations", {}) == {}
+
+    # The orphan is *adopted* rather than stranded: an in-flight entry with no
+    # reservation gets one starting now, so the next pass judges it by the same
+    # rule every other entry is judged by. That costs one visibility timeout and
+    # is why this first call recovers nothing.
+    later = NOW + timedelta(seconds=1)
+    assert await queue.recover_expired(policy=AGENT_RETRY, now=later) == []
+    assert await queue.inflight_depth() == 1
+
+    # One timeout later it is judged. `UNKNOWN` on a non-idempotent queue is not
+    # safe to repeat, so it is quarantined rather than sent a second time.
+    outcomes = await queue.recover_expired(
+        policy=AGENT_RETRY,
+        now=later + timedelta(seconds=DEFAULT_VISIBILITY_TIMEOUT_SECONDS + 1),
+    )
+    assert [outcome.action for outcome in outcomes] == ["quarantined"]
+    assert [outcome.category for outcome in outcomes] == [FailureCategory.UNCERTAIN_DELIVERY]
+    assert await queue.depth() == 0, "a second copy must never go back on the queue"
+    assert await queue.failed_depth() == 1
