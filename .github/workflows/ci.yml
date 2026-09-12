@@ -291,24 +291,25 @@ jobs:
             exit 1
           fi
 
-      - name: Lifecycle suites against the migrated schema
-        # The endpoints AUTH-01 broke, plus the workspace lifecycle, plus the
-        # committed-transaction races. Run against the schema production has,
-        # which is the only run of them that can prove anything about it.
-        run: |
-          pytest -q -rs \
-            tests/integration/test_account_lifecycle.py \
-            tests/integration/test_account_self_deletion.py \
-            tests/integration/test_workspace_lifecycle.py \
-            tests/integration/test_workspace_billing_lifecycle.py \
-            tests/integration/test_workspace_entitlements.py \
-            tests/integration/test_workspace_purge.py \
-            tests/integration/test_orphan_workspace.py \
-            tests/integration/test_google_reauth.py \
-            tests/integration/test_lifecycle_concurrency.py \
-            tests/integration/test_audit_trail.py \
-            tests/integration/test_route_authorization.py \
-            tests/e2e/test_account_and_workspace_lifecycle.py
+      - name: Every integration and end-to-end suite against the migrated schema
+        # Was a hand-listed selection of twelve files, and the list is what went
+        # wrong. It was chosen when AUTH-01 was the failure being prevented, so
+        # it named the lifecycle endpoints and nothing else - and the entire
+        # billing family, 210 tests, was never once executed against the plan
+        # catalogue a deployment actually has. 166 of them failed the moment
+        # somebody tried it (WQ-04).
+        #
+        # A list cannot be maintained against that: nobody adding a test thinks
+        # to ask which CI job covers the schema production runs. So the scope is
+        # now "everything that touches a database", and a file added tomorrow is
+        # covered by default rather than by remembering.
+        #
+        # It costs about twenty minutes, in its own job, in parallel with the
+        # model-built run. That is the price of the guarantee, and it is worth
+        # paying: the model-built schema agrees with the models *by
+        # construction*, so it is structurally incapable of catching a
+        # difference between the models and the migrations.
+        run: pytest -q -rs tests/integration tests/e2e
 
   monitoring:
     name: Alert rules and receivers

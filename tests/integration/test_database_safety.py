@@ -55,14 +55,20 @@ def _table_exists(url: str, table: str) -> bool:
 
 
 @pytest.fixture
-def canary(database_url: str) -> Iterator[tuple[str, str]]:
-    """A real database standing in for a developer's working copy.
+def scratch(database_url: str) -> Iterator[tuple[str, str]]:
+    """A disposable database of this test's own, with one table in it.
 
-    Built beside the run's own test database on the same server, with one table
-    in it whose survival is the assertion. Dropped afterwards however the test
-    ends.
+    Built beside the run's own test database on the same server and dropped
+    afterwards however the test ends. Two tests use it for opposite reasons: one
+    names it in `DATABASE_URL` and asserts the table *survives*, and the other
+    names it in `TEST_DATABASE_URL` and lets the child run destroy it.
+
+    Never the database this run is itself using, and that is not fastidiousness
+    - the child process builds a schema and drops it at teardown, so pointing it
+    at the parent's database would delete the schema out from under the suite
+    that spawned it. (It did, once, which is how this fixture came to exist.)
     """
-    name = f"wasla_wq_canary_{uuid.uuid4().hex[:8]}"
+    name = f"wasla_wq_scratch_{uuid.uuid4().hex[:8]}"
     administrative = database_url.rsplit("/", 1)[0] + "/postgres"
     target = database_url.rsplit("/", 1)[0] + "/" + name
     marker = "developers_working_copy"
@@ -147,7 +153,7 @@ ASKS_FOR_THE_DESTRUCTIVE_FIXTURE = textwrap.dedent('''
 
 
 def test_the_application_database_alone_is_refused_before_anything_connects(
-    canary: tuple[str, str],
+    scratch: tuple[str, str],
 ) -> None:
     """The finding, stated as the behaviour that replaced it.
 
@@ -162,7 +168,7 @@ def test_the_application_database_alone_is_refused_before_anything_connects(
     afterwards, which is only possible if nothing ever reached
     `DROP SCHEMA public CASCADE`.
     """
-    url, marker = canary
+    url, marker = scratch
 
     result = _run({"DATABASE_URL": url}, test_body=ASKS_FOR_THE_DESTRUCTIVE_FIXTURE)
     output = result.stdout + result.stderr
@@ -178,20 +184,17 @@ def test_the_application_database_alone_is_refused_before_anything_connects(
     ), "the run destroyed the schema of the database DATABASE_URL named"
 
 
-def test_a_dedicated_test_database_is_accepted() -> None:
+def test_a_dedicated_test_database_is_accepted(scratch: tuple[str, str]) -> None:
     """The other side of it: the supported configuration still works.
 
-    Uses whatever database this very run was given, which is by definition one
-    somebody named on purpose for testing.
+    Deliberately *not* the database this run is using. The child builds a schema
+    and drops it at teardown, so naming the parent's database here would delete
+    the schema out from under the suite that spawned it - which is exactly the
+    class of accident this whole file is about.
     """
-    configured = os.environ.get("TEST_DATABASE_URL")
-    if not configured:
-        pytest.skip("No PostgreSQL URL configured; set TEST_DATABASE_URL to run these tests.")
+    url, _ = scratch
 
-    result = _run(
-        {"TEST_DATABASE_URL": configured},
-        test_body=ASKS_FOR_THE_DESTRUCTIVE_FIXTURE,
-    )
+    result = _run({"TEST_DATABASE_URL": url}, test_body=ASKS_FOR_THE_DESTRUCTIVE_FIXTURE)
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     assert "1 passed" in output
