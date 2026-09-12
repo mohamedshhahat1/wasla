@@ -73,7 +73,9 @@ def upgrade() -> None:
     # What is left is a human reply or an agent reply, and `sent_by_id`
     # distinguishes those correctly - it was only the two cases above that made
     # it unreliable.
-    op.execute("UPDATE messages SET origin = 'human' WHERE origin IS NULL AND sent_by_id IS NOT NULL")
+    op.execute(
+        "UPDATE messages SET origin = 'human' WHERE origin IS NULL AND sent_by_id IS NOT NULL"
+    )
     op.execute("UPDATE messages SET origin = 'agent' WHERE origin IS NULL")
 
     op.alter_column("messages", "origin", nullable=False)
