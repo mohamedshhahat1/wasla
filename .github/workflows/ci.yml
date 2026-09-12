@@ -88,6 +88,11 @@ jobs:
       ENVIRONMENT: test
       LOG_FORMAT: json
       DATABASE_URL: postgresql+asyncpg://wasla:wasla@localhost:5432/wasla_test
+      # The database-backed suites take no variable but this one, by design:
+      # they begin by dropping the public schema of whatever they are given,
+      # and `DATABASE_URL` is usually a database something is running against.
+      # Here both name the same throwaway service container, deliberately.
+      TEST_DATABASE_URL: postgresql+asyncpg://wasla:wasla@localhost:5432/wasla_test
       REDIS_URL: redis://localhost:6379/0
       # CI-only value. Never used by any deployed environment.
       JWT_SECRET: continuous-integration-secret-value-not-for-deployment
