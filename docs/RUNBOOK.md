@@ -422,6 +422,38 @@ docker inspect <container> --format '{{index .Config.Labels "org.opencontainers.
 
 Every published image carries its commit, version and build time as OCI labels.
 
+### Check the workers are actually running
+
+`docker compose ps` showing green services is not the same as every worker
+running, and the difference is easy to misread: a service that never started has
+no row at all, so two healthy containers beside a missing one looks like two
+healthy containers.
+
+```bash
+docker compose ps                       # is there a worker row at all?
+docker compose exec worker scripts/entrypoint.sh worker-health
+docker compose logs worker | grep worker.startup
+```
+
+`worker-health` is the container's own `HEALTHCHECK`: it asks Redis whether
+every loop this container is configured to run has beaten recently, and exits
+non-zero if any has not. `worker.startup` names the kinds the process actually
+started, which is what catches a `WORKER_KINDS` that no longer selects a loop -
+a different failure from a crash, and one the logs are the only place to see.
+
+**A worker that refuses to boot is usually configuration.** `Settings` validates
+at startup and the container exits rather than running half-configured, so the
+first line of `docker compose logs worker` names the variable. The commonest one
+locally is `JWT_SECRET`, which must be at least 32 random characters:
+
+```bash
+python -c 'import secrets; print(secrets.token_urlsafe(48))'
+```
+
+In a deployment, `WorkerLoopNotBeating` is what tells you this without anyone
+having to look — see the symptom section above. Locally there is no alerting, so
+this is the check.
+
 ### Rotate a secret
 
 | Secret | Effect | Procedure |
