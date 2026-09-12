@@ -43,6 +43,7 @@ from app.workers.heartbeat import (
     all_alive,
 )
 from app.workers.inbound_recovery import InboundRecoveryWorker
+from app.workers.ingestion_recovery import IngestionRecoveryWorker
 from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_worker import MediaWorker
 from app.workers.purge_worker import PurgeWorker
@@ -74,6 +75,11 @@ UPLOADS: Final = "uploads"
 # and a deployment running neither has two different silent failures rather
 # than one (ADR-102).
 INBOUND_RECOVERY: Final = "inbound_recovery"
+# The sweep that finishes uploads whose ingestion job never reached Redis.
+# Named apart from `inbound_recovery` for the same reason that one is named
+# apart from `recovery`: they cover different producers, and a deployment
+# running two of the three has a silent failure rather than none (WQ-03).
+INGESTION_RECOVERY: Final = "ingestion_recovery"
 # Media comes before agent deliberately. It is the order the work flows in -
 # a file is read, then answered - and the order the log lines appear in at
 # startup, which is worth having match. Billing and email come last: billing
@@ -107,6 +113,7 @@ ALL_KINDS: Final = (
     EMAIL,
     RECOVERY,
     INBOUND_RECOVERY,
+    INGESTION_RECOVERY,
     RETENTION,
     PURGE,
     UPLOADS,
@@ -190,6 +197,10 @@ def build_workers(
             workers.append(RecoveryWorker(redis=redis, settings=settings))
         elif kind == INBOUND_RECOVERY:
             workers.append(InboundRecoveryWorker(database=database, redis=redis, settings=settings))
+        elif kind == INGESTION_RECOVERY:
+            workers.append(
+                IngestionRecoveryWorker(database=database, redis=redis, settings=settings)
+            )
         elif kind == RETENTION:
             workers.append(RetentionWorker(database=database, settings=settings))
         elif kind == PURGE:

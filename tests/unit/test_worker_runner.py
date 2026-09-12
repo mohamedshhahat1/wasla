@@ -18,6 +18,7 @@ from app.workers.billing_worker import BillingWorker
 from app.workers.campaign_worker import CampaignWorker
 from app.workers.follow_up_worker import FollowUpWorker
 from app.workers.inbound_recovery import InboundRecoveryWorker
+from app.workers.ingestion_recovery import IngestionRecoveryWorker
 from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_worker import MediaWorker
 from app.workers.purge_worker import PurgeWorker
@@ -151,6 +152,11 @@ def test_each_kind_builds_its_own_worker(settings: Settings) -> None:
         # never reached Redis, so a deployment running it nowhere answers 200
         # to customer messages nothing will ever pick up (ADR-102).
         InboundRecoveryWorker,
+        # Ingestion recovery for the third of those failures: a document
+        # committed while Redis was refusing is `PENDING` for ever with nobody
+        # told, and until this loop existed nothing in the deployment called
+        # `list_pending` for documents at all (WQ-03).
+        IngestionRecoveryWorker,
         # Retention is present by the same rule: a deployment that had to name
         # it is one where forgetting to is a media store that grows for ever
         # with nothing to say so. It removes nothing until MEDIA_RETENTION_DAYS

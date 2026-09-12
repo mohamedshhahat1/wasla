@@ -531,3 +531,131 @@ tests:
               description: >-
                 Work has stopped being retried and is waiting for a person. Inspect it with `python -m app.workers.queues dead-letters <queue>`. Replaying the agent queue is refused without --force on purpose: a turn that failed after the provider was engaged may already have sent the customer a reply.
               runbook: docs/RUNBOOK.md
+
+  # ------------------------------------------------- worker heartbeats, WQ-05
+  - interval: 30s
+    name: every worker kind beating does not alert
+    input_series:
+      - series: 'wasla_worker_heartbeat_alive{job="wasla-api", kind="agent"}'
+        values: "1+0x200"
+      - series: 'wasla_worker_heartbeat_alive{job="wasla-api", kind="recovery"}'
+        values: "1+0x200"
+      - series: 'wasla_worker_heartbeat_alive{job="wasla-api", kind="ingestion_recovery"}'
+        values: "1+0x200"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: WorkerLoopNotBeating
+        exp_alerts: []
+
+  - interval: 30s
+    name: a worker that misses one beat does not alert before the for duration
+    input_series:
+      # Alive, then a two-minute gap in the heartbeat, then alive again - a
+      # container restart, or one slow Redis round trip. The `for: 5m` is what
+      # separates that from a worker that is gone.
+      - series: 'wasla_worker_heartbeat_alive{job="wasla-api", kind="agent"}'
+        values: "1+0x20 0+0x4 1+0x200"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: WorkerLoopNotBeating
+        exp_alerts: []
+
+  - interval: 30s
+    name: a worker kind that stops beating alerts
+    input_series:
+      - series: 'wasla_worker_heartbeat_alive{job="wasla-api", kind="recovery"}'
+        values: "1+0x10 0+0x200"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: WorkerLoopNotBeating
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: WorkerLoopNotBeating
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: workers
+              kind: recovery
+            exp_annotations:
+              summary: "The recovery worker loop has stopped beating"
+              description: >-
+                A worker kind has not refreshed its liveness key inside its expiry, so either the worker container is not running, its event loop is blocked, or WORKER_KINDS no longer selects this loop. Nothing this kind is responsible for is being done. If it is `recovery`, the deployment currently has no crash recovery at all; if it is `inbound_recovery` or `ingestion_recovery`, work lost to a Redis outage is no longer being repaired. Check the worker container's health and logs.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 30s
+    name: a worker kind that never started is a zero rather than a gap
+    input_series:
+      # The case §33 of the remediation brief insists on. The exposition
+      # iterates the whole worker inventory and publishes 0 for a kind that has
+      # never beaten, so "the container was deployed without this loop" reaches
+      # the rule as a zero series rather than as an absent one - which an
+      # expression matching only stale series would have missed entirely.
+      - series: 'wasla_worker_heartbeat_alive{job="wasla-api", kind="ingestion_recovery"}'
+        values: "0+0x200"
+      - series: 'wasla_worker_heartbeat_alive{job="wasla-api", kind="agent"}'
+        values: "1+0x200"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: WorkerLoopNotBeating
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: workers
+              kind: ingestion_recovery
+            exp_annotations:
+              summary: "The ingestion_recovery worker loop has stopped beating"
+              description: >-
+                A worker kind has not refreshed its liveness key inside its expiry, so either the worker container is not running, its event loop is blocked, or WORKER_KINDS no longer selects this loop. Nothing this kind is responsible for is being done. If it is `recovery`, the deployment currently has no crash recovery at all; if it is `inbound_recovery` or `ingestion_recovery`, work lost to a Redis outage is no longer being repaired. Check the worker container's health and logs.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 30s
+    name: one replica reading stale does not hide a kind the other says is alive
+    input_series:
+      # Two API replicas render the same gauge from the same Redis keys. `min
+      # by (kind)` is what makes a genuine death visible through that, and it is
+      # also what could make a single replica's blip fire - so both replicas
+      # disagreeing briefly is asserted not to alert.
+      - series: 'wasla_worker_heartbeat_alive{job="wasla-api", instance="a", kind="billing"}'
+        values: "1+0x200"
+      - series: 'wasla_worker_heartbeat_alive{job="wasla-api", instance="b", kind="billing"}'
+        values: "1+0x20 0+0x4 1+0x200"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: WorkerLoopNotBeating
+        exp_alerts: []
+
+  # --------------------------------------------- unindexed documents, WQ-03
+  - interval: 30s
+    name: a document indexed promptly does not alert
+    input_series:
+      # Uploaded, pending for a couple of minutes, indexed. The ordinary life
+      # of every document, and the reason this rule is on age rather than on
+      # existence.
+      - series: 'wasla_oldest_pending_document_age_seconds{job="wasla-api"}'
+        values: "0+30x8 0+0x200"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: UnindexedDocumentBacklog
+        exp_alerts: []
+
+  - interval: 30s
+    name: a document nobody indexed for half an hour alerts
+    input_series:
+      - series: 'wasla_oldest_pending_document_age_seconds{job="wasla-api"}'
+        values: "0+30x200"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: UnindexedDocumentBacklog
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: UnindexedDocumentBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: workers
+              job: wasla-api
+            exp_annotations:
+              summary: "An uploaded document has been unsearchable for over half an hour"
+              description: >-
+                A customer uploaded a document successfully and it is still not indexed, so no agent can answer from it and nobody has been told. The content is not lost. Check that a worker process is running both the ingestion and ingestion_recovery loops and that Redis is reachable from it; list the backlog with `python -m app.workers.queues unindexed-documents`.
+              runbook: docs/RUNBOOK.md

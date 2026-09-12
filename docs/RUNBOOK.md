@@ -72,6 +72,49 @@ If the backlog is **not** shrinking:
 
 **Do not replay the webhook.** Recovery re-derives rather than replays for a reason: replaying would re-project the message, re-cancel its follow-ups and re-meter the delivery. Running the sweeper twice is safe; feeding Meta's payload back in is not.
 
+### An uploaded document is never searchable
+
+**Alert:** `UnindexedDocumentBacklog`. **Metrics:** `wasla_pending_documents`, `wasla_oldest_pending_document_age_seconds`.
+
+Somebody uploaded a document successfully and no agent can answer from it. Almost always Redis was unavailable at the moment the upload committed: `KnowledgeService` logs that failure and swallows it, deliberately, because failing the request would throw away a document the customer had already given us.
+
+**Nothing is lost.** The row and its text are in `documents` with `status = 'pending'`, and `IngestionRecoveryWorker` re-queues it. The alert fires on *age* rather than existence, because every healthy upload is `pending` for a few seconds.
+
+```
+docker compose exec worker python -m app.workers.queues unindexed-documents
+```
+
+Each row shows its age, workspace, knowledge base and document id. No document contents: an operator needs to find it in the product, not read somebody's file out of a shell history.
+
+If the backlog is **not** shrinking:
+
+1. Is a worker running the `ingestion_recovery` loop? Check `WORKER_KINDS` — it is in the default set, so an explicit list that omits it is the usual cause. `WorkerLoopNotBeating{kind="ingestion_recovery"}` says this directly.
+2. Is the `ingestion` loop running as well? Recovery only re-queues; the consumer is what indexes.
+3. Can either reach Redis?
+
+Re-queueing is safe to repeat. Ingestion clears a document's chunks before writing new ones and leaves a `ready` document alone, so a duplicate job costs a round trip and changes nothing.
+
+### A worker loop has stopped
+
+**Alert:** `WorkerLoopNotBeating`. **Metric:** `wasla_worker_heartbeat_alive{kind}`.
+
+The named loop has not refreshed its liveness key inside its expiry. Workers serve no HTTP and are deliberately not a scrape target ([ADR-069](../DECISIONS.md)), so `ScrapeTargetDown` cannot see them — this is the only alert that can.
+
+**Which kind it is decides how urgent this is.**
+
+* `recovery` — the deployment has **no crash recovery at all**. Jobs a dead worker was holding stay in flight until this comes back. Treat as an incident.
+* `inbound_recovery` / `ingestion_recovery` — work lost to a Redis outage is no longer being repaired. Nothing is lost yet; nothing is converging either.
+* `agent` / `media` / `ingestion` — customers are waiting. `QueueJobsStuck` will follow within fifteen minutes.
+* `billing` — collections, dunning and invoicing have stopped. Hours matter, minutes do not.
+* `follow_up`, `campaign`, `email`, `retention`, `purge`, `uploads` — scheduled work is not happening.
+
+What to check, in order:
+
+1. `docker compose ps` — is the worker container running, or restarting? A crash loop is usually configuration: the container validates its settings at startup and refuses to boot rather than running half-configured.
+2. `docker compose logs worker` — `worker.startup` names the kinds this process actually started. A kind missing there is a `WORKER_KINDS` problem, not a crash.
+3. The container's own `HEALTHCHECK` (`entrypoint.sh worker-health`) asks the same question against Redis. An unhealthy container with a healthy API is exactly this alert.
+4. If the process is up and one kind alone is silent, that loop is blocked rather than dead. Its work is still claimable — every queue consumer's reservation expires and every sweep's lease runs out — so restarting the container is safe.
+
 ### A send WhatsApp never confirmed
 
 **Alert:** `UnresolvedOutboundSends`. **Metric:** `wasla_unresolved_outbound_messages`.
@@ -909,6 +952,8 @@ that are more specific than a counter can be.
 | `whatsapp.payload_rejected_by_database` | A delivery PostgreSQL cannot store. Acknowledged rather than retried for ever | High if sustained |
 | `whatsapp.api_version_expiring` | `META_API_VERSION` is inside its last 90 days | Plan it now |
 | `inbound_recovery.swept` | The sweeper finished work a queue outage lost | Informational; High if it never stops |
+| `ingestion_recovery.swept` | Documents a queue outage stranded were re-queued | Informational; High if it never stops |
+| `agent.turn_already_answered` | A duplicate job found the turn already owned, and did nothing | Informational — this is WQ-01's guard working |
 | `follow_up.cancelled_on_handoff` | A colleague took a conversation over, so its nudge was cancelled | Informational |
 | `billing.ai_allowance_exhausted` | A workspace is out of AI requests | Commercial, not operational |
 | `ratelimit.unavailable` | Redis down; limiting is failing open | High |

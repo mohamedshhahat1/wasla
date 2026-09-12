@@ -490,6 +490,73 @@ groups:
             sent the customer a reply.
           runbook: docs/RUNBOOK.md
 
+  - name: wasla-workers
+    interval: 30s
+    rules:
+      - alert: WorkerLoopNotBeating
+        # The one metric that answers "is this loop running" directly, and until
+        # now nothing consumed it. Workers serve no HTTP and are deliberately
+        # not a scrape target (ADR-069), so `ScrapeTargetDown` - which watches
+        # `up{job="wasla-api"}` - cannot see them: a worker container that is
+        # absent entirely produced no `up == 0` anywhere, and every other rule
+        # here fires on a *symptom*. `QueueJobsStuck` needs stuck work, so a
+        # dead worker on a quiet queue stayed invisible until the first customer
+        # message arrived and then waited fifteen minutes for the alert.
+        #
+        # The worst case is `recovery`: if it stops, the deployment has no crash
+        # recovery at all, every other queue keeps draining normally, and
+        # nothing fires until an unrelated backlog builds (WQ-05).
+        #
+        # `min by (kind)` because production runs two API replicas, each
+        # rendering the same gauge from the same Redis keys, and one of them
+        # briefly reading stale must not hide a kind that is genuinely gone.
+        #
+        # An absent series cannot make this silently disappear: the exposition
+        # iterates the full worker inventory and publishes 0 for any kind that
+        # has not beaten inside its expiry, so a kind that never started is a
+        # zero rather than a gap.
+        expr: min by (kind) (wasla_worker_heartbeat_alive) == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: workers
+        annotations:
+          summary: "The {{ $labels.kind }} worker loop has stopped beating"
+          description: >-
+            A worker kind has not refreshed its liveness key inside its expiry,
+            so either the worker container is not running, its event loop is
+            blocked, or WORKER_KINDS no longer selects this loop. Nothing this
+            kind is responsible for is being done. If it is `recovery`, the
+            deployment currently has no crash recovery at all; if it is
+            `inbound_recovery` or `ingestion_recovery`, work lost to a Redis
+            outage is no longer being repaired. Check the worker container's
+            health and logs.
+          runbook: docs/RUNBOOK.md
+
+      - alert: UnindexedDocumentBacklog
+        # Documents somebody uploaded that no agent can search. Fires on age
+        # rather than on existence, deliberately: a document is `pending` for
+        # the few seconds between committing and being indexed, so a rule on
+        # `> 0` would fire on every healthy upload and be turned off within a
+        # week. Half an hour means the job never arrived - almost always a Redis
+        # outage at upload time - and `IngestionRecoveryWorker` drains those on
+        # its own, so this firing means recovery is not running either (WQ-03).
+        expr: wasla_oldest_pending_document_age_seconds > 1800
+        for: 15m
+        labels:
+          severity: warning
+          component: workers
+        annotations:
+          summary: "An uploaded document has been unsearchable for over half an hour"
+          description: >-
+            A customer uploaded a document successfully and it is still not
+            indexed, so no agent can answer from it and nobody has been told.
+            The content is not lost. Check that a worker process is running both
+            the ingestion and ingestion_recovery loops and that Redis is
+            reachable from it; list the backlog with `python -m
+            app.workers.queues unindexed-documents`.
+          runbook: docs/RUNBOOK.md
+
   - name: wasla-availability
     interval: 30s
     rules:

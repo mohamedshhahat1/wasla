@@ -12,13 +12,14 @@ has exactly the audience this should have.
     docker compose exec worker python -m app.workers.queues dead-letters agent
     docker compose exec worker python -m app.workers.queues replay ingestion
     docker compose exec worker python -m app.workers.queues unprocessed-inbound
+    docker compose exec worker python -m app.workers.queues unindexed-documents
     docker compose exec worker python -m app.workers.queues unresolved-sends
 
-The last two read the database rather than Redis, and they are here because
-this is where an operator already looks when messages are not moving. Each
-answers a question the deployment previously had no way to ask: what inbound
-did we store and never process, and what did we send that we cannot account
-for.
+The last three read the database rather than Redis, and they are here because
+this is where an operator already looks when work is not moving. Each answers
+a question the deployment previously had no way to ask: what inbound did we
+store and never process, what did somebody upload that is still not
+searchable, and what did we send that we cannot account for.
 
 **Replay is never automatic, and never bulk by default.** A dead-lettered job
 is one the system decided it could not finish; putting it back is a judgement
@@ -48,8 +49,10 @@ from app.core.logging import configure_logging, get_logger
 from app.core.redis import RedisClient
 from app.db.session import Database
 from app.repositories.conversation_repository import UnresolvedOutboundDirectory
+from app.repositories.knowledge_repository import PendingDocumentSweep
 from app.repositories.whatsapp_repository import InboundEventSweep
 from app.workers.inbound_recovery import unprocessed_since
+from app.workers.ingestion_recovery import unindexed_since
 from app.workers.queue import QUEUES, ReliableQueue
 
 logger = get_logger(__name__)
@@ -205,6 +208,44 @@ async def unprocessed_inbound(database: Database, *, limit: int) -> int:
     return 0
 
 
+async def unindexed_documents(database: Database, *, limit: int) -> int:
+    """Documents that were uploaded and never indexed.
+
+    A row here is a file somebody in a workspace successfully uploaded that no
+    agent can search - almost always because Redis was unavailable when the
+    upload committed (WQ-03). `IngestionRecoveryWorker` drains these on its own;
+    this command exists so a person can see the backlog, see whether it is
+    shrinking, and see how old the oldest one is.
+
+    No document contents and no filenames-as-payload: the workspace, the
+    knowledge base and the document id are enough to find it in the product, and
+    printing a customer's uploaded text into a terminal scrollback and a shell
+    history is not something an operator asked for.
+    """
+    async with database.session() as session:
+        documents = await PendingDocumentSweep(session).claim_pending(
+            older_than=unindexed_since(datetime.now(UTC)),
+            limit=limit,
+        )
+        if not documents:
+            print("no unindexed documents")  # noqa: T201
+            return 0
+        header = f"{'age':>10}  {'workspace':<36}  {'knowledge base':<36}  document"
+        print(header)  # noqa: T201
+        print("-" * len(header))  # noqa: T201
+        now = datetime.now(UTC)
+        for document in documents:
+            age = f"{(now - document.created_at).total_seconds():.0f}s"
+            print(  # noqa: T201
+                f"{age:>10}  {document.tenant_id!s:<36}  "
+                f"{document.knowledge_base_id!s:<36}  {document.id}"
+            )
+    # The claim's transaction ends here without marking anything, so the rows
+    # are released exactly as they were found. Reading the backlog must not
+    # change it.
+    return 0
+
+
 async def unresolved_sends(database: Database, *, limit: int) -> int:
     """Sends Meta may already have delivered, whose outcome is unknown.
 
@@ -265,6 +306,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stuck.add_argument("--limit", type=int, default=50)
 
+    unindexed = commands.add_parser(
+        "unindexed-documents",
+        help="documents that were uploaded and never handed to a worker",
+    )
+    unindexed.add_argument("--limit", type=int, default=50)
+
     open_sends = commands.add_parser(
         "unresolved-sends",
         help="sends whose outcome WhatsApp never confirmed (never resent automatically)",
@@ -282,11 +329,13 @@ async def run(argv: Sequence[str] | None = None) -> int:
     # queue commands build no database pool, so neither half of the deployment
     # has to be reachable to inspect the other. During the outage that produced
     # a backlog, that is not a detail.
-    if arguments.command in {"unprocessed-inbound", "unresolved-sends"}:
+    if arguments.command in {"unprocessed-inbound", "unindexed-documents", "unresolved-sends"}:
         database = Database(settings)
         try:
             if arguments.command == "unprocessed-inbound":
                 return await unprocessed_inbound(database, limit=arguments.limit)
+            if arguments.command == "unindexed-documents":
+                return await unindexed_documents(database, limit=arguments.limit)
             return await unresolved_sends(database, limit=arguments.limit)
         finally:
             await database.dispose()

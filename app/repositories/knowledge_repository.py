@@ -22,7 +22,7 @@ from app.db.models.knowledge import (
     DocumentStatus,
     KnowledgeBase,
 )
-from app.repositories.base import TenantScopedRepository
+from app.repositories.base import BaseRepository, TenantScopedRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,3 +347,77 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
                 " set_config('plan_cache_mode', 'force_custom_plan', true)"
             )
         )
+
+
+class PendingDocumentSweep(BaseRepository[Document]):
+    """The unscoped read over documents still waiting to be indexed.
+
+    Deliberately not workspace-scoped, and deliberately its own class so that is
+    visible - the same exception, for the same reason, that `InboundEventSweep`
+    makes over the inbound log. A backlog of unindexed documents is a
+    platform-wide condition: the Redis outage that produced it did not choose a
+    workspace, and a sweeper constructed once per workspace would need a list of
+    every workspace to iterate, which is a worse thing to maintain than one
+    honest exception to scoping.
+
+    Nothing here is reachable from an API route. The three callers are
+    `IngestionRecoveryWorker`, the metrics exposition and the operator command,
+    and all three are counting or finishing work rather than answering a person.
+    """
+
+    model = Document
+
+    async def claim_pending(
+        self,
+        *,
+        older_than: datetime,
+        limit: int,
+    ) -> list[Document]:
+        """Documents still owed an ingestion, locked so one sweeper gets each.
+
+        `FOR UPDATE SKIP LOCKED` rather than a plain read. Ingestion itself is
+        idempotent - a document already `READY` is left alone and a re-run
+        replaces its chunks rather than doubling them - so two jobs for one
+        document would be harmless. The lock is here for the cheaper reason:
+        two sweepers publishing the same backlog would double the queue depth
+        during exactly the outage recovery that is already behind, and a sweep
+        that cannot say which rows it has dealt with cannot be reasoned about.
+
+        `older_than` keeps the sweep off documents that are merely in flight. A
+        document committed a second ago has not failed; the request that
+        committed it is very likely publishing its job right now, and claiming
+        it would race the path this exists to back up.
+        """
+        return await self._all(
+            self._select()
+            .where(
+                Document.status == DocumentStatus.PENDING,
+                Document.created_at < older_than,
+            )
+            .order_by(Document.created_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+
+    async def backlog(self, *, older_than: datetime) -> tuple[int, float]:
+        """How many documents are still unindexed, and how old the oldest is.
+
+        Returned together because they are read together, as the inbound
+        backlog is: the count says whether there is one and the age says
+        whether it is being drained. An alert on the count alone would fire on
+        every healthy upload; an alert on the age is the one worth waking
+        somebody for.
+        """
+        rows = await self.session.execute(
+            select(
+                func.count(Document.id),
+                func.min(Document.created_at),
+            ).where(
+                Document.status == DocumentStatus.PENDING,
+                Document.created_at < older_than,
+            )
+        )
+        count, oldest = rows.one()
+        if not count or oldest is None:
+            return 0, 0.0
+        return int(count), max((datetime.now(UTC) - oldest).total_seconds(), 0.0)

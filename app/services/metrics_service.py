@@ -47,10 +47,12 @@ from app.core.telemetry import (
 )
 from app.db.session import Database
 from app.repositories.conversation_repository import UnresolvedOutboundDirectory
+from app.repositories.knowledge_repository import PendingDocumentSweep
 from app.repositories.whatsapp_repository import InboundEventSweep
 from app.services.backup_status import read_backup_status
 from app.workers.heartbeat import heartbeat_key
 from app.workers.inbound_recovery import unprocessed_since
+from app.workers.ingestion_recovery import unindexed_since
 from app.workers.queue import QUEUES, ReliableQueue
 from app.workers.runner import ALL_KINDS
 
@@ -192,6 +194,9 @@ class MetricsService:
                     older_than=unprocessed_since(moment)
                 )
                 outbound, outbound_age = await UnresolvedOutboundDirectory(session).backlog()
+                unindexed, unindexed_age = await PendingDocumentSweep(session).backlog(
+                    older_than=unindexed_since(moment)
+                )
         except Exception:
             logger.warning(
                 "metrics.messaging_read_failed",
@@ -220,6 +225,16 @@ class MetricsService:
                 "wasla_oldest_unresolved_outbound_age_seconds",
                 "Age of the oldest send whose outcome is unknown.",
                 outbound_age,
+            ),
+            (
+                "wasla_pending_documents",
+                "Uploaded documents that are committed and not yet searchable.",
+                float(unindexed),
+            ),
+            (
+                "wasla_oldest_pending_document_age_seconds",
+                "Age of the oldest document still waiting to be indexed.",
+                unindexed_age,
             ),
         ):
             lines.extend(render_gauge_lines(name, help_text, [({}, value)]))
