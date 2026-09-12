@@ -19,6 +19,7 @@ stubbed, because what has to be counted is requests that genuinely left.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import uuid
 from collections.abc import AsyncIterator, Awaitable
@@ -29,7 +30,8 @@ import httpx
 import pytest
 from redis.asyncio import Redis
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.core.config import Settings
 from app.core.redis import RedisClient
@@ -52,6 +54,7 @@ from app.db.models.whatsapp import (
     WhatsAppEventState,
 )
 from app.db.session import Database
+from app.repositories.agent_turn_repository import AgentTurnRepository
 from app.workers.ai_worker import AgentWorker
 from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.queue import AgentJob, AgentQueue
@@ -606,4 +609,92 @@ async def test_a_turn_that_engaged_is_never_run_again(
         assert stubbed_hosts.sends == 0
         assert await _outbound(turn_database, tenant_id) == []
     finally:
+        await _cleanup(turn_database, tenant_id)
+
+
+# ------------------------------------------------ the claim, on real connections
+#
+# Every test above drives one worker at a time, where nothing can interleave. The
+# claim's atomicity - one `INSERT ... ON CONFLICT DO NOTHING` rather than a read
+# followed by an insert - is the whole of WQ-01's first line of defence, and until
+# these two tests nothing in the repository's own suite would have failed if it
+# were replaced by the read-then-insert it exists to avoid (audit mutation AI-M02).
+
+
+async def test_eight_connections_racing_one_trigger_yield_one_winner(
+    prepared_database: str, turn_database: Database
+) -> None:
+    """Eight claims released together at one message: one winner, seven told no."""
+    async with turn_database.session() as session:
+        tenant_id, pairs = await _seed(session)
+    conversation_id, message_id = pairs[0]
+    engine = create_async_engine(prepared_database, poolclass=NullPool)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    contenders = 8
+    barrier = asyncio.Barrier(contenders)
+
+    async def contend(index: int) -> bool:
+        async with factory() as session:
+            await asyncio.wait_for(barrier.wait(), 10)
+            won = await AgentTurnRepository(session, tenant_id=tenant_id).claim(
+                conversation_id=conversation_id,
+                trigger_message_id=message_id,
+                worker_id=f"worker-{index}",
+            )
+            await session.commit()
+            return won
+
+    try:
+        results = await asyncio.gather(*(contend(index) for index in range(contenders)))
+        rows = await _turns(turn_database, tenant_id)
+    finally:
+        await engine.dispose()
+        await _cleanup(turn_database, tenant_id)
+
+    # A loser is *told*, never raised at: an exception here would be a
+    # dead-lettered job and an unanswered customer.
+    assert sorted(results) == [False] * (contenders - 1) + [True]
+    assert rows == 1
+
+
+async def test_a_claim_waiting_on_an_uncommitted_one_is_told_it_lost(
+    prepared_database: str, turn_database: Database
+) -> None:
+    """The deterministic interleaving: the second claim genuinely waits.
+
+    The first claim is written and held uncommitted; the second is made while it
+    is, and must be seen waiting before the first commits. A read-then-insert
+    would read "nothing there", insert, wait on the unique index, and raise.
+    """
+    async with turn_database.session() as session:
+        tenant_id, pairs = await _seed(session)
+    conversation_id, message_id = pairs[0]
+    engine = create_async_engine(prepared_database, poolclass=NullPool)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def second() -> bool:
+        async with factory() as session:
+            won = await AgentTurnRepository(session, tenant_id=tenant_id).claim(
+                conversation_id=conversation_id,
+                trigger_message_id=message_id,
+                worker_id="second",
+            )
+            await session.commit()
+            return won
+
+    try:
+        async with factory() as first:
+            assert await AgentTurnRepository(first, tenant_id=tenant_id).claim(
+                conversation_id=conversation_id,
+                trigger_message_id=message_id,
+                worker_id="first",
+            )
+            racing = asyncio.create_task(second())
+            await asyncio.sleep(0.3)
+            assert not racing.done(), "the second claim must be waiting on the first"
+            await first.commit()
+        assert await asyncio.wait_for(racing, 10) is False
+        assert await _turns(turn_database, tenant_id) == 1
+    finally:
+        await engine.dispose()
         await _cleanup(turn_database, tenant_id)
