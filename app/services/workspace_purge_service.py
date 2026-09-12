@@ -102,6 +102,13 @@ logger = get_logger(__name__)
 # retention question would look for it. Naming every table is what makes the
 # classification auditable.
 PURGED_TABLES: tuple[str, ...] = (
+    # A record that an agent answered one customer message. It carries no
+    # message text - only the id of the message it answered - but it is a
+    # statement about what a workspace's customers said and when, and a
+    # workspace exercising erasure is entitled to have that go with the
+    # conversation rather than outlive it. Before `conversations`, which it
+    # references.
+    "agent_turns",
     "message_sentiments",
     "message_media",
     "messages",
