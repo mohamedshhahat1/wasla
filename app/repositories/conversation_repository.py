@@ -386,43 +386,45 @@ class MessageRepository(TenantScopedRepository[Message]):
         limit: int = 50,
         after: Cursor | None = None,
     ) -> list[Message]:
-        """Most recent messages first.
+        """Most recent messages first, in the conversation's own order.
 
-        `created_at` is never null here, so the keyset is a plain row
-        comparison - no nulls-last branch is needed.
+        Ordered by `sequence`, the position the database assigned at insert,
+        and never by `created_at`: that is the transaction's start, so every
+        message one webhook delivery wrote shares it, and a transcript sorted on
+        it is scrambled in a way no log shows (AI-01). This is the one ordering
+        the agent's window and the inbox both read.
+
+        The cursor's id names the last message of the previous page, and its
+        position is read here rather than carried in the cursor - so the cursor
+        format callers already hold is unchanged, and a cursor naming a message
+        in another conversation or workspace resolves to no position and
+        matches nothing.
         """
         query = (
             self._select()
             .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.desc(), Message.id.desc())
+            .order_by(Message.sequence.desc())
             .limit(limit)
         )
-        if after is not None and after.sort_value is not None:
-            query = query.where(
-                or_(
-                    Message.created_at < after.sort_value,
-                    and_(
-                        Message.created_at == after.sort_value,
-                        Message.id < after.id,
-                    ),
+        if after is not None:
+            position = (
+                select(Message.sequence)
+                .where(
+                    Message.id == after.id,
+                    Message.conversation_id == conversation_id,
+                    self._tenant_filter(),
                 )
+                .scalar_subquery()
             )
+            query = query.where(Message.sequence < position)
         return await self._all(query)
 
     async def latest_inbound(self, conversation_id: uuid.UUID) -> Message | None:
-        """The most recent thing the customer said.
+        """The most recent thing the customer said, by position.
 
-        What sentiment analysis reads. Only the newest one: a job that waited
-        behind others is answering the conversation as it stands now, and the
-        mood that matters is the mood of the message that prompted it.
-
-        "Newest" is by `created_at`, and Meta can deliver several messages in
-        one webhook. Those are stored in one transaction, so they share a
-        timestamp - PostgreSQL's `now()` is the transaction's start - and which
-        of them this returns is then decided by the id tie-break rather than by
-        arrival order. Accepted: messages that arrived together came from the
-        same moment and carry the same mood, and the alternative is a monotonic
-        column on the busiest table in the schema.
+        By `sequence`, so of several messages delivered together this is the
+        one the customer sent last rather than whichever a random id tie-break
+        happened to favour.
         """
         return await self._first(
             self._select()
@@ -430,7 +432,7 @@ class MessageRepository(TenantScopedRepository[Message]):
                 Message.conversation_id == conversation_id,
                 Message.direction == MessageDirection.INBOUND,
             )
-            .order_by(Message.created_at.desc(), Message.id.desc())
+            .order_by(Message.sequence.desc())
         )
 
     async def record_inbound(

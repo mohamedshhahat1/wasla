@@ -28,7 +28,14 @@ def _message(
     minutes: int = 0,
     status: MessageStatus = MessageStatus.RECEIVED,
     kind: MessageKind = MessageKind.TEXT,
+    sequence: int | None = None,
 ) -> Message:
+    """A message whose position follows its minute unless one is named.
+
+    A named position is how a test builds what one webhook delivery produces:
+    several messages sharing one `created_at`, ordered only by where the
+    database put them.
+    """
     return Message(
         id=uuid.uuid4(),
         direction=direction,
@@ -39,6 +46,7 @@ def _message(
         status=status,
         body=body,
         created_at=BASE_TIME + timedelta(minutes=minutes),
+        sequence=minutes if sequence is None else sequence,
     )
 
 
@@ -93,6 +101,25 @@ def test_turns_are_chronological_whatever_order_they_arrive_in() -> None:
     window = build_window([newest, oldest], message_limit=10, token_budget=1000)
 
     assert [turn.text for turn in window.turns] == ["first", "second"]
+
+
+def test_a_shared_timestamp_is_ordered_by_position() -> None:
+    """Every message of one webhook delivery shares `created_at` (AI-01).
+
+    PostgreSQL's `now()` is the transaction's start, so a burst the customer
+    typed is five rows with one instant. The window follows the position the
+    database assigned, whatever order the caller passed them in.
+    """
+    texts = ["FIRST", "SECOND", "THIRD", "FOURTH", "FIFTH"]
+    batch = [
+        _message(body=text, minutes=0, sequence=position)
+        for position, text in enumerate(texts, start=1)
+    ]
+    scrambled = [batch[3], batch[4], batch[1], batch[2], batch[0]]
+
+    window = build_window(scrambled, message_limit=10, token_budget=1000)
+
+    assert [turn.text for turn in window.turns] == texts
 
 
 def test_direction_decides_the_role() -> None:

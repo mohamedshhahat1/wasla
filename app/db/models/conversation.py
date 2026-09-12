@@ -14,10 +14,13 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from enum import StrEnum
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import (
+    BigInteger,
+    Connection,
     DateTime,
+    FetchedValue,
     Float,
     ForeignKey,
     ForeignKeyConstraint,
@@ -25,6 +28,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -315,6 +319,17 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
     intent: Mapped[str | None] = mapped_column(String(MAX_INTENT_LENGTH), nullable=True)
     intent_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # The last position handed to a message in this conversation (AI-01).
+    # Written by the `messages` insert trigger and by nothing else - application
+    # code never assigns it, so the ORM never includes it in an UPDATE and a
+    # stale value loaded into a session cannot overwrite the real one.
+    last_message_sequence: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
     @property
     def is_ai_handled(self) -> bool:
         return self.mode is ConversationMode.AI
@@ -374,9 +389,32 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             name="fk_messages_tenant_conversation",
             ondelete="CASCADE",
         ),
+        # One position per conversation. Also the index a transcript is read
+        # through, newest first.
+        UniqueConstraint(
+            "conversation_id",
+            "sequence",
+            name="uq_messages_conversation_id_sequence",
+        ),
     )
 
     conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # Where this message sits in its conversation, assigned by the database at
+    # insert (AI-01). The conversation's order is this column and never
+    # `created_at`: `created_at` is PostgreSQL's `now()`, which is the start of
+    # the *transaction*, so every message one webhook delivery wrote shares one
+    # instant and a sort on it hands the model a scrambled transcript.
+    #
+    # Assigned by a trigger rather than by the repository so that every
+    # producer takes part - inbound projection, an agent's reply, a colleague's,
+    # a campaign, a follow-up, and whatever writes a message next - without any
+    # of them having to remember to. `FetchedValue` tells the ORM the database
+    # supplies it, so it is read back on insert rather than sent as NULL.
+    sequence: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=FetchedValue(),
+    )
     wa_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     direction: Mapped[MessageDirection] = mapped_column(MESSAGE_DIRECTION_TYPE, nullable=False)
     kind: Mapped[MessageKind] = mapped_column(
@@ -448,3 +486,56 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     def delivery_resolved(self) -> bool:
         """Whether this send has a known outcome, either way."""
         return self.delivery_state in RESOLVED_DELIVERY_STATES
+
+
+# The ordering primitive (AI-01), kept in the database because that is the only
+# place every writer passes through.
+#
+# One conditional UPDATE ... RETURNING on the conversation row. Two transactions
+# writing to one conversation serialise on that row's lock - the second waits for
+# the first to commit and then reads the incremented counter - so positions are
+# unique without a `max()+1` read that two writers could both make. The lock is
+# one the write already took in practice: inbound projection touches
+# `last_inbound_at` and a send touches `last_message_at` on the same row.
+#
+# A row naming no conversation in its own workspace gets position 0, which is
+# never persisted: the composite foreign key refuses the row a moment later under
+# its own name, rather than a NOT NULL error describing a symptom.
+#
+# Migration 0058 carries its own frozen copy of this text; a change here needs a
+# migration of its own.
+MESSAGE_SEQUENCE_FUNCTION: Final = """
+CREATE OR REPLACE FUNCTION wasla_assign_message_sequence() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE conversations
+       SET last_message_sequence = last_message_sequence + 1
+     WHERE id = NEW.conversation_id
+       AND tenant_id = NEW.tenant_id
+    RETURNING last_message_sequence INTO NEW.sequence;
+    NEW.sequence = COALESCE(NEW.sequence, 0);
+    RETURN NEW;
+END;
+$$
+"""
+
+MESSAGE_SEQUENCE_TRIGGER: Final = """
+CREATE TRIGGER trg_messages_assign_sequence
+BEFORE INSERT ON messages
+FOR EACH ROW EXECUTE FUNCTION wasla_assign_message_sequence()
+"""
+
+
+def _install_message_sequence(_target: object, connection: Connection, **_kwargs: Any) -> None:
+    """Create the ordering trigger alongside `messages` in a model-built schema.
+
+    A `create_all` schema needs it as much as a migrated one: without it every
+    insert fails NOT NULL, and the fast test build would stop describing the
+    database a deployment runs. Sent as driver SQL, so nothing in the function
+    body is parsed for bind parameters on the way.
+    """
+    connection.exec_driver_sql(MESSAGE_SEQUENCE_FUNCTION)
+    connection.exec_driver_sql(MESSAGE_SEQUENCE_TRIGGER)
+
+
+event.listen(Message.__table__, "after_create", _install_message_sequence)

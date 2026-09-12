@@ -4,6 +4,7 @@ No database, no Redis, no HTTP. The orchestrator was deliberately given a client
 and a registry rather than building its own, and this is what that buys.
 """
 
+import itertools
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
@@ -46,6 +47,7 @@ from tests.fakes import as_embeddings, as_http_client, as_responses, as_sentimen
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 CONVERSATION = uuid.UUID("22222222-2222-2222-2222-222222222222")
 SENT_AT = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
+_POSITIONS = itertools.count(1)
 
 
 class StubClient:
@@ -238,6 +240,10 @@ def _inbound(body: str) -> Message:
         kind=MessageKind.TEXT,
         body=body,
         created_at=SENT_AT,
+        # The database assigns this in production. Every message here shares
+        # one instant, exactly as a webhook batch does, so position is the
+        # only thing that orders them.
+        sequence=next(_POSITIONS),
     )
 
 
@@ -776,6 +782,7 @@ async def test_an_image_description_reaches_the_model(monkeypatch: pytest.Monkey
         kind=MessageKind.IMAGE,
         body="how much?",
         created_at=SENT_AT,
+        sequence=next(_POSITIONS),
         origin=MessageOrigin.CUSTOMER,
     )
     attachment = MessageMedia(

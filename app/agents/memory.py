@@ -79,12 +79,18 @@ def build_window(
     a caller's query, because reversed history reads as a different conversation
     and the mistake is invisible in the output.
 
+    Sorted by `sequence` - the same total order `list_for_conversation` reads -
+    and not by `created_at`, which every message of one webhook delivery shares
+    (AI-01). A key that is not unique is not an order: the tie is settled by
+    whatever the caller happened to pass, and "oldest first" and "the newest
+    always survives" both stop meaning anything.
+
     `media` maps message id to the file attached to it, and is passed in rather
     than reached through a relationship on purpose. Lazy loading inside an async
     session raises rather than working, and even where it worked it would issue
     one query per message in the window; the caller fetches them in one.
     """
-    ordered = sorted(messages, key=lambda message: message.created_at)
+    ordered = sorted(messages, key=lambda message: message.sequence)
     attachments = media or {}
     turns: list[Turn] = []
     spent = 0

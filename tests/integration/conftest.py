@@ -82,6 +82,11 @@ from sqlalchemy.pool import NullPool
 
 from app.db.models import Base
 
+# Re-exported so every AI suite shares one harness; pytest registers a fixture
+# found in a conftest namespace, and redefining them per module would be six
+# copies of the transport that has to dispatch through a closure.
+from tests.integration.ai_harness import ai_providers, ai_turns  # noqa: F401
+
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 # The *only* variable that may point these tests at a database. There is no
