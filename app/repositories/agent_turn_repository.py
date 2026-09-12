@@ -17,7 +17,7 @@ from sqlalchemy import ColumnElement, CursorResult, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.core.logging import get_logger
-from app.db.models.agent_turn import AgentTurn, AgentTurnState
+from app.db.models.agent_turn import AgentTurn, AgentTurnState, TurnOutcome
 from app.repositories.base import TenantScopedRepository
 
 logger = get_logger(__name__)
@@ -172,12 +172,22 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
         result = cast("CursorResult[Any]", await self._session.execute(statement))
         return bool(result.rowcount)
 
-    async def complete(self, *, trigger_message_id: uuid.UUID, now: datetime | None = None) -> bool:
-        """Record that this turn ran to its end, whatever that end was.
+    async def complete(
+        self,
+        *,
+        trigger_message_id: uuid.UUID,
+        now: datetime | None = None,
+        outcome: TurnOutcome | None = None,
+        provider_response_id: str | None = None,
+    ) -> bool:
+        """Record that this turn ran to its end, and how.
 
-        A reply sent, a handoff, or a deliberate silence: all three are the turn
+        A reply sent, a handoff, a suppression, a refusal: all are the turn
         finishing, and none of them is owed anything further. Refusing a turn
         that never engaged would leave a claim behind for a turn that is over.
+
+        `outcome` says which ending it was, so none of them is a silence nobody
+        can explain afterwards. The worker always passes one.
         """
         moment = now or datetime.now(UTC)
         statement = (
@@ -191,6 +201,8 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
                 state=AgentTurnState.COMPLETED,
                 completed_at=moment,
                 claim_expires_at=None,
+                outcome=outcome,
+                provider_response_id=provider_response_id,
             )
         )
         result = cast("CursorResult[Any]", await self._session.execute(statement))

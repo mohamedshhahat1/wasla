@@ -396,6 +396,26 @@ class TurnRunner:
             )
             return sorted(str(state) for state in rows)
 
+    async def turn_outcomes(self, tenant_id: uuid.UUID) -> list[str | None]:
+        """How each of a workspace's turns ended, sorted, `None` for none recorded."""
+        async with self.database.session() as session:
+            rows = await session.scalars(
+                select(AgentTurn.outcome).where(AgentTurn.tenant_id == tenant_id)
+            )
+            return sorted((None if value is None else str(value) for value in rows), key=str)
+
+    async def response_ids(self, tenant_id: uuid.UUID) -> list[str | None]:
+        async with self.database.session() as session:
+            rows = await session.scalars(
+                select(AgentTurn.provider_response_id).where(AgentTurn.tenant_id == tenant_id)
+            )
+            return list(rows)
+
+    async def execute(self, statement: Any) -> None:
+        """Run one write on a connection of its own, committed - as a colleague would."""
+        async with self.database.session() as session:
+            await session.execute(statement)
+
     async def outbound(self, tenant_id: uuid.UUID) -> list[Message]:
         async with self.database.session() as session:
             rows = await session.scalars(

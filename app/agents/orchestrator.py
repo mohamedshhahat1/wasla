@@ -14,7 +14,6 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable, Sequence, Set
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Final
 
 from sqlalchemy import select
@@ -31,6 +30,7 @@ from app.agents.registry import (
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
 from app.db.models.agent import DEFAULT_MAX_OUTPUT_TOKENS, Agent
+from app.db.models.agent_turn import TurnOutcome
 from app.db.models.conversation import Conversation, ConversationMode, Message, MessageDirection
 from app.db.session import released
 from app.integrations.openai.client import ResponsesClient
@@ -71,10 +71,27 @@ class AgentOutcome:
     # asked for: a job naming no agent is answered by the workspace default.
     # Carried out so usage can be attributed to the model that was billed.
     model: str | None = None
+    # How the turn ended, named rather than left to be inferred from a null.
+    # `REPLIED` is the default and is refined by `effective_outcome` for callers
+    # that built an outcome without saying.
+    outcome: TurnOutcome = TurnOutcome.REPLIED
+    # The provider's id for the last response, for support correlation (AI-12).
+    response_id: str | None = None
 
     @property
     def should_send(self) -> bool:
         return bool(self.reply) and not self.handed_off
+
+    @property
+    def effective_outcome(self) -> TurnOutcome:
+        """The ending, never `REPLIED` for a turn that has nothing to send."""
+        if self.outcome is not TurnOutcome.REPLIED:
+            return self.outcome
+        if self.handed_off:
+            return TurnOutcome.HANDED_OFF
+        if not self.reply:
+            return TurnOutcome.EMPTY_RESPONSE if self.rounds > 0 else TurnOutcome.NOTHING_TO_ANSWER
+        return TurnOutcome.REPLIED
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +139,7 @@ def _reply_instructions(system_prompt: str) -> str:
 
 def _nothing(
     *,
+    outcome: TurnOutcome,
     agent_id: uuid.UUID | None = None,
     handed_off: bool = False,
     escalated: bool = False,
@@ -134,6 +152,7 @@ def _nothing(
         rounds=0,
         agent_id=agent_id,
         escalated=escalated,
+        outcome=outcome,
     )
 
 
@@ -156,19 +175,12 @@ def _sentiment_subject(history: Sequence[Message]) -> Message | None:
     return max(inbound, key=lambda message: message.sequence) if inbound else None
 
 
-class TurnRefusal(StrEnum):
-    """Why a turn will not reach a provider, decided before anything is spent."""
-
-    HUMAN_OWNS_CONVERSATION = "human_mode"
-    NO_ANSWERING_AGENT = "no_answering_agent"
-
-
 @dataclass(frozen=True, slots=True)
 class TurnPlan:
-    """Which agent answers a turn, or why none will."""
+    """Which agent answers a turn, or the outcome that says why none will."""
 
     agent: Agent | None
-    refusal: TurnRefusal | None = None
+    refusal: TurnOutcome | None = None
 
 
 async def plan_turn(
@@ -195,7 +207,7 @@ async def plan_turn(
             "agent.skipped_human_mode",
             extra={"conversation_id": str(conversation_id)},
         )
-        return TurnPlan(agent=None, refusal=TurnRefusal.HUMAN_OWNS_CONVERSATION)
+        return TurnPlan(agent=None, refusal=TurnOutcome.SUPPRESSED_HUMAN)
 
     resolved = agent if agent is not None else await agents.get_answering_default()
     if resolved is None:
@@ -203,10 +215,10 @@ async def plan_turn(
             "agent.no_active_default",
             extra={"conversation_id": str(conversation_id)},
         )
-        return TurnPlan(agent=None, refusal=TurnRefusal.NO_ANSWERING_AGENT)
+        return TurnPlan(agent=None, refusal=TurnOutcome.SUPPRESSED_AGENT)
     if not resolved.is_answering:
         logger.info("agent.not_active", extra={"agent_id": str(resolved.id)})
-        return TurnPlan(agent=resolved, refusal=TurnRefusal.NO_ANSWERING_AGENT)
+        return TurnPlan(agent=resolved, refusal=TurnOutcome.SUPPRESSED_AGENT)
     return TurnPlan(agent=resolved)
 
 
@@ -275,7 +287,10 @@ class AgentOrchestrator:
             agent=agent,
         )
         if plan.agent is None or plan.refusal is not None:
-            return _nothing(agent_id=plan.agent.id if plan.agent is not None else None)
+            return _nothing(
+                agent_id=plan.agent.id if plan.agent is not None else None,
+                outcome=plan.refusal or TurnOutcome.SUPPRESSED_AGENT,
+            )
         resolved = plan.agent
 
         # Read before the assessment, so the mood that gates this reply is taken
@@ -300,7 +315,12 @@ class AgentOrchestrator:
                     "agent.escalated_before_reply",
                     extra={"conversation_id": str(conversation_id)},
                 )
-                return _nothing(agent_id=resolved.id, handed_off=True, escalated=True)
+                return _nothing(
+                    agent_id=resolved.id,
+                    handed_off=True,
+                    escalated=True,
+                    outcome=TurnOutcome.ESCALATED,
+                )
         # Fetched for the whole window at once. What a customer attached is
         # part of what they said, and an agent answering a photograph with
         # "[image]" is the thing this phase exists to stop.
@@ -313,7 +333,7 @@ class AgentOrchestrator:
         )
         if window.is_empty:
             # Nothing was ever said, so there is nothing to answer.
-            return _nothing(agent_id=resolved.id)
+            return _nothing(agent_id=resolved.id, outcome=TurnOutcome.NOTHING_TO_ANSWER)
 
         grants = await self._grants.list_for_agent(agent_id=resolved.id, enabled_only=True)
         # Kept as a set as well as a spec list, because these are two different
@@ -333,6 +353,7 @@ class AgentOrchestrator:
         pending = False
         text: str | None = None
         rounds = 0
+        response_id: str | None = None
 
         for round_number in range(1, self._max_rounds + 1):
             # The turn's connection goes back to the pool here, and stays
@@ -371,6 +392,7 @@ class AgentOrchestrator:
             output_tokens += reply.usage.output_tokens
             total_tokens += reply.usage.total_tokens
             text = reply.text or text
+            response_id = reply.response_id or response_id
 
             pending = reply.wants_tools
             if not pending:
@@ -443,6 +465,8 @@ class AgentOrchestrator:
                 rounds=rounds,
                 agent_id=resolved.id,
                 model=resolved.model,
+                outcome=TurnOutcome.SUPPRESSED_HUMAN,
+                response_id=response_id,
             )
 
         logger.info(
@@ -459,6 +483,14 @@ class AgentOrchestrator:
             },
         )
 
+        if handed_off:
+            ending = TurnOutcome.HANDED_OFF
+        elif text:
+            ending = TurnOutcome.REPLIED
+        else:
+            # The provider answered, and said nothing that could be sent and did
+            # nothing that could stand in for words. Named, never left as a null.
+            ending = TurnOutcome.EMPTY_RESPONSE
         return AgentOutcome(
             reply=None if handed_off else text,
             handed_off=handed_off,
@@ -471,6 +503,8 @@ class AgentOrchestrator:
             rounds=rounds,
             agent_id=resolved.id,
             model=resolved.model,
+            outcome=ending,
+            response_id=response_id,
         )
 
     def _max_output_tokens(self, agent: Agent) -> int:

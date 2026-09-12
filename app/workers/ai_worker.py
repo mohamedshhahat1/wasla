@@ -49,6 +49,7 @@ from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from typing import Final
 
+from app.agents.lifecycle import refusal_now
 from app.agents.orchestrator import AgentOrchestrator, plan_turn
 from app.agents.registry import ToolRegistry
 from app.agents.reply import prepare_channel_reply
@@ -57,6 +58,7 @@ from app.core.logging import get_logger
 from app.core.redis import RedisClient
 from app.core.tracing import JOB_OUTCOME
 from app.db.models.agent import Agent
+from app.db.models.agent_turn import TurnOutcome
 from app.db.models.analytics import AnalyticsSource
 from app.db.models.billing import LimitKey
 from app.db.models.conversation import ConversationMode, MessageOrigin
@@ -435,7 +437,8 @@ class AgentWorker:
                 )
             if job.trigger_message_id is not None:
                 await AgentTurnRepository(blocked, tenant_id=job.tenant_id).complete(
-                    trigger_message_id=job.trigger_message_id
+                    trigger_message_id=job.trigger_message_id,
+                    outcome=TurnOutcome.QUOTA_BLOCKED,
                 )
         logger.warning(
             "billing.ai_allowance_exhausted",
@@ -446,19 +449,36 @@ class AgentWorker:
             },
         )
 
-    async def _complete_turn(self, job: AgentJob) -> None:
-        """Record that the turn ran to its end.
+    async def _complete_turn(
+        self,
+        job: AgentJob,
+        outcome: TurnOutcome,
+        *,
+        response_id: str | None = None,
+    ) -> None:
+        """Record that the turn ran to its end, and which end it was.
 
         Every end counts: a reply sent, a handoff, a conversation a person
-        owns, or nothing worth saying. All of them mean the customer's message
-        has been dealt with, and a turn left `CLAIMED` after one of them would
-        be a turn a later duplicate could adopt.
+        owns, a workspace no longer served. All of them mean the customer's
+        message has been dealt with, and a turn left `CLAIMED` after one of them
+        would be a turn a later duplicate could adopt. None of them is recorded
+        as an unexplained silence.
         """
+        logger.info(
+            "agent.turn_outcome",
+            extra={
+                "event": "agent.turn_outcome",
+                "outcome": outcome.value,
+                "conversation_id": str(job.conversation_id),
+            },
+        )
         if job.trigger_message_id is None:
             return
         async with self._database.session() as marking:
             await AgentTurnRepository(marking, tenant_id=job.tenant_id).complete(
-                trigger_message_id=job.trigger_message_id
+                trigger_message_id=job.trigger_message_id,
+                outcome=outcome,
+                provider_response_id=response_id,
             )
 
     def _reply_key(self, job: AgentJob) -> str | None:
@@ -518,8 +538,22 @@ class AgentWorker:
                 conversation_id=job.conversation_id,
                 agent=agent,
             )
-            if plan.refusal is not None:
-                await self._complete_turn(job)
+            if plan.agent is None or plan.refusal is not None:
+                await self._complete_turn(job, plan.refusal or TurnOutcome.SUPPRESSED_AGENT)
+                return
+
+            # The workspace, the conversation's status and the number, read as
+            # columns before anything is charged or called (AI-06). A suspended
+            # workspace, or a deleted one for however long retention keeps its
+            # data, gets no provider call, no tool and no message.
+            refusal = await refusal_now(
+                session,
+                tenant_id=job.tenant_id,
+                conversation_id=job.conversation_id,
+                agent_id=plan.agent.id,
+            )
+            if refusal is not None:
+                await self._complete_turn(job, refusal)
                 return
 
             # The reservation takes a session of its own. Handing this one's
@@ -605,11 +639,39 @@ class AgentWorker:
             await session.commit()
 
             reply = outcome.reply
-            if outcome.handed_off or not reply:
-                # Silence is a decision here, not a failure: a handoff, an
-                # escalation, a conversation a human owns, or nothing worth
-                # saying. The turn is still over, so it is still finished.
-                await self._complete_turn(job)
+            if not reply:
+                # Nothing to send - and never an unexplained nothing. A handoff,
+                # an escalation, a colleague who took over mid-turn or a model
+                # that produced no words is each recorded as what it was.
+                await self._complete_turn(
+                    job, outcome.effective_outcome, response_id=outcome.response_id
+                )
+                return
+
+            # Everything a reply depends on, read again now, as columns (AI-06,
+            # AI-07). The provider was called with no transaction open, so the
+            # workspace, the agent, the conversation and the number read before
+            # it are precisely what could have moved underneath it. A number
+            # disabled mid-turn is refused here too, rather than raised by the
+            # send and left stranding the turn `ENGAGED`.
+            refusal = await refusal_now(
+                session,
+                tenant_id=job.tenant_id,
+                conversation_id=job.conversation_id,
+                # The agent that answered, and the one planned if the outcome
+                # does not say: a reply is never checked against no agent at all.
+                agent_id=outcome.agent_id or plan.agent.id,
+            )
+            if refusal is not None:
+                logger.info(
+                    "agent.reply_suppressed",
+                    extra={
+                        "event": "agent.reply_suppressed",
+                        "outcome": refusal.value,
+                        "conversation_id": str(job.conversation_id),
+                    },
+                )
+                await self._complete_turn(job, refusal, response_id=outcome.response_id)
                 return
 
             messaging = MessagingService(
@@ -628,4 +690,4 @@ class AgentWorker:
                 # key however many times it is published (WQ-01).
                 idempotency_key=self._reply_key(job),
             )
-        await self._complete_turn(job)
+        await self._complete_turn(job, TurnOutcome.REPLIED, response_id=outcome.response_id)

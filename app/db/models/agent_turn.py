@@ -78,6 +78,43 @@ class AgentTurnState(StrEnum):
 
 AGENT_TURN_STATE_TYPE = _enum_type(AgentTurnState, name="agent_turn_state")
 
+
+class TurnOutcome(StrEnum):
+    """How a finished turn ended - so no ending is an unexplained silence.
+
+    The audit's central finding was one shape repeated: a customer's message, no
+    reply, no handoff, no retry, no durable reason and no signal to anyone. Every
+    turn that completes now says which of these it was, so "did this customer get
+    an answer, and if not, why?" is a column rather than an investigation.
+    """
+
+    #: A reply was sent to the customer.
+    REPLIED = "replied"
+    #: The agent's own handoff tool ran and a person now owns the conversation.
+    HANDED_OFF = "handed_off"
+    #: The sentiment classifier handed the conversation over before any reply.
+    ESCALATED = "escalated"
+    #: The provider answered with no words and no action that could stand in
+    #: for them.
+    EMPTY_RESPONSE = "empty_response"
+    #: The conversation held nothing an agent could answer.
+    NOTHING_TO_ANSWER = "nothing_to_answer"
+    #: The plan had no AI turn left; a person was asked to answer (AI-02).
+    QUOTA_BLOCKED = "quota_blocked"
+    #: A person owns the conversation, before or during the turn.
+    SUPPRESSED_HUMAN = "suppressed_human"
+    #: No agent is allowed to answer - none configured, or disabled mid-turn.
+    SUPPRESSED_AGENT = "suppressed_agent"
+    #: The workspace is suspended or deleted (AI-06).
+    SUPPRESSED_WORKSPACE = "suppressed_workspace"
+    #: A colleague closed the conversation, or it no longer exists (AI-07).
+    SUPPRESSED_CLOSED = "suppressed_closed"
+    #: The WhatsApp number cannot send - disabled or released.
+    SUPPRESSED_CHANNEL = "suppressed_channel"
+
+
+AGENT_TURN_OUTCOME_TYPE = _enum_type(TurnOutcome, name="agent_turn_outcome")
+
 #: States from which no second attempt may ever proceed. `CLAIMED` is absent
 #: deliberately: it means nothing has left the process, so a worker that died
 #: before engaging must be able to hand its turn on rather than stranding the
@@ -142,6 +179,13 @@ class AgentTurn(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     )
     engaged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # How the turn ended. Null while it is running, and on turns completed before
+    # migration 0061; every turn the worker completes since carries one.
+    outcome: Mapped[TurnOutcome | None] = mapped_column(AGENT_TURN_OUTCOME_TYPE, nullable=True)
+    # The provider's id for the turn's last response, for correlating a support
+    # question with the provider's own records (AI-12). An id, never a body: no
+    # prompt and no reply text is stored here.
+    provider_response_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     @property
     def finished(self) -> bool:
@@ -150,8 +194,10 @@ class AgentTurn(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
 
 
 __all__ = [
+    "AGENT_TURN_OUTCOME_TYPE",
     "AGENT_TURN_STATE_TYPE",
     "TERMINAL_AGENT_TURN_STATES",
     "AgentTurn",
     "AgentTurnState",
+    "TurnOutcome",
 ]
