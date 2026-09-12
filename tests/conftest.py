@@ -91,6 +91,33 @@ class FakeRedisCommands:
     async def ttl(self, key: str) -> int:
         return self.expiries.get(key, -1)
 
+    def register_script(self, source: str) -> _RefusedScript:
+        """Let a queue be *built*, without letting a route run one.
+
+        `ReliableQueue.__init__` registers its terminal-transition scripts, so a
+        request that constructs a queue to enqueue work now touches this. That
+        is registration rather than execution, and it has to succeed.
+
+        Calling the script is a different matter, and it raises. Dead-lettering
+        and retry scheduling belong to the worker, exactly as reserving and
+        releasing do - and the reason this class implements so little is that
+        implementing them here would invite a route to start using them.
+        """
+        return _RefusedScript(source)
+
+
+class _RefusedScript:
+    """A registered script a request may hold and must never run."""
+
+    def __init__(self, source: str) -> None:
+        self._source = source
+
+    async def __call__(self, *, keys: list[str], args: list[object]) -> int:
+        raise AssertionError(
+            "a request ran a queue's terminal-transition script; "
+            "dead-lettering and retry scheduling belong to the worker"
+        )
+
 
 class FakeDependency:
     """Stands in for the database or Redis client.

@@ -94,6 +94,7 @@ def test_every_worker_kind_is_described_in_the_architecture() -> None:
         10: "ten",
         11: "eleven",
         12: "twelve",
+        13: "thirteen",
     }
     counted = spelled.get(len(ALL_KINDS), str(len(ALL_KINDS)))
     assert f"{counted} loops" in text, f"ARCHITECTURE.md does not say {counted} loops"
