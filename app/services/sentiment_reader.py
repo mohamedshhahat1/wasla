@@ -18,7 +18,7 @@ from typing import Any, Final
 from app.core.exceptions import ExternalServiceError
 from app.core.logging import get_logger
 from app.db.models.sentiment import MAX_INTENT_LENGTH, SentimentLabel
-from app.integrations.openai.client import ResponsesClient
+from app.integrations.openai.client import RESPOND_SENTIMENT, ResponsesClient
 from app.integrations.openai.types import StructuredFormat, TokenUsage, Turn
 
 logger = get_logger(__name__)
@@ -157,6 +157,9 @@ class SentimentAnalyzer:
             temperature=0.0,
             max_output_tokens=MAX_ANALYSIS_TOKENS,
             response_format=SENTIMENT_SCHEMA,
+            # Counted apart from the agent's rounds (AI-09): this runs on every
+            # customer message, so its volume and failures are their own series.
+            operation=RESPOND_SENTIMENT,
         )
         return self._decode(reply.text, usage=reply.usage)
 

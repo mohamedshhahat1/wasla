@@ -147,6 +147,15 @@ class AgentTurn(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             "claim_expires_at",
             postgresql_where=text("state = 'claimed'"),
         ),
+        # Turns that engaged a provider and have not finished (AI-09). What the
+        # stranded-turn gauge reads at every scrape; partial for the same reason
+        # as the index above - on a healthy deployment it holds only the turns
+        # in flight right now.
+        Index(
+            "ix_agent_turns_engaged",
+            "engaged_at",
+            postgresql_where=text("state = 'engaged'"),
+        ),
         # A turn belongs to a conversation in its own workspace (ADR-100).
         ForeignKeyConstraint(
             ["tenant_id", "conversation_id"],

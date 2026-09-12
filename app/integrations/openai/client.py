@@ -54,10 +54,15 @@ logger = get_logger(__name__)
 OPENAI_BASE_URL: Final = "https://api.openai.com/v1"
 RESPONSES_PATH: Final = "/responses"
 
-# What this client is counted under. A fixed constant, never anything
-# derived from the prompt or the model's answer: a metric label domain is
-# chosen where it is written, not where a customer types.
-RESPOND: Final = "respond"
+# What a call is counted under, chosen by the caller from these constants and
+# never derived from a prompt or an answer: a metric label domain is chosen where
+# it is written, not where a customer types. Split by purpose (AI-09), because
+# the classifier runs on every customer message and an agent round only on the
+# ones that are answered, and one shared label hid which of them was failing or
+# slowing down.
+RESPOND_AGENT: Final = "respond_agent"
+RESPOND_SENTIMENT: Final = "respond_sentiment"
+RESPOND_VISION: Final = "respond_vision"
 REQUEST_TIMEOUT_SECONDS: Final = 60.0
 # What a request carries when its caller named no output ceiling. The deployment
 # default, and deliberately not configurable here: callers are expected to pass
@@ -68,6 +73,17 @@ BACKOFF_SECONDS: Final = 1.0
 TOO_MANY_REQUESTS: Final = 429
 SERVER_ERROR_FLOOR: Final = 500
 CLIENT_ERROR_FLOOR: Final = 400
+
+
+def _attempt_outcome(status: int) -> CallOutcome:
+    """The closed outcome domain for one HTTP answer."""
+    if status == TOO_MANY_REQUESTS:
+        return CallOutcome.RATE_LIMITED
+    if status >= SERVER_ERROR_FLOOR:
+        return CallOutcome.UNAVAILABLE
+    if status >= CLIENT_ERROR_FLOOR:
+        return CallOutcome.FAILURE
+    return CallOutcome.SUCCESS
 
 
 def build_http_client(*, seconds: float = REQUEST_TIMEOUT_SECONDS) -> httpx.AsyncClient:
@@ -122,6 +138,7 @@ class ResponsesClient:
         temperature: float | None = None,
         max_output_tokens: int | None = None,
         response_format: StructuredFormat | None = None,
+        operation: str = RESPOND_AGENT,
     ) -> AgentReply:
         """Run one inference.
 
@@ -161,10 +178,10 @@ class ResponsesClient:
         if response_format is not None:
             payload["text"] = {"format": response_format.to_payload()}
 
-        body = await self._post(payload)
+        body = await self._post(payload, operation=operation)
         return self._reply(body)
 
-    async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _post(self, payload: dict[str, Any], *, operation: str) -> dict[str, Any]:
         # One inference attempt, observed here rather than in the worker
         # because this is where the outcome is already distinguished: a 429, a
         # 5xx and a refused request are three different operational problems
@@ -176,7 +193,7 @@ class ResponsesClient:
         # duration covers the retries too: what the agent turn waited on is
         # this whole method, and a call that succeeded on its third attempt was
         # slow for the customer however fast the third attempt was.
-        call = ProviderCall(provider=Provider.OPENAI, operation=RESPOND)
+        call = ProviderCall(provider=Provider.OPENAI, operation=operation)
         url = self._base_url + RESPONSES_PATH
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -190,6 +207,7 @@ class ResponsesClient:
             except httpx.TransportError as error:
                 # Connect, timeout and protocol failures alike: retrying can at
                 # worst duplicate an inference, which no customer ever sees.
+                await call.attempt(CallOutcome.UNAVAILABLE)
                 if attempt >= self._max_attempts:
                     logger.warning("openai.unreachable", extra={"attempts": attempt})
                     await call.record(CallOutcome.UNAVAILABLE)
@@ -198,6 +216,10 @@ class ResponsesClient:
                 attempt += 1
                 continue
 
+            # Every attempt, not only the last (AI-09): a call that succeeds on
+            # its third try is recorded as a success once and as two throttled
+            # attempts here, so absorbed throttling is still visible.
+            await call.attempt(_attempt_outcome(response.status_code))
             retryable = (
                 response.status_code == TOO_MANY_REQUESTS
                 or response.status_code >= SERVER_ERROR_FLOOR

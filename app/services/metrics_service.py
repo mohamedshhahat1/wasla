@@ -46,6 +46,10 @@ from app.core.telemetry import (
     read_redis_histograms,
 )
 from app.db.session import Database
+from app.repositories.agent_turn_repository import (
+    STRANDED_TURN_AFTER,
+    EngagedTurnSweep,
+)
 from app.repositories.conversation_repository import UnresolvedOutboundDirectory
 from app.repositories.knowledge_repository import PendingDocumentSweep
 from app.repositories.whatsapp_repository import InboundEventSweep
@@ -197,6 +201,9 @@ class MetricsService:
                 unindexed, unindexed_age = await PendingDocumentSweep(session).backlog(
                     older_than=unindexed_since(moment)
                 )
+                stranded, stranded_age = await EngagedTurnSweep(session).backlog(
+                    older_than=moment - STRANDED_TURN_AFTER
+                )
         except Exception:
             logger.warning(
                 "metrics.messaging_read_failed",
@@ -235,6 +242,20 @@ class MetricsService:
                 "wasla_oldest_pending_document_age_seconds",
                 "Age of the oldest document still waiting to be indexed.",
                 unindexed_age,
+            ),
+            # Customer messages an agent engaged a provider for and never
+            # finished - never retried, because a reply may already be out
+            # (AI-09). Counted only past the longest a healthy turn takes, so a
+            # turn in flight right now is not an alert.
+            (
+                "wasla_agent_turns_engaged_unfinished",
+                "Agent turns engaged longer than any healthy turn takes, and never finished.",
+                float(stranded),
+            ),
+            (
+                "wasla_oldest_engaged_agent_turn_age_seconds",
+                "Age of the oldest agent turn engaged past that threshold.",
+                stranded_age,
             ),
         ):
             lines.extend(render_gauge_lines(name, help_text, [({}, value)]))

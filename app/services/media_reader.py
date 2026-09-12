@@ -26,7 +26,7 @@ from typing import Final
 
 from app.core.exceptions import ExternalServiceError
 from app.core.logging import get_logger
-from app.integrations.openai.client import ResponsesClient
+from app.integrations.openai.client import RESPOND_VISION, ResponsesClient
 from app.integrations.openai.transcription import TranscriptionClient
 from app.integrations.openai.types import Turn
 from app.services import extraction
@@ -162,6 +162,9 @@ class MediaReader:
                 )
             ],
             max_output_tokens=MAX_VISION_TOKENS,
+            # Its own series (AI-09): describing photographs is a cost and a
+            # failure mode of its own, not part of any agent round.
+            operation=RESPOND_VISION,
         )
 
         described = (reply.text or "").strip()

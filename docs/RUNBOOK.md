@@ -307,12 +307,57 @@ Resource limits (numbers, agents, colleagues, documents) count rows that exist n
 
 ### The agent has stopped replying
 
-In order of likelihood:
+Every turn the worker completes records how it ended, so start there rather than
+with the logs:
 
-1. **The conversation was handed to a person.** `mode = 'human'`. The orchestrator refuses to answer those, by design. `GET /api/v1/analytics/conversations/{id}/events` says who took it and why.
-2. **The workspace is out of AI requests.** `grep billing.ai_allowance_exhausted`. The message is stored and the conversation waits for a person; the job is *not* dead-lettered.
-3. **No active default agent.** `grep agent.no_active_default`.
-4. **The provider is failing.** `grep openai` in the worker logs. The client retries three times with backoff before giving up.
+```sql
+SELECT t.outcome, t.state, t.engaged_at, t.completed_at, t.provider_response_id,
+       c.mode, c.status, c.handoff_reason
+  FROM agent_turns t
+  JOIN conversations c ON c.id = t.conversation_id AND c.tenant_id = t.tenant_id
+ WHERE t.conversation_id = '<conversation id>'
+ ORDER BY t.created_at DESC
+ LIMIT 5;
+```
+
+| `outcome` | What happened | What to do |
+| --- | --- | --- |
+| `replied` | A reply was sent | Check delivery: see *A send WhatsApp never confirmed* |
+| `handed_off` / `escalated` | The agent's handoff tool, or the sentiment classifier, gave it to a person | Nothing — `handoff_reason` says why |
+| `quota_blocked` | The plan has no AI turns left this period (`handoff_reason` starts `AI_QUOTA_EXHAUSTED`) | Commercial: upgrade the plan or wait for the period to roll over |
+| `empty_response` | The provider answered with no words; the customer was told a colleague will follow up and the conversation was handed over (`AI_EMPTY_RESPONSE`) | If it recurs, `AgentEmptyResponses` fires — check the model and the provider |
+| `suppressed_workspace` | The workspace is suspended or deleted | Intended. A deleted workspace is not served during retention |
+| `suppressed_agent` | No active default agent, or it was disabled mid-turn | Activate an agent |
+| `suppressed_closed` | The conversation was closed, before or during the turn | Intended: an old turn never reopens a closed conversation |
+| `suppressed_human` | A person owns the conversation | Nothing |
+| `suppressed_channel` | The WhatsApp number is disabled or released | Reconnect the number |
+| *no row, or `state = 'engaged'` with no `completed_at`* | See *An agent turn engaged and never finished* | |
+
+If there is no turn at all, the job never reached the worker: `grep agent.enqueue_failed`, and see *Inbound stored but never answered*.
+
+### An agent turn engaged and never finished
+
+**Alert:** `AgentTurnsStranded`. **Metric:** `wasla_agent_turns_engaged_unfinished`.
+
+A turn becomes `engaged` in the same transaction that charges the customer's AI
+turn, immediately before the provider is called. If anything then fails — the
+provider past its retries (`OpenAIUnavailable` will usually be firing too), an
+unexpected exception, a worker killed mid-turn — the turn stays `engaged` for
+ever. That is deliberate: the reply may already be on the customer's phone, so
+nothing retries it, and the job is dead-lettered rather than replayed.
+
+```sql
+SELECT t.tenant_id, t.conversation_id, t.trigger_message_id, t.engaged_at
+  FROM agent_turns t
+ WHERE t.state = 'engaged'
+   AND t.engaged_at < now() - interval '15 minutes'
+ ORDER BY t.engaged_at;
+```
+
+For each, read the conversation. If an outbound message follows the trigger
+message, the customer was answered and only the bookkeeping is stranded. If not,
+answer the customer by hand. **Do not replay the dead-lettered agent job** — see
+*Replaying dead-lettered work* for why agent replays require `--force`.
 
 ### Campaigns are not sending
 
@@ -1021,7 +1066,12 @@ that are more specific than a counter can be.
 | `ingestion_recovery.swept` | Documents a queue outage stranded were re-queued | Informational; High if it never stops |
 | `agent.turn_already_answered` | A duplicate job found the turn already owned, and did nothing | Informational — this is WQ-01's guard working |
 | `follow_up.cancelled_on_handoff` | A colleague took a conversation over, so its nudge was cancelled | Informational |
-| `billing.ai_allowance_exhausted` | A workspace is out of AI requests | Commercial, not operational |
+| `billing.ai_allowance_exhausted` | A workspace is out of AI turns; the conversation was handed to a person (`AI_QUOTA_EXHAUSTED`) | Commercial, not operational |
+| `agent.turn_outcome` | How every turn ended, with `outcome`. Counted by `wasla_agent_turn_outcomes_total` | Informational |
+| `agent.reply_suppressed` | A reply was ready and not sent, because the workspace, agent, conversation or number changed while the model was composing | Informational; Medium if sudden |
+| `agent.empty_response` | The provider answered with no words; the customer was told a colleague will follow up. `AgentEmptyResponses` | Medium, High as a rate |
+| `agent.reply_truncated` | A reply over WhatsApp's limit was shortened at a sentence, with an offer to continue | Low; a rate means an agent's prompt invites long answers |
+| `sentiment.persistence_failed` | A sentiment reading could not be stored; the turn continued without it | Medium if sustained |
 | `ratelimit.unavailable` | Redis down; limiting is failing open | High |
 | `credential.decryption_failed` | A stored credential is unreadable — check key configuration | High |
 | `worker.heartbeat_failed` | A loop cannot reach Redis | High |

@@ -58,6 +58,7 @@ from app.agents.reply import fallback_reply, prepare_channel_reply
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
+from app.core.telemetry import record_agent_turn_outcome
 from app.core.tracing import JOB_OUTCOME
 from app.db.models.agent import Agent
 from app.db.models.agent_turn import TurnOutcome
@@ -481,6 +482,9 @@ class AgentWorker:
                 "conversation_id": str(job.conversation_id),
             },
         )
+        # A series per ending, so a surge of quota refusals, suppressions or
+        # empty answers is a graph and an alert rather than log lines (AI-09).
+        await record_agent_turn_outcome(outcome.value)
         if job.trigger_message_id is None:
             return
         async with self._database.session() as marking:

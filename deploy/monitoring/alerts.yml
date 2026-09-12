@@ -587,3 +587,117 @@ groups:
             No metrics are arriving, so no other alert in this file can fire.
             Treat a silent monitoring system as an incident in its own right.
           runbook: docs/RUNBOOK.md
+
+  # ==========================================================================
+  # AI.
+  #
+  # Missing until the AI remediation (AI-09), and the gap was specific: a *hard*
+  # provider outage was visible through DeadLetterGrowth, and a *degraded* one
+  # was not. Throttling the retry absorbed, a classifier failing on every
+  # message, turns stranded engaged, and a provider that began answering with
+  # nothing all kept every rule in this file green.
+  #
+  # Every label matched below is a closed vocabulary: `operation` is one of
+  # three client constants and `outcome` either the four-value provider domain or
+  # `TurnOutcome`. Nothing identifies a workspace or a customer.
+  - name: wasla-ai
+    interval: 30s
+    rules:
+      - alert: OpenAIRequestFailureRate
+        # The final outcome of each call, after its retries - what an agent turn
+        # or a sentiment reading actually experienced. Ratio, so a quiet night
+        # and a busy afternoon are held to one standard.
+        expr: |
+          sum(rate(wasla_provider_requests_total{provider="openai", outcome!="success"}[15m]))
+          /
+          clamp_min(sum(rate(wasla_provider_requests_total{provider="openai"}[15m])), 0.001)
+          > 0.2
+        for: 15m
+        labels:
+          severity: warning
+          component: ai
+        annotations:
+          summary: "More than a fifth of AI provider calls are failing"
+          description: >-
+            Agent turns and sentiment readings are failing after their retries.
+            Check wasla_provider_requests_total by operation to see whether it is
+            respond_agent, respond_sentiment or respond_vision, and the worker
+            logs for openai.request_failed with its status and provider code. A
+            401 or 403 is the API key; a 5xx is the provider.
+          runbook: docs/RUNBOOK.md
+
+      - alert: OpenAIRateLimited
+        # Attempts, not calls. A 429 the retry absorbed is still a customer
+        # waiting longer for a reply, and it never appears in the counter above.
+        expr: |
+          sum(rate(wasla_provider_attempts_total{provider="openai", outcome="rate_limited"}[15m])) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+          component: ai
+        annotations:
+          summary: "OpenAI is rate limiting this deployment"
+          description: >-
+            Provider attempts are being refused with 429 at a sustained rate,
+            whether or not the retries eventually succeed, so customers are
+            waiting longer for replies. Check the account's request and token
+            limits with the provider and whether traffic has outgrown them.
+          runbook: docs/RUNBOOK.md
+
+      - alert: OpenAIUnavailable
+        # Transport failures and 5xx, per attempt. Critical rather than warning:
+        # a turn that exhausts its retries after engaging is stranded and its
+        # customer is not answered by anything.
+        expr: |
+          sum(rate(wasla_provider_attempts_total{provider="openai", outcome="unavailable"}[10m])) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          component: ai
+        annotations:
+          summary: "OpenAI is unreachable or failing with server errors"
+          description: >-
+            Provider attempts are failing with transport errors or 5xx responses.
+            Agent turns that exhaust their retries are left engaged and are not
+            retried, so their customers are not being answered. Check the
+            provider's status and this deployment's egress to api.openai.com.
+          runbook: docs/RUNBOOK.md
+
+      - alert: AgentTurnsStranded
+        # A state invariant rather than an event, counted at scrape time: turns
+        # engaged longer than any healthy turn takes. Fires whatever stranded
+        # them - an outage, an exception, a killed worker.
+        expr: max(wasla_agent_turns_engaged_unfinished) > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: ai
+        annotations:
+          summary: "Agent turns engaged a provider and never finished"
+          description: >-
+            At least one customer message had an agent turn engaged more than
+            fifteen minutes ago that never finished, so it was not answered and
+            will not be retried automatically. List the turns with the query in
+            the runbook, read each conversation and answer by hand; do not replay
+            the job, because a reply may already have been sent.
+          runbook: docs/RUNBOOK.md
+
+      - alert: AgentEmptyResponses
+        # The provider answering with nothing. Each one is already handled - the
+        # customer is told a colleague will follow up and a colleague is asked
+        # to - but a sustained rate means the provider changed or a model is
+        # refusing, and every AI reply is being replaced by a holding message.
+        expr: |
+          sum(rate(wasla_agent_turn_outcomes_total{outcome="empty_response"}[30m])) > 0.01
+        for: 30m
+        labels:
+          severity: warning
+          component: ai
+        annotations:
+          summary: "The AI is producing empty answers"
+          description: >-
+            Agent turns are ending with no words from the provider, so customers
+            are being sent a holding message and handed to a colleague. A
+            sustained rate usually means the provider changed its response shape
+            or a model is refusing; check the agent.empty_response log.
+          runbook: docs/RUNBOOK.md

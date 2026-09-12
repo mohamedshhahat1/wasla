@@ -659,3 +659,172 @@ tests:
               description: >-
                 A customer uploaded a document successfully and it is still not indexed, so no agent can answer from it and nobody has been told. The content is not lost. Check that a worker process is running both the ingestion and ingestion_recovery loops and that Redis is reachable from it; list the backlog with `python -m app.workers.queues unindexed-documents`.
               runbook: docs/RUNBOOK.md
+
+  # ==================================================================== AI
+  # Every AI rule twice: under its threshold and over it (AI-09).
+
+  # -------------------------------------------------- provider failure rate
+  - interval: 30s
+    name: an occasional failed AI call among many successes does not alert
+    input_series:
+      - series: 'wasla_provider_requests_total{job="wasla-api", provider="openai", operation="respond_agent", outcome="success"}'
+        values: "0+20x160"
+      - series: 'wasla_provider_requests_total{job="wasla-api", provider="openai", operation="respond_agent", outcome="failure"}'
+        values: "0+1x160"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: OpenAIRequestFailureRate
+        exp_alerts: []
+
+  - interval: 30s
+    name: AI calls that mostly fail alert
+    input_series:
+      - series: 'wasla_provider_requests_total{job="wasla-api", provider="openai", operation="respond_agent", outcome="success"}'
+        values: "0+0x160"
+      - series: 'wasla_provider_requests_total{job="wasla-api", provider="openai", operation="respond_sentiment", outcome="failure"}'
+        values: "0+4x160"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OpenAIRequestFailureRate
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: OpenAIRequestFailureRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: ai
+            exp_annotations:
+              summary: "More than a fifth of AI provider calls are failing"
+              description: >-
+                Agent turns and sentiment readings are failing after their retries. Check wasla_provider_requests_total by operation to see whether it is respond_agent, respond_sentiment or respond_vision, and the worker logs for openai.request_failed with its status and provider code. A 401 or 403 is the API key; a 5xx is the provider.
+              runbook: docs/RUNBOOK.md
+
+  # --------------------------------------------------- provider throttling
+  - interval: 30s
+    name: a single throttled attempt the retry absorbed does not alert
+    input_series:
+      - series: 'wasla_provider_attempts_total{job="wasla-api", provider="openai", operation="respond_agent", outcome="rate_limited"}'
+        values: "0+0x40 1+0x160"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: OpenAIRateLimited
+        exp_alerts: []
+
+  - interval: 30s
+    name: sustained throttled attempts alert even when calls eventually succeed
+    input_series:
+      - series: 'wasla_provider_attempts_total{job="wasla-api", provider="openai", operation="respond_agent", outcome="rate_limited"}'
+        values: "0+3x160"
+      - series: 'wasla_provider_requests_total{job="wasla-api", provider="openai", operation="respond_agent", outcome="success"}'
+        values: "0+3x160"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OpenAIRateLimited
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: OpenAIRateLimited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: ai
+            exp_annotations:
+              summary: "OpenAI is rate limiting this deployment"
+              description: >-
+                Provider attempts are being refused with 429 at a sustained rate, whether or not the retries eventually succeed, so customers are waiting longer for replies. Check the account's request and token limits with the provider and whether traffic has outgrown them.
+              runbook: docs/RUNBOOK.md
+
+  # -------------------------------------------------- provider unavailable
+  - interval: 30s
+    name: a trickle of provider server errors stays under the page
+    input_series:
+      - series: 'wasla_provider_attempts_total{job="wasla-api", provider="openai", operation="respond_agent", outcome="unavailable"}'
+        values: "0+1x100"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: OpenAIUnavailable
+        exp_alerts: []
+
+  - interval: 30s
+    name: a provider outage pages
+    input_series:
+      - series: 'wasla_provider_attempts_total{job="wasla-api", provider="openai", operation="respond_agent", outcome="unavailable"}'
+        values: "0+3x100"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OpenAIUnavailable
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: OpenAIUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: ai
+            exp_annotations:
+              summary: "OpenAI is unreachable or failing with server errors"
+              description: >-
+                Provider attempts are failing with transport errors or 5xx responses. Agent turns that exhaust their retries are left engaged and are not retried, so their customers are not being answered. Check the provider's status and this deployment's egress to api.openai.com.
+              runbook: docs/RUNBOOK.md
+
+  # ------------------------------------------------------- stranded turns
+  - interval: 30s
+    name: a stranded turn a person resolves inside the window does not page
+    input_series:
+      - series: 'wasla_agent_turns_engaged_unfinished{job="wasla-api"}'
+        values: "0x10 1x10 0x100"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: AgentTurnsStranded
+        exp_alerts: []
+
+  - interval: 30s
+    name: a turn left stranded alerts
+    input_series:
+      - series: 'wasla_agent_turns_engaged_unfinished{job="wasla-api"}'
+        values: "0x10 1x100"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AgentTurnsStranded
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: AgentTurnsStranded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: ai
+            exp_annotations:
+              summary: "Agent turns engaged a provider and never finished"
+              description: >-
+                At least one customer message had an agent turn engaged more than fifteen minutes ago that never finished, so it was not answered and will not be retried automatically. List the turns with the query in the runbook, read each conversation and answer by hand; do not replay the job, because a reply may already have been sent.
+              runbook: docs/RUNBOOK.md
+
+  # ------------------------------------------------------- empty answers
+  - interval: 30s
+    name: one empty answer is handled and does not alert
+    input_series:
+      - series: 'wasla_agent_turn_outcomes_total{job="wasla-api", outcome="empty_response"}'
+        values: "0+0x100 1+0x200"
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: AgentEmptyResponses
+        exp_alerts: []
+
+  - interval: 30s
+    name: a sustained run of empty answers alerts
+    input_series:
+      - series: 'wasla_agent_turn_outcomes_total{job="wasla-api", outcome="empty_response"}'
+        values: "0+1x300"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AgentEmptyResponses
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: AgentEmptyResponses
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: ai
+            exp_annotations:
+              summary: "The AI is producing empty answers"
+              description: >-
+                Agent turns are ending with no words from the provider, so customers are being sent a holding message and handed to a colleague. A sustained rate usually means the provider changed its response shape or a model is refusing; check the agent.empty_response log.
+              runbook: docs/RUNBOOK.md

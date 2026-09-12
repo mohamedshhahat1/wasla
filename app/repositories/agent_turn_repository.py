@@ -11,14 +11,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, Final, cast
 
-from sqlalchemy import ColumnElement, CursorResult, update
+from sqlalchemy import ColumnElement, CursorResult, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.core.logging import get_logger
 from app.db.models.agent_turn import AgentTurn, AgentTurnState, TurnOutcome
-from app.repositories.base import TenantScopedRepository
+from app.repositories.base import BaseRepository, TenantScopedRepository
 
 logger = get_logger(__name__)
 
@@ -28,6 +28,13 @@ logger = get_logger(__name__)
 #: engaging a provider, which is a handful of database round trips, and a worker
 #: that has not crossed it in two minutes is a worker that is not going to.
 DEFAULT_CLAIM_SECONDS = 120.0
+
+#: How long a turn may stay `ENGAGED` before it counts as stranded (AI-09). The
+#: longest a healthy turn can take is a classification and three rounds, each up
+#: to three attempts of sixty seconds - twelve minutes - so fifteen is past
+#: anything a working turn does and short enough to page on while the customer
+#: still remembers writing in.
+STRANDED_TURN_AFTER: Final = timedelta(minutes=15)
 
 
 class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
@@ -215,4 +222,38 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
         )
 
 
-__all__ = ["DEFAULT_CLAIM_SECONDS", "AgentTurnRepository"]
+class EngagedTurnSweep(BaseRepository[AgentTurn]):
+    """Turns that engaged a provider and never finished, across the deployment.
+
+    Unscoped, like `UnresolvedOutboundDirectory`, and for the same reason: a
+    backlog of stranded turns is a platform-wide condition, and the only caller
+    is the metrics exposition, which counts rather than answers a person. Which
+    workspaces they belong to is a question for the runbook's query.
+
+    Not a resolver. An `ENGAGED` turn may already have put a reply on a
+    customer's phone, which is why nothing retries it; this exists so that a
+    person is told there are some to look at (AI-09).
+    """
+
+    model = AgentTurn
+
+    async def backlog(self, *, older_than: datetime) -> tuple[int, float]:
+        """How many engaged turns are older than `older_than`, and the oldest's age."""
+        rows = await self.session.execute(
+            select(func.count(AgentTurn.id), func.min(AgentTurn.engaged_at)).where(
+                AgentTurn.state == AgentTurnState.ENGAGED,
+                AgentTurn.engaged_at < older_than,
+            )
+        )
+        count, oldest = rows.one()
+        if not count or oldest is None:
+            return 0, 0.0
+        return int(count), max((datetime.now(UTC) - oldest).total_seconds(), 0.0)
+
+
+__all__ = [
+    "DEFAULT_CLAIM_SECONDS",
+    "STRANDED_TURN_AFTER",
+    "AgentTurnRepository",
+    "EngagedTurnSweep",
+]

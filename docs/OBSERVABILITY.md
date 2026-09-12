@@ -49,7 +49,11 @@ customers.
 | `wasla_orphaned_workspaces` | gauge | — | **A state invariant, counted at scrape time**: active workspaces with no active owner. Should always be zero. |
 | `wasla_db_pool_*` | gauge | `process_role` | Connection pool depth. |
 | `wasla_jobs_total`, `wasla_job_failures_total` | counter | `queue`, `outcome` / `category` | Worker throughput and failures. |
-| `wasla_provider_requests_total` | counter | `provider`, `operation`, `outcome` | External calls. |
+| `wasla_provider_requests_total` | counter | `provider`, `operation`, `outcome` | External calls, one final outcome per call. OpenAI calls are labelled `respond_agent`, `respond_sentiment` or `respond_vision`, so the classifier that runs on every message is never mistaken for the agent. |
+| `wasla_provider_attempts_total` | counter | `provider`, `operation`, `outcome` | Every attempt, retries included. A call that succeeded on its third try is one success above and two `rate_limited` attempts here — throttling the retry absorbed is visible only in this series. |
+| `wasla_agent_turn_outcomes_total` | counter | `outcome` | How agent turns ended: `replied`, `handed_off`, `escalated`, `empty_response`, `nothing_to_answer`, `quota_blocked`, or `suppressed_human` / `_agent` / `_workspace` / `_closed` / `_channel`. Eleven fixed values. |
+| `wasla_agent_turns_engaged_unfinished` | gauge | — | **A state invariant**: agent turns engaged longer than any healthy turn takes (15 minutes) and never finished. Those customers were not answered and nothing retries them. Should be zero. |
+| `wasla_oldest_engaged_agent_turn_age_seconds` | gauge | — | How long the oldest of those has been stranded. |
 | `wasla_queue_*` | gauge | `queue` | Pending, in-flight, delayed, dead-lettered, expired reservations, and the age of the oldest waiting job. |
 | `wasla_unprocessed_inbound_events` | gauge | — | **A state invariant**: inbound stored whose agent or media handoff never reached a queue. Should be zero. |
 | `wasla_unprocessed_inbound_oldest_age_seconds` | gauge | — | Whether that backlog is being drained or is stuck. |
@@ -121,6 +125,38 @@ which is precisely the state this whole document exists to get out of. It also
 inhibits the rest: when the scraper cannot reach the application, every other
 rule is evaluating absent data, and suppressing them keeps the one actionable
 alert from being buried under the alerts it caused.
+
+### AI
+
+Added by the AI remediation (AI-09). A *hard* provider outage was already
+visible — agent jobs dead-letter after engaging and `DeadLetterGrowth` fires —
+but a *degraded* one was not: throttling the retry absorbed, a classifier
+failing on every message, turns stranded engaged, and a provider that began
+answering with nothing all left every rule green.
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `OpenAIRequestFailureRate` | >20% of OpenAI calls fail after their retries for 15m | warning |
+| `OpenAIRateLimited` | Sustained 429 *attempts*, including ones a retry absorbed | warning |
+| `OpenAIUnavailable` | Sustained transport failures or 5xx attempts for 10m | critical |
+| `AgentTurnsStranded` | An agent turn engaged over 15 minutes ago never finished | warning |
+| `AgentEmptyResponses` | The provider keeps answering turns with no words, for 30m | warning |
+
+`OpenAIRateLimited` and `OpenAIUnavailable` read `wasla_provider_attempts_total`
+rather than the per-call counter on purpose: a call that is throttled twice and
+then succeeds is a customer waiting longer for a reply, and on the per-call
+counter it is indistinguishable from an instant success.
+
+`AgentTurnsStranded` is a state invariant like `OrphanedWorkspace`: counted at
+scrape time from `agent_turns`, so it fires however the turn was stranded — an
+outage past the retries, an exception after the provider was called, a worker
+killed mid-turn. Those turns are never retried automatically, because the
+customer may already have a reply; the runbook says how to find them.
+
+A quota-blocked turn has no alert of its own. It is a commercial condition
+rather than an operational one, and the conversation has already been handed to
+a person; `wasla_agent_turn_outcomes_total{outcome="quota_blocked"}` is there
+for a dashboard.
 
 **Every rule is tested twice** — once under its threshold and once over it.
 A rule only ever shown firing has not been shown to discriminate, and a

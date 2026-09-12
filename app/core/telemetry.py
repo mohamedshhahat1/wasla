@@ -234,6 +234,24 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Calls to an external provider, by provider, operation and outcome.",
         ("provider", "operation", "outcome"),
     ),
+    # Every HTTP attempt inside a provider call, retries included (AI-09). The
+    # counter above records one final outcome per call, so a call that took two
+    # 429s and then succeeded read as one success, and throttling the retry had
+    # absorbed was invisible - exactly what a rate-limit alert exists to catch.
+    # The same labels and the same four-value outcome domain.
+    "wasla_provider_attempts_total": (
+        "Individual attempts at an external provider, retries included, by outcome.",
+        ("provider", "operation", "outcome"),
+    ),
+    # How agent turns ended (AI-09). `outcome` is one of `TurnOutcome`'s eleven
+    # fixed values and nothing else: no workspace, conversation or message id,
+    # so the cardinality of this metric is eleven for ever. The silent endings
+    # the AI audit found - an allowance refused, an empty answer, a reply
+    # suppressed - each have a series here instead of a warning line.
+    "wasla_agent_turn_outcomes_total": (
+        "Agent turns by how they ended.",
+        ("outcome",),
+    ),
     # Retention (ADR-078). One label with three fixed values, and no tenant,
     # media id, filename or storage key anywhere near it - the cardinality of
     # this metric is three, for ever.
@@ -493,6 +511,34 @@ async def record_provider_call(
         )
 
 
+async def record_provider_attempt(
+    *,
+    provider: Provider,
+    operation: str,
+    outcome: CallOutcome,
+) -> None:
+    """One HTTP attempt inside a provider call, whether or not it is retried.
+
+    Recorded beside `record_provider_call` rather than instead of it: the call's
+    final outcome is what a turn experienced, and the attempts are what the
+    provider did. A rate limit the retry absorbed shows up only here.
+    """
+    await _increment(
+        "wasla_provider_attempts_total",
+        {"provider": str(provider), "operation": operation, "outcome": str(outcome)},
+    )
+
+
+async def record_agent_turn_outcome(outcome: str) -> None:
+    """One finished agent turn, by how it ended.
+
+    `outcome` is a `TurnOutcome` value, passed as a string so this leaf module
+    does not import the models, the same arrangement `record_job_outcome` has
+    with `FailureCategory`.
+    """
+    await _increment("wasla_agent_turn_outcomes_total", {"outcome": outcome})
+
+
 @dataclass(slots=True)
 class ProviderCall:
     """One call to somebody else, timed from the moment it was started.
@@ -552,6 +598,14 @@ class ProviderCall:
             # catalogue is unbounded, changes without notice, and its text can
             # echo the request.
             error=None if outcome is CallOutcome.SUCCESS else str(outcome),
+        )
+
+    async def attempt(self, outcome: CallOutcome) -> None:
+        """Count one attempt inside this call (AI-09); `record` still closes it."""
+        await record_provider_attempt(
+            provider=self.provider,
+            operation=self.operation,
+            outcome=outcome,
         )
 
 
