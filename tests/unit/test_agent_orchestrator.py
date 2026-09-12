@@ -309,6 +309,7 @@ def _build(
     attachments: Mapping[uuid.UUID, MessageMedia] | None = None,
     sentiment: FakeSentiment | None = None,
     session: AsyncSession | None = None,
+    output_ceiling: int | None = None,
 ) -> AgentOrchestrator:
     fakes = {
         "ConversationRepository": FakeConversations(
@@ -332,6 +333,7 @@ def _build(
         max_rounds=max_rounds,
         embeddings=as_embeddings(embeddings),
         sentiment=as_sentiment(sentiment) if sentiment is not None else None,
+        **({"output_ceiling": output_ceiling} if output_ceiling is not None else {}),
     )
 
 
@@ -573,6 +575,55 @@ async def test_the_mood_is_read_from_the_newest_customer_message_the_turn_answer
     await orchestrator.answer(conversation_id=CONVERSATION)
 
     assert sentiment.subjects == [second]
+
+
+async def test_an_agent_with_no_ceiling_still_sends_the_deployments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A null ceiling used to omit `max_output_tokens` entirely (AI-05)."""
+    client = StubClient([_reply(text="Hello.")])
+    orchestrator = _build(
+        monkeypatch,
+        client=as_http_client(client),
+        agent=_agent(max_output_tokens=None),
+        output_ceiling=1_024,
+    )
+
+    await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert client.calls[0]["max_output_tokens"] == 1_024
+
+
+async def test_an_agent_ceiling_above_the_deployments_is_held_to_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = StubClient([_reply(text="Hello.")])
+    orchestrator = _build(
+        monkeypatch,
+        client=as_http_client(client),
+        agent=_agent(max_output_tokens=4_096),
+        output_ceiling=1_024,
+    )
+
+    await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert client.calls[0]["max_output_tokens"] == 1_024
+
+
+async def test_an_agent_ceiling_below_the_deployments_is_honoured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = StubClient([_reply(text="Hello.")])
+    orchestrator = _build(
+        monkeypatch,
+        client=as_http_client(client),
+        agent=_agent(max_output_tokens=300),
+        output_ceiling=1_024,
+    )
+
+    await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert client.calls[0]["max_output_tokens"] == 300
 
 
 async def _fails(context: ToolContext, arguments: dict[str, Any]) -> str:

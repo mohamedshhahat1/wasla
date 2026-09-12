@@ -20,7 +20,17 @@ import uuid
 from enum import StrEnum
 from typing import Any, Final
 
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -48,6 +58,9 @@ AGENT_STATUS_TYPE = _enum_type(AgentStatus, name="agent_status")
 DEFAULT_TEMPERATURE: Final = 0.3
 DEFAULT_MEMORY_MESSAGE_LIMIT: Final = 20
 DEFAULT_MEMORY_TOKEN_BUDGET: Final = 4_000
+# The default `OPENAI_MAX_OUTPUT_TOKENS`, restated rather than imported because
+# configuration is loaded after models; a unit test pins the two together.
+DEFAULT_MAX_OUTPUT_TOKENS: Final = 2_048
 # Escalate when a customer reads as angry, and not merely unhappy. Chosen as the
 # default because it is the reading a business would want a person to see, and
 # because the cost of the alternative runs the wrong way: an agent that hands
@@ -87,7 +100,17 @@ class Agent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         nullable=False,
         default=DEFAULT_TEMPERATURE,
     )
-    max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Always present (AI-05). A null used to omit the ceiling from the provider
+    # request entirely; migration 0060 backfilled every null and made the
+    # column NOT NULL. The orchestrator still clamps to the deployment's
+    # configured ceiling at run time, so this guarantees a value exists and the
+    # configuration decides how large it may be.
+    max_output_tokens: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=DEFAULT_MAX_OUTPUT_TOKENS,
+        server_default=text(str(DEFAULT_MAX_OUTPUT_TOKENS)),
+    )
     # Two limits, because either alone is insufficient: a message count keeps
     # the prompt cheap, and a token budget keeps a single long message from
     # blowing the context anyway.

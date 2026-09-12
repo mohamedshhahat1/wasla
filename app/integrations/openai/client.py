@@ -59,6 +59,10 @@ RESPONSES_PATH: Final = "/responses"
 # chosen where it is written, not where a customer types.
 RESPOND: Final = "respond"
 REQUEST_TIMEOUT_SECONDS: Final = 60.0
+# What a request carries when its caller named no output ceiling. The deployment
+# default, and deliberately not configurable here: callers are expected to pass
+# their own, and this exists only so forgetting is bounded rather than free.
+FALLBACK_MAX_OUTPUT_TOKENS: Final = 2_048
 MAX_ATTEMPTS: Final = 3
 BACKOFF_SECONDS: Final = 1.0
 TOO_MANY_REQUESTS: Final = 429
@@ -148,8 +152,12 @@ class ResponsesClient:
             payload["tools"] = [spec.to_payload() for spec in tools]
         if temperature is not None:
             payload["temperature"] = temperature
-        if max_output_tokens is not None:
-            payload["max_output_tokens"] = max_output_tokens
+        # Never absent (AI-05). A request without a ceiling buys whatever output
+        # the provider's own default allows, which is a per-call spend nobody
+        # chose; every caller passes one, and this is what holds if one forgets.
+        payload["max_output_tokens"] = (
+            max_output_tokens if max_output_tokens is not None else FALLBACK_MAX_OUTPUT_TOKENS
+        )
         if response_format is not None:
             payload["text"] = {"format": response_format.to_payload()}
 

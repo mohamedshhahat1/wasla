@@ -51,6 +51,7 @@ from typing import Final
 
 from app.agents.orchestrator import AgentOrchestrator, plan_turn
 from app.agents.registry import ToolRegistry
+from app.agents.reply import prepare_channel_reply
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
@@ -568,6 +569,7 @@ class AgentWorker:
                     client=client,
                     registry=self._registry,
                     meter_round=self._round_meter(job),
+                    output_ceiling=self._settings.openai_max_output_tokens,
                     embeddings=embeddings,
                     sentiment=sentiment,
                 )
@@ -596,6 +598,11 @@ class AgentWorker:
                 conversation_id=job.conversation_id,
                 purpose=AI_PURPOSE_AGENT,
             )
+            # Committed now, before anything about the reply can fail (AI-05).
+            # The tokens were spent whatever becomes of the send, and staging
+            # them into the send's own transaction meant a send refused before
+            # it began - an over-long body, once - rolled them back unmetered.
+            await session.commit()
 
             reply = outcome.reply
             if outcome.handed_off or not reply:
@@ -612,7 +619,9 @@ class AgentWorker:
             )
             await messaging.send_text(
                 conversation_id=job.conversation_id,
-                body=reply,
+                # One message within WhatsApp's limit, shortened at a sentence
+                # with an offer to continue if the model ran long (AI-05).
+                body=prepare_channel_reply(reply).text,
                 origin=MessageOrigin.AGENT,
                 # Deterministic, and derived from the message being answered
                 # rather than generated here, so the same turn produces the same

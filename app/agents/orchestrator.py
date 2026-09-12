@@ -30,7 +30,7 @@ from app.agents.registry import (
 )
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
-from app.db.models.agent import Agent
+from app.db.models.agent import DEFAULT_MAX_OUTPUT_TOKENS, Agent
 from app.db.models.conversation import Conversation, ConversationMode, Message, MessageDirection
 from app.db.session import released
 from app.integrations.openai.client import ResponsesClient
@@ -99,8 +99,8 @@ class ToolExecution:
 # Guidance, not a guarantee. A model asked for brevity usually obliges and
 # sometimes does not, and tokens are not characters - a budget in tokens cannot
 # bound a length in characters, least of all across languages. So this reduces
-# how often the reply is refused; `MessagingService.send_text` is what makes
-# refusing safe (MSG-25).
+# how often a reply has to be shortened; `app.agents.reply` is what guarantees
+# the reply that is sent fits (AI-05).
 _CHANNEL_INSTRUCTIONS = (
     "\n\nYou are replying over WhatsApp. Keep every reply under "
     f"{WHATSAPP_TEXT_MAX_CHARS} characters - WhatsApp will not deliver a longer "
@@ -224,6 +224,7 @@ class AgentOrchestrator:
         embeddings: EmbeddingsClient | None = None,
         sentiment: SentimentService | None = None,
         meter_round: Callable[[str], Awaitable[None]] | None = None,
+        output_ceiling: int = DEFAULT_MAX_OUTPUT_TOKENS,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
@@ -242,6 +243,10 @@ class AgentOrchestrator:
         # out of it. Optional so a unit test can drive the loop without a
         # database; the worker always supplies one.
         self._meter_round = meter_round
+        # The deployment's per-call output ceiling (AI-05). Every request carries
+        # the smaller of this and the agent's own figure, so an agent configured
+        # before a deployment lowered its ceiling is still held to the new one.
+        self._output_ceiling = max(1, output_ceiling)
         self._registry = registry if registry is not None else build_default_registry()
         self._max_rounds = max(1, max_rounds)
         self._agents = AgentRepository(session, tenant_id=tenant_id)
@@ -360,7 +365,7 @@ class AgentOrchestrator:
                     tools=specs,
                     tool_results=results,
                     temperature=resolved.temperature,
-                    max_output_tokens=resolved.max_output_tokens,
+                    max_output_tokens=self._max_output_tokens(resolved),
                 )
             input_tokens += reply.usage.input_tokens
             output_tokens += reply.usage.output_tokens
@@ -467,6 +472,11 @@ class AgentOrchestrator:
             agent_id=resolved.id,
             model=resolved.model,
         )
+
+    def _max_output_tokens(self, agent: Agent) -> int:
+        """The output ceiling this request carries, never absent (AI-05)."""
+        configured = agent.max_output_tokens or self._output_ceiling
+        return min(configured, self._output_ceiling)
 
     async def _taken_over(self, conversation_id: uuid.UUID) -> bool:
         """Whether a person has taken this conversation since the turn began.

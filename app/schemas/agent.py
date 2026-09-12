@@ -117,7 +117,7 @@ class AgentRead(BaseModel):
     model: str
     system_prompt: str
     temperature: float
-    max_output_tokens: int | None
+    max_output_tokens: int
     memory_message_limit: int
     memory_token_budget: int
     is_default: bool
