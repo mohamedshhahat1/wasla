@@ -161,6 +161,26 @@ def classify(error: BaseException) -> FailureCategory:
         return FailureCategory.DEPENDENCY_UNAVAILABLE
     if isinstance(error, DBAPIError) and error.connection_invalidated:
         return FailureCategory.DEPENDENCY_UNAVAILABLE
+    if isinstance(error, ConnectionError):
+        # `builtins.ConnectionError` - refused, reset, aborted - not the Redis
+        # or httpx class of the same name, both of which are caught above.
+        #
+        # This is what asyncpg raises while *establishing* a connection, which
+        # is precisely what happens during a database restart or a failover: the
+        # pool has no live connection for SQLAlchemy to wrap and invalidate, so
+        # the bare OSError subclass arrives here unwrapped and fell through to
+        # `UNKNOWN`. `UNKNOWN` is not retryable, by design and correctly, so a
+        # ten-second failover dead-lettered every job any worker touched during
+        # it - on attempt one, and on the agent queue that is a customer whose
+        # message needs an operator running `replay agent --force` (WQ-02).
+        #
+        # Narrow deliberately. `OSError` as a whole would sweep in
+        # `PermissionError`, `FileNotFoundError` and every local filesystem
+        # failure, and calling those transient dependency failures would retry
+        # work that fails identically every time. Refusing an unrecognised
+        # error remains the default; this adds one proven case to the map
+        # rather than widening the fall-through.
+        return FailureCategory.DEPENDENCY_UNAVAILABLE
     if isinstance(error, PlanLimitExceededError):
         return FailureCategory.PLAN_LIMIT
     if isinstance(error, PermissionDeniedError):

@@ -264,3 +264,74 @@ def test_one_retry_covers_the_commit_window_by_three_orders_of_magnitude() -> No
     """
     for policy in (IDEMPOTENT_RETRY, AGENT_RETRY):
         assert policy.delay_for(1, jitter=0.0) >= 2.0
+
+
+# ------------------------------ infrastructure failures are retryable, WQ-07
+
+
+def test_a_database_that_refuses_a_connection_is_a_transient_dependency() -> None:
+    """The hole WQ-02 fell through, closed and pinned.
+
+    SQLAlchemy wraps *statement* failures in `OperationalError`, which was
+    already handled. It does not wrap the bare `OSError` asyncpg raises while
+    **establishing** a connection - which is exactly what a restart or a
+    failover produces, because the pool has no live connection to invalidate.
+    Those arrived unclassified, and `unknown` is deliberately terminal, so a
+    ten-second failover dead-lettered every in-flight job on attempt one.
+    """
+    for error in (ConnectionRefusedError(), ConnectionResetError(), ConnectionAbortedError()):
+        assert classify(error) is FailureCategory.DEPENDENCY_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(PermissionError("denied"), id="permission"),
+        pytest.param(FileNotFoundError("missing"), id="missing-file"),
+        pytest.param(IsADirectoryError("a directory"), id="directory"),
+        pytest.param(OSError("something local"), id="bare-oserror"),
+    ],
+)
+def test_a_local_filesystem_failure_is_not_a_database_blip(error: OSError) -> None:
+    """The reason the branch above names `ConnectionError` and not `OSError`.
+
+    `OSError` is a large family, and most of it fails identically every time. A
+    branch wide enough to catch a refused connection would also catch a missing
+    file and a denied permission, and retrying those four more times spends the
+    budget a genuine transient needs while telling an operator nothing.
+    """
+    assert classify(error) is FailureCategory.UNKNOWN
+
+
+def test_infrastructure_failures_are_named_as_retryable_rather_than_counted() -> None:
+    """Why this assertion is spelled out rather than parametrised over the set.
+
+    `test_every_retryable_category_is_retried_while_budget_remains` draws its
+    cases *from* `RETRYABLE`, so deleting a member deletes its own test case and
+    the suite stays green - which is exactly how the audit's WQ-M08 mutation
+    survived. Naming the members here means removing one is a failure rather
+    than a smaller parametrisation.
+    """
+    assert FailureCategory.DEPENDENCY_UNAVAILABLE in RETRYABLE
+    assert FailureCategory.PROVIDER_ERROR in RETRYABLE
+    assert FailureCategory.RATE_LIMITED in RETRYABLE
+    assert FailureCategory.TIMEOUT in RETRYABLE
+    assert FailureCategory.WORKER_CRASHED in RETRYABLE
+
+
+@pytest.mark.parametrize("policy", [IDEMPOTENT_RETRY, AGENT_RETRY])
+def test_a_dependency_failure_earns_another_attempt_on_every_working_policy(
+    policy: RetryPolicy,
+) -> None:
+    """Classification is half the question; this is the half that was missing.
+
+    A category can be named perfectly and still be terminal. Both queue policies
+    have to *act* on it, because the failure this covers - Redis away,
+    PostgreSQL restarting - is the ordinary condition of a deployment being
+    maintained.
+    """
+    assert policy.should_retry(FailureCategory.DEPENDENCY_UNAVAILABLE, attempt=1)
+    assert policy.should_retry(
+        classify(ConnectionRefusedError()),
+        attempt=1,
+    )

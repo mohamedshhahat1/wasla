@@ -405,3 +405,76 @@ async def test_a_worker_with_no_counter_sink_still_handles_the_failure() -> None
     )
 
     assert outcome.action == "dead_lettered"
+
+
+# --------------------- infrastructure failures survive maintenance, WQ-02/07
+
+
+async def test_a_database_that_is_restarting_costs_a_delay_and_not_the_job() -> None:
+    """The behavioural half of WQ-02, asserted where the consequence lands.
+
+    The audit's mutation - removing `DEPENDENCY_UNAVAILABLE` from `RETRYABLE` -
+    survived the entire unit suite, because every test of it asked how the
+    failure was *named* and none asked what was *done* about it. A build that
+    made every Redis or PostgreSQL blip terminal would have shipped green.
+
+    `ConnectionRefusedError` rather than `DependencyUnavailableError`, because
+    the bare `OSError` subclass is what asyncpg actually raises while a database
+    is coming back up, and it is the one that used to reach `unknown`.
+    """
+    redis = FakeQueueRedis()
+    queue = AgentQueue(as_redis(redis))
+    raw, envelope = await reserved(queue, redis)
+
+    outcome = await handle_failure(
+        queue,
+        raw,
+        envelope,
+        job_type="agent",
+        identity=identity(),
+        error=ConnectionRefusedError(),
+        policy=POLICY,
+        now=NOW,
+        jitter=0.0,
+    )
+
+    assert outcome.action == "retried"
+    assert outcome.category is FailureCategory.DEPENDENCY_UNAVAILABLE
+    assert await queue.failed_depth() == 0, "a routine restart must not dead-letter the job"
+    (scheduled,) = redis.zsets[DELAYED]
+    assert JobEnvelope.decode(scheduled).attempt == 2
+
+
+async def test_the_job_a_restart_delayed_succeeds_when_the_database_returns() -> None:
+    """The whole point: the delay is not the outcome, converging is.
+
+    A retry that is scheduled and never converges is the same incident with an
+    extra step, so the promotion and the successful second attempt are asserted
+    rather than assumed from the delayed-set entry above.
+    """
+    redis = FakeQueueRedis()
+    queue = AgentQueue(as_redis(redis))
+    raw, envelope = await reserved(queue, redis)
+
+    await handle_failure(
+        queue,
+        raw,
+        envelope,
+        job_type="agent",
+        identity=identity(),
+        error=ConnectionRefusedError(),
+        policy=POLICY,
+        now=NOW,
+        jitter=0.0,
+    )
+
+    later = NOW + timedelta(seconds=11)
+    retried = await queue.reserve(wait_seconds=1, now=later)
+    assert retried is not None, "the delayed job must become due, not merely be recorded"
+    assert JobEnvelope.decode(retried).attempt == 2
+
+    # The database is back; the attempt finishes and the job leaves the queue.
+    assert await queue.release(retried) is True
+    assert await queue.depth() == 0
+    assert await queue.inflight_depth() == 0
+    assert await queue.failed_depth() == 0
