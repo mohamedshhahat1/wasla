@@ -398,6 +398,7 @@ async def test_a_tombstoned_owner_no_longer_holds_the_role(
             )
         )
     ).scalar_one()
+    assert entry.meta is not None
     assert entry.meta["previous_platform_role"] == PlatformRole.PLATFORM_OWNER.value
     assert entry.actor_id == actor.id
 

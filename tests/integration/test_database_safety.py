@@ -107,7 +107,9 @@ def scratch(database_url: str) -> Iterator[tuple[str, str]]:
         asyncio.run(drop())
 
 
-def _run(env_overrides: dict[str, str | None], *, test_body: str) -> subprocess.CompletedProcess:
+def _run(
+    env_overrides: dict[str, str | None], *, test_body: str
+) -> subprocess.CompletedProcess[str]:
     """Run one generated test file in a clean subprocess."""
     environment = {
         key: value

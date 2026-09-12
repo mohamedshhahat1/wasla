@@ -620,4 +620,5 @@ async def test_one_deletion_decides_each_workspace_on_its_own_facts(
         for row in await _entries(db_session, AuditAction.USER_DELETED)
         if row.target_id == target.id
     )
+    assert entry.meta is not None
     assert entry.meta["orphaned_workspaces"] == ["sole-owned"]

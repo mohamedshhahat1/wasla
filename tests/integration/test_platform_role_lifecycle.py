@@ -84,7 +84,15 @@ async def test_only_live_accounts_count_as_platform_owners(
     is the finding; a *live* owner not counting would be a guard that refuses
     every legitimate revocation, which the third case is here to rule out.
     """
-    owner = await _account(db_session, role=PlatformRole.PLATFORM_OWNER, **state)
+    owner = await _account(
+        db_session,
+        role=PlatformRole.PLATFORM_OWNER,
+        # Named rather than unpacked. `**state` is a `dict[str, bool]`, which
+        # the checker cannot match against keyword-only parameters, and naming
+        # them also puts the two axes the table varies in front of the reader.
+        active=state.get("active", True),
+        deleted=state.get("deleted", False),
+    )
 
     found = [row.id for row in await service.owners()]
 

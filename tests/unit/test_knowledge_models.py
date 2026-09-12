@@ -104,7 +104,8 @@ def test_tenant_foreign_keys_cascade() -> None:
     accurate question before those existed and is an ambiguous one now, so the
     test asks the question it actually means.
     """
-    for table in (KnowledgeBase.__table__, Document.__table__, DocumentChunk.__table__):
+    for mapped in (KnowledgeBase.__table__, Document.__table__, DocumentChunk.__table__):
+        table = as_table(mapped)
         to_tenants = [
             key for key in table.c.tenant_id.foreign_keys if key.column.table.name == "tenants"
         ]

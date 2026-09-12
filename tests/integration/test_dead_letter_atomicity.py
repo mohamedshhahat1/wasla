@@ -20,8 +20,9 @@ One script each. Either the whole transition happens or none of it does, and
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 from redis.asyncio import Redis
@@ -36,6 +37,20 @@ from app.workers.queue import (
 from app.workers.retry import FailureCategory
 
 pytestmark = pytest.mark.integration
+
+
+async def _int(result: Awaitable[int] | int) -> int:
+    """Narrow a redis-py command result.
+
+    One class backs both the sync and async clients, so every command is typed
+    sync-or-async. The same narrowing `app.workers.queue._command` makes.
+    """
+    return await cast("Awaitable[int]", result)
+
+
+async def _text(result: Awaitable[str | None] | str | None) -> str | None:
+    return await cast("Awaitable[str | None]", result)
+
 
 REDIS_URL = "redis://localhost:6379/11"
 NOW = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
@@ -93,7 +108,7 @@ async def test_the_real_script_performs_the_whole_dead_letter_transition(
     assert await queue.dead_letter(raw, _record(queue, envelope)) is True
 
     assert await queue.inflight_depth() == 0
-    assert await redis.hlen(f"{queue.namespace}:reservations") == 0
+    assert await _int(redis.hlen(f"{queue.namespace}:reservations")) == 0
     assert await queue.failed_depth() == 1
     assert await queue.depth() == 0
 
@@ -126,17 +141,17 @@ async def test_the_real_script_trims_to_the_retention_limit(
     *oldest* records - the opposite of what an incident needs.
     """
     failed = f"{queue.namespace}:failed"
-    await redis.rpush(failed, *[f"old-{index}" for index in range(DEAD_LETTER_LIMIT)])
+    await _int(redis.rpush(failed, *[f"old-{index}" for index in range(DEAD_LETTER_LIMIT)]))
 
     raw, envelope = await _reserved(queue, '{"probe":"trim"}')
     assert await queue.dead_letter(raw, _record(queue, envelope)) is True
 
     assert await queue.failed_depth() == DEAD_LETTER_LIMIT
-    newest = await redis.lindex(failed, -1)
+    newest = await _text(redis.lindex(failed, -1))
     # The body is JSON inside JSON, so the quotes in it are escaped.
     assert newest is not None and "trim" in newest
     # The oldest went, not the newest.
-    assert await redis.lindex(failed, 0) == "old-1"
+    assert await _text(redis.lindex(failed, 0)) == "old-1"
 
 
 async def test_the_real_script_performs_the_whole_retry_transition(
@@ -157,7 +172,7 @@ async def test_the_real_script_performs_the_whole_retry_transition(
     )
 
     assert await queue.inflight_depth() == 0
-    assert await redis.hlen(f"{queue.namespace}:reservations") == 0
+    assert await _int(redis.hlen(f"{queue.namespace}:reservations")) == 0
     assert await queue.delayed_depth() == 1
 
     scheduled = await redis.zrange(f"{queue.namespace}:delayed", 0, -1, withscores=True)
@@ -209,7 +224,7 @@ async def test_a_transition_that_never_reached_redis_leaves_the_job_recoverable(
 
     assert await queue.inflight_depth() == 1
     assert await queue.failed_depth() == 0
-    assert await redis.hlen(f"{queue.namespace}:reservations") == 1
+    assert await _int(redis.hlen(f"{queue.namespace}:reservations")) == 1
 
     # And it is genuinely still finishable by somebody who can reach Redis.
     assert await queue.dead_letter(raw, _record(queue, envelope)) is True

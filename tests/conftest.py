@@ -27,7 +27,9 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
-import app
+# Aliased: the fixture below is also called `app`, and one name for both
+# made the module unreachable from inside it.
+import app as app_package
 from app.api.dependencies import get_entitlement_service
 from app.core.config import Settings
 from app.core.exceptions import DependencyUnavailableError
@@ -47,7 +49,7 @@ from app.services.entitlement_service import Entitlement
 # than written down: a hardcoded path is the same bug wearing a different hat,
 # passing on the machine it was written on and misleading everywhere else.
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-_APP_ROOT = pathlib.Path(app.__file__).resolve()
+_APP_ROOT = pathlib.Path(app_package.__file__).resolve()
 if _REPO_ROOT not in _APP_ROOT.parents:  # pragma: no cover - an environment fault
     raise RuntimeError(
         f"tests import `app` from {_APP_ROOT}, which is outside this checkout "

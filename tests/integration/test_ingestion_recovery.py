@@ -25,12 +25,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import pytest
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -51,6 +52,20 @@ from tests.fake_embeddings import FakeEmbeddings
 from tests.fakes import as_embeddings
 
 pytestmark = pytest.mark.integration
+
+
+async def _int(result: Awaitable[int] | int) -> int:
+    """Narrow a redis-py command result.
+
+    One class backs both the sync and async clients, so every command is typed
+    sync-or-async. The same narrowing `app.workers.queue._command` makes.
+    """
+    return await cast("Awaitable[int]", result)
+
+
+async def _text(result: Awaitable[str | None] | str | None) -> str | None:
+    return await cast("Awaitable[str | None]", result)
+
 
 REDIS_URL = "redis://localhost:6379/14"
 # A port nothing is listening on. Every command against it raises `RedisError`,
@@ -121,7 +136,7 @@ async def _workspace(session: AsyncSession) -> tuple[Tenant, KnowledgeBase]:
 
 
 async def _queued(redis: Redis) -> int:
-    return int(await redis.llen(PENDING))
+    return await _int(redis.llen(PENDING))
 
 
 async def _status(database: Database, document_id: uuid.UUID) -> DocumentStatus:
@@ -145,7 +160,7 @@ async def _chunks(database: Database, document_id: uuid.UUID) -> int:
 async def _cleanup(database: Database, tenant_id: uuid.UUID) -> None:
     """Remove what these tests committed; deleting the workspace cascades."""
     async with database.session() as session:
-        await session.execute(Tenant.__table__.delete().where(Tenant.id == tenant_id))
+        await session.execute(delete(Tenant).where(Tenant.id == tenant_id))
 
 
 async def test_a_document_the_queue_refused_is_found_and_requeued(
@@ -184,7 +199,9 @@ async def test_a_document_the_queue_refused_is_found_and_requeued(
         assert outcome.still_owing == 0
         assert await _queued(live_redis) == 1
 
-        job = IngestionJob.decode(JobEnvelope.decode(await live_redis.lindex(PENDING, 0)).body)
+        head = await _text(live_redis.lindex(PENDING, 0))
+        assert head is not None
+        job = IngestionJob.decode(JobEnvelope.decode(head).body)
         assert job.document_id == document_id
         assert job.tenant_id == tenant_id
     finally:

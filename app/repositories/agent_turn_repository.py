@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
-from sqlalchemy import ColumnElement, update
+from sqlalchemy import ColumnElement, CursorResult, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.core.logging import get_logger
@@ -89,7 +90,8 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
             )
             .returning(AgentTurn.id)
         )
-        if (await self._session.execute(statement)).scalar_one_or_none() is not None:
+        won: uuid.UUID | None = (await self._session.execute(statement)).scalar_one_or_none()
+        if won is not None:
             return True
 
         return await self._adopt(
@@ -125,7 +127,12 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
             )
             .values(claimed_by=worker_id, claim_expires_at=expires)
         )
-        adopted = (await self._session.execute(statement)).rowcount > 0
+        # `CursorResult.rowcount`, which `Result` does not declare - an ORM
+        # UPDATE always returns the cursor variant, and how many rows it
+        # matched is the answer. The same narrowing `identity_repository`
+        # makes for the same reason.
+        result = cast("CursorResult[Any]", await self._session.execute(statement))
+        adopted = bool(result.rowcount)
         if not adopted:
             logger.info(
                 "agent.turn_already_owned",
@@ -162,7 +169,8 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
                 claim_expires_at=None,
             )
         )
-        return (await self._session.execute(statement)).rowcount > 0
+        result = cast("CursorResult[Any]", await self._session.execute(statement))
+        return bool(result.rowcount)
 
     async def complete(self, *, trigger_message_id: uuid.UUID, now: datetime | None = None) -> bool:
         """Record that this turn ran to its end, whatever that end was.
@@ -185,7 +193,8 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
                 claim_expires_at=None,
             )
         )
-        return (await self._session.execute(statement)).rowcount > 0
+        result = cast("CursorResult[Any]", await self._session.execute(statement))
+        return bool(result.rowcount)
 
     async def get(self, *, trigger_message_id: uuid.UUID) -> AgentTurn | None:
         """The turn answering this message, if one has been claimed."""

@@ -21,13 +21,14 @@ from __future__ import annotations
 
 import contextlib
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import httpx
 import pytest
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -56,6 +57,20 @@ from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.queue import AgentJob, AgentQueue
 
 pytestmark = pytest.mark.integration
+
+
+async def _int(result: Awaitable[int] | int) -> int:
+    """Narrow a redis-py command result.
+
+    One class backs both the sync and async clients, so every command is typed
+    sync-or-async. The same narrowing `app.workers.queue._command` makes.
+    """
+    return await cast("Awaitable[int]", result)
+
+
+async def _text(result: Awaitable[str | None] | str | None) -> str | None:
+    return await cast("Awaitable[str | None]", result)
+
 
 REDIS_URL = "redis://localhost:6379/13"
 REPLY = "Yes, we are here."
@@ -261,9 +276,7 @@ async def _seed(
         session.add(event)
         await session.flush()
         await session.execute(
-            WhatsAppEvent.__table__.update()
-            .where(WhatsAppEvent.id == event.id)
-            .values(created_at=aged)
+            update(WhatsAppEvent).where(WhatsAppEvent.id == event.id).values(created_at=aged)
         )
         pairs.append((conversation.id, message.id))
 
@@ -332,7 +345,7 @@ async def _turns(database: Database, tenant_id: uuid.UUID) -> int:
 async def _cleanup(database: Database, tenant_id: uuid.UUID) -> None:
     """Remove what these tests committed; deleting the workspace cascades."""
     async with database.session() as session:
-        await session.execute(Tenant.__table__.delete().where(Tenant.id == tenant_id))
+        await session.execute(delete(Tenant).where(Tenant.id == tenant_id))
 
 
 @contextlib.asynccontextmanager
@@ -426,11 +439,13 @@ async def test_the_sweepers_failed_commit_still_answers_the_customer_once(
                 await sweeper.run_once()
 
         pending = f"{namespace}:pending"
-        assert await live_redis.llen(pending) == 1, "the publish must survive the failed commit"
+        assert (
+            await _int(live_redis.llen(pending)) == 1
+        ), "the publish must survive the failed commit"
 
         # A healthy pass finds the event still owed and publishes a second time.
         await sweeper.run_once()
-        assert await live_redis.llen(pending) == 2, "the window must genuinely be reproduced"
+        assert await _int(live_redis.llen(pending)) == 2, "the window must genuinely be reproduced"
 
         consumed = await _drain(_agent_worker(turn_database, live_redis, namespace), budget=6)
 
@@ -470,7 +485,7 @@ async def test_a_whole_batch_losing_its_commit_costs_n_turns_and_not_two_n(
         await sweeper.run_once()
 
         pending = f"{namespace}:pending"
-        assert await live_redis.llen(pending) == 2 * conversations
+        assert await _int(live_redis.llen(pending)) == 2 * conversations
 
         consumed = await _drain(
             _agent_worker(turn_database, live_redis, namespace),
@@ -484,7 +499,13 @@ async def test_a_whole_batch_losing_its_commit_costs_n_turns_and_not_two_n(
 
         keys = await _outbound(turn_database, tenant_id)
         assert len(keys) == conversations
-        assert sorted(keys) == sorted(f"agent-turn:{message_id}" for _, message_id in pairs)
+        # None would mean a reply that carried no key at all, which is the
+        # defect; asserting the exact set is what proves each turn produced its
+        # own one rather than N copies of one key.
+        assert None not in keys
+        assert sorted(str(key) for key in keys) == sorted(
+            f"agent-turn:{message_id}" for _, message_id in pairs
+        )
     finally:
         await _cleanup(turn_database, tenant_id)
 

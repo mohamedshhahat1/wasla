@@ -224,7 +224,7 @@ class _Handoff:
         second: Callable[[], Awaitable[str]],
     ) -> list[str]:
         """Both contenders, ordered, with their outcomes returned as labels."""
-        leading = asyncio.create_task(first())
+        leading: asyncio.Task[str] = asyncio.ensure_future(first())
         try:
             await asyncio.wait_for(self.holds.wait(), timeout=15)
         except TimeoutError:  # pragma: no cover - only on a regression
@@ -233,7 +233,7 @@ class _Handoff:
                 "the owner guard never took the advisory lock; the count and the "
                 "mutation are not one critical section"
             )
-        trailing = asyncio.create_task(second())
+        trailing: asyncio.Task[str] = asyncio.ensure_future(second())
         # Long enough for the trailing contender to reach the lock it cannot
         # have. Both contenders authenticated before the race began, so nothing
         # in this window can fail for want of a credential - the only thing the
