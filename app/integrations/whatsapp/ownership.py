@@ -62,9 +62,17 @@ GRAPH_BASE_URL: Final = "https://graph.facebook.com"
 # better refused than left hanging.
 VERIFY_TIMEOUT_SECONDS: Final = 8.0
 # Fields asked for by name rather than taking the default node shape, so a
-# future Graph version cannot quietly stop returning the WABA edge and have
-# that read as "no WABA" instead of "look again".
-NUMBER_FIELDS: Final = "id,display_phone_number,verified_name,whatsapp_business_account"
+# future Graph version cannot quietly change what a bare read returns.
+#
+# `whatsapp_business_account` is deliberately *not* among them. The phone
+# number node does not expose it: Graph answers a request that names it with
+# `(#100) Tried accessing nonexisting field`, and that error fails the whole
+# read rather than omitting one key - which made every claim unprovable and
+# every connect attempt a 422. Verified against the live API on 2026-09-12 on
+# both v21.0 and v26.0. The owning account is therefore resolved the other way
+# round, by `_resolve_waba` listing the claimed account's numbers; that path
+# was always here as the fallback and is now the only one.
+NUMBER_FIELDS: Final = "id,display_phone_number,verified_name"
 # One page is plenty: this is the fallback path, used only when the phone
 # number node omits its WABA edge, and a business account holding more numbers
 # than this does not need us to walk all of them to answer one question.
