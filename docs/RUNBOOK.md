@@ -237,20 +237,54 @@ docker compose -f docker-compose.prod.yml exec worker \
   python -m app.workers.queues replay media --limit 20
 ```
 
-The agent queue is **refused** without `--force`, because an agent turn ends in
-a WhatsApp message that carries no idempotency key: replaying a job whose
-failure came after the provider was engaged sends a second answer to a question
-that already has one. Read the conversation first, decide whether answering it
-again is right, and then:
+**Start with a dry run.** It changes nothing, needs no `--force` even on the
+agent queue, and prints one line per record — age, category, attempts,
+workspace, job id — so the decision is made after looking rather than before.
 
 ```bash
 docker compose -f docker-compose.prod.yml exec worker \
-  python -m app.workers.queues replay agent --limit 1 --force
+  python -m app.workers.queues replay agent --limit 20 --dry-run
 ```
+
+The agent queue is **refused** without `--force`, because an agent turn ends in
+a WhatsApp message: replaying a job whose failure came after the provider was
+engaged sends a second answer to a question that already has one. Read the
+conversation first, decide whether answering it again is right, and then:
+
+```bash
+docker compose -f docker-compose.prod.yml exec worker \
+  python -m app.workers.queues replay agent --limit 20 --force
+```
+
+**An `uncertain_delivery` record is not replayed by that, and that is the
+point.** `--force` says *this queue* may be replayed; it does not say *this
+record* is safe, and the two are different questions. An `uncertain_delivery`
+job engaged a provider and then stopped, so the customer may already have the
+reply — the exact harm the engagement barrier exists to prevent, and exactly the
+records a provider outage leaves mixed in with ordinary ones. They are listed as
+`PROTECTED` and left alone, whatever `--force` says.
+
+If you have read the conversation and know the reply never arrived, replay that
+one record and only that one:
+
+```bash
+docker compose -f docker-compose.prod.yml exec worker \
+  python -m app.workers.queues replay agent --force --include-uncertain --job-id <job-id>
+```
+
+`--job-id` on its own is worth using for any careful recovery: it turns a
+decision about one conversation into an action on one conversation.
 
 Replayed jobs go back as fresh first attempts, and the dead-letter records are
 kept — so if the replay fails too, comparing the new record with the old one is
 what tells you whether anything changed.
+
+The logical-turn claim is a second line under all of this: a replayed agent job
+whose turn already reached `engaged` or `completed` is consumed and does nothing,
+so even a mistaken replay cannot re-run the inference or re-send the reply
+(WQ-01). Do not treat that as permission to replay uncertain records casually —
+the claim protects a turn that ran, and the operator's judgement is still what
+decides whether one *should* run again.
 
 ### Nobody can log in
 

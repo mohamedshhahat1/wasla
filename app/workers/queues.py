@@ -11,6 +11,7 @@ has exactly the audience this should have.
     docker compose exec worker python -m app.workers.queues status
     docker compose exec worker python -m app.workers.queues dead-letters agent
     docker compose exec worker python -m app.workers.queues replay ingestion
+    docker compose exec worker python -m app.workers.queues replay agent --force --dry-run
     docker compose exec worker python -m app.workers.queues unprocessed-inbound
     docker compose exec worker python -m app.workers.queues unindexed-documents
     docker compose exec worker python -m app.workers.queues unresolved-sends
@@ -28,11 +29,22 @@ a provider outage into the same jobs failing round and round for ever.
 
 **Replay refuses the agent queue unless forced.** Ingestion and media are
 idempotent - re-running replaces a document's chunks, and a file already read
-is not read again - so replaying one costs a round trip. An agent turn is not:
-it ends in a WhatsApp message that carries no idempotency key, so replaying one
-whose failure came after the provider was engaged sends a second answer to a
-question that already has one. `--force` exists because an operator who has
-read the conversation may know better, and it says so out loud.
+is not read again - so replaying one costs a round trip. An agent turn is not,
+so `--force` exists because an operator who has read the conversation may know
+better, and it says so out loud.
+
+**And an uncertain record is never replayed by default, on any queue.** The
+queue gate above asks whether this *queue* is safe; it cannot ask whether a
+particular *record* is, and a dead-letter list mixing ordinary `provider_error`
+failures with `uncertain_delivery` ones used to be replayable only as a whole.
+That is the worst possible moment for it - a long mixed list is what a provider
+outage produces - and `uncertain_delivery` means precisely "a customer may
+already have this reply" (WQ-06). Recovering the ordinary failures no longer
+takes the uncertain ones with them:
+
+    replay agent --force --dry-run          # look first
+    replay agent --force                    # the ordinary ones
+    replay agent --force --include-uncertain --job-id <id>   # one, deliberately
 """
 
 from __future__ import annotations
@@ -43,6 +55,7 @@ import json
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
@@ -54,6 +67,7 @@ from app.repositories.whatsapp_repository import InboundEventSweep
 from app.workers.inbound_recovery import unprocessed_since
 from app.workers.ingestion_recovery import unindexed_since
 from app.workers.queue import QUEUES, ReliableQueue
+from app.workers.retry import FailureCategory
 
 logger = get_logger(__name__)
 
@@ -62,6 +76,14 @@ logger = get_logger(__name__)
 # each worker carries: the queues that take `IDEMPOTENT_RETRY` are the queues
 # that are safe to replay.
 IDEMPOTENT_QUEUES = frozenset({"ingestion", "media"})
+
+# The one category that is never replayed by default, on any queue. A job
+# dead-lettered as `uncertain_delivery` engaged a provider and then stopped,
+# so the customer may already have the reply it was about to send - which is
+# the exact harm the engagement barrier exists to prevent (ADR-074). Read
+# from the taxonomy rather than written as a literal, so the two cannot
+# drift apart.
+UNCERTAIN_DELIVERY = str(FailureCategory.UNCERTAIN_DELIVERY)
 
 
 async def status(redis: RedisClient) -> int:
@@ -104,7 +126,16 @@ async def dead_letters(redis: RedisClient, *, queue_name: str, limit: int) -> in
     return 0
 
 
-async def replay(redis: RedisClient, *, queue_name: str, limit: int, force: bool) -> int:
+async def replay(
+    redis: RedisClient,
+    *,
+    queue_name: str,
+    limit: int,
+    force: bool,
+    include_uncertain: bool = False,
+    job_id: str | None = None,
+    dry_run: bool = False,
+) -> int:
     """Put dead-lettered jobs back on the queue, as fresh first attempts.
 
     Fresh attempts, not continuations: the attempt count is what said the job
@@ -116,13 +147,34 @@ async def replay(redis: RedisClient, *, queue_name: str, limit: int, force: bool
     Records are taken from the *newest* end, matching what `dead-letters`
     prints, so an operator who has just read a record and decided to replay it
     gets that record rather than one from a fortnight ago.
+
+    **Two gates, not one, and the second is the one that was missing.** The
+    queue gate (`--force`) asks whether this *queue* is safe to replay at all.
+    It is correct and it stays. What it could not ask is whether a particular
+    *record* is safe, and `--force` took the whole batch - so an operator
+    recovering from a provider outage, which is exactly when the list is long
+    and mixed, replayed the `uncertain_delivery` records sitting alongside the
+    ordinary ones. `uncertain_delivery` means precisely "a customer may already
+    have this reply": it is the harm the engagement barrier exists to prevent,
+    reintroduced at the operator's own hand (WQ-06).
+
+    So an uncertain record is skipped by default, on every queue, whatever
+    `--force` says. `--include-uncertain` exists because an operator who has
+    read the conversation may know the reply never arrived - but it has to be
+    asked for separately from "replay this queue", because those are different
+    decisions about different risks.
+
+    `--job-id` narrows to one record, and `--dry-run` prints what would happen
+    without doing it. Both exist for the same reason: the safe way to recover a
+    mixed list is to look first and act narrowly, and until now the only
+    available action was the widest one.
     """
     namespace = QUEUES.get(queue_name)
     if namespace is None:
         print(f"unknown queue: {queue_name}", file=sys.stderr)  # noqa: T201
         return 2
 
-    if queue_name not in IDEMPOTENT_QUEUES and not force:
+    if queue_name not in IDEMPOTENT_QUEUES and not force and not dry_run:
         print(  # noqa: T201
             f"refusing to replay {queue_name}: an agent turn is not idempotent, so a "
             "replayed job can send a customer a second reply to a question that "
@@ -139,36 +191,101 @@ async def replay(redis: RedisClient, *, queue_name: str, limit: int, force: bool
         return 0
 
     replayed = 0
+    protected = 0
+    skipped = 0
+    header = f"{'age':>10}  {'category':<22}  {'attempts':>8}  {'workspace':<36}  job"
+    print(header)  # noqa: T201
+    print("-" * len(header))  # noqa: T201
+    now = datetime.now(UTC)
+
     for entry in entries:
         try:
             record = json.loads(entry)
             body = record["body"]
         except (ValueError, KeyError, TypeError):
             print(f"skipping an unreadable dead-letter record in {queue_name}")  # noqa: T201
+            skipped += 1
             continue
-        if not isinstance(body, str):
+        if not isinstance(body, str) or not isinstance(record, dict):
             print(f"skipping a dead-letter record with no payload in {queue_name}")  # noqa: T201
+            skipped += 1
             continue
+
+        identifier = record.get("job_id")
+        if job_id is not None and identifier != job_id:
+            continue
+
+        category = record.get("category")
+        age = _record_age(record, now=now)
+        # Identifiers, a category, a count and an age. No message content and no
+        # credentials, for the same reason the record itself carries none: this
+        # is printed into a terminal scrollback and a shell history.
+        line = (
+            f"{age:>10}  {category!s:<22}  {record.get('attempts', '?')!s:>8}  "
+            f"{record.get('tenant_id') or '-'!s:<36}  {identifier or '-'}"
+        )
+
+        if category == UNCERTAIN_DELIVERY and not include_uncertain:
+            print(f"{line}   PROTECTED - not replayed")  # noqa: T201
+            protected += 1
+            continue
+
+        if dry_run:
+            print(f"{line}   would replay")  # noqa: T201
+            replayed += 1
+            continue
+
         await queue.enqueue_body(body)
+        print(f"{line}   replayed")  # noqa: T201
         replayed += 1
 
     # The records are left where they are. A replayed job that fails again
     # writes a *new* record, and an operator comparing the two learns whether
     # the replay helped - which deleting the original would take away.
-    logger.warning(
-        "worker.dead_letters_replayed",
-        extra={
-            "event": "worker.dead_letters_replayed",
-            "queue": queue_name,
-            "replayed": replayed,
-            "forced": force,
-        },
-    )
+    if not dry_run:
+        logger.warning(
+            "worker.dead_letters_replayed",
+            extra={
+                "event": "worker.dead_letters_replayed",
+                "queue": queue_name,
+                "replayed": replayed,
+                "protected": protected,
+                "forced": force,
+                "included_uncertain": include_uncertain,
+            },
+        )
+
+    verb = "would re-queue" if dry_run else "re-queued"
+    print()  # noqa: T201
     print(  # noqa: T201
-        f"{queue_name}: re-queued {replayed} job(s). The dead-letter records are kept; "
-        "clear them once the replay is known to have worked."
+        f"{queue_name}: {verb} {replayed} job(s); {protected} left alone as "
+        f"{UNCERTAIN_DELIVERY}; {skipped} unreadable."
     )
+    if protected:
+        print(  # noqa: T201
+            f"An {UNCERTAIN_DELIVERY} record means the customer may already have that "
+            "reply. Read the conversation; replay one only with --include-uncertain, "
+            "and preferably with --job-id so it is the only one."
+        )
+    if not dry_run:
+        print(  # noqa: T201
+            "The dead-letter records are kept; clear them once the replay has worked."
+        )
     return 0
+
+
+def _record_age(record: dict[str, Any], *, now: datetime) -> str:
+    """How long ago this job was given up on, or `-` if the record cannot say."""
+    stamp = record.get("dead_lettered_at")
+    if not isinstance(stamp, str):
+        return "-"
+    try:
+        moment = datetime.fromisoformat(stamp)
+    except ValueError:
+        return "-"
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return f"{(now - moment).total_seconds():.0f}s"
 
 
 async def unprocessed_inbound(database: Database, *, limit: int) -> int:
@@ -299,6 +416,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replay a queue whose jobs are not idempotent (agent)",
     )
+    again.add_argument(
+        "--include-uncertain",
+        action="store_true",
+        help=(
+            "also replay records whose failure was uncertain_delivery - the "
+            "customer may already have that reply"
+        ),
+    )
+    again.add_argument(
+        "--job-id",
+        help="replay only the record for this job id",
+    )
+    again.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what would be replayed without replaying anything",
+    )
 
     stuck = commands.add_parser(
         "unprocessed-inbound",
@@ -351,6 +485,9 @@ async def run(argv: Sequence[str] | None = None) -> int:
             queue_name=arguments.queue,
             limit=arguments.limit,
             force=arguments.force,
+            include_uncertain=arguments.include_uncertain,
+            job_id=arguments.job_id,
+            dry_run=arguments.dry_run,
         )
     finally:
         await redis.close()

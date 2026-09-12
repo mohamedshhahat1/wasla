@@ -44,7 +44,14 @@ def wrapper(redis: FakeQueueRedis) -> RedisWrapper:
     return RedisWrapper(redis)
 
 
-async def dead_letter_one(redis: FakeQueueRedis, *, namespace: str, body: str) -> None:
+async def dead_letter_one(
+    redis: FakeQueueRedis,
+    *,
+    namespace: str,
+    body: str,
+    category: FailureCategory = FailureCategory.PROVIDER_ERROR,
+    job_id: str = str(JOB),
+) -> None:
     queue = ReliableQueue(as_redis(redis), namespace=namespace)
     await queue.enqueue_body(body, now=NOW)
     raw = await queue.reserve(wait_seconds=1, now=NOW)
@@ -55,9 +62,9 @@ async def dead_letter_one(redis: FakeQueueRedis, *, namespace: str, body: str) -
             queue=namespace,
             job_type=namespace.split(":")[0],
             tenant_id=str(TENANT),
-            job_id=str(JOB),
+            job_id=job_id,
             attempts=5,
-            category=FailureCategory.PROVIDER_ERROR,
+            category=category,
             enqueued_at=JobEnvelope.decode(raw).enqueued_at,
             first_attempted_at=NOW,
             last_attempted_at=NOW,
@@ -221,3 +228,195 @@ def test_the_parser_accepts_the_documented_invocations(argv: list[str]) -> None:
 def test_the_parser_refuses_a_queue_that_does_not_exist() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["replay", "nonsense"])
+
+
+# ------------------------------------------- per-record replay safety, WQ-06
+
+
+async def _mixed_list(redis: FakeQueueRedis) -> None:
+    """The list a provider outage actually produces: ordinary and uncertain.
+
+    Three records, with the uncertain one in the middle so it cannot be skipped
+    by an off-by-one at either end of the batch.
+    """
+    await dead_letter_one(
+        redis,
+        namespace="agent:jobs",
+        body='{"conversation_id":"first"}',
+        category=FailureCategory.PROVIDER_ERROR,
+        job_id="job-first",
+    )
+    await dead_letter_one(
+        redis,
+        namespace="agent:jobs",
+        body='{"conversation_id":"uncertain"}',
+        category=FailureCategory.UNCERTAIN_DELIVERY,
+        job_id="job-uncertain",
+    )
+    await dead_letter_one(
+        redis,
+        namespace="agent:jobs",
+        body='{"conversation_id":"third"}',
+        category=FailureCategory.PROVIDER_ERROR,
+        job_id="job-third",
+    )
+
+
+def _requeued(redis: FakeQueueRedis) -> list[str]:
+    """The payloads now waiting on the agent queue."""
+    return [JobEnvelope.decode(entry).body for entry in redis.lists.get("agent:jobs:pending", [])]
+
+
+async def test_the_mixed_list_really_is_mixed(redis: FakeQueueRedis) -> None:
+    """Non-vacuity for everything below.
+
+    If the fixture produced three ordinary records, "the uncertain one was not
+    replayed" would be true of a list containing no uncertain one, and every
+    test in this section would pass while proving nothing.
+    """
+    await _mixed_list(redis)
+
+    categories = [json.loads(entry)["category"] for entry in redis.lists["agent:jobs:failed"]]
+    assert categories.count(str(FailureCategory.UNCERTAIN_DELIVERY)) == 1
+    assert categories.count(str(FailureCategory.PROVIDER_ERROR)) == 2
+
+
+async def test_force_replays_the_ordinary_failures_and_protects_the_uncertain_one(
+    wrapper: RedisWrapper, redis: FakeQueueRedis, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The finding, inverted.
+
+    `--force` used to take the whole batch, so an operator recovering from a
+    provider outage - which is exactly when the list is long and mixed - sent a
+    second copy of a reply the customer may already have had. The queue gate was
+    never the wrong idea; it was the wrong *granularity* (WQ-06).
+    """
+    await _mixed_list(redis)
+
+    assert await replay(as_redis_client(wrapper), queue_name="agent", limit=10, force=True) == 0
+
+    assert sorted(_requeued(redis)) == [
+        '{"conversation_id":"first"}',
+        '{"conversation_id":"third"}',
+    ]
+    output = capsys.readouterr().out
+    assert "PROTECTED" in output
+    assert "1 left alone as uncertain_delivery" in output
+
+
+async def test_an_uncertain_record_needs_a_second_deliberate_flag(
+    wrapper: RedisWrapper, redis: FakeQueueRedis
+) -> None:
+    """Two decisions, asked separately, because they are about different risks.
+
+    `--force` says this queue may be replayed at all. `--include-uncertain`
+    says this record may be, knowing the customer might already have it. One
+    keystroke should not answer both.
+    """
+    await _mixed_list(redis)
+
+    assert (
+        await replay(
+            as_redis_client(wrapper),
+            queue_name="agent",
+            limit=10,
+            force=True,
+            include_uncertain=True,
+        )
+        == 0
+    )
+
+    assert '{"conversation_id":"uncertain"}' in _requeued(redis)
+
+
+async def test_one_record_can_be_replayed_on_its_own(
+    wrapper: RedisWrapper, redis: FakeQueueRedis
+) -> None:
+    """The narrow action an operator who has read one conversation wants.
+
+    Without it the only way to recover a single job was to replay a batch, which
+    is how a careful decision about one conversation became a careless one about
+    twenty.
+    """
+    await _mixed_list(redis)
+
+    assert (
+        await replay(
+            as_redis_client(wrapper),
+            queue_name="agent",
+            limit=10,
+            force=True,
+            job_id="job-third",
+        )
+        == 0
+    )
+
+    assert _requeued(redis) == ['{"conversation_id":"third"}']
+
+
+async def test_a_targeted_uncertain_replay_is_still_refused_without_the_flag(
+    wrapper: RedisWrapper, redis: FakeQueueRedis
+) -> None:
+    """Naming the record is not the same as accepting what replaying it means."""
+    await _mixed_list(redis)
+
+    assert (
+        await replay(
+            as_redis_client(wrapper),
+            queue_name="agent",
+            limit=10,
+            force=True,
+            job_id="job-uncertain",
+        )
+        == 0
+    )
+
+    assert _requeued(redis) == []
+
+
+async def test_a_dry_run_changes_nothing(
+    wrapper: RedisWrapper, redis: FakeQueueRedis, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Look first.
+
+    The recovery procedure now starts with a command that cannot make anything
+    worse - including on the agent queue, where a dry run needs no `--force`
+    because it does nothing.
+    """
+    await _mixed_list(redis)
+
+    assert (
+        await replay(
+            as_redis_client(wrapper),
+            queue_name="agent",
+            limit=10,
+            force=False,
+            dry_run=True,
+        )
+        == 0
+    )
+
+    assert _requeued(redis) == []
+    output = capsys.readouterr().out
+    assert "would re-queue 2 job(s)" in output
+    assert "PROTECTED" in output
+
+
+async def test_the_printed_summary_carries_no_customer_content(
+    wrapper: RedisWrapper, redis: FakeQueueRedis, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It is printed into a terminal scrollback and a shell history.
+
+    Identifiers, a category, a count and an age - the same rule the dead-letter
+    record itself follows, restated where the output is produced.
+    """
+    await _mixed_list(redis)
+
+    await replay(as_redis_client(wrapper), queue_name="agent", limit=10, force=False, dry_run=True)
+
+    output = capsys.readouterr().out
+    assert str(TENANT) in output
+    assert "job-uncertain" in output
+    # The payload bodies are identifiers only in production, but the summary
+    # must not print them even so: the guarantee belongs here, not upstream.
+    assert "conversation_id" not in output
