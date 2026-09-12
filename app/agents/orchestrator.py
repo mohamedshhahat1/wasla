@@ -77,6 +77,20 @@ class AgentOutcome:
         return bool(self.reply) and not self.handed_off
 
 
+@dataclass(frozen=True, slots=True)
+class ToolExecution:
+    """What running one requested tool call actually did.
+
+    `output` is what the model reads next round. `succeeded` is whether the
+    server ran the handler to completion: the tool was granted, its arguments
+    validated, and the handler returned. A tool name the model emitted is a
+    request, never an event, and only this flag says the event happened.
+    """
+
+    output: str
+    succeeded: bool
+
+
 # What every agent is told about the channel it is answering on, appended to
 # whatever the workspace wrote. Two reasons it is here rather than in the
 # workspace's own prompt: a workspace cannot be relied on to know Meta's limit,
@@ -346,11 +360,15 @@ class AgentOrchestrator:
                 embeddings=self._embeddings,
             )
             for call in reply.tool_calls:
-                results.append(
-                    ToolResult.for_call(call, output=await self._run(call, context, granted))
-                )
+                execution = await self._execute(call, context, granted)
+                results.append(ToolResult.for_call(call, output=execution.output))
                 tools_run.append(call.name)
-                if call.name == HANDOFF_TOOL:
+                if call.name == HANDOFF_TOOL and execution.succeeded:
+                    # From what the server did, never from what the model named
+                    # (AI-03). A refused, invalid or failed handoff changed
+                    # nothing about who owns the conversation, so it must not
+                    # silence the agent either: the model reads that the tool
+                    # did not work and answers on the next round.
                     handed_off = True
 
             if handed_off:
@@ -455,7 +473,24 @@ class AgentOrchestrator:
         context: ToolContext,
         granted: Set[str],
     ) -> str:
+        """The output the model reads for one call; see `_execute`."""
+        return (await self._execute(call, context, granted)).output
+
+    async def _execute(
+        self,
+        call: ToolCall,
+        context: ToolContext,
+        granted: Set[str],
+    ) -> ToolExecution:
         """Run one call, turning refusals into output the model can learn from.
+
+        Answers two things, because they are two facts: what the model should
+        read, and whether the handler actually ran to completion. Only the
+        second may drive a decision the application makes on the model's
+        behalf (AI-03). Deciding from the output text instead would be string
+        matching against sentences written for a model, and deciding from the
+        call's name - which is what this replaced - let a refused tool silence
+        an agent that had been granted nothing.
 
         Neither a rejected argument nor a failed operation should end the turn.
         The model is told what went wrong and gets a chance to adapt, which is
@@ -487,17 +522,21 @@ class AgentOrchestrator:
             )
             # Phrased for the model rather than for a log reader: it gets a
             # chance to answer without the tool instead of the turn collapsing.
-            return f"The tool {call.name} is not available to this agent."
+            return ToolExecution(
+                output=f"The tool {call.name} is not available to this agent.",
+                succeeded=False,
+            )
 
         try:
-            return await self._registry.run(
+            output = await self._registry.run(
                 name=call.name,
                 arguments=call.arguments,
                 context=context,
             )
         except ToolArgumentError as error:
             logger.info("agent.tool_rejected", extra={"tool": call.name})
-            return str(error)
+            return ToolExecution(output=str(error), succeeded=False)
         except WaslaError as error:
             logger.warning("agent.tool_failed", extra={"tool": call.name})
-            return "That did not work: " + str(error)
+            return ToolExecution(output="That did not work: " + str(error), succeeded=False)
+        return ToolExecution(output=output, succeeded=True)

@@ -27,6 +27,7 @@ from app.agents.registry import (
     ToolRegistry,
     build_default_registry,
 )
+from app.core.exceptions import ConflictError
 from app.db.models.agent import Agent, AgentStatus
 from app.db.models.conversation import (
     Conversation,
@@ -541,6 +542,114 @@ async def test_a_handoff_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -
     assert len(client.calls) == 1
 
 
+async def _fails(context: ToolContext, arguments: dict[str, Any]) -> str:
+    raise ConflictError("The inbox could not take the conversation.")
+
+
+async def test_a_handoff_the_agent_was_never_granted_does_not_silence_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused tool changes what the model is told, and nothing else (AI-03).
+
+    Before this, the flag was set from the *name* the model emitted: an agent
+    with no grants whose model mentioned the handoff sent nothing, handed over
+    nothing, and completed the turn - the customer answered by silence.
+    """
+    client = StubClient(
+        [
+            _reply(text="One moment.", tool_calls=[_call(HANDOFF_TOOL, {"reason": "asked"})]),
+            _reply(text="I can help you here."),
+        ]
+    )
+    orchestrator = _build(
+        monkeypatch,
+        client=as_http_client(client),
+        agent=_agent(),
+        grants=[],
+        registry=_registry_with(HANDOFF_TOOL, handler=_handed_over),
+    )
+
+    outcome = await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert not outcome.handed_off
+    assert outcome.reply == "I can help you here."
+    assert outcome.should_send
+    assert len(client.calls) == 2, "the model was given a second round to answer"
+    assert "not available" in client.calls[1]["tool_results"][0].output
+
+
+async def test_a_handoff_with_invalid_arguments_is_not_a_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = StubClient(
+        [
+            _reply(text="One moment.", tool_calls=[_call(HANDOFF_TOOL)]),
+            _reply(text="Could you tell me a little more?"),
+        ]
+    )
+    orchestrator = _build(
+        monkeypatch,
+        client=as_http_client(client),
+        agent=_agent(),
+        grants=[HANDOFF_TOOL],
+        registry=build_default_registry(),
+    )
+
+    outcome = await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert not outcome.handed_off
+    assert outcome.reply == "Could you tell me a little more?"
+    assert "required" in client.calls[1]["tool_results"][0].output
+
+
+async def test_a_handoff_whose_handler_fails_is_not_a_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = StubClient(
+        [
+            _reply(text="One moment.", tool_calls=[_call(HANDOFF_TOOL)]),
+            _reply(text="Let me try to help you myself."),
+        ]
+    )
+    orchestrator = _build(
+        monkeypatch,
+        client=as_http_client(client),
+        agent=_agent(),
+        grants=[HANDOFF_TOOL],
+        registry=_registry_with(HANDOFF_TOOL, handler=_fails),
+    )
+
+    outcome = await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert not outcome.handed_off
+    assert outcome.reply == "Let me try to help you myself."
+    assert "did not work" in client.calls[1]["tool_results"][0].output
+
+
+async def test_a_tool_no_deployment_implements_does_not_suppress_the_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = StubClient(
+        [
+            _reply(text="Checking.", tool_calls=[_call("summon_the_manager")]),
+            _reply(text="Here is what I found."),
+        ]
+    )
+    orchestrator = _build(
+        monkeypatch,
+        client=as_http_client(client),
+        agent=_agent(),
+        grants=["summon_the_manager"],
+        registry=ToolRegistry(),
+    )
+
+    outcome = await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert not outcome.handed_off
+    assert outcome.reply == "Here is what I found."
+    assert "no tool named" in client.calls[1]["tool_results"][0].output
+
+
 async def test_the_round_limit_stops_the_loop_but_keeps_the_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -914,6 +1023,9 @@ async def test_the_session_is_released_before_every_provider_call(
         client=as_http_client(client),
         agent=_agent(),
         grants=(HANDOFF_TOOL,),
+        # A handoff that genuinely runs. The default registry would refuse this
+        # argument-less call, and a refused handoff is not a handoff (AI-03).
+        registry=_registry_with(HANDOFF_TOOL, handler=_handed_over),
         session=as_session(session),
     )
 
