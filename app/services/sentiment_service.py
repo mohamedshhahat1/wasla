@@ -21,12 +21,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Final
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ExternalServiceError, RateLimitedError
+from app.core.exceptions import ConflictError, ExternalServiceError, RateLimitedError
 from app.core.logging import get_logger
 from app.db.models.analytics import AnalyticsSource
-from app.db.models.conversation import Conversation, ConversationMode
+from app.db.models.conversation import Conversation, ConversationMode, Message
 from app.db.models.sentiment import (
     ConversationPriority,
     SentimentLabel,
@@ -104,13 +105,24 @@ class SentimentService:
         *,
         conversation_id: uuid.UUID,
         escalation_sentiment: SentimentLabel | None,
+        subject: Message | None = None,
     ) -> SentimentOutcome:
-        """Judge the newest customer message and apply what it implies.
+        """Judge one customer message and apply what it implies.
 
         `escalation_sentiment` is the agent's configured threshold, passed in
         rather than looked up: the agent that will answer is the agent whose
         rules apply, and only the caller knows which one that is. None disables
         automatic handoff while still taking the reading.
+
+        `subject` is the message to judge. The agent turn passes the newest
+        customer message in the history it is about to answer, so the mood that
+        gates a reply is the mood of what that reply is to; without one, the
+        newest customer message on the conversation is read.
+
+        Losing the reading never costs the customer the reply. A provider
+        failure is contained, and so is a failure *storing* the reading (AI-04):
+        it is written in a savepoint of its own, and a database error there
+        rolls back the reading and nothing else.
         """
         conversation = await self._conversations.require_by_id(conversation_id)
         if conversation.mode is ConversationMode.HUMAN:
@@ -119,7 +131,9 @@ class SentimentService:
             # decision that has been made.
             return SentimentOutcome()
 
-        message = await self._messages.latest_inbound(conversation_id)
+        message = (
+            subject if subject is not None else await self._messages.latest_inbound(conversation_id)
+        )
         if message is None:
             return SentimentOutcome()
 
@@ -158,10 +172,35 @@ class SentimentService:
             )
             return SentimentOutcome()
 
+        try:
+            # A savepoint of its own, so a failure storing the reading unwinds
+            # the reading and leaves the turn's session usable. The flush is
+            # inside the block on purpose: an error has to surface here, where
+            # it is contained, rather than at a commit three frames away.
+            async with self._session.begin_nested():
+                outcome = await self._persist(
+                    conversation,
+                    conversation_id=conversation_id,
+                    message=message,
+                    reading=reading,
+                    threshold=escalation_sentiment,
+                )
+                await self._session.flush()
+        except (SQLAlchemyError, ConflictError):
+            logger.warning(
+                "sentiment.persistence_failed",
+                extra={
+                    "event": "sentiment.persistence_failed",
+                    "conversation_id": str(conversation_id),
+                },
+            )
+            outcome = SentimentOutcome()
+
         # Metered here rather than by the caller, because the caller never sees
         # this call: an assessment is a provider request of its own, on a model
         # of its own, and folding it into the agent turn's figures would hide a
-        # cost from the workspace paying it.
+        # cost from the workspace paying it. Metered whatever became of the
+        # reading, too - a reading that could not be stored was still paid for.
         #
         # Cost, and only cost (AI-02). The customer's allowance is one turn,
         # reserved by the worker before this runs; a classification is part of
@@ -173,8 +212,46 @@ class SentimentService:
             conversation_id=conversation_id,
             purpose=AI_PURPOSE_SENTIMENT,
         )
+        return outcome
 
-        escalated = self._should_escalate(reading, threshold=escalation_sentiment)
+    async def _persist(
+        self,
+        conversation: Conversation,
+        *,
+        conversation_id: uuid.UUID,
+        message: Message,
+        reading: SentimentReading,
+        threshold: SentimentLabel | None,
+    ) -> SentimentOutcome:
+        """Store a reading and apply it - unless another turn stored this one first.
+
+        Recorded before it is applied. Two turns on one conversation can judge
+        the same message at once, and only one of them may act on it: the loser
+        follows the winner's decision instead of writing a second escalation, a
+        second analytics handoff and a second set of conversation fields over
+        the first (AI-04).
+        """
+        escalated = self._should_escalate(reading, threshold=threshold)
+        stored, created = await self._readings.record(
+            message_id=message.id,
+            conversation_id=conversation_id,
+            label=reading.label,
+            score=reading.score,
+            intent=reading.intent,
+            confidence=reading.confidence,
+            escalated=escalated,
+            model=reading.model,
+        )
+        if not created:
+            logger.info(
+                "sentiment.reading_already_recorded",
+                extra={
+                    "event": "sentiment.reading_already_recorded",
+                    "conversation_id": str(conversation_id),
+                },
+            )
+            return SentimentOutcome(escalated=stored.escalated)
+
         self._apply(conversation, reading)
         if escalated:
             conversation.mode = ConversationMode.HUMAN
@@ -192,17 +269,6 @@ class SentimentService:
                 source=AnalyticsSource.SENTIMENT,
                 reason=conversation.handoff_reason,
             )
-
-        await self._readings.record(
-            message_id=message.id,
-            conversation_id=conversation_id,
-            label=reading.label,
-            score=reading.score,
-            intent=reading.intent,
-            confidence=reading.confidence,
-            escalated=escalated,
-            model=reading.model,
-        )
 
         logger.info(
             "sentiment.escalated" if escalated else "sentiment.recorded",

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ExternalServiceError, RateLimitedError
@@ -183,6 +184,22 @@ class FakeSession:
 
     async def commit(self) -> None:
         self.commits += 1
+
+    def begin_nested(self) -> _Savepoint:
+        return _Savepoint()
+
+    async def flush(self) -> None:
+        return None
+
+
+class _Savepoint:
+    """A savepoint that lets whatever happened inside it escape, as a real one does."""
+
+    async def __aenter__(self) -> _Savepoint:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
 
 
 #: What `_build` uses when a test does not name a message of its own.
@@ -568,8 +585,106 @@ async def test_an_assessment_is_metered_as_a_provider_call_of_its_own(
             "output_tokens": 5,
             "model": "gpt-4.1-mini",
             "conversation_id": CONVERSATION,
+            "purpose": "sentiment",
         }
     ]
+
+
+class _AlreadyRecorded(FakeReadings):
+    """Another turn stored this message's reading between our read and our write."""
+
+    def __init__(self, winner: MessageSentiment) -> None:
+        super().__init__()
+        self._winner = winner
+
+    async def record(self, **fields: Any) -> tuple[Any, ...]:
+        self.recorded.append(fields)
+        return self._winner, False
+
+
+class _BrokenReadings(FakeReadings):
+    async def record(self, **fields: Any) -> tuple[Any, ...]:
+        raise SQLAlchemyError("the reading could not be stored")
+
+
+async def test_a_reading_another_turn_stored_first_is_followed_not_repeated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loser of the race applies nothing and follows the winner (AI-04).
+
+    Applying its own reading as well would write a second escalation and a
+    second analytics handoff over the first turn's - for one customer message.
+    The classification it made is still paid for.
+    """
+    conversation = Conversation(mode=ConversationMode.AI, priority=ConversationPriority.NORMAL)
+    winner = MessageSentiment(
+        tenant_id=TENANT,
+        message_id=MESSAGE,
+        conversation_id=CONVERSATION,
+        label=SentimentLabel.ANGRY,
+        score=-1.0,
+        confidence=0.9,
+        escalated=True,
+    )
+    analytics, usage = FakeAnalytics(), FakeUsage()
+    service = _build(
+        monkeypatch,
+        analyzer=StubAnalyzer(),
+        conversation=conversation,
+        readings=_AlreadyRecorded(winner),
+        analytics=analytics,
+        usage=usage,
+    )
+
+    outcome = await service.assess(
+        conversation_id=CONVERSATION, escalation_sentiment=SentimentLabel.ANGRY
+    )
+
+    assert outcome.escalated is True, "the winner escalated, so this turn stays quiet too"
+    assert outcome.analysed is False
+    assert conversation.mode is ConversationMode.AI
+    assert conversation.priority is ConversationPriority.NORMAL
+    assert analytics.handoffs == []
+    assert len(usage.requests) == 1
+
+
+async def test_a_reading_that_cannot_be_stored_costs_no_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sentiment is an enhancement, including when the database refuses it (PD-2)."""
+    conversation = Conversation(mode=ConversationMode.AI, priority=ConversationPriority.NORMAL)
+    usage = FakeUsage()
+    service = _build(
+        monkeypatch,
+        analyzer=StubAnalyzer(),
+        conversation=conversation,
+        readings=_BrokenReadings(),
+        usage=usage,
+    )
+
+    outcome = await service.assess(
+        conversation_id=CONVERSATION, escalation_sentiment=SentimentLabel.ANGRY
+    )
+
+    assert outcome.reading is None
+    assert outcome.blocks_reply is False
+    assert conversation.mode is ConversationMode.AI
+    assert len(usage.requests) == 1, "the classification was still paid for"
+
+
+async def test_the_callers_subject_is_judged_rather_than_the_newest_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analyzer = StubAnalyzer()
+    service = _build(monkeypatch, analyzer=analyzer, message=_inbound("a later, calmer note"))
+
+    await service.assess(
+        conversation_id=CONVERSATION,
+        escalation_sentiment=SentimentLabel.ANGRY,
+        subject=_inbound("the message this turn answers"),
+    )
+
+    assert analyzer.seen == ["the message this turn answers"]
 
 
 async def test_a_provider_failure_is_not_metered(monkeypatch: pytest.MonkeyPatch) -> None:

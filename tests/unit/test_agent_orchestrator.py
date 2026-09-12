@@ -182,14 +182,17 @@ class FakeSentiment:
     def __init__(self, *, escalates: bool = False) -> None:
         self._escalates = escalates
         self.thresholds: list[object] = []
+        self.subjects: list[Message | None] = []
 
     async def assess(
         self,
         *,
         conversation_id: uuid.UUID,
         escalation_sentiment: object,
+        subject: Message | None = None,
     ) -> SentimentOutcome:
         self.thresholds.append(escalation_sentiment)
+        self.subjects.append(subject)
         return SentimentOutcome(escalated=self._escalates)
 
 
@@ -540,6 +543,36 @@ async def test_a_handoff_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -
     assert outcome.reply is None
     assert not outcome.should_send
     assert len(client.calls) == 1
+
+
+async def test_the_mood_is_read_from_the_newest_customer_message_the_turn_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The subject is chosen from the history this turn loaded, by position (AI-04)."""
+    first, second = _inbound("I have a question"), _inbound("this is taking forever")
+    reply = Message(
+        direction=MessageDirection.OUTBOUND,
+        status=MessageStatus.SENT,
+        kind=MessageKind.TEXT,
+        body="Happy to help.",
+        created_at=SENT_AT,
+        sequence=next(_POSITIONS),
+        origin=MessageOrigin.AGENT,
+    )
+    sentiment = FakeSentiment()
+    orchestrator = _build(
+        monkeypatch,
+        client=as_http_client(StubClient([_reply(text="Sorry for the wait.")])),
+        agent=_agent(),
+        # Newest first, as the repository returns them, and the newest item an
+        # agent reply rather than something the customer said.
+        messages=[reply, second, first],
+        sentiment=sentiment,
+    )
+
+    await orchestrator.answer(conversation_id=CONVERSATION)
+
+    assert sentiment.subjects == [second]
 
 
 async def _fails(context: ToolContext, arguments: dict[str, Any]) -> str:

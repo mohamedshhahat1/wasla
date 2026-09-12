@@ -12,7 +12,7 @@ project and lets a worker decide whether a turn is kept or rolled back.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Set
+from collections.abc import Awaitable, Callable, Sequence, Set
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -31,7 +31,7 @@ from app.agents.registry import (
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
 from app.db.models.agent import Agent
-from app.db.models.conversation import Conversation, ConversationMode
+from app.db.models.conversation import Conversation, ConversationMode, Message, MessageDirection
 from app.db.session import released
 from app.integrations.openai.client import ResponsesClient
 from app.integrations.openai.embeddings import EmbeddingsClient
@@ -135,6 +135,25 @@ def _nothing(
         agent_id=agent_id,
         escalated=escalated,
     )
+
+
+def _sentiment_subject(history: Sequence[Message]) -> Message | None:
+    """The message whose mood gates this turn: the newest customer message it reads.
+
+    The rule, stated because two turns can share a conversation (AI-04). A
+    single message is judged on itself. A burst delivered together and answered
+    by one turn is judged on its last message, which is where a customer's mood
+    has got to. Two independent turns each judge the newest customer message in
+    the history *they* load - and while bursts are not coalesced (AI-08), two
+    turns that both load a history ending in the same message both judge that
+    message. That is why the reading is stored atomically and the second turn
+    follows the first's decision rather than racing it.
+
+    By `sequence`, so of messages that share a transaction timestamp this is
+    the one sent last (AI-01).
+    """
+    inbound = [message for message in history if message.direction is MessageDirection.INBOUND]
+    return max(inbound, key=lambda message: message.sequence) if inbound else None
 
 
 class TurnRefusal(StrEnum):
@@ -254,13 +273,22 @@ class AgentOrchestrator:
             return _nothing(agent_id=plan.agent.id if plan.agent is not None else None)
         resolved = plan.agent
 
-        if self._sentiment is not None:
+        # Read before the assessment, so the mood that gates this reply is taken
+        # from exactly the history the reply answers (AI-04).
+        history = await self._messages.list_for_conversation(
+            conversation_id=conversation_id,
+            limit=resolved.memory_message_limit * HISTORY_MULTIPLIER,
+        )
+
+        subject = _sentiment_subject(history)
+        if self._sentiment is not None and subject is not None:
             # Before a word is composed, not after. An escalation that arrives
             # second means the agent already answered an angry customer, which
             # is the thing this is here to prevent.
             mood = await self._sentiment.assess(
                 conversation_id=conversation_id,
                 escalation_sentiment=resolved.escalation_sentiment,
+                subject=subject,
             )
             if mood.blocks_reply:
                 logger.info(
@@ -268,11 +296,6 @@ class AgentOrchestrator:
                     extra={"conversation_id": str(conversation_id)},
                 )
                 return _nothing(agent_id=resolved.id, handed_off=True, escalated=True)
-
-        history = await self._messages.list_for_conversation(
-            conversation_id=conversation_id,
-            limit=resolved.memory_message_limit * HISTORY_MULTIPLIER,
-        )
         # Fetched for the whole window at once. What a customer attached is
         # part of what they said, and an agent answering a photograph with
         # "[image]" is the thing this phase exists to stop.

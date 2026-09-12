@@ -5,7 +5,9 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import ColumnElement
+from sqlalchemy.dialects.postgresql import insert
 
+from app.core.exceptions import ConflictError
 from app.db.models.sentiment import MessageSentiment, SentimentLabel
 from app.repositories.base import TenantScopedRepository
 
@@ -47,27 +49,45 @@ class SentimentRepository(TenantScopedRepository[MessageSentiment]):
         escalated: bool,
         model: str | None = None,
     ) -> tuple[MessageSentiment, bool]:
-        """Store a reading. Returns the row and whether it is new.
+        """Store a reading, atomically. Returns the row and whether this call wrote it.
 
-        A message already carrying one is returned unchanged rather than
-        re-read. That is what stops a retried agent job from paying for a second
-        inference, and the unique constraint would refuse the row anyway -
-        checking first turns a crash into a no-op.
+        One statement, and it has to be one statement (AI-04). This used to read
+        and then insert, which is correct inside one transaction and wrong across
+        two: two turns on one conversation both read "no reading", both
+        inserted, and the second commit raised `UniqueViolation` *after* its turn
+        had engaged the provider - dead-lettering the job and stranding the
+        customer's message for ever. The unique constraint is the arbiter, and
+        `ON CONFLICT` is how the loser is told rather than raised at: its insert
+        waits for the winner, does nothing, and reads the winner's row back.
+
+        The same shape `AgentTurnRepository.claim` uses a few files away, for
+        the same reason.
         """
-        existing = await self.get_for_message(message_id)
-        if existing is not None:
-            return existing, False
-
-        reading = MessageSentiment(
-            tenant_id=self.tenant_id,
-            message_id=message_id,
-            conversation_id=conversation_id,
-            label=label,
-            score=score,
-            intent=intent,
-            confidence=confidence,
-            escalated=escalated,
-            model=model,
+        statement = (
+            insert(MessageSentiment)
+            .values(
+                id=uuid.uuid4(),
+                tenant_id=self.tenant_id,
+                message_id=message_id,
+                conversation_id=conversation_id,
+                label=label,
+                score=score,
+                intent=intent,
+                confidence=confidence,
+                escalated=escalated,
+                model=model,
+            )
+            .on_conflict_do_nothing(constraint="uq_message_sentiments_message_id")
+            .returning(MessageSentiment.id)
         )
-        self.add(reading)
-        return reading, True
+        written: uuid.UUID | None = (await self.session.execute(statement)).scalar_one_or_none()
+        if written is not None:
+            row = await self._first(self._select().where(MessageSentiment.id == written))
+        else:
+            row = await self.get_for_message(message_id)
+        if row is None:
+            # The conflicting reading is outside this workspace, which a message
+            # belonging to this workspace cannot produce. Refused rather than
+            # answered with a row the caller may not see.
+            raise ConflictError("That message already carries a reading.")
+        return row, written is not None
