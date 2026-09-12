@@ -966,11 +966,27 @@ class AgentJob:
     Carries identifiers only. The conversation's contents are read fresh when
     the job runs, because a queued job may wait behind others and the customer
     may have sent more in the meantime.
+
+    `trigger_message_id` names the inbound message this turn is answering, and
+    it is what makes two envelopes for one customer message one turn rather than
+    two (WQ-01). Every producer derives it from the same durable row - the
+    webhook from the message it has just projected, the inbound sweeper from the
+    message the stored event projected onto, the media worker from the message
+    the file arrived on - so a turn converges on one identity however many times,
+    and by whichever route, it is published.
+
+    Optional, and it has to be: a job enqueued by an older build is already in
+    Redis when this one starts, and refusing it would leave a customer
+    unanswered to protect them from a duplicate. A job without one runs without
+    the durable claim, exactly as every job did before, and the send's own
+    idempotency key is then the only line - which is the behaviour being
+    replaced, not a new hazard.
     """
 
     tenant_id: uuid.UUID
     conversation_id: uuid.UUID
     agent_id: uuid.UUID | None = None
+    trigger_message_id: uuid.UUID | None = None
 
     def encode(self) -> str:
         payload: dict[str, str] = {
@@ -979,6 +995,8 @@ class AgentJob:
         }
         if self.agent_id is not None:
             payload["agent_id"] = str(self.agent_id)
+        if self.trigger_message_id is not None:
+            payload["trigger_message_id"] = str(self.trigger_message_id)
         return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
     @classmethod
@@ -988,6 +1006,7 @@ class AgentJob:
             tenant_id=_identifier(payload, "tenant_id"),
             conversation_id=_identifier(payload, "conversation_id"),
             agent_id=_optional_identifier(payload, "agent_id"),
+            trigger_message_id=_optional_identifier(payload, "trigger_message_id"),
         )
 
 

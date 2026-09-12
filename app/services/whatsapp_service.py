@@ -151,7 +151,10 @@ class WhatsAppIngestionService:
         stored = duplicates = unknown = inactive = cancelled = opted_out = unowned = 0
         attachments: list[tuple[uuid.UUID, uuid.UUID]] = []
         ignored = envelope.ignored
-        answering: list[tuple[uuid.UUID, uuid.UUID]] = []
+        # (tenant, conversation, triggering message). The message is what
+        # the agent turn is keyed on, so a turn published twice for one
+        # customer message is recognised as one turn (WQ-01).
+        answering: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]] = []
         # What each stored event still owes, so its state can be advanced once
         # the enqueues below have said whether they landed.
         owed: list[_Handoff] = []
@@ -306,7 +309,7 @@ class WhatsAppIngestionService:
         source: InboundMessage,
         historical: bool,
         attachments: list[tuple[uuid.UUID, uuid.UUID]],
-        answering: list[tuple[uuid.UUID, uuid.UUID]],
+        answering: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]],
     ) -> _Handoff:
         """What still has to happen for this message, after it is stored.
 
@@ -334,7 +337,7 @@ class WhatsAppIngestionService:
             return _Handoff(event=event, media_for_message=(tenant_id, message.id))
         if historical or message.kind is MessageKind.UNSUPPORTED:
             return _Handoff(event=event)
-        answering.append((tenant_id, message.conversation_id))
+        answering.append((tenant_id, message.conversation_id, message.id))
         return _Handoff(event=event, agent_for_conversation=(tenant_id, message.conversation_id))
 
     def _settle(
@@ -499,12 +502,17 @@ class WhatsAppIngestionService:
 
     async def _enqueue(
         self,
-        conversations: list[tuple[uuid.UUID, uuid.UUID]],
+        conversations: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]],
     ) -> set[tuple[uuid.UUID, uuid.UUID]]:
         """Ask a worker to look at each conversation that received a message.
 
         One job per conversation however many messages arrived: the worker reads
-        the conversation fresh, so a second job would only repeat the first.
+        the conversation fresh, so a second job would only repeat the first. The
+        job is keyed on the *first* of those messages, because that is the one
+        whose arrival decided a turn was owed - and because the sweeper backing
+        this path up derives the same key from the same row, so a delivery that
+        reaches Redis and a delivery that has to be recovered converge rather
+        than producing a turn each (WQ-01).
 
         Whether an agent should answer at all is not decided here. The
         orchestrator refuses a conversation a human has taken over, and keeping
@@ -521,8 +529,16 @@ class WhatsAppIngestionService:
             return set()
 
         queued: set[tuple[uuid.UUID, uuid.UUID]] = set()
-        for tenant_id, conversation_id in dict.fromkeys(conversations):
-            job = AgentJob(tenant_id=tenant_id, conversation_id=conversation_id)
+        triggers: dict[tuple[uuid.UUID, uuid.UUID], uuid.UUID] = {}
+        for tenant_id, conversation_id, message_id in conversations:
+            triggers.setdefault((tenant_id, conversation_id), message_id)
+
+        for (tenant_id, conversation_id), message_id in triggers.items():
+            job = AgentJob(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                trigger_message_id=message_id,
+            )
             try:
                 await self._queue.enqueue(job)
             except RedisError:

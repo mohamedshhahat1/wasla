@@ -3,6 +3,11 @@
 from app.db.base import Base
 
 from .agent import Agent, AgentStatus, AgentTool
+from .agent_turn import (
+    TERMINAL_AGENT_TURN_STATES,
+    AgentTurn,
+    AgentTurnState,
+)
 from .analytics import AnalyticsEvent, AnalyticsEventType, AnalyticsSource
 from .audit import AuditAction, AuditActorKind, AuditLog
 from .billing import (
@@ -151,6 +156,7 @@ __all__ = [
     "SENTIMENT_PRIORITY",
     "SENTIMENT_SEVERITY",
     "SERVING_STATUSES",
+    "TERMINAL_AGENT_TURN_STATES",
     "TERMINAL_CAMPAIGN_STATUSES",
     "TERMINAL_EMAIL_STATUSES",
     "TERMINAL_FOLLOW_UP_STATUSES",
@@ -162,6 +168,8 @@ __all__ = [
     "Agent",
     "AgentStatus",
     "AgentTool",
+    "AgentTurn",
+    "AgentTurnState",
     "AnalyticsEvent",
     "AnalyticsEventType",
     "AnalyticsSource",

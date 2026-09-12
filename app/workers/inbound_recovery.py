@@ -264,7 +264,15 @@ class InboundRecoveryWorker:
 
         try:
             await self._agent_queue.enqueue(
-                AgentJob(tenant_id=event.tenant_id, conversation_id=message.conversation_id)
+                AgentJob(
+                    tenant_id=event.tenant_id,
+                    conversation_id=message.conversation_id,
+                    # The message the stored event projected onto, which is the
+                    # same row the webhook would have named had it got this far.
+                    # Publishing this event twice therefore publishes one turn
+                    # twice rather than two turns (WQ-01).
+                    trigger_message_id=message.id,
+                )
             )
         except RedisError:
             return _Resolution(owing="agent_enqueue_failed")

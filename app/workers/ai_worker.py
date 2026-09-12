@@ -54,6 +54,7 @@ from app.db.session import Database
 from app.integrations.openai.client import ResponsesClient, build_http_client
 from app.integrations.openai.embeddings import EmbeddingsClient
 from app.repositories.agent_repository import AgentRepository
+from app.repositories.agent_turn_repository import AgentTurnRepository
 from app.repositories.conversation_repository import ConversationRepository
 from app.services.entitlement_service import EntitlementService
 from app.services.messaging_service import MessagingService
@@ -283,6 +284,89 @@ class AgentWorker:
 
         return reserve
 
+    async def _claim_turn(self, job: AgentJob) -> bool:
+        """Take ownership of this logical turn, or report that somebody has it.
+
+        A transaction of its own, and committed here rather than with the rest
+        of the turn, for the same reason the allowance reservation is: the
+        turn's own session stays open across an inference, and a claim that
+        commits only at the end of the turn is a claim that is invisible to the
+        duplicate arriving while the inference runs. Committing first is also
+        the safe direction - a crash between claiming and engaging leaves a
+        `CLAIMED` row whose lease expires, and the next attempt adopts it.
+
+        A job carrying no trigger proceeds. That is a job an older build
+        enqueued, and refusing it would leave a customer unanswered in order to
+        protect them from a duplicate.
+        """
+        if job.trigger_message_id is None:
+            logger.info(
+                "agent.turn_unkeyed",
+                extra={
+                    "event": "agent.turn_unkeyed",
+                    "conversation_id": str(job.conversation_id),
+                },
+            )
+            return True
+
+        async with self._database.session() as claim:
+            owned = await AgentTurnRepository(claim, tenant_id=job.tenant_id).claim(
+                conversation_id=job.conversation_id,
+                trigger_message_id=job.trigger_message_id,
+                worker_id=self._queue.worker_id,
+            )
+        if not owned:
+            logger.info(
+                "agent.turn_already_answered",
+                extra={
+                    "event": "agent.turn_already_answered",
+                    "conversation_id": str(job.conversation_id),
+                    "trigger_message_id": str(job.trigger_message_id),
+                },
+            )
+        return owned
+
+    async def _engage_turn(self, job: AgentJob) -> None:
+        """Record durably that this turn is about to reach a provider.
+
+        The business-level counterpart of `mark_engaged` on the reservation, and
+        it is written for the same reason: after this, no other attempt may run
+        this turn, whatever becomes of the process holding it.
+        """
+        if job.trigger_message_id is None:
+            return
+        async with self._database.session() as marking:
+            await AgentTurnRepository(marking, tenant_id=job.tenant_id).engage(
+                trigger_message_id=job.trigger_message_id
+            )
+
+    async def _complete_turn(self, job: AgentJob) -> None:
+        """Record that the turn ran to its end.
+
+        Every end counts: a reply sent, a handoff, a workspace out of allowance,
+        or nothing worth saying. All of them mean the customer's message has
+        been dealt with, and a turn left `CLAIMED` after one of them would be a
+        turn a later duplicate could adopt.
+        """
+        if job.trigger_message_id is None:
+            return
+        async with self._database.session() as marking:
+            await AgentTurnRepository(marking, tenant_id=job.tenant_id).complete(
+                trigger_message_id=job.trigger_message_id
+            )
+
+    def _reply_key(self, job: AgentJob) -> str | None:
+        """The idempotency key for this turn's reply, if the turn has an identity.
+
+        Defence in depth behind the claim above, using the machinery the manual
+        send path already has (MSG-15): if anything ever produces two turns for
+        one message again, `uq_messages_tenant_id_idempotency_key` still refuses
+        to put a second copy on the customer's phone.
+        """
+        if job.trigger_message_id is None:
+            return None
+        return f"agent-turn:{job.trigger_message_id}"
+
     async def _handle(self, job: AgentJob, progress: _TurnProgress) -> None:
         async with self._database.session() as session:
             entitlements = EntitlementService(
@@ -348,11 +432,25 @@ class AgentWorker:
                 job.conversation_id
             )
 
+            # The business-level half of the same question the queue barrier
+            # below asks about the envelope: is this turn already somebody
+            # else's? Two envelopes naming one inbound message are one turn, and
+            # this is where the second one finds that out - before the sentiment
+            # call, before the inference, before any tool runs, because a key on
+            # the send alone would stop the second reply and still bill the
+            # workspace for the second turn that produced it (WQ-01).
+            #
+            # Its own transaction, committed before the provider is reached, so
+            # nothing holds a row lock across an inference (ADR-080).
+            if not await self._claim_turn(job):
+                return
+
             # Past this line the turn can reserve an allowance, call the
             # provider and send a customer a message, none of which a second
             # attempt could tell had already happened. Awaited rather than
             # assigned because it also persists the fact, so a worker that dies
             # after this point is not mistaken for one that died before it.
+            await self._engage_turn(job)
             await progress.engage()
             async with build_http_client() as http:
                 api_key = self._settings.openai_api_key or ""
@@ -416,7 +514,8 @@ class AgentWorker:
             if outcome.handed_off or not reply:
                 # Silence is a decision here, not a failure: a handoff, an
                 # escalation, a conversation a human owns, or nothing worth
-                # saying.
+                # saying. The turn is still over, so it is still finished.
+                await self._complete_turn(job)
                 return
 
             messaging = MessagingService(
@@ -428,4 +527,9 @@ class AgentWorker:
                 conversation_id=job.conversation_id,
                 body=reply,
                 origin=MessageOrigin.AGENT,
+                # Deterministic, and derived from the message being answered
+                # rather than generated here, so the same turn produces the same
+                # key however many times it is published (WQ-01).
+                idempotency_key=self._reply_key(job),
             )
+        await self._complete_turn(job)

@@ -398,4 +398,11 @@ class MediaWorker:
             )
             return None
 
-        return AgentJob(tenant_id=job.tenant_id, conversation_id=media.conversation_id)
+        return AgentJob(
+            tenant_id=job.tenant_id,
+            conversation_id=media.conversation_id,
+            # The message the file arrived on. The inbound sweeper re-derives a
+            # media handoff from the same row, so a file whose turn is published
+            # twice is answered once (WQ-01).
+            trigger_message_id=media.message_id,
+        )
