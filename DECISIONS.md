@@ -5524,3 +5524,83 @@ test passes with no constraint at all, and the deliberate mutation that removes
 the atomic claim is killed by it. The test that two keyless sends of identical
 words produce two messages is as important as the deduplication tests: it is
 where the decision not to infer is written down.
+
+## ADR-104 — A Plan Sells AI Customer Turns; Provider Requests Are Cost
+
+**Context.** A plan's AI allowance was `period_ai_requests`, enforced against one
+`ai_request` row per provider call. A customer turn makes a sentiment
+classification and then one to three inference rounds, and the classification
+metered itself without ever being checked. With exactly one unit left, the
+classifier spent it, the first round's reservation was refused, the turn
+completed with nothing sent, and nothing retried or signalled. Four concurrent
+turns against an allowance of one produced four classifications and no replies.
+Every ordinary turn cost two units, so a plan advertising 100 bought roughly
+fifty answered conversations (AI-02).
+
+**Decision. The allowance counts turns. Provider requests are recorded as cost
+and enforced against nothing.**
+
+- `ai_turn` / `period_ai_turns` is what a customer buys. The worker reserves one
+  per turn under `consume`'s advisory lock, in the same transaction that moves
+  the turn from `claimed` to `engaged`. The charge and the point of no return
+  are one commit: a duplicate job that lost the claim spends nothing, and a
+  reservation that can no longer engage rolls back.
+- A turn the AI will not take — a person owns the conversation, no agent may
+  answer, the workspace is not being served — is decided before the charge and
+  costs nothing.
+- A refused turn is not silent. No provider is called; the conversation is
+  handed to a person with reason `AI_QUOTA_EXHAUSTED` (analytics source
+  `system`); the turn records `quota_blocked`. The customer is not told about
+  the business's plan.
+- `ai_request` and the token meters stay exact: one request row before each
+  inference round (`purpose=agent`), one per classification
+  (`purpose=sentiment`). They are the platform's cost ledger.
+
+**Consequences.** Migration 0059 moved each plan's `period_ai_requests` value to
+`period_ai_turns` unchanged. A turn costs at least one request, so no customer's
+effective allowance falls and no price changed. The "allowance ran out mid-turn"
+branch no longer exists, because nothing inside a turn can run out of it. This
+supersedes the per-round reservation described in ADR-054 and ADR-056; the
+advisory-lock primitive those introduced is unchanged and is what the turn
+reservation uses.
+
+## ADR-105 — An Agent Turn Ends In A Named Outcome, Never In Unexplained Silence
+
+**Context.** The AI audit found one failure shape five times: a customer's
+message, then no reply, no handoff, no retry, no durable reason and no signal to
+anyone. The history could reach the model scrambled (AI-01); a refused tool
+could silence the agent (AI-03); two turns could race a sentiment row and strand
+one (AI-04); a long reply was refused after being paid for (AI-05); a suspended
+or deleted workspace kept answering (AI-06); stale state after an inference
+went unread (AI-07); and an empty model answer completed as a success.
+
+**Decision.**
+
+1. **Order is a position the database assigns.** `messages.sequence`, allocated
+   by a trigger doing one atomic update of the conversation's counter, so every
+   producer takes part and concurrent writers serialise on the conversation row.
+2. **Decisions come from what the server did.** A handoff counts only when the
+   handoff tool's handler ran to completion, never because the model named it.
+3. **Writes that two turns can race are atomic, and auxiliary writes are
+   contained.** A sentiment reading is one `INSERT ... ON CONFLICT DO NOTHING`;
+   storing it happens in a savepoint, and failing to store it never ends the turn.
+4. **What a reply depends on is read again, as columns, immediately before it is
+   sent** — workspace status and deletion, agent status, conversation mode and
+   status, number status — and the same gate runs before the turn is charged.
+   A closed conversation is never reopened by an old turn.
+5. **A reply is one bounded message.** Longer than WhatsApp allows, it is cut at
+   a sentence with an offer to continue. Automatic splitting stays decided
+   against (MSG-25).
+6. **An empty answer is answered.** The customer is sent a holding message in
+   their own language and the conversation is handed to a person.
+7. **Every completed turn records its outcome** in `agent_turns.outcome`, and the
+   outcomes, per-attempt provider results and stranded engaged turns are
+   metrics with alerts.
+
+**Consequences.** A turn that engaged and then failed — a provider outage past
+its retries — still stays `engaged` and is not retried, because a reply may
+already exist; what changed is that it is now counted and alerted on
+(`AgentTurnsStranded`) and the runbook says how to settle it. Two rapid
+customer messages still produce two turns that can load the same history
+(AI-08); coalescing bursts is a product feature for later, and the atomic
+sentiment write is what keeps that case safe meanwhile.

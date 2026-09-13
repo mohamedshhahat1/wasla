@@ -301,7 +301,7 @@ GET /api/v1/billing/entitlements     # every limit, used and remaining
 GET /api/v1/usage                    # the meters behind the period limits
 ```
 
-Resource limits (numbers, agents, colleagues, documents) count rows that exist now; period limits (messages, AI requests, campaign messages) count the current billing period. Nothing on the *inbound* path is ever refused for a limit ([ADR-030](../DECISIONS.md)), so a workspace over its message allowance still receives its customers' messages — it is charged for the overage rather than cut off.
+Resource limits (numbers, agents, colleagues, documents) count rows that exist now; period limits (messages, AI turns, campaign messages) count the current billing period. Nothing on the *inbound* path is ever refused for a limit ([ADR-030](../DECISIONS.md)), so a workspace over its message allowance still receives its customers' messages — it is charged for the overage rather than cut off.
 
 **403** is a role problem, not a plan problem. **429** is the rate limiter.
 

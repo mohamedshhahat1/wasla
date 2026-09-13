@@ -12,7 +12,8 @@ Scope: analytics events, usage metering, and dashboard data contracts.
 | --- | --- | --- |
 | `whatsapp_message_received` | count | An inbound message is stored for the first time |
 | `whatsapp_message_sent` | count | An outbound message leaves for Meta |
-| `ai_request` | count | One provider call inside an agent turn |
+| `ai_turn` | count | One customer turn an agent took on — what a plan's AI allowance counts |
+| `ai_request` | count | One provider call — an agent round (`purpose=agent`) or a sentiment classification (`purpose=sentiment`). Cost, never entitlement |
 | `ai_input_token` | token | Prompt tokens the provider reported |
 | `ai_output_token` | token | Completion tokens the provider reported |
 | `rag_query` | count | One tenant-scoped vector search |
@@ -95,7 +96,7 @@ All analytics and usage endpoints take an optional UTC window and report the one
 | workspace daily series | 63ms | 66ms |
 | platform `by_tenant` | 64ms | 172ms |
 
-**The entitlement check does not grow with the table.** It sums one meter over one workspace's billing period, and the rows in that sum are bounded by the plan limit rather than by how much history exists — a workspace that has spent its 25,000 AI requests stops making them. It scanned the same 26,035 rows at both sizes.
+**The entitlement check does not grow with the table.** It sums one meter over one workspace's billing period, and the rows in that sum are bounded by the plan limit rather than by how much history exists — a workspace that has spent its 25,000 AI turns stops being answered by the AI. It scanned the same 26,035 rows at both sizes.
 
 What it did do was visit the table once per row to read two narrow columns, so `quantity` and `unit` are now INCLUDE columns on `ix_usage_events_tenant_id_event_type_occurred_at` and the sum is an `Index Only Scan`. 9.4ms to 7.1ms, and — more to the point — indifferent to the table growing around it: the same check on a 1.3GB table whose heap pages had been evicted measured 50ms before the change.
 

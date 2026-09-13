@@ -1,6 +1,6 @@
 # AI Agents
 
-**Status: Implemented** — an agent answers a customer end to end, in a worker of its own, grounded in the workspace's own documents, and every provider call it makes is metered. Decisions: ADR-007, ADR-014, ADR-015, ADR-027.
+**Status: Implemented** — an agent answers a customer end to end, in a worker of its own, grounded in the workspace's own documents; every provider call it makes is metered, every customer turn is charged once, and every turn records how it ended. Decisions: ADR-007, ADR-014, ADR-015, ADR-027, ADR-104, ADR-105.
 
 Scope: agent configuration, orchestration, tool calling, and conversation memory. What an agent sees of an attached file is covered in [MEDIA.md](MEDIA.md); when an agent is stopped from replying at all, in [SENTIMENT.md](SENTIMENT.md).
 
@@ -43,41 +43,86 @@ Reading is open to members because staffing an inbox means seeing what the agent
 ## Orchestrator flow
 
 ```
-Webhook stores + projects the message -> enqueue one job per conversation
+Webhook stores + projects the message (each gets its position) -> enqueue a job
   -> worker reserves the job -> open one database session
-  -> load conversation -> HUMAN mode? stop
-  -> resolve the agent (requested, or the active default)
-  -> sentiment reading   [connection released for the call]
+  -> load conversation (missing yet? retry)
+  -> claim the logical turn          [lost? another attempt owns it: stop]
+  -> plan: HUMAN mode? no answering agent?          [complete, no charge]
+  -> lifecycle gate: workspace suspended or deleted? conversation closed?
+     number disabled?                               [complete, no charge]
+  -> charge one AI turn AND engage the turn, one transaction
+     [no turn left: hand to a person as AI_QUOTA_EXHAUSTED, complete]
+  -> load history (by sequence) -> sentiment on its newest customer message
+     [connection released for the call; escalated? complete]
   -> build the memory window -> collect granted tools
   -> per round, up to 3:
-       release the connection -> reserve one AI request -> Responses API
+       release the connection -> record one provider request -> Responses API
        -> reacquire -> run any tool calls, feed results back
-  -> re-read the conversation mode -> still ours to answer?
-  -> reply text -> worker sends it through the messaging service -> commit
+  -> commit the turn's token usage
+  -> read workspace, agent, conversation and number again, as columns
+     [anything changed: suppress, complete with why]
+  -> words?    shorten to fit WhatsApp if needed -> send one message
+     no words? send a holding message, hand to a person -> complete
 ```
 
 **No provider call happens while this turn holds a database connection**
 (ADR-080). The session is committed and the connection returned to the pool
-before each inference and before each reservation, so the number of turns a
-worker can run at once is the depth of the queue rather than
+before each inference and before each per-round meter write, so the number of
+turns a worker can run at once is the depth of the queue rather than
 `pool_size + max_overflow`. Two consequences are worth knowing: the turn is not
 one transaction, so a turn that dies partway leaves the work it finished; and a
-commit ends a snapshot, so the conversation mode is deliberately read again
-before a reply is offered — a colleague who took the conversation over while the
-model was composing gets silence rather than an AI answer arriving underneath
-them.
+commit ends a snapshot, so everything a reply depends on is read again before it
+is sent — the workspace's status and deletion, the agent's status, the
+conversation's mode and status, and the number. They are read as column values
+(`app/agents/lifecycle.py`), never as the objects already in the session, which
+would hand back the snapshot. A workspace suspended, an agent disabled, a
+conversation closed or taken over while the model was composing gets no AI
+answer arriving underneath it, and an old turn never reopens a closed
+conversation (AI-06, AI-07).
 
 The split in the last two lines is the important one. `AgentOrchestrator.answer()` returns an `AgentOutcome` — reply text, whether a handoff was requested, which tools ran, token usage, how many rounds it took — and sends nothing. The worker decides to send. That keeps the orchestrator testable with no WhatsApp account and no database, and it means a bug in sending cannot be reached by a bug in reasoning.
 
-Three guards stop a turn before it costs anything:
+These stop a turn before it costs the customer a turn or the platform a provider call:
 
 - **`HUMAN` mode.** A conversation a colleague has taken over is never answered by an agent, logged as `agent.skipped_human_mode`.
 - **No active default.** If nothing is configured to answer, the turn ends rather than falling back to some built-in prompt.
+- **A workspace no longer served.** A suspended workspace, and a deleted one for the whole of its retention window, gets no inference, no tool and no message. Retention decides when data is erased; it does not keep the AI serving in the meantime.
+- **A closed conversation, or a disabled number.** A colleague closed it on purpose; a disabled number cannot send.
+- **No AI turn left.** The conversation is handed to a person with reason `AI_QUOTA_EXHAUSTED`. The customer is not told about the business's plan.
+
+And one bounds the turn once it runs:
+
 - **A round limit.** The tool loop runs at most three rounds. A model that keeps asking for tools stops being useful long before it stops being expensive, and `agent.round_limit_reached` says so.
+
+## How a turn ends
+
+Every turn the worker completes writes `agent_turns.outcome`, counted by `wasla_agent_turn_outcomes_total`, so "did this customer get an answer, and if not, why?" is a column rather than an investigation:
+
+| `outcome` | Meaning |
+| --- | --- |
+| `replied` | One reply was sent |
+| `handed_off` | The agent's handoff tool ran — the tool genuinely executed, not merely its name appearing in the model's output (AI-03) |
+| `escalated` | The sentiment classifier handed the conversation over before a word was composed |
+| `empty_response` | The provider answered with no words; the customer was sent a holding message in their own language and the conversation was handed to a person (`AI_EMPTY_RESPONSE`) |
+| `quota_blocked` | No AI turn was left in the plan |
+| `suppressed_workspace` / `_agent` / `_closed` / `_human` / `_channel` | Something a reply depends on stopped allowing it, before or during the turn |
+| `nothing_to_answer` | The conversation held nothing an agent could answer |
+
+`agent_turns.provider_response_id` keeps the provider's id for the turn's last response, for correlating a support question with the provider's records. It is an id, never a body.
+
+**A reply is always one WhatsApp message within the limit.** WhatsApp refuses a body over 4,096 characters, and a model cannot be relied on to stay under it: the default output ceiling of English is roughly twice that. `app/agents/reply.py` sends a reply that fits exactly as written; a longer one is cut at the last paragraph, else sentence, else line or word break inside a 3,800-character target, followed by a short offer to continue in the reply's own language. It is never split across several messages — that decision (MSG-25) stands.
+
+**Every provider request carries an output ceiling** — the smaller of the agent's `max_output_tokens` and `OPENAI_MAX_OUTPUT_TOKENS`, so a deployment that lowers its ceiling holds existing agents to it. `agents.max_output_tokens` is NOT NULL since migration 0060.
+
+**A sentiment failure never costs a reply.** A classifier that cannot be reached, answers unreadably, or whose reading cannot be stored is logged and the turn continues without a reading. Two turns that classify the same message at once store one reading atomically, and the second follows the first's decision.
 
 A tool that raises is not an outage. A rejected argument becomes tool output the model can read and retry against (`agent.tool_rejected`), and a domain error becomes "That did not work: …" (`agent.tool_failed`). Only unexpected exceptions escape, and they belong to the worker.
 
 ## Conversation memory
+
+**The conversation is read in the order it happened, by position.** Every message has `messages.sequence`, assigned at insert by a database trigger doing one atomic update of the conversation's counter, so concurrent writers serialise on the conversation row and every producer — inbound, agent, colleague, campaign, follow-up — takes part. The window, the inbox and the sentiment subject all read that one order. `created_at` is not an order: it is the transaction's start, so every message one webhook delivery wrote shares it, and sorting on it handed the model `FOURTH, FIFTH, SECOND, THIRD, FIRST` (AI-01). Migration 0058 numbered existing history by `created_at`, Meta's `sent_at`, then `id` — deterministic, and not a reconstruction of true order for historical rows that shared both timestamps.
+
+**No single message may exceed 100,000 characters in a prompt.** The newest message is admitted whatever its token cost, because an agent with no context cannot answer; that exception had no ceiling. Past it, the message keeps two thirds from its start and one from its end — where a customer's question usually is — around an explicit note that the middle was left out.
 
 The window is assembled from the conversation's own messages, newest first, and stops at whichever bound is reached first: `memory_message_limit` turns or `memory_token_budget` estimated tokens. Dropped turns are counted and logged, so a truncated context is visible rather than silent.
 
@@ -106,7 +151,9 @@ All inference goes through `app/integrations/openai/`, over HTTP with no vendor 
 
 **Verified against the real Responses API**, not only against a fake transport: authentication and endpoint, the request shape this application builds, the four tool schemas, a returned tool call and its parsing, two-round tool results, the `input_tokens`/`output_tokens`/`total_tokens` fields the meter reads, and the handling of an unknown model, invalid credentials and a timeout. `tests/real_provider/` holds those and is skipped without `OPENAI_API_KEY`, so CI stays green without credentials. What remains unverified against the real provider is listed in the same file's docstring.
 
-Retries are the inverse of the WhatsApp client's — 429, transport errors and 5xx are all retried, three attempts with linear backoff — because a duplicated inference costs tokens and reaches no customer, while a duplicated send reaches one. Provider error prose is never logged, only its `code` and `type`, because that prose can quote the request and the request contains a customer's conversation.
+Retries are the inverse of the WhatsApp client's — 429, transport errors and 5xx are all retried, three attempts — because a duplicated inference costs tokens and reaches no customer, while a duplicated send reaches one. A `Retry-After` header, as seconds or as an HTTP date, is honoured up to 30 seconds; a longer hint ends the retries rather than spending attempts on refusals. Without a hint the backoff is linear with equal jitter, so workers that met one rate limit do not retry in the same instant (AI-10). Every attempt is counted in `wasla_provider_attempts_total`, so throttling a retry absorbed is still visible. Provider error prose is never logged, only its `code` and `type`, because that prose can quote the request and the request contains a customer's conversation — and the provider's message for a bad key quotes the key.
+
+**What is read and trusted is bounded.** A response body is streamed and read up to 1 MiB: an oversized success body is refused after one attempt and never held whole (AI-14). Token counts are validated where they are parsed — a boolean, a non-integer, a negative or anything past two million per call is recorded as zero and logged, rather than reaching a `BIGINT` column in the transaction that commits a reply (AI-11). A malformed HTTP 200 is a failed call, never a reply.
 
 ## Model and cost policy (ADR-053)
 
@@ -119,15 +166,19 @@ Two settings decide what a workspace may spend per call, and both are enforced i
 
 `OPENAI_MODEL` is always permitted whatever the allowlist says: it is what an agent naming no model is given, so a list omitting it would make an ordinary agent unbuildable.
 
-Empty-means-unrestricted is the right default for a developer's container and the wrong one for anything paying a provider bill. The plan caps the *number* of AI requests; only these settings cap what each one costs, so a deployment without them lets a workspace administrator name the most expensive model on offer.
+Empty-means-unrestricted is the right default for a developer's container and the wrong one for anything paying a provider bill. The plan caps the *number* of AI turns; only these settings cap what each call costs, so a deployment without them lets a workspace administrator name the most expensive model on offer.
 
 **Neither is reachable from a prompt or a tool.** Model choice, token ceiling, temperature and system prompt are configuration, and no tool declares an argument by any of those names — `tests/integration/test_ai_security.py` asserts that structurally over the whole registry, so a tool added later cannot quietly expose one.
 
-### The allowance is reserved, not counted afterwards (ADR-054, ADR-056)
+### A turn is charged once, when it engages (ADR-104)
 
-One turn is up to three provider calls and each one costs a request. The request meter is therefore taken **before** each call rather than counted after the turn: `EntitlementService.consume` reserves one AI request atomically, and the orchestrator makes the call only if the reservation succeeded. A turn that runs out mid-way stops and sends whatever it has, rather than making a call nobody paid for.
+**What a customer's plan counts is AI turns, not provider requests.** One turn is a sentiment classification and one to three inference rounds. When the allowance was written in provider requests, the classifier — which nothing checked — spent the last unit of every period and the customer was never answered; four concurrent turns against an allowance of one produced four classifications and no replies (AI-02).
 
-**The concurrent race is closed, and the fix is platform-wide rather than AI-only.** `consume` takes a PostgreSQL advisory lock keyed on (workspace, limit), re-checks under it, records the meter, and flushes before releasing — so two workers cannot both spend the last permitted request. It is a general primitive on `EntitlementService`: any limit fed by a usage meter can use it, and messages and campaigns are free to adopt it without a second mechanism being invented.
+`PERIOD_AI_TURNS` is reserved through `EntitlementService.consume` exactly once per turn, **in the same transaction that engages the turn**. A duplicate job that lost the claim therefore spends nothing, and a reservation that finds the turn no longer engageable rolls its charge back. A turn that will not reach a provider — a person owns the conversation, the workspace is suspended — is never charged.
+
+**Provider requests are still recorded, as cost.** Every call writes `ai_request` with its tokens, tagged `purpose=agent` or `purpose=sentiment`: one row before each inference round, one for the classification. Nothing checks those against a limit. They are what the platform pays for, and the plan is what the customer bought; neither is derived from the other.
+
+**The concurrent race is closed, and the fix is platform-wide rather than AI-only.** `consume` takes a PostgreSQL advisory lock keyed on (workspace, limit), re-checks under it, records the meter, and flushes before releasing — so two workers cannot both spend the last permitted turn. It is a general primitive on `EntitlementService`: any limit fed by a usage meter can use it, and messages and campaigns are free to adopt it without a second mechanism being invented.
 
 The race was real and larger than an estimate suggested. With the lock removed, ten concurrent reservations against an allowance of three **all ten succeeded**; with it, exactly three do. `tests/integration/test_ai_security.py::test_concurrent_reservations_cannot_oversell_the_allowance` runs that on ten real connections, and it is mutation-tested: deleting the lock fails it.
 
