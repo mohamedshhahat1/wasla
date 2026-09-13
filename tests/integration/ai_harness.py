@@ -32,7 +32,8 @@ import httpx
 import pytest
 import pytest_asyncio
 from redis.asyncio import Redis
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.core.config import Settings
 from app.db.models.agent import Agent, AgentStatus, AgentTool
@@ -115,6 +116,36 @@ def tool_call_response(
         }
     )
     return body
+
+
+async def wait_for_lock_waiter(engine: AsyncEngine, *, within: float = 10.0) -> None:
+    """Return once some connection to this database is waiting on a row lock.
+
+    What turns "the second write was probably concurrent" into "the second write
+    was provably blocked behind the first". Sleeping a moment and asserting the
+    second task had not finished is not the same claim: a connection that has
+    not even reached its read yet has not finished either, and when it does read,
+    after the first has committed, it sees the row and a read-then-insert passes
+    - which is exactly how a mutation survived a race test that only slept.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + within
+    async with engine.connect() as observer:
+        while True:
+            waiting = await observer.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                )
+            )
+            if waiting:
+                return
+            if loop.time() > deadline:
+                raise AssertionError("no connection ever waited on the first one's lock")
+            # A new transaction per poll: activity statistics are snapshotted
+            # for the length of one.
+            await observer.commit()
+            await asyncio.sleep(0.05)
 
 
 def scripted(*bodies: JsonObject) -> AgentHandler:
@@ -444,6 +475,13 @@ class TurnRunner:
             return {str(kind): int(total) for kind, total in rows.all()}
 
     async def cleanup(self) -> None:
+        if os.environ.get("WASLA_TEST_KEEP_AI_DATA") == "1":
+            # Kept so `test_ai_invariants.py`, run after the AI suites in the
+            # same session, sweeps everything they did. The schema itself is
+            # still dropped when the session ends.
+            async for key in self.redis.scan_iter(match=f"{self.namespace}*"):
+                await self.redis.delete(key)
+            return
         async with self.database.session() as session:
             if self.tenants:
                 await session.execute(delete(Tenant).where(Tenant.id.in_(self.tenants)))

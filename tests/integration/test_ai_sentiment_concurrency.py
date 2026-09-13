@@ -25,7 +25,12 @@ from sqlalchemy.pool import NullPool
 
 from app.db.models.sentiment import MessageSentiment, SentimentLabel
 from app.repositories.sentiment_repository import SentimentRepository
-from tests.integration.ai_harness import FakeProviders, TurnRunner, Workspace
+from tests.integration.ai_harness import (
+    FakeProviders,
+    TurnRunner,
+    Workspace,
+    wait_for_lock_waiter,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -86,7 +91,9 @@ async def test_two_connections_recording_one_message_both_converge(
             winner, won = await _record(first, workspace, conversation_id, message_id)
             await first.flush()
             racing = asyncio.create_task(second_writer())
-            await asyncio.sleep(0.3)
+            # Proven, not assumed: the second insert is blocked on the first
+            # one's uncommitted row before the first commits.
+            await wait_for_lock_waiter(engine)
             assert not racing.done(), "the second write must be waiting on the first"
             await first.commit()
         loser, lost = await asyncio.wait_for(racing, 10)

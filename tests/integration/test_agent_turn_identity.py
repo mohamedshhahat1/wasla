@@ -58,6 +58,7 @@ from app.repositories.agent_turn_repository import AgentTurnRepository
 from app.workers.ai_worker import AgentWorker
 from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.queue import AgentJob, AgentQueue
+from tests.integration.ai_harness import wait_for_lock_waiter
 
 pytestmark = pytest.mark.integration
 
@@ -690,7 +691,7 @@ async def test_a_claim_waiting_on_an_uncommitted_one_is_told_it_lost(
                 worker_id="first",
             )
             racing = asyncio.create_task(second())
-            await asyncio.sleep(0.3)
+            await wait_for_lock_waiter(engine)
             assert not racing.done(), "the second claim must be waiting on the first"
             await first.commit()
         assert await asyncio.wait_for(racing, 10) is False

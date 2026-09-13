@@ -21,6 +21,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from redis.asyncio import Redis
+from sqlalchemy import delete
 
 from app.core.metrics import MetricsRegistry
 from app.core.telemetry import read_redis_counters, set_counter_sink
@@ -151,7 +152,12 @@ async def test_a_turn_stranded_engaged_is_counted_once_it_is_old_enough(
                 )
             )
 
-    rendered = await service.render(now=now)
+    try:
+        rendered = await service.render(now=now)
+    finally:
+        # Hand-made turns, removed whatever the harness keeps: they model a
+        # stranded turn and would be one to any sweep that ran afterwards.
+        await ai_turns.execute(delete(AgentTurn).where(AgentTurn.tenant_id == workspace.tenant_id))
 
     assert _gauge(rendered, "wasla_agent_turns_engaged_unfinished") == before + 1
     assert _gauge(rendered, "wasla_oldest_engaged_agent_turn_age_seconds") >= 3_500
