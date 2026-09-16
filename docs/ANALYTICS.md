@@ -17,6 +17,8 @@ Scope: analytics events, usage metering, and dashboard data contracts.
 | `ai_input_token` | token | Prompt tokens the provider reported |
 | `ai_output_token` | token | Completion tokens the provider reported |
 | `rag_query` | count | One tenant-scoped vector search |
+| `embedding_request` | count | One embedding provider call, for indexing (`purpose=ingest`) or a knowledge search (`purpose=query`), with the model and characters sent. Cost, never entitlement |
+| `embedding_input_token` | token | Embedding input tokens, when the provider reports them |
 | `media_processing` | count | One attachment read |
 | `voice_transcription` | second | Audio transcribed |
 | `storage_used` | byte | Bytes written to the file store |

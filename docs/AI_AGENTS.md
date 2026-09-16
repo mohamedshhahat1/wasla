@@ -222,7 +222,7 @@ Every tool that mutates writes an audit row after — never before — the mutat
 
 Rules the registry enforces now: every argument is validated against a declared schema before a handler runs; a handler receives a `ToolContext` carrying the tenant id, the conversation id, the session and — where one is configured — an embeddings client, so a tool cannot reach outside the workspace it was called in; an agent is offered only the tools it has been granted; and a name the registry does not know is never dispatched, so model output cannot name its way into arbitrary execution.
 
-A tool that cannot work says so in its own output rather than failing the turn. `search_knowledge` without a configured provider returns a sentence telling the agent not to guess and to offer a handoff, which is a usable instruction; an exception would only end the turn silently.
+A tool that cannot work says so in its own output rather than failing the turn. `search_knowledge` without a configured provider returns a sentence telling the agent not to guess and to offer a handoff, which is a usable instruction; an exception would only end the turn silently. The same holds when a search *fails* — an embedding outage, an invalid query vector, a database error inside the search: it becomes `KnowledgeSearchUnavailableError`, a failed tool call the model answers around, and its database work is rolled back to a savepoint so the turn's transaction stays usable (RAG-03). Retrieved passages reach the model as one JSON object inside `function_call_output`, never as instructions or message items, and the result count, relevance threshold and context size are the server's whatever the arguments say ([RAG.md](RAG.md)).
 
 Retrieval details in [RAG.md](RAG.md); escalation in [CRM.md](CRM.md).
 
