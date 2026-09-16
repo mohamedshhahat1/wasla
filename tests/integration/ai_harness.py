@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.core.config import Settings
 from app.db.models.agent import Agent, AgentStatus, AgentTool
 from app.db.models.agent_turn import AgentTurn
+from app.db.models.audit import AuditLog
 from app.db.models.billing import BillingInterval, Plan
 from app.db.models.conversation import Conversation, Message, MessageDirection
 from app.db.models.tenant import Tenant
@@ -484,6 +485,10 @@ class TurnRunner:
             return
         async with self.database.session() as session:
             if self.tenants:
+                # `audit_logs.tenant_id` is SET NULL, so deleting the workspace
+                # alone would leave its handoff entries behind as platform-wide
+                # rows that a later platform audit-log test counts.
+                await session.execute(delete(AuditLog).where(AuditLog.tenant_id.in_(self.tenants)))
                 await session.execute(delete(Tenant).where(Tenant.id.in_(self.tenants)))
             if self.plans:
                 await session.execute(delete(Plan).where(Plan.code.in_(self.plans)))
