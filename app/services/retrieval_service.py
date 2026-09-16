@@ -129,6 +129,7 @@ class RetrievalService:
         self._usage.record(UsageEventType.RAG_QUERY)
         scored = await self._chunks.search(
             embedding=vector,
+            space=self._embeddings.space,
             limit=limit,
             knowledge_base_id=knowledge_base_id,
         )

@@ -1,20 +1,23 @@
-"""The worker that turns submitted documents into retrievable chunks.
+"""The worker that turns submitted documents into retrievable generations.
 
-Why this is not in the request that submitted the document: extraction, chunking
-and embedding call a provider, and a large document is dozens of embedding
-requests. An upload endpoint that waited for that would time out, and a webhook
-that waited for it would be retried by Meta (claude.md §61).
+Why this is not in the request that submitted the document: chunking and
+embedding call a provider, and a large document is several embedding requests.
+An upload endpoint that waited for that would time out, and a webhook that waited
+for it would be retried by Meta (claude.md §61).
 
-Failure handling differs from the agent worker's in one way that matters. A
-failed agent turn leaves nothing behind but a log line; a failed ingestion
-leaves the document in `FAILED` with the reason on the row, so the person who
-uploaded it can see what went wrong and fix it. The job is dead-lettered as well,
-because the document says what broke and the job says that anything tried.
+**What this worker does not do any more is hold a transaction while it waits for
+the provider** (RAG-04). Each job runs `run_indexing` over *committed units* - a
+claim, a renewal and a meter per batch, and a publish or a failure record, each
+its own short transaction - with the embedding calls between them and no
+connection held. See `app.services.document_indexing` for the state machine.
 
-Ingestion is idempotent - re-running replaces a document's chunks rather than
-appending to them - so a transient failure here is genuinely worth another
-attempt, and this worker carries `IDEMPOTENT_RETRY` rather than the agent
-worker's narrower policy (ADR-068).
+**The queue's retry policy is not the document's retry budget** (RAG-01). A
+provider failure is recorded on the generation - retry later, or failed - and the
+job is then *acknowledged*: the generation's `next_retry_at` and attempt count are
+what bring it back, through the recovery sweep, and what stop it. The queue's own
+`IDEMPOTENT_RETRY` is left for failures that happen before anything could be
+recorded: a job that arrived before the upload committed, a database that is not
+there.
 """
 
 from __future__ import annotations
@@ -24,11 +27,16 @@ import asyncio
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
+from app.core.telemetry import record_ingestion_outcome
 from app.core.tracing import JOB_OUTCOME
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.db.session import Database
-from app.integrations.openai.embeddings import EmbeddingsClient, build_http_client
-from app.services.knowledge_service import KnowledgeService
+from app.integrations.openai.embeddings import (
+    EMBED_INGEST,
+    EmbeddingsClient,
+    build_http_client,
+)
+from app.services.document_indexing import IndexingOutcome, committed_units, run_indexing
 from app.workers.dispatch import (
     SUCCEEDED,
     JobIdentity,
@@ -163,25 +171,40 @@ class IngestionWorker:
         return SUCCEEDED
 
     async def _handle(self, job: IngestionJob) -> None:
-        async with self._database.session() as session:
-            knowledge = KnowledgeService(session=session, tenant_id=job.tenant_id)
-            async with build_http_client() as http:
-                embeddings = EmbeddingsClient(
-                    http=http,
-                    api_key=self._settings.openai_api_key or "",
-                    model=self._settings.openai_embedding_model,
-                    dimensions=EMBEDDING_DIMENSIONS,
-                )
-                result = await knowledge.ingest(
-                    document_id=job.document_id,
-                    embeddings=embeddings,
-                )
+        if not self._settings.openai_api_key:
+            # Configuration, not the document's fault: nothing is claimed and no
+            # attempt is spent, so the backlog drains the moment a key is set.
+            # The backlog gauge and its alert make the wait visible.
+            logger.warning(
+                "knowledge.embeddings_not_configured",
+                extra={"document_id": str(job.document_id)},
+            )
+            await record_ingestion_outcome(str(IndexingOutcome.SKIPPED))
+            return
 
+        async with build_http_client() as http:
+            embeddings = EmbeddingsClient(
+                http=http,
+                api_key=self._settings.openai_api_key,
+                model=self._settings.openai_embedding_model,
+                dimensions=EMBEDDING_DIMENSIONS,
+                operation=EMBED_INGEST,
+            )
+            run = await run_indexing(
+                committed_units(self._database, tenant_id=job.tenant_id),
+                document_id=job.document_id,
+                embeddings=embeddings,
+            )
+
+        await record_ingestion_outcome(str(run.outcome))
         logger.info(
             "knowledge.job_completed",
             extra={
                 "document_id": str(job.document_id),
-                "chunks": result.chunks_written,
-                "reused": result.reused,
+                "outcome": str(run.outcome),
+                "refusal": str(run.refusal) if run.refusal is not None else None,
+                "generation": run.generation,
+                "chunks": run.chunks,
+                "failure_code": run.failure.code if run.failure is not None else None,
             },
         )

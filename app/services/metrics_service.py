@@ -32,6 +32,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.pool import QueuePool
 
+from app.core.embedding_space import EmbeddingSpace
 from app.core.logging import get_logger
 from app.core.metrics import (
     REGISTRY,
@@ -51,7 +52,7 @@ from app.repositories.agent_turn_repository import (
     EngagedTurnSweep,
 )
 from app.repositories.conversation_repository import UnresolvedOutboundDirectory
-from app.repositories.knowledge_repository import PendingDocumentSweep
+from app.repositories.knowledge_repository import IndexingBacklog, IndexingSweep
 from app.repositories.whatsapp_repository import InboundEventSweep
 from app.services.backup_status import read_backup_status
 from app.workers.heartbeat import heartbeat_key
@@ -147,8 +148,12 @@ class MetricsService:
         registry: MetricsRegistry = REGISTRY,
         backup_status_path: str | None = None,
         database: Database | None = None,
+        space: EmbeddingSpace | None = None,
     ) -> None:
         self._redis = redis
+        # The space this deployment queries in, so documents embedded in any
+        # other one can be counted as needing a re-index (RAG-06).
+        self._space = space
         self._registry = registry
         self._backup_status_path = backup_status_path
         self._database = database
@@ -198,8 +203,10 @@ class MetricsService:
                     older_than=unprocessed_since(moment)
                 )
                 outbound, outbound_age = await UnresolvedOutboundDirectory(session).backlog()
-                unindexed, unindexed_age = await PendingDocumentSweep(session).backlog(
-                    older_than=unindexed_since(moment)
+                indexing: IndexingBacklog = await IndexingSweep(session).backlog(
+                    now=moment,
+                    unindexed_before=unindexed_since(moment),
+                    space=self._space,
                 )
                 stranded, stranded_age = await EngagedTurnSweep(session).backlog(
                     older_than=moment - STRANDED_TURN_AFTER
@@ -236,12 +243,54 @@ class MetricsService:
             (
                 "wasla_pending_documents",
                 "Uploaded documents that are committed and not yet searchable.",
-                float(unindexed),
+                float(indexing.unindexed),
             ),
             (
                 "wasla_oldest_pending_document_age_seconds",
                 "Age of the oldest document still waiting to be indexed.",
-                unindexed_age,
+                indexing.oldest_unindexed_seconds,
+            ),
+            # The indexing state machine, whole (RAG-05). Generations a worker
+            # holds, and how long the oldest has been held: a claim is renewed
+            # every batch, so one held far past its lease is a worker that died
+            # and a sweep that is not reclaiming it.
+            (
+                "wasla_documents_processing",
+                "Document indexing attempts a worker currently holds.",
+                float(indexing.processing),
+            ),
+            (
+                "wasla_oldest_processing_document_age_seconds",
+                "How long the longest-held indexing attempt has gone since its claim was renewed.",
+                indexing.oldest_processing_seconds,
+            ),
+            (
+                "wasla_documents_retry_waiting",
+                "Documents waiting out the backoff after a transient indexing failure.",
+                float(indexing.retry_waiting),
+            ),
+            (
+                "wasla_documents_serving",
+                "Documents with an active, searchable generation.",
+                float(indexing.serving),
+            ),
+            # Terminal, and split, because an operator does different things
+            # about each: a permanent failure is a key, a model or a document to
+            # fix; an exhausted one is an outage that outlasted the budget.
+            (
+                "wasla_documents_indexing_failed",
+                "Documents whose latest indexing attempt failed permanently.",
+                float(indexing.failed),
+            ),
+            (
+                "wasla_documents_indexing_exhausted",
+                "Documents whose latest indexing attempt spent its retry budget.",
+                float(indexing.exhausted),
+            ),
+            (
+                "wasla_documents_stale_embedding",
+                "Documents served from an embedding space other than the configured one.",
+                float(indexing.stale_embedding),
             ),
             # Customer messages an agent engaged a provider for and never
             # finished - never retried, because a reply may already be out

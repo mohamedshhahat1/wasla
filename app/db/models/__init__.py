@@ -81,8 +81,10 @@ from .knowledge import (
     EMBEDDING_DIMENSIONS,
     Document,
     DocumentChunk,
+    DocumentIndexGeneration,
     DocumentSource,
     DocumentStatus,
+    GenerationState,
     KnowledgeBase,
 )
 from .lead import (
@@ -188,6 +190,7 @@ __all__ = [
     "ConversationStatus",
     "Document",
     "DocumentChunk",
+    "DocumentIndexGeneration",
     "DocumentSource",
     "DocumentStatus",
     "EmailStatus",
@@ -196,6 +199,7 @@ __all__ = [
     "FederatedIdentity",
     "FollowUp",
     "FollowUpStatus",
+    "GenerationState",
     "IdentityProvider",
     "InvitationStatus",
     "Invoice",

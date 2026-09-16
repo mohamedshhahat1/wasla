@@ -58,6 +58,13 @@ class UsageEventType(StrEnum):
     AI_INPUT_TOKEN = "ai_input_token"  # noqa: S105
     AI_OUTPUT_TOKEN = "ai_output_token"  # noqa: S105
     RAG_QUERY = "rag_query"
+    # Embedding provider calls, for ingestion and for knowledge searches
+    # (RAG-07). Platform cost, like `AI_REQUEST`: nothing here is checked against
+    # a plan, and in particular none of it is ever counted against the AI turn
+    # allowance. `meta` says which model and whether it was `ingest` or `query`.
+    EMBEDDING_REQUEST = "embedding_request"
+    # Ruff reads a member named *_TOKEN as a credential. A billing unit.
+    EMBEDDING_INPUT_TOKEN = "embedding_input_token"  # noqa: S105
     MEDIA_PROCESSING = "media_processing"
     VOICE_TRANSCRIPTION = "voice_transcription"
     STORAGE_USED = "storage_used"
@@ -96,6 +103,8 @@ EVENT_UNITS: Final[dict[UsageEventType, UsageUnit]] = {
     UsageEventType.AI_INPUT_TOKEN: UsageUnit.TOKEN,
     UsageEventType.AI_OUTPUT_TOKEN: UsageUnit.TOKEN,
     UsageEventType.RAG_QUERY: UsageUnit.COUNT,
+    UsageEventType.EMBEDDING_REQUEST: UsageUnit.COUNT,
+    UsageEventType.EMBEDDING_INPUT_TOKEN: UsageUnit.TOKEN,
     UsageEventType.MEDIA_PROCESSING: UsageUnit.COUNT,
     # A count of recordings, not their length. `gpt-4o-mini-transcribe` and
     # its siblings answer in plain JSON with no duration field, and the

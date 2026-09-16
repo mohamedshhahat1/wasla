@@ -79,6 +79,7 @@ from app.services.retrieval_service import DEFAULT_TOP_K, MAX_TOP_K, RetrievalSe
 from tests.fake_embeddings import FakeEmbeddings, embed_text
 from tests.fake_queue_redis import FakeQueueRedis
 from tests.fakes import as_embeddings
+from tests.knowledge_seed import add_generation
 
 pytestmark = pytest.mark.integration
 
@@ -561,6 +562,7 @@ async def _seed_chunks(session: AsyncSession, *, tenant: Tenant) -> None:
     )
     session.add(document)
     await session.flush()
+    generation = await add_generation(session, document)
 
     for ordinal in range(SEEDED_CHUNKS):
         text = f"{CHUNK_SUBJECT} number {ordinal}"
@@ -569,6 +571,7 @@ async def _seed_chunks(session: AsyncSession, *, tenant: Tenant) -> None:
                 tenant_id=tenant.id,
                 document_id=document.id,
                 knowledge_base_id=base.id,
+                generation_id=generation.id,
                 ordinal=ordinal,
                 content=text,
                 token_estimate=len(text) // 4,

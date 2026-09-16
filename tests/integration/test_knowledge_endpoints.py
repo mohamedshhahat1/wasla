@@ -10,6 +10,7 @@ document added here is something the AI will state to customers as fact.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -26,6 +27,7 @@ from app.api.dependencies import (
 from app.core.exceptions import TenantIsolationError
 from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.db.models.knowledge import Document, DocumentSource, DocumentStatus, KnowledgeBase
+from app.services.knowledge_service import DocumentView
 
 pytestmark = pytest.mark.integration
 
@@ -81,7 +83,8 @@ class StubKnowledge:
 
     def __init__(self) -> None:
         self.submitted: list[dict[str, Any]] = []
-        self.reingested: list[uuid.UUID] = []
+        self.reindexed: list[uuid.UUID] = []
+        self.actors: list[Any] = []
         self.deleted: list[uuid.UUID] = []
         self.created_bases: list[dict[str, Any]] = []
         self.missing = False
@@ -101,7 +104,9 @@ class StubKnowledge:
         *,
         name: str,
         description: str | None = None,
+        actor: Any = None,
     ) -> KnowledgeBase:
+        self.actors.append(actor)
         self.created_bases.append({"name": name, "description": description})
         return _base()
 
@@ -113,24 +118,27 @@ class StubKnowledge:
     ) -> list[Any]:
         if self.missing:
             raise TenantIsolationError()
-        return [self.document]
+        return [DocumentView(document=self.document)]
 
-    async def get_document(self, document_id: uuid.UUID) -> Document:
+    async def get_document(self, document_id: uuid.UUID) -> DocumentView:
         if self.missing:
             raise TenantIsolationError()
-        return self.document
+        return DocumentView(document=self.document)
 
     async def submit(self, **kwargs: Any) -> tuple[Any, ...]:
+        self.actors.append(kwargs.pop("actor", None))
         self.submitted.append(kwargs)
-        return self.document, self.created
+        return DocumentView(document=self.document), self.created
 
-    async def reingest(self, document_id: uuid.UUID) -> Document:
-        self.reingested.append(document_id)
-        return _document(status=DocumentStatus.PENDING)
+    async def reindex(self, document_id: uuid.UUID, *, actor: Any = None) -> DocumentView:
+        self.actors.append(actor)
+        self.reindexed.append(document_id)
+        return DocumentView(document=_document(status=DocumentStatus.PENDING))
 
-    async def delete_document(self, document_id: uuid.UUID) -> None:
+    async def delete_document(self, document_id: uuid.UUID, *, actor: Any = None) -> None:
         if self.missing:
             raise TenantIsolationError()
+        self.actors.append(actor)
         self.deleted.append(document_id)
 
 
@@ -306,7 +314,7 @@ async def test_the_document_read_does_not_return_the_extracted_text(
     assert "content" not in body
 
 
-async def test_an_admin_can_queue_a_reingest(
+async def test_an_admin_can_queue_a_reindex(
     client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
 ) -> None:
     _as(app, TenantRole.TENANT_ADMIN)
@@ -314,10 +322,10 @@ async def test_an_admin_can_queue_a_reingest(
     response = await client.post(f"{PATH}/documents/{DOCUMENT_ID}/ingest")
 
     assert response.status_code == 202
-    assert knowledge.reingested == [DOCUMENT_ID]
+    assert knowledge.reindexed == [DOCUMENT_ID]
 
 
-async def test_a_member_cannot_queue_a_reingest(
+async def test_a_member_cannot_queue_a_reindex(
     client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
 ) -> None:
     _as(app, TenantRole.MEMBER)
@@ -325,7 +333,7 @@ async def test_a_member_cannot_queue_a_reingest(
     response = await client.post(f"{PATH}/documents/{DOCUMENT_ID}/ingest")
 
     assert response.status_code == 403
-    assert knowledge.reingested == []
+    assert knowledge.reindexed == []
 
 
 async def test_an_admin_can_delete_a_document(
@@ -377,3 +385,121 @@ async def test_knowledge_routes_require_authentication(client: AsyncClient) -> N
     response = await client.get(f"{PATH}/bases")
 
     assert response.status_code == 401
+
+
+# ------------------------------------------------------------------ RAG-11
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("content", "Refunds within fourteen days.\u0000"),
+        ("content", "Refunds \ud800 within fourteen days."),
+        ("content", "\u200b\u200c\u200d \n\t"),
+        ("title", "Prices\u0000"),
+        ("title", "\u200f\u200e"),
+        ("filename", "prices\u0000.txt"),
+    ],
+    ids=[
+        "nul-content",
+        "surrogate-content",
+        "invisible-content",
+        "nul-title",
+        "invisible-title",
+        "nul-filename",
+    ],
+)
+async def test_text_that_cannot_be_stored_or_indexed_is_a_422_not_a_500(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge, field: str, value: str
+) -> None:
+    _as(app, TenantRole.TENANT_ADMIN)
+
+    # Serialized here, ASCII-escaped, because that is how a lone surrogate
+    # travels in JSON at all - httpx would refuse to encode it as UTF-8 first.
+    response = await client.post(
+        f"{PATH}/bases/{BASE_ID}/documents",
+        content=json.dumps({**DOCUMENT_BODY, field: value}),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert knowledge.submitted == []
+
+
+async def test_arabic_marks_and_ordinary_controls_are_accepted(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
+    """The positive control: validation refuses what cannot be stored, not what is unusual."""
+    _as(app, TenantRole.TENANT_ADMIN)
+
+    response = await client.post(
+        f"{PATH}/bases/{BASE_ID}/documents",
+        json={
+            **DOCUMENT_BODY,
+            "title": (
+                "\u0633\u064a\u0627\u0633\u0629\u200f "
+                "\u0627\u0644\u0627\u0633\u062a\u0631\u062c\u0627\u0639"
+            ),
+            "content": (
+                "\u0646\u0635\u200d\t" "\u0645\u0639\u0007 \u0639\u0644\u0627\u0645\u0627\u062a"
+            ),
+        },
+    )
+
+    assert response.status_code == 202
+    assert len(knowledge.submitted) == 1
+
+
+async def test_a_document_read_reports_what_serves_and_what_is_being_tried(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
+    """A failed re-index beside a serving generation reads as both facts (PD-RAG-1)."""
+    from app.db.models.knowledge import DocumentIndexGeneration, GenerationState
+
+    _as(app, TenantRole.MEMBER)
+    active = DocumentIndexGeneration(
+        number=1,
+        state=GenerationState.ACTIVE,
+        attempts=1,
+        embedding_model="text-embedding-3-small",
+    )
+    failed = DocumentIndexGeneration(
+        number=2,
+        state=GenerationState.FAILED,
+        attempts=1,
+        last_error_code="provider_unauthorized",
+        embedding_model="text-embedding-3-small",
+    )
+    knowledge.document = _document(status=DocumentStatus.READY, chunk_count=3)
+
+    async def described(document_id: uuid.UUID) -> DocumentView:
+        return DocumentView(
+            document=knowledge.document, latest=failed, active=active, needs_reindex=True
+        )
+
+    knowledge.get_document = described  # type: ignore[method-assign]
+
+    response = await client.get(f"{PATH}/documents/{DOCUMENT_ID}")
+
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["serving_generation"] == 1
+    assert body["indexing"]["generation"] == 2
+    assert body["indexing"]["state"] == "failed"
+    assert body["indexing"]["last_error_code"] == "provider_unauthorized"
+    assert body["needs_reindex"] is True
+
+
+async def test_mutations_carry_the_acting_user_into_the_service(
+    client: AsyncClient, app: FastAPI, knowledge: StubKnowledge
+) -> None:
+    """What the audit trail records as the actor comes from the authenticated request."""
+    _as(app, TenantRole.TENANT_ADMIN)
+
+    await client.post(f"{PATH}/bases", json={"name": "Products"})
+    await client.post(f"{PATH}/bases/{BASE_ID}/documents", json=DOCUMENT_BODY)
+    await client.post(f"{PATH}/documents/{DOCUMENT_ID}/ingest")
+    await client.delete(f"{PATH}/documents/{DOCUMENT_ID}")
+
+    assert len(knowledge.actors) == 4
+    assert all(actor is not None and actor.id == USER_ID for actor in knowledge.actors)

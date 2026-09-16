@@ -16,6 +16,7 @@ from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.dependencies import RedisDep, SessionDep, SettingsDep
+from app.core.embedding_space import OPENAI_PROVIDER, EmbeddingSpace
 from app.core.exceptions import AuthenticationError, NotFoundError, PermissionDeniedError
 from app.core.rate_limit import RateLimiter
 from app.core.reauth import ReauthProofStore
@@ -25,6 +26,7 @@ from app.core.telemetry import observe_auth_event
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.db.models.billing import LimitKey
+from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.integrations.billing import build_checkout_provider
 from app.integrations.whatsapp.ownership import MetaOwnershipVerifier
 from app.platform.access_audit import PlatformAccessAudit
@@ -393,12 +395,18 @@ def get_knowledge_service(
     session: SessionDep,
     redis: RedisDep,
     workspace: ActiveWorkspaceDep,
+    settings: SettingsDep,
 ) -> KnowledgeService:
     """Workspace-scoped, so no route can pass a tenant id of its own choosing."""
     return KnowledgeService(
         session=session,
         tenant_id=workspace.tenant.id,
         queue=IngestionQueue(redis.client),
+        space=EmbeddingSpace(
+            provider=OPENAI_PROVIDER,
+            model=settings.openai_embedding_model,
+            dimensions=EMBEDDING_DIMENSIONS,
+        ),
     )
 
 

@@ -6,14 +6,16 @@ suite and catch drift against migration 0007 without PostgreSQL.
 
 from __future__ import annotations
 
-from sqlalchemy import Table, UniqueConstraint
+from sqlalchemy import ForeignKeyConstraint, Index, Table, UniqueConstraint
 
 from app.db.models.knowledge import (
     EMBEDDING_DIMENSIONS,
     Document,
     DocumentChunk,
+    DocumentIndexGeneration,
     DocumentSource,
     DocumentStatus,
+    GenerationState,
     KnowledgeBase,
 )
 from tests.fakes import as_table
@@ -46,7 +48,53 @@ def test_knowledge_tables_declare_the_indexes_the_migrations_create() -> None:
         # this cannot see: that it is HNSW over `vector_cosine_ops`, which is
         # the half that decides whether the planner will ever use it.
         "ix_document_chunks_embedding_hnsw",
+        # Migration 0063: what a superseded generation's chunks are deleted by.
+        "ix_document_chunks_generation_id",
     }
+    assert _index_names(as_table(DocumentIndexGeneration.__table__)) == {
+        "ix_document_index_generations_tenant_id",
+        "ix_document_index_generations_document_id",
+        "ix_document_index_generations_outstanding",
+        "uq_document_index_generations_active",
+        "uq_document_index_generations_in_flight",
+    }
+
+
+def _partial_unique(table: Table, name: str) -> tuple[tuple[str, ...], str]:
+    for index in table.indexes:
+        if isinstance(index, Index) and index.name == name:
+            assert index.unique, name
+            where = index.dialect_options["postgresql"]["where"]
+            return tuple(column.name for column in index.columns), str(where)
+    raise AssertionError(f"{table.name} has no index named {name}")
+
+
+def test_a_document_serves_at_most_one_generation() -> None:
+    """The database, not the publish code, is what refuses two active versions."""
+    columns, where = _partial_unique(
+        as_table(DocumentIndexGeneration.__table__), "uq_document_index_generations_active"
+    )
+    assert columns == ("document_id",)
+    assert where == "state = 'active'"
+
+
+def test_a_document_has_at_most_one_attempt_outstanding() -> None:
+    """What coalesces a burst of re-index requests into one (RAG-07)."""
+    columns, where = _partial_unique(
+        as_table(DocumentIndexGeneration.__table__), "uq_document_index_generations_in_flight"
+    )
+    assert columns == ("document_id",)
+    assert where == "state IN ('pending', 'processing')"
+
+
+def test_generation_states_match_the_migration_literals() -> None:
+    assert [member.value for member in GenerationState] == [
+        "pending",
+        "processing",
+        "active",
+        "superseded",
+        "failed",
+    ]
 
 
 def test_enum_values_match_the_migration_literals() -> None:
@@ -76,11 +124,12 @@ def test_ingestion_idempotency_is_keyed_on_the_content_hash() -> None:
     ) == ("tenant_id", "knowledge_base_id", "content_hash")
 
 
-def test_a_chunk_ordinal_is_unique_within_its_document() -> None:
+def test_a_chunk_ordinal_is_unique_within_its_generation() -> None:
+    """Per generation: while a re-index publishes, two versions' ordinals coexist."""
     assert _unique_columns(
         as_table(DocumentChunk.__table__),
-        "uq_document_chunks_tenant_id_document_id_ordinal",
-    ) == ("tenant_id", "document_id", "ordinal")
+        "uq_document_chunks_tenant_id_generation_id_ordinal",
+    ) == ("tenant_id", "generation_id", "ordinal")
 
 
 def test_every_knowledge_table_carries_its_own_tenant_column() -> None:
@@ -90,7 +139,12 @@ def test_every_knowledge_table_carries_its_own_tenant_column() -> None:
     to be expressible on the row being scanned. A filter that depends on a join
     is a filter someone will eventually write without the join.
     """
-    for table in (KnowledgeBase.__table__, Document.__table__, DocumentChunk.__table__):
+    for table in (
+        KnowledgeBase.__table__,
+        Document.__table__,
+        DocumentChunk.__table__,
+        DocumentIndexGeneration.__table__,
+    ):
         assert "tenant_id" in table.columns
 
 
@@ -104,7 +158,12 @@ def test_tenant_foreign_keys_cascade() -> None:
     accurate question before those existed and is an ambiguous one now, so the
     test asks the question it actually means.
     """
-    for mapped in (KnowledgeBase.__table__, Document.__table__, DocumentChunk.__table__):
+    for mapped in (
+        KnowledgeBase.__table__,
+        Document.__table__,
+        DocumentChunk.__table__,
+        DocumentIndexGeneration.__table__,
+    ):
         table = as_table(mapped)
         to_tenants = [
             key for key in table.c.tenant_id.foreign_keys if key.column.table.name == "tenants"
@@ -113,14 +172,37 @@ def test_tenant_foreign_keys_cascade() -> None:
         assert to_tenants[0].ondelete == "CASCADE"
 
 
-def test_chunks_die_with_their_document_and_their_knowledge_base() -> None:
-    (document_key,) = as_table(DocumentChunk.__table__).c.document_id.foreign_keys
-    assert document_key.column.table.name == "documents"
+def _composite(table: Table, name: str) -> ForeignKeyConstraint:
+    for constraint in table.constraints:
+        if isinstance(constraint, ForeignKeyConstraint) and constraint.name == name:
+            return constraint
+    raise AssertionError(f"{table.name} has no foreign key named {name}")
+
+
+def test_chunks_die_with_their_document_generation_and_knowledge_base() -> None:
+    chunks = as_table(DocumentChunk.__table__)
+
+    # RAG-13: three columns, so a chunk's knowledge base must be its document's.
+    document_key = _composite(chunks, "fk_document_chunks_tenant_document_knowledge_base")
+    assert [element.target_fullname for element in document_key.elements] == [
+        "documents.tenant_id",
+        "documents.id",
+        "documents.knowledge_base_id",
+    ]
     assert document_key.ondelete == "CASCADE"
 
-    (base_key,) = as_table(DocumentChunk.__table__).c.knowledge_base_id.foreign_keys
-    assert base_key.column.table.name == "knowledge_bases"
+    generation_key = _composite(chunks, "fk_document_chunks_tenant_document_generation")
+    assert [element.target_fullname for element in generation_key.elements] == [
+        "document_index_generations.tenant_id",
+        "document_index_generations.document_id",
+        "document_index_generations.id",
+    ]
+    assert generation_key.ondelete == "CASCADE"
+
+    base_key = _composite(chunks, "fk_document_chunks_tenant_knowledge_base")
+    assert base_key.referred_table.name == "knowledge_bases"
     assert base_key.ondelete == "CASCADE"
+    assert chunks.c.generation_id.nullable is False
 
 
 def test_documents_die_with_their_knowledge_base() -> None:
@@ -137,10 +219,11 @@ def test_the_embedding_column_matches_the_declared_width() -> None:
     assert column.type.dim == EMBEDDING_DIMENSIONS  # type: ignore[attr-defined]
 
 
-def test_an_embedding_may_be_absent() -> None:
-    """A chunk is written before its embedding is known.
+def test_an_embedding_column_is_nullable_in_the_schema() -> None:
+    """Nullable as migration 0007 created it; retrieval filters NULLs regardless.
 
-    That is what lets ingestion fail partway without losing the chunking work.
+    A generation's chunks are written with validated vectors in the transaction
+    that publishes it, so no writer produces one without an embedding.
     """
     assert as_table(DocumentChunk.__table__).c.embedding.nullable is True
 

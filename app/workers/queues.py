@@ -14,13 +14,20 @@ has exactly the audience this should have.
     docker compose exec worker python -m app.workers.queues replay agent --force --dry-run
     docker compose exec worker python -m app.workers.queues unprocessed-inbound
     docker compose exec worker python -m app.workers.queues unindexed-documents
+    docker compose exec worker python -m app.workers.queues failed-documents
+    docker compose exec worker python -m app.workers.queues stale-embeddings
+    docker compose exec worker python -m app.workers.queues reindex-stale-embeddings --dry-run
+    docker compose exec worker python -m app.workers.queues reindex-document <workspace> <document>
     docker compose exec worker python -m app.workers.queues unresolved-sends
 
-The last three read the database rather than Redis, and they are here because
-this is where an operator already looks when work is not moving. Each answers
-a question the deployment previously had no way to ask: what inbound did we
-store and never process, what did somebody upload that is still not
-searchable, and what did we send that we cannot account for.
+The database-backed commands are here because this is where an operator already
+looks when work is not moving. Each answers a question the deployment previously
+had no way to ask: what inbound did we store and never process, what did somebody
+upload that is still not searchable - and why (RAG-01) - which documents are
+served from an embedding model this deployment no longer queries with (RAG-06),
+and what did we send that we cannot account for. The two re-index commands are
+the only writers among them, and re-indexing never takes knowledge away: a
+document keeps serving its current generation until the new one publishes.
 
 **Replay is never automatic, and never bulk by default.** A dead-lettered job
 is one the system decided it could not finish; putting it back is a judgement
@@ -53,21 +60,37 @@ import argparse
 import asyncio
 import json
 import sys
+import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from sqlalchemy import select
 
 from app.core.config import get_settings
+from app.core.embedding_space import OPENAI_PROVIDER, EmbeddingSpace
 from app.core.logging import configure_logging, get_logger
 from app.core.redis import RedisClient
+from app.db.models.knowledge import (
+    EMBEDDING_DIMENSIONS,
+    DocumentIndexGeneration,
+    GenerationState,
+)
 from app.db.session import Database
 from app.repositories.conversation_repository import UnresolvedOutboundDirectory
-from app.repositories.knowledge_repository import PendingDocumentSweep
+from app.repositories.knowledge_repository import (
+    TRIGGER_REINDEX,
+    TRIGGER_STALE_EMBEDDING,
+    IndexingSweep,
+)
 from app.repositories.whatsapp_repository import InboundEventSweep
 from app.workers.inbound_recovery import unprocessed_since
-from app.workers.ingestion_recovery import unindexed_since
+from app.workers.ingestion_queue import IngestionQueue
 from app.workers.queue import QUEUES, ReliableQueue
 from app.workers.retry import FailureCategory
+
+if TYPE_CHECKING:
+    from app.services.knowledge_service import DocumentView
 
 logger = get_logger(__name__)
 
@@ -326,41 +349,163 @@ async def unprocessed_inbound(database: Database, *, limit: int) -> int:
 
 
 async def unindexed_documents(database: Database, *, limit: int) -> int:
-    """Documents that were uploaded and never indexed.
+    """Indexing attempts outstanding: waiting for a worker, backing off, or held.
 
-    A row here is a file somebody in a workspace successfully uploaded that no
-    agent can search - almost always because Redis was unavailable when the
-    upload committed (WQ-03). `IngestionRecoveryWorker` drains these on its own;
-    this command exists so a person can see the backlog, see whether it is
-    shrinking, and see how old the oldest one is.
+    A row here is a document somebody uploaded, or asked to re-index, whose
+    attempt has not finished. `IngestionRecoveryWorker` hands these on by itself;
+    this command exists so a person can see the backlog, its age, how many
+    attempts each has spent and the code of the last failure - which is what
+    tells a Redis outage (`-`, never tried) from a provider rejecting the key
+    (`provider_unauthorized`).
 
-    No document contents and no filenames-as-payload: the workspace, the
-    knowledge base and the document id are enough to find it in the product, and
-    printing a customer's uploaded text into a terminal scrollback and a shell
-    history is not something an operator asked for.
+    A plain read that takes no locks, so running it during recovery changes
+    nothing. No document contents, no titles and no filenames: the workspace and
+    document ids are enough to find it in the product.
     """
+    now = datetime.now(UTC)
     async with database.session() as session:
-        documents = await PendingDocumentSweep(session).claim_pending(
-            older_than=unindexed_since(datetime.now(UTC)),
-            limit=limit,
-        )
-        if not documents:
+        generations = await IndexingSweep(session).list_outstanding(limit=limit)
+        if not generations:
             print("no unindexed documents")  # noqa: T201
             return 0
-        header = f"{'age':>10}  {'workspace':<36}  {'knowledge base':<36}  document"
-        print(header)  # noqa: T201
-        print("-" * len(header))  # noqa: T201
-        now = datetime.now(UTC)
-        for document in documents:
-            age = f"{(now - document.created_at).total_seconds():.0f}s"
-            print(  # noqa: T201
-                f"{age:>10}  {document.tenant_id!s:<36}  "
-                f"{document.knowledge_base_id!s:<36}  {document.id}"
-            )
-    # The claim's transaction ends here without marking anything, so the rows
-    # are released exactly as they were found. Reading the backlog must not
-    # change it.
+        _print_generations(generations, now=now)
     return 0
+
+
+async def failed_documents(database: Database, *, limit: int) -> int:
+    """Documents whose latest indexing attempt ended terminally, and why.
+
+    Never retried automatically. `reindex-document` retries one once its cause -
+    shown here as a code - is fixed; so does the workspace's own re-index action.
+    """
+    now = datetime.now(UTC)
+    async with database.session() as session:
+        rows = await session.scalars(
+            select(DocumentIndexGeneration)
+            .where(DocumentIndexGeneration.state == GenerationState.FAILED)
+            .order_by(DocumentIndexGeneration.last_error_at.desc())
+            .limit(limit)
+        )
+        generations = list(rows)
+        if not generations:
+            print("no failed documents")  # noqa: T201
+            return 0
+        _print_generations(generations, now=now)
+    return 0
+
+
+async def stale_embeddings(database: Database, *, space: EmbeddingSpace, limit: int) -> int:
+    """Documents served from a different embedding space than the configured one.
+
+    Retrieval does not search these (RAG-06): a query embedded with the
+    configured model is not comparable with their vectors. They are listed so
+    they can be re-indexed, not merely noticed.
+    """
+    now = datetime.now(UTC)
+    async with database.session() as session:
+        generations = await IndexingSweep(session).list_stale(space=space, limit=limit)
+        if not generations:
+            print(f"no documents outside {space.describe()}")  # noqa: T201
+            return 0
+        print(f"configured space: {space.describe()}")  # noqa: T201
+        _print_generations(generations, now=now, with_space=True)
+    return 0
+
+
+async def reindex_stale_embeddings(
+    database: Database,
+    redis: RedisClient,
+    *,
+    space: EmbeddingSpace,
+    limit: int,
+    dry_run: bool,
+) -> int:
+    """Ask for a re-index of every document served from another space.
+
+    Coalesced per document like any re-index, so running it twice queues
+    nothing twice, and each document keeps serving what it serves until its new
+    generation publishes. Bounded by `--limit`; run it again for the next batch.
+    """
+    async with database.session() as session:
+        stale = [
+            (generation.tenant_id, generation.document_id)
+            for generation in await IndexingSweep(session).list_stale(space=space, limit=limit)
+        ]
+    if not stale:
+        print(f"no documents outside {space.describe()}")  # noqa: T201
+        return 0
+    verb = "would re-index" if dry_run else "re-index"
+    for tenant_id, document_id in stale:
+        print(f"{verb}  {tenant_id}  {document_id}")  # noqa: T201
+        if not dry_run:
+            await _reindex(database, redis, tenant_id, document_id, trigger=TRIGGER_STALE_EMBEDDING)
+    return 0
+
+
+async def reindex_document(
+    database: Database,
+    redis: RedisClient,
+    *,
+    tenant_id: uuid.UUID,
+    document_id: uuid.UUID,
+) -> int:
+    """Retry one document, after its failure's cause has been fixed."""
+    view = await _reindex(database, redis, tenant_id, document_id, trigger=TRIGGER_REINDEX)
+    latest = view.latest
+    print(  # noqa: T201
+        f"{document_id}: status={view.document.status} "
+        f"generation={latest.number if latest else '-'} "
+        f"state={latest.state if latest else '-'}"
+    )
+    return 0
+
+
+async def _reindex(
+    database: Database,
+    redis: RedisClient,
+    tenant_id: uuid.UUID,
+    document_id: uuid.UUID,
+    *,
+    trigger: str,
+) -> DocumentView:
+    # Imported here: the service pulls in the indexing pipeline, which the
+    # queue-only commands have no reason to load.
+    from app.services.knowledge_service import KnowledgeService
+
+    async with database.session() as session:
+        knowledge = KnowledgeService(
+            session=session, tenant_id=tenant_id, queue=IngestionQueue(redis.client)
+        )
+        return await knowledge.reindex(document_id, trigger=trigger)
+
+
+def _print_generations(
+    generations: Sequence[DocumentIndexGeneration],
+    *,
+    now: datetime,
+    with_space: bool = False,
+) -> None:
+    header = (
+        f"{'age':>9}  {'state':<10}  {'gen':>4}  {'tries':>5}  {'last error':<28}  "
+        f"{'workspace':<36}  document"
+    )
+    if with_space:
+        header += "  space"
+    print(header)  # noqa: T201
+    print("-" * len(header))  # noqa: T201
+    for generation in generations:
+        age = f"{(now - generation.created_at).total_seconds():.0f}s"
+        line = (
+            f"{age:>9}  {generation.state!s:<10}  {generation.number:>4}  "
+            f"{generation.attempts:>5}  {(generation.last_error_code or '-'):<28}  "
+            f"{generation.tenant_id!s:<36}  {generation.document_id}"
+        )
+        if with_space:
+            line += (
+                f"  {generation.embedding_provider}/{generation.embedding_model}/"
+                f"{generation.embedding_dimensions}d/v{generation.embedding_schema_version}"
+            )
+        print(line)  # noqa: T201
 
 
 async def unresolved_sends(database: Database, *, limit: int) -> int:
@@ -446,6 +591,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     unindexed.add_argument("--limit", type=int, default=50)
 
+    failed = commands.add_parser(
+        "failed-documents",
+        help="documents whose latest indexing attempt failed, with the failure code",
+    )
+    failed.add_argument("--limit", type=int, default=50)
+
+    stale = commands.add_parser(
+        "stale-embeddings",
+        help="documents served from an embedding model other than the configured one",
+    )
+    stale.add_argument("--limit", type=int, default=50)
+
+    restale = commands.add_parser(
+        "reindex-stale-embeddings",
+        help="re-index documents served from another embedding model (coalesced)",
+    )
+    restale.add_argument("--limit", type=int, default=100)
+    restale.add_argument("--dry-run", action="store_true")
+
+    one = commands.add_parser("reindex-document", help="retry indexing one document")
+    one.add_argument("tenant_id", type=uuid.UUID)
+    one.add_argument("document_id", type=uuid.UUID)
+
     open_sends = commands.add_parser(
         "unresolved-sends",
         help="sends whose outcome WhatsApp never confirmed (never resent automatically)",
@@ -463,15 +631,52 @@ async def run(argv: Sequence[str] | None = None) -> int:
     # queue commands build no database pool, so neither half of the deployment
     # has to be reachable to inspect the other. During the outage that produced
     # a backlog, that is not a detail.
-    if arguments.command in {"unprocessed-inbound", "unindexed-documents", "unresolved-sends"}:
+    space = EmbeddingSpace(
+        provider=OPENAI_PROVIDER,
+        model=settings.openai_embedding_model,
+        dimensions=EMBEDDING_DIMENSIONS,
+    )
+    if arguments.command in {
+        "unprocessed-inbound",
+        "unindexed-documents",
+        "failed-documents",
+        "stale-embeddings",
+        "unresolved-sends",
+    }:
         database = Database(settings)
         try:
             if arguments.command == "unprocessed-inbound":
                 return await unprocessed_inbound(database, limit=arguments.limit)
             if arguments.command == "unindexed-documents":
                 return await unindexed_documents(database, limit=arguments.limit)
+            if arguments.command == "failed-documents":
+                return await failed_documents(database, limit=arguments.limit)
+            if arguments.command == "stale-embeddings":
+                return await stale_embeddings(database, space=space, limit=arguments.limit)
             return await unresolved_sends(database, limit=arguments.limit)
         finally:
+            await database.dispose()
+
+    if arguments.command in {"reindex-stale-embeddings", "reindex-document"}:
+        database = Database(settings)
+        redis_client = RedisClient(settings)
+        try:
+            if arguments.command == "reindex-document":
+                return await reindex_document(
+                    database,
+                    redis_client,
+                    tenant_id=arguments.tenant_id,
+                    document_id=arguments.document_id,
+                )
+            return await reindex_stale_embeddings(
+                database,
+                redis_client,
+                space=space,
+                limit=arguments.limit,
+                dry_run=arguments.dry_run,
+            )
+        finally:
+            await redis_client.close()
             await database.dispose()
 
     redis = RedisClient(settings)

@@ -50,6 +50,9 @@ MAX_WINDOW: Final = timedelta(days=366)
 # classifier?" reads it from here without a second event type to sum.
 AI_PURPOSE_AGENT: Final = "agent"
 AI_PURPOSE_SENTIMENT: Final = "sentiment"
+# Which side of retrieval an embedding call served (RAG-07).
+EMBEDDING_PURPOSE_INGEST: Final = "ingest"
+EMBEDDING_PURPOSE_QUERY: Final = "query"
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +258,42 @@ class UsageRecorder:
             occurred_at=occurred_at,
             meta=line,
         )
+
+    def embedding_request(
+        self,
+        *,
+        model: str,
+        purpose: str,
+        characters: int,
+        input_tokens: int | None,
+        requests: int = 1,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        """Stage one or more embedding provider calls and what they consumed.
+
+        Platform cost, never a customer allowance (RAG-07): an ingestion is not
+        an AI turn and a knowledge search is already inside one, so nothing here
+        is checked against `PERIOD_AI_TURNS` or any other limit.
+
+        `input_tokens` is what the provider reported, and absent when it did not
+        say - then only the request row is written, carrying the characters that
+        were sent, because an estimate of tokens stored as tokens would be a
+        number in a cost report nobody measured.
+        """
+        meta: dict[str, Any] = {"model": model, "purpose": purpose, "characters": characters}
+        self.record(
+            UsageEventType.EMBEDDING_REQUEST,
+            quantity=requests,
+            occurred_at=occurred_at,
+            meta=meta,
+        )
+        if input_tokens:
+            self.record(
+                UsageEventType.EMBEDDING_INPUT_TOKEN,
+                quantity=input_tokens,
+                occurred_at=occurred_at,
+                meta={"model": model, "purpose": purpose},
+            )
 
 
 class UsageService:

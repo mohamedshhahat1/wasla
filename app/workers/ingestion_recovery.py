@@ -1,40 +1,35 @@
-"""The sweep that finishes uploads whose ingestion job never reached Redis.
+"""The sweep that hands outstanding indexing work back to a worker - and only that.
 
-`KnowledgeService._enqueue` logs a `RedisError` and swallows it, and that is the
-right call: the document is already committed and already `PENDING`, which is
-the truth - it exists and is not yet searchable - and failing the request would
-throw away a document the customer successfully uploaded because Redis was busy
-for a moment. Its docstring said `list_pending` existed "so a sweeper can find
-anything stranded".
+It began as the sweeper for uploads whose ingestion job never reached Redis
+(WQ-03): `KnowledgeService._enqueue` logs a `RedisError` and swallows it, because
+the document is already committed and failing the request would throw away an
+upload over a moment of Redis trouble. Something had to find those.
 
-There was no sweeper. Nothing in the deployment called `list_pending` for
-documents at all, and there was no gauge, no alert and no operator command
-either - so a document accepted from a customer could sit `PENDING` for ever,
-never searchable by any agent, with nobody told: not the customer, not the
-workspace, not an operator (WQ-03).
+What it found as well was every document whose ingestion had *failed*, because a
+failure was never recorded and every broken document still looked `pending` -
+and it re-queued each of them every sixty seconds, for ever, at five provider
+calls a time (RAG-01). Recovery meant "anything old and pending".
 
-This is that sweeper, and it is deliberately the plainest one in the package.
-`InboundRecoveryWorker` has to *re-derive* what each event still owes, because
-replaying a webhook would re-project a message and re-meter a delivery. Nothing
-like that applies here: ingestion is idempotent by construction - a document
-already `READY` is left alone, and a re-run replaces its chunks rather than
-doubling them - so recovering a stranded document is simply publishing its job
-again. The only judgement is which documents to touch.
+**It now means "owed an attempt, and allowed one".** The eligibility predicate
+is `IndexingSweep.claim_due`, and it admits exactly three things: a pending
+generation never retried and older than the grace period (the lost job this was
+built for), a pending generation whose backoff has passed, and a processing
+generation whose lease has lapsed (a worker that died). Never a failed one;
+never one past its attempt budget; never one in a suspended or deleted
+workspace (RAG-10). A document that fails permanently is `FAILED` after one
+attempt and this sweep never looks at it again; one that fails transiently comes
+back a bounded number of times and then is `FAILED` as `retry_exhausted`.
 
-**Two of these running is safe**, and the lock is what makes the sweep legible
-rather than what makes it correct. Duplicate jobs would be harmless; two
-sweepers republishing an entire backlog during the outage recovery that is
-already behind would not be. `FOR UPDATE SKIP LOCKED` divides the work.
+**Two of these running is safe.** `FOR UPDATE SKIP LOCKED` divides the backlog,
+and the claim a worker makes admits one worker per generation whatever the queue
+holds - a duplicate job costs one short transaction and no provider call.
 
 **The grace period is not decoration.** A document committed a second ago has
 not failed - the request that committed it is very likely publishing its job at
 that moment - and claiming it would race the path this exists to back up.
 
-It also closes the other half of `appendfsync everysec`. An unclean host crash
-can lose up to a second of Redis writes, including a successfully-published
-ingestion job; agent and media work is already covered by
-`InboundRecoveryWorker` re-deriving it from `whatsapp_events`, and this is what
-covers the third queue.
+It also closes the other half of `appendfsync everysec`: an unclean host crash can
+lose up to a second of Redis writes, including a published ingestion job.
 """
 
 from __future__ import annotations
@@ -49,7 +44,8 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
 from app.db.session import Database
-from app.repositories.knowledge_repository import PendingDocumentSweep
+from app.repositories.knowledge_repository import IndexingSweep
+from app.services.document_indexing import CLAIM_LEASE, MAX_INDEXING_ATTEMPTS
 from app.workers.ingestion_queue import IngestionJob, IngestionQueue
 
 logger = get_logger(__name__)
@@ -128,33 +124,37 @@ class IngestionRecoveryWorker:
         self._stopping.set()
 
     async def run_once(self, *, now: datetime | None = None) -> IngestionRecoveryOutcome:
-        """Claim what is still unindexed and publish as much as Redis allows.
+        """Claim what is owed an attempt and publish as much as Redis allows.
 
         The claim's transaction ends without marking anything, and that is
-        correct rather than an omission: the document's own `status` is the
-        durable state, and the ingestion worker is what advances it. A sweep
-        that marked rows itself would be inventing a second state machine beside
-        the one the consumer already owns.
+        correct rather than an omission: the generation's own state is the
+        durable record, and the worker's claim is what advances it. A sweep that
+        marked rows itself would be inventing a second state machine beside the
+        one the consumer already owns.
 
-        A document Redis still refuses stays `PENDING` and is claimed again next
-        pass, which is exactly what should happen - there is nothing else to do
-        with it, and the gauge beside this keeps it visible meanwhile.
+        A generation Redis still refuses is claimed again next pass, which is
+        exactly what should happen; the gauges keep it visible meanwhile.
         """
         moment = now or datetime.now(UTC)
         queued = still_owing = 0
 
         async with self._database.session() as session:
-            documents = await PendingDocumentSweep(session).claim_pending(
-                older_than=moment - self._grace,
+            due = await IndexingSweep(session).claim_due(
+                now=moment,
+                unenqueued_before=moment - self._grace,
+                lease_expired_before=moment - CLAIM_LEASE,
+                max_attempts=MAX_INDEXING_ATTEMPTS,
                 limit=self._batch_limit,
             )
-            if not documents:
+            if not due:
                 return IngestionRecoveryOutcome()
 
-            for document in documents:
+            for generation in due:
                 try:
                     await self._queue.enqueue(
-                        IngestionJob(tenant_id=document.tenant_id, document_id=document.id)
+                        IngestionJob(
+                            tenant_id=generation.tenant_id, document_id=generation.document_id
+                        )
                     )
                 except RedisError:
                     still_owing += 1
@@ -162,20 +162,19 @@ class IngestionRecoveryWorker:
                 queued += 1
 
         outcome = IngestionRecoveryOutcome(
-            claimed=len(documents),
+            claimed=len(due),
             queued=queued,
             still_owing=still_owing,
         )
-        if outcome.claimed:
-            logger.warning(
-                "ingestion_recovery.swept",
-                extra={
-                    "event": "ingestion_recovery.swept",
-                    "claimed": outcome.claimed,
-                    "queued": outcome.queued,
-                    "still_owing": outcome.still_owing,
-                },
-            )
+        logger.warning(
+            "ingestion_recovery.swept",
+            extra={
+                "event": "ingestion_recovery.swept",
+                "claimed": outcome.claimed,
+                "queued": outcome.queued,
+                "still_owing": outcome.still_owing,
+            },
+        )
         return outcome
 
 

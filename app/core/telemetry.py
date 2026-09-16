@@ -295,6 +295,14 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Unresolved collection attempts by how reconciliation settled them.",
         ("outcome",),
     ),
+    # How ingestion jobs ended (RAG-05). `outcome` is one of `IndexingOutcome`'s
+    # seven fixed values - published, retry scheduled, failed, exhausted, stale,
+    # suspended, skipped - and nothing identifying: no workspace, no document,
+    # no failure code. Which document failed and why is on its generation row.
+    "wasla_rag_ingestion_outcomes_total": (
+        "Document indexing jobs by how they ended.",
+        ("outcome",),
+    ),
 }
 
 # Distributions written across processes, by metric name: help text, the labels
@@ -527,6 +535,11 @@ async def record_provider_attempt(
         "wasla_provider_attempts_total",
         {"provider": str(provider), "operation": operation, "outcome": str(outcome)},
     )
+
+
+async def record_ingestion_outcome(outcome: str) -> None:
+    """One ingestion job, by how it ended (an `IndexingOutcome` value)."""
+    await _increment("wasla_rag_ingestion_outcomes_total", {"outcome": outcome})
 
 
 async def record_agent_turn_outcome(outcome: str) -> None:

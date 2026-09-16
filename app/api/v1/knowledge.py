@@ -65,6 +65,7 @@ async def create_knowledge_base(
     base = await knowledge.create_knowledge_base(
         name=payload.name,
         description=payload.description,
+        actor=admin.user,
     )
     return KnowledgeBaseRead.from_model(base)
 
@@ -94,7 +95,7 @@ async def list_documents(
         knowledge_base_id=knowledge_base_id,
         limit=limit,
     )
-    return [DocumentRead.from_model(document) for document in documents]
+    return [DocumentRead.from_view(document) for document in documents]
 
 
 @router.post(
@@ -123,8 +124,9 @@ async def submit_document(
         source=payload.source,
         filename=payload.filename,
         media_type=payload.media_type,
+        actor=admin.user,
     )
-    return DocumentSubmission(document=DocumentRead.from_model(document), created=created)
+    return DocumentSubmission(document=DocumentRead.from_view(document), created=created)
 
 
 @router.get("/documents/{document_id}", response_model=DocumentRead)
@@ -133,9 +135,9 @@ async def get_document(
     knowledge: KnowledgeServiceDep,
     workspace: ActiveWorkspaceDep,
 ) -> DocumentRead:
-    """One document and its ingestion state, including why it failed."""
+    """One document: whether it serves, and what its latest indexing attempt is doing."""
     document = await knowledge.get_document(document_id)
-    return DocumentRead.from_model(document)
+    return DocumentRead.from_view(document)
 
 
 @router.post(
@@ -150,12 +152,13 @@ async def reingest_document(
 ) -> DocumentRead:
     """Queue a document to be indexed again.
 
-    How a failed ingestion is recovered once its cause is fixed. Safe to call on
-    a document that is already ready: re-ingestion replaces its chunks rather
-    than appending, so the worst case is some wasted embedding calls.
+    How a failed document is retried once its cause is fixed. Safe on a document
+    that is ready: it keeps serving its current version until the new one is
+    complete, and a failed re-index leaves that version serving. Coalesced - a
+    request made while an attempt is already outstanding asks for nothing more.
     """
-    document = await knowledge.reingest(document_id)
-    return DocumentRead.from_model(document)
+    document = await knowledge.reindex(document_id, actor=admin.user)
+    return DocumentRead.from_view(document)
 
 
 @router.delete(
@@ -175,4 +178,4 @@ async def delete_document(
     that should no longer be said to customers, and a soft-deleted row that
     retrieval forgot to filter would keep saying it.
     """
-    await knowledge.delete_document(document_id)
+    await knowledge.delete_document(document_id, actor=admin.user)

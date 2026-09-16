@@ -30,8 +30,12 @@ from app.db.models.knowledge import (
     KnowledgeBase,
 )
 from app.db.models.tenant import Tenant
+from tests.knowledge_seed import add_generation
 
 ANN_INDEX = "ix_document_chunks_embedding_hnsw"
+
+# Each seeded document's generation, so the chunks written for it can name it.
+GENERATIONS: dict[uuid.UUID, uuid.UUID] = {}
 
 # The small workspace owns 2% of the corpus. Enough that the default candidate
 # budget, spent in global distance order, reliably lands on other workspaces'
@@ -111,6 +115,8 @@ async def _document(
     )
     session.add(document)
     await session.flush()
+    generation = await add_generation(session, document)
+    GENERATIONS[document.id] = generation.id
     return document
 
 
@@ -141,6 +147,7 @@ async def seed_corpus(session: AsyncSession) -> Corpus:
             DocumentChunk(
                 tenant_id=large.id,
                 document_id=large_document.id,
+                generation_id=GENERATIONS[large_document.id],
                 knowledge_base_id=large_base.id,
                 ordinal=ordinal,
                 content=f"Neighbour passage {ordinal}.",
@@ -153,6 +160,7 @@ async def seed_corpus(session: AsyncSession) -> Corpus:
     planted = DocumentChunk(
         tenant_id=large.id,
         document_id=large_document.id,
+        generation_id=GENERATIONS[large_document.id],
         knowledge_base_id=large_base.id,
         ordinal=LARGE_CHUNKS,
         content="The neighbour's closest passage.",
@@ -168,6 +176,7 @@ async def seed_corpus(session: AsyncSession) -> Corpus:
             DocumentChunk(
                 tenant_id=small.id,
                 document_id=small_document.id,
+                generation_id=GENERATIONS[small_document.id],
                 knowledge_base_id=small_base.id,
                 ordinal=ordinal,
                 content=f"Handbook passage {ordinal}.",
@@ -183,12 +192,13 @@ async def seed_corpus(session: AsyncSession) -> Corpus:
         title="Half-ingested",
         status=DocumentStatus.FAILED,
     )
-    unready_ids = set()
+    unready_ids: set[uuid.UUID] = set()
     for ordinal in range(4):
         # On the query, so only the READY join can keep them out of the answer.
         chunk = DocumentChunk(
             tenant_id=small.id,
             document_id=unready.id,
+            generation_id=GENERATIONS[unready.id],
             knowledge_base_id=small_base.id,
             ordinal=ordinal,
             content=f"Unready passage {ordinal}.",
