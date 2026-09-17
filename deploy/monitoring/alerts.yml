@@ -703,6 +703,60 @@ groups:
             or a model is refusing; check the agent.empty_response log.
           runbook: docs/RUNBOOK.md
 
+      - alert: AgentToolFailures
+        # Tool calls that *broke* - a handler raised and its work was rolled
+        # back - as a share of everything the executor ran. Refusals are
+        # excluded deliberately: a model asking for a tool it was not granted,
+        # or naming a field that does not exist, is ordinary and is the system
+        # working. A failure is not.
+        #
+        # A ratio rather than a rate, so a quiet workspace and a busy one alert
+        # at the same badness, and `for: 30m` so one bad minute is not a page.
+        expr: |
+          sum(rate(wasla_agent_tool_executions_total{outcome="failed"}[30m]))
+          /
+          clamp_min(sum(rate(wasla_agent_tool_executions_total[30m])), 0.001)
+          > 0.1
+        for: 30m
+        labels:
+          severity: warning
+          component: ai
+        annotations:
+          summary: "Agent tools are failing"
+          description: >-
+            More than a tenth of agent tool calls are ending in a failure rather
+            than a refusal, so the model is being told its tools do not work and
+            customers are getting answers composed without them. Group
+            wasla_agent_tool_executions_total by tool to see which one, and read
+            the agent.tool_crashed log for the exception class.
+          runbook: docs/RUNBOOK.md
+
+      - alert: AgentToolDenials
+        # Calls refused because the agent holds no enabled grant for the tool.
+        # A handful is normal - a model reaching for something it was never
+        # offered is a thing models do, and the executor refuses it safely - but
+        # a sustained share means either a capability was revoked while agents
+        # are still configured to use it, or a conversation is talking a model
+        # into naming tools it does not have.
+        expr: |
+          sum(rate(wasla_agent_tool_executions_total{outcome="denied"}[30m]))
+          /
+          clamp_min(sum(rate(wasla_agent_tool_executions_total[30m])), 0.001)
+          > 0.25
+        for: 30m
+        labels:
+          severity: warning
+          component: ai
+        annotations:
+          summary: "Agent tool calls are being denied"
+          description: >-
+            A quarter of agent tool calls are being refused for want of an
+            enabled grant. Check whether a tool was revoked while agents still
+            expect it, and read the agent.tool_not_granted log for the tool
+            names being asked for; a name no agent was ever granted is worth
+            reading the conversation for.
+          runbook: docs/RUNBOOK.md
+
   # ================================================================== RAG
   # Knowledge indexing and knowledge search (docs/RAG.md, RAG-05). Before these,
   # a rejected embedding key and a total query-embedding outage were both
