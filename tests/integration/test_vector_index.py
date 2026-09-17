@@ -39,6 +39,7 @@ from app.repositories.knowledge_repository import DocumentChunkRepository
 from tests.integration.vector_corpus import (
     ANN_INDEX,
     GENERATIONS,
+    RECALL_QUERIES,
     Corpus,
     clustered_vector,
     seed_corpus,
@@ -202,13 +203,28 @@ async def test_the_approximate_answer_is_as_close_as_the_exact_one(
     signal. At the scale where the planner actually chooses this path - 45,000
     chunks in one workspace - the local drill in `docs/RAG.md` measures id
     overlap of 1.000 over 20 queries.
+
+    Both sides of the comparison are pinned to the path they claim to be. The
+    reference is a scan with index scans refused, not whatever the planner
+    picks for the plain query: that choice follows the table's statistics, and
+    where it lands on the HNSW index the test compares the approximate answer
+    with itself and proves nothing. And the overlap floor is taken over
+    `RECALL_QUERIES` queries rather than a handful, because on this corpus a
+    single graph build moves overlap by a few ids either way, and a floor two
+    ids below the typical count over 40 ids fails on that noise alone.
     """
     corpus = await seed_corpus(db_session)
     chunks = DocumentChunkRepository(db_session, tenant_id=corpus.large.id)
 
+    async with _only_the_ann_index(db_session):
+        assert await _plan_uses_the_ann_index(db_session, corpus, corpus.large.id)
+    async with _only_an_exact_scan(db_session):
+        assert not await _plan_uses_the_ann_index(db_session, corpus, corpus.large.id)
+
     hits = truth = 0
     for query in corpus.recall_queries:
-        exact = await chunks.search(space=FAKE_SPACE, embedding=query, limit=TOP_K)
+        async with _only_an_exact_scan(db_session):
+            exact = await chunks.search(space=FAKE_SPACE, embedding=query, limit=TOP_K)
         async with _only_the_ann_index(db_session):
             approximate = await chunks.search(space=FAKE_SPACE, embedding=query, limit=TOP_K)
 
@@ -222,7 +238,7 @@ async def test_the_approximate_answer_is_as_close_as_the_exact_one(
         hits += len({scored.chunk.id for scored in exact} & {s.chunk.id for s in approximate})
         truth += len(exact)
 
-    assert truth
+    assert truth == RECALL_QUERIES * TOP_K
     assert hits / truth >= 0.75
 
 
@@ -259,6 +275,30 @@ class _only_the_ann_index:  # noqa: N801 - a context manager, used as one
         for statement in self._DROPS:
             await self._session.execute(text(statement))
         await self._session.execute(text("SET LOCAL enable_seqscan = off"))
+        return self
+
+    async def __aexit__(self, *_: object) -> bool:
+        await self._savepoint.rollback()
+        return False
+
+
+class _only_an_exact_scan:  # noqa: N801 - a context manager, used as one
+    """Leave the planner no way to answer except reading every candidate row.
+
+    Index and bitmap scans are refused inside a savepoint, so the HNSW index
+    cannot be used and the answer is the true nearest neighbours: the reference
+    the approximate answer is measured against. `SET LOCAL` inside the savepoint
+    ends with it.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> _only_an_exact_scan:
+        await self._session.flush()
+        self._savepoint = await self._session.begin_nested()
+        await self._session.execute(text("SET LOCAL enable_indexscan = off"))
+        await self._session.execute(text("SET LOCAL enable_bitmapscan = off"))
         return self
 
     async def __aexit__(self, *_: object) -> bool:
