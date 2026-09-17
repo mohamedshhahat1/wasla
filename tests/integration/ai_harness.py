@@ -38,10 +38,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.core.config import Settings
 from app.db.models.agent import Agent, AgentStatus, AgentTool
 from app.db.models.agent_turn import AgentTurn
+from app.db.models.analytics import AnalyticsEvent
 from app.db.models.audit import AuditLog
 from app.db.models.billing import BillingInterval, Plan
 from app.db.models.conversation import Conversation, Message, MessageDirection
+from app.db.models.follow_up import FollowUp
+from app.db.models.lead import Lead
 from app.db.models.tenant import Tenant
+from app.db.models.tool_execution import ToolExecution
 from app.db.models.usage import UsageEvent
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.db.session import Database
@@ -144,6 +148,31 @@ def tool_call_response(
             "arguments": json.dumps(arguments),
         }
     )
+    return body
+
+
+def tool_calls_response(
+    calls: Sequence[tuple[str, JsonObject]],
+    *,
+    text: str | None = None,
+    call_id: str | None = None,
+) -> JsonObject:
+    """One response asking for several tools, in the order given.
+
+    `call_id` forces every call to share one id, which is how a test drives the
+    duplicate-suppression path (PD-TOOLS-04) without waiting for a provider to
+    do it by accident.
+    """
+    body = text_response(text)
+    for index, (name, arguments) in enumerate(calls):
+        body["output"].append(
+            {
+                "type": "function_call",
+                "call_id": call_id or f"call_{index}_{uuid.uuid4().hex[:8]}",
+                "name": name,
+                "arguments": json.dumps(arguments),
+            }
+        )
     return body
 
 
@@ -481,6 +510,65 @@ class TurnRunner:
                 select(AgentTurn.provider_response_id).where(AgentTurn.tenant_id == tenant_id)
             )
             return list(rows)
+
+    async def executions(self, tenant_id: uuid.UUID) -> list[ToolExecution]:
+        """Every durable tool execution record of a workspace, in request order."""
+        async with self.database.session() as session:
+            rows = await session.scalars(
+                select(ToolExecution)
+                .where(ToolExecution.tenant_id == tenant_id)
+                .order_by(
+                    ToolExecution.round_number,
+                    ToolExecution.call_ordinal,
+                    ToolExecution.requested_at,
+                )
+            )
+            return list(rows)
+
+    async def execution_outcomes(self, tenant_id: uuid.UUID) -> list[tuple[str, str, str | None]]:
+        """(tool, state, reason) for every recorded call, in request order."""
+        return [
+            (
+                row.tool_name,
+                str(row.state),
+                None if row.reason_code is None else str(row.reason_code),
+            )
+            for row in await self.executions(tenant_id)
+        ]
+
+    async def audit_actions(self, tenant_id: uuid.UUID) -> list[str]:
+        async with self.database.session() as session:
+            rows = await session.scalars(
+                select(AuditLog.action)
+                .where(AuditLog.tenant_id == tenant_id)
+                .order_by(AuditLog.occurred_at)
+            )
+            return [str(row) for row in rows]
+
+    async def leads(self, tenant_id: uuid.UUID) -> list[Lead]:
+        async with self.database.session() as session:
+            rows = await session.scalars(
+                select(Lead).where(Lead.tenant_id == tenant_id).order_by(Lead.created_at)
+            )
+            return list(rows)
+
+    async def follow_ups(self, tenant_id: uuid.UUID) -> list[FollowUp]:
+        async with self.database.session() as session:
+            rows = await session.scalars(
+                select(FollowUp)
+                .where(FollowUp.tenant_id == tenant_id)
+                .order_by(FollowUp.created_at)
+            )
+            return list(rows)
+
+    async def analytics_types(self, tenant_id: uuid.UUID) -> list[str]:
+        async with self.database.session() as session:
+            rows = await session.scalars(
+                select(AnalyticsEvent.event_type)
+                .where(AnalyticsEvent.tenant_id == tenant_id)
+                .order_by(AnalyticsEvent.occurred_at)
+            )
+            return [str(row) for row in rows]
 
     async def execute(self, statement: Any) -> None:
         """Run one write on a connection of its own, committed - as a colleague would."""

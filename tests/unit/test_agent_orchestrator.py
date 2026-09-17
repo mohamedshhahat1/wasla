@@ -16,6 +16,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import orchestrator as orchestrator_module
+from app.agents.lifecycle import ServingState
 from app.agents.orchestrator import AgentOrchestrator
 from app.agents.registry import (
     HANDOFF_TOOL,
@@ -40,6 +41,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.media import MediaStatus, MessageMedia
 from app.db.models.sentiment import SentimentLabel
+from app.db.models.tool_execution import ToolExecution as ToolExecutionRecord
 from app.integrations.openai.types import AgentReply, TokenUsage, ToolCall
 from app.services.messaging_service import WHATSAPP_TEXT_MAX_CHARS
 from app.services.sentiment_service import SentimentOutcome
@@ -74,16 +76,42 @@ class StubClient:
         return self._replies.pop(0)
 
 
+class FakeSavepoint:
+    """What `begin_nested` hands back: a scope the tool's work is undone to.
+
+    Records whether it was left by an exception, because "the failed tool's
+    rows were rolled back and the turn's were not" is the property the savepoint
+    exists for (TOOL-01, TOOL-02).
+    """
+
+    def __init__(self, owner: "FakeSession") -> None:
+        self._owner = owner
+
+    async def __aenter__(self) -> "FakeSavepoint":
+        self._owner.savepoints += 1
+        self._owner.timeline.append("savepoint")
+        return self
+
+    async def __aexit__(self, kind: object, value: object, trace: object) -> bool:
+        self._owner.timeline.append("savepoint_rollback" if kind else "savepoint_release")
+        if kind:
+            self._owner.savepoint_rollbacks += 1
+        return False
+
+
 class FakeSession:
-    """Enough of an AsyncSession for the two things the orchestrator asks it.
+    """Enough of an AsyncSession for what the orchestrator asks it directly.
 
-    Everything else it needs goes through a repository, and those are
-    monkeypatched. The orchestrator reaches for the session itself exactly
-    twice: `released` commits it to hand the connection back before a provider
-    call, and `_taken_over` reads the conversation mode again afterwards.
+    Everything that goes through a repository is monkeypatched. What the
+    orchestrator reaches for on the session itself is: `released` committing to
+    hand the connection back before a provider call, `_taken_over` reading the
+    conversation mode again afterwards, and - since the executor began keeping
+    durable execution records - staging and flushing those records and wrapping
+    each tool handler in a savepoint.
 
-    Both are recorded. The commit count is how a test knows a release happened
-    per round, and the shared timeline is how it knows the release came first.
+    All of it is recorded. The commit count is how a test knows a release
+    happened per round, and the shared timeline is how it knows the release came
+    first.
     """
 
     def __init__(
@@ -95,6 +123,11 @@ class FakeSession:
         self.mode = mode
         self.commits = 0
         self.mode_reads = 0
+        self.flushes = 0
+        self.rollbacks = 0
+        self.savepoints = 0
+        self.savepoint_rollbacks = 0
+        self.added: list[object] = []
         self.timeline = timeline if timeline is not None else []
 
     async def commit(self) -> None:
@@ -105,6 +138,23 @@ class FakeSession:
         self.mode_reads += 1
         self.timeline.append("mode")
         return self.mode
+
+    def add(self, entity: object) -> None:
+        self.added.append(entity)
+
+    async def flush(self) -> None:
+        self.flushes += 1
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
+
+    def begin_nested(self) -> FakeSavepoint:
+        return FakeSavepoint(self)
+
+    @property
+    def executions(self) -> list[Any]:
+        """The tool execution records this turn staged, in order."""
+        return [entity for entity in self.added if isinstance(entity, ToolExecutionRecord)]
 
 
 class FakeConversations:
@@ -127,8 +177,16 @@ class FakeAgents:
 
 
 class FakeGrants:
-    def __init__(self, names: Sequence[str]) -> None:
+    """The agent's tool grants, answering both questions the executor asks.
+
+    `list_for_agent` decides what the model is *offered* at turn start;
+    `get` is the re-read the executor makes immediately before every call,
+    because a snapshot is not authorization (PD-TOOLS-07).
+    """
+
+    def __init__(self, names: Sequence[str], *, disabled: Sequence[str] = ()) -> None:
         self._names = tuple(names)
+        self._disabled = frozenset(disabled)
 
     async def list_for_agent(
         self,
@@ -137,6 +195,17 @@ class FakeGrants:
         enabled_only: bool = True,
     ) -> list[SimpleNamespace]:
         return [SimpleNamespace(name=name) for name in self._names]
+
+    async def get(
+        self,
+        *,
+        agent_id: uuid.UUID,
+        name: str,
+        populate_existing: bool = False,
+    ) -> SimpleNamespace | None:
+        if name not in self._names:
+            return None
+        return SimpleNamespace(name=name, enabled=name not in self._disabled)
 
 
 class FakeMessages:
@@ -309,6 +378,7 @@ def _build(
     sentiment: FakeSentiment | None = None,
     session: AsyncSession | None = None,
     output_ceiling: int | None = None,
+    serving: ServingState = ServingState(missing=False),
 ) -> AgentOrchestrator:
     fakes = {
         "ConversationRepository": FakeConversations(
@@ -323,6 +393,15 @@ def _build(
     }
     for name, fake in fakes.items():
         monkeypatch.setattr(orchestrator_module, name, _returns(fake))
+
+    # The executor re-reads the workspace, the agent, the conversation and the
+    # number before every tool call (TOOL-03). That is a real query; these tests
+    # drive the loop without a database, so the answer is supplied directly.
+    # `serving` lets a test say the world changed mid-inference.
+    async def state(*args: object, **kwargs: object) -> ServingState:
+        return serving
+
+    monkeypatch.setattr(orchestrator_module, "serving_state", state)
 
     return AgentOrchestrator(
         session=as_session(session if session is not None else FakeSession()),

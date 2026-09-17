@@ -115,13 +115,30 @@ class AgentToolRepository(TenantScopedRepository[AgentTool]):
     def _tenant_filter(self) -> ColumnElement[bool]:
         return AgentTool.tenant_id == self.tenant_id
 
-    async def get(self, *, agent_id: uuid.UUID, name: str) -> AgentTool | None:
-        return await self._first(
-            self._select().where(
-                AgentTool.agent_id == agent_id,
-                AgentTool.name == name,
-            )
+    async def get(
+        self,
+        *,
+        agent_id: uuid.UUID,
+        name: str,
+        populate_existing: bool = False,
+    ) -> AgentTool | None:
+        """One grant, or None because the agent does not have that tool.
+
+        `populate_existing` overwrites what the identity map already holds with
+        what the database holds now. The tool executor asks for it before every
+        call (PD-TOOLS-07): `expire_on_commit=False` means an ordinary select
+        returns the row as it was loaded at turn start, and the whole question
+        being asked is whether an administrator has revoked the capability since
+        then. Off by default, because every other caller loads the grant once
+        inside one unit of work.
+        """
+        statement = self._select().where(
+            AgentTool.agent_id == agent_id,
+            AgentTool.name == name,
         )
+        if populate_existing:
+            statement = statement.execution_options(populate_existing=True)
+        return await self._first(statement)
 
     async def list_for_agent(
         self,
