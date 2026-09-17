@@ -425,6 +425,59 @@ message, the customer was answered and only the bookkeeping is stranded. If not,
 answer the customer by hand. **Do not replay the dead-lettered agent job** — see
 *Replaying dead-lettered work* for why agent replays require `--force`.
 
+### Agent tools are failing or being denied
+
+**Alerts:** `AgentToolFailures`, `AgentToolDenials`.
+**Metric:** `wasla_agent_tool_executions_total{tool,outcome}`.
+**Table:** `tool_executions`.
+
+Every tool call an agent is asked to make writes one row — the ones that ran,
+the ones refused before they ran, and the ones suppressed as duplicates — so
+"did this run, and did it have an effect" is a query rather than an
+investigation (TOOL-12).
+
+Start with which tool and which reason:
+
+```sql
+SELECT tool_name, state, reason_code, count(*)
+  FROM tool_executions
+ WHERE requested_at > now() - interval '1 hour'
+ GROUP BY 1, 2, 3
+ ORDER BY 4 DESC;
+```
+
+**`failed`** means a handler raised: its work was rolled back to the call's own
+savepoint, the model was told the tool did not work, and the turn went on to
+reply or hand over. The exception class is in the `agent.tool_crashed` log line;
+the values it was given are deliberately not, anywhere (TOOL-10).
+
+**`denied`** (`not_granted`, `tool_disabled`) means the agent holds no enabled
+grant. A handful is ordinary — a model reaching for something it was never
+offered is refused safely. A sustained share means either a capability was
+revoked while agents are still configured to use it, or a conversation is
+talking a model into naming tools it does not have. `audit_logs` now answers the
+first: look for `agent_tool_granted` / `agent_tool_revoked` and who made the
+change (TOOL-13). For the second, read the conversation.
+
+**Lifecycle reasons** (`workspace_suspended`, `workspace_deleted`,
+`agent_disabled`, `conversation_human`, `conversation_closed`) are the system
+working: the world changed while a model was composing and the tool was refused
+rather than run. No action beyond confirming the change was intended.
+
+**Bounded reasons** (`response_call_limit`, `turn_call_limit`, `round_limit`)
+mean a model asked for more than one turn may spend, or asked on the final round
+for something whose answer no round could read. Bounded and safe; a sustained
+rate is a prompt to look at.
+
+To see one turn end to end:
+
+```sql
+SELECT round_number, call_ordinal, tool_name, state, reason_code, argument_fields
+  FROM tool_executions
+ WHERE agent_turn_id = :turn
+ ORDER BY round_number, call_ordinal;
+```
+
 ### Campaigns are not sending
 
 ```sql
@@ -1136,6 +1189,13 @@ that are more specific than a counter can be.
 | `agent.turn_outcome` | How every turn ended, with `outcome`. Counted by `wasla_agent_turn_outcomes_total` | Informational |
 | `agent.reply_suppressed` | A reply was ready and not sent, because the workspace, agent, conversation or number changed while the model was composing | Informational; Medium if sudden |
 | `agent.empty_response` | The provider answered with no words; the customer was told a colleague will follow up. `AgentEmptyResponses` | Medium, High as a rate |
+| `agent.tool_crashed` | A tool handler raised; its work was rolled back to the call's savepoint and the turn continued. Carries the exception class and never its message or parameters. `AgentToolFailures` | Medium, High as a rate |
+| `agent.tool_not_granted` | A model asked for a tool this agent does not have an enabled grant for. `AgentToolDenials` | Low, Medium as a rate |
+| `agent.tool_not_served` | A tool was refused because the workspace, the agent, the conversation or the number stopped allowing it mid-turn | Informational |
+| `agent.tool_budget_exhausted` | A model asked for more tool calls than one response or one turn may make | Low |
+| `agent.tool_call_duplicate` | The provider repeated a call id inside one turn; the handler did not run again | Informational |
+| `agent.turn_unkeyed` | An agent job with no trigger message; dead-lettered rather than run, because it has no identity | Medium |
+| `agent.tool_execution_unrecorded` | A tool execution record could not be written; the call itself was unaffected | Medium |
 | `agent.reply_truncated` | A reply over WhatsApp's limit was shortened at a sentence, with an offer to continue | Low; a rate means an agent's prompt invites long answers |
 | `sentiment.persistence_failed` | A sentiment reading could not be stored; the turn continued without it | Medium if sustained |
 | `ratelimit.unavailable` | Redis down; limiting is failing open | High |
