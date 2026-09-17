@@ -229,6 +229,71 @@ async def test_another_workspace_cannot_own_a_generation_of_this_document(
     assert "fk_document_index_generations_tenant_document" in error
 
 
+@pytest.mark.parametrize("state", ["superseded", "failed", "processing", "pending"])
+async def test_only_the_active_generation_is_ever_searched(
+    db_session: AsyncSession, state: str
+) -> None:
+    """The active-state filter on its own (M03).
+
+    Real indexing never leaves chunks on a generation that is not active - a
+    publish deletes the superseded one's - so every other test would pass with
+    the filter gone. This one gives an inactive generation chunks and vectors in
+    exactly the query's embedding space, so nothing but the filter can keep them
+    out.
+    """
+    from datetime import UTC, datetime
+
+    from app.repositories.knowledge_repository import DocumentChunkRepository
+    from tests.fake_embeddings import embed_text
+    from tests.knowledge_seed import FAKE_SPACE
+
+    tenant = await _tenant(db_session)
+    view = await _indexed(db_session, tenant)
+    stray = uuid.uuid4()
+    async with db_session.begin_nested():
+        await db_session.execute(
+            text(INSERT_GENERATION),
+            _generation(
+                tenant,
+                view.document.id,
+                8,
+                id=stray,
+                state=state,
+                published=datetime.now(UTC),
+                provider=FAKE_SPACE.provider,
+                model=FAKE_SPACE.model,
+                dims=FAKE_SPACE.dimensions,
+                version=FAKE_SPACE.schema_version,
+                token=uuid.uuid4() if state == "processing" else None,
+                claimed=datetime.now(UTC) if state == "processing" else None,
+            ),
+        )
+        await db_session.execute(
+            text(
+                "INSERT INTO document_chunks (id, tenant_id, document_id, knowledge_base_id, "
+                "generation_id, ordinal, content, token_estimate, embedding, created_at, "
+                "updated_at) VALUES (:id, :tenant, :document, :base, :generation, 0, "
+                "'STRAY_GENERATION_MARKER', 1, CAST(:vector AS vector), now(), now())"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "tenant": tenant.id,
+                "document": view.document.id,
+                "base": view.document.knowledge_base_id,
+                "generation": stray,
+                "vector": str(embed_text("STRAY_GENERATION_MARKER")),
+            },
+        )
+
+    found = await DocumentChunkRepository(db_session, tenant_id=tenant.id).search(
+        embedding=embed_text("STRAY_GENERATION_MARKER"), space=FAKE_SPACE, limit=10
+    )
+
+    # Presence: the active generation is found by the same search.
+    assert found and all(row.chunk.generation_id == view.active.id for row in found)
+    assert "STRAY_GENERATION_MARKER" not in [row.chunk.content for row in found]
+
+
 def test_generations_are_erased_with_the_workspace() -> None:
     assert "document_index_generations" in PURGED_TABLES
     assert (
