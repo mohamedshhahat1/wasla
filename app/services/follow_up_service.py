@@ -41,10 +41,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.exceptions import ExternalServiceError, RateLimitedError, ValidationError
+from app.core.exceptions import (
+    ConflictError,
+    ExternalServiceError,
+    RateLimitedError,
+    ValidationError,
+)
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
 from app.db.models.conversation import (
@@ -54,6 +61,7 @@ from app.db.models.conversation import (
     MessageOrigin,
     MessageStatus,
 )
+from app.db.models.enums import TenantStatus
 from app.db.models.follow_up import (
     MAX_ATTEMPTS,
     MAX_BODY_LENGTH,
@@ -62,6 +70,7 @@ from app.db.models.follow_up import (
     FollowUpStatus,
 )
 from app.db.models.lead import ActorKind
+from app.db.models.tenant import Tenant
 from app.integrations.whatsapp.client import ProviderAuthError
 from app.repositories.conversation_repository import (
     ContactRepository,
@@ -81,6 +90,25 @@ logger = get_logger(__name__)
 MIN_DELAY: Final = timedelta(minutes=1)
 MAX_DELAY: Final = timedelta(days=30)
 DEFAULT_DELAY: Final = timedelta(minutes=30)
+
+
+@dataclass(frozen=True, slots=True)
+class _Intention:
+    """What a caller wants the conversation's one pending nudge to say.
+
+    Extracted so that creating a row and rescheduling the row somebody else
+    created apply the same fields. The race path does both, and two hand-written
+    copies of "what a follow-up is" would drift.
+    """
+
+    scheduled_at: datetime
+    body: str | None
+    template_name: str | None
+    template_language: str | None
+    template_components: list[dict[str, Any]] | None
+    reason: str | None
+    created_by_id: uuid.UUID | None
+    created_by_kind: ActorKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,9 +199,29 @@ class FollowUpService:
         call carries newer information than the first, and a customer who said
         "next week" after saying "tomorrow" should be followed up next week.
         """
-        conversation = await self._conversations.require_by_id(conversation_id)
+        conversation = await self._conversations.require_by_id(
+            conversation_id,
+            # Read as the database holds it now, not as the turn loaded it
+            # before the inference (TOOL-21). The takeover this guards against
+            # is one that happened while the model was composing.
+            populate_existing=True,
+        )
         if conversation.status is ConversationStatus.CLOSED:
             raise ValidationError("This conversation is closed.")
+
+        if conversation.mode is ConversationMode.HUMAN and created_by_kind is ActorKind.AGENT:
+            # **Handing a conversation to a person stops the AI** (TOOL-06,
+            # PD-TOOLS-01). This had no guard at all: an agent could plant a
+            # nudge on a conversation a colleague had just taken over - and
+            # could do it in the same model response as the handoff that was
+            # supposed to cancel the nudges, moments after `set_mode` had
+            # cancelled the ones that existed. `dispatch` would skip it while
+            # the conversation stayed human, but the row waited, and handing the
+            # conversation back to the AI released it.
+            #
+            # Only an agent is refused. A colleague scheduling a follow-up on a
+            # conversation they own is the ordinary way to use the feature.
+            raise ConflictError("This conversation is handled by a colleague.")
 
         when = self._resolve_time(delay=delay, scheduled_at=scheduled_at)
         text = _validated_body(body)
@@ -192,46 +240,116 @@ class FollowUpService:
                 # against nobody.
                 raise ValidationError(refusal)
 
-        existing = await self._follow_ups.get_pending_for_conversation(conversation_id)
-        if existing is not None:
-            existing.scheduled_at = when
-            existing.body = text
-            existing.template_name = name
-            existing.template_language = language
-            existing.template_components = template_components
-            existing.reason = _trimmed(reason)
-            existing.created_by_id = created_by_id
-            existing.created_by_kind = created_by_kind
-            # Reset, because this is a fresh intention rather than a retry of
-            # the old one.
-            existing.attempts = 0
-            existing.last_error = None
-            logger.info(
-                "follow_up.rescheduled",
-                extra={"follow_up_id": str(existing.id), "conversation_id": str(conversation_id)},
-            )
-            return existing
-
-        follow_up = self._follow_ups.create(
-            conversation_id=conversation_id,
+        intention = _Intention(
             scheduled_at=when,
             body=text,
             template_name=name,
             template_language=language,
             template_components=template_components,
             reason=_trimmed(reason),
-            lead_id=lead_id,
             created_by_id=created_by_id,
             created_by_kind=created_by_kind,
         )
-        # Flushed so the caller can read the generated id and the timestamps.
-        # Without it a route serialising this row answers 500: the primary key
-        # default and the server defaults are applied at flush, and the request
-        # commits after the response has already been built.
-        await self._session.flush()
+
+        existing = await self._follow_ups.get_pending_for_conversation(conversation_id)
+        if existing is not None:
+            return self._reschedule(existing, intention)
+
+        created = await self._create_pending(
+            conversation_id=conversation_id,
+            intention=intention,
+            lead_id=lead_id,
+        )
+        if created is not None:
+            return created
+
+        # Another turn of this conversation scheduled one between the read above
+        # and the insert (TOOL-02). Its row is the pending follow-up now, and
+        # this call carries the newer intention, so the contract is the same one
+        # rescheduling has always had: the later decision wins.
+        winner = await self._follow_ups.get_pending_for_conversation(conversation_id)
+        if winner is None:  # pragma: no cover - the index says this cannot happen
+            raise ConflictError("A follow-up for this conversation could not be resolved.")
+        return self._reschedule(winner, intention)
+
+    def _reschedule(self, follow_up: FollowUp, intention: _Intention) -> FollowUp:
+        """Point the one pending nudge at what the caller wants now."""
+        follow_up.scheduled_at = intention.scheduled_at
+        follow_up.body = intention.body
+        follow_up.template_name = intention.template_name
+        follow_up.template_language = intention.template_language
+        follow_up.template_components = intention.template_components
+        follow_up.reason = intention.reason
+        follow_up.created_by_id = intention.created_by_id
+        follow_up.created_by_kind = intention.created_by_kind
+        # Reset, because this is a fresh intention rather than a retry of
+        # the old one.
+        follow_up.attempts = 0
+        follow_up.last_error = None
+        logger.info(
+            "follow_up.rescheduled",
+            extra={
+                "follow_up_id": str(follow_up.id),
+                "conversation_id": str(follow_up.conversation_id),
+            },
+        )
+        return follow_up
+
+    async def _create_pending(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        intention: _Intention,
+        lead_id: uuid.UUID | None,
+    ) -> FollowUp | None:
+        """Open the conversation's pending nudge, or None because somebody else did.
+
+        **Inside a savepoint** (TOOL-02), for the same reason the lead tool's
+        create is. Two turns of one conversation are ordinary - a customer
+        writing twice in a few seconds produces two, deliberately not coalesced
+        (AI-08) - and `uq_follow_ups_pending_conversation` lets exactly one
+        insert win. The loser's `IntegrityError` used to escape the tool and
+        abort the turn's whole transaction, so the second customer message was
+        answered by silence. Rolled back to a savepoint, the session survives and
+        the caller reschedules the winner's row.
+        """
+        try:
+            async with self._session.begin_nested():
+                follow_up = self._follow_ups.create(
+                    conversation_id=conversation_id,
+                    scheduled_at=intention.scheduled_at,
+                    body=intention.body,
+                    template_name=intention.template_name,
+                    template_language=intention.template_language,
+                    template_components=intention.template_components,
+                    reason=intention.reason,
+                    lead_id=lead_id,
+                    created_by_id=intention.created_by_id,
+                    created_by_kind=intention.created_by_kind,
+                )
+                # Flushed so the caller can read the generated id and the
+                # timestamps. Without it a route serialising this row answers
+                # 500: the primary key default and the server defaults are
+                # applied at flush, and the request commits after the response
+                # has already been built. It is also what makes the unique
+                # index speak here rather than at the round's commit.
+                await self._session.flush()
+        except IntegrityError:
+            logger.info(
+                "follow_up.create_raced",
+                extra={
+                    "event": "follow_up.create_raced",
+                    "conversation_id": str(conversation_id),
+                },
+            )
+            return None
+
         logger.info(
             "follow_up.scheduled",
-            extra={"conversation_id": str(conversation_id), "scheduled_at": when.isoformat()},
+            extra={
+                "conversation_id": str(conversation_id),
+                "scheduled_at": intention.scheduled_at.isoformat(),
+            },
         )
         return follow_up
 
@@ -351,6 +469,30 @@ class FollowUpService:
                 session=self._session,
                 settings=self._settings,
                 tenant_id=self._tenant_id,
+            )
+
+        if not await self._workspace_is_served():
+            # **No automated message leaves a workspace that is not being
+            # served** (TOOL-04, PD-TOOLS-06). Every other pre-send fact here is
+            # re-read because hours pass between scheduling and sending; the
+            # workspace's own lifecycle was the one that was not, so a
+            # suspended or deleted workspace went on delivering nudges a model
+            # had composed - the one place a tool's effect was both
+            # customer-visible and detached from every check the AI path makes.
+            #
+            # Terminal rather than postponed, and that is deliberate
+            # (PD-TOOLS-06): a nudge suppressed during a suspension must not
+            # arrive weeks later as a surprise when the workspace is restored.
+            # The customer has moved on and the message is about a conversation
+            # they no longer remember.
+            #
+            # The second of two guards. Lifecycle transitions cancel the pending
+            # agent nudges they can see; this one is authoritative, because it
+            # runs immediately before the send and cannot be missed by a
+            # transition that happened while the sweep already held the row.
+            return self._skip(
+                follow_up,
+                "The workspace was not being served when the follow-up came due.",
             )
 
         conversation = await self._conversations.require_by_id(follow_up.conversation_id)
@@ -476,6 +618,55 @@ class FollowUpService:
             },
         )
         return DispatchOutcome(follow_up, FollowUpStatus.SENT)
+
+    async def _workspace_is_served(self) -> bool:
+        """Whether this workspace is still one Wasla sends for.
+
+        Columns rather than the mapped row, for the reason `app.agents.lifecycle`
+        gives: the tenant may already be in this session's identity map with the
+        attributes it was loaded with, and what this needs is the row as it is
+        now. Suspension and soft deletion both stop service; retention decides
+        when a deleted workspace's data is erased, not whether it is served in
+        the meantime.
+        """
+        row = (
+            await self._session.execute(
+                select(Tenant.status, Tenant.deleted_at)
+                .where(Tenant.id == self._tenant_id)
+                .execution_options(populate_existing=True)
+            )
+        ).one_or_none()
+        if row is None:
+            return False
+        status, deleted_at = row
+        return status is TenantStatus.ACTIVE and deleted_at is None
+
+    async def cancel_agent_follow_ups(self, *, reason: str) -> int:
+        """Cancel every pending nudge an agent scheduled. Returns how many.
+
+        Called when a workspace stops being served (PD-TOOLS-06). The dispatch
+        gate above is what guarantees nothing is sent; this is what stops the
+        rows waiting, so a colleague looking at a suspended workspace sees no
+        AI messages queued against their customers and a restore does not have
+        to reason about a backlog.
+
+        Only agent-created nudges. A colleague's own scheduled follow-up is
+        their work, and a suspension that silently discarded it would lose
+        something a person did rather than something a model decided.
+        """
+        pending = await self._follow_ups.list_pending_by_actor(ActorKind.AGENT)
+        for follow_up in pending:
+            self._cancel(follow_up, reason=reason)
+        if pending:
+            logger.info(
+                "follow_up.cancelled_on_workspace_change",
+                extra={
+                    "event": "follow_up.cancelled_on_workspace_change",
+                    "tenant_id": str(self._tenant_id),
+                    "cancelled": len(pending),
+                },
+            )
+        return len(pending)
 
     def _skip(self, follow_up: FollowUp, detail: str) -> DispatchOutcome:
         """Record a follow-up that policy forbade sending.

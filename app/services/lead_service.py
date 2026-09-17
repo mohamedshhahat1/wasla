@@ -30,12 +30,13 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, ValidationError
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
-from app.db.models.conversation import ConversationMode
+from app.db.models.conversation import Conversation, ConversationMode
 from app.db.models.lead import (
     AGENT_WRITABLE_FIELDS,
     MAX_SCORE,
@@ -131,6 +132,21 @@ class ExtractedLead:
             "budget_currency": self.budget_currency,
         }
         return {key: value for key, value in candidates.items() if value not in (None, "")}
+
+
+@dataclass(frozen=True, slots=True)
+class LeadCapture:
+    """What one agent capture did to the customer's lead.
+
+    `changed_fields` is empty when the model reported details the lead already
+    held, which is the ordinary case for a model that calls the tool on every
+    turn. The caller uses it to decide whether anything happened worth a row in
+    the audit trail (TOOL-18).
+    """
+
+    lead: Lead
+    created: bool
+    changed_fields: frozenset[str]
 
 
 class LeadService:
@@ -502,7 +518,7 @@ class LeadService:
         *,
         conversation_id: uuid.UUID,
         extracted: ExtractedLead,
-    ) -> Lead:
+    ) -> LeadCapture:
         """Record what an agent learned, into the customer's open lead.
 
         The lead is found from the conversation's contact, never named by the
@@ -511,8 +527,13 @@ class LeadService:
 
         Fields a person has verified are left alone, and fields outside
         `AGENT_WRITABLE_FIELDS` are not reachable from here at all.
+
+        Returns what happened as well as the row, because "saved" and "changed
+        something" are different facts and only the caller knows which it needs.
+        The agent tool needs the second: forty identical calls used to write
+        forty audit rows for one lead (TOOL-18).
         """
-        conversation = await self._conversations.require_by_id(conversation_id)
+        conversation = await self._fresh_conversation(conversation_id)
 
         if conversation.mode is ConversationMode.HUMAN:
             # Defence in depth. The orchestrator already refuses to run an agent
@@ -523,44 +544,117 @@ class LeadService:
             raise ConflictError("This conversation is handled by a colleague.")
 
         lead = await self._leads.get_active_for_contact(conversation.contact_id)
-        created = lead is None
 
         if lead is None:
-            fields = _validated(
-                _agent_writable(extracted.as_fields()),
-                # An agent's guess is dropped rather than raised on: it is not a
-                # caller mistake to be reported, and failing the whole capture
-                # over one malformed phone number would lose the rest.
-                lenient=True,
-            )
-            lead = self._leads.create(
-                source=LeadSource.AGENT,
-                contact_id=conversation.contact_id,
-                conversation_id=conversation.id,
-                last_activity_at=datetime.now(UTC),
-                **fields,
-            )
-            await self._session.flush()
-            self._activities.record(
-                lead_id=lead.id,
-                kind=LeadActivityKind.CREATED,
-                summary="Lead created from a conversation.",
-                actor_kind=ActorKind.AGENT,
-                data={"conversation_id": str(conversation.id), "fields": sorted(fields)},
-            )
-            # Only the branch that created one. An extraction that updated an
-            # existing lead has captured nothing new, and counting it would
-            # make "leads created" grow every time a customer says anything.
-            self._usage.record(
-                UsageEventType.LEAD_CREATED,
-                meta={"lead_id": str(lead.id), "source": LeadSource.AGENT.value},
-            )
-            logger.info(
-                "lead.captured",
-                extra={"lead_id": str(lead.id), "conversation_id": str(conversation.id)},
-            )
-            return lead
+            created = await self._create_from_conversation(conversation, extracted)
+            if created is not None:
+                return created
+            # Somebody else opened the customer's lead between the read above
+            # and the insert. Fall through and update theirs.
+            lead = await self._leads.get_active_for_contact(conversation.contact_id)
+            if lead is None:  # pragma: no cover - the index says this cannot happen
+                raise ConflictError("This customer's lead could not be resolved.")
 
+        return self._update_from_extraction(lead, conversation, extracted)
+
+    async def _fresh_conversation(self, conversation_id: uuid.UUID) -> Conversation:
+        """The conversation as the database holds it *now* (TOOL-21).
+
+        `populate_existing`, and that is the whole point of this method. The
+        turn's session loaded this conversation before the inference and
+        `expire_on_commit=False` keeps the loaded attributes readable
+        afterwards - so an ordinary `select` returning the mapped instance would
+        hand back the snapshot from before the provider was called, and the
+        takeover guard below would be reading a picture of the world minutes
+        old.
+
+        It held before this only by accident: nothing kept a strong reference to
+        the instance across the inference, so the identity map had usually
+        dropped it and the re-select genuinely re-read. That is a property of
+        garbage collection rather than of the code, and a refactor keeping the
+        object alive would have turned a proved guard into a stale read with no
+        test to notice.
+        """
+        return await self._conversations.require_by_id(
+            conversation_id,
+            populate_existing=True,
+        )
+
+    async def _create_from_conversation(
+        self,
+        conversation: Conversation,
+        extracted: ExtractedLead,
+    ) -> LeadCapture | None:
+        """Open the customer's lead, or answer None because somebody else did.
+
+        **Inside a savepoint, and the savepoint is the point** (TOOL-02). Two
+        turns of one conversation are ordinary: a customer writing twice in a
+        few seconds produces two, and this product deliberately does not
+        coalesce them (AI-08). Both can reach this line, and
+        `uq_leads_active_contact` lets exactly one insert succeed - which used
+        to mean the loser's `IntegrityError` escaped the tool, aborted the
+        turn's whole transaction, and left the second customer message answered
+        by silence.
+
+        Converging instead of crashing needs the failed insert rolled back to a
+        point the rest of the turn survives, which is what `begin_nested` gives:
+        after the rollback this session is usable and the caller updates the
+        winner's row. The unique index stays; it is what makes the outcome
+        correct rather than merely uncrashed.
+        """
+        fields = _validated(
+            _agent_writable(extracted.as_fields()),
+            # An agent's guess is dropped rather than raised on: it is not a
+            # caller mistake to be reported, and failing the whole capture
+            # over one malformed phone number would lose the rest.
+            lenient=True,
+        )
+        try:
+            async with self._session.begin_nested():
+                lead = self._leads.create(
+                    source=LeadSource.AGENT,
+                    contact_id=conversation.contact_id,
+                    conversation_id=conversation.id,
+                    last_activity_at=datetime.now(UTC),
+                    **fields,
+                )
+                await self._session.flush()
+        except IntegrityError:
+            logger.info(
+                "lead.create_raced",
+                extra={
+                    "event": "lead.create_raced",
+                    "conversation_id": str(conversation.id),
+                },
+            )
+            return None
+
+        self._activities.record(
+            lead_id=lead.id,
+            kind=LeadActivityKind.CREATED,
+            summary="Lead created from a conversation.",
+            actor_kind=ActorKind.AGENT,
+            data={"conversation_id": str(conversation.id), "fields": sorted(fields)},
+        )
+        # Only the branch that created one. An extraction that updated an
+        # existing lead has captured nothing new, and counting it would
+        # make "leads created" grow every time a customer says anything.
+        self._usage.record(
+            UsageEventType.LEAD_CREATED,
+            meta={"lead_id": str(lead.id), "source": LeadSource.AGENT.value},
+        )
+        logger.info(
+            "lead.captured",
+            extra={"lead_id": str(lead.id), "conversation_id": str(conversation.id)},
+        )
+        return LeadCapture(lead=lead, created=True, changed_fields=frozenset(fields))
+
+    def _update_from_extraction(
+        self,
+        lead: Lead,
+        conversation: Conversation,
+        extracted: ExtractedLead,
+    ) -> LeadCapture:
         proposed = _agent_writable(extracted.as_fields())
         protected = set(lead.human_verified_fields)
         # The core rule: a human's entry wins over a model's inference.
@@ -591,10 +685,10 @@ class LeadService:
             extra={
                 "lead_id": str(lead.id),
                 "conversation_id": str(conversation.id),
-                "is_new": created,
+                "is_new": False,
             },
         )
-        return lead
+        return LeadCapture(lead=lead, created=False, changed_fields=frozenset(changes))
 
 
 def _agent_writable(fields: dict[str, Any]) -> dict[str, Any]:

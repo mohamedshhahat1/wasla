@@ -18,6 +18,8 @@ from app.agents.registry import (
     build_default_registry,
     validate_arguments,
 )
+from app.db.models.tool_execution import ToolExecutionReason
+from app.services.retrieval_service import MAX_TOP_K, effective_top_k
 from tests.fakes import as_session
 
 
@@ -289,3 +291,162 @@ def test_the_budget_argument_is_a_number_not_prose() -> None:
     assert definition is not None
     budget = next(p for p in definition.parameters if p.name == "budget_amount")
     assert budget.type == "number"
+
+
+# --------------------------------------------------------------- bounds (TOOL-16)
+#
+# The bounds the server enforces used to live only in the descriptions, in
+# prose: "1 to 10", "1 to 43200". A model is told a limit in a sentence and
+# violates it more often than one told in schema, and every violation is a
+# wasted round at best - and, for `delay_minutes`, was the crash of TOOL-01.
+# These assert the *serialized* schema, because that is the artefact the
+# provider actually reads.
+
+
+def test_the_published_schema_carries_the_bounds_the_server_enforces() -> None:
+    registry = build_default_registry()
+
+    search = registry.get(SEARCH_KNOWLEDGE_TOOL)
+    follow_up = registry.get(SCHEDULE_FOLLOW_UP_TOOL)
+    handoff = registry.get(HANDOFF_TOOL)
+    lead = registry.get(RECORD_LEAD_TOOL)
+    assert search is not None and follow_up is not None
+    assert handoff is not None and lead is not None
+
+    assert search.json_schema()["properties"]["max_results"]["minimum"] == 1
+    assert search.json_schema()["properties"]["max_results"]["maximum"] == MAX_TOP_K
+
+    delay = follow_up.json_schema()["properties"]["delay_minutes"]
+    assert (delay["minimum"], delay["maximum"]) == (1, 43_200)
+    assert follow_up.json_schema()["properties"]["message"]["maxLength"] == 4_096
+    assert follow_up.json_schema()["properties"]["reason"]["maxLength"] == 300
+
+    assert handoff.json_schema()["properties"]["reason"]["maxLength"] == 200
+    assert lead.json_schema()["properties"]["budget_currency"]["pattern"] == "^[A-Z]{3}$"
+
+
+def test_the_schema_still_refuses_arguments_nobody_declared() -> None:
+    """The bound additions must not have loosened the object itself."""
+    for name in build_default_registry().names():
+        definition = build_default_registry().get(name)
+        assert definition is not None
+        assert definition.json_schema()["additionalProperties"] is False
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (SEARCH_KNOWLEDGE_TOOL, {"query": "prices", "max_results": 0}),
+        (SEARCH_KNOWLEDGE_TOOL, {"query": "prices", "max_results": 11}),
+        (SCHEDULE_FOLLOW_UP_TOOL, {"delay_minutes": 0, "message": "hi"}),
+        (SCHEDULE_FOLLOW_UP_TOOL, {"delay_minutes": 43_201, "message": "hi"}),
+        (SCHEDULE_FOLLOW_UP_TOOL, {"delay_minutes": 10**15, "message": "hi"}),
+        (HANDOFF_TOOL, {"reason": "r" * 201}),
+        (RECORD_LEAD_TOOL, {"budget_currency": "egp"}),
+        (RECORD_LEAD_TOOL, {"budget_amount": -1}),
+    ],
+)
+def test_a_value_outside_a_published_bound_is_refused(tool: str, arguments: dict[str, Any]) -> None:
+    definition = build_default_registry().get(tool)
+    assert definition is not None
+
+    with pytest.raises(ToolArgumentError):
+        validate_arguments(definition, arguments)
+
+
+def test_the_top_k_clamp_is_what_the_tool_actually_uses() -> None:
+    """`effective_top_k` was tested directly; its use inside the tool was not (TM08)."""
+    definition = build_default_registry().get(SEARCH_KNOWLEDGE_TOOL)
+    assert definition is not None
+
+    assert validate_arguments(definition, {"query": "q", "max_results": MAX_TOP_K}) == {
+        "query": "q",
+        "max_results": MAX_TOP_K,
+    }
+    assert effective_top_k(MAX_TOP_K + 5) == MAX_TOP_K
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (HANDOFF_TOOL, {"reason": "bad\x00reason"}),
+        (RECORD_LEAD_TOOL, {"name": "Ah\x00med"}),
+        (RECORD_LEAD_TOOL, {"interest": "flat \ud800"}),
+        (SCHEDULE_FOLLOW_UP_TOOL, {"delay_minutes": 60, "message": "hi\x00"}),
+    ],
+)
+def test_text_the_database_cannot_hold_is_refused_at_the_boundary(
+    tool: str, arguments: dict[str, Any]
+) -> None:
+    """NUL and lone surrogates are legal JSON and are not storable text (TOOL-01)."""
+    definition = build_default_registry().get(tool)
+    assert definition is not None
+
+    with pytest.raises(ToolArgumentError) as refusal:
+        validate_arguments(definition, arguments)
+    assert refusal.value.reason is ToolExecutionReason.UNSAFE_TEXT
+
+
+def test_arabic_rtl_marks_and_emoji_are_ordinary_text() -> None:
+    """The control: the rule is about storability, never about alphabet."""
+    definition = build_default_registry().get(RECORD_LEAD_TOOL)
+    assert definition is not None
+
+    arguments = {"name": "‏أحمد 😀", "interest": "تشطيب شقة 150م"}
+    assert validate_arguments(definition, arguments) == arguments
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (HANDOFF_TOOL, {"reason": 7}),
+        (RECORD_LEAD_TOOL, {"name": 7}),
+        (RECORD_LEAD_TOOL, {"interest": ["a", "b"]}),
+        (SCHEDULE_FOLLOW_UP_TOOL, {"delay_minutes": 60, "message": {"text": "hi"}}),
+        (SEARCH_KNOWLEDGE_TOOL, {"query": None, "max_results": 3}),
+    ],
+)
+def test_a_text_argument_that_is_not_text_is_refused(tool: str, arguments: dict[str, Any]) -> None:
+    """String typing was only asserted where a type error also broke something else (TM06)."""
+    definition = build_default_registry().get(tool)
+    assert definition is not None
+
+    with pytest.raises(ToolArgumentError):
+        validate_arguments(definition, arguments)
+
+
+# ------------------------------------------------ blank means absent (TM27)
+#
+# A blank optional lead field means "I learned nothing about this", never "clear
+# what is stored". Making it a clear is a silent data-loss path from ordinary
+# model output: a model that fills every argument on every call would erase the
+# customer's name the first time it did not hear one.
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_a_blank_lead_field_leaves_the_stored_value_alone(blank: str) -> None:
+    from app.agents.registry import _optional_text
+
+    assert _optional_text(blank) is None
+    assert _optional_text(None) is None
+    assert _optional_text("  Ahmed  ") == "Ahmed"
+
+
+def test_the_handoff_tool_is_the_only_terminal_one() -> None:
+    """Which tool may still run when no round is left to read a result (PD-TOOLS-05)."""
+    registry = build_default_registry()
+    terminal = {
+        name for name in registry.names() if (d := registry.get(name)) is not None and d.terminal
+    }
+    assert terminal == {HANDOFF_TOOL}
+
+
+def test_the_knowledge_tool_is_the_only_one_that_releases_the_session() -> None:
+    """Which tool calls somebody else's API, and so must not sit in a savepoint (TOOL-09)."""
+    registry = build_default_registry()
+    releasing = {
+        name
+        for name in registry.names()
+        if (d := registry.get(name)) is not None and d.releases_session
+    }
+    assert releasing == {SEARCH_KNOWLEDGE_TOOL}

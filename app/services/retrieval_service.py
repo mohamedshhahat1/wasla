@@ -44,7 +44,8 @@ from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
 from app.core.telemetry import record_retrieval
 from app.db.models.usage import UsageEventType
-from app.integrations.openai.embeddings import EmbeddingsClient
+from app.db.session import released
+from app.integrations.openai.embeddings import EmbeddingBatch, EmbeddingsClient
 from app.repositories.knowledge_repository import DocumentChunkRepository, ScoredChunk
 from app.services.usage_service import EMBEDDING_PURPOSE_QUERY, UsageRecorder
 
@@ -228,11 +229,22 @@ class RetrievalService:
         top_k: int = DEFAULT_TOP_K,
         knowledge_base_id: uuid.UUID | None = None,
         max_distance: float = MAX_DISTANCE,
+        release_session: bool = False,
     ) -> Retrieval:
         """Find the passages in this workspace most relevant to a question.
 
         Raises `KnowledgeSearchUnavailableError`, and nothing else, when the
         search cannot be completed.
+
+        `release_session` hands the session's connection back for the embedding
+        call (TOOL-09, ADR-080). Off by default, because a request handler's
+        unit of work must not be committed underneath it half way through - the
+        release *is* a commit. The agent tool turns it on, because there the
+        alternative is holding a pooled connection, an open transaction and
+        whatever row locks the previous tool of the same model response took
+        across somebody else's API, for up to three attempts with backoff. What
+        is staged at that point is a finished tool's work, which is exactly the
+        condition `released` documents for its callers.
         """
         cleaned = query.strip()[:MAX_QUERY_CHARACTERS].strip()
         if not cleaned:
@@ -243,7 +255,9 @@ class RetrievalService:
         started = perf_counter()
 
         try:
-            batch = await self._embeddings.embed_batch([cleaned])
+            batch = await self._embed(cleaned, release_session=release_session)
+        except KnowledgeSearchUnavailableError:
+            raise
         except Exception as error:
             await self._failed(started, stage="embedding", error=error)
             raise KnowledgeSearchUnavailableError() from None
@@ -290,6 +304,19 @@ class RetrievalService:
             },
         )
         return Retrieval(passages=passages, query=cleaned)
+
+    async def _embed(self, cleaned: str, *, release_session: bool) -> EmbeddingBatch:
+        """Turn the question into a vector, optionally with no connection held.
+
+        Nothing touches the session inside the released block - the embeddings
+        client speaks HTTP and nothing else - which is the condition `released`
+        requires and the regression
+        `tests/integration/test_provider_session_lifetime.py` exists to catch.
+        """
+        if not release_session:
+            return await self._embeddings.embed_batch([cleaned])
+        async with released(self._session):
+            return await self._embeddings.embed_batch([cleaned])
 
     async def _failed(self, started: float, *, stage: str, error: BaseException) -> None:
         await record_retrieval(

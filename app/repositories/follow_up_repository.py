@@ -78,6 +78,21 @@ class FollowUpRepository(TenantScopedRepository[FollowUp]):
             )
         )
 
+    async def list_pending_by_actor(self, kind: ActorKind) -> list[FollowUp]:
+        """Every pending nudge in this workspace that `kind` scheduled.
+
+        Written for the lifecycle transitions that have to stop automated
+        messages without touching what a colleague arranged (PD-TOOLS-06). The
+        workspace filter is the repository's; `kind` is what separates an AI
+        decision from a person's.
+        """
+        return await self._all(
+            self._select().where(
+                FollowUp.status == FollowUpStatus.PENDING,
+                FollowUp.created_by_kind == kind,
+            )
+        )
+
     async def list_follow_ups(
         self,
         *,

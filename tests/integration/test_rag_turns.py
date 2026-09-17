@@ -256,14 +256,46 @@ async def test_a_model_cannot_widen_the_result_count(
 
     await ai_turns.answer(workspace, conversation_id, message_id)
 
-    # Non-vacuity: the model really asked for a billion, and more than the
-    # ceiling were relevant enough to return.
+    # Non-vacuity: the model really asked for a billion.
     (call,) = [
         item
         for item in ai_providers.agent_requests[1]["input"]
         if item.get("type") == "function_call"
     ]
     assert json.loads(call["arguments"])["max_results"] == 10**9
+
+    # Refused at the boundary rather than clamped in the service (TOOL-16). The
+    # ceiling is published in the tool's JSON Schema as `maximum`, so a count
+    # outside it is a rejection the model reads and can correct - and no
+    # embedding is paid for on the way to a clamp.
+    (output,) = _tool_outputs(ai_providers)
+    assert "max_results must be at most" in output
+    assert ai_providers.embedding_requests == []
+    await _assert_answered(ai_turns, workspace.tenant_id)
+
+
+async def test_the_server_still_bounds_a_count_it_does_accept(
+    ai_turns: TurnRunner, ai_providers: FakeProviders
+) -> None:
+    """The clamp behind the published bound, exercised through the real tool.
+
+    `effective_top_k` is what actually holds - the schema is advice - so this
+    asks for the ceiling exactly and asserts no more than the ceiling comes
+    back, with more than that many documents relevant enough to return.
+    """
+    workspace = await ai_turns.workspace(grants=[SEARCH])
+    for index in range(MAX_TOP_K + 5):
+        await _index(
+            ai_turns,
+            workspace.tenant_id,
+            title=f"Quote {index}",
+            body=f"Finishing quote number {index} for apartment finishing work. Q{index}X",
+        )
+    ai_providers.agent = _searching("apartment finishing quote", max_results=MAX_TOP_K)
+    conversation_id, (message_id,) = await ai_turns.write(workspace, ["quotes?"])
+
+    await ai_turns.answer(workspace, conversation_id, message_id)
+
     (output,) = _tool_outputs(ai_providers)
     sources = json.loads(output)["knowledge_sources"]
     assert 0 < len(sources) <= MAX_TOP_K
