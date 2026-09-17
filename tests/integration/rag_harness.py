@@ -273,6 +273,14 @@ class Indexing:
         if self.provider.gate is not None and not self.provider.gate.is_set():
             self.provider.gate.set()
             await asyncio.sleep(0.5)
+        if os.environ.get("WASLA_TEST_KEEP_RAG_DATA") == "1":
+            # Kept so a database invariant sweep run later in the same session
+            # has real indexing state to sweep - generations in every state,
+            # chunks, usage and audit rows. The schema is still dropped when
+            # the session ends.
+            async for key in self.redis.scan_iter(match=f"{self.namespace}*"):
+                await self.redis.delete(key)
+            return
         async with self.database.session() as session:
             if self.tenants:
                 await session.execute(delete(AuditLog).where(AuditLog.tenant_id.in_(self.tenants)))
