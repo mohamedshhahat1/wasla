@@ -27,9 +27,12 @@ from app.db.models.agent import (
     AgentStatus,
     AgentTool,
 )
+from app.db.models.audit import AuditAction
 from app.db.models.sentiment import SentimentLabel
+from app.db.models.user import User
 from app.integrations.openai.types import ToolSpec
 from app.repositories.agent_repository import AgentRepository, AgentToolRepository
+from app.services.audit_service import AuditTrail
 
 logger = get_logger(__name__)
 
@@ -47,6 +50,27 @@ class _Unset(Enum):
 
 
 UNSET: Final = _Unset.TOKEN
+
+
+def _refuse_unsupported_config(config: dict[str, Any] | None) -> None:
+    """Refuse per-grant settings this build does not act on (TOOL-14).
+
+    `agent_tools.config` was stored, documented as carrying per-grant policy
+    ("such as which lead statuses a tool may write") and **read by nothing**. An
+    administrator could set it through the API, watch it come back on the next
+    read, and believe they had constrained a tool. Nothing was constrained.
+
+    The column stays, because it is the right shape for the first tool that
+    needs a knob and dropping it would be migration churn for nothing. What goes
+    is the pretence: until a tool reads it, a non-empty value is refused at the
+    boundary rather than accepted and ignored. An empty object is allowed, so a
+    client that always sends the field is not broken by this.
+    """
+    if config:
+        raise ValidationError(
+            "Per-grant tool settings are reserved and not applied by this "
+            "release. Remove `config`, or leave it empty."
+        )
 
 
 def _model_refusal(model: str, allowed: Sequence[str]) -> str:
@@ -74,6 +98,7 @@ class AgentService:
     ) -> None:
         self._session = session
         self._settings = settings
+        self._tenant_id = tenant_id
         self._agents = AgentRepository(session, tenant_id=tenant_id)
         self._grants = AgentToolRepository(session, tenant_id=tenant_id)
         self._registry = registry if registry is not None else build_default_registry()
@@ -265,16 +290,23 @@ class AgentService:
         name: str,
         enabled: bool = True,
         config: dict[str, Any] | None = None,
+        actor: User | None = None,
     ) -> AgentTool:
         """Grant a tool, refusing a name this build cannot run.
 
         Validated when granted rather than when read: a typo should fail at the
         moment it is made, while a grant for a tool a later release removed must
         still be readable instead of breaking the screen.
+
+        Audited, because this is the decision that sets what a model may do
+        (TOOL-13). A grant written with `enabled=False` is a withdrawal and is
+        recorded as one: the row on the table is what matters, not which
+        endpoint reached it.
         """
         agent = await self._agents.require_by_id(agent_id)
         if not self._registry.knows(name):
             raise ValidationError(f"There is no tool named {name}.")
+        _refuse_unsupported_config(config)
 
         grant = await self._grants.upsert(
             agent_id=agent.id,
@@ -283,13 +315,20 @@ class AgentService:
             config=config,
         )
         await self._session.flush()
+        self._record_capability_change(grant, actor=actor, enabled=enabled)
         logger.info(
             "agent.tool_granted",
             extra={"agent_id": str(agent.id), "tool": name, "enabled": enabled},
         )
         return grant
 
-    async def revoke_tool(self, agent_id: uuid.UUID, *, name: str) -> AgentTool:
+    async def revoke_tool(
+        self,
+        agent_id: uuid.UUID,
+        *,
+        name: str,
+        actor: User | None = None,
+    ) -> AgentTool:
         """Withdraw a tool by disabling the grant.
 
         Disabled rather than deleted, so re-enabling it later does not silently
@@ -300,5 +339,30 @@ class AgentService:
         if grant is None:
             raise NotFoundError("This agent does not have that tool.")
 
+        revoked = await self._grants.set_enabled(grant, enabled=False)
+        self._record_capability_change(revoked, actor=actor, enabled=False)
         logger.info("agent.tool_revoked", extra={"agent_id": str(agent.id), "tool": name})
-        return await self._grants.set_enabled(grant, enabled=False)
+        return revoked
+
+    def _record_capability_change(
+        self,
+        grant: AgentTool,
+        *,
+        actor: User | None,
+        enabled: bool,
+    ) -> None:
+        """One audit row for a change to what an agent may do (TOOL-13).
+
+        The actor is the authenticated administrator who made the change, and
+        the metadata is the agent, the tool and the state it was left in -
+        never the grant's stored settings, which are a payload rather than a
+        decision and would put arbitrary JSON somebody typed into the trail.
+        """
+        AuditTrail(self._session, tenant_id=self._tenant_id).record(
+            AuditAction.AGENT_TOOL_GRANTED if enabled else AuditAction.AGENT_TOOL_REVOKED,
+            actor=actor,
+            target_type="agent_tool",
+            target_id=grant.id,
+            target_label=grant.name,
+            meta={"agent_id": str(grant.agent_id), "tool": grant.name, "enabled": enabled},
+        )

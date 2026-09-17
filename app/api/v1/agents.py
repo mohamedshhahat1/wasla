@@ -130,6 +130,9 @@ async def grant_tool(
         name=payload.name,
         enabled=payload.enabled,
         config=payload.config,
+        # Named, because "who gave this agent this capability" is what the
+        # audit row exists to answer (TOOL-13).
+        actor=admin.user,
     )
     return ToolGrantRead.model_validate(grant)
 
@@ -151,4 +154,4 @@ async def revoke_tool(
     The grant is disabled rather than deleted, so anything configured with it
     survives being turned back on.
     """
-    await service.revoke_tool(agent_id, name=name)
+    await service.revoke_tool(agent_id, name=name, actor=admin.user)
