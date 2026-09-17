@@ -22,7 +22,12 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
+from app.core.embedding_space import OPENAI_PROVIDER, EmbeddingSpace
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
+from app.integrations.openai.embeddings import EmbeddingBatch
+
+#: The model the fakes claim to be, which is the deployment default.
+FAKE_MODEL = "text-embedding-3-small"
 
 _TOKEN = re.compile(r"\w+", re.UNICODE)
 
@@ -52,33 +57,60 @@ class FakeEmbeddings:
 
     Records what it was asked to embed, so a test can assert that ingestion
     embedded the chunks it produced and that retrieval embedded the question.
+    `calls` counts provider requests - one per batch - which is the unit a
+    cost assertion is about.
     """
 
-    def __init__(self, *, dimensions: int = EMBEDDING_DIMENSIONS) -> None:
+    def __init__(self, *, dimensions: int = EMBEDDING_DIMENSIONS, model: str = FAKE_MODEL) -> None:
         self.dimensions = dimensions
+        self.model = model
         self.embedded: list[str] = []
         self.calls = 0
 
-    async def embed(self, texts: Sequence[str]) -> list[Any]:
+    @property
+    def space(self) -> EmbeddingSpace:
+        return EmbeddingSpace(
+            provider=OPENAI_PROVIDER, model=self.model, dimensions=self.dimensions
+        )
+
+    async def embed_batch(self, texts: Sequence[str]) -> EmbeddingBatch:
         self.calls += 1
         self.embedded.extend(texts)
-        return [embed_text(text, dimensions=self.dimensions) for text in texts]
+        return EmbeddingBatch(
+            vectors=[embed_text(text, dimensions=self.dimensions) for text in texts],
+            input_tokens=sum(len(text.split()) for text in texts),
+            characters=sum(len(text) for text in texts),
+        )
+
+    async def embed(self, texts: Sequence[str]) -> list[Any]:
+        return (await self.embed_batch(texts)).vectors
 
     async def embed_one(self, text: str) -> list[float]:
-        vectors = await self.embed([text])
-        vector: list[float] = vectors[0]
+        vector: list[float] = (await self.embed_batch([text])).vectors[0]
         return vector
 
 
 class BrokenEmbeddings:
-    """Fails the way a provider outage does, for the failure-path tests."""
+    """Fails the way a provider outage or rejection does, for the failure paths."""
 
-    def __init__(self, error: Exception) -> None:
+    def __init__(self, error: Exception, *, model: str = FAKE_MODEL) -> None:
         self.error = error
         self.dimensions = EMBEDDING_DIMENSIONS
+        self.model = model
+        self.calls = 0
+
+    @property
+    def space(self) -> EmbeddingSpace:
+        return EmbeddingSpace(
+            provider=OPENAI_PROVIDER, model=self.model, dimensions=self.dimensions
+        )
+
+    async def embed_batch(self, texts: Sequence[str]) -> EmbeddingBatch:
+        self.calls += 1
+        raise self.error
 
     async def embed(self, texts: Sequence[str]) -> None:
-        raise self.error
+        await self.embed_batch(texts)
 
     async def embed_one(self, text: str) -> None:
-        raise self.error
+        await self.embed_batch([text])

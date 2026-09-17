@@ -61,6 +61,34 @@ DEFAULT_REPLY = "Yes, we are here."
 
 JsonObject = dict[str, Any]
 AgentHandler = Callable[[JsonObject], Awaitable[JsonObject | httpx.Response]]
+EmbeddingHandler = Callable[[JsonObject], Awaitable[httpx.Response]]
+
+
+def embedding_response(
+    body: JsonObject, *, value: object = ..., width: int | None = None
+) -> httpx.Response:
+    """An embeddings answer for `body`'s inputs.
+
+    By default each vector is the suite's deterministic fake embedding of its
+    input, so retrieval over what a turn searched behaves like the rest of the
+    RAG suite. `value` fills every element instead - `math.nan`, `True`, `None` -
+    and is written literally, because the point of those cases is what the
+    provider's JSON says, not what Python's encoder would allow.
+    """
+    from tests.fake_embeddings import embed_text
+
+    dimensions = width if width is not None else int(body.get("dimensions", 1536))
+    data = []
+    for index, item in enumerate(body["input"]):
+        vector = embed_text(item, dimensions=dimensions) if value is ... else [value] * dimensions
+        data.append({"object": "embedding", "index": index, "embedding": vector})
+    content = json.dumps(
+        {"object": "list", "data": data, "usage": {"prompt_tokens": 3, "total_tokens": 3}},
+        allow_nan=True,
+    )
+    return httpx.Response(
+        200, content=content.encode(), headers={"content-type": "application/json"}
+    )
 
 
 def text_response(
@@ -166,6 +194,11 @@ class FakeProviders:
         self.sentiment_requests: list[JsonObject] = []
         self.agent_requests: list[JsonObject] = []
         self.sends: list[JsonObject] = []
+        # Embedding requests are counted apart from inference: a knowledge
+        # search is its own provider call, and a test about retrieval needs to
+        # know one was made - or was not.
+        self.embedding_requests: list[JsonObject] = []
+        self.embeddings: EmbeddingHandler = self._embed
         self.reading: JsonObject = {
             "sentiment": "neutral",
             "score": 0.0,
@@ -203,6 +236,9 @@ class FakeProviders:
     async def _dispatch(self, request: httpx.Request) -> httpx.Response:
         host = request.url.host
         body: JsonObject = json.loads(request.content or b"{}")
+        if "openai" in host and request.url.path.endswith("/embeddings"):
+            self.embedding_requests.append(body)
+            return await self.embeddings(body)
         if "openai" in host:
             fmt = body.get("text", {}).get("format", {})
             if isinstance(fmt, dict) and fmt.get("name") == SENTIMENT_FORMAT:
@@ -234,6 +270,9 @@ class FakeProviders:
 
     async def _reply(self, _request: JsonObject) -> JsonObject:
         return text_response(DEFAULT_REPLY)
+
+    async def _embed(self, body: JsonObject) -> httpx.Response:
+        return embedding_response(body)
 
 
 @dataclass(frozen=True, slots=True)

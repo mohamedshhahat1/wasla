@@ -14,9 +14,10 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ExternalServiceError, TenantIsolationError, ValidationError
-from app.db.models.knowledge import DocumentSource, DocumentStatus
+from app.core.exceptions import TenantIsolationError, ValidationError
+from app.db.models.knowledge import DocumentSource, DocumentStatus, GenerationState
 from app.db.models.tenant import Tenant
+from app.integrations.openai.embeddings import EmbeddingError, EmbeddingFailure
 from app.repositories.knowledge_repository import DocumentChunkRepository
 from app.services.knowledge_service import KnowledgeService
 from app.services.retrieval_service import RetrievalService
@@ -71,16 +72,16 @@ async def _ingested(
     """Submit and ingest a document, returning it ready to retrieve."""
     knowledge = KnowledgeService(session=session, tenant_id=tenant.id)
     base = await knowledge.ensure_default_knowledge_base()
-    document, _ = await knowledge.submit(
+    view, _ = await knowledge.submit(
         knowledge_base_id=base.id,
         title=title,
         raw=text,
     )
-    await knowledge.ingest(
-        document_id=document.id,
+    result = await knowledge.ingest(
+        document_id=view.document.id,
         embeddings=as_embeddings(embeddings or FakeEmbeddings()),
     )
-    return base, document
+    return base, result.document
 
 
 def _service(
@@ -265,11 +266,11 @@ async def test_submitting_the_same_text_twice_is_one_document(db_session: AsyncS
 
     assert created_first is True
     assert created_second is False
-    assert first.id == second.id
+    assert first.document.id == second.document.id
 
 
 async def test_ingesting_twice_does_not_double_the_chunks(db_session: AsyncSession) -> None:
-    """Re-ingestion replaces chunks; a duplicated job must change nothing."""
+    """A re-index replaces the served generation; the old chunks go with it."""
     tenant = await _tenant(db_session, slug="acme")
     _, document = await _ingested(
         db_session,
@@ -280,12 +281,17 @@ async def test_ingesting_twice_does_not_double_the_chunks(db_session: AsyncSessi
     first_count = document.chunk_count
 
     knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
-    await knowledge.reingest(document.id)
-    await knowledge.ingest(document_id=document.id, embeddings=as_embeddings(FakeEmbeddings()))
+    await knowledge.reindex(document.id)
+    result = await knowledge.ingest(
+        document_id=document.id, embeddings=as_embeddings(FakeEmbeddings())
+    )
 
+    assert result.chunks_written == first_count
     chunks = DocumentChunkRepository(db_session, tenant_id=tenant.id)
     assert await chunks.count_for_document(document_id=document.id) == first_count
-    assert document.chunk_count == first_count
+    assert result.document.chunk_count == first_count
+    view = await knowledge.get_document(document.id)
+    assert view.active is not None and view.active.number == 2
 
 
 async def test_a_document_already_ready_is_left_alone(db_session: AsyncSession) -> None:
@@ -308,84 +314,119 @@ async def test_a_document_already_ready_is_left_alone(db_session: AsyncSession) 
     assert embeddings.calls == 0
 
 
-async def test_a_provider_failure_marks_the_document_failed(db_session: AsyncSession) -> None:
-    tenant = await _tenant(db_session, slug="acme")
-    knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
+async def _submitted(session: AsyncSession, tenant_slug: str) -> tuple[Any, KnowledgeService]:
+    tenant = await _tenant(session, slug=tenant_slug)
+    knowledge = KnowledgeService(session=session, tenant_id=tenant.id)
     base = await knowledge.ensure_default_knowledge_base()
-    document, _ = await knowledge.submit(
+    view, _ = await knowledge.submit(
         knowledge_base_id=base.id,
         title="Prices",
         raw=FINISHING_PRICES,
     )
+    return (tenant, view.document), knowledge
 
-    with pytest.raises(ExternalServiceError):
-        await knowledge.ingest(
-            document_id=document.id,
-            embeddings=as_embeddings(
-                BrokenEmbeddings(ExternalServiceError("The AI provider is unavailable."))
-            ),
-        )
 
-    assert document.status is DocumentStatus.FAILED
-    assert document.error is not None
+async def test_a_permanent_provider_failure_marks_the_document_failed(
+    db_session: AsyncSession,
+) -> None:
+    """A rejected key is terminal on the first attempt, with a reason (RAG-01)."""
+    (_, document), knowledge = await _submitted(db_session, "acme")
+    broken = BrokenEmbeddings(EmbeddingError(EmbeddingFailure.PROVIDER_UNAUTHORIZED))
+
+    result = await knowledge.ingest(document_id=document.id, embeddings=as_embeddings(broken))
+
+    assert broken.calls == 1
+    assert result.document.status is DocumentStatus.FAILED
+    assert result.document.error == "The AI provider rejected the request."
     # Zeroed, because a failed run leaves nothing retrievable and claiming
     # otherwise would advertise knowledge that is not there.
-    assert document.chunk_count == 0
+    assert result.document.chunk_count == 0
+    view = await knowledge.get_document(document.id)
+    assert view.latest is not None
+    assert view.latest.state is GenerationState.FAILED
+    assert view.latest.last_error_code == "provider_unauthorized"
 
 
-async def test_a_failed_document_is_not_retrievable(db_session: AsyncSession) -> None:
-    """Chunks written before a failure must not answer questions."""
-    tenant = await _tenant(db_session, slug="acme")
-    knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
-    base = await knowledge.ensure_default_knowledge_base()
-    document, _ = await knowledge.submit(
-        knowledge_base_id=base.id,
-        title="Prices",
-        raw=FINISHING_PRICES,
+async def test_a_transient_provider_failure_is_retried_later_not_failed(
+    db_session: AsyncSession,
+) -> None:
+    (_, document), knowledge = await _submitted(db_session, "acme")
+    broken = BrokenEmbeddings(EmbeddingError(EmbeddingFailure.PROVIDER_UNAVAILABLE))
+
+    result = await knowledge.ingest(document_id=document.id, embeddings=as_embeddings(broken))
+
+    assert result.document.status is DocumentStatus.PENDING
+    view = await knowledge.get_document(document.id)
+    assert view.latest is not None
+    assert view.latest.state is GenerationState.PENDING
+    assert view.latest.attempts == 1
+    assert view.latest.next_retry_at is not None
+    assert view.latest.last_error_code == "provider_unavailable"
+
+
+async def test_a_never_indexed_failed_document_is_not_retrievable(
+    db_session: AsyncSession,
+) -> None:
+    (tenant, document), knowledge = await _submitted(db_session, "acme")
+    await knowledge.ingest(
+        document_id=document.id,
+        embeddings=as_embeddings(
+            BrokenEmbeddings(EmbeddingError(EmbeddingFailure.PROVIDER_FORBIDDEN))
+        ),
     )
-    await knowledge.ingest(document_id=document.id, embeddings=as_embeddings(FakeEmbeddings()))
-
-    # Now break it: the chunks still exist, but the document is not READY.
-    await knowledge.reingest(document.id)
-    with pytest.raises(ExternalServiceError):
-        await knowledge.ingest(
-            document_id=document.id,
-            embeddings=as_embeddings(
-                BrokenEmbeddings(ExternalServiceError("The AI provider is unavailable."))
-            ),
-        )
 
     found = await _service(db_session, tenant).search(query="premium finishing cost")
 
     assert found.is_empty
 
 
+async def test_a_failed_reindex_keeps_the_previous_version_searchable(
+    db_session: AsyncSession,
+) -> None:
+    """Last known good (PD-RAG-1): a broken re-index takes nothing away."""
+    (tenant, document), knowledge = await _submitted(db_session, "acme")
+    await knowledge.ingest(document_id=document.id, embeddings=as_embeddings(FakeEmbeddings()))
+    before = await _service(db_session, tenant).search(query="premium finishing cost")
+    assert not before.is_empty
+
+    await knowledge.reindex(document.id)
+    result = await knowledge.ingest(
+        document_id=document.id,
+        embeddings=as_embeddings(
+            BrokenEmbeddings(EmbeddingError(EmbeddingFailure.PROVIDER_MODEL_NOT_FOUND))
+        ),
+    )
+
+    assert result.document.status is DocumentStatus.READY
+    view = await knowledge.get_document(document.id)
+    assert view.active is not None and view.active.number == 1
+    assert view.latest is not None and view.latest.state is GenerationState.FAILED
+    after = await _service(db_session, tenant).search(query="premium finishing cost")
+    assert [passage.content for passage in after.passages] == [
+        passage.content for passage in before.passages
+    ]
+
+
 async def test_a_failed_document_can_be_retried_once_the_cause_is_fixed(
     db_session: AsyncSession,
 ) -> None:
-    tenant = await _tenant(db_session, slug="acme")
-    knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
-    base = await knowledge.ensure_default_knowledge_base()
-    document, _ = await knowledge.submit(
-        knowledge_base_id=base.id,
-        title="Prices",
-        raw=FINISHING_PRICES,
+    (_, document), knowledge = await _submitted(db_session, "acme")
+    await knowledge.ingest(
+        document_id=document.id,
+        embeddings=as_embeddings(
+            BrokenEmbeddings(EmbeddingError(EmbeddingFailure.PROVIDER_UNAUTHORIZED))
+        ),
     )
-    with pytest.raises(ExternalServiceError):
-        await knowledge.ingest(
-            document_id=document.id,
-            embeddings=as_embeddings(BrokenEmbeddings(ExternalServiceError("down"))),
-        )
 
-    await knowledge.reingest(document.id)
+    await knowledge.reindex(document.id)
     result = await knowledge.ingest(
         document_id=document.id, embeddings=as_embeddings(FakeEmbeddings())
     )
 
     assert result.chunks_written > 0
-    assert document.status is DocumentStatus.READY
+    assert result.document.status is DocumentStatus.READY
     # The stale explanation must not outlive the problem.
-    assert document.error is None
+    assert result.document.error is None
 
 
 async def test_a_document_with_no_indexable_text_is_refused(db_session: AsyncSession) -> None:

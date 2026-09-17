@@ -34,14 +34,17 @@ import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
-from app.db.models.knowledge import DocumentChunk, DocumentStatus
+from app.db.models.knowledge import DocumentChunk
 from app.repositories.knowledge_repository import DocumentChunkRepository
 from tests.integration.vector_corpus import (
     ANN_INDEX,
+    GENERATIONS,
+    RECALL_QUERIES,
     Corpus,
     clustered_vector,
     seed_corpus,
 )
+from tests.knowledge_seed import FAKE_SPACE
 
 pytestmark = pytest.mark.integration
 
@@ -106,7 +109,7 @@ async def test_the_approximate_scan_returns_every_passage_that_was_asked_for(
     chunks = DocumentChunkRepository(db_session, tenant_id=corpus.small.id)
 
     async with _only_the_ann_index(db_session):
-        found = await chunks.search(embedding=corpus.query, limit=TOP_K)
+        found = await chunks.search(space=FAKE_SPACE, embedding=corpus.query, limit=TOP_K)
         # Inside the block, because outside it the exact path is back and the
         # plan would say so.
         took_the_index = await _plan_uses_the_ann_index(db_session, corpus, corpus.small.id)
@@ -127,7 +130,7 @@ async def test_the_approximate_scan_stays_inside_the_workspace(db_session: Async
     chunks = DocumentChunkRepository(db_session, tenant_id=corpus.small.id)
 
     async with _only_the_ann_index(db_session):
-        found = await chunks.search(embedding=corpus.query, limit=TOP_K)
+        found = await chunks.search(space=FAKE_SPACE, embedding=corpus.query, limit=TOP_K)
 
     assert found
     assert {scored.chunk.tenant_id for scored in found} == {corpus.small.id}
@@ -147,7 +150,7 @@ async def test_the_approximate_scan_skips_a_document_that_is_not_ready(
     chunks = DocumentChunkRepository(db_session, tenant_id=corpus.small.id)
 
     async with _only_the_ann_index(db_session):
-        found = await chunks.search(embedding=corpus.query, limit=TOP_K)
+        found = await chunks.search(space=FAKE_SPACE, embedding=corpus.query, limit=TOP_K)
 
     assert found
     assert corpus.unready_chunk_ids.isdisjoint({scored.chunk.id for scored in found})
@@ -165,6 +168,7 @@ async def test_a_chunk_written_after_the_index_exists_is_retrievable(
             tenant_id=corpus.small.id,
             document_id=corpus.small_document_id,
             knowledge_base_id=corpus.small_base_id,
+            generation_id=GENERATIONS[corpus.small_document_id],
             ordinal=9_000,
             content="Written after the index existed.",
             token_estimate=8,
@@ -174,7 +178,7 @@ async def test_a_chunk_written_after_the_index_exists_is_retrievable(
     await db_session.flush()
 
     async with _only_the_ann_index(db_session):
-        found = await chunks.search(embedding=corpus.query, limit=TOP_K)
+        found = await chunks.search(space=FAKE_SPACE, embedding=corpus.query, limit=TOP_K)
 
     assert found
     assert found[0].chunk.ordinal == 9_000
@@ -199,15 +203,30 @@ async def test_the_approximate_answer_is_as_close_as_the_exact_one(
     signal. At the scale where the planner actually chooses this path - 45,000
     chunks in one workspace - the local drill in `docs/RAG.md` measures id
     overlap of 1.000 over 20 queries.
+
+    Both sides of the comparison are pinned to the path they claim to be. The
+    reference is a scan with index scans refused, not whatever the planner
+    picks for the plain query: that choice follows the table's statistics, and
+    where it lands on the HNSW index the test compares the approximate answer
+    with itself and proves nothing. And the overlap floor is taken over
+    `RECALL_QUERIES` queries rather than a handful, because on this corpus a
+    single graph build moves overlap by a few ids either way, and a floor two
+    ids below the typical count over 40 ids fails on that noise alone.
     """
     corpus = await seed_corpus(db_session)
     chunks = DocumentChunkRepository(db_session, tenant_id=corpus.large.id)
 
+    async with _only_the_ann_index(db_session):
+        assert await _plan_uses_the_ann_index(db_session, corpus, corpus.large.id)
+    async with _only_an_exact_scan(db_session):
+        assert not await _plan_uses_the_ann_index(db_session, corpus, corpus.large.id)
+
     hits = truth = 0
     for query in corpus.recall_queries:
-        exact = await chunks.search(embedding=query, limit=TOP_K)
+        async with _only_an_exact_scan(db_session):
+            exact = await chunks.search(space=FAKE_SPACE, embedding=query, limit=TOP_K)
         async with _only_the_ann_index(db_session):
-            approximate = await chunks.search(embedding=query, limit=TOP_K)
+            approximate = await chunks.search(space=FAKE_SPACE, embedding=query, limit=TOP_K)
 
         assert len(approximate) == len(exact) == TOP_K
         furthest_exact = max(scored.distance for scored in exact)
@@ -219,7 +238,7 @@ async def test_the_approximate_answer_is_as_close_as_the_exact_one(
         hits += len({scored.chunk.id for scored in exact} & {s.chunk.id for s in approximate})
         truth += len(exact)
 
-    assert truth
+    assert truth == RECALL_QUERIES * TOP_K
     assert hits / truth >= 0.75
 
 
@@ -241,8 +260,9 @@ class _only_the_ann_index:  # noqa: N801 - a context manager, used as one
         "DROP INDEX ix_document_chunks_tenant_id",
         "DROP INDEX ix_document_chunks_tenant_id_knowledge_base_id",
         "DROP INDEX ix_document_chunks_document_id",
+        "DROP INDEX ix_document_chunks_generation_id",
         "ALTER TABLE document_chunks"
-        " DROP CONSTRAINT uq_document_chunks_tenant_id_document_id_ordinal",
+        " DROP CONSTRAINT uq_document_chunks_tenant_id_generation_id_ordinal",
         "ALTER TABLE document_chunks DROP CONSTRAINT pk_document_chunks CASCADE",
     )
 
@@ -255,6 +275,30 @@ class _only_the_ann_index:  # noqa: N801 - a context manager, used as one
         for statement in self._DROPS:
             await self._session.execute(text(statement))
         await self._session.execute(text("SET LOCAL enable_seqscan = off"))
+        return self
+
+    async def __aexit__(self, *_: object) -> bool:
+        await self._savepoint.rollback()
+        return False
+
+
+class _only_an_exact_scan:  # noqa: N801 - a context manager, used as one
+    """Leave the planner no way to answer except reading every candidate row.
+
+    Index and bitmap scans are refused inside a savepoint, so the HNSW index
+    cannot be used and the answer is the true nearest neighbours: the reference
+    the approximate answer is measured against. `SET LOCAL` inside the savepoint
+    ends with it.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> _only_an_exact_scan:
+        await self._session.flush()
+        self._savepoint = await self._session.begin_nested()
+        await self._session.execute(text("SET LOCAL enable_indexscan = off"))
+        await self._session.execute(text("SET LOCAL enable_bitmapscan = off"))
         return self
 
     async def __aexit__(self, *_: object) -> bool:
@@ -277,17 +321,20 @@ async def _plan_uses_the_ann_index(
             text(
                 "EXPLAIN SELECT document_chunks.id"
                 " FROM document_chunks"
+                " JOIN document_index_generations g ON g.id = document_chunks.generation_id"
                 " JOIN documents ON documents.id = document_chunks.document_id"
                 " WHERE document_chunks.tenant_id = :tenant"
+                "   AND g.tenant_id = :tenant"
                 "   AND documents.tenant_id = :tenant"
-                "   AND documents.status = :ready"
+                "   AND g.state = 'active'"
+                "   AND g.embedding_model = :model"
                 "   AND document_chunks.embedding IS NOT NULL"
                 " ORDER BY document_chunks.embedding <=> CAST(:query AS vector)"
                 " LIMIT :k"
             ),
             {
                 "tenant": tenant_id,
-                "ready": DocumentStatus.READY.value,
+                "model": FAKE_SPACE.model,
                 "k": TOP_K,
                 "query": _literal(corpus.query),
             },

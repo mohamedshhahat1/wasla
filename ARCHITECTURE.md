@@ -188,35 +188,36 @@ Agent memory is a window over the conversation's own messages, bounded by both a
 
 ## 7. RAG flow
 
-**Status: Implemented** — ingestion, tenant-scoped retrieval and the `search_knowledge` tool, exercised against real PostgreSQL with pgvector. PDF extraction and an approximate vector index are not.
+**Status: Implemented** — ingestion in indexing generations, tenant-scoped retrieval over active generations in the configured embedding space, and the `search_knowledge` tool, exercised against real PostgreSQL with pgvector. PDF extraction runs in a killable child process, and an approximate vector index is measured.
 
 ```
-Upload (202)                      Question
-    |                                 |
-Document row, PENDING             embed the question
-    |                                 |
-Redis: knowledge:ingestion        tenant-filtered pgvector search
-    |                                 |
-IngestionWorker                   distance threshold
-    |-- extract                       |
-    |-- chunk (overlapping)       passages, or an explicit "nothing found"
-    |-- embed (batched)               |
-    +-- store chunks + vectors    search_knowledge tool output
-    |                                 |
-Document READY                    Agent orchestrator -> Responses API -> answer
+Upload (202)                           Question
+    |                                      |
+Document + generation (pending)        embed + validate the question
+    |                                      |
+Redis: knowledge:ingestion             tenant-filtered pgvector search over
+    |                                  active generations in the query's space
+IngestionWorker                            |
+    |-- claim (short tx)               distance threshold, server-owned top-k
+    |-- chunk, check limits                |
+    |-- embed batches (no tx open)     JSON passages, or an explicit "nothing found"
+    +-- publish (short tx, atomic swap)    |  (a failed search is a failed tool call)
+    |                                  Agent orchestrator -> Responses API -> answer
+Generation ACTIVE, document READY
 ```
 
-Ingestion never happens in the request that submitted the document. Submitting writes a `PENDING` row, enqueues, and answers `202`; extraction, chunking and embedding call a provider, and a large document is dozens of embedding requests. It has its own queue and worker rather than sharing the agent's (ADR-019), so a bulk upload cannot sit in front of a customer waiting for a reply.
+Ingestion never happens in the request that submitted the document. Submitting writes the document and its first `pending` generation, enqueues, and answers `202`. It has its own queue and worker rather than sharing the agent's (ADR-019), so a bulk upload cannot sit in front of a customer waiting for a reply.
 
-Three properties are load-bearing and each has a test:
+Properties that are load-bearing, each with a test:
 
-- **Cross-tenant retrieval is structurally impossible.** The similarity search is written once, in `DocumentChunkRepository.search`, and carries a mandatory `tenant_id` predicate. The tenant id comes from the tool's context, never from an argument the model produced — a tenant id a model could supply is a tenant id a model could change.
-- **Only `READY` documents answer.** The search joins the document and filters on status, so chunks written before a failure contribute nothing. A half-ingested document that still answered would be worse than one that answered not at all.
-- **Nothing found is said, not implied.** An empty retrieval returns a sentence instructing the agent to say it does not have the information and offer a handoff. A model handed an empty string fills the silence from its training data, which is the invented answer grounding exists to prevent.
+- **Cross-tenant retrieval is structurally impossible.** The similarity search is written once, in `DocumentChunkRepository.search`, with the tenant predicate on the chunk, its generation and its document; composite foreign keys make a cross-tenant parent impossible at the database. The tenant id comes from the tool's context, never from an argument the model produced.
+- **Only an active generation answers, and the last good one keeps answering** (ADR-106). A re-index builds a new generation beside the served one and replaces it in one short transaction; a failed re-index leaves the old one serving. At most one active and one in-flight generation per document are database constraints.
+- **Every indexing attempt ends bounded.** A claim token fences out late workers; permanent failures are terminal after one attempt, transient ones back off and end `retry_exhausted` after five; the recovery sweep re-queues only what is owed an attempt, in served workspaces. No transaction is held across an embedding call.
+- **Vectors are compared only within their embedding space** (ADR-107): a model change excludes old vectors until they are re-indexed.
+- **Parsing and size are bounded before cost** (ADR-108): pages, extracted characters, time, chunks and passage characters each have a ceiling, and a PDF over the page limit is refused rather than truncated.
+- **A failed search never costs the customer their reply** (ADR-109), and nothing found is said, not implied.
 
-Chunking splits on paragraph structure first and character count only when a paragraph exceeds the budget alone, because a cut mid-sentence embeds as neither of the ideas it straddles. Chunks overlap, so an answer sitting across a boundary is reachable from either side. Ingestion is idempotent by content hash: the same text submitted twice is one document, and re-ingesting replaces a document's chunks rather than appending, which is what makes a duplicated job harmless. A failure is recorded on the document with its reason and is retryable through the API.
-
-Embedding width is fixed in the column at 1536 rather than being configurable (ADR-018): a width that could be changed by configuration would corrupt a knowledge base quietly, because existing vectors are not recomputed and distances across widths are meaningless. `ix_document_chunks_embedding_hnsw` is an HNSW index over `vector_cosine_ops`, matching the `<=>` the retrieval query orders by (ADR-079, migration `0039`). PostgreSQL chooses between it and an exact scan per query and is right at both ends of the range — its crossover sits around 26,000 chunks in one workspace. Two GUCs are set per search and the index is worse than useless without them: `hnsw.iterative_scan`, because the tenant filter is a post-filter on an approximate scan and a small workspace otherwise gets back nothing, and `plan_cache_mode`, because a generic plan cannot know which workspace is asking. `docs/RAG.md` carries the measurements.
+Embedding width is fixed in the column at 1536 rather than being configurable (ADR-018). `ix_document_chunks_embedding_hnsw` is an HNSW index over `vector_cosine_ops`, matching the `<=>` the retrieval query orders by (ADR-079, migration `0039`). PostgreSQL chooses between it and an exact scan per query; two GUCs are set per search and the index is worse than useless without them. `docs/RAG.md` carries the measurements, the limits and the failure semantics.
 
 ## 8. Human handoff flow
 

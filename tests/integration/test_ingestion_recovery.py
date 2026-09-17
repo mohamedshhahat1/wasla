@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.redis import RedisClient
+from app.db.models.audit import AuditLog
 from app.db.models.knowledge import (
     Document,
     DocumentChunk,
@@ -160,6 +161,10 @@ async def _chunks(database: Database, document_id: uuid.UUID) -> int:
 async def _cleanup(database: Database, tenant_id: uuid.UUID) -> None:
     """Remove what these tests committed; deleting the workspace cascades."""
     async with database.session() as session:
+        # Submitting a document is audited, and `audit_logs.tenant_id` is SET
+        # NULL, so the workspace's entries have to go first or they outlive it
+        # as platform-wide rows that other suites count.
+        await session.execute(delete(AuditLog).where(AuditLog.tenant_id == tenant_id))
         await session.execute(delete(Tenant).where(Tenant.id == tenant_id))
 
 
@@ -183,7 +188,7 @@ async def test_a_document_the_queue_refused_is_found_and_requeued(
             title="Refund policy",
             raw="Refunds are issued within fourteen days.",
         )
-        document_id = document.id
+        document_id = document.document.id
         assert created
 
     try:
@@ -231,7 +236,7 @@ async def test_a_job_lost_after_a_successful_publish_is_recovered_too(
             title="Opening hours",
             raw="We open at nine.",
         )
-        document_id = document.id
+        document_id = document.document.id
 
     try:
         assert await _queued(live_redis) == 1, "the publish must genuinely have succeeded first"
@@ -269,8 +274,9 @@ async def test_two_sweepers_converge_on_one_indexed_document(
     So the property that has to hold is convergence rather than a single
     publication, and that is what is asserted here: however many envelopes the
     sweeps produce, the document ends `READY` exactly once, with one set of
-    chunks rather than two. Re-ingestion clears chunks before writing new ones,
-    and a `READY` document is left alone, which is what makes the extra envelope
+    chunks rather than two. The first envelope's claim takes the one outstanding
+    generation and publishes it; every later envelope finds nothing outstanding
+    and leaves without an embedding call, which is what makes the extra envelope
     cost a round trip and nothing else.
     """
     async with sweep_database.session() as session:
@@ -283,7 +289,7 @@ async def test_two_sweepers_converge_on_one_indexed_document(
             title="Delivery",
             raw="We deliver on Tuesdays. Orders placed on Monday arrive that week.",
         )
-        document_id = document.id
+        document_id = document.document.id
 
     try:
         first, second = await asyncio.gather(
@@ -315,6 +321,7 @@ async def test_two_sweepers_converge_on_one_indexed_document(
         # last: the second run finds it `READY` and leaves it alone, and a run
         # that did index again would replace the chunks rather than double them.
         assert len(set(counts)) == 1, f"the chunk count moved between envelopes: {counts}"
+        assert embeddings.calls == 1, "later envelopes cost no embedding call"
     finally:
         await _cleanup(sweep_database, tenant_id)
 
@@ -331,7 +338,8 @@ async def test_a_claimed_document_is_invisible_to_another_sweeper_holding_it_ope
     the first transaction claims and *stays open*, and only then does the second
     look.
     """
-    from app.repositories.knowledge_repository import PendingDocumentSweep
+    from app.repositories.knowledge_repository import IndexingSweep
+    from app.services.document_indexing import CLAIM_LEASE, MAX_INDEXING_ATTEMPTS
 
     async with sweep_database.session() as session:
         tenant, base = await _workspace(session)
@@ -343,18 +351,27 @@ async def test_a_claimed_document_is_invisible_to_another_sweeper_holding_it_ope
         )
 
     try:
-        cutoff = datetime.now(UTC) + timedelta(seconds=1)
-        async with sweep_database.session() as first:
-            claimed_by_first = await PendingDocumentSweep(first).claim_pending(
-                older_than=cutoff, limit=10
+        now = datetime.now(UTC)
+        cutoff = now + timedelta(seconds=1)
+
+        async def claim(session: AsyncSession) -> list[object]:
+            return list(
+                await IndexingSweep(session).claim_due(
+                    now=now,
+                    unenqueued_before=cutoff,
+                    lease_expired_before=now - CLAIM_LEASE,
+                    max_attempts=MAX_INDEXING_ATTEMPTS,
+                    limit=10,
+                )
             )
+
+        async with sweep_database.session() as first:
+            claimed_by_first = await claim(first)
             assert len(claimed_by_first) == 1
 
             # The first transaction is still open and still holding the row.
             async with sweep_database.session() as second:
-                claimed_by_second = await PendingDocumentSweep(second).claim_pending(
-                    older_than=cutoff, limit=10
-                )
+                claimed_by_second = await claim(second)
             assert claimed_by_second == []
     finally:
         await _cleanup(sweep_database, tenant_id)
@@ -369,14 +386,16 @@ async def test_a_document_already_indexed_is_never_requeued(
     async with sweep_database.session() as session:
         tenant, base = await _workspace(session)
         tenant_id = tenant.id
-        document, _ = await KnowledgeService(
-            session=session, tenant_id=tenant_id, queue=broken_queue
-        ).submit(
+        knowledge = KnowledgeService(session=session, tenant_id=tenant_id, queue=broken_queue)
+        document, _ = await knowledge.submit(
             knowledge_base_id=base.id,
             title="Returns",
             raw="Returns within thirty days.",
         )
-        document.status = DocumentStatus.READY
+        indexed = await knowledge.ingest(
+            document_id=document.document.id, embeddings=as_embeddings(FakeEmbeddings())
+        )
+        assert indexed.document.status is DocumentStatus.READY
 
     try:
         outcome = await _worker(sweep_database).run_once()
@@ -441,7 +460,7 @@ async def test_a_redis_that_is_still_refusing_leaves_the_document_claimable(
             title="Pricing",
             raw="Prices on request.",
         )
-        document_id = document.id
+        document_id = document.document.id
 
     try:
         worker = _worker(sweep_database)

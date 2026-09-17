@@ -336,6 +336,25 @@ class AuditAction(StrEnum):
     CAMPAIGN_SCHEDULED = "campaign_scheduled"
     CAMPAIGN_CANCELLED = "campaign_cancelled"
 
+    # What the agents are allowed to say (RAG-17, docs/RAG.md).
+    #
+    # A document in the knowledge base is stated to customers as the business's
+    # own fact, so "who added this refund policy, and when" and "who removed the
+    # price list the agent was quoting yesterday" are exactly the questions an
+    # audit trail is for. `meta` carries the knowledge base, the source type and
+    # the generation - never the document's text or its title, which are the
+    # workspace's content rather than a record of an act.
+    KNOWLEDGE_BASE_CREATED = "knowledge_base_created"
+    KNOWLEDGE_DOCUMENT_SUBMITTED = "knowledge_document_submitted"
+    KNOWLEDGE_DOCUMENT_DELETED = "knowledge_document_deleted"
+    # A person, or an operator's stale-embedding sweep, asked for a new index.
+    KNOWLEDGE_DOCUMENT_REINDEX_REQUESTED = "knowledge_document_reindex_requested"
+    # Indexing ended terminally - a rejected key, a model that does not exist, a
+    # document past a limit, a retry budget spent. Written by the system, once
+    # per failed generation, so "why did this document stop updating" has an
+    # answer beyond the current row.
+    KNOWLEDGE_DOCUMENT_INDEXING_FAILED = "knowledge_document_indexing_failed"
+
     # Platform staff reading across workspaces (ADR-095). The one place this
     # vocabulary records a *read*, and the exception is argued rather than
     # assumed: ordinary reads are not audited because a row per page view would

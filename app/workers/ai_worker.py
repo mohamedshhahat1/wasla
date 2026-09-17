@@ -69,7 +69,7 @@ from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.db.models.usage import UsageEventType
 from app.db.session import Database
 from app.integrations.openai.client import ResponsesClient, build_http_client
-from app.integrations.openai.embeddings import EmbeddingsClient
+from app.integrations.openai.embeddings import EMBED_QUERY, EmbeddingsClient
 from app.repositories.agent_repository import AgentRepository
 from app.repositories.agent_turn_repository import AgentTurnRepository
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
@@ -597,6 +597,7 @@ class AgentWorker:
                     api_key=api_key,
                     model=self._settings.openai_embedding_model,
                     dimensions=EMBEDDING_DIMENSIONS,
+                    operation=EMBED_QUERY,
                 )
                 # Shares the turn's client too. One small classification call
                 # runs before the agent composes anything, which is the only

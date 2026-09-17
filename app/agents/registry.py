@@ -32,7 +32,12 @@ from app.services.audit_service import AuditTrail
 from app.services.follow_up_service import MAX_DELAY, MIN_DELAY, FollowUpService
 from app.services.inbox_service import InboxService
 from app.services.lead_service import ExtractedLead, LeadService
-from app.services.retrieval_service import DEFAULT_TOP_K, MAX_TOP_K, RetrievalService
+from app.services.retrieval_service import (
+    DEFAULT_TOP_K,
+    MAX_TOP_K,
+    RetrievalService,
+    effective_top_k,
+)
 
 logger = get_logger(__name__)
 
@@ -299,8 +304,9 @@ async def _search_knowledge(context: ToolContext, arguments: dict[str, Any]) -> 
         )
 
     query = str(arguments["query"])
-    requested = arguments.get("max_results")
-    top_k = int(requested) if isinstance(requested, int) else DEFAULT_TOP_K
+    # Bounded by the service whatever the model asked for (M07): a count the
+    # model chooses is a count the model can make enormous.
+    top_k = effective_top_k(arguments.get("max_results"))
 
     service = RetrievalService(
         session=context.session,
@@ -309,6 +315,10 @@ async def _search_knowledge(context: ToolContext, arguments: dict[str, Any]) -> 
         tenant_id=context.tenant_id,
         embeddings=context.embeddings,
     )
+    # No threshold or context size is taken from the arguments at all; both
+    # are the server's (M27). A failed search raises
+    # `KnowledgeSearchUnavailableError`, which the orchestrator gives the model
+    # as a failed tool call rather than ending the customer's turn (RAG-03).
     retrieval = await service.search(query=query, top_k=top_k)
     logger.info(
         "agent.knowledge_searched",

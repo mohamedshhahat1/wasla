@@ -550,11 +550,12 @@ groups:
           summary: "An uploaded document has been unsearchable for over half an hour"
           description: >-
             A customer uploaded a document successfully and it is still not
-            indexed, so no agent can answer from it and nobody has been told.
-            The content is not lost. Check that a worker process is running both
-            the ingestion and ingestion_recovery loops and that Redis is
-            reachable from it; list the backlog with `python -m
-            app.workers.queues unindexed-documents`.
+            indexed, so no agent can answer from it. The content is not lost.
+            List the backlog with `python -m app.workers.queues
+            unindexed-documents`: a last error of `-` means the job never ran
+            (check the ingestion and ingestion_recovery loops and Redis); a
+            provider code means indexing is backing off after embedding
+            failures (check EmbeddingProviderUnavailable).
           runbook: docs/RUNBOOK.md
 
   - name: wasla-availability
@@ -608,9 +609,9 @@ groups:
         # or a sentiment reading actually experienced. Ratio, so a quiet night
         # and a busy afternoon are held to one standard.
         expr: |
-          sum(rate(wasla_provider_requests_total{provider="openai", outcome!="success"}[15m]))
+          sum(rate(wasla_provider_requests_total{provider="openai", operation=~"respond_.*", outcome!="success"}[15m]))
           /
-          clamp_min(sum(rate(wasla_provider_requests_total{provider="openai"}[15m])), 0.001)
+          clamp_min(sum(rate(wasla_provider_requests_total{provider="openai", operation=~"respond_.*"}[15m])), 0.001)
           > 0.2
         for: 15m
         labels:
@@ -630,7 +631,7 @@ groups:
         # Attempts, not calls. A 429 the retry absorbed is still a customer
         # waiting longer for a reply, and it never appears in the counter above.
         expr: |
-          sum(rate(wasla_provider_attempts_total{provider="openai", outcome="rate_limited"}[15m])) > 0.05
+          sum(rate(wasla_provider_attempts_total{provider="openai", operation=~"respond_.*", outcome="rate_limited"}[15m])) > 0.05
         for: 15m
         labels:
           severity: warning
@@ -649,7 +650,7 @@ groups:
         # a turn that exhausts its retries after engaging is stranded and its
         # customer is not answered by anything.
         expr: |
-          sum(rate(wasla_provider_attempts_total{provider="openai", outcome="unavailable"}[10m])) > 0.05
+          sum(rate(wasla_provider_attempts_total{provider="openai", operation=~"respond_.*", outcome="unavailable"}[10m])) > 0.05
         for: 10m
         labels:
           severity: critical
@@ -700,4 +701,119 @@ groups:
             are being sent a holding message and handed to a colleague. A
             sustained rate usually means the provider changed its response shape
             or a model is refusing; check the agent.empty_response log.
+          runbook: docs/RUNBOOK.md
+
+  # ================================================================== RAG
+  # Knowledge indexing and knowledge search (docs/RAG.md, RAG-05). Before these,
+  # a rejected embedding key and a total query-embedding outage were both
+  # invisible: every agent said it had no information, with every alert green.
+  - name: wasla-rag
+    interval: 30s
+    rules:
+      - alert: EmbeddingProviderUnavailable
+        # Final outcomes of embedding calls, for indexing and for searches
+        # alike. A ratio, and deliberately including refusals: a revoked key or
+        # a model name that does not exist fails every call, and that is exactly
+        # the outage that used to look like "nothing indexed yet".
+        expr: |
+          sum(rate(wasla_provider_requests_total{provider="openai", operation=~"embed_.*", outcome!="success"}[15m]))
+          /
+          clamp_min(sum(rate(wasla_provider_requests_total{provider="openai", operation=~"embed_.*"}[15m])), 0.001)
+          > 0.2
+        for: 15m
+        labels:
+          severity: critical
+          component: rag
+        annotations:
+          summary: "Embedding calls are failing"
+          description: >-
+            More than a fifth of embedding calls are failing after their retries,
+            so documents are not being indexed and knowledge searches are
+            answering without the knowledge base. Split
+            wasla_provider_requests_total by operation (embed_ingest,
+            embed_query) and outcome: failure is a refusal - check the API key
+            and OPENAI_EMBEDDING_MODEL, and `python -m app.workers.queues
+            failed-documents` for the code - while unavailable is the provider.
+          runbook: docs/RUNBOOK.md
+
+      - alert: EmbeddingRateLimited
+        # Attempts, not calls: a 429 the retry absorbed still slowed an upload
+        # or a customer's answer.
+        expr: |
+          sum(rate(wasla_provider_attempts_total{provider="openai", operation=~"embed_.*", outcome="rate_limited"}[15m])) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+          component: rag
+        annotations:
+          summary: "OpenAI is rate limiting embedding calls"
+          description: >-
+            Embedding attempts are being refused with 429 at a sustained rate.
+            Indexing backs off and retries, and searches wait longer; check the
+            account's embedding limits and whether a bulk upload or a
+            stale-embedding re-index is running.
+          runbook: docs/RUNBOOK.md
+
+      - alert: RAGRetrievalFailureRate
+        # Searches that could not be completed. The customer's turn continues
+        # without the knowledge base (RAG-03), which is why this has to be an
+        # alert: nothing a customer sees is broken, the answers are just worse.
+        expr: |
+          sum(rate(wasla_rag_retrievals_total{outcome="failed"}[15m]))
+          /
+          clamp_min(sum(rate(wasla_rag_retrievals_total[15m])), 0.001)
+          > 0.2
+        for: 15m
+        labels:
+          severity: warning
+          component: rag
+        annotations:
+          summary: "Knowledge searches are failing"
+          description: >-
+            More than a fifth of knowledge searches could not be completed, so
+            agents are answering without the company's documents. Check the
+            knowledge.search_failed log for its stage: embedding means the
+            provider (see EmbeddingProviderUnavailable), search means the
+            database.
+          runbook: docs/RUNBOOK.md
+
+      - alert: RAGIngestionFailureRate
+        # Indexing jobs that ended terminally, against those that ended at all.
+        # Retries in progress are neither.
+        expr: |
+          sum(rate(wasla_rag_ingestion_outcomes_total{outcome=~"failed|exhausted"}[30m]))
+          /
+          clamp_min(sum(rate(wasla_rag_ingestion_outcomes_total{outcome=~"published|failed|exhausted"}[30m])), 0.001)
+          > 0.5
+        for: 30m
+        labels:
+          severity: warning
+          component: rag
+        annotations:
+          summary: "Most document indexing is failing"
+          description: >-
+            More than half of the indexing attempts that finished in the last
+            half hour failed terminally. Run `python -m app.workers.queues
+            failed-documents`: provider codes point at the key, the model or the
+            provider; document_too_large and invalid_document are uploads to
+            fix, not an incident.
+          runbook: docs/RUNBOOK.md
+
+      - alert: RAGDocumentsStuck
+        # A claim is renewed before every embedding batch and lapses after ten
+        # minutes, and the recovery sweep then hands it on. Held for half an
+        # hour means the worker holding it is gone and nothing reclaimed it.
+        expr: max(wasla_oldest_processing_document_age_seconds) > 1800
+        for: 10m
+        labels:
+          severity: warning
+          component: rag
+        annotations:
+          summary: "A document has been held by an indexing worker for over half an hour"
+          description: >-
+            An indexing claim has not been renewed for half an hour, so the
+            worker that held it is gone and the recovery sweep has not handed it
+            on. Check the ingestion_recovery loop (WorkerLoopNotBeating) and list
+            the attempts with `python -m app.workers.queues
+            unindexed-documents`.
           runbook: docs/RUNBOOK.md

@@ -26,6 +26,8 @@ from fastapi import APIRouter, Response, status
 
 from app.api.route import CommittingRoute
 from app.core.dependencies import DatabaseDep, RedisDep, SettingsDep
+from app.core.embedding_space import OPENAI_PROVIDER, EmbeddingSpace
+from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.services.metrics_service import MetricsService
 
 router = APIRouter(route_class=CommittingRoute, tags=["health"])
@@ -63,5 +65,10 @@ async def metrics(redis: RedisDep, database: DatabaseDep, settings: SettingsDep)
         # own and publishes none; the `process_role` label on the series says
         # so rather than leaving a reader to assume otherwise.
         database=database,
+        space=EmbeddingSpace(
+            provider=OPENAI_PROVIDER,
+            model=settings.openai_embedding_model,
+            dimensions=EMBEDDING_DIMENSIONS,
+        ),
     ).render()
     return Response(content=body, media_type=CONTENT_TYPE)

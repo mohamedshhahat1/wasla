@@ -74,25 +74,91 @@ If the backlog is **not** shrinking:
 
 ### An uploaded document is never searchable
 
-**Alert:** `UnindexedDocumentBacklog`. **Metrics:** `wasla_pending_documents`, `wasla_oldest_pending_document_age_seconds`.
+**Alert:** `UnindexedDocumentBacklog`. **Metrics:** `wasla_pending_documents`, `wasla_oldest_pending_document_age_seconds`, `wasla_documents_retry_waiting`.
 
-Somebody uploaded a document successfully and no agent can answer from it. Almost always Redis was unavailable at the moment the upload committed: `KnowledgeService` logs that failure and swallows it, deliberately, because failing the request would throw away a document the customer had already given us.
+Somebody uploaded a document successfully, it has no active generation, and its indexing attempt has been outstanding for over half an hour in a workspace that is being served. Suspended workspaces are excluded on purpose: their indexing is paused until they are reactivated.
 
-**Nothing is lost.** The row and its text are in `documents` with `status = 'pending'`, and `IngestionRecoveryWorker` re-queues it. The alert fires on *age* rather than existence, because every healthy upload is `pending` for a few seconds.
+**Nothing is lost.** The row and its text are in `documents`, and the attempt is a `pending` or `processing` row in `document_index_generations`.
 
 ```
 docker compose exec worker python -m app.workers.queues unindexed-documents
 ```
 
-Each row shows its age, workspace, knowledge base and document id. No document contents: an operator needs to find it in the product, not read somebody's file out of a shell history.
+Each row shows the attempt's age, state, generation number, attempts so far, last error code, workspace and document id — never document text, titles or filenames. **The last error column tells the two causes apart:**
 
-If the backlog is **not** shrinking:
+* **`-`, zero tries** — the job never ran. Almost always Redis was unavailable when the upload committed. Check that a worker runs both the `ingestion` and `ingestion_recovery` loops (`WorkerLoopNotBeating`) and can reach Redis. The recovery sweep re-queues these on its own.
+* **A provider code** (`provider_unavailable`, `provider_rate_limited`, `provider_unreachable`, `dependency_unavailable`) — indexing is backing off after transient failures and will retry on its own, up to five attempts, then end as `retry_exhausted` in `failed-documents`. See `EmbeddingProviderUnavailable` below.
+* **`embeddings_not_configured`** does not appear here as a code; if nothing is ever tried and the worker logs `knowledge.embeddings_not_configured`, `OPENAI_API_KEY` is unset on the worker. Nothing is spent and nothing is marked failed; setting the key drains the backlog.
 
-1. Is a worker running the `ingestion_recovery` loop? Check `WORKER_KINDS` — it is in the default set, so an explicit list that omits it is the usual cause. `WorkerLoopNotBeating{kind="ingestion_recovery"}` says this directly.
-2. Is the `ingestion` loop running as well? Recovery only re-queues; the consumer is what indexes.
-3. Can either reach Redis?
+Re-queueing is safe to repeat. A worker's claim admits one worker per attempt, so a duplicate job costs one short transaction and no embedding call.
 
-Re-queueing is safe to repeat. Ingestion clears a document's chunks before writing new ones and leaves a `ready` document alone, so a duplicate job costs a round trip and changes nothing.
+### Documents failed to index
+
+**Alert:** `RAGIngestionFailureRate`. **Metrics:** `wasla_documents_indexing_failed`, `wasla_documents_indexing_exhausted`, `wasla_rag_ingestion_outcomes_total{outcome}`.
+
+```
+docker compose exec worker python -m app.workers.queues failed-documents
+```
+
+A failed attempt is **never retried automatically**. Read the code:
+
+* `provider_unauthorized`, `provider_forbidden` — the OpenAI key is wrong, revoked or not allowed embeddings. Fix the key first.
+* `provider_model_not_found`, `provider_invalid_request` — `OPENAI_EMBEDDING_MODEL` names a model that does not exist or does not accept `dimensions` (for example `text-embedding-ada-002`). Fix the configuration first.
+* `invalid_embedding`, `provider_response_too_large` — the provider, or a proxy in front of it, returned something that is not a valid embedding. Check egress proxies.
+* `retry_exhausted` — a transient outage outlasted five attempts. Check that the provider is healthy now.
+* `document_too_large`, `document_empty`, `invalid_document` — the upload itself. Not an incident; the workspace needs to split or fix the document.
+* `internal_error` — a defect. Collect the `knowledge.ingestion_failed` log line (it carries the exception class, never its message) before retrying.
+
+Then retry, one document at a time or through the workspace's own re-index action:
+
+```
+docker compose exec worker python -m app.workers.queues reindex-document <workspace-id> <document-id>
+```
+
+**A failed re-index takes nothing away.** If a document was already serving, `status` stays `ready` and its previous generation keeps answering; only the new attempt is `failed`. The failure is also in the workspace's audit trail as `knowledge_document_indexing_failed`.
+
+### Embedding calls are failing or throttled
+
+**Alerts:** `EmbeddingProviderUnavailable` (critical), `EmbeddingRateLimited`. **Metrics:** `wasla_provider_requests_total{provider="openai", operation=~"embed_.*"}`, `wasla_provider_attempts_total{…}`.
+
+`embed_ingest` is document indexing; `embed_query` is a knowledge search inside an agent turn. Split by `outcome`:
+
+* **`failure`** is a refusal — key, model, or an invalid response. Every document indexed now fails permanently with the codes above; searches return "could not be searched" to the model. Fix the configuration, then re-index the failed documents.
+* **`unavailable`** is the provider or the network. Indexing backs off and retries by itself; searches fail and agents answer without the knowledge base (the customer still gets a reply). Nothing to replay.
+* **`rate_limited`** — check the account's embedding limits and whether a bulk upload or a `reindex-stale-embeddings` run is under way; the latter is bounded by `--limit` and can be paused by not running the next batch.
+
+The OpenAI alerts in the AI section (`OpenAIUnavailable` and its siblings) cover only `respond_*` operations, so a firing embedding alert with those quiet means the embeddings path specifically.
+
+### Knowledge searches are failing
+
+**Alert:** `RAGRetrievalFailureRate`. **Metrics:** `wasla_rag_retrievals_total{outcome}`, `wasla_rag_retrieval_duration_seconds`, `wasla_rag_retrieved_passages`.
+
+Customers are still answered — a failed search becomes a failed tool call and the turn continues — but without the company's documents, so answers about products, prices and policies are worse or deferred to a colleague. Check `knowledge.search_failed` logs for `stage`:
+
+* `embedding` — the provider; see the section above.
+* `search` — the database: statement errors, a pgvector error, or an unhealthy connection. `reason` carries the exception class.
+
+A high `empty` rate with a low `failed` rate is not this alert. It can mean workspaces have not uploaded what customers ask about, or — after a model change — that documents are served from another embedding space: check `wasla_documents_stale_embedding`.
+
+### Documents are served from an old embedding model
+
+**Metric:** `wasla_documents_stale_embedding`.
+
+After `OPENAI_EMBEDDING_MODEL` changes, documents indexed with the previous model are **not searched** — a query from one model is not comparable with vectors from another, even at the same width — until they are re-indexed. Each keeps its old generation until the new one publishes.
+
+```
+docker compose exec worker python -m app.workers.queues stale-embeddings
+docker compose exec worker python -m app.workers.queues reindex-stale-embeddings --limit 100 --dry-run
+docker compose exec worker python -m app.workers.queues reindex-stale-embeddings --limit 100
+```
+
+Run it in batches and watch `EmbeddingRateLimited`. The command is coalesced per document, so running a batch twice queues nothing twice.
+
+### An indexing claim was abandoned
+
+**Alert:** `RAGDocumentsStuck`. **Metrics:** `wasla_documents_processing`, `wasla_oldest_processing_document_age_seconds`.
+
+A worker claims an attempt and renews the claim before every embedding batch; a claim not renewed for ten minutes is reclaimed by the recovery sweep and spends one of the five attempts. Held for half an hour means the worker holding it died and the sweep is not running. Check `WorkerLoopNotBeating{kind="ingestion_recovery"}`, then `unindexed-documents`. Nothing needs to be released by hand: once recovery runs, the attempt is re-queued, and a late worker that comes back cannot publish over it.
 
 ### A worker loop has stopped
 

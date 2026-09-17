@@ -5604,3 +5604,43 @@ already exist; what changed is that it is now counted and alerted on
 customer messages still produce two turns that can load the same history
 (AI-08); coalescing bursts is a product feature for later, and the atomic
 sentiment write is what keeps that case safe meanwhile.
+
+## ADR-106 — Documents Are Indexed In Generations, And The Last Good One Keeps Serving
+
+**Context.** The RAG audit found `documents.status` carrying two facts that cannot share a column: whether a document serves, and whether an indexing attempt is outstanding (RAG-01). A re-index set a serving document `pending`, hiding it for the length of the re-index and permanently if it failed. The failure itself was written inside the worker's transaction that the failure rolled back, so no document ever reached `failed`, and the recovery sweep re-embedded broken documents every minute for ever. The worker also held the document's row lock across every embedding call (RAG-04), so a delete waited on the provider and a duplicate job waited and then paid again (RAG-09).
+
+**Decision.**
+
+1. `document_index_generations` records each indexing attempt: state, claim token and lease, attempts, next retry time, last error, embedding space, chunk count. Every chunk belongs to one generation. At most one `active` and at most one `pending`/`processing` generation per document are partial unique indexes.
+2. Retrieval serves only active generations. A publish retires the previous active generation and activates the new one in one transaction; a failed attempt leaves the previous one active (PD-RAG-1).
+3. Indexing is three short transactions — claim, publish, failure record — with every provider call between them and no transaction open. The claim token fences out a worker whose claim was lost, and the claim is renewed before every embedding batch.
+4. Failures are classified at the source as permanent or transient. Permanent ends the attempt after one try; transient backs off (30 s doubling to 15 min, equal jitter) for at most five claims, then `retry_exhausted`. The retry budget lives on the generation, not in Redis.
+5. The recovery sweep re-queues only generations owed an attempt — unenqueued past the grace period, due for retry, or holding a lapsed lease — in active, undeleted workspaces. Never a failed one.
+6. Re-index requests are coalesced into the outstanding attempt.
+
+**Consequences.** A document can show `ready` while its latest attempt `failed`; the API reports both. Stale-lease reclaim spends an attempt, so a crash loop is bounded. Superseded generation rows are kept as history, their chunks are not. The backfill in migration `0063` gives every existing document generation 1 in the state its status implied.
+
+## ADR-107 — An Embedding's Space Is Part Of Its Identity
+
+**Context.** ADR-018 fixed the width and allowed swapping same-width models by configuration. Two same-width models place text in unrelated spaces, and nothing recorded which model made a stored vector, so a model change silently mixed spaces and ranked noise as relevance (RAG-06).
+
+**Decision.** Each published generation records provider, model, dimensions and an embedding schema version. A search compares its query only with active generations in the query's space. The schema version is bumped only for changes that make old vectors incomparable with new queries, never for chunking changes. Operators list and re-index documents in other spaces with `stale-embeddings` and `reindex-stale-embeddings`.
+
+**Consequences.** Changing `OPENAI_EMBEDDING_MODEL` makes existing knowledge unsearchable until re-indexed — deliberately. This amends ADR-018's note that same-width models can be swapped by configuration alone.
+
+## ADR-108 — Knowledge PDFs Are Parsed In A Killable Process Under Hard Limits, And Refused Rather Than Truncated
+
+**Context.** A 32 KB compressed PDF, inside the submitted-size limit, extracted 7.5 million characters on the API's event loop for six minutes, producing 7,500 chunks (RAG-02); a 60-page PDF was indexed to page 40 and reported ready (RAG-08).
+
+**Decision.** Knowledge PDF extraction runs in a separate interpreter with no secrets in its environment, an address-space and CPU limit where the platform supports one, a 20-second wall clock enforced by killing it, and at most two at a time per process. It refuses more than 40 pages before reading any, stops as soon as extracted text passes 400,000 characters, and the worker independently refuses more than 1,000 chunks or 600,000 passage characters before any embedding call. Every refusal names its limit. Text input rejects NUL, invalid Unicode and invisible-only content at the boundary. PDFs sent in conversations keep the media path's read-up-to-the-limit behaviour.
+
+**Consequences.** An upload request can wait up to the extraction deadline. Partial documents for long PDFs are a future product feature; until then a long PDF must be split.
+
+## ADR-109 — Knowledge Search Is Optional Enrichment; Its Failure Is A Tool Failure
+
+**Context.** A non-provider error during retrieval — a NaN query vector reaching pgvector — escaped the tool loop after the turn engaged, leaving the customer with no reply, no handoff and no outcome (RAG-03). Retrieved text rendered as `[n] From "title":` could forge extra source headers (RAG-12), and the tool path could pass a relevance threshold looser than intended (M27).
+
+**Decision.** `RetrievalService.search` raises only `KnowledgeSearchUnavailableError`, a `WaslaError` whose fixed message the model reads as a failed tool call. The embedding response is validated element by element; the vector query runs in a savepoint so its failure is rolled back without poisoning the turn's transaction. Passages are serialized as one JSON object inside `function_call_output`, budgeted over the serialized size. Result count (1–10), relevance threshold (no looser than 0.75), query length and context size are enforced by the service regardless of caller arguments. There is no grounded-only mode.
+
+**Consequences.** When knowledge is unavailable agents answer without it or offer a colleague, which is visible through `RAGRetrievalFailureRate` rather than through lost customers.
+

@@ -121,6 +121,9 @@ PURGED_TABLES: tuple[str, ...] = (
     "leads",
     "contacts",
     "document_chunks",
+    # Indexing attempts, their errors and embedding identity. Between the chunks
+    # that reference them and the documents they reference.
+    "document_index_generations",
     "documents",
     "knowledge_bases",
     "agent_tools",

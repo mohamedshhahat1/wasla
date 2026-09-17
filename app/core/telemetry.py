@@ -295,6 +295,23 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Unresolved collection attempts by how reconciliation settled them.",
         ("outcome",),
     ),
+    # How ingestion jobs ended (RAG-05). `outcome` is one of `IndexingOutcome`'s
+    # seven fixed values - published, retry scheduled, failed, exhausted, stale,
+    # suspended, skipped - and nothing identifying: no workspace, no document,
+    # no failure code. Which document failed and why is on its generation row.
+    "wasla_rag_ingestion_outcomes_total": (
+        "Document indexing jobs by how they ended.",
+        ("outcome",),
+    ),
+    # Knowledge searches by what they found (RAG-05). Three values: `found`,
+    # `empty`, `failed`. `failed` is the one that used to be invisible - an
+    # embedding outage made every agent say it had no information, with every
+    # alert green - and `empty` is kept apart from it because a knowledge base
+    # with nothing on a subject is an answer, not an incident.
+    "wasla_rag_retrievals_total": (
+        "Knowledge searches by outcome.",
+        ("outcome",),
+    ),
 }
 
 # Distributions written across processes, by metric name: help text, the labels
@@ -323,6 +340,9 @@ PENDING_PAYMENT_AGE_BUCKETS: Final[tuple[float, ...]] = (
     259_200.0,
 )
 
+# Passages per search, one bucket per possible count up to the top-k ceiling.
+RETRIEVED_PASSAGE_BUCKETS: Final[tuple[float, ...]] = (0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0)
+
 REDIS_HISTOGRAMS: Final[dict[str, tuple[str, tuple[str, ...], tuple[float, ...]]]] = {
     "wasla_provider_request_duration_seconds": (
         "How long a call to an external provider took, whether or not it succeeded.",
@@ -333,6 +353,20 @@ REDIS_HISTOGRAMS: Final[dict[str, tuple[str, tuple[str, ...], tuple[float, ...]]
         "Age of the oldest collection attempt whose provider outcome is unknown.",
         (),
         PENDING_PAYMENT_AGE_BUCKETS,
+    ),
+    # A whole knowledge search - query embedding and vector query - whatever it
+    # ended in. No labels: the outcome split is the counter above.
+    "wasla_rag_retrieval_duration_seconds": (
+        "How long a knowledge search took, embedding included.",
+        (),
+        PROVIDER_LATENCY_BUCKETS,
+    ),
+    # How many passages a search handed the model. Bounded by the top-k ceiling,
+    # so the buckets are the whole domain.
+    "wasla_rag_retrieved_passages": (
+        "Passages a knowledge search returned after the relevance threshold.",
+        (),
+        RETRIEVED_PASSAGE_BUCKETS,
     ),
 }
 
@@ -527,6 +561,20 @@ async def record_provider_attempt(
         "wasla_provider_attempts_total",
         {"provider": str(provider), "operation": operation, "outcome": str(outcome)},
     )
+
+
+async def record_ingestion_outcome(outcome: str) -> None:
+    """One ingestion job, by how it ended (an `IndexingOutcome` value)."""
+    await _increment("wasla_rag_ingestion_outcomes_total", {"outcome": outcome})
+
+
+async def record_retrieval(*, outcome: str, duration_seconds: float, passages: int) -> None:
+    """One knowledge search: `found`, `empty` or `failed`, how long, how many kept."""
+    await _increment("wasla_rag_retrievals_total", {"outcome": outcome})
+    await _observe(
+        "wasla_rag_retrieval_duration_seconds", {}, duration_seconds, PROVIDER_LATENCY_BUCKETS
+    )
+    await _observe("wasla_rag_retrieved_passages", {}, float(passages), RETRIEVED_PASSAGE_BUCKETS)
 
 
 async def record_agent_turn_outcome(outcome: str) -> None:

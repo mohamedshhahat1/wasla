@@ -52,6 +52,7 @@ class _Workspace:
         self.conversation_id = uuid.uuid4()
         self.knowledge_base_id = uuid.uuid4()
         self.document_id = uuid.uuid4()
+        self.generation_id = uuid.uuid4()
 
 
 async def _seed(session: AsyncSession, workspace: _Workspace) -> None:
@@ -157,6 +158,22 @@ async def _seed(session: AsyncSession, workspace: _Workspace) -> None:
             "digest": uuid.uuid4().hex,
         },
     )
+    # Since migration 0063 every chunk belongs to an indexing generation of its
+    # own document, so the seeded workspace carries one for the probes to name.
+    await session.execute(
+        text(
+            "INSERT INTO document_index_generations "
+            "(id, tenant_id, document_id, number, state, trigger, attempts, chunk_count, "
+            " created_at, updated_at) "
+            "VALUES (:id, :tenant_id, :document_id, 1, 'pending', 'submitted', 0, 0, "
+            " now(), now())"
+        ),
+        {
+            "id": workspace.generation_id,
+            "tenant_id": workspace.tenant_id,
+            "document_id": workspace.document_id,
+        },
+    )
     await session.flush()
 
 
@@ -207,17 +224,17 @@ RELATIONS = {
     ),
     "document_chunks -> documents": (
         "INSERT INTO document_chunks "
-        "(id, tenant_id, document_id, knowledge_base_id, ordinal, content, "
+        "(id, tenant_id, document_id, knowledge_base_id, generation_id, ordinal, content, "
         " token_estimate, created_at, updated_at) "
-        "VALUES (:id, :tenant_id, :parent_id, :knowledge_base_id, 0, 'probe', 1, "
+        "VALUES (:id, :tenant_id, :parent_id, :knowledge_base_id, :generation_id, 0, 'probe', 1, "
         " now(), now())",
         "document_id",
     ),
     "document_chunks -> knowledge_bases": (
         "INSERT INTO document_chunks "
-        "(id, tenant_id, document_id, knowledge_base_id, ordinal, content, "
+        "(id, tenant_id, document_id, knowledge_base_id, generation_id, ordinal, content, "
         " token_estimate, created_at, updated_at) "
-        "VALUES (:id, :tenant_id, :document_id, :parent_id, 1, 'probe', 1, "
+        "VALUES (:id, :tenant_id, :document_id, :parent_id, :generation_id, 1, 'probe', 1, "
         " now(), now())",
         "knowledge_base_id",
     ),
@@ -237,6 +254,7 @@ def _arguments(child: _Workspace, parent: _Workspace, parent_field: str) -> dict
         "conversation_id": child.conversation_id,
         "knowledge_base_id": child.knowledge_base_id,
         "document_id": child.document_id,
+        "generation_id": child.generation_id,
         "digest": uuid.uuid4().hex,
     }
 
