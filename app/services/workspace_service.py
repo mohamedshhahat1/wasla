@@ -73,6 +73,7 @@ from app.repositories.billing_repository import SubscriptionRepository
 from app.repositories.payment_method_repository import PaymentMethodRepository
 from app.repositories.tenant_repository import normalise_slug
 from app.services.audit_service import AuditTrail
+from app.services.follow_up_service import FollowUpService
 from app.services.subscription_service import (
     SubscriptionService,
     bootstrap_default_subscription,
@@ -569,6 +570,10 @@ class WorkspaceService:
             membership.status = MembershipStatus.REVOKED
             membership.revoked_at = moment
             membership.revoked_by_id = actor.id
+        await self._stop_automated_messages(
+            tenant_id=tenant.id,
+            reason="The workspace was deleted.",
+        )
         await self._session.flush()
 
         AuditTrail(self._session, tenant_id=tenant.id).record(
@@ -728,6 +733,10 @@ class WorkspaceService:
             )
 
         tenant.status = TenantStatus.SUSPENDED
+        await self._stop_automated_messages(
+            tenant_id=tenant.id,
+            reason="The workspace was suspended.",
+        )
         await self._session.flush()
 
         AuditTrail(self._session, tenant_id=tenant.id).record(
@@ -752,6 +761,34 @@ class WorkspaceService:
             },
         )
         return tenant
+
+    async def _stop_automated_messages(self, *, tenant_id: uuid.UUID, reason: str) -> None:
+        """Cancel the AI-scheduled messages a workspace leaving service still holds.
+
+        The first of two guards (PD-TOOLS-06). A follow-up an agent scheduled is
+        a WhatsApp message to a real customer, waiting on a timer, and a
+        workspace the platform has stopped serving must not send one. Cancelling
+        here is what stops the rows waiting; `FollowUpService.dispatch` re-reads
+        the workspace immediately before every send and is the authoritative
+        guard, because a transition landing after the sweep has claimed a row
+        cannot be seen by this one.
+
+        Only what an agent scheduled. A colleague's own follow-up is their work
+        and is not a decision this should take for them.
+        """
+        cancelled = await FollowUpService(
+            session=self._session,
+            tenant_id=tenant_id,
+        ).cancel_agent_follow_ups(reason=reason)
+        if cancelled:
+            logger.info(
+                "workspace.automated_messages_cancelled",
+                extra={
+                    "event": "workspace.automated_messages_cancelled",
+                    "tenant_id": str(tenant_id),
+                    "cancelled": cancelled,
+                },
+            )
 
     async def restore(self, *, tenant_id: uuid.UUID, actor: User) -> Tenant:
         """Return a suspended workspace to service. Platform staff only.
