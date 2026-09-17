@@ -294,6 +294,55 @@ async def test_only_the_active_generation_is_ever_searched(
     assert "STRAY_GENERATION_MARKER" not in [row.chunk.content for row in found]
 
 
+async def test_purging_a_workspace_erases_every_knowledge_row_and_nothing_of_its_neighbours(
+    db_session: AsyncSession,
+) -> None:
+    """At runtime, not only in the table list: bases, documents, generations, chunks."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.services.workspace_purge_service import WorkspacePurgeService
+    from tests.integration.rag_invariants import sweep
+    from tests.knowledge_seed import FAKE_SPACE
+
+    now = datetime.now(UTC)
+    doomed = await _tenant(db_session)
+    neighbour = await _tenant(db_session)
+    for tenant in (doomed, neighbour):
+        view = await _indexed(db_session, tenant)
+        knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
+        await knowledge.reindex(view.document.id)
+        await knowledge.ingest(
+            document_id=view.document.id, embeddings=as_embeddings(FakeEmbeddings())
+        )
+    tables = ("knowledge_bases", "documents", "document_index_generations", "document_chunks")
+
+    async def counts(tenant: Tenant) -> dict[str, int]:
+        return {
+            table: int(
+                await db_session.scalar(
+                    text(f"SELECT count(*) FROM {table} WHERE tenant_id = :t"),  # noqa: S608
+                    {"t": tenant.id},
+                )
+                or 0
+            )
+            for table in tables
+        }
+
+    before = await counts(doomed)
+    # Presence: a superseded and an active generation, with chunks, really exist.
+    assert before["document_index_generations"] == 2 and before["document_chunks"] > 0
+    doomed.deleted_at = now - timedelta(days=31)
+    doomed.purge_due_at = now - timedelta(days=1)
+    await db_session.flush()
+
+    await WorkspacePurgeService(db_session).purge(doomed, now=now)
+
+    assert await counts(doomed) == dict.fromkeys(tables, 0)
+    assert await counts(neighbour) == before
+    result = await sweep(db_session, space=FAKE_SPACE)
+    assert result.violations["rag_rows_of_purged_workspaces"] == 0
+
+
 def test_generations_are_erased_with_the_workspace() -> None:
     assert "document_index_generations" in PURGED_TABLES
     assert (
