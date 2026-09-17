@@ -120,12 +120,6 @@ VIOLATIONS: Final[dict[str, str]] = {
         JOIN tenants t ON t.id = g.tenant_id
         WHERE g.state = 'processing' AND {scope:g}
           AND (t.status <> 'active' OR t.deleted_at IS NOT NULL)""",
-    "active_generation_in_another_embedding_space": """
-        SELECT count(*) FROM document_index_generations g
-        WHERE state = 'active' AND {scope:g}
-          AND (embedding_provider, embedding_model, embedding_dimensions,
-               embedding_schema_version)
-              IS DISTINCT FROM (:provider, :model, :dimensions, :schema_version)""",
     "rag_rows_of_purged_workspaces": """
         SELECT (SELECT count(*) FROM knowledge_bases x JOIN tenants t ON t.id = x.tenant_id
                  WHERE t.purged_at IS NOT NULL)
@@ -156,6 +150,18 @@ PRESENCE: Final[dict[str, str]] = {
     "failed_generations": (
         "SELECT count(*) FROM document_index_generations g WHERE state = 'failed' AND {scope:g}"
     ),
+    # Not a violation: a document served from an embedding space other than the
+    # configured one is a legal state after a model change, and what RAG-06
+    # requires is that it is visible (`needs_reindex`, the stale-embedding gauge
+    # and command) and never compared with the configured space's queries -
+    # which the search filter and its tests prove. Counted, so a sweep report
+    # shows how much of it there was.
+    "active_generations_in_another_embedding_space": """
+        SELECT count(*) FROM document_index_generations g
+        WHERE state = 'active' AND {scope:g}
+          AND (embedding_provider, embedding_model, embedding_dimensions,
+               embedding_schema_version)
+              IS DISTINCT FROM (:provider, :model, :dimensions, :schema_version)""",
     "embedding_usage_rows": (
         "SELECT count(*) FROM usage_events u "
         "WHERE event_type IN ('embedding_request', 'embedding_input_token') AND {scope:u}"
