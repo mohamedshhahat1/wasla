@@ -266,6 +266,13 @@ class Indexing:
             return list(rows)
 
     async def cleanup(self) -> None:
+        # A test that failed while a worker was held at the provider gate would
+        # otherwise leave that worker - and any lock it holds - waiting for ever,
+        # and the delete below waiting behind it. Released first, and given a
+        # moment to finish, so a failing concurrency test fails instead of hangs.
+        if self.provider.gate is not None and not self.provider.gate.is_set():
+            self.provider.gate.set()
+            await asyncio.sleep(0.5)
         async with self.database.session() as session:
             if self.tenants:
                 await session.execute(delete(AuditLog).where(AuditLog.tenant_id.in_(self.tenants)))
