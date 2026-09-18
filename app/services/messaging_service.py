@@ -45,6 +45,7 @@ from app.core.exceptions import (
     RateLimitedError,
     ValidationError,
 )
+from app.core.filenames import require_storable_filename
 from app.core.logging import get_logger
 from app.core.media_types import SNIFF_BYTES, MediaClass
 from app.core.media_types import resolve as resolve_media_type
@@ -448,6 +449,15 @@ class MessagingService:
                 )
                 return replayed
 
+        # Before anything reaches Meta (MEDIA-06). The name used to be stored
+        # raw after the send, so one over 300 characters, or carrying a NUL,
+        # was delivered to the customer and then failed to record: the request
+        # errored, the message stayed `pending`, and a retry sent it twice. A
+        # name that cannot be stored as given is refused here, with nothing
+        # sent; one that can is brought to the canonical form every later step
+        # uses - the row, and the Meta-safe name derived from it.
+        display_name = require_storable_filename(filename)
+
         detected = resolve_media_type(claimed=mime_type, prefix=content[:SNIFF_BYTES])
         canonical = detected.mime_type
         family = _whatsapp_kind(detected.kind)
@@ -473,7 +483,7 @@ class MessagingService:
         if storage is not None:
             await self._entitlements.require(LimitKey.STORAGE_BYTES, additional=len(content))
 
-        upload_name = _safe_filename(filename, mime_type=canonical)
+        upload_name = _safe_filename(display_name, mime_type=canonical)
 
         # The two halves of a media send, split because only the second one can
         # reach a customer. Uploading a file to Meta creates a handle valid for
@@ -524,7 +534,7 @@ class MessagingService:
             message=message,
             content=content,
             mime_type=canonical,
-            filename=filename,
+            filename=display_name,
             storage=storage,
         )
         return message
