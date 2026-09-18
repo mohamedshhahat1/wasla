@@ -264,6 +264,12 @@ class MediaService:
             return self._as_it_stands(row)
         if row.wa_media_id is None:
             return await self._finish(row, MediaReason.NO_FILE)
+        refusal = await self._lifecycle_refusal(row)
+        if refusal is not None:
+            # Before Meta is asked anything: no descriptor, no download, no
+            # object, no provider spend for a workspace the platform has
+            # stopped serving (MEDIA-08, PD-MEDIA-05).
+            return await self._finish(row, refusal)
         if self._whatsapp is None:
             return await self._finish(row, MediaReason.CREDENTIAL_UNAVAILABLE)
 
@@ -285,6 +291,11 @@ class MediaService:
 
         if fetched.refusal is not None:
             return await self._finish(row, fetched.refusal)
+        refusal = await self._lifecycle_refusal(row)
+        if refusal is not None:
+            # Suspended, deleted or released while the file was on the wire.
+            # The bytes are dropped here; no object is written for it.
+            return await self._finish(row, refusal)
         downloaded = fetched.downloaded
         if downloaded is None:  # pragma: no cover - `_fetch` returns one or the other
             return await self._finish(row, MediaReason.DOWNLOAD_FAILED)
@@ -589,6 +600,12 @@ class MediaService:
             # A row mid-upload has a key and no proven object. Reading from it
             # would consume a write that has not been finalised (ADR-087).
             return await self._finish(row, MediaReason.NOTHING_STORED)
+        refusal = await self._lifecycle_refusal(row)
+        if refusal is not None:
+            # No vision, transcription or PDF parse for a workspace that is no
+            # longer served. The object already stored stays, under the same
+            # retention and purge as every other stored file.
+            return await self._finish(row, refusal)
 
         if self._claim_id is None or row.claim_id != self._claim_id:
             claimed = await self._claim(row, status=MediaStatus.STORED)
@@ -717,6 +734,28 @@ class MediaService:
         if row.claim_id is not None and row.claim_id != claim_id and self._claim_is_live(row):
             return MediaOutcome(media_id=row.id, status=row.status, deferred=True)
         return await self._finish(row, MediaReason.ABANDONED)
+
+    # ------------------------------------------------------------ lifecycle
+
+    async def _lifecycle_refusal(self, row: MessageMedia) -> MediaReason | None:
+        """Why this file may not be processed now, or None if it may (MEDIA-08).
+
+        Asked fresh before each thing that costs something - Meta, the object
+        store, a paid read - because the answer can change between them. A
+        closed conversation or a disabled agent is deliberately *not* a
+        refusal: the file is still the customer's message and is kept, and
+        whether anybody answers it is the agent worker's decision (AI-06).
+        """
+        serving = await self._media.serving(row.conversation_id)
+        if serving is None:
+            return MediaReason.CHANNEL_UNAVAILABLE
+        if serving.workspace_deleted:
+            return MediaReason.WORKSPACE_DELETED
+        if not serving.workspace_active:
+            return MediaReason.WORKSPACE_SUSPENDED
+        if not serving.channel_available:
+            return MediaReason.CHANNEL_UNAVAILABLE
+        return None
 
     # --------------------------------------------------------------- claims
 

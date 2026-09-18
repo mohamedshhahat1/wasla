@@ -11,20 +11,43 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import ColumnElement, and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.conversation import Conversation, Message
+from app.db.models.enums import TenantStatus
 from app.db.models.media import (
     UNRESOLVED_MEDIA_STATUSES,
     MediaStatus,
     MediaStorageState,
     MessageMedia,
 )
-from app.db.models.whatsapp import WhatsAppEvent, WhatsAppEventState
+from app.db.models.tenant import Tenant
+from app.db.models.whatsapp import (
+    WhatsAppAccount,
+    WhatsAppAccountStatus,
+    WhatsAppEvent,
+    WhatsAppEventState,
+)
 from app.repositories.base import BaseRepository, TenantScopedRepository
+
+
+@dataclass(frozen=True, slots=True)
+class MediaServing:
+    """Whether the platform is still serving the workspace and number a file came in on.
+
+    Read as columns at the moment it is asked, never from mapped objects: a
+    worker that loaded the conversation before a suspension would otherwise go
+    on seeing the workspace it loaded (the same reasoning as
+    `app.agents.lifecycle`).
+    """
+
+    workspace_active: bool
+    workspace_deleted: bool
+    channel_available: bool
 
 
 class MediaRepository(TenantScopedRepository[MessageMedia]):
@@ -129,6 +152,46 @@ class MediaRepository(TenantScopedRepository[MessageMedia]):
 
         rows = await self._all(self._select().where(MessageMedia.message_id.in_(message_ids)))
         return {row.message_id: row for row in rows}
+
+    async def serving(self, conversation_id: uuid.UUID) -> MediaServing | None:
+        """The lifecycle a file is processed under, read now (MEDIA-08).
+
+        Tenant-scoped on the conversation, so another workspace's conversation
+        reads as missing rather than as somebody else's state.
+        """
+        row = (
+            await self._session.execute(
+                select(
+                    Tenant.status,
+                    Tenant.deleted_at,
+                    WhatsAppAccount.status,
+                    WhatsAppAccount.released_at,
+                )
+                .select_from(Conversation)
+                .join(Tenant, Tenant.id == Conversation.tenant_id)
+                .join(
+                    WhatsAppAccount,
+                    and_(
+                        WhatsAppAccount.id == Conversation.account_id,
+                        WhatsAppAccount.tenant_id == Conversation.tenant_id,
+                    ),
+                )
+                .where(
+                    Conversation.id == conversation_id,
+                    Conversation.tenant_id == self.tenant_id,
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        workspace_status, deleted_at, account_status, released_at = row
+        return MediaServing(
+            workspace_active=workspace_status is TenantStatus.ACTIVE,
+            workspace_deleted=deleted_at is not None,
+            channel_available=(
+                account_status is WhatsAppAccountStatus.ACTIVE and released_at is None
+            ),
+        )
 
     async def count_unresolved(self, conversation_id: uuid.UUID) -> int:
         """How many files on this conversation still owe it an answer."""

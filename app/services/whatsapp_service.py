@@ -63,6 +63,7 @@ from app.repositories.whatsapp_repository import (
 )
 from app.services.conversation_service import ConversationProjectionService
 from app.services.follow_up_service import FollowUpService
+from app.services.media_outcomes import MediaReason, status_for, text_for
 from app.services.opt_out import is_stop_request
 from app.workers.media_queue import MediaJob, MediaQueue
 from app.workers.queue import AgentJob, AgentQueue
@@ -311,6 +312,8 @@ class WhatsAppIngestionService:
         projection = self._projection(account.tenant_id)
         if isinstance(source, InboundMessage):
             message = await projection.project_message(account_id=account.id, message=source)
+            if historical and source.media is not None:
+                await self._record_unprocessed_media(account.tenant_id, message)
             step.owed.append(
                 self._message_handoff(
                     event=event,
@@ -368,7 +371,9 @@ class WhatsAppIngestionService:
         recorded, not answered. The workspace cannot send through that number
         any more - `MessagingService._dispatch` refuses a claim that is not
         live - so an agent turn could only end in a refusal, after paying for
-        an inference (MSG-01).
+        an inference (MSG-01). A file on it is recorded the same way: its row
+        is written terminal and nothing is queued, so Meta is never asked for
+        it and nothing is stored or read (MEDIA-08).
 
         **A message Wasla cannot read** - a reaction, an order, a system
         notice - has no content to answer. It was still being handed to an
@@ -381,13 +386,32 @@ class WhatsAppIngestionService:
         produces a reply about nothing (ADR-092). Its debt is the download, not
         the turn.
         """
+        if historical:
+            # Recorded, not answered - and a file on it is not fetched either
+            # (`_record_unprocessed_media`).
+            return _Handoff(event=event)
         if source.media is not None:
             attachments.append((tenant_id, message.id))
             return _Handoff(event=event, media_for_message=(tenant_id, message.id))
-        if historical or message.kind is MessageKind.UNSUPPORTED:
+        if message.kind is MessageKind.UNSUPPORTED:
             return _Handoff(event=event)
         answering.append((tenant_id, message.conversation_id, message.id))
         return _Handoff(event=event, agent_for_conversation=(tenant_id, message.conversation_id))
+
+    async def _record_unprocessed_media(self, tenant_id: uuid.UUID, message: Message) -> None:
+        """Keep a released number's file as history, and never fetch it (MEDIA-08).
+
+        The text beside it is recorded and not answered (MSG-01); the file is
+        treated the same way. Its row is written terminal at once - nothing is
+        queued, so Meta is never asked for it, nothing is stored or read, and no
+        row is left waiting on a job that will not come.
+        """
+        media = await self._media_repository(tenant_id).get_for_message(message.id)
+        if media is None or media.is_resolved:
+            return
+        media.status = status_for(MediaReason.CHANNEL_UNAVAILABLE)
+        media.last_error = text_for(MediaReason.CHANNEL_UNAVAILABLE)
+        media.processed_at = datetime.now(UTC)
 
     def _settle(
         self,
