@@ -1017,3 +1017,65 @@ tests:
               description: >-
                 An indexing claim has not been renewed for half an hour, so the worker that held it is gone and the recovery sweep has not handed it on. Check the ingestion_recovery loop (WorkerLoopNotBeating) and list the attempts with `python -m app.workers.queues unindexed-documents`.
               runbook: docs/RUNBOOK.md
+
+  # -------------------------------------------------------- agent tool calls
+  - interval: 30s
+    name: ordinary refusals do not look like tool failures
+    input_series:
+      - series: 'wasla_agent_tool_executions_total{job="wasla-api", tool="record_lead_details", outcome="succeeded"}'
+        values: "0+10x300"
+      - series: 'wasla_agent_tool_executions_total{job="wasla-api", tool="record_lead_details", outcome="rejected"}'
+        values: "0+5x300"
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: AgentToolFailures
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: AgentToolDenials
+        exp_alerts: []
+
+  - interval: 30s
+    name: a sustained run of tool failures alerts
+    input_series:
+      - series: 'wasla_agent_tool_executions_total{job="wasla-api", tool="schedule_follow_up", outcome="succeeded"}'
+        values: "0+1x300"
+      - series: 'wasla_agent_tool_executions_total{job="wasla-api", tool="schedule_follow_up", outcome="failed"}'
+        values: "0+1x300"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AgentToolFailures
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: AgentToolFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: ai
+            exp_annotations:
+              summary: "Agent tools are failing"
+              description: >-
+                More than a tenth of agent tool calls are ending in a failure rather than a refusal, so the model is being told its tools do not work and customers are getting answers composed without them. Group wasla_agent_tool_executions_total by tool to see which one, and read the agent.tool_crashed log for the exception class.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 30s
+    name: a sustained run of denials alerts
+    input_series:
+      - series: 'wasla_agent_tool_executions_total{job="wasla-api", tool="search_knowledge", outcome="succeeded"}'
+        values: "0+1x300"
+      - series: 'wasla_agent_tool_executions_total{job="wasla-api", tool="search_knowledge", outcome="denied"}'
+        values: "0+1x300"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AgentToolDenials
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: AgentToolDenials
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: ai
+            exp_annotations:
+              summary: "Agent tool calls are being denied"
+              description: >-
+                A quarter of agent tool calls are being refused for want of an enabled grant. Check whether a tool was revoked while agents still expect it, and read the agent.tool_not_granted log for the tool names being asked for; a name no agent was ever granted is worth reading the conversation for.
+              runbook: docs/RUNBOOK.md

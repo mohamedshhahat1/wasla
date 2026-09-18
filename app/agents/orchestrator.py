@@ -11,27 +11,42 @@ project and lets a worker decide whether a turn is kept or rolled back.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from collections.abc import Awaitable, Callable, Sequence, Set
-from dataclasses import dataclass
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Final
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.lifecycle import serving_state, tool_refusal_for
 from app.agents.memory import build_window
 from app.agents.registry import (
     HANDOFF_TOOL,
     ToolArgumentError,
     ToolContext,
+    ToolDefinition,
     ToolRegistry,
     build_default_registry,
+    validate_arguments,
 )
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
+from app.core.telemetry import UNKNOWN_TOOL, record_tool_execution
 from app.db.models.agent import DEFAULT_MAX_OUTPUT_TOKENS, Agent
 from app.db.models.agent_turn import TurnOutcome
 from app.db.models.conversation import Conversation, ConversationMode, Message, MessageDirection
+from app.db.models.tool_execution import (
+    ToolExecution as ToolExecutionRecord,
+)
+from app.db.models.tool_execution import (
+    ToolExecutionReason,
+    ToolExecutionState,
+    meta_for,
+)
 from app.db.session import released
 from app.integrations.openai.client import ResponsesClient
 from app.integrations.openai.embeddings import EmbeddingsClient
@@ -39,6 +54,10 @@ from app.integrations.openai.types import TokenUsage, ToolCall, ToolResult, Turn
 from app.repositories.agent_repository import AgentRepository, AgentToolRepository
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
 from app.repositories.media_repository import MediaRepository
+from app.repositories.tool_execution_repository import (
+    ToolExecutionRepository,
+    terminal_values,
+)
 from app.services.messaging_service import WHATSAPP_TEXT_MAX_CHARS
 from app.services.sentiment_service import SentimentService
 
@@ -48,6 +67,49 @@ MAX_ROUNDS: Final = 3
 # Failed sends are filtered out of the window after loading, so fetching exactly
 # the message limit could leave the window short.
 HISTORY_MULTIPLIER: Final = 2
+
+# How many tool calls one model response may make, and how many one turn may
+# make across all its rounds (TOOL-08, PD-TOOLS-03). Server constants, and that
+# is the point: nothing in a provider response chooses them. Before this the
+# executor ran whatever it was given - one scripted response of eighty calls
+# executed all eighty, made forty embedding requests, wrote forty audit rows and
+# grew the next request from 2.4 kB to 30 kB. The practical ceiling was the
+# model's output-token budget and the 1 MiB body limit, neither of which is a
+# decision anybody took.
+#
+# Eight and twelve, because the tools that exist are used one or two at a time
+# and a legitimate turn has never needed more: search, record what was learned,
+# schedule a nudge, hand over. A model asking for more than eight things at once
+# has lost the thread, and the cost of being wrong is one refused call the model
+# reads and can retry on the next round - against the cost of an unbounded fan
+# out into somebody else's API.
+MAX_TOOL_CALLS_PER_RESPONSE: Final = 8
+MAX_TOOL_CALLS_PER_TURN: Final = 12
+
+# What the model reads when a call was not run. Fixed sentences: they carry no
+# database state, no exception text and no customer content, and they say enough
+# for the model to do something else.
+_OVER_BUDGET_OUTPUT: Final = (
+    "That tool call was not run: this turn has made too many tool calls. "
+    "Answer the customer with what you already know, or hand the conversation "
+    "to a colleague."
+)
+_UNAVAILABLE_NOW_OUTPUT: Final = (
+    "That tool is not available on this conversation right now. Do not retry it."
+)
+_ROUND_LIMIT_OUTPUT: Final = (
+    "That tool call was not run: there is no round left to read its result. "
+    "Answer the customer with what you already know."
+)
+_DUPLICATE_OUTPUT: Final = "That tool call was already made in this turn; it was not run again."
+_AFTER_HANDOFF_OUTPUT: Final = (
+    "This conversation has been handed to a colleague, so that call was not run. "
+    "Do not reply further."
+)
+_FAILED_OUTPUT: Final = (
+    "That tool did not work. Do not try it again; answer the customer with what "
+    "you already know, or hand the conversation to a colleague."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +154,62 @@ class AgentOutcome:
         if not self.reply:
             return TurnOutcome.EMPTY_RESPONSE if self.rounds > 0 else TurnOutcome.NOTHING_TO_ANSWER
         return TurnOutcome.REPLIED
+
+
+@dataclass(slots=True)
+class _CallBudget:
+    """How many tool calls this turn has left, and this response (TOOL-08).
+
+    **Every call the provider asked for is counted**, including the ones refused
+    for a bad argument, denied for a missing grant or suppressed as a duplicate.
+    Counting only the calls that ran would let a model spend the budget on
+    malformed ones for free, which is the shape of the bypass the cap exists to
+    close.
+
+    Two numbers rather than one because they answer different questions: the
+    per-response cap bounds one fan-out, the per-turn cap bounds a model that
+    fans out modestly three rounds running.
+    """
+
+    per_response: int
+    per_turn: int
+    turn_used: int = 0
+    response_used: int = 0
+
+    def start_response(self) -> None:
+        self.response_used = 0
+
+    def take(self) -> ToolExecutionReason | None:
+        """Charge one call, and say which cap it broke - or None if it fits."""
+        self.turn_used += 1
+        self.response_used += 1
+        if self.turn_used > self.per_turn:
+            return ToolExecutionReason.TURN_CALL_LIMIT
+        if self.response_used > self.per_response:
+            return ToolExecutionReason.RESPONSE_CALL_LIMIT
+        return None
+
+
+@dataclass(slots=True)
+class _TurnTools:
+    """The tool state of one turn: identity, budget and what has already run."""
+
+    budget: _CallBudget
+    agent_turn_id: uuid.UUID | None = None
+    trigger_message_id: uuid.UUID | None = None
+    #: Provider call ids already executed in this turn. The provider is not
+    #: required to make these unique and has been observed repeating one inside
+    #: a single response, so this is what stops a repeat becoming a second
+    #: business effect (TOOL-08, PD-TOOLS-04). The unique index on
+    #: `tool_executions` is the backstop behind it.
+    seen_call_ids: set[str] = field(default_factory=set)
+    #: Set once a handoff has succeeded in the response being executed. Every
+    #: later call of that response is recorded and not run (PD-TOOLS-02).
+    handed_over: bool = False
+    #: Executions whose row could not be written. Kept so a record that was
+    #: rolled back with its savepoint is not updated again against a row that no
+    #: longer exists.
+    unrecorded: set[uuid.UUID] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +355,9 @@ class AgentOrchestrator:
         sentiment: SentimentService | None = None,
         meter_round: Callable[[str], Awaitable[None]] | None = None,
         output_ceiling: int = DEFAULT_MAX_OUTPUT_TOKENS,
+        agent_turn_id: uuid.UUID | None = None,
+        trigger_message_id: uuid.UUID | None = None,
+        unit_of_work: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
@@ -266,6 +387,25 @@ class AgentOrchestrator:
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._media = MediaRepository(session, tenant_id=tenant_id)
+        self._executions = ToolExecutionRepository(session, tenant_id=tenant_id)
+        # The turn this orchestrator is running, so every tool call it executes
+        # is recoverable from the customer's message afterwards (TOOL-12). Both
+        # are optional because a unit test may drive the loop with no turn row
+        # at all; the worker always supplies them.
+        self._tools = _TurnTools(
+            budget=_CallBudget(
+                per_response=MAX_TOOL_CALLS_PER_RESPONSE,
+                per_turn=MAX_TOOL_CALLS_PER_TURN,
+            ),
+            agent_turn_id=agent_turn_id,
+            trigger_message_id=trigger_message_id,
+        )
+        # A way to open a *clean* transaction, used only when the turn's own has
+        # been lost and a terminal execution outcome still has to be written.
+        # Optional for the same reason as the meter: a unit test without a
+        # database drives the loop without one, and then a lost transaction
+        # simply loses the record it could not write.
+        self._unit_of_work = unit_of_work
 
     async def answer(
         self,
@@ -409,8 +549,17 @@ class AgentOrchestrator:
                 session=self._session,
                 embeddings=self._embeddings,
             )
-            for call in reply.tool_calls:
-                execution = await self._execute(call, context, granted)
+            self._tools.budget.start_response()
+            self._tools.handed_over = False
+            for ordinal, call in enumerate(reply.tool_calls, start=1):
+                execution = await self._execute(
+                    call,
+                    context,
+                    granted,
+                    agent=resolved,
+                    round_number=round_number,
+                    ordinal=ordinal,
+                )
                 results.append(ToolResult.for_call(call, output=execution.output))
                 tools_run.append(call.name)
                 if call.name == HANDOFF_TOOL and execution.succeeded:
@@ -420,6 +569,13 @@ class AgentOrchestrator:
                     # silence the agent either: the model reads that the tool
                     # did not work and answers on the next round.
                     handed_off = True
+                    # And the rest of *this response* stops here (PD-TOOLS-02).
+                    # The loop used to run on, so a response of
+                    # `[handoff, schedule_follow_up]` handed the conversation to
+                    # a colleague - cancelling the nudges that existed - and then
+                    # planted a fresh nudge on it. Recorded rather than silently
+                    # dropped, so the trail shows what the model asked for.
+                    self._tools.handed_over = True
 
             if handed_off:
                 # The conversation belongs to a person now. Another round could
@@ -539,17 +695,34 @@ class AgentOrchestrator:
         call: ToolCall,
         context: ToolContext,
         granted: Set[str],
+        *,
+        agent: Agent | None = None,
+        round_number: int = 1,
+        ordinal: int = 1,
     ) -> str:
         """The output the model reads for one call; see `_execute`."""
-        return (await self._execute(call, context, granted)).output
+        return (
+            await self._execute(
+                call,
+                context,
+                granted,
+                agent=agent,
+                round_number=round_number,
+                ordinal=ordinal,
+            )
+        ).output
 
     async def _execute(
         self,
         call: ToolCall,
         context: ToolContext,
         granted: Set[str],
+        *,
+        agent: Agent | None = None,
+        round_number: int = 1,
+        ordinal: int = 1,
     ) -> ToolExecution:
-        """Run one call, turning refusals into output the model can learn from.
+        """Run one call, turning every refusal into output the model can learn from.
 
         Answers two things, because they are two facts: what the model should
         read, and whether the handler actually ran to completion. Only the
@@ -563,47 +736,492 @@ class AgentOrchestrator:
         The model is told what went wrong and gets a chance to adapt, which is
         the whole reason tool output exists.
 
-        **The grant is re-checked here, and that is the point of this method.**
-        Offering a tool and permitting a tool were previously the same act: only
-        granted tools were described to the model, but `ToolRegistry.run` looks a
-        name up in the whole deployment registry, so any tool the deployment
-        implements would execute if the model named it. A model naming a tool it
-        was never offered is not hypothetical - the tool names are ordinary
-        English, and the conversation contains text written by a stranger whose
-        message is read as instructions.
-        The exposure was real: an agent granted nothing but a handoff could be
-        talked into calling `search_knowledge`, which reads the workspace's
-        private documents and returns them into a reply the customer receives.
-        A grant is an authorization decision, so it is enforced where the
-        authority is used rather than only where the menu is written.
+        The gates, in order, and each one is a finding:
+
+        1. **The call is recorded before anything is decided** (TOOL-12). A
+           refusal and a success now leave the same evidence, so "no row" means
+           "the provider never asked" rather than "something happened and
+           nothing recorded it".
+        2. **The budget is charged** (TOOL-08), for every call including the
+           ones about to be refused, so malformed calls cannot buy a bypass.
+        3. **A handoff already made in this response stops the rest of it**
+           (PD-TOOLS-02).
+        4. **A provider call id seen before in this turn is a duplicate**
+           (PD-TOOLS-04), not a second execution.
+        5. **The grant is re-read from the database** (TOOL-05, PD-TOOLS-07).
+           Offering a tool and permitting a tool were previously the same act:
+           only granted tools were described to the model, but `ToolRegistry.run`
+           looks a name up in the whole deployment registry, so any tool the
+           deployment implements would execute if the model named it - and the
+           tool names are ordinary English in a conversation containing text a
+           stranger wrote. The `granted` set closed that; what it did not close
+           is revocation, because the set is a snapshot taken at turn start. An
+           administrator withdrawing a capability now stops the calls of the
+           turn already running.
+        6. **The workspace, agent, conversation and number are re-read**
+           (TOOL-03). Everything a *reply* depends on was already re-read before
+           sending; nothing a *tool* depends on was re-read at all, so a
+           workspace suspended or soft-deleted while the model was composing
+           went on writing CRM records and scheduling customer messages. This is
+           also what makes human ownership outrank a stale AI decision
+           (PD-TOOLS-01) and what makes the freshness explicit rather than
+           accidental (TOOL-21).
+        7. **Side-effecting calls do not run on the final round**
+           (PD-TOOLS-05, TOOL-19). Their result could not be read by any round,
+           so the only thing they can produce is an effect the model never got
+           to reason about. A handoff still runs: it *is* the ending.
+        8. **Arguments are validated against published bounds** (TOOL-01).
+        9. **The handler runs inside a savepoint**, so a failure loses the call
+           rather than the turn, and **any** exception is contained - not only
+           the two this method was originally written to expect.
         """
-        if call.name not in granted:
+        started = perf_counter()
+        record = self._executions.start(
+            conversation_id=context.conversation_id,
+            tool_name=call.name,
+            round_number=round_number,
+            call_ordinal=ordinal,
+            agent_turn_id=self._tools.agent_turn_id,
+            trigger_message_id=self._tools.trigger_message_id,
+            agent_id=agent.id if agent is not None else None,
+            provider_call_id=call.call_id or None,
+            # Names, never values. Tool arguments are where a customer's name,
+            # a handoff sentence and a follow-up body live (ADR-052).
+            argument_fields=meta_for(call.arguments),
+        )
+        execution = await self._gated(
+            call,
+            context,
+            granted,
+            agent=agent,
+            round_number=round_number,
+            record=record,
+        )
+        await self._report(record, tool=call.name, seconds=perf_counter() - started)
+        return execution
+
+    async def _gated(
+        self,
+        call: ToolCall,
+        context: ToolContext,
+        granted: Set[str],
+        *,
+        agent: Agent | None,
+        round_number: int,
+        record: ToolExecutionRecord,
+    ) -> ToolExecution:
+        """Every check that can refuse a call, then the call. See `_execute`."""
+        over = self._tools.budget.take()
+        if over is not None:
             logger.warning(
-                "agent.tool_not_granted",
+                "agent.tool_budget_exhausted",
                 extra={
-                    "event": "agent.tool_not_granted",
+                    "event": "agent.tool_budget_exhausted",
                     "tool": call.name,
-                    "agent_id": str(context.conversation_id),
-                    "tenant_id": str(context.tenant_id),
+                    "conversation_id": str(context.conversation_id),
+                    "reason": over.value,
                 },
             )
-            # Phrased for the model rather than for a log reader: it gets a
-            # chance to answer without the tool instead of the turn collapsing.
-            return ToolExecution(
-                output=f"The tool {call.name} is not available to this agent.",
-                succeeded=False,
+            return await self._refuse(record, over, _OVER_BUDGET_OUTPUT)
+
+        if self._tools.handed_over:
+            return await self._refuse(
+                record,
+                ToolExecutionReason.HANDOFF_COMPLETED,
+                _AFTER_HANDOFF_OUTPUT,
+            )
+
+        if call.call_id:
+            # Claimed here rather than after the handler returns, so a provider
+            # call id is one logical execution whatever became of the first one
+            # (PD-TOOLS-04). Claiming it only on success would let a call that
+            # was refused come back under the same id and run.
+            if call.call_id in self._tools.seen_call_ids:
+                logger.info(
+                    "agent.tool_call_duplicate",
+                    extra={
+                        "event": "agent.tool_call_duplicate",
+                        "tool": call.name,
+                        "conversation_id": str(context.conversation_id),
+                    },
+                )
+                await self._settle(
+                    record,
+                    state=ToolExecutionState.DUPLICATE,
+                    reason=ToolExecutionReason.DUPLICATE_CALL,
+                )
+                return ToolExecution(output=_DUPLICATE_OUTPUT, succeeded=False)
+            self._tools.seen_call_ids.add(call.call_id)
+
+        if call.name not in granted:
+            return await self._deny(call, context, record, ToolExecutionReason.NOT_GRANTED)
+
+        definition = self._registry.get(call.name)
+        if definition is None:
+            # A grant naming a tool this build does not implement. Grants
+            # outlive code, so this is a deployment fact rather than an
+            # authorization one, and the model is told plainly that the name
+            # does not exist here.
+            logger.warning(
+                "agent.tool_not_implemented",
+                extra={"event": "agent.tool_not_implemented", "tool": call.name},
+            )
+            return await self._refuse(
+                record,
+                ToolExecutionReason.TOOL_NOT_IMPLEMENTED,
+                f"There is no tool named {call.name}.",
+            )
+
+        fresh = await self._grant_refusal(agent, call.name)
+        if fresh is not None:
+            return await self._deny(call, context, record, fresh)
+
+        state = await serving_state(
+            self._session,
+            tenant_id=context.tenant_id,
+            conversation_id=context.conversation_id,
+            agent_id=agent.id if agent is not None else None,
+        )
+        blocked = tool_refusal_for(state)
+        if blocked is not None:
+            logger.info(
+                "agent.tool_not_served",
+                extra={
+                    "event": "agent.tool_not_served",
+                    "tool": call.name,
+                    "conversation_id": str(context.conversation_id),
+                    "reason": blocked.value,
+                },
+            )
+            return await self._refuse(record, blocked, _UNAVAILABLE_NOW_OUTPUT)
+
+        if round_number >= self._max_rounds and not definition.terminal:
+            # No round left to read the result, so the only thing this call can
+            # produce is an effect nothing reasoned about (PD-TOOLS-05). A
+            # knowledge search would spend an embedding call for nobody; a lead
+            # write and a follow-up would land in a turn the model never got to
+            # think about.
+            return await self._refuse(
+                record,
+                ToolExecutionReason.ROUND_LIMIT,
+                _ROUND_LIMIT_OUTPUT,
             )
 
         try:
-            output = await self._registry.run(
-                name=call.name,
-                arguments=call.arguments,
-                context=context,
-            )
+            arguments = validate_arguments(definition, call.arguments)
         except ToolArgumentError as error:
             logger.info("agent.tool_rejected", extra={"tool": call.name})
+            return await self._refuse(record, error.reason, str(error))
+
+        ToolExecutionRepository.authorize(record)
+        return await self._invoke(definition, context, arguments, record=record)
+
+    async def _grant_refusal(self, agent: Agent | None, name: str) -> ToolExecutionReason | None:
+        """Whether this agent may run `name` **now**, read from the database.
+
+        `populate_existing` so an administrator's change is seen rather than the
+        grant row this session loaded when the turn began (PD-TOOLS-07). A turn
+        start snapshot is enough to decide what to *offer*; it is not
+        authorization, and an inference is long enough - up to three rounds of
+        three attempts - for a capability to be withdrawn inside one.
+
+        A turn with no agent at all cannot be checked against a grant and is
+        refused, which is the safe direction: a tool running for nobody is a
+        tool nobody authorised.
+        """
+        if agent is None:
+            return ToolExecutionReason.NOT_GRANTED
+        grant = await self._grants.get(agent_id=agent.id, name=name, populate_existing=True)
+        if grant is None:
+            return ToolExecutionReason.NOT_GRANTED
+        if not grant.enabled:
+            return ToolExecutionReason.TOOL_DISABLED
+        return None
+
+    async def _invoke(
+        self,
+        definition: ToolDefinition,
+        context: ToolContext,
+        arguments: dict[str, object],
+        *,
+        record: ToolExecutionRecord,
+    ) -> ToolExecution:
+        """Run the handler, containing whatever it does (TOOL-01, TOOL-02).
+
+        **The execution record is written before the savepoint opens**, and the
+        record is not touched again inside it. A savepoint rollback undoes every
+        statement issued since the savepoint *and expires the objects those
+        statements wrote*, so a record marked `started` inside the savepoint
+        would come back expired - and the next plain attribute read of it would
+        be a lazy load with no greenlet to run in, which is a second, worse way
+        to lose the turn. Marked and flushed first, it is clean by the time the
+        handler runs and survives whatever the handler does.
+
+        **Every exception is contained, not only the two that were expected.**
+        `ToolArgumentError` and `WaslaError` were handled and everything else
+        escaped to the worker, which - past engagement - has no honest response
+        but to give up. So a NUL in a handoff reason, a lone surrogate in a lead
+        field, an out-of-range delay, or an ordinary concurrent duplicate ended
+        the customer's turn: no reply, no handoff, no explanation, the
+        conversation left in AI mode so nobody was asked to pick it up, and the
+        earlier rounds' writes still committed. The model can cause those, so
+        "unexpected" was never the right word for them.
+
+        `asyncio.CancelledError` is a `BaseException` and is deliberately not
+        caught: a worker shutting down is not a tool that failed.
+        """
+        ToolExecutionRepository.begin(record)
+        await self._flush(record)
+        try:
+            if definition.releases_session:
+                # A tool that hands the connection back cannot be wrapped in a
+                # savepoint - releasing commits, which would close it (TOOL-09).
+                # Such a tool contains its own database work in a nested
+                # transaction of its own; `search_knowledge` always has.
+                output = await definition.handler(context, arguments)
+            else:
+                async with self._session.begin_nested():
+                    output = await definition.handler(context, arguments)
+        except ToolArgumentError as error:
+            # A handler may still reject what the declaration could not express.
+            # Recorded as a *failure* rather than a rejection, and the
+            # distinction is the one this vocabulary is built on: `rejected`
+            # means the call never ran, and this one did.
+            logger.info("agent.tool_rejected", extra={"tool": definition.name})
+            await self._settle(
+                record,
+                state=ToolExecutionState.FAILED,
+                reason=error.reason,
+            )
             return ToolExecution(output=str(error), succeeded=False)
         except WaslaError as error:
-            logger.warning("agent.tool_failed", extra={"tool": call.name})
+            logger.warning("agent.tool_failed", extra={"tool": definition.name})
+            await self._settle(
+                record,
+                state=ToolExecutionState.FAILED,
+                reason=ToolExecutionReason.DOMAIN_ERROR,
+            )
             return ToolExecution(output="That did not work: " + str(error), succeeded=False)
+        except Exception as error:
+            # Safe metadata only. The exception itself is not formatted into the
+            # log: a driver error quotes its SQL and its bound parameters, which
+            # is a customer's name, a handoff sentence or a follow-up body
+            # (TOOL-10).
+            logger.warning(
+                "agent.tool_crashed",
+                extra={
+                    "event": "agent.tool_crashed",
+                    "tool": definition.name,
+                    "conversation_id": str(context.conversation_id),
+                    "reason": type(error).__name__,
+                },
+            )
+            await self._settle(
+                record,
+                state=ToolExecutionState.FAILED,
+                reason=ToolExecutionReason.INTERNAL_ERROR,
+            )
+            # A fixed sentence: never the exception, which could carry SQL, a
+            # provider body or the customer's own values back to the model.
+            return ToolExecution(output=_FAILED_OUTPUT, succeeded=False)
+
+        await self._settle(record, state=ToolExecutionState.SUCCEEDED, reason=None)
         return ToolExecution(output=output, succeeded=True)
+
+    async def _deny(
+        self,
+        call: ToolCall,
+        context: ToolContext,
+        record: ToolExecutionRecord,
+        reason: ToolExecutionReason,
+    ) -> ToolExecution:
+        """Refuse a call the agent is not authorised to make."""
+        logger.warning(
+            "agent.tool_not_granted",
+            extra={
+                "event": "agent.tool_not_granted",
+                "tool": call.name,
+                # The conversation, under its own name. This carried the
+                # conversation id under the key `agent_id`, so the one signal
+                # that a model tried to use a capability it does not have
+                # pointed an investigator at an agent that does not exist
+                # (TOOL-15).
+                "conversation_id": str(context.conversation_id),
+                "agent_id": str(record.agent_id) if record.agent_id else None,
+                "tenant_id": str(context.tenant_id),
+                "reason": reason.value,
+            },
+        )
+        # Phrased for the model rather than for a log reader: it gets a chance
+        # to answer without the tool instead of the turn collapsing. One
+        # sentence for both refusals, because "you were never given this" and
+        # "this was taken away" are the same instruction to the model and the
+        # difference belongs in the record, not in the prompt.
+        return await self._refuse(
+            record,
+            reason,
+            f"The tool {call.name} is not available to this agent.",
+        )
+
+    async def _refuse(
+        self,
+        record: ToolExecutionRecord,
+        reason: ToolExecutionReason,
+        output: str,
+    ) -> ToolExecution:
+        await self._settle(record, state=ToolExecutionState.REJECTED, reason=reason)
+        return ToolExecution(output=output, succeeded=False)
+
+    async def _settle(
+        self,
+        record: ToolExecutionRecord,
+        *,
+        state: ToolExecutionState,
+        reason: ToolExecutionReason | None,
+    ) -> None:
+        """Close the execution record out, however the turn's transaction is.
+
+        The ordinary path stages the terminal state in the turn's own session,
+        so a successful call's record commits with the mutation it describes -
+        a row saying `succeeded` beside a rolled-back lead would be worse than
+        no row at all.
+
+        The fallback exists because the whole point of this table is answering
+        questions after something went wrong, and "the transaction was broken,
+        so nothing was written" is exactly the answer it must not give.
+        """
+        ToolExecutionRepository.settle(record, state=state, reason=reason)
+        await self._flush(record)
+
+    async def _flush(self, record: ToolExecutionRecord) -> None:
+        """Write the record, without letting bookkeeping cost the turn its work.
+
+        **Inside a savepoint of its own.** Writing a record must never be the
+        thing that ends a customer's turn: a failure here rolls back the
+        record's own statement and leaves everything the turn has finished
+        exactly where it was. Without that, an unflushable record would abort
+        the whole transaction - so the table built to explain failures would
+        have become a new way to cause them.
+
+        A record whose write failed is not written again. Its statements were
+        undone with the savepoint, so a later update would address a row that
+        does not exist; the execution is reported once as unrecorded and the
+        turn carries on.
+        """
+        if record.id in self._tools.unrecorded:
+            return
+        try:
+            async with self._session.begin_nested():
+                await self._session.flush()
+            return
+        except Exception as error:
+            self._tools.unrecorded.add(record.id)
+            # Detached, not merely abandoned. A savepoint rollback puts the row
+            # back among the session's pending objects, so the *next* flush -
+            # the one that commits a tool's actual work - would reissue the
+            # statement that just failed, outside any savepoint, and take the
+            # turn's transaction with it.
+            with contextlib.suppress(Exception):
+                self._session.expunge(record)
+            logger.warning(
+                "agent.tool_execution_unrecorded",
+                extra={
+                    "event": "agent.tool_execution_unrecorded",
+                    "tool": record.tool_name,
+                    "reason": type(error).__name__,
+                },
+            )
+        if record.is_terminal:
+            await self._settle_out_of_band(
+                record,
+                state=record.state,
+                reason=record.reason_code,
+            )
+
+    async def _settle_out_of_band(
+        self,
+        record: ToolExecutionRecord,
+        *,
+        state: ToolExecutionState,
+        reason: ToolExecutionReason | None,
+    ) -> None:
+        """Write a terminal outcome through a transaction of its own.
+
+        The last resort, reached when the turn's session could not hold the
+        record even inside a savepoint. An insert rather than an update: the
+        savepoint took the original row with it, so there is nothing to update,
+        and a terminal outcome nobody can read is the one answer this table must
+        never give.
+
+        Failure here is logged and swallowed. A metric is an observation of the
+        work and so is this record; neither may become a participant in it.
+        """
+        if self._unit_of_work is None:
+            return
+        try:
+            async with self._unit_of_work() as clean:
+                clean.add(
+                    ToolExecutionRecord(
+                        id=record.id,
+                        tenant_id=self._tenant_id,
+                        agent_turn_id=record.agent_turn_id,
+                        trigger_message_id=record.trigger_message_id,
+                        agent_id=record.agent_id,
+                        conversation_id=record.conversation_id,
+                        tool_name=record.tool_name,
+                        provider_call_id=record.provider_call_id,
+                        round_number=record.round_number,
+                        call_ordinal=record.call_ordinal,
+                        requested_at=record.requested_at,
+                        authorized_at=record.authorized_at,
+                        started_at=record.started_at,
+                        argument_fields=record.argument_fields,
+                        **terminal_values(state=state, reason=reason),
+                    )
+                )
+        except Exception as error:
+            logger.warning(
+                "agent.tool_execution_unrecorded",
+                extra={
+                    "event": "agent.tool_execution_unrecorded",
+                    "reason": type(error).__name__,
+                },
+            )
+
+    async def _report(self, record: ToolExecutionRecord, *, tool: str, seconds: float) -> None:
+        """Count one tool call, by tool and by closed outcome (TOOL-11).
+
+        The tool label comes from the registry, never from the call: a name the
+        model invented is counted as `unknown`, because the conversation
+        contains text a stranger wrote and a label domain a stranger can extend
+        is a cardinality leak.
+        """
+        await record_tool_execution(
+            tool=tool if self._registry.knows(tool) else UNKNOWN_TOOL,
+            outcome=_tool_outcome(record),
+            duration_seconds=seconds,
+        )
+
+
+#: Reasons that mean "this agent was not allowed to call this tool", as opposed
+#: to the many other ways a call can be refused. Separated because an operator
+#: alerts on them differently: a denial spike is a configuration change or an
+#: injection attempt, and a rejection spike is a model behaving badly.
+_DENIAL_REASONS: Final = frozenset(
+    {ToolExecutionReason.NOT_GRANTED, ToolExecutionReason.TOOL_DISABLED}
+)
+
+
+def _tool_outcome(record: ToolExecutionRecord) -> str:
+    """The metric label for one finished execution, from its own state."""
+    if record.state is ToolExecutionState.SUCCEEDED:
+        return "succeeded"
+    if record.state is ToolExecutionState.DUPLICATE:
+        return "duplicate"
+    if record.state is ToolExecutionState.FAILED:
+        return "failed"
+    if record.state is ToolExecutionState.AMBIGUOUS:
+        return "ambiguous"
+    if record.reason_code in _DENIAL_REASONS:
+        return "denied"
+    return "rejected"

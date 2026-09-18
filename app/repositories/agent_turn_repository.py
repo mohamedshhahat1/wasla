@@ -108,6 +108,21 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
             expires=expires,
         )
 
+    async def id_for(self, *, trigger_message_id: uuid.UUID) -> uuid.UUID | None:
+        """This turn's durable id, for the records its tools will write.
+
+        A separate read rather than a value threaded out of `claim`, because a
+        turn may also be *adopted* - the claim's second branch updates a row it
+        did not insert - and both paths need the same answer.
+        """
+        found: uuid.UUID | None = await self._session.scalar(
+            select(AgentTurn.id).where(
+                AgentTurn.tenant_id == self._tenant_id,
+                AgentTurn.trigger_message_id == trigger_message_id,
+            )
+        )
+        return found
+
     async def _adopt(
         self,
         *,

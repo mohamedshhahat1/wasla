@@ -252,6 +252,22 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Agent turns by how they ended.",
         ("outcome",),
     ),
+    # What the tool executor did, by tool and by closed outcome (TOOL-11).
+    # There was no tool series at all: a crashed turn caused by a tool, an
+    # authorization denial and a duplicate suppression were visible only as a
+    # generic worker failure or a log line, so a grant being abused or one
+    # workspace's tool failing could not be seen, graphed or alerted on.
+    #
+    # Both labels are closed. `tool` is a name from the deployment's own
+    # registry - four values today, and a name the model invented is counted as
+    # `unknown` rather than becoming a label of its own, because a label domain
+    # a stranger's message can extend is a cardinality leak. `outcome` is the
+    # six terminal states. No tenant, conversation, turn or call id appears
+    # anywhere near this metric.
+    "wasla_agent_tool_executions_total": (
+        "Agent tool calls by tool and by how the execution ended.",
+        ("tool", "outcome"),
+    ),
     # Retention (ADR-078). One label with three fixed values, and no tenant,
     # media id, filename or storage key anywhere near it - the cardinality of
     # this metric is three, for ever.
@@ -367,6 +383,16 @@ REDIS_HISTOGRAMS: Final[dict[str, tuple[str, tuple[str, ...], tuple[float, ...]]
         "Passages a knowledge search returned after the relevance threshold.",
         (),
         RETRIEVED_PASSAGE_BUCKETS,
+    ),
+    # How long one tool call took, from the executor taking it up to its
+    # terminal state (TOOL-11). Labelled by tool alone: the outcome split is the
+    # counter above, and crossing the two would multiply the series for a
+    # question nobody asks. Provider-latency buckets, because the one tool that
+    # calls anybody else dominates the distribution.
+    "wasla_agent_tool_execution_duration_seconds": (
+        "How long an agent tool call took, refusals included.",
+        ("tool",),
+        PROVIDER_LATENCY_BUCKETS,
     ),
 }
 
@@ -585,6 +611,46 @@ async def record_agent_turn_outcome(outcome: str) -> None:
     with `FailureCategory`.
     """
     await _increment("wasla_agent_turn_outcomes_total", {"outcome": outcome})
+
+
+#: What a tool call is counted as. Six values, closed, and deliberately coarser
+#: than `ToolExecutionReason`: an operator graphs "denied" and drills into the
+#: reason in the table, rather than carrying eighteen reason labels in Redis.
+TOOL_OUTCOMES: Final[tuple[str, ...]] = (
+    "succeeded",
+    "rejected",
+    "denied",
+    "failed",
+    "duplicate",
+    "ambiguous",
+)
+
+#: The label a tool this deployment does not implement is counted under. A name
+#: the model invented must not become a label of its own - the conversation
+#: contains text a stranger wrote, and that is the shape of a cardinality leak.
+UNKNOWN_TOOL: Final = "unknown"
+
+
+async def record_tool_execution(
+    *,
+    tool: str,
+    outcome: str,
+    duration_seconds: float,
+) -> None:
+    """One agent tool call: which tool, how it ended, how long it took.
+
+    `tool` must already have been checked against the registry by the caller -
+    see `UNKNOWN_TOOL`. `outcome` is one of `TOOL_OUTCOMES`, passed as a string
+    so this leaf module does not import the models, the same arrangement
+    `record_agent_turn_outcome` has with `TurnOutcome`.
+    """
+    await _increment("wasla_agent_tool_executions_total", {"tool": tool, "outcome": outcome})
+    await _observe(
+        "wasla_agent_tool_execution_duration_seconds",
+        {"tool": tool},
+        duration_seconds,
+        PROVIDER_LATENCY_BUCKETS,
+    )
 
 
 @dataclass(slots=True)
@@ -886,7 +952,9 @@ __all__ = [
     "HTTP_REQUESTS",
     "REDIS_COUNTERS",
     "REDIS_HISTOGRAMS",
+    "TOOL_OUTCOMES",
     "UNHANDLED_ERRORS",
+    "UNKNOWN_TOOL",
     "CallOutcome",
     "JobOutcome",
     "Provider",
@@ -902,6 +970,7 @@ __all__ = [
     "record_payment_reconciliation",
     "record_provider_call",
     "record_retention_pass",
+    "record_tool_execution",
     "record_upload_reconciliation",
     "set_counter_sink",
 ]

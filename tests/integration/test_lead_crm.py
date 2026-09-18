@@ -200,14 +200,18 @@ async def test_an_agent_updates_the_open_lead_rather_than_creating_another(
     conversation = await _conversation(db_session, tenant=acme, wa_id="201000000001")
     service = _service(db_session, acme)
 
-    first = await service.capture_from_conversation(
-        conversation_id=conversation.id,
-        extracted=ExtractedLead(name="Ahmed"),
-    )
-    second = await service.capture_from_conversation(
-        conversation_id=conversation.id,
-        extracted=ExtractedLead(interest="Apartment finishing"),
-    )
+    first = (
+        await service.capture_from_conversation(
+            conversation_id=conversation.id,
+            extracted=ExtractedLead(name="Ahmed"),
+        )
+    ).lead
+    second = (
+        await service.capture_from_conversation(
+            conversation_id=conversation.id,
+            extracted=ExtractedLead(interest="Apartment finishing"),
+        )
+    ).lead
     await db_session.flush()
 
     assert first.id == second.id
@@ -333,10 +337,12 @@ async def test_an_agent_may_correct_its_own_earlier_guess(db_session: AsyncSessi
         conversation_id=conversation.id,
         extracted=ExtractedLead(interest="Something vague"),
     )
-    lead = await service.capture_from_conversation(
-        conversation_id=conversation.id,
-        extracted=ExtractedLead(interest="150m apartment finishing"),
-    )
+    lead = (
+        await service.capture_from_conversation(
+            conversation_id=conversation.id,
+            extracted=ExtractedLead(interest="150m apartment finishing"),
+        )
+    ).lead
     await db_session.flush()
 
     assert lead.interest == "150m apartment finishing"
@@ -380,10 +386,12 @@ async def test_confirming_an_unchanged_value_still_protects_it(db_session: Async
     conversation = await _conversation(db_session, tenant=acme, wa_id="201000000008")
     service = _service(db_session, acme)
 
-    lead = await service.capture_from_conversation(
-        conversation_id=conversation.id,
-        extracted=ExtractedLead(name="Ahmed"),
-    )
+    lead = (
+        await service.capture_from_conversation(
+            conversation_id=conversation.id,
+            extracted=ExtractedLead(name="Ahmed"),
+        )
+    ).lead
     await db_session.flush()
 
     # The same value a person now confirms by hand.
@@ -406,10 +414,12 @@ async def test_an_agent_cannot_reach_judgement_fields(db_session: AsyncSession) 
     conversation = await _conversation(db_session, tenant=acme, wa_id="201000000009")
     service = _service(db_session, acme)
 
-    lead = await service.capture_from_conversation(
-        conversation_id=conversation.id,
-        extracted=ExtractedLead(name="Ahmed"),
-    )
+    lead = (
+        await service.capture_from_conversation(
+            conversation_id=conversation.id,
+            extracted=ExtractedLead(name="Ahmed"),
+        )
+    ).lead
     await db_session.flush()
 
     assert lead.status is LeadStatus.NEW
@@ -437,10 +447,12 @@ async def test_a_bad_extracted_value_is_dropped_without_losing_the_rest(
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme, wa_id="201000000011")
 
-    lead = await _service(db_session, acme).capture_from_conversation(
-        conversation_id=conversation.id,
-        extracted=ExtractedLead(name="Ahmed", email="not-an-email", budget_amount="500k"),
-    )
+    lead = (
+        await _service(db_session, acme).capture_from_conversation(
+            conversation_id=conversation.id,
+            extracted=ExtractedLead(name="Ahmed", email="not-an-email", budget_amount="500k"),
+        )
+    ).lead
     await db_session.flush()
 
     assert lead.name == "Ahmed"
@@ -452,10 +464,12 @@ async def test_a_captured_lead_records_where_it_came_from(db_session: AsyncSessi
     acme = await _tenant(db_session, slug="acme")
     conversation = await _conversation(db_session, tenant=acme, wa_id="201000000012")
 
-    lead = await _service(db_session, acme).capture_from_conversation(
-        conversation_id=conversation.id,
-        extracted=ExtractedLead(name="Ahmed"),
-    )
+    lead = (
+        await _service(db_session, acme).capture_from_conversation(
+            conversation_id=conversation.id,
+            extracted=ExtractedLead(name="Ahmed"),
+        )
+    ).lead
     await db_session.flush()
 
     assert lead.source is LeadSource.AGENT
@@ -571,10 +585,12 @@ async def test_the_trail_says_who_made_each_change(db_session: AsyncSession) -> 
     conversation = await _conversation(db_session, tenant=acme, wa_id="201000000013")
     service = _service(db_session, acme)
 
-    lead = await service.capture_from_conversation(
-        conversation_id=conversation.id,
-        extracted=ExtractedLead(name="Ahmed"),
-    )
+    lead = (
+        await service.capture_from_conversation(
+            conversation_id=conversation.id,
+            extracted=ExtractedLead(name="Ahmed"),
+        )
+    ).lead
     await db_session.flush()
     await service.update_lead(lead_id=lead.id, actor_id=owner.id, update=LeadUpdate(name="Ahmed H"))
     await db_session.flush()

@@ -262,8 +262,26 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
     async def get_by_id(self, conversation_id: uuid.UUID) -> Conversation | None:
         return await self._first(self._select().where(Conversation.id == conversation_id))
 
-    async def require_by_id(self, conversation_id: uuid.UUID) -> Conversation:
-        return await self._require(self._select().where(Conversation.id == conversation_id))
+    async def require_by_id(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        populate_existing: bool = False,
+    ) -> Conversation:
+        """This workspace's conversation, or a tenant-scoped miss.
+
+        `populate_existing` overwrites what the identity map already holds with
+        what the database holds now. It exists because `expire_on_commit=False`
+        makes an ordinary select return the instance as it was *loaded*, and an
+        agent turn reads this row again after an inference precisely because it
+        may have changed - a colleague taking the conversation over is the case
+        that matters (TOOL-21). Off by default: every other caller loads it
+        once inside one unit of work and wants the identity map's copy.
+        """
+        statement = self._select().where(Conversation.id == conversation_id)
+        if populate_existing:
+            statement = statement.execution_options(populate_existing=True)
+        return await self._require(statement)
 
     async def get_for_contact(
         self,

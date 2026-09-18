@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -41,6 +42,15 @@ from app.api.rate_limits import UNKNOWN_CLIENT, client_identity
 from app.core.config import Settings
 from app.core.dependencies import get_session
 from app.core.rate_limit import account_identity
+from app.db.models.agent import Agent, AgentStatus, AgentTool
+from app.db.models.conversation import (
+    Contact,
+    Conversation,
+    ConversationMode,
+    ConversationStatus,
+)
+from app.db.models.tenant import Tenant
+from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.integrations.openai.types import ToolCall
 from app.main import create_app
 from tests.conftest import AllowingEntitlements, FakeDependency
@@ -427,6 +437,54 @@ class _Recorder:
         return "ran"
 
 
+async def _served(session: AsyncSession, *names: str) -> tuple[Tenant, Agent, Conversation]:
+    """A workspace an agent may actually act in, right now.
+
+    The executor re-reads the workspace, the agent, the conversation, the number
+    and the grant immediately before every call (TOOL-03, TOOL-05), so a test
+    that wants a tool to *run* has to give it a world in which running is
+    allowed. A test about a refusal does not, which is why only the control
+    cases below use this.
+    """
+    slug = f"served-{uuid.uuid4().hex[:8]}"
+    tenant = Tenant(name="Served", slug=slug)
+    session.add(tenant)
+    await session.flush()
+
+    account = WhatsAppAccount(
+        tenant_id=tenant.id,
+        phone_number_id=f"phone-{slug}",
+        waba_id="555000444",
+        display_phone_number="+201000000003",
+        status=WhatsAppAccountStatus.ACTIVE,
+        ownership_started_at=datetime.now(UTC) - timedelta(days=1),
+    )
+    contact = Contact(tenant_id=tenant.id, wa_id=f"2017{uuid.uuid4().int % 10_000_000:07d}")
+    agent = Agent(
+        tenant_id=tenant.id,
+        name="Sales",
+        status=AgentStatus.ACTIVE,
+        model="gpt-4o-mini",
+        system_prompt="Answer briefly.",
+        is_default=True,
+    )
+    session.add_all([account, contact, agent])
+    await session.flush()
+
+    conversation = Conversation(
+        tenant_id=tenant.id,
+        contact_id=contact.id,
+        account_id=account.id,
+        status=ConversationStatus.OPEN,
+        mode=ConversationMode.AI,
+    )
+    session.add(conversation)
+    for name in names:
+        session.add(AgentTool(tenant_id=tenant.id, agent_id=agent.id, name=name, enabled=True))
+    await session.flush()
+    return tenant, agent, conversation
+
+
 def _registry(*names: str) -> tuple[ToolRegistry, dict[str, _Recorder]]:
     registry = ToolRegistry()
     recorders: dict[str, _Recorder] = {}
@@ -486,15 +544,16 @@ async def test_an_ungranted_tool_is_refused_at_execution(db_session: AsyncSessio
 async def test_a_granted_tool_still_runs(db_session: AsyncSession) -> None:
     """The control. A guard that refused everything would pass the test above."""
     registry, recorders = _registry("granted_tool")
+    tenant, agent, conversation = await _served(db_session, "granted_tool")
     orchestrator = AgentOrchestrator(
         session=db_session,
-        tenant_id=uuid.uuid4(),
+        tenant_id=tenant.id,
         client=as_responses(object()),
         registry=registry,
     )
     context = ToolContext(
-        tenant_id=orchestrator._tenant_id,
-        conversation_id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        conversation_id=conversation.id,
         session=db_session,
         embeddings=None,
     )
@@ -503,6 +562,7 @@ async def test_a_granted_tool_still_runs(db_session: AsyncSession) -> None:
         ToolCall(call_id="1", name="granted_tool", arguments={}, arguments_json="{}"),
         context,
         {"granted_tool"},
+        agent=agent,
     )
 
     assert recorders["granted_tool"].ran is True
@@ -719,15 +779,16 @@ async def test_a_tool_that_does_run_acts_in_the_conversation_workspace(
     from dataclasses import fields
 
     registry, recorders = _registry("create_lead")
+    tenant, agent, conversation = await _served(db_session, "create_lead")
     orchestrator = AgentOrchestrator(
         session=db_session,
-        tenant_id=uuid.uuid4(),
+        tenant_id=tenant.id,
         client=as_responses(object()),
         registry=registry,
     )
     context = ToolContext(
-        tenant_id=orchestrator._tenant_id,
-        conversation_id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        conversation_id=conversation.id,
         session=db_session,
         embeddings=None,
     )
@@ -736,12 +797,13 @@ async def test_a_tool_that_does_run_acts_in_the_conversation_workspace(
         ToolCall(call_id="1", name="create_lead", arguments={}, arguments_json="{}"),
         context,
         {"create_lead"},
+        agent=agent,
     )
 
     assert recorders["create_lead"].ran is True
     recorded = recorders["create_lead"].context
     assert recorded is not None
-    assert recorded.tenant_id == orchestrator._tenant_id
+    assert recorded.tenant_id == tenant.id
     # The context carries no field a model's arguments could reach.
     assert {field.name for field in fields(ToolContext)} == {
         "tenant_id",

@@ -46,6 +46,20 @@ class Database:
             max_overflow=settings.database_max_overflow,
             pool_timeout=settings.database_pool_timeout,
             pool_recycle=settings.database_pool_recycle_seconds,
+            # **Bound parameters never reach a log line** (TOOL-10). Without
+            # this, SQLAlchemy formats the statement's parameters into the
+            # exception's own message, and anything that logs a database
+            # failure with its traceback publishes them: a probe captured a
+            # customer's name, an agent's handoff sentence and a follow-up body
+            # in `[parameters: (...)]` blocks. That is exactly the content the
+            # audit trail is built never to copy (ADR-052), reaching the log
+            # store by another route, with a different retention story, on
+            # precisely the failures an operator greps.
+            #
+            # What is lost is the values in a debugging session, and the trade
+            # is not close: the statement, the constraint name and the SQLSTATE
+            # are all still there, and they are what identifies the bug.
+            hide_parameters=True,
             connect_args=self._connect_args(settings),
         )
         self._session_factory = async_sessionmaker(

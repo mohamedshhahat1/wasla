@@ -252,8 +252,14 @@ async def test_an_agent_job_arriving_before_the_commit_is_retried(
     worker = AgentWorker(database=database, redis=_RedisClient(redis), settings=_settings(""))  # type: ignore[arg-type]
     producer = committing()
     try:
-        conversation_id, _ = await _uncommitted_conversation(producer, tenant_id)
-        await worker.queue.enqueue(AgentJob(tenant_id=tenant_id, conversation_id=conversation_id))
+        conversation_id, message_id = await _uncommitted_conversation(producer, tenant_id)
+        await worker.queue.enqueue(
+            AgentJob(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                trigger_message_id=message_id,
+            )
+        )
 
         assert await worker.run_once(wait_seconds=1) is True
 
@@ -311,8 +317,14 @@ async def test_an_agent_job_succeeds_once_its_creator_commits(
 
     worker = AgentWorker(database=database, redis=_RedisClient(redis), settings=_settings(""))  # type: ignore[arg-type]
     producer = committing()
-    conversation_id, _ = await _uncommitted_conversation(producer, tenant_id)
-    await worker.queue.enqueue(AgentJob(tenant_id=tenant_id, conversation_id=conversation_id))
+    conversation_id, message_id = await _uncommitted_conversation(producer, tenant_id)
+    await worker.queue.enqueue(
+        AgentJob(
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            trigger_message_id=message_id,
+        )
+    )
 
     await worker.run_once(wait_seconds=1)
     assert answered == []
@@ -339,7 +351,13 @@ async def test_a_conversation_that_never_existed_dead_letters_boundedly(
 ) -> None:
     """Two attempts, not three, and not for ever."""
     worker = AgentWorker(database=database, redis=_RedisClient(redis), settings=_settings(""))  # type: ignore[arg-type]
-    await worker.queue.enqueue(AgentJob(tenant_id=tenant_id, conversation_id=uuid.uuid4()))
+    await worker.queue.enqueue(
+        AgentJob(
+            tenant_id=tenant_id,
+            conversation_id=uuid.uuid4(),
+            trigger_message_id=uuid.uuid4(),
+        )
+    )
 
     await worker.run_once(wait_seconds=1)
     await _promote(worker.queue)
@@ -362,7 +380,13 @@ async def test_the_retried_agent_job_keeps_its_workspace_and_conversation(
 ) -> None:
     worker = AgentWorker(database=database, redis=_RedisClient(redis), settings=_settings(""))  # type: ignore[arg-type]
     conversation_id = uuid.uuid4()
-    await worker.queue.enqueue(AgentJob(tenant_id=tenant_id, conversation_id=conversation_id))
+    await worker.queue.enqueue(
+        AgentJob(
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            trigger_message_id=uuid.uuid4(),
+        )
+    )
 
     await worker.run_once(wait_seconds=1)
 
@@ -507,14 +531,20 @@ async def test_another_workspaces_conversation_is_still_not_found(
         other = Tenant(name="Somebody else", slug=f"other-{uuid.uuid4().hex[:8]}")
         owner.add(other)
         await owner.flush()
-        conversation_id, _ = await _uncommitted_conversation(owner, other.id)
+        conversation_id, message_id = await _uncommitted_conversation(owner, other.id)
         await owner.commit()
         other_id = other.id
 
     try:
         worker = AgentWorker(database=database, redis=_RedisClient(redis), settings=_settings(""))  # type: ignore[arg-type]
         # The job names *this* workspace and the other workspace's conversation.
-        await worker.queue.enqueue(AgentJob(tenant_id=tenant_id, conversation_id=conversation_id))
+        await worker.queue.enqueue(
+            AgentJob(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                trigger_message_id=message_id,
+            )
+        )
 
         await worker.run_once(wait_seconds=1)
         await _promote(worker.queue)

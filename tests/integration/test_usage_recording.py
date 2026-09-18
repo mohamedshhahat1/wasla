@@ -687,7 +687,14 @@ async def test_an_agent_turn_meters_its_provider_calls_and_tokens(
     # Two tool rounds are two provider calls, and the tokens are their sum.
     worker = _worker(monkeypatch, db_session, settings, _outcome(reply="Certainly.", rounds=2))
     progress = _TurnProgress()
-    await worker._handle(AgentJob(tenant_id=tenant.id, conversation_id=conversation.id), progress)
+    await worker._handle(
+        AgentJob(
+            tenant_id=tenant.id,
+            conversation_id=conversation.id,
+            trigger_message_id=uuid.uuid4(),
+        ),
+        progress,
+    )
     await db_session.flush()
 
     # The turn reached the provider, so it is no longer safe to retry: a second
@@ -727,7 +734,14 @@ async def test_a_turn_that_says_nothing_is_still_metered(
 
     worker = _worker(monkeypatch, db_session, settings, _outcome(handed_off=True))
     progress = _TurnProgress()
-    await worker._handle(AgentJob(tenant_id=tenant.id, conversation_id=conversation.id), progress)
+    await worker._handle(
+        AgentJob(
+            tenant_id=tenant.id,
+            conversation_id=conversation.id,
+            trigger_message_id=uuid.uuid4(),
+        ),
+        progress,
+    )
     await db_session.flush()
 
     # A handoff still engaged the provider, so it is still not retryable.

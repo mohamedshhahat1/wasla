@@ -102,6 +102,12 @@ logger = get_logger(__name__)
 # retention question would look for it. Naming every table is what makes the
 # classification auditable.
 PURGED_TABLES: tuple[str, ...] = (
+    # What an agent's tools were asked to do inside those turns (TOOL-12). It
+    # carries no argument value - only which fields a call supplied - but it is
+    # a statement about a workspace's own customers and conversations, and it
+    # goes with them. Before `agent_turns` and `conversations`, both of which it
+    # names.
+    "tool_executions",
     # A record that an agent answered one customer message. It carries no
     # message text - only the id of the message it answered - but it is a
     # statement about what a workspace's customers said and when, and a

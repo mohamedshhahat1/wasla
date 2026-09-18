@@ -118,6 +118,12 @@ from .sentiment import (
     raised_priority,
 )
 from .tenant import Tenant
+from .tool_execution import (
+    TERMINAL_TOOL_EXECUTION_STATES,
+    ToolExecution,
+    ToolExecutionReason,
+    ToolExecutionState,
+)
 from .usage import (
     EVENT_UNITS,
     UsageEvent,
@@ -165,6 +171,7 @@ __all__ = [
     "TERMINAL_INVOICE_STATUSES",
     "TERMINAL_STATUSES",
     "TERMINAL_SUBSCRIPTION_STATUSES",
+    "TERMINAL_TOOL_EXECUTION_STATES",
     "UNRESOLVED_MEDIA_STATUSES",
     "ActorKind",
     "Agent",
@@ -241,6 +248,9 @@ __all__ = [
     "TenantInvitation",
     "TenantRole",
     "TenantStatus",
+    "ToolExecution",
+    "ToolExecutionReason",
+    "ToolExecutionState",
     "UsageEvent",
     "UsageEventType",
     "UsageUnit",

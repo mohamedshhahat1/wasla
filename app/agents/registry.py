@@ -8,32 +8,62 @@ back. Two hand-written copies of one contract drift apart.
 There is no JSON Schema validator in the dependency set, and adding one to check
 four scalar types would be disproportionate. These checks cover exactly what the
 parameter type can express and refuse anything it cannot.
+
+**Bounds are part of the declaration** (TOOL-01, TOOL-16). A parameter carries
+its own length, range and pattern, which are published in the provider schema
+*and* enforced here. Publishing them is a courtesy to the model - a bound stated
+in prose is violated more often than one stated in schema - and enforcing them is
+the contract: the provider's adherence is advisory, this is what holds. Before
+this, every bound lived downstream in a service, so `delay_minutes` of 10^15 was
+accepted at the boundary and raised `OverflowError` inside `timedelta`, and a
+model that emitted a NUL or a lone surrogate in any text argument killed the
+customer's turn at the database.
+
+**Text safety is applied here** (TOOL-01). `app.core.text_safety` already refuses
+what PostgreSQL cannot store and was applied on the knowledge-upload path only;
+tool arguments are the other place text a stranger influenced reaches a column.
+Valid Arabic, RTL marks and emoji pass untouched - the rule is about what can be
+stored, not about what alphabet it is in.
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Final, Literal
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, ValidationError
 from app.core.logging import get_logger
+from app.core.text_safety import storable_problem
 from app.db.models.analytics import AnalyticsSource
 from app.db.models.audit import AuditAction, AuditActorKind
-from app.db.models.conversation import ConversationMode
+from app.db.models.conversation import Conversation, ConversationMode
+from app.db.models.follow_up import MAX_BODY_LENGTH, MAX_REASON_LENGTH
 from app.db.models.lead import ActorKind
+from app.db.models.tool_execution import ToolExecutionReason
 from app.integrations.openai.embeddings import EmbeddingsClient
 from app.integrations.openai.types import ToolSpec
 from app.services.audit_service import AuditTrail
 from app.services.follow_up_service import MAX_DELAY, MIN_DELAY, FollowUpService
 from app.services.inbox_service import InboxService
-from app.services.lead_service import ExtractedLead, LeadService
+from app.services.lead_service import (
+    MAX_BUDGET,
+    MAX_EMAIL_LENGTH,
+    MAX_INTEREST_LENGTH,
+    MAX_NAME_LENGTH,
+    MAX_PHONE_LENGTH,
+    ExtractedLead,
+    LeadService,
+)
 from app.services.retrieval_service import (
     DEFAULT_TOP_K,
+    MAX_QUERY_CHARACTERS,
     MAX_TOP_K,
     RetrievalService,
     effective_top_k,
@@ -52,13 +82,35 @@ SCHEDULE_FOLLOW_UP_TOOL: Final = "schedule_follow_up"
 MAX_HANDOFF_REASON_LENGTH: Final = 200
 
 
+MIN_TOP_K: Final = 1
+# Currency codes are three upper-case letters and nothing else. Published to
+# the model as a pattern so it is told the shape rather than guessing it.
+CURRENCY_PATTERN: Final = "^[A-Z]{3}$"
+
+
 class ToolArgumentError(Exception):
     """The model called a tool with arguments it cannot use.
 
     Deliberately not a domain exception. Domain exceptions carry HTTP statuses,
     and this one must never become a response: the orchestrator turns it into
     tool output so the model can correct itself on the next turn.
+
+    `reason` is which *kind* of refusal it was, from the closed vocabulary the
+    execution record stores. The message and the reason exist for different
+    readers and neither does the other's job: "delay_minutes must be at most
+    43200" is what a model needs to correct itself and is useless in a
+    `GROUP BY`; `range_violation` is what an operator counts and is useless to
+    the model.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: ToolExecutionReason = ToolExecutionReason.INVALID_ARGUMENTS,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +140,12 @@ class ToolParameter:
 
     `description` is prompt text: it is the only explanation the model gets, so
     it is part of the contract rather than a comment.
+
+    The bounds are declared once and used twice, exactly as the type is: they
+    become `minimum`/`maximum`/`minLength`/`maxLength`/`pattern` in the schema
+    the provider is given, and they are what `validate_arguments` enforces. A
+    bound present in one and absent from the other is the drift this class
+    exists to prevent (TOOL-16).
     """
 
     name: str
@@ -95,6 +153,31 @@ class ToolParameter:
     description: str
     required: bool = True
     choices: tuple[str, ...] | None = None
+    #: Inclusive bounds for `integer` and `number`.
+    minimum: int | float | None = None
+    maximum: int | float | None = None
+    #: Inclusive bounds on the length of a `string`, in characters.
+    min_length: int | None = None
+    max_length: int | None = None
+    #: A regular expression the whole string must match. JSON Schema's `pattern`
+    #: is a search rather than a full match, so every pattern used here anchors
+    #: itself and `re.fullmatch` is what enforces it.
+    pattern: str | None = None
+
+    def constraints(self) -> dict[str, Any]:
+        """The bounds as JSON Schema spells them."""
+        schema: dict[str, Any] = {}
+        if self.minimum is not None:
+            schema["minimum"] = self.minimum
+        if self.maximum is not None:
+            schema["maximum"] = self.maximum
+        if self.min_length is not None:
+            schema["minLength"] = self.min_length
+        if self.max_length is not None:
+            schema["maxLength"] = self.max_length
+        if self.pattern is not None:
+            schema["pattern"] = self.pattern
+        return schema
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +188,17 @@ class ToolDefinition:
     description: str
     parameters: tuple[ToolParameter, ...]
     handler: ToolHandler
+    #: Whether this tool ends the turn by itself. A terminal tool is the one
+    #: thing still worth doing when the model can no longer read a result, so it
+    #: alone runs on the final round (PD-TOOLS-05), and it stops the rest of its
+    #: own response (PD-TOOLS-02).
+    terminal: bool = False
+    #: Whether the handler hands the session's connection back while it calls
+    #: somebody else's API. A tool that does must not be wrapped in a savepoint
+    #: by the executor: releasing commits, and a savepoint open across the
+    #: release would defeat it (TOOL-09, ADR-080). Such a tool contains its own
+    #: database failures, which `search_knowledge` has always done.
+    releases_session: bool = False
 
     def json_schema(self) -> dict[str, Any]:
         """The parameters as the provider expects to see them."""
@@ -118,6 +212,10 @@ class ToolDefinition:
             }
             if parameter.choices:
                 schema["enum"] = list(parameter.choices)
+            # Published, not merely described. A limit a model is told in prose
+            # is violated more often than one it is told in schema, and every
+            # violation is a wasted round at best (TOOL-16).
+            schema.update(parameter.constraints())
             properties[parameter.name] = schema
             if parameter.required:
                 required.append(parameter.name)
@@ -176,11 +274,13 @@ def _checked_value(parameter: ToolParameter, value: Any) -> Any:
         # boolean, so accepting it would hide the mistake.
         if isinstance(value, bool) or not isinstance(value, int):
             raise ToolArgumentError(f"Argument {parameter.name} must be a whole number.")
+        _checked_range(parameter, value)
         return value
 
     if parameter.type == "number":
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise ToolArgumentError(f"Argument {parameter.name} must be a number.")
+        _checked_range(parameter, value)
         return float(value)
 
     if not isinstance(value, str):
@@ -188,6 +288,65 @@ def _checked_value(parameter: ToolParameter, value: Any) -> Any:
     if parameter.choices and value not in parameter.choices:
         allowed = ", ".join(parameter.choices)
         raise ToolArgumentError(f"Argument {parameter.name} must be one of: {allowed}.")
+    return _checked_text(parameter, value)
+
+
+def _checked_range(parameter: ToolParameter, value: int | float) -> None:
+    """Refuse a number outside the bound the schema publishes.
+
+    **Before the value is used for anything**, which is the whole point. The
+    follow-up service bounded a delay at thirty days and did it by building
+    `timedelta(minutes=…)` and adding it to `now` - so 10^15 minutes raised
+    `OverflowError` on the way to the check that would have refused it, and the
+    customer's turn died (TOOL-01). A bound applied after the value has been
+    converted is not a bound.
+    """
+    if parameter.minimum is not None and value < parameter.minimum:
+        raise ToolArgumentError(
+            f"Argument {parameter.name} must be at least {parameter.minimum}.",
+            reason=ToolExecutionReason.RANGE_VIOLATION,
+        )
+    if parameter.maximum is not None and value > parameter.maximum:
+        raise ToolArgumentError(
+            f"Argument {parameter.name} must be at most {parameter.maximum}.",
+            reason=ToolExecutionReason.RANGE_VIOLATION,
+        )
+
+
+def _checked_text(parameter: ToolParameter, value: str) -> str:
+    """Refuse text the server cannot store, or that breaks a published bound.
+
+    Storability first, because it is the failure that used to escape: a NUL or a
+    lone surrogate is legal JSON, legal in a Python string, and refused by
+    PostgreSQL at flush - after the tool had already staged its write (TOOL-01).
+    Refused here it is an ordinary tool rejection the model reads and corrects.
+
+    Nothing is stripped or repaired. A model that wrote a NUL is told so, for
+    the same reason the upload path tells an API client rather than quietly
+    sanitising what somebody submitted. Ordinary Unicode is untouched: Arabic,
+    RTL marks and emoji are all storable text and all pass.
+    """
+    problem = storable_problem(value)
+    if problem is not None:
+        raise ToolArgumentError(
+            f"Argument {parameter.name} {problem}.",
+            reason=ToolExecutionReason.UNSAFE_TEXT,
+        )
+    if parameter.min_length is not None and len(value) < parameter.min_length:
+        raise ToolArgumentError(
+            f"Argument {parameter.name} must be at least " f"{parameter.min_length} characters.",
+            reason=ToolExecutionReason.RANGE_VIOLATION,
+        )
+    if parameter.max_length is not None and len(value) > parameter.max_length:
+        raise ToolArgumentError(
+            f"Argument {parameter.name} must be at most {parameter.max_length} characters.",
+            reason=ToolExecutionReason.RANGE_VIOLATION,
+        )
+    if parameter.pattern is not None and not re.fullmatch(parameter.pattern, value):
+        raise ToolArgumentError(
+            f"Argument {parameter.name} is not in the expected format.",
+            reason=ToolExecutionReason.RANGE_VIOLATION,
+        )
     return value
 
 
@@ -238,7 +397,41 @@ def _record(
 
 
 async def _request_human_handoff(context: ToolContext, arguments: dict[str, Any]) -> str:
-    """Switch the conversation to human mode and stop answering it."""
+    """Switch the conversation to human mode and stop answering it.
+
+    **A conversation a person already owns is left alone** (TOOL-07,
+    PD-TOOLS-01). Handing over something already handed over is not a second
+    handoff; it is a model with a stale picture of the world writing over a
+    colleague's own note about why they took the conversation. Before this it
+    did exactly that: the colleague's "VIP, call personally" became the model's
+    sentence, an agent handoff audit row was written for a handover the agent
+    did not perform, and the analytics counter that exists to report handovers
+    counted one conversation twice.
+
+    Read as a column rather than through the repository, and read here as well
+    as in the executor's own lifecycle gate: the executor is the guard, this is
+    the one the service keeps if a future caller arrives by another route.
+    """
+    mode = await context.session.scalar(
+        select(Conversation.mode).where(
+            Conversation.id == context.conversation_id,
+            Conversation.tenant_id == context.tenant_id,
+        )
+    )
+    if mode is ConversationMode.HUMAN:
+        logger.info(
+            "agent.handoff_already_human",
+            extra={
+                "event": "agent.handoff_already_human",
+                "conversation_id": str(context.conversation_id),
+            },
+        )
+        # Raised rather than returned, so the executor records that no handoff
+        # happened. A string here would read as a successful handoff and the
+        # turn would be filed as `handed_off` - claiming the agent did
+        # something a colleague had already done.
+        raise ConflictError("This conversation is already handled by a colleague.")
+
     reason = str(arguments["reason"])[:MAX_HANDOFF_REASON_LENGTH]
     inbox = InboxService(session=context.session, tenant_id=context.tenant_id)
     await inbox.set_mode(
@@ -280,9 +473,17 @@ HANDOFF_DEFINITION: Final = ToolDefinition(
             name="reason",
             type="string",
             description="One short sentence for the colleague taking over.",
+            min_length=1,
+            # The column's own width, published rather than silently applied.
+            # It used to be a truncation the model was never told about, so a
+            # long reason lost its ending and nothing said so (TM09).
+            max_length=MAX_HANDOFF_REASON_LENGTH,
         ),
     ),
     handler=_request_human_handoff,
+    # Handing over is the end of the turn by definition, which is what makes it
+    # the one tool still worth running when no round is left to read a result.
+    terminal=True,
 )
 
 
@@ -319,7 +520,18 @@ async def _search_knowledge(context: ToolContext, arguments: dict[str, Any]) -> 
     # are the server's (M27). A failed search raises
     # `KnowledgeSearchUnavailableError`, which the orchestrator gives the model
     # as a failed tool call rather than ending the customer's turn (RAG-03).
-    retrieval = await service.search(query=query, top_k=top_k)
+    # The connection goes back to the pool for the embedding call (TOOL-09,
+    # ADR-080). A knowledge search that follows a write in the same model
+    # response used to hold a pooled connection, an open transaction and a
+    # `RowExclusiveLock` on `leads` for the whole of an embeddings round trip -
+    # up to three attempts with backoff - which is precisely the bottleneck
+    # ADR-080 removed from the inference path, reappearing inside a tool. It
+    # also blocked the concurrent turn TOOL-02 is about.
+    #
+    # Releasing commits, so the previous tool's finished work becomes durable
+    # here. That is the price and it is the right one: the alternative is
+    # holding a write lock across somebody else's API.
+    retrieval = await service.search(query=query, top_k=top_k, release_session=True)
     logger.info(
         "agent.knowledge_searched",
         extra={
@@ -346,17 +558,29 @@ SEARCH_KNOWLEDGE_DEFINITION: Final = ToolDefinition(
                 "What to look up, in the customer's own words. Include the "
                 "specific product, service or policy they asked about."
             ),
+            min_length=1,
+            max_length=MAX_QUERY_CHARACTERS,
         ),
         ToolParameter(
             name="max_results",
             type="integer",
             description=(
-                f"How many passages to return, 1 to {MAX_TOP_K}. " f"Defaults to {DEFAULT_TOP_K}."
+                f"How many passages to return, {MIN_TOP_K} to {MAX_TOP_K}. "
+                f"Defaults to {DEFAULT_TOP_K}."
             ),
             required=False,
+            # The clamp the service applies, published. `effective_top_k` still
+            # runs and is still what holds; this is what stops the model asking
+            # for four hundred in the first place.
+            minimum=MIN_TOP_K,
+            maximum=MAX_TOP_K,
         ),
     ),
     handler=_search_knowledge,
+    # Its own provider call, made with the session released (TOOL-09). The
+    # executor must not wrap it in a savepoint; it contains its own database
+    # failures in a nested transaction of its own.
+    releases_session=True,
 )
 
 
@@ -387,7 +611,7 @@ async def _record_lead_details(context: ToolContext, arguments: dict[str, Any]) 
         )
 
     try:
-        lead = await service.capture_from_conversation(
+        capture = await service.capture_from_conversation(
             conversation_id=context.conversation_id,
             extracted=extracted,
         )
@@ -401,18 +625,26 @@ async def _record_lead_details(context: ToolContext, arguments: dict[str, Any]) 
     # set a phone number on this lead at 14:02" is the auditable fact; the
     # number itself is the customer's personal data and belongs on the lead
     # row alone, where deleting the lead deletes it.
-    _record(
-        context,
-        AuditAction.AGENT_LEAD_RECORDED,
-        target_type="lead",
-        target_id=lead.id,
-        meta={"fields": sorted(extracted.as_fields())},
-    )
+    #
+    # **Only when something changed** (TOOL-18). A chatty model calling this on
+    # every turn with the same details used to write a row per call - forty
+    # calls in one response produced forty rows - burying the mutations the
+    # trail exists to show under repeats of one. The service already knows
+    # which fields actually moved; a row now says that one of them did.
+    if capture.changed_fields:
+        _record(
+            context,
+            AuditAction.AGENT_LEAD_RECORDED,
+            target_type="lead",
+            target_id=capture.lead.id,
+            meta={"fields": sorted(capture.changed_fields)},
+        )
     logger.info(
         "agent.lead_recorded",
         extra={
             "conversation_id": str(context.conversation_id),
-            "lead_id": str(lead.id),
+            "lead_id": str(capture.lead.id),
+            "changed": len(capture.changed_fields),
         },
     )
     return (
@@ -444,6 +676,9 @@ RECORD_LEAD_DEFINITION: Final = ToolDefinition(
             type="string",
             description="The customer's name, exactly as they gave it.",
             required=False,
+            # The column's own width. Blank still means "absent" rather than
+            # "clear this" - see `_optional_text` - so there is no minimum.
+            max_length=MAX_NAME_LENGTH,
         ),
         ToolParameter(
             name="phone",
@@ -453,12 +688,14 @@ RECORD_LEAD_DEFINITION: Final = ToolDefinition(
                 "if they stated it in the conversation."
             ),
             required=False,
+            max_length=MAX_PHONE_LENGTH,
         ),
         ToolParameter(
             name="email",
             type="string",
             description="An email address the customer gave.",
             required=False,
+            max_length=MAX_EMAIL_LENGTH,
         ),
         ToolParameter(
             name="interest",
@@ -468,6 +705,7 @@ RECORD_LEAD_DEFINITION: Final = ToolDefinition(
                 "terms - the product, service or job they described."
             ),
             required=False,
+            max_length=MAX_INTEREST_LENGTH,
         ),
         ToolParameter(
             name="budget_amount",
@@ -478,12 +716,20 @@ RECORD_LEAD_DEFINITION: Final = ToolDefinition(
                 "not '500,000'. Omit it entirely unless they named a figure."
             ),
             required=False,
+            # A budget is not negative and not larger than the column. The
+            # service still validates the scale and refuses NaN; this is what
+            # the model is told.
+            minimum=0,
+            maximum=float(MAX_BUDGET),
         ),
         ToolParameter(
             name="budget_currency",
             type="string",
             description="Three-letter currency code for the budget, such as EGP.",
             required=False,
+            min_length=3,
+            max_length=3,
+            pattern=CURRENCY_PATTERN,
         ),
     ),
     handler=_record_lead_details,
@@ -517,6 +763,11 @@ async def _schedule_follow_up(context: ToolContext, arguments: dict[str, Any]) -
             reason=reason,
             created_by_kind=ActorKind.AGENT,
         )
+    except ConflictError:
+        # A colleague owns the conversation. Planting an AI nudge underneath
+        # them is the one thing handing a conversation over is supposed to stop
+        # (TOOL-06), so this is a refusal rather than a schedule.
+        return "A colleague has taken over this conversation. Do not reply further."
     except ValidationError as error:
         # Written for the model to read and correct on the next turn: a delay
         # outside the bounds, or a conversation that has since been closed.
@@ -564,6 +815,12 @@ SCHEDULE_FOLLOW_UP_DEFINITION: Final = ToolDefinition(
                 "Use what the customer asked for: 1440 for tomorrow, 10080 for "
                 "next week."
             ),
+            # Checked before anything builds a `timedelta` out of it. The
+            # service's own bound was applied after `now + timedelta(minutes=…)`
+            # and so was never reached for a number big enough to overflow
+            # (TOOL-01).
+            minimum=MIN_FOLLOW_UP_MINUTES,
+            maximum=MAX_FOLLOW_UP_MINUTES,
         ),
         ToolParameter(
             name="message",
@@ -573,6 +830,8 @@ SCHEDULE_FOLLOW_UP_DEFINITION: Final = ToolDefinition(
                 "to the customer, in the language they are using. Make it stand "
                 "on its own - they may not remember this conversation."
             ),
+            min_length=1,
+            max_length=MAX_BODY_LENGTH,
         ),
         ToolParameter(
             name="reason",
@@ -582,6 +841,7 @@ SCHEDULE_FOLLOW_UP_DEFINITION: Final = ToolDefinition(
                 "explaining why a follow-up was appropriate."
             ),
             required=False,
+            max_length=MAX_REASON_LENGTH,
         ),
     ),
     handler=_schedule_follow_up,

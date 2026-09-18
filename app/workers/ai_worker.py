@@ -45,6 +45,7 @@ policy becomes `NO_RETRY` (ADR-068).
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from typing import Final
@@ -101,6 +102,17 @@ from app.workers.retry import (
 )
 
 logger = get_logger(__name__)
+
+
+class UnidentifiedTurnError(Exception):
+    """An agent job with no trigger message, which cannot be run at most once.
+
+    Raised before anything is claimed, charged or called, and dead-lettered
+    rather than retried: the identity a turn needs is the inbound message it
+    answers, and a job that names none has no way to tell a redelivery from a
+    second customer message (TOOL-17).
+    """
+
 
 # How long to wait after a failed reserve before trying again.
 RETRY_DELAY_SECONDS = 5.0
@@ -277,10 +289,35 @@ class AgentWorker:
         progress = _TurnProgress(lambda: self._queue.mark_engaged(raw))
         try:
             await self._handle(job, progress)
+        except UnidentifiedTurnError:
+            # Nothing has been charged, called or sent - the refusal happens
+            # before the claim - and retrying would refuse identically for ever,
+            # so this takes the same route as a malformed envelope (TOOL-17).
+            outcome = await handle_failure(
+                self._queue,
+                raw,
+                envelope,
+                job_type=JOB_TYPE,
+                identity=JobIdentity(tenant_id=job.tenant_id, job_id=job.conversation_id),
+                category=FailureCategory.MALFORMED,
+                policy=NO_RETRY,
+            )
+            return outcome.action
         except Exception as error:
-            logger.exception(
+            # The exception class, and not the exception. A database failure
+            # formats its statement and - before `hide_parameters` - its bound
+            # parameters into its own message, which is a customer's name, an
+            # agent's handoff sentence or a follow-up body (TOOL-10). The
+            # statement and the constraint name are what identify the bug, and
+            # they are still in the driver's own log; what a job failure needs
+            # here is which class it was and which conversation it was in.
+            logger.error(
                 "agent.job_failed",
-                extra={"conversation_id": str(job.conversation_id)},
+                extra={
+                    "event": "agent.job_failed",
+                    "conversation_id": str(job.conversation_id),
+                    "reason": type(error).__name__,
+                },
             )
             outcome = await handle_failure(
                 self._queue,
@@ -328,8 +365,12 @@ class AgentWorker:
 
         return meter
 
-    async def _claim_turn(self, job: AgentJob) -> bool:
+    async def _claim_turn(self, job: AgentJob) -> uuid.UUID | None:
         """Take ownership of this logical turn, or report that somebody has it.
+
+        Answers the turn's own id when this attempt owns it, because every tool
+        the turn runs records which turn asked for it (TOOL-12) and the id is
+        already in hand here.
 
         A transaction of its own, and committed here rather than with the rest
         of the turn: the turn's own session stays open across an inference, and
@@ -339,25 +380,41 @@ class AgentWorker:
         and engaging leaves a `CLAIMED` row whose lease expires, and the next
         attempt adopts it.
 
-        A job carrying no trigger proceeds. That is a job an older build
-        enqueued, and refusing it would leave a customer unanswered in order to
-        protect them from a duplicate.
+        **A job carrying no trigger is refused** (TOOL-17, PD-TOOLS-09). It used
+        to proceed, on the reasoning that answering a customer beats protecting
+        them from a duplicate - but a job with no trigger message has no
+        identity at all, so redelivery ran the inference again, executed the
+        tools again and sent the customer a second reply; the same nudge was
+        scheduled twice and audited twice. Every enqueue site in this build sets
+        a trigger id, so the only jobs this refuses are ones an older build left
+        in the queue across a deploy, and the honest thing to do with work whose
+        effects cannot be bounded is to stop and say so rather than guess at an
+        identity that changes on every redelivery.
+
+        Draining the legacy queue is deployment work; see the remediation
+        report's deployment backlog.
         """
         if job.trigger_message_id is None:
-            logger.info(
+            logger.warning(
                 "agent.turn_unkeyed",
                 extra={
                     "event": "agent.turn_unkeyed",
                     "conversation_id": str(job.conversation_id),
                 },
             )
-            return True
+            raise UnidentifiedTurnError(
+                "This agent job carries no trigger message and cannot be run once."
+            )
 
         async with self._database.session() as claim:
-            owned = await AgentTurnRepository(claim, tenant_id=job.tenant_id).claim(
+            turns = AgentTurnRepository(claim, tenant_id=job.tenant_id)
+            owned = await turns.claim(
                 conversation_id=job.conversation_id,
                 trigger_message_id=job.trigger_message_id,
                 worker_id=self._queue.worker_id,
+            )
+            turn_id = (
+                await turns.id_for(trigger_message_id=job.trigger_message_id) if owned else None
             )
         if not owned:
             logger.info(
@@ -368,7 +425,7 @@ class AgentWorker:
                     "trigger_message_id": str(job.trigger_message_id),
                 },
             )
-        return owned
+        return turn_id
 
     async def _reserve_turn(self, job: AgentJob) -> _Reservation:
         """Charge this turn to the plan and engage it, as one transaction.
@@ -539,7 +596,8 @@ class AgentWorker:
             # sentiment call, the inference or any tool, because a key on the
             # send alone would stop the second reply and still bill the
             # workspace for the second turn that produced it (WQ-01).
-            if not await self._claim_turn(job):
+            turn_id = await self._claim_turn(job)
+            if turn_id is None:
                 return
 
             # Before the charge, not after it: a conversation a person owns or
@@ -620,6 +678,14 @@ class AgentWorker:
                     output_ceiling=self._settings.openai_max_output_tokens,
                     embeddings=embeddings,
                     sentiment=sentiment,
+                    # Which turn is asking, so every tool call it makes is
+                    # recoverable from the customer's message afterwards
+                    # (TOOL-12).
+                    agent_turn_id=turn_id,
+                    trigger_message_id=job.trigger_message_id,
+                    # A way to open a clean transaction if the turn's own is
+                    # lost, so a terminal tool outcome is still written down.
+                    unit_of_work=self._database.session,
                 )
                 outcome = await orchestrator.answer(
                     conversation_id=job.conversation_id,

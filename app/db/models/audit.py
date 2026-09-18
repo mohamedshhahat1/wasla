@@ -239,6 +239,19 @@ class AuditAction(StrEnum):
     AGENT_LEAD_RECORDED = "agent_lead_recorded"
     AGENT_FOLLOW_UP_SCHEDULED = "agent_follow_up_scheduled"
 
+    # Who decided what an agent is *able* to do (TOOL-13). These are not agent
+    # actions - a person takes them - and they were the one privileged
+    # configuration change in the product that wrote no row, although every
+    # comparable one does: workspace suspension, number release, model
+    # configuration. "Who gave this agent the ability to hand conversations
+    # over, to write leads, to message customers, and when" is the first
+    # question after a prompt-injection report, and it was unanswerable.
+    #
+    # The tool's name and the state it was left in; never the grant's stored
+    # settings, which are a payload rather than a decision.
+    AGENT_TOOL_GRANTED = "agent_tool_granted"
+    AGENT_TOOL_REVOKED = "agent_tool_revoked"
+
     # The channel a business talks to its customers through
     WHATSAPP_ACCOUNT_CONNECTED = "whatsapp_account_connected"
     WHATSAPP_ACCOUNT_DISABLED = "whatsapp_account_disabled"

@@ -279,14 +279,24 @@ async def test_a_refused_argument_records_nothing(db_session: AsyncSession) -> N
     conversation = await _conversation(db_session, tenant=tenant)
     context = _context(db_session, tenant=tenant, conversation=conversation)
 
-    # A delay far outside the permitted bounds. The schema accepts it - it is a
-    # whole number - and the *service* refuses it, which the handler turns into
-    # text for the model rather than an exception. That is the interesting
-    # shape: the tool ran, the mutation did not happen, and the trail must say
-    # nothing rather than record a follow-up that does not exist.
+    # A conversation a colleague closed. The schema accepts these arguments -
+    # they are well formed, and the delay is inside the bound the tool
+    # publishes - and the *service* refuses the scheduling, which the handler
+    # turns into text for the model rather than an exception. That is the
+    # interesting shape: the tool ran, the mutation did not happen, and the
+    # trail must say nothing rather than record a follow-up that does not
+    # exist.
+    #
+    # It used to be an out-of-range delay, which no longer reaches the service:
+    # the bound is published in the tool's schema and enforced at the boundary
+    # (TOOL-16), so the refusal happens a layer earlier and the property this
+    # test is about needs a rule only the service knows.
+    conversation.status = ConversationStatus.CLOSED
+    await db_session.flush()
+
     output = await build_default_registry().run(
         name=SCHEDULE_FOLLOW_UP_DEFINITION.name,
-        arguments={"delay_minutes": 99_999_999, "message": "later"},
+        arguments={"delay_minutes": 60, "message": "later"},
         context=context,
     )
     await db_session.flush()
