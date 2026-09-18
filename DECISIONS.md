@@ -5632,7 +5632,7 @@ sentiment write is what keeps that case safe meanwhile.
 
 **Context.** A 32 KB compressed PDF, inside the submitted-size limit, extracted 7.5 million characters on the API's event loop for six minutes, producing 7,500 chunks (RAG-02); a 60-page PDF was indexed to page 40 and reported ready (RAG-08).
 
-**Decision.** Knowledge PDF extraction runs in a separate interpreter with no secrets in its environment, an address-space and CPU limit where the platform supports one, a 20-second wall clock enforced by killing it, and at most two at a time per process. It refuses more than 40 pages before reading any, stops as soon as extracted text passes 400,000 characters, and the worker independently refuses more than 1,000 chunks or 600,000 passage characters before any embedding call. Every refusal names its limit. Text input rejects NUL, invalid Unicode and invisible-only content at the boundary. PDFs sent in conversations keep the media path's read-up-to-the-limit behaviour.
+**Decision.** Knowledge PDF extraction runs in a separate interpreter with no secrets in its environment, an address-space and CPU limit where the platform supports one, a 20-second wall clock enforced by killing it, and at most two at a time per process. It refuses more than 40 pages before reading any, stops as soon as extracted text passes 400,000 characters, and the worker independently refuses more than 1,000 chunks or 600,000 passage characters before any embedding call. Every refusal names its limit. Text input rejects NUL, invalid Unicode and invisible-only content at the boundary. PDFs sent in conversations now use the same child and limits, and a PDF past them is stored but not read (amended by ADR-110).
 
 **Consequences.** An upload request can wait up to the extraction deadline. Partial documents for long PDFs are a future product feature; until then a long PDF must be split.
 
@@ -5644,3 +5644,19 @@ sentiment write is what keeps that case safe meanwhile.
 
 **Consequences.** When knowledge is unavailable agents answer without it or offer a colleague, which is visible through `RAGRetrievalFailureRate` rather than through lost customers.
 
+## ADR-110 — Every Inbound Attachment Attempt Is Claimed, Bounded And Terminal
+
+**Context.** The media audit (`media-e5f1`) found the fetch/parse/turn path unsafe while the storage, typing and tenancy foundations held. The Meta token was re-attached to every redirect hop on any public host (MEDIA-01); a 25 KB customer PDF was parsed in-process for 170 s at 763 MB (MEDIA-02); a parser exception or a failed descriptor lookup dead-lettered the job with the row unresolved, which silenced every later attachment in the conversation because the reply waits for none to be unresolved (MEDIA-03/04); a transaction and row lock were held across the Meta download (MEDIA-11) with no wall-clock bound (MEDIA-10); suspended workspaces still paid for reads (MEDIA-08); downloads ignored workspace credentials (MEDIA-13); and a workspace purge whose deletes failed left files with nothing naming them (MEDIA-07).
+
+**Decision.**
+
+1. Every read hop attaches the Meta token in one place and only to hosts in `META_MEDIA_HOST_ROOTS`, matched on a label boundary; any other hop is refused. The SSRF address checks remain a separate control.
+2. Customer PDFs go through `extract_pdf_bounded` with the knowledge limits unchanged (ADR-108). Over any limit: stored, `SKIPPED`, not read.
+3. An attempt commits a claim (`claim_id`, `claimed_at`) before any network call and holds no transaction across Meta, the object store, vision, transcription or the parser child. Later writes check the claim is still the attempt's own; a duplicate job with a live claim stands aside.
+4. Provider failures are retried only inside the client (three attempts for transient ones, none for permanent ones), then the file is terminal with a closed-vocabulary reason and a fixed Wasla sentence. There is no queue-level retry of a failed file.
+5. A dead-lettered job gives its file up and releases the conversation. `MediaRecoveryWorker`, under the `media` kind, requeues files whose claim outlived the derived claim lease or which went unclaimed past the queue's retry budget, and gives them up after `MAX_ATTEMPTS`.
+6. The workspace and number lifecycle is read fresh before Meta, before the object write and before any paid read; suspended, deleted and released end the file `SKIPPED` without spend. A released number's file is written terminal at the webhook and never queued.
+7. The credential is the number's, through `CredentialService`, never downgraded.
+8. A workspace purge writes every key it removes to `media_purge_objects` in the deleting statement; rows are removed only when the store confirms the delete, and keys whose upload was mid-write wait out the upload grace.
+
+**Consequences.** A worker that dies mid-download delays that file until the claim lease (330 s by default) passes. A failed file stays failed; the customer is answered and can resend. PDFs over 300 KB are kept but not read. The production Meta host list is a deployment verification item (DV-1), changed by configuration rather than release.
