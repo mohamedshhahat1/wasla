@@ -20,7 +20,9 @@ from __future__ import annotations
 import pytest
 
 from app.agents.registry import RECORD_LEAD_TOOL, SCHEDULE_FOLLOW_UP_TOOL
-from app.db.models.tool_execution import ToolExecutionState
+from app.db.models.conversation import ConversationMode
+from app.db.models.lead import ActorKind
+from app.db.models.tool_execution import ToolExecutionReason, ToolExecutionState
 from tests.integration.ai_harness import (
     FakeProviders,
     TurnRunner,
@@ -140,3 +142,73 @@ async def test_a_lead_call_that_did_change_something_is_still_recorded(
         "finishing a flat",
         "EGP",
     )
+
+
+async def test_a_nudge_the_tool_scheduled_is_recorded_as_the_agents(
+    ai_turns: TurnRunner, ai_providers: FakeProviders
+) -> None:
+    """Attribution, asserted through the tool rather than through the service (TM23).
+
+    `created_by_kind` is what separates "the AI decided to chase this customer"
+    from "somebody on the team did", everywhere the CRM and the analytics show
+    it - and it is a literal in the tool, which is exactly the kind of thing a
+    refactor changes without noticing.
+    """
+    workspace = await ai_turns.workspace(grants=[SCHEDULE_FOLLOW_UP_TOOL])
+    conversation_id, ids = await ai_turns.write(workspace, ["talk tomorrow"])
+    ai_providers.agent = scripted(
+        tool_call_response(
+            SCHEDULE_FOLLOW_UP_TOOL, {"delay_minutes": 60, "message": "Still interested?"}
+        ),
+        text_response(ANSWER),
+    )
+
+    await ai_turns.answer(workspace, conversation_id, ids[0])
+
+    follow_ups = await ai_turns.follow_ups(workspace.tenant_id)
+    assert [row.body for row in follow_ups] == ["Still interested?"]
+    assert follow_ups[0].created_by_kind is ActorKind.AGENT
+    assert follow_ups[0].created_by_id is None
+
+
+async def test_a_grant_naming_a_tool_this_build_does_not_implement_runs_nothing(
+    ai_turns: TurnRunner, ai_providers: FakeProviders
+) -> None:
+    """A name with no implementation is refused, never substituted (TM28).
+
+    Grants outlive code: a workspace can hold a grant for a tool a later release
+    removed, and that must neither break the agent nor quietly run a different
+    tool. The model is told plainly that the name does not exist here, and the
+    conversation is answered.
+    """
+    retired = "summon_the_manager"
+    workspace = await ai_turns.workspace(grants=[retired])
+    conversation_id, ids = await ai_turns.write(workspace, ["get me a person"])
+    ai_providers.agent = scripted(
+        tool_call_response(retired, {"anything": "at all"}, text="One moment."),
+        text_response(ANSWER),
+    )
+
+    await ai_turns.answer(workspace, conversation_id, ids[0])
+
+    # Non-vacuity: the refusal genuinely reached the model on a second round.
+    assert ai_providers.inference == 2
+    (output,) = [
+        item["output"]
+        for item in ai_providers.agent_requests[1]["input"]
+        if item.get("type") == "function_call_output"
+    ]
+    assert output == f"There is no tool named {retired}."
+
+    # Nothing was substituted for it: the conversation is still the AI's.
+    conversation = await ai_turns.conversation(conversation_id)
+    assert conversation.mode is ConversationMode.AI
+    assert conversation.handoff_reason is None
+    assert [row.body for row in await ai_turns.outbound(workspace.tenant_id)] == [ANSWER]
+    assert await ai_turns.execution_outcomes(workspace.tenant_id) == [
+        (
+            retired,
+            ToolExecutionState.REJECTED.value,
+            ToolExecutionReason.TOOL_NOT_IMPLEMENTED.value,
+        )
+    ]

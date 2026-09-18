@@ -28,15 +28,20 @@ import uuid
 
 import pytest
 from redis.asyncio import Redis
+from sqlalchemy import delete
+from sqlalchemy.exc import IntegrityError
 
 from app.agents.registry import RECORD_LEAD_TOOL, SCHEDULE_FOLLOW_UP_TOOL
 from app.core.telemetry import REDIS_COUNTERS, REDIS_HISTOGRAMS, set_counter_sink
+from app.db.models.tenant import Tenant
 from app.db.models.tool_execution import ToolExecutionState
+from app.db.session import Database
 from tests.integration.ai_harness import (
     REDIS_URL,
     FakeProviders,
     TurnRunner,
     scripted,
+    settings_for,
     text_response,
     tool_calls_response,
 )
@@ -112,6 +117,43 @@ async def test_a_failing_tool_publishes_no_parameters(
     )
     assert SENTINEL_NAME not in written
     assert "parameters:" not in written
+
+
+async def test_a_database_error_from_this_application_quotes_no_parameters(
+    prepared_database: str,
+) -> None:
+    """The engine setting, asserted on a real error rather than on a keyword.
+
+    `hide_parameters=True` is what stops SQLAlchemy formatting a statement's
+    bound parameters into the exception's own message - and an exception message
+    is a string that travels: into a traceback, into a dead-letter record, into
+    whatever an operator pastes into a ticket. The two tests above prove nothing
+    leaks through the *paths the tool layer takes today*; this one proves the
+    setting itself, on the class the application builds its engine with, because
+    the next path is not written yet.
+
+    Provoked with a genuine unique violation, so the sentinel really is a bound
+    parameter of the statement that failed.
+    """
+    database = Database(settings_for(prepared_database))
+    slug = f"hidden-{uuid.uuid4().hex[:8]}"
+    try:
+        async with database.session() as session:
+            session.add(Tenant(name=SENTINEL_NAME, slug=slug))
+        with pytest.raises(IntegrityError) as failure:
+            async with database.session() as session:
+                session.add(Tenant(name=SENTINEL_NAME, slug=slug))
+    finally:
+        async with database.session() as session:
+            await session.execute(delete(Tenant).where(Tenant.slug == slug))
+        await database.dispose()
+
+    # Non-vacuity: the failure really is the one carrying the sentinel.
+    message = str(failure.value)
+    assert "uq_tenants_slug" in message or "tenants" in message
+    assert SENTINEL_NAME not in message
+    assert "[parameters:" not in message
+    assert "hide_parameters=True" in message
 
 
 def test_the_tool_metrics_are_in_the_catalogue_that_is_scraped() -> None:

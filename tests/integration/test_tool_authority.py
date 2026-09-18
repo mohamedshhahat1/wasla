@@ -21,20 +21,37 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import insert, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.registry import HANDOFF_TOOL, RECORD_LEAD_TOOL, SCHEDULE_FOLLOW_UP_TOOL
+from app.agents.registry import (
+    HANDOFF_TOOL,
+    RECORD_LEAD_TOOL,
+    SCHEDULE_FOLLOW_UP_TOOL,
+    ToolContext,
+    build_default_registry,
+)
+from app.core.exceptions import ConflictError
 from app.db.models.agent import Agent, AgentStatus, AgentTool
 from app.db.models.agent_turn import TurnOutcome
 from app.db.models.analytics import AnalyticsEventType
-from app.db.models.conversation import Conversation, ConversationMode
+from app.db.models.audit import AuditLog
+from app.db.models.conversation import (
+    Contact,
+    Conversation,
+    ConversationMode,
+    ConversationStatus,
+)
 from app.db.models.enums import TenantStatus
 from app.db.models.tenant import Tenant
 from app.db.models.tool_execution import ToolExecutionReason, ToolExecutionState
+from app.db.models.whatsapp import WhatsAppAccount
+from app.repositories.conversation_repository import ConversationRepository
+from app.services.lead_service import ExtractedLead, LeadService
 from tests.integration.ai_harness import (
     FakeProviders,
     JsonObject,
@@ -341,3 +358,174 @@ async def test_a_handoff_that_succeeds_stops_the_rest_of_its_own_response(
 
 async def _answer(body: JsonObject) -> JsonObject:
     return body
+
+
+# ------------------------------------------- the service's own guard, directly
+
+
+async def test_the_handoff_tool_refuses_a_conversation_a_colleague_already_owns(
+    db_session: AsyncSession,
+) -> None:
+    """The second layer, reached the way a future caller would reach it (TOOL-07).
+
+    The executor's per-call lifecycle read refuses this before the handler runs,
+    which is why every test above goes through the worker. But the executor is
+    one caller, and the rule - a colleague's own note about why they took a
+    conversation is not a model's to overwrite - belongs to the tool as well.
+    Driven through `ToolRegistry.run` with a server-built context, which is the
+    shape any other caller would have.
+    """
+    tenant, conversation = await _human_conversation(db_session)
+    context = ToolContext(
+        tenant_id=tenant.id,
+        conversation_id=conversation.id,
+        session=db_session,
+        embeddings=None,
+    )
+
+    # Non-vacuity: the colleague really owns it, and really wrote that.
+    assert conversation.mode is ConversationMode.HUMAN
+    assert conversation.handoff_reason == COLLEAGUE_REASON
+
+    with pytest.raises(ConflictError):
+        await build_default_registry().run(
+            name=HANDOFF_TOOL,
+            arguments={"reason": "model reason"},
+            context=context,
+        )
+    await db_session.flush()
+
+    assert conversation.handoff_reason == COLLEAGUE_REASON
+    rows = await db_session.scalars(select(AuditLog.action).where(AuditLog.tenant_id == tenant.id))
+    assert list(rows) == []
+
+
+async def _human_conversation(session: AsyncSession) -> tuple[Tenant, Conversation]:
+    """A conversation a colleague has taken over, with their own reason on it."""
+    slug = f"owned-{uuid.uuid4().hex[:8]}"
+    tenant = Tenant(name="Owned", slug=slug)
+    session.add(tenant)
+    await session.flush()
+
+    account = WhatsAppAccount(
+        tenant_id=tenant.id,
+        phone_number_id=f"phone-{slug}",
+        waba_id="555000555",
+        display_phone_number="+201000000004",
+        ownership_started_at=datetime.now(UTC) - timedelta(days=1),
+    )
+    contact = Contact(tenant_id=tenant.id, wa_id=f"2018{uuid.uuid4().int % 10_000_000:07d}")
+    session.add_all([account, contact])
+    await session.flush()
+
+    conversation = Conversation(
+        tenant_id=tenant.id,
+        contact_id=contact.id,
+        account_id=account.id,
+        status=ConversationStatus.OPEN,
+        mode=ConversationMode.HUMAN,
+        handoff_reason=COLLEAGUE_REASON,
+    )
+    session.add(conversation)
+    await session.flush()
+    return tenant, conversation
+
+
+async def test_the_lead_tool_re_reads_a_conversation_it_is_already_holding(
+    ai_turns: TurnRunner,
+) -> None:
+    """Freshness on purpose, not by accident (TOOL-21).
+
+    The takeover guard worked before this remediation because nothing kept a
+    strong reference to the conversation across the inference, so the identity
+    map had usually dropped it and the re-`select` genuinely re-read. That is a
+    property of garbage collection. This test deliberately keeps the loaded
+    instance alive - exactly what a refactor might do - commits a takeover from
+    another connection, and asserts the service still sees the database.
+    """
+    workspace = await ai_turns.workspace(grants=[RECORD_LEAD_TOOL])
+    conversation_id, _ = await ai_turns.write(workspace, ["I am Ahmed"])
+
+    async with ai_turns.database.session() as session:
+        conversations = ConversationRepository(session, tenant_id=workspace.tenant_id)
+        stale = await conversations.require_by_id(conversation_id)
+        # Non-vacuity: the session is holding this row, and it says AI.
+        loaded_as = stale.mode
+        assert loaded_as is ConversationMode.AI
+        assert stale in session
+
+        await _take_over(ai_turns, conversation_id)
+
+        service = LeadService(session=session, tenant_id=workspace.tenant_id)
+        with pytest.raises(ConflictError):
+            await service.capture_from_conversation(
+                conversation_id=conversation_id,
+                extracted=ExtractedLead(name="Ahmed"),
+            )
+
+        # The instance the session was holding is the one that was refreshed,
+        # which is what `populate_existing` is for.
+        assert stale.mode is ConversationMode.HUMAN
+
+    assert await ai_turns.leads(workspace.tenant_id) == []
+
+
+async def test_a_capability_granted_during_the_inference_is_not_usable_in_that_turn(
+    ai_turns: TurnRunner, ai_providers: FakeProviders
+) -> None:
+    """The turn-start snapshot decides what may run, and it is not only advisory.
+
+    Two questions share one set of grants and they are not the same question.
+    The snapshot says what the model was *offered*, and this request's `tools`
+    array is that snapshot; the database says what is currently permitted. A
+    grant added while the model was composing is permitted and was never
+    offered, and a call naming it is a call the request did not describe - so
+    the snapshot refuses it, and the database read cannot un-refuse it.
+    """
+    workspace = await ai_turns.workspace(grants=[RECORD_LEAD_TOOL])
+    conversation_id, ids = await ai_turns.write(workspace, ["talk tomorrow"])
+
+    granted: dict[str, Any] = {}
+
+    async def grant_mid_turn() -> None:
+        await ai_turns.execute(
+            insert(AgentTool).values(
+                id=uuid.uuid4(),
+                tenant_id=workspace.tenant_id,
+                agent_id=workspace.agent_id,
+                name=SCHEDULE_FOLLOW_UP_TOOL,
+                enabled=True,
+            )
+        )
+        async with ai_turns.database.session() as session:
+            granted["enabled"] = list(
+                await session.scalars(
+                    select(AgentTool.name).where(
+                        AgentTool.agent_id == workspace.agent_id,
+                        AgentTool.enabled.is_(True),
+                    )
+                )
+            )
+
+    ai_providers.agent = _during_inference(
+        ai_turns,
+        grant_mid_turn,
+        tool_calls_response(
+            ((SCHEDULE_FOLLOW_UP_TOOL, {"delay_minutes": 60, "message": "Still there?"}),)
+        ),
+    )
+
+    await ai_turns.answer(workspace, conversation_id, ids[0])
+
+    # Non-vacuity: the grant really is enabled in the database now.
+    assert sorted(granted["enabled"]) == sorted([RECORD_LEAD_TOOL, SCHEDULE_FOLLOW_UP_TOOL])
+
+    assert await ai_turns.execution_outcomes(workspace.tenant_id) == [
+        (
+            SCHEDULE_FOLLOW_UP_TOOL,
+            ToolExecutionState.REJECTED.value,
+            ToolExecutionReason.NOT_GRANTED.value,
+        )
+    ]
+    assert await ai_turns.follow_ups(workspace.tenant_id) == []
+    assert [row.body for row in await ai_turns.outbound(workspace.tenant_id)] == [ANSWER]

@@ -20,7 +20,7 @@ from app.agents.registry import (
 )
 from app.db.models.tool_execution import ToolExecutionReason
 from app.services.retrieval_service import MAX_TOP_K, effective_top_k
-from tests.fakes import as_session
+from tests.fakes import as_embeddings, as_session
 
 
 async def _handler(context: ToolContext, arguments: dict[str, Any]) -> str:
@@ -364,6 +364,54 @@ def test_the_top_k_clamp_is_what_the_tool_actually_uses() -> None:
         "max_results": MAX_TOP_K,
     }
     assert effective_top_k(MAX_TOP_K + 5) == MAX_TOP_K
+
+
+async def test_the_tool_clamps_a_count_even_when_nothing_validated_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The handler's own clamp, which is the second line and not the first (TM08).
+
+    The published bound refuses an out-of-range count at the boundary, so no
+    ordinary call can reach the clamp any more. It stays because the boundary is
+    one layer and the service is another: a future caller that reaches the
+    handler by some other route must still not be able to ask for four hundred
+    passages. Driven by calling the handler directly with an argument
+    `validate_arguments` would have refused - which is exactly the situation the
+    clamp exists for.
+    """
+    import app.agents.registry as registry_module
+
+    asked: dict[str, int] = {}
+
+    class _Spy:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def search(self, *, query: str, top_k: int, **kwargs: Any) -> Any:
+            asked["top_k"] = top_k
+
+            class _Empty:
+                passages: tuple[()] = ()
+
+                def as_context(self) -> str:
+                    return "nothing found"
+
+            return _Empty()
+
+    monkeypatch.setattr(registry_module, "RetrievalService", _Spy)
+
+    definition = build_default_registry().get(SEARCH_KNOWLEDGE_TOOL)
+    assert definition is not None
+    context = ToolContext(
+        tenant_id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        session=as_session(object()),
+        embeddings=as_embeddings(object()),
+    )
+
+    await definition.handler(context, {"query": "prices", "max_results": 400})
+
+    assert asked["top_k"] == MAX_TOP_K
 
 
 @pytest.mark.parametrize(
