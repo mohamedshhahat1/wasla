@@ -40,6 +40,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.filenames import MAX_FILENAME_LENGTH
+from app.core.media_types import MAX_MIME_TYPE_LENGTH
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import _enum_type
 
@@ -54,6 +56,11 @@ from app.db.models.enums import _enum_type
 MAX_ATTEMPTS: Final = 3
 
 MAX_TRANSCRIPT_LENGTH: Final = 8_000
+
+# Meta's handle for a file: `message_media.wa_media_id`. A handle longer than
+# this is not one Meta issued, and an inbound message carrying one is stored as a
+# message without a downloadable file rather than failing its delivery (MEDIA-05).
+MAX_MEDIA_HANDLE_LENGTH: Final = 255
 
 
 class MediaStatus(StrEnum):
@@ -243,16 +250,17 @@ class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
     )
     # Meta's handle for the file. Nullable because an outbound attachment has no
     # inbound handle until it is uploaded.
-    wa_media_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    wa_media_id: Mapped[str | None] = mapped_column(String(MAX_MEDIA_HANDLE_LENGTH), nullable=True)
     status: Mapped[MediaStatus] = mapped_column(
         MEDIA_STATUS_TYPE,
         nullable=False,
         default=MediaStatus.PENDING,
     )
-    mime_type: Mapped[str | None] = mapped_column(String(150), nullable=True)
-    # As the customer's phone reported it. Shown to people; never used to build
-    # a path.
-    filename: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(MAX_MIME_TYPE_LENGTH), nullable=True)
+    # As the customer's phone reported it, brought to one canonical, bounded
+    # form before it is stored (`app.core.filenames`). Shown to people; never
+    # used to build a path, a key or a header.
+    filename: Mapped[str | None] = mapped_column(String(MAX_FILENAME_LENGTH), nullable=True)
     byte_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # SHA-256 of the bytes that actually arrived, hex encoded - computed here
     # rather than taken from the descriptor Meta sent.

@@ -32,14 +32,16 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from redis.exceptions import RedisError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.db.errors import is_data_exception
 from app.db.models.campaign import OptOutSource
 from app.db.models.conversation import Message, MessageKind
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppEvent, WhatsAppEventKind
@@ -117,6 +119,30 @@ class IngestionOutcome:
     # number" and this one means "our number, but not now, and we will not
     # guess" (MSG-01).
     unowned: int = 0
+    # Messages PostgreSQL refused as content - a value no column can hold - each
+    # rolled back on its own so the rest of the delivery was kept (MEDIA-05).
+    rejected: int = 0
+
+
+@dataclass(slots=True)
+class _Step:
+    """What ingesting one message or status produced, before it is kept.
+
+    Collected per source and folded into the delivery's totals only once that
+    source's savepoint has been released, so a message PostgreSQL refused adds
+    nothing - no count, no handoff, no job - and its siblings are unaffected.
+    """
+
+    stored: int = 0
+    duplicates: int = 0
+    unknown: int = 0
+    inactive: int = 0
+    unowned: int = 0
+    cancelled: int = 0
+    opted_out: int = 0
+    attachments: list[tuple[uuid.UUID, uuid.UUID]] = field(default_factory=list)
+    answering: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]] = field(default_factory=list)
+    owed: list[_Handoff] = field(default_factory=list)
 
 
 class WhatsAppIngestionService:
@@ -148,16 +174,8 @@ class WhatsAppIngestionService:
 
     async def ingest(self, payload: Mapping[str, Any]) -> IngestionOutcome:
         envelope = parse_webhook(payload)
-        stored = duplicates = unknown = inactive = cancelled = opted_out = unowned = 0
-        attachments: list[tuple[uuid.UUID, uuid.UUID]] = []
-        ignored = envelope.ignored
-        # (tenant, conversation, triggering message). The message is what
-        # the agent turn is keyed on, so a turn published twice for one
-        # customer message is recognised as one turn (WQ-01).
-        answering: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]] = []
-        # What each stored event still owes, so its state can be advanced once
-        # the enqueues below have said whether they landed.
-        owed: list[_Handoff] = []
+        totals = _Step()
+        rejected = 0
 
         # Messages and statuses are handled by the same loop because the storage
         # rules are identical; only the projection and the resolver differ.
@@ -167,138 +185,169 @@ class WhatsAppIngestionService:
         ]
 
         for source in sources:
-            occurred_at = source.timestamp or datetime.now(UTC)
-            is_message = isinstance(source, InboundMessage)
-
-            reconciled: Message | None = None
-            if isinstance(source, InboundMessage):
-                resolution = await self._owner_at(source.phone_number_id, occurred_at)
-            else:
-                # A status names a message rather than a moment, so it is
-                # resolved by that name first. Ownership is the fallback, for a
-                # status whose message this deployment never sent.
-                resolution, reconciled = await self._status_owner(source)
-
-            account = resolution.account
-            if account is None:
-                if resolution.reason == UNKNOWN_NUMBER:
-                    # Someone else's number, or one connected then removed. Not
-                    # an error for us to report: Meta cannot fix it by retrying.
-                    unknown += 1
-                    logger.warning(
-                        "whatsapp.unknown_phone_number_id",
-                        extra={"phone_number_id": source.phone_number_id},
-                    )
-                else:
-                    # Our number, but nobody held it when this happened. The
-                    # one thing that must not follow is attributing it to
-                    # whoever holds it now (MSG-01).
-                    unowned += 1
-                    logger.warning(
-                        "whatsapp.event_without_owner",
-                        extra={
-                            "event": "whatsapp.event_without_owner",
-                            "phone_number_id": source.phone_number_id,
-                            "reason": resolution.reason,
-                        },
-                    )
-                continue
-
-            # A claim the workspace still holds may be paused, and a paused
-            # number processes nothing. A claim it has already given up is a
-            # different thing: the event belongs to a period when the number
-            # was live, and recording it is history rather than traffic.
-            historical = account.released_at is not None
-            if not historical and not account.is_active:
-                inactive += 1
-                logger.info(
-                    "whatsapp.account_disabled",
-                    extra={"phone_number_id": source.phone_number_id},
+            step = _Step()
+            try:
+                # One savepoint per message (MEDIA-05). The delivery used to be
+                # one unit of work, so a single value PostgreSQL would not
+                # store - a 301-character document name - failed the flush for
+                # every message in it, and every one of Meta's retries failed
+                # identically: the customer's text sent alongside the file was
+                # lost with it. Flushed inside the savepoint, so a refused
+                # value is refused here, against this message alone.
+                async with self._session.begin_nested():
+                    await self._ingest_one(source, step)
+                    await self._session.flush()
+            except DBAPIError as error:
+                # Only a refusal of the *content* is contained. Anything else -
+                # the database down, a connection lost, a deadlock - is not a
+                # fact about this message, and still fails the delivery so Meta
+                # retries it (MSG-03).
+                if not is_data_exception(error):
+                    raise
+                rejected += 1
+                logger.error(
+                    "whatsapp.message_rejected_by_database",
+                    extra={
+                        "event": "whatsapp.message_rejected_by_database",
+                        "phone_number_id": source.phone_number_id,
+                        "kind": "message" if isinstance(source, InboundMessage) else "status",
+                    },
                 )
                 continue
+            _fold(totals, step)
 
-            repository = self._repository(account.tenant_id)
-            event, created = await repository.record(
-                account_id=account.id,
-                event_id=source.event_id,
-                kind=WhatsAppEventKind.MESSAGE if is_message else WhatsAppEventKind.STATUS,
-                payload=source.raw,
-                # A missing timestamp still needs a value to order by; arrival
-                # time is the honest fallback.
-                received_at=occurred_at,
-            )
-            if not created:
-                # A replay. Projecting again would duplicate a message or
-                # re-advance a status, so the event stops here - and it stops
-                # here whatever state the stored event is in. A redelivery is
-                # not a recovery mechanism: if the first delivery left work
-                # owing, the sweeper owns finishing it, and enqueueing from
-                # here as well would be two paths racing to queue one agent
-                # turn (ADR-102).
-                duplicates += 1
-                continue
-
-            stored += 1
-            projection = self._projection(account.tenant_id)
-            if isinstance(source, InboundMessage):
-                message = await projection.project_message(account_id=account.id, message=source)
-                owed.append(
-                    self._message_handoff(
-                        event=event,
-                        tenant_id=account.tenant_id,
-                        message=message,
-                        source=source,
-                        historical=historical,
-                        attachments=attachments,
-                        answering=answering,
-                    )
-                )
-                # The customer has spoken, so any nudge waiting on this
-                # conversation has lost its reason. Cancelled here, on the
-                # inbound path, rather than left for the follow-up worker to
-                # notice: the worker may sweep before this transaction's effects
-                # are visible to it, and a message that talks over someone who
-                # is already talking is exactly what a follow-up must never do.
-                cancelled += await self._follow_up_service(
-                    account.tenant_id
-                ).cancel_for_conversation(conversation_id=message.conversation_id)
-                # A customer asking to stop is honoured here rather than by a
-                # worker. It costs one string comparison, and the alternative is
-                # a window in which a campaign sweep could write to somebody who
-                # has already said no.
-                opted_out += await self._record_opt_out(
-                    tenant_id=account.tenant_id,
-                    wa_id=source.from_number,
-                    text=source.text,
-                )
-            else:
-                # A delivery status tells us about our own message. There is
-                # nothing for an agent to reply to, so the event owes nothing
-                # beyond the projection it just received - including when the
-                # message is unknown, which is ordinary traffic rather than a
-                # failure and must not leave the event owing work for ever.
-                await projection.project_status(status=source, message=reconciled)
-                owed.append(_Handoff(event=event))
-
-        if stored:
-            await self._session.flush()
-
-        queued_conversations = await self._enqueue(answering)
-        queued_media = await self._enqueue_media(attachments)
-        self._settle(owed, conversations=queued_conversations, media=queued_media)
+        queued_conversations = await self._enqueue(totals.answering)
+        queued_media = await self._enqueue_media(totals.attachments)
+        self._settle(totals.owed, conversations=queued_conversations, media=queued_media)
 
         return IngestionOutcome(
-            stored=stored,
-            duplicates=duplicates,
-            unknown_accounts=unknown,
-            inactive_accounts=inactive,
-            ignored=ignored,
+            stored=totals.stored,
+            duplicates=totals.duplicates,
+            unknown_accounts=totals.unknown,
+            inactive_accounts=totals.inactive,
+            ignored=envelope.ignored,
             queued=len(queued_conversations),
-            cancelled_follow_ups=cancelled,
+            cancelled_follow_ups=totals.cancelled,
             media_queued=len(queued_media),
-            opt_outs=opted_out,
-            unowned=unowned,
+            opt_outs=totals.opted_out,
+            unowned=totals.unowned,
+            rejected=rejected,
         )
+
+    async def _ingest_one(self, source: InboundMessage | DeliveryStatus, step: _Step) -> None:
+        """Store and project one message or status, recording what it owes in `step`."""
+        occurred_at = source.timestamp or datetime.now(UTC)
+        is_message = isinstance(source, InboundMessage)
+
+        reconciled: Message | None = None
+        if isinstance(source, InboundMessage):
+            resolution = await self._owner_at(source.phone_number_id, occurred_at)
+        else:
+            # A status names a message rather than a moment, so it is
+            # resolved by that name first. Ownership is the fallback, for a
+            # status whose message this deployment never sent.
+            resolution, reconciled = await self._status_owner(source)
+
+        account = resolution.account
+        if account is None:
+            if resolution.reason == UNKNOWN_NUMBER:
+                # Someone else's number, or one connected then removed. Not
+                # an error for us to report: Meta cannot fix it by retrying.
+                step.unknown += 1
+                logger.warning(
+                    "whatsapp.unknown_phone_number_id",
+                    extra={"phone_number_id": source.phone_number_id},
+                )
+            else:
+                # Our number, but nobody held it when this happened. The
+                # one thing that must not follow is attributing it to
+                # whoever holds it now (MSG-01).
+                step.unowned += 1
+                logger.warning(
+                    "whatsapp.event_without_owner",
+                    extra={
+                        "event": "whatsapp.event_without_owner",
+                        "phone_number_id": source.phone_number_id,
+                        "reason": resolution.reason,
+                    },
+                )
+            return
+
+        # A claim the workspace still holds may be paused, and a paused
+        # number processes nothing. A claim it has already given up is a
+        # different thing: the event belongs to a period when the number
+        # was live, and recording it is history rather than traffic.
+        historical = account.released_at is not None
+        if not historical and not account.is_active:
+            step.inactive += 1
+            logger.info(
+                "whatsapp.account_disabled",
+                extra={"phone_number_id": source.phone_number_id},
+            )
+            return
+
+        repository = self._repository(account.tenant_id)
+        event, created = await repository.record(
+            account_id=account.id,
+            event_id=source.event_id,
+            kind=WhatsAppEventKind.MESSAGE if is_message else WhatsAppEventKind.STATUS,
+            payload=source.raw,
+            # A missing timestamp still needs a value to order by; arrival
+            # time is the honest fallback.
+            received_at=occurred_at,
+        )
+        if not created:
+            # A replay. Projecting again would duplicate a message or
+            # re-advance a status, so the event stops here - and it stops
+            # here whatever state the stored event is in. A redelivery is
+            # not a recovery mechanism: if the first delivery left work
+            # owing, the sweeper owns finishing it, and enqueueing from
+            # here as well would be two paths racing to queue one agent
+            # turn (ADR-102).
+            step.duplicates += 1
+            return
+
+        step.stored += 1
+        projection = self._projection(account.tenant_id)
+        if isinstance(source, InboundMessage):
+            message = await projection.project_message(account_id=account.id, message=source)
+            step.owed.append(
+                self._message_handoff(
+                    event=event,
+                    tenant_id=account.tenant_id,
+                    message=message,
+                    source=source,
+                    historical=historical,
+                    attachments=step.attachments,
+                    answering=step.answering,
+                )
+            )
+            # The customer has spoken, so any nudge waiting on this
+            # conversation has lost its reason. Cancelled here, on the
+            # inbound path, rather than left for the follow-up worker to
+            # notice: the worker may sweep before this transaction's effects
+            # are visible to it, and a message that talks over someone who
+            # is already talking is exactly what a follow-up must never do.
+            step.cancelled += await self._follow_up_service(
+                account.tenant_id
+            ).cancel_for_conversation(conversation_id=message.conversation_id)
+            # A customer asking to stop is honoured here rather than by a
+            # worker. It costs one string comparison, and the alternative is
+            # a window in which a campaign sweep could write to somebody who
+            # has already said no.
+            step.opted_out += await self._record_opt_out(
+                tenant_id=account.tenant_id,
+                wa_id=source.from_number,
+                text=source.text,
+            )
+        else:
+            # A delivery status tells us about our own message. There is
+            # nothing for an agent to reply to, so the event owes nothing
+            # beyond the projection it just received - including when the
+            # message is unknown, which is ordinary traffic rather than a
+            # failure and must not leave the event owing work for ever.
+            await projection.project_status(status=source, message=reconciled)
+            step.owed.append(_Handoff(event=event))
 
     def _message_handoff(
         self,
@@ -608,3 +657,17 @@ class WhatsAppIngestionService:
             )
             self._projections[tenant_id] = projection
         return projection
+
+
+def _fold(totals: _Step, step: _Step) -> None:
+    """Add one kept source's results to the delivery's."""
+    totals.stored += step.stored
+    totals.duplicates += step.duplicates
+    totals.unknown += step.unknown
+    totals.inactive += step.inactive
+    totals.unowned += step.unowned
+    totals.cancelled += step.cancelled
+    totals.opted_out += step.opted_out
+    totals.attachments.extend(step.attachments)
+    totals.answering.extend(step.answering)
+    totals.owed.extend(step.owed)
