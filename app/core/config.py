@@ -16,6 +16,7 @@ from urllib.parse import urlparse, urlsplit
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.core.hostnames import normalize_roots
 from app.core.proxy import parse_trusted_proxies
 
 Environment = Literal["local", "test", "staging", "production"]
@@ -243,6 +244,18 @@ def _google_problems(
 # the signing key is a shared secret, so an asymmetric algorithm could only
 # ever be configured wrongly here, and `none` is not an algorithm.
 ALLOWED_JWT_ALGORITHMS: Final = frozenset({"HS256", "HS384", "HS512"})
+
+# The hosts an inbound media download may send the Meta access token to
+# (MEDIA-01), as roots: each matches itself and its subdomains on a label
+# boundary, never by suffix. The families the Graph API and its CDN answer with
+# in the documentation and in the audit's captured redirect chain. The real
+# production chain is confirmed in deployment verification (DV-1) before
+# launch, and this list changes by configuration rather than by release.
+DEFAULT_META_MEDIA_HOST_ROOTS: Final[tuple[str, ...]] = (
+    "graph.facebook.com",
+    "fbsbx.com",
+    "fbcdn.net",
+)
 VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"})
 
 
@@ -679,6 +692,13 @@ class Settings(BaseSettings):
     # Checked against `META_API_SUNSETS` at start-up, which warns when this
     # version is inside its final 90 days. See `api_version_warning`.
     meta_api_version: str = "v21.0"
+    # Where a media download may carry the Meta token (MEDIA-01). A hop to any
+    # other host is refused outright rather than fetched without the token: a
+    # provider response naming a host outside this list is not a file Meta is
+    # serving. Comma-separated; `NoDecode` for the reason `cors_origins` has it.
+    meta_media_host_roots: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_META_MEDIA_HOST_ROOTS)
+    )
 
     # Email (ADR-042). Off by default: a deployment that has not configured a
     # sender is a deployment that sends nothing, and every enqueue is a no-op
@@ -836,6 +856,30 @@ class Settings(BaseSettings):
                 return json.loads(raw)
             return [item.strip() for item in raw.split(",") if item.strip()]
         return value
+
+    @field_validator("meta_media_host_roots", mode="before")
+    @classmethod
+    def _parse_meta_media_host_roots(cls, value: Any) -> Any:
+        """Accept a JSON array, a comma-separated string, or a list.
+
+        Normalised here, so an entry that is not a bare DNS name - a wildcard,
+        a URL, an address - refuses to start the process instead of becoming
+        a policy that matches nothing or something nobody meant. An empty list
+        is refused too: it would make every media download fail, and a
+        deployment wanting that should not be able to reach it by a typo.
+        """
+        if value is None:
+            value = []
+        if isinstance(value, str):
+            raw = value.strip()
+            if raw.startswith("["):
+                value = json.loads(raw)
+            else:
+                value = [item.strip() for item in raw.split(",") if item.strip()]
+        roots = normalize_roots(value)
+        if not roots:
+            raise ValueError("meta_media_host_roots must name at least one host")
+        return list(roots)
 
     @field_validator("trusted_proxy_ips", mode="before")
     @classmethod

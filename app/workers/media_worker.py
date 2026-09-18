@@ -312,6 +312,7 @@ class MediaWorker:
             http=http,
             access_token=self._settings.meta_access_token,
             api_version=self._settings.meta_api_version,
+            media_host_roots=self._settings.meta_media_host_roots,
         )
 
     def _reader(self, http: httpx.AsyncClient) -> MediaReader:
