@@ -130,7 +130,7 @@ INVARIANTS: Final[dict[str, str]] = {
     """,
     "conversations with more than one agent handoff audit row": """
         SELECT count(*) FROM (
-            SELECT meta->>'conversation_id' AS conversation
+            SELECT metadata->>'conversation_id' AS conversation
               FROM audit_logs
              WHERE action = 'agent_handoff_requested'
              GROUP BY 1 HAVING count(*) > 1
@@ -145,13 +145,13 @@ INVARIANTS: Final[dict[str, str]] = {
     """,
     "agent handoff audit rows on a conversation still answered by the AI": """
         SELECT count(*) FROM audit_logs a
-          JOIN conversations c ON c.id::text = a.meta->>'conversation_id'
+          JOIN conversations c ON c.id::text = a.metadata->>'conversation_id'
          WHERE a.action = 'agent_handoff_requested' AND c.mode <> 'human'
     """,
     "agent audit rows pointing outside their own workspace": """
         SELECT count(*) FROM audit_logs a
-          JOIN conversations c ON c.id::text = a.meta->>'conversation_id'
-         WHERE a.action LIKE 'agent\\_%' AND a.tenant_id IS NOT NULL
+          JOIN conversations c ON c.id::text = a.metadata->>'conversation_id'
+         WHERE a.action::text LIKE 'agent\\_%' AND a.tenant_id IS NOT NULL
            AND c.tenant_id <> a.tenant_id
     """,
     # ---------------------------------------------- the turn survives a tool
@@ -169,7 +169,7 @@ INVARIANTS: Final[dict[str, str]] = {
            AND NOT EXISTS (
                 SELECT 1 FROM tool_executions e
                  WHERE e.tenant_id = a.tenant_id
-                   AND e.conversation_id::text = a.meta->>'conversation_id'
+                   AND e.conversation_id::text = a.metadata->>'conversation_id'
                    AND e.state = 'succeeded'
            )
     """,
