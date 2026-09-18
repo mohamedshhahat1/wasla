@@ -385,6 +385,17 @@ class AuditAction(StrEnum):
     PLATFORM_WORKSPACES_READ = "platform_workspaces_read"
     PLATFORM_AUDIT_LOG_READ = "platform_audit_log_read"
 
+    # A colleague opened a customer's file, or sent one (MEDIA-17, PD-MEDIA-06).
+    # Audited because a customer's photographs, voice notes and documents are
+    # the most personal data a workspace holds, and "who looked at this, and
+    # when" is asked after the fact. Only a person's act is recorded - the media
+    # worker reading a file to understand it is not a colleague accessing it.
+    # `meta` carries internal identifiers only: the conversation, message and
+    # file ids. Never the filename, the storage key, a URL, the caption, the
+    # transcript or the file.
+    MEDIA_DOWNLOADED = "media_downloaded"
+    MEDIA_SENT = "media_sent"
+
 
 AUDIT_ACTOR_KIND_TYPE = _enum_type(AuditActorKind, name="audit_actor_kind")
 AUDIT_ACTION_TYPE = _enum_type(AuditAction, name="audit_action")

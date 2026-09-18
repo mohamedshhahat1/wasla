@@ -71,6 +71,7 @@ from app.core.media_types import SNIFF_BYTES, MediaTypeError
 from app.core.media_types import resolve as resolve_media_type
 from app.core.storage import MediaStorage, StorageError, build_key
 from app.core.telemetry import record_media_outcome
+from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey
 from app.db.models.media import (
     MAX_TRANSCRIPT_LENGTH,
@@ -79,6 +80,7 @@ from app.db.models.media import (
     MessageMedia,
 )
 from app.db.models.usage import UsageEventType
+from app.db.models.user import User
 from app.db.session import released
 from app.integrations.whatsapp.client import (
     DownloadedMedia,
@@ -90,6 +92,7 @@ from app.integrations.whatsapp.client import (
     WhatsAppClient,
 )
 from app.repositories.media_repository import MediaRepository
+from app.services.audit_service import AuditTrail
 from app.services.credential_service import CredentialService
 from app.services.entitlement_service import EntitlementService
 from app.services.extraction import UnreadableDocumentError
@@ -747,6 +750,26 @@ class MediaService:
         await self._session.flush()
         await record_media_outcome("ready")
         return MediaOutcome(media_id=media.id, status=MediaStatus.READY)
+
+    def record_colleague_download(self, media: MessageMedia, *, actor: User) -> None:
+        """Stage the audit entry for a colleague opening this file (MEDIA-17).
+
+        Staged in the request's transaction, so it commits with the response
+        that served the bytes. Internal identifiers only - no filename, key,
+        caption or transcript - and the actor recorded as a member of this
+        workspace, which is the capacity the download was authorised in.
+        """
+        AuditTrail(self._session, tenant_id=self._tenant_id).record(
+            AuditAction.MEDIA_DOWNLOADED,
+            actor=actor,
+            actor_kind=AuditActorKind.USER,
+            target_type="message_media",
+            target_id=media.id,
+            meta={
+                "conversation_id": str(media.conversation_id),
+                "message_id": str(media.message_id),
+            },
+        )
 
     # ------------------------------------------------------ giving a file up
 
