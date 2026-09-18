@@ -17,6 +17,8 @@ signal-to-noise matters most.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from app.agents.registry import RECORD_LEAD_TOOL, SCHEDULE_FOLLOW_UP_TOOL
@@ -212,3 +214,50 @@ async def test_a_grant_naming_a_tool_this_build_does_not_implement_runs_nothing(
             ToolExecutionReason.TOOL_NOT_IMPLEMENTED.value,
         )
     ]
+
+
+async def test_an_ordinary_repeat_takes_the_update_path_not_the_race_path(
+    ai_turns: TurnRunner,
+    ai_providers: FakeProviders,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The lead and the pending nudge are found before anything is inserted (TM20, TM22).
+
+    Since TOOL-02 an insert that collides with an existing lead or pending
+    nudge converges onto it, so a missing pre-read would still produce the
+    right rows - by attempting an insert that fails on every repeat call, rolling
+    back a savepoint each time, and logging a race that never happened. That is
+    write amplification on the most-called tool and noise in the one log line
+    that exists to show a real race. The pre-read is what keeps the ordinary
+    case ordinary.
+    """
+    workspace = await ai_turns.workspace(grants=[RECORD_LEAD_TOOL, SCHEDULE_FOLLOW_UP_TOOL])
+    conversation_id, ids = await ai_turns.write(workspace, ["I am Ahmed, talk tomorrow"])
+    ai_providers.agent = scripted(
+        tool_calls_response(
+            (
+                (RECORD_LEAD_TOOL, {"name": "Ahmed"}),
+                (SCHEDULE_FOLLOW_UP_TOOL, {"delay_minutes": 60, "message": "First."}),
+            )
+        ),
+        tool_calls_response(
+            (
+                (RECORD_LEAD_TOOL, {"interest": "finishing"}),
+                (SCHEDULE_FOLLOW_UP_TOOL, {"delay_minutes": 120, "message": "Second."}),
+            )
+        ),
+        text_response(ANSWER),
+    )
+
+    with caplog.at_level(logging.INFO):
+        await ai_turns.answer(workspace, conversation_id, ids[0])
+
+    # Non-vacuity: the second round really did find an existing lead and an
+    # existing nudge, and updated them.
+    (lead,) = await ai_turns.leads(workspace.tenant_id)
+    assert (lead.name, lead.interest) == ("Ahmed", "finishing")
+    (follow_up,) = await ai_turns.follow_ups(workspace.tenant_id)
+    assert follow_up.body == "Second."
+
+    raced = [r.getMessage() for r in caplog.records if r.getMessage().endswith("_raced")]
+    assert raced == []
