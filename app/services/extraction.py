@@ -2,9 +2,15 @@
 
 Two callers, one implementation. A customer sends a PDF over WhatsApp and an
 agent needs to know what it says; a workspace uploads a PDF to its knowledge base
-and it needs to be searchable. Both want the same thing, and `KnowledgeService`
-has refused PDFs since phase 6 with a note saying a parser was not yet a
-dependency. It is now.
+and it needs to be searchable. Both want the same thing - and both now get it the
+same way: parsed in a killable child process with byte, page, text, memory and
+time limits (`extract_pdf_bounded`, RAG-02).
+
+The message path used to have its own in-process `extract_pdf`, which ran
+`pypdf` on the event loop every worker in the process shares. A 25 KB customer
+PDF stalled that loop for 170 seconds and took it to 763 MB (MEDIA-02), and
+parser exceptions outside its catch list escaped it altogether (MEDIA-03). It is
+gone rather than fixed: nothing in this process parses a stranger's PDF.
 
 What this deliberately does not do is OCR. A PDF that is a photograph of a
 contract has no text layer, and this returns nothing rather than a page of
@@ -15,16 +21,12 @@ gibberish that answers questions wrongly.
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import os
 import sys
 import weakref
 from pathlib import Path
 from typing import Final
-
-from pypdf import PdfReader
-from pypdf.errors import PyPdfError
 
 from app.core.exceptions import ValidationError
 from app.core.logging import get_logger
@@ -50,15 +52,6 @@ CHILD_ENVIRONMENT: Final = ("PATH", "SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP", 
 # limit, escaped as ASCII JSON at worst six bytes a character, plus the envelope.
 MAX_CHILD_OUTPUT_BYTES: Final = MAX_EXTRACTED_CHARACTERS * 6 + 4_096
 
-# For a document a customer sends in a conversation (`extract_pdf`), read up to
-# this many pages rather than refused: an agent describing the first forty pages
-# of an attachment is still answering the message it was sent.
-#
-# The knowledge base does the opposite (`extract_pdf_bounded`). A document there
-# is something agents answer from for months, and one indexed to page forty of
-# sixty reads as complete while being silent about a third of itself (RAG-08).
-MAX_PAGES: Final = MAX_PDF_PAGES
-
 PDF_TYPE: Final = "application/pdf"
 TEXT_TYPE: Final = "text/plain"
 
@@ -71,28 +64,6 @@ class UnreadableDocumentError(ValidationError):
     """The bytes are not a document this can read."""
 
     message = "This document could not be read."
-
-
-def extract_pdf(content: bytes) -> str:
-    """Pull the text layer out of a PDF.
-
-    Returns an empty string for a scanned document, which is a real answer
-    rather than a failure: the file is a valid PDF and simply contains no text.
-    Telling those apart matters, because one is worth reporting to the person
-    who uploaded it and the other is worth retrying.
-    """
-    try:
-        reader = PdfReader(io.BytesIO(content))
-        pages = reader.pages[:MAX_PAGES]
-        extracted = [page.extract_text() or "" for page in pages]
-    except (PyPdfError, ValueError, OSError, RecursionError) as error:
-        # RecursionError is in this list on purpose. A malformed cross-reference
-        # table can send the parser into a cycle, and a customer's attachment is
-        # exactly the kind of input that carries one.
-        logger.warning("media.pdf_unreadable")
-        raise UnreadableDocumentError() from error
-
-    return "\n\n".join(part.strip() for part in extracted if part.strip()).strip()
 
 
 class DocumentTooLargeError(ValidationError):
@@ -129,10 +100,12 @@ async def extract_pdf_bounded(
     max_characters: int = MAX_EXTRACTED_CHARACTERS,
     timeout_seconds: float = EXTRACTION_TIMEOUT_SECONDS,
 ) -> str:
-    """The text layer of a knowledge PDF, parsed in a process that can be killed.
+    """The text layer of a PDF, parsed in a process that can be killed.
 
-    For the knowledge base, where the result becomes chunks somebody pays to
-    embed (RAG-02). Never runs `pypdf` on the calling event loop, and never lets
+    The only PDF parser this application runs. The knowledge base uses it for
+    documents whose text becomes chunks somebody pays to embed (RAG-02), and the
+    media reader uses it, with the same limits, for a PDF a customer sent
+    (MEDIA-02). Never runs `pypdf` on the calling event loop, and never lets
     it run past `timeout_seconds`: the parse happens in `pdf_extract_child`,
     which enforces the page and character limits itself, and which this kills if
     the clock runs out first.
@@ -140,8 +113,12 @@ async def extract_pdf_bounded(
     Refuses rather than truncates. A PDF over the page limit, or one whose text
     would exceed the character limit, raises `DocumentTooLargeError` with the
     limit in the message; the audit's 60-page PDF was indexed to page 40 and
-    reported `ready` (RAG-08). A scanned PDF returns an empty string, exactly as
-    `extract_pdf` does.
+    reported `ready` (RAG-08). A scanned PDF returns an empty string, which is a
+    real answer rather than a failure: a valid PDF with no text layer.
+
+    A crash of the child - whatever the parser raised, and it raises far more
+    than its own error type on hostile input - arrives here as no answer and
+    becomes `UnreadableDocumentError`. The parent never sees the exception.
     """
     if not content:
         raise UnreadableDocumentError()
@@ -246,11 +223,16 @@ def extract_text(content: bytes) -> str:
     return content.decode("latin-1", errors="replace").strip()
 
 
-def extract_document(*, content: bytes, mime_type: str | None) -> str:
-    """Text from a document of a supported type."""
+async def extract_document(*, content: bytes, mime_type: str | None) -> str:
+    """Text from a document of a supported type.
+
+    A PDF goes to the bounded child and may raise `DocumentTooLargeError` as
+    well as `UnreadableDocumentError`; plain text is decoded here, which is a
+    linear pass over at most the media byte cap and cannot amplify.
+    """
     kind = (mime_type or "").lower()
     if kind == PDF_TYPE:
-        return extract_pdf(content)
+        return await extract_pdf_bounded(content)
     if kind == TEXT_TYPE:
         return extract_text(content)
     raise UnreadableDocumentError()

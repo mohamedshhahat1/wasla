@@ -11,7 +11,7 @@ The three paths and what each produces:
 | --- | --- | --- |
 | Image | Responses API, image input | A description written for an agent |
 | Audio | Transcription endpoint | The words that were spoken |
-| Document | PDF or plain text extraction | The text layer |
+| Document | PDF (bounded child process) or plain text | The text layer |
 
 Everything here returns a transcript or raises. Deciding what a failure means -
 retry or give up - belongs to the caller, which is the only thing that knows how
@@ -87,6 +87,19 @@ class SilentRecordingError(ExternalServiceError):
     message = "No speech could be heard in this recording."
 
 
+class DocumentBeyondLimitsError(ExternalServiceError):
+    """A PDF past what the bounded parser will read (MEDIA-02).
+
+    Over the byte, page or text limit, or still parsing when the clock ran out.
+    The file is kept - it is the customer's message - and it is not read: a
+    parse that cannot finish inside the limits is the shape a decompression
+    bomb has, and telling the two apart would mean running it. A decision, like
+    a scan, and no retry changes it.
+    """
+
+    message = "This document is too large or too complex to read automatically."
+
+
 class ScannedDocumentError(ExternalServiceError):
     """A document with no text layer, such as a photograph of a page.
 
@@ -143,7 +156,7 @@ class MediaReader:
         if kind in AUDIO_TYPES:
             return await self._transcribe(content=content, mime_type=kind)
         if kind in DOCUMENT_TYPES:
-            return self._extract(content=content, mime_type=kind)
+            return await self._extract(content=content, mime_type=kind)
         raise extraction.UnreadableDocumentError()
 
     async def _describe(self, *, content: bytes, mime_type: str) -> ReadResult:
@@ -187,8 +200,14 @@ class MediaReader:
             raise SilentRecordingError()
         return ReadResult(transcript=spoken, method=TRANSCRIPTION_METHOD)
 
-    def _extract(self, *, content: bytes, mime_type: str) -> ReadResult:
-        text = extraction.extract_document(content=content, mime_type=mime_type)
+    async def _extract(self, *, content: bytes, mime_type: str) -> ReadResult:
+        try:
+            text = await extraction.extract_document(content=content, mime_type=mime_type)
+        except extraction.DocumentTooLargeError as refusal:
+            # The knowledge base's wording names indexing and splitting, which
+            # mean nothing to an agent answering a customer. The limits are the
+            # same; the sentence is this module's.
+            raise DocumentBeyondLimitsError() from refusal
         if not text:
             raise ScannedDocumentError()
         return ReadResult(transcript=text, method=EXTRACTION_METHOD)

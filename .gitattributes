@@ -34,3 +34,7 @@ Dockerfile text eol=lf
 *.md text eol=lf
 *.sql text eol=lf
 *.env text eol=lf
+
+# Byte-exact fixtures: a poison PDF with one line ending changed is a different
+# file, and not the one the audit found.
+tests/media_fixtures/** binary

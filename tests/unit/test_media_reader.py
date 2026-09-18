@@ -21,11 +21,14 @@ from app.core.exceptions import ExternalServiceError
 from app.integrations.openai.client import ResponsesClient
 from app.integrations.openai.transcription import TranscriptionClient
 from app.services.extraction import UnreadableDocumentError
+from app.services.knowledge_limits import MAX_PDF_BYTES
 from app.services.media_reader import (
+    DocumentBeyondLimitsError,
     MediaReader,
     ScannedDocumentError,
     SilentRecordingError,
 )
+from tests.pdf_fixtures import POISON_PDF_CLASSES, amplifying_pdf, poison_pdf
 
 PIXEL = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -213,3 +216,69 @@ def test_can_read_matches_what_read_accepts() -> None:
     for absent in ("application/zip", "video/mp4", ""):
         assert not reader.can_read(absent)
     assert not reader.can_read(None)
+
+
+# ------------------------------------------------ the bounded parser (MEDIA-02/03)
+
+
+@pytest.mark.parametrize("escape_class", POISON_PDF_CLASSES)
+async def test_a_poison_pdf_is_unreadable_and_its_exception_never_reaches_this_process(
+    escape_class: str,
+) -> None:
+    """The five classes that escaped the old in-process catch list. In the
+    child they crash the child; here they are one fixed refusal."""
+    with pytest.raises(UnreadableDocumentError) as raised:
+        await MediaReader().read(content=poison_pdf(escape_class), mime_type="application/pdf")
+
+    assert escape_class not in str(raised.value)
+    # Nothing chained: the parent was told "no answer", never what was raised.
+    assert raised.value.__cause__ is None
+
+
+async def test_a_pdf_past_the_byte_limit_is_a_decision_without_starting_a_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[object] = []
+
+    async def spawn(*args: object, **kwargs: object) -> object:
+        started.append(args)
+        raise AssertionError("no parser process should start")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+    oversized = b"%PDF-1.4" + b"0" * (MAX_PDF_BYTES + 1)
+
+    with pytest.raises(DocumentBeyondLimitsError) as raised:
+        await MediaReader().read(content=oversized, mime_type="application/pdf")
+
+    assert started == []
+    assert raised.value.message == DocumentBeyondLimitsError.message
+
+
+async def test_a_pdf_that_expands_past_the_text_limit_is_a_decision() -> None:
+    with pytest.raises(DocumentBeyondLimitsError):
+        await MediaReader().read(content=amplifying_pdf(4), mime_type="application/pdf")
+
+
+async def test_a_pdf_is_read_in_a_child_process_not_on_this_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restoring an in-process parse would not spawn anything, and this fails."""
+    import asyncio
+
+    spawned: list[tuple[object, ...]] = []
+    real = asyncio.create_subprocess_exec
+
+    async def spy(*args: object, **kwargs: object) -> object:
+        spawned.append(args)
+        return await real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+    from tests.unit.test_extraction import _pdf_with_text
+
+    result = await MediaReader().read(
+        content=_pdf_with_text("Quote 4500 EGP"), mime_type="application/pdf"
+    )
+
+    assert "Quote 4500 EGP" in result.transcript
+    assert len(spawned) == 1
+    assert str(spawned[0][1]).endswith("pdf_extract_child.py")

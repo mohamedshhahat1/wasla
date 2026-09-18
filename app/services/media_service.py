@@ -48,6 +48,7 @@ from app.services.extraction import UnreadableDocumentError
 from app.services.media_reader import (
     READABLE_TYPES,
     TRANSCRIPTION_METHOD,
+    DocumentBeyondLimitsError,
     MediaReader,
     ScannedDocumentError,
     SilentRecordingError,
@@ -60,6 +61,11 @@ logger = get_logger(__name__)
 # retention, or an operator looking at a quarantined object - and restarting a
 # download from one of them would be this service overruling that owner.
 _NOT_OURS_TO_WRITE: Final = frozenset({MediaStorageState.PURGING, MediaStorageState.MISMATCHED})
+
+# What a row says when its reader raised something unexpected. Wasla's words,
+# never the exception's: an agent is shown this line, and an exception raised
+# while opening a customer's file can quote the file.
+READER_FAILED: Final = "This file could not be read."
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,9 +455,15 @@ class MediaService:
 
         try:
             result = await reader.read(content=content, mime_type=media.mime_type)
-        except (SilentRecordingError, ScannedDocumentError, UnreadableDocumentError) as decision:
-            # Not failures. The file was opened and found to hold no text, which
-            # is an answer rather than an error.
+        except (
+            SilentRecordingError,
+            ScannedDocumentError,
+            UnreadableDocumentError,
+            DocumentBeyondLimitsError,
+        ) as decision:
+            # Not failures. The file was opened and found to hold no text, or
+            # to be more than the bounded parser will read - an answer rather
+            # than an error, and no retry changes it.
             return await self._skip(media, decision.message)
         except (ExternalServiceError, RateLimitedError) as error:
             if media.is_exhausted:
@@ -460,6 +472,27 @@ class MediaService:
                     "This file could not be read after several attempts.",
                 )
             return await self._fail(media, str(error))
+        except Exception as error:
+            # The containment boundary (MEDIA-03). A reader raising something
+            # nobody anticipated - a parser, a provider client, a bug - costs
+            # this file's reading and nothing else: not the conversation, whose
+            # reply is gated on this row resolving, and not the queue. Without
+            # it the job dead-lettered with the row unresolved, and every later
+            # attachment in the conversation went unanswered with it.
+            #
+            # `Exception`, so cancellation and interpreter exit still leave. The
+            # error's type is logged and its text is not: a message raised while
+            # reading a customer's file can quote the file.
+            logger.warning(
+                "media.reader_failed",
+                extra={
+                    "event": "media.reader_failed",
+                    "tenant_id": str(self._tenant_id),
+                    "media_id": str(media.id),
+                    "error_type": type(error).__name__,
+                },
+            )
+            return await self._fail(media, READER_FAILED)
 
         # One file read, whatever it took to read it. Transcription is metered
         # separately because it is a second provider and priced as one - but as
