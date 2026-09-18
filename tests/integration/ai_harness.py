@@ -35,6 +35,7 @@ from redis.asyncio import Redis
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.agents.registry import ToolRegistry
 from app.core.config import Settings
 from app.db.models.agent import Agent, AgentStatus, AgentTool
 from app.db.models.agent_turn import AgentTurn
@@ -335,6 +336,8 @@ class TurnRunner:
     settings: Settings
     tenants: list[uuid.UUID] = field(default_factory=list)
     plans: list[str] = field(default_factory=list)
+    #: A registry to run instead of the deployment's. See `worker`.
+    registry: ToolRegistry | None = None
 
     def configure(self, **overrides: Any) -> None:
         """Replace the settings every worker built from here on will read."""
@@ -435,11 +438,21 @@ class TurnRunner:
             return stored[0].conversation_id, [message.id for message in stored]
 
     def worker(self, database: Database | None = None) -> AgentWorker:
+        """A real worker on this runner's queue.
+
+        `registry`, when the test set one, replaces the deployment's own. That
+        is how a suite reaches properties the four shipped tools cannot express
+        on their own - a handler that stages a row and then raises, for
+        instance, which is the only way to exercise the executor's savepoint
+        while every real tool contains its own failures.
+        """
         worker = AgentWorker(
             database=database or self.database,
             redis=_redis_client(self.settings),
             settings=self.settings,
         )
+        if self.registry is not None:
+            worker._registry = self.registry
         worker._queue = AgentQueue(
             self.redis, namespace=self.namespace, visibility_timeout_seconds=60
         )

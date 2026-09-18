@@ -948,10 +948,14 @@ class AgentOrchestrator:
     ) -> ToolExecution:
         """Run the handler, containing whatever it does (TOOL-01, TOOL-02).
 
-        **The execution record is flushed before the savepoint opens.** A
-        savepoint rollback undoes everything staged after it, and a record of a
-        failed call that the failure itself erased would defeat the whole point
-        of keeping one.
+        **The execution record is written before the savepoint opens**, and the
+        record is not touched again inside it. A savepoint rollback undoes every
+        statement issued since the savepoint *and expires the objects those
+        statements wrote*, so a record marked `started` inside the savepoint
+        would come back expired - and the next plain attribute read of it would
+        be a lazy load with no greenlet to run in, which is a second, worse way
+        to lose the turn. Marked and flushed first, it is clean by the time the
+        handler runs and survives whatever the handler does.
 
         **Every exception is contained, not only the two that were expected.**
         `ToolArgumentError` and `WaslaError` were handled and everything else
@@ -966,6 +970,7 @@ class AgentOrchestrator:
         `asyncio.CancelledError` is a `BaseException` and is deliberately not
         caught: a worker shutting down is not a tool that failed.
         """
+        ToolExecutionRepository.begin(record)
         await self._flush(record)
         try:
             if definition.releases_session:
@@ -976,12 +981,19 @@ class AgentOrchestrator:
                 output = await definition.handler(context, arguments)
             else:
                 async with self._session.begin_nested():
-                    ToolExecutionRepository.begin(record)
                     output = await definition.handler(context, arguments)
         except ToolArgumentError as error:
             # A handler may still reject what the declaration could not express.
+            # Recorded as a *failure* rather than a rejection, and the
+            # distinction is the one this vocabulary is built on: `rejected`
+            # means the call never ran, and this one did.
             logger.info("agent.tool_rejected", extra={"tool": definition.name})
-            return await self._refuse(record, error.reason, str(error))
+            await self._settle(
+                record,
+                state=ToolExecutionState.FAILED,
+                reason=error.reason,
+            )
+            return ToolExecution(output=str(error), succeeded=False)
         except WaslaError as error:
             logger.warning("agent.tool_failed", extra={"tool": definition.name})
             await self._settle(
