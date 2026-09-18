@@ -271,11 +271,17 @@ class MediaService:
         if row.is_stored:
             self._settle_stored(row)
             return MediaOutcome(media_id=row.id, status=MediaStatus.STORED)
-        if row.storage_state in _NOT_OURS_TO_WRITE or row.is_purged:
-            # Being purged, already quarantined, or removed by retention
-            # (ADR-078): each has an owner, and it is not this. A null key used
-            # to mean one thing - not downloaded yet - and now means several, so
-            # this is checked before anything treats the row as fresh work.
+        if row.is_purged:
+            # Retention removed this file before anybody read it (ADR-078). A
+            # null key used to mean one thing - not downloaded yet - and now
+            # means several, so this is checked before anything treats the row
+            # as fresh work: asking Meta again would undo a deletion the
+            # workspace asked for. Terminal, so the row cannot hold its
+            # conversation's reply for ever either.
+            return await self._finish(row, MediaReason.NOTHING_STORED)
+        if row.storage_state in _NOT_OURS_TO_WRITE:
+            # Being purged, or quarantined: each has an owner, and it is not
+            # this. Reported as it stands rather than restarted.
             return self._as_it_stands(row)
         if row.wa_media_id is None:
             return await self._finish(row, MediaReason.NO_FILE)

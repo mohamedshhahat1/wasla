@@ -269,3 +269,32 @@ async def test_an_inbound_file_inside_the_capacity_is_stored(
     await db_session.refresh(incoming)
     assert incoming.status is MediaStatus.READY
     assert incoming.storage_state is MediaStorageState.STORED
+
+
+# ------------------------------------------------------------------- M23
+
+
+async def test_a_file_retention_removed_before_it_was_read_is_never_fetched_again(
+    db_session: AsyncSession, tmp_path: Path, settings: Settings
+) -> None:
+    """M23. Retention purged a stored file nobody had read yet. A replayed job
+    must not ask Meta for it again - that would undo the deletion - and the row
+    must end rather than hold its conversation's reply."""
+    where = await h.scene(db_session)
+    media = await h.attachment(db_session, where)
+    media.status = MediaStatus.STORED
+    media.storage_state = MediaStorageState.PURGED
+    media.purge_started_at = datetime.now(UTC)
+    await db_session.flush()
+    whatsapp = h.StubWhatsApp()
+
+    outcome = await _service(
+        db_session, where, settings, tmp_path, whatsapp=as_whatsapp(whatsapp)
+    ).download(media)
+
+    assert (whatsapp.probes, whatsapp.fetches) == (0, 0)
+    assert outcome.status is MediaStatus.SKIPPED
+    assert outcome.reason is MediaReason.NOTHING_STORED
+    await db_session.refresh(media)
+    assert media.storage_state is MediaStorageState.PURGED
+    assert media.storage_key is None

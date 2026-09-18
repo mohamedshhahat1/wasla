@@ -307,7 +307,9 @@ async def test_a_body_that_drips_for_ever_hits_the_total_deadline(
     )
 
     started = time.perf_counter()
-    job = await h.run(worker, media)
+    # Bounded here too, so a missing deadline fails this test instead of
+    # hanging it: the drip really does never end.
+    job = await asyncio.wait_for(h.run(worker, media), timeout=deadline + 10)
     elapsed = time.perf_counter() - started
 
     await db_session.refresh(media)
