@@ -62,6 +62,7 @@ from app.core.config import Settings
 from app.core.crypto import CredentialDecryptionError
 from app.core.exceptions import (
     ExternalServiceError,
+    NotFoundError,
     PlanLimitExceededError,
     RateLimitedError,
 )
@@ -299,7 +300,12 @@ class MediaService:
         async with released(self._session):
             fetched = await self._fetch(whatsapp, wa_media_id, announced=announced)
 
-        row_or_none = await self._fenced(media.id)
+        try:
+            row_or_none = await self._fenced(media.id)
+        except NotFoundError:
+            # Purged with its workspace while the file was on the wire. There
+            # is no row to record anything on and nothing was written.
+            return self._gone(media.id)
         if row_or_none is None:
             return await self._superseded(media.id)
         row = row_or_none
@@ -361,7 +367,16 @@ class MediaService:
                 key=key, data=downloaded.content, mime_type=detected.mime_type
             )
 
-        row_or_none = await self._fenced(media.id)
+        try:
+            row_or_none = await self._fenced(media.id)
+        except NotFoundError:
+            # The post-purge write fence (MEDIA-07). The workspace was purged
+            # between the intent and this write, so the object just written
+            # belongs to nothing. It is removed here, now; the purge's ledger
+            # holds the same key past the upload grace in case this process
+            # dies before it can.
+            await self._discard_orphan(key)
+            return self._gone(media.id)
         if row_or_none is None:
             return await self._superseded(media.id)
         row = row_or_none
@@ -651,7 +666,10 @@ class MediaService:
                     meta={"media_id": str(media.id), "byte_size": row.byte_size},
                 )
 
-        row_or_none = await self._fenced(media.id)
+        try:
+            row_or_none = await self._fenced(media.id)
+        except NotFoundError:
+            return self._gone(media.id)
         if row_or_none is None:
             return await self._superseded(media.id)
         row = row_or_none
@@ -876,6 +894,33 @@ class MediaService:
             )
             return None
         return row
+
+    def _gone(self, media_id: uuid.UUID) -> MediaOutcome:
+        """The row was deleted underneath this attempt - its workspace purged.
+
+        Deferred rather than terminal: there is no row to be terminal, and no
+        conversation left to release.
+        """
+        logger.warning(
+            "media.row_gone",
+            extra={
+                "event": "media.row_gone",
+                "tenant_id": str(self._tenant_id),
+                "media_id": str(media_id),
+            },
+        )
+        return MediaOutcome(media_id=media_id, status=MediaStatus.PENDING, deferred=True)
+
+    async def _discard_orphan(self, key: str) -> None:
+        try:
+            await self._storage.delete(key)
+        except StorageError:
+            # The ledger row the purge wrote for this key will delete it after
+            # the upload grace. Logged without the key, which names a file.
+            logger.warning(
+                "media.orphan_delete_failed",
+                extra={"event": "media.orphan_delete_failed", "tenant_id": str(self._tenant_id)},
+            )
 
     async def _superseded(self, media_id: uuid.UUID) -> MediaOutcome:
         row = await self._media.lock_for_upload(media_id)

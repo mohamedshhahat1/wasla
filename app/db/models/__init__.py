@@ -103,6 +103,7 @@ from .lead import (
     clamp_score,
 )
 from .media import UNRESOLVED_MEDIA_STATUSES, MediaStatus, MessageMedia
+from .media_purge import MediaPurgeObject
 from .membership import Membership
 from .password_reset import PasswordResetToken
 from .payment_event import PaymentEvent
@@ -219,6 +220,7 @@ __all__ = [
     "LeadSource",
     "LeadStatus",
     "LimitKey",
+    "MediaPurgeObject",
     "MediaStatus",
     "Membership",
     "MembershipStatus",
