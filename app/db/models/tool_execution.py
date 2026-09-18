@@ -247,7 +247,16 @@ class ToolExecution(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
 
     #: The argument *names* the call carried, sorted. Shapes only - never a
     #: value, for the same reason `audit_logs.meta` never carries one.
-    argument_fields: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    #:
+    #: `none_as_null` because a call that carried no arguments must read as an
+    #: absence rather than as a JSON `null`: without it SQLAlchemy binds Python
+    #: `None` to the JSON literal, and "there were no arguments" becomes a
+    #: stored value of a different type from every other row - which a sweep
+    #: asking "is this an array of names" reads as a violation, correctly.
+    argument_fields: Mapped[list[str] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
 
     @property
     def is_terminal(self) -> bool:
