@@ -279,6 +279,7 @@ async def download_media(
     conversation_id: uuid.UUID,
     media_id: uuid.UUID,
     media_service: MediaServiceDep,
+    workspace: ActiveWorkspaceDep,
 ) -> Response:
     """The stored bytes of one attachment.
 
@@ -307,6 +308,8 @@ async def download_media(
         raise NotFoundError(reason)
 
     content = await media_service.read(media)
+    # After the read, so only a file actually served is recorded (MEDIA-17).
+    media_service.record_colleague_download(media, actor=workspace.user)
     return Response(
         content=content,
         # The stored type, and only if it is one this system canonically

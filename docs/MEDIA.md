@@ -19,14 +19,16 @@ message_media row written, status PENDING
       ↓
 Media job enqueued  ← not an agent job
       ↓
-Media worker: probe size → download → store → read
+Media worker: claim → lifecycle → probe → download → store → read
       ↓
-Transcript on the row, status READY
+Transcript on the row, status READY  (or SKIPPED / FAILED, with a reason)
       ↓
-Nothing else unread on this conversation?
+Nothing else unresolved on this conversation?
       ↓
 Agent job enqueued
 ```
+
+A message on a number the workspace has since **released** is recorded as history and not answered ([WHATSAPP.md](WHATSAPP.md)); a file on it is recorded the same way — its row is written `SKIPPED` at the webhook and no media job is queued, so Meta is never asked for it.
 
 The webhook does none of the work. It resolves the workspace, stores the event, notes the attachment and returns, exactly as it does for text ([WHATSAPP.md](WHATSAPP.md)).
 
@@ -50,13 +52,17 @@ how much is this one?
 | --- | --- | --- |
 | Image, sticker | Responses API, image input | A description written for an agent |
 | Voice note, audio | Transcription endpoint | The words spoken |
-| PDF, plain text | Local extraction | The text layer |
+| PDF | The bounded parser child (below) | The text layer |
+| Plain text | Local decode | The text |
+| Video, Office documents, anything else | Not read | `SKIPPED` before download |
 
 Images travel as data URLs rather than links: the alternative is putting every customer's attachment behind a URL a provider can reach, which is far wider exposure than sending the bytes for one request. Image understanding reuses `ResponsesClient` through an `images` field on `Turn`, so it inherits the retry and timeout policy rather than growing a second copy of it.
 
 Transcription forces no language. This product's customers switch between Arabic and English inside a single sentence, and pinning one makes the other come back as nonsense rather than as a translation.
 
 The vision prompt asks for exact transcription of any text in the image — a price, a receipt, a serial number. A description that paraphrases a price list throws away the entire message.
+
+**A PDF is parsed in a process that can be killed, never on the worker's event loop** (MEDIA-02, PD-MEDIA-09). The message path used to run `pypdf` in-process with no bound but a page count; a 25 KB PDF whose content stream inflates to text operators stalled every worker in the process for 170 seconds at 763 MB, and a sub-kilobyte malformed PDF raised exceptions outside the parser's catch list that escaped the job entirely (MEDIA-03). The reader now uses `extract_pdf_bounded` — the child the knowledge base already used (RAG-02) — with the same limits unchanged: 300 KB of input, 40 pages, 400,000 characters of text, 768 MB of address space and 20 seconds of wall clock. A PDF past any of them is stored like any other file and **not read**: `SKIPPED`, "too large or too complex to read automatically". Safety takes priority over reading every stored PDF, so a customer's PDF over 300 KB is kept but not understood; the parser limits are not raised to fit. Whatever the parser raises, the child crashes and the parent sees one fixed refusal; above that, any unexpected reader exception is contained as `FAILED` for that file alone.
 
 ## Statuses, and the two ways of giving up
 
@@ -65,11 +71,38 @@ The vision prompt asks for exact transcription of any text in the image — a pr
 | Outcome | Meaning | Retried |
 | --- | --- | --- |
 | `SKIPPED` | Wasla decided not to process it | Never |
-| `FAILED` | An attempt broke | Yes, to `MAX_ATTEMPTS` |
+| `FAILED` | An attempt broke, after the provider client's own retries | Never |
 
-A file over the size cap, of a type nothing can read, a silent recording, or a scanned PDF with no text layer is **skipped** — the file was looked at and there was nothing to get. Retrying is a loop against a wall. A provider outage or a Meta timeout is **failed**, and worth another attempt. This is the same distinction follow-ups draw ([CRM.md](CRM.md)).
+A file over the size cap, of a type nothing can read, a silent recording, a scanned PDF, a PDF past the parser's limits, a file Meta says it no longer has, a workspace no longer served — each is **skipped**: a decision no retry changes. A provider or Meta failure is **failed**. Both are final.
+
+**The retry contract** (PD-MEDIA-08). A transient provider failure — a 5xx, a 429, a reset connection — is retried inside the client that met it, three attempts with backoff. After that the file is `FAILED`, and the conversation is released at once. There is **no second, queue-level round**: this document used to promise one "to `MAX_ATTEMPTS`", and none existed — a failed file was never retried (MEDIA-12). A permanent answer is not retried at all: a 400/404/410 on the descriptor is `SKIPPED` after one request, a 401/403/code-190 is `FAILED` after one. The customer is answered with the file marked unreadable, and can send it again.
+
+Every failure carries a reason from a closed vocabulary (`app/services/media_outcomes.py`) with a short, fixed Wasla sentence. No provider text, MIME string, parser message or filename ever reaches `last_error`: an agent is shown that sentence, and a provider string interpolated into it once overflowed the column and stranded the conversation (MEDIA-04).
 
 Both count as resolved: the customer is still owed an answer, and an agent that says it could not open the attachment is better than one that never speaks. Memory renders an unreadable file with its reason, so the agent can say what happened.
+
+## Every file resolves
+
+The reply to a conversation waits until none of its files is unresolved (`PENDING`, `DOWNLOADING`, `STORED`), so one file that never resolves silences every later attachment in that conversation. Four mechanisms make sure none stays unresolved:
+
+1. **Every failure inside an attempt is classified** — the descriptor lookup, the download, the store, the reader — into a terminal state with a reason (above).
+2. **An attempt claims the file.** `message_media.claim_id` and `claimed_at` are committed before any network call. A duplicate job finds a live claim and stands aside, so one file costs one download and one paid read; every later write checks the claim is still the attempt's own.
+3. **A dead-lettered job gives its file up.** If a media job is dead-lettered anyway — an infrastructure failure outlasting the queue's retries — the worker marks the file `FAILED` (`abandoned`) and re-evaluates the conversation under the same gate, idempotently.
+4. **A recovery sweep finishes what nobody will** (`MediaRecoveryWorker`, run under the `media` kind every minute). A claim older than the longest an attempt can take (the *claim lease*: download deadline + two store timeouts + understanding deadline + 60 s, 330 s by default) belongs to a worker that died; a file unclaimed for longer than the queue's whole retry budget (about 20 minutes by default) has a lost job. Both horizons are computed from configuration (`app/services/media_horizons.py`), never chosen beside it. A stranded file is put back on the queue while it has attempts left and given up on (`FAILED`, `abandoned`, conversation released) after `MAX_ATTEMPTS` (3). A file whose inbound event is still `received` is inbound recovery's, and the sweep leaves it alone.
+
+**No database connection is held across somebody else's network** (MEDIA-11). Meta's descriptor, every redirect and the body, the object write, the read-back, vision, transcription and the PDF child's wait all run with no transaction open; the claim, the intent, the finalisation and the result are each a short transaction of their own.
+
+**One download has a wall-clock deadline** (MEDIA-10): `MEDIA_DOWNLOAD_DEADLINE_SECONDS`, 90 seconds by default, around the descriptor and the whole body together. The HTTP client's timeouts are per read, so a host dripping a byte inside each one used to have no end. Start-up refuses a deadline at or past the queue's visibility timeout (120 s), so one download cannot outlast the lease its job was reserved under. Understanding has its own deadline, `MEDIA_UNDERSTANDING_DEADLINE_SECONDS` (120 s).
+
+## The workspace a file belongs to
+
+**Lifecycle** (MEDIA-08, PD-MEDIA-05). Before Meta is asked anything, again before the downloaded object is written, and again before a paid read, the worker reads the workspace's and the number's state fresh from the database. A **suspended** workspace, a **soft-deleted** one, and a **released or paused** number end the file `SKIPPED` with the reason — no descriptor, no download, no object, no vision, transcription or PDF parse, no provider spend — and the conversation is re-evaluated as usual; any agent turn that follows is refused by the agent worker's own lifecycle check (AI-06). An object already stored before a suspension is kept under ordinary retention and purge. A **closed conversation** or a **disabled agent** is not a reason to drop the file: it is the customer's message and is kept; whether anybody answers is the agent worker's decision.
+
+**Credentials** (MEDIA-13). A file is fetched with the credential of the number it arrived on, resolved server-side from the conversation's account by `CredentialService` — the same authority model outbound sends use ([ADR-034](../DECISIONS.md)). A number connected with its own token is fetched with it; one without uses the platform token. A workspace token the process cannot decrypt is never downgraded to the platform's, and a file with no usable credential is `FAILED` (`credential_unavailable`) rather than left pending. The token lives only in the client built for that attempt: never on the row, in a log line or in anything an agent reads.
+
+**Which hosts get the token** (MEDIA-01). Every read hop — descriptor, file, and each redirect — attaches `Authorization` in one place, and only to a host inside `META_MEDIA_HOST_ROOTS` (default `graph.facebook.com`, `fbsbx.com`, `fbcdn.net`), matched on a label boundary after IDNA normalisation, over https on 443, with no userinfo and no address literals. A hop anywhere else is **refused**, not fetched anonymously. The token used to be re-attached on every hop to any public host. This is a separate control from the SSRF address checks in `app/core/net.py`, which still apply to every hop. The production host list is confirmed in deployment verification (DV-1) and changes by configuration.
+
+**Error bodies** are read to 16 KiB and never logged; Graph descriptors are read to 64 KiB and template pages to 4 MiB (MEDIA-09). A failed read costs less memory than a successful one.
 
 ## Size, and paying to find out
 
@@ -153,6 +186,12 @@ A pass that dies anywhere leaves a claimed row; the next pass deletes again — 
 
 A poll rather than a queue: enqueueing one job per file would put the deletion of customer data behind the replay command, where an operator could re-run a dead-lettered purge weeks later against a row since re-populated.
 
+### When the whole workspace is purged
+
+`MEDIA_RETENTION_DAYS` removes files by age; a **workspace purge** removes a deleted workspace's rows once its retention window has passed ([RUNBOOK.md](RUNBOOK.md)). The rows and the objects are two systems again, and the purge used to hold the keys only in memory between deleting the rows and deleting the objects — so a refused delete, or a process dying after the commit, left the customer's files in the bucket with no row naming them and the workspace recorded as purged (MEDIA-07).
+
+Every key now goes to `media_purge_objects` **in the same statement that deletes its row** (`DELETE … RETURNING` into the ledger), so no key can slip between reading and deleting. The purge worker deletes the objects after the commit and removes each ledger row only once the store confirms the object is gone; a refused delete keeps its row and is retried every five minutes. A workspace is fully erased when `purged_at` is set **and** it has no ledger rows. A key whose upload was still mid-write at the purge is not deleted before `MEDIA_UPLOAD_GRACE_SECONDS`, so a write that lands afterwards is deleted rather than orphaned; the writer also removes its own object at once if it finds its row gone. `MediaPurgeDeletesFailing` fires when deletes stay owed for six hours.
+
 **On a versioned bucket, deleted does not mean gone.** A delete leaves a delete marker and previous versions stay until the bucket's own lifecycle rule expires them. What retention guarantees is that the object is no longer retrievable through Wasla; making it unrecoverable is a rule configured on the bucket.
 
 **Retention only claims fully stored files.** An upload still in flight carries a key and is as old as its message the moment it exists, so an age query over keys would select it — and deleting the object of a write nobody has finished is retention destroying a file rather than expiring one. Those belong to the recovery pass below.
@@ -225,7 +264,7 @@ A disaster recovery that restores the database and points it at a surviving buck
 
 Two photographs in one delivery are two jobs, possibly on two workers. Each finishes and asks whether anything is still unread; if both ask at the same moment, both see nothing and both ask an agent to answer. An agent turn is not idempotent, so the customer gets two replies to one question.
 
-`ConversationMediaGate` takes a row lock on the conversation before the count, which makes the second worker wait for the first to commit. No new table and no Redis key — the lock is held for a single count.
+`ConversationMediaGate` takes a row lock on the conversation before the count, which makes the second worker wait for the first to commit. No new table and no Redis key — the lock is held for a single count. `tests/integration/test_media_release_race.py` builds that race on two real connections and observes the lock contended.
 
 ## Sending
 
@@ -240,6 +279,10 @@ An attachment is a free-form message, so the **24-hour service window applies** 
 
 Meta groups attachments as `image`, `audio`, `video` or `document`, which are not the mime families — `application/pdf` is a *document*. Wasla's accepted list is narrower than Meta's: Meta will carry almost any file as a document, and a business forwarding an executable to a customer is not a feature anyone asked for.
 
+**The attachment's name is settled before Meta is asked anything** (MEDIA-06). A name longer than the column (300 characters) or carrying a control character is refused with a 422 and nothing is sent; a storable name is used in one canonical form (NFC, trimmed) for the recorded row, and the Meta-safe upload name is derived from it. It used to be stored raw after delivery, so a long or NUL name reached the customer and then failed to record. An **inbound** name is never refused — the message is the customer's — and is normalised instead: control characters removed, bounded to 300 characters keeping a short extension, Arabic and other scripts kept (MEDIA-05). Neither is ever used for a path, a key or a header.
+
+**Colleague access is audited** (MEDIA-17, PD-MEDIA-06): `media_downloaded` when a file is served to a member and `media_sent` when a member's attachment send may have reached the customer, each with the actor and internal ids only — never the filename, caption, key, URL, transcript or content. The worker reading a file is not a colleague and is not audited.
+
 Serving a file back goes through the application rather than from a public URL, because a customer's photograph is workspace data and a link needing no authentication is a link that leaves the workspace. `Content-Disposition: attachment` and `X-Content-Type-Options: nosniff` are not decoration: a customer-supplied HTML file rendered inline on this origin is a script running against whoever is reading the inbox.
 
 ## Documents in the knowledge base
@@ -252,7 +295,10 @@ The PDF parser added here also settles a note `KnowledgeService` had carried sin
 | --- | --- | --- |
 | `MEDIA_STORAGE_BACKEND` | `local` | `local` or `s3` |
 | `MEDIA_STORAGE_PATH` | `/var/lib/wasla/media` | `local` only; shared volume between API and worker |
-| `MEDIA_MAX_BYTES` | `26214400` | 25 MB; bites on video and little else |
+| `MEDIA_MAX_BYTES` | `26214400` | 25 MB storage cap per file; PDF *reading* has its own 300 KB bound |
+| `MEDIA_DOWNLOAD_DEADLINE_SECONDS` | `90` | Wall clock over descriptor + body; must be below `QUEUE_VISIBILITY_TIMEOUT_SECONDS` |
+| `MEDIA_UNDERSTANDING_DEADLINE_SECONDS` | `120` | Wall clock over read-back + vision / transcription / PDF child |
+| `META_MEDIA_HOST_ROOTS` | `graph.facebook.com,fbsbx.com,fbcdn.net` | Hosts a media read may send the Meta token to; confirm in DV-1 |
 | `MEDIA_S3_BUCKET` | — | Required for `s3`; must be private |
 | `MEDIA_S3_ENDPOINT_URL` | — | Empty means AWS. A bare origin, no path |
 | `MEDIA_S3_REGION` | `us-east-1` | |
@@ -274,10 +320,28 @@ Without an OpenAI key, documents are still read — extraction needs no provider
 
 ## Known gaps
 
-- **No OCR.** A scanned document is reported as unreadable rather than being read. Recorded honestly on the row, so nobody is left wondering.
-- **Video is downloaded and stored but not understood.** There is no route from a video to a transcript; it is skipped as an unreadable type.
+- **No OCR** (PD-MEDIA-04). A scanned document is reported as unreadable rather than being read. Recorded honestly on the row, so nobody is left wondering.
+- **Inbound video is neither downloaded nor stored.** It is skipped on Meta's declared type before any download; there is no route from a video to a transcript, and no transcoding. (This section used to say video was downloaded and stored; it never was.) Office documents are skipped the same way. Outbound video is uploaded to Meta and stored.
+- **PDFs over 300 KB are stored but not read** (PD-MEDIA-09), because the bounded parser's limits are the knowledge base's and were not raised.
+- **No malware scanning** (PD-MEDIA-02). Customer documents are stored, served to colleagues only as attachments with `nosniff`, and never executed server-side.
+- **EXIF and GPS metadata are preserved** (PD-MEDIA-03). Images are stored byte for byte, visible to the workspace's colleagues and sent to the vision provider.
+- **Stored objects are not re-verified on read** (MEDIA-16, accepted hardening). An object replaced by somebody with bucket-write access is served as the row's type; the defences are the private bucket, the authenticated tenant route, `attachment` disposition and `nosniff`.
 - **Nothing streams.** A file is read into memory whole, bounded by the download cap and by a smaller cap on the upload endpoint.
-- **A quarantined object is never cleaned up automatically.** `mismatched` is deliberately terminal: the object stays where it is and an operator decides. It should be zero always, and `wasla_media_upload_reconciliation_total{outcome="quarantined"}` above zero is the alert.
+- **A quarantined object is never cleaned up automatically.** `mismatched` is deliberately terminal: the object stays where it is and an operator decides. It should be zero always; the `MediaUploadQuarantined` alert fires on it.
+
+## Observability
+
+| Signal | Kind | Watch for |
+| --- | --- | --- |
+| `wasla_media_outcomes_total{outcome}` | counter | `ready` or a reason token; the failure subset drives `MediaProcessingFailureSpike` |
+| `wasla_media_stranded`, `…_oldest_age_seconds` | gauge (scrape) | above zero for 15 minutes: `MediaStranded` |
+| `wasla_media_recovery_total{outcome}` | counter | `requeued`, `abandoned`, `release_failed` |
+| `wasla_media_purge_deletes_owed`, `…_oldest_age_seconds` | gauge (scrape) | owed for six hours: `MediaPurgeDeletesFailing` |
+| `wasla_media_purge_objects_total{outcome}` | counter | `failed` is a store refusing deletes |
+| `wasla_provider_requests_total{operation="transcribe"}` | counter | `TranscriptionFailureRate` |
+| `wasla_media_upload_reconciliation_total{outcome="quarantined"}` | counter | `MediaUploadQuarantined` |
+
+Labels are closed vocabularies; none carries a workspace, file, key, URL or filename. Procedures for each alert are in [RUNBOOK.md](RUNBOOK.md).
 
 ## Storage capacity
 

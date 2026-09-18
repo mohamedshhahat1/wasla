@@ -40,15 +40,27 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.filenames import MAX_FILENAME_LENGTH
+from app.core.media_types import MAX_MIME_TYPE_LENGTH
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import _enum_type
 
-# Kept low for the same reason follow-ups keep it low, though the cost is
-# different: each attempt is a download and a provider call, so an over-eager
-# retry spends real money on a file that is not going to become readable.
+# How many times a file may be taken up by a worker before it is given up on.
+#
+# Not a retry budget for provider failures - those are terminal after the
+# client's own bounded retries, with no queue-level second round (PD-MEDIA-08).
+# This counts *attempts that never finished*: a worker that died holding the
+# file, a job lost before anybody claimed it. The recovery sweep puts such a file
+# back on the queue until this many attempts have been spent on it, then marks
+# it terminal, so a file that kills its worker every time cannot loop for ever.
 MAX_ATTEMPTS: Final = 3
 
 MAX_TRANSCRIPT_LENGTH: Final = 8_000
+
+# Meta's handle for a file: `message_media.wa_media_id`. A handle longer than
+# this is not one Meta issued, and an inbound message carrying one is stored as a
+# message without a downloadable file rather than failing its delivery (MEDIA-05).
+MAX_MEDIA_HANDLE_LENGTH: Final = 255
 
 
 class MediaStatus(StrEnum):
@@ -193,6 +205,14 @@ class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
             "upload_started_at",
             postgresql_where=text("storage_state = 'pending'"),
         ),
+        # The media recovery sweep's query and the stranded-media gauge: files
+        # still owing their conversation an answer. Partial, because a healthy
+        # deployment has only the handful in flight (MEDIA-03).
+        Index(
+            "ix_message_media_unresolved",
+            "created_at",
+            postgresql_where=text("status IN ('pending', 'downloading', 'stored')"),
+        ),
         # What each state is allowed to look like. These are not belt and
         # braces over the services: they are the reason a consumer can trust
         # `storage_state` alone and never re-derive the lifecycle from which
@@ -230,16 +250,17 @@ class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
     )
     # Meta's handle for the file. Nullable because an outbound attachment has no
     # inbound handle until it is uploaded.
-    wa_media_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    wa_media_id: Mapped[str | None] = mapped_column(String(MAX_MEDIA_HANDLE_LENGTH), nullable=True)
     status: Mapped[MediaStatus] = mapped_column(
         MEDIA_STATUS_TYPE,
         nullable=False,
         default=MediaStatus.PENDING,
     )
-    mime_type: Mapped[str | None] = mapped_column(String(150), nullable=True)
-    # As the customer's phone reported it. Shown to people; never used to build
-    # a path.
-    filename: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(MAX_MIME_TYPE_LENGTH), nullable=True)
+    # As the customer's phone reported it, brought to one canonical, bounded
+    # form before it is stored (`app.core.filenames`). Shown to people; never
+    # used to build a path, a key or a header.
+    filename: Mapped[str | None] = mapped_column(String(MAX_FILENAME_LENGTH), nullable=True)
     byte_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # SHA-256 of the bytes that actually arrived, hex encoded - computed here
     # rather than taken from the descriptor Meta sent.
@@ -275,6 +296,15 @@ class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
     # extracted text for a document. Never the customer's own words.
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Which worker attempt is processing this file, and since when (MEDIA-11).
+    # Committed before any network call, in place of the row lock that used to
+    # be held across the whole Meta download: a second attempt finds a live
+    # claim and stands aside, and every later write by the claimant checks the
+    # claim is still its own. Cleared when the file resolves. A claim older
+    # than the longest an attempt can take is one nobody is honouring, which is
+    # how the recovery sweep recognises a stranded file (MEDIA-03).
+    claim_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -16,6 +16,7 @@ from urllib.parse import urlparse, urlsplit
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.core.hostnames import normalize_roots
 from app.core.proxy import parse_trusted_proxies
 
 Environment = Literal["local", "test", "staging", "production"]
@@ -243,6 +244,18 @@ def _google_problems(
 # the signing key is a shared secret, so an asymmetric algorithm could only
 # ever be configured wrongly here, and `none` is not an algorithm.
 ALLOWED_JWT_ALGORITHMS: Final = frozenset({"HS256", "HS384", "HS512"})
+
+# The hosts an inbound media download may send the Meta access token to
+# (MEDIA-01), as roots: each matches itself and its subdomains on a label
+# boundary, never by suffix. The families the Graph API and its CDN answer with
+# in the documentation and in the audit's captured redirect chain. The real
+# production chain is confirmed in deployment verification (DV-1) before
+# launch, and this list changes by configuration rather than by release.
+DEFAULT_META_MEDIA_HOST_ROOTS: Final[tuple[str, ...]] = (
+    "graph.facebook.com",
+    "fbsbx.com",
+    "fbcdn.net",
+)
 VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"})
 
 
@@ -446,6 +459,18 @@ class Settings(BaseSettings):
     # downloaded: the point is not to pay to move ninety megabytes in order to
     # discover there was nothing to read.
     media_max_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
+    # The whole of one download - Meta's descriptor, every redirect, the body -
+    # measured on a wall clock (MEDIA-10). The HTTP client's timeouts are per
+    # read, so a host dripping a byte just inside each one never tripped them,
+    # and the download had no end at all. Must be shorter than the queue's
+    # visibility timeout: a download still running when its lease lapsed would
+    # otherwise be started a second time by the job's next holder. Enforced at
+    # start-up (`_validate_media_deadlines`).
+    media_download_deadline_seconds: float = Field(default=90.0, gt=0)
+    # The same for reading a stored file: the store's GET and the vision call,
+    # transcription or bounded PDF child that follows. The parser's own kill
+    # (twenty seconds) is well inside it; a provider stall is what it is for.
+    media_understanding_deadline_seconds: float = Field(default=120.0, gt=0)
 
     # Credential encryption at rest (ADR-034). A key ring: the first key
     # encrypts, every key decrypts, so rotation is prepending one. Each is 32
@@ -679,6 +704,13 @@ class Settings(BaseSettings):
     # Checked against `META_API_SUNSETS` at start-up, which warns when this
     # version is inside its final 90 days. See `api_version_warning`.
     meta_api_version: str = "v21.0"
+    # Where a media download may carry the Meta token (MEDIA-01). A hop to any
+    # other host is refused outright rather than fetched without the token: a
+    # provider response naming a host outside this list is not a file Meta is
+    # serving. Comma-separated; `NoDecode` for the reason `cors_origins` has it.
+    meta_media_host_roots: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_META_MEDIA_HOST_ROOTS)
+    )
 
     # Email (ADR-042). Off by default: a deployment that has not configured a
     # sender is a deployment that sends nothing, and every enqueue is a no-op
@@ -837,6 +869,30 @@ class Settings(BaseSettings):
             return [item.strip() for item in raw.split(",") if item.strip()]
         return value
 
+    @field_validator("meta_media_host_roots", mode="before")
+    @classmethod
+    def _parse_meta_media_host_roots(cls, value: Any) -> Any:
+        """Accept a JSON array, a comma-separated string, or a list.
+
+        Normalised here, so an entry that is not a bare DNS name - a wildcard,
+        a URL, an address - refuses to start the process instead of becoming
+        a policy that matches nothing or something nobody meant. An empty list
+        is refused too: it would make every media download fail, and a
+        deployment wanting that should not be able to reach it by a typo.
+        """
+        if value is None:
+            value = []
+        if isinstance(value, str):
+            raw = value.strip()
+            if raw.startswith("["):
+                value = json.loads(raw)
+            else:
+                value = [item.strip() for item in raw.split(",") if item.strip()]
+        roots = normalize_roots(value)
+        if not roots:
+            raise ValueError("meta_media_host_roots must name at least one host")
+        return list(roots)
+
     @field_validator("trusted_proxy_ips", mode="before")
     @classmethod
     def _parse_trusted_proxy_ips(cls, value: Any) -> Any:
@@ -950,6 +1006,25 @@ class Settings(BaseSettings):
         default, instead of being lax until somebody remembers to name it.
         """
         return self.environment in DEVELOPER_ENVIRONMENTS
+
+    @model_validator(mode="after")
+    def _validate_media_deadlines(self) -> Settings:
+        """Refuse a download deadline the queue lease cannot cover (MEDIA-10).
+
+        A media job's lease is renewed while its worker lives, so this is not
+        about a healthy worker losing its job. It is about the bound on one
+        download being *meaningful*: a deadline at or past the visibility
+        timeout is one a single stalled host can use to outlast a lease that
+        failed to renew, and the job's next holder would then download the
+        same file alongside it. Every environment, because the relationship is
+        arithmetic rather than hardening.
+        """
+        if self.media_download_deadline_seconds >= self.queue_visibility_timeout_seconds:
+            raise ValueError(
+                "media_download_deadline_seconds must be shorter than "
+                "queue_visibility_timeout_seconds"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_hardening(self) -> Settings:

@@ -155,14 +155,26 @@ class LocalMediaStorage:
         mime_type: str | None = None,
     ) -> None:
         destination = self._path(key)
+        staging = destination.with_name(f".{destination.name}.partial")
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
-            staging = destination.with_name(f".{destination.name}.partial")
             staging.write_bytes(data)
             staging.replace(destination)
-        except OSError as error:
-            logger.exception("media.store_failed")
-            raise StorageError() from error
+        except BaseException as error:
+            # Whatever stopped the write - a full disk, a failed rename, the
+            # task being cancelled mid-write - the half-written staging file
+            # is removed (MEDIA-14). It used to stay: on a full disk every
+            # failed write left its partial behind, holding the very space
+            # whose absence caused the failure. The removal must not replace
+            # the error that matters, so its own failure is swallowed.
+            _discard(staging)
+            if isinstance(error, OSError):
+                logger.warning(
+                    "media.store_failed",
+                    extra={"event": "media.store_failed", "errno": error.errno},
+                )
+                raise StorageError() from error
+            raise
 
     async def exists(self, key: str) -> bool:
         """Whether the file is there, distinguishing absent from unreadable.
@@ -218,6 +230,15 @@ class LocalMediaStorage:
         if not resolved.is_relative_to(root):
             raise StorageError()
         return resolved
+
+
+def _discard(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning(
+            "media.partial_cleanup_failed", extra={"event": "media.partial_cleanup_failed"}
+        )
 
 
 def build_media_storage(settings: Settings) -> MediaStorage:

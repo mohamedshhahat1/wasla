@@ -1079,3 +1079,144 @@ tests:
               description: >-
                 A quarter of agent tool calls are being refused for want of an enabled grant. Check whether a tool was revoked while agents still expect it, and read the agent.tool_not_granted log for the tool names being asked for; a name no agent was ever granted is worth reading the conversation for.
               runbook: docs/RUNBOOK.md
+
+  # ================================================================== media
+  - interval: 30s
+    name: stranded media fires when it persists and clears when the sweep finishes it
+    input_series:
+      - series: 'wasla_media_stranded{job="wasla-api"}'
+        values: "0+0x20 2+0x60 0+0x20"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: MediaStranded
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: MediaStranded
+        # Stranded for ten minutes: not yet the fifteen the rule waits.
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: MediaStranded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: media
+            exp_annotations:
+              summary: "Customer attachments are stranded and their replies held"
+              description: >-
+                One or more inbound attachments have been unresolved for longer than any attempt can take, and the media recovery sweep has not finished them. Replies to those conversations are waiting. Check that a worker runs the media kind (WorkerLoopNotBeating) and look for media_recovery.sweep_failed in its logs.
+              runbook: docs/RUNBOOK.md
+      - eval_time: 50m
+        alertname: MediaStranded
+        exp_alerts: []
+
+  - interval: 30s
+    name: a burst of failed attachments fires, and decisions never do
+    input_series:
+      # Twenty files a minute read, then a Meta outage fails twenty a minute.
+      - series: 'wasla_media_outcomes_total{job="wasla-api", outcome="ready"}'
+        values: "0+10x180"
+      - series: 'wasla_media_outcomes_total{job="wasla-api", outcome="download_failed"}'
+        values: "0+0x40 0+10x140"
+      # A steady stream of unsupported and oversized files: decisions.
+      - series: 'wasla_media_outcomes_total{job="wasla-api", outcome="unsupported_type"}'
+        values: "0+10x180"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: MediaProcessingFailureSpike
+        # Half the traffic is unsupported files and nothing is failing.
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: MediaProcessingFailureSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: media
+            exp_annotations:
+              summary: "More than a quarter of customer attachments are failing"
+              description: >-
+                Attachments are ending FAILED rather than read. The outcome label says where: credential_* is a number's token, host_refused is a Meta host outside META_MEDIA_HOST_ROOTS, download_failed / timeout / rate_limited is Meta, provider_failed is the reading provider, storage_failed is the object store. Customers are still answered, with the file marked unreadable.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 30s
+    name: one failed file on a quiet night does not page anybody
+    input_series:
+      - series: 'wasla_media_outcomes_total{job="wasla-api", outcome="download_failed"}'
+        values: "0 1+0x120"
+      - series: 'wasla_media_outcomes_total{job="wasla-api", outcome="unsupported_type"}'
+        values: "0 1+0x120"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MediaProcessingFailureSpike
+        exp_alerts: []
+
+  - interval: 1m
+    name: purge deletes owed for hours fire, and a key in its grace does not
+    input_series:
+      # Fifteen minutes old and settled, then a store refusing for hours.
+      - series: 'wasla_media_purge_deletes_oldest_age_seconds{job="wasla-api"}'
+        values: "900 0+0x30 0+60x480"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MediaPurgeDeletesFailing
+        exp_alerts: []
+      - eval_time: 8h
+        alertname: MediaPurgeDeletesFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: retention
+            exp_annotations:
+              summary: "A purged workspace's files are still in the object store"
+              description: >-
+                Object deletes recorded by a workspace purge have been owed for more than six hours, so a purged customer's files are still in the bucket. The purge worker retries every five minutes; check its purge.object_delete_failed lines and the media store credentials. The keys are in media_purge_objects.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 30s
+    name: a transcription outage fires and clears
+    input_series:
+      - series: 'wasla_provider_requests_total{job="wasla-worker", provider="openai", operation="transcribe", outcome="success"}'
+        values: "0+2x20 40+0x40 40+2x40"
+      - series: 'wasla_provider_requests_total{job="wasla-worker", provider="openai", operation="transcribe", outcome="unavailable"}'
+        values: "0+0x20 0+2x40 80+0x40"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: TranscriptionFailureRate
+        exp_alerts: []
+      - eval_time: 33m
+        alertname: TranscriptionFailureRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: media
+            exp_annotations:
+              summary: "Most voice-note transcriptions are failing"
+              description: >-
+                More than half of transcription calls are failing after their retries, so customers' voice notes are being answered as unreadable. Check the OpenAI key, quota and status, and the transcription.rejected / transcription.unreachable log lines.
+              runbook: docs/RUNBOOK.md
+      - eval_time: 59m
+        alertname: TranscriptionFailureRate
+        exp_alerts: []
+
+  - interval: 5m
+    name: a quarantined upload fires while one remains
+    input_series:
+      # Reconciliation adds the quarantined level every pass.
+      - series: 'wasla_media_upload_reconciliation_total{job="wasla-worker", outcome="quarantined"}'
+        values: "0+0x12 0+1x24"
+      - series: 'wasla_media_upload_reconciliation_total{job="wasla-worker", outcome="finalized"}'
+        values: "0+3x36"
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: MediaUploadQuarantined
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: MediaUploadQuarantined
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: media
+            exp_annotations:
+              summary: "An attachment object does not match what Wasla wrote"
+              description: >-
+                Upload reconciliation found an object whose size or hash differs from its intent, and quarantined it: it is neither served nor deleted. Somebody with bucket access, or a store fault, changed it. Find it with storage_state = 'mismatched' in message_media and follow the quarantine procedure in the runbook.
+              runbook: docs/RUNBOOK.md

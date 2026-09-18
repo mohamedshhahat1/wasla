@@ -77,6 +77,8 @@ class StubMediaService:
         self._media = media if media is not None else _media()
         self._content = content
         self.missing = False
+        # Who the route recorded as having opened a file (MEDIA-17).
+        self.downloads: list[tuple[uuid.UUID, uuid.UUID]] = []
 
     async def get(self, media_id: uuid.UUID) -> MessageMedia:
         if self.missing or media_id != self._media.id:
@@ -88,6 +90,9 @@ class StubMediaService:
         if self._content is None:
             raise StorageError()
         return self._content
+
+    def record_colleague_download(self, media: MessageMedia, *, actor: User) -> None:
+        self.downloads.append((media.id, actor.id))
 
 
 class StubMessaging:
@@ -213,6 +218,27 @@ async def test_media_from_another_conversation_is_not_found(
     response = await client.get(f"/api/v1/conversations/{other}/media/{MEDIA_ID}")
 
     assert response.status_code == 404
+    # Nothing was served, so nothing is recorded as opened.
+    assert media_service.downloads == []
+
+
+async def test_a_served_attachment_is_audited_to_the_colleague_who_opened_it(
+    client: AsyncClient, media_service: StubMediaService
+) -> None:
+    response = await client.get(f"/api/v1/conversations/{CONVERSATION_ID}/media/{MEDIA_ID}")
+
+    assert response.status_code == 200
+    assert media_service.downloads == [(MEDIA_ID, USER_ID)]
+
+
+async def test_a_file_the_store_cannot_serve_is_not_recorded_as_opened(
+    client: AsyncClient, media_service: StubMediaService
+) -> None:
+    media_service._content = None
+    response = await client.get(f"/api/v1/conversations/{CONVERSATION_ID}/media/{MEDIA_ID}")
+
+    assert response.status_code >= 500
+    assert media_service.downloads == []
 
 
 async def test_media_from_another_workspace_is_not_found(

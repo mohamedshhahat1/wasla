@@ -170,6 +170,7 @@ services:
       # nothing broke - but a deployment that cannot pin the version cannot
       # respond to Meta deprecating one either.
       META_API_VERSION: ${META_API_VERSION:-v21.0}
+      META_MEDIA_HOST_ROOTS: ${META_MEDIA_HOST_ROOTS:-graph.facebook.com,fbsbx.com,fbcdn.net}
       # --- Media storage (ADR-077) ---
       #
       # Both processes get the same values, and they must: the worker writes an
@@ -182,6 +183,8 @@ services:
       MEDIA_STORAGE_BACKEND: ${MEDIA_STORAGE_BACKEND:-local}
       MEDIA_STORAGE_PATH: ${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
       MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-26214400}
+      MEDIA_DOWNLOAD_DEADLINE_SECONDS: ${MEDIA_DOWNLOAD_DEADLINE_SECONDS:-90}
+      MEDIA_UNDERSTANDING_DEADLINE_SECONDS: ${MEDIA_UNDERSTANDING_DEADLINE_SECONDS:-120}
       # `${VAR:-}`, never `${VAR:?}`: a deployment that has not switched the
       # object store on must still come up, and the application's own validator
       # is what refuses a *half* configured one (ADR-062).
@@ -381,6 +384,7 @@ services:
       # version is a deployment where a message sends and its media download
       # does not.
       META_API_VERSION: ${META_API_VERSION:-v21.0}
+      META_MEDIA_HOST_ROOTS: ${META_MEDIA_HOST_ROOTS:-graph.facebook.com,fbsbx.com,fbcdn.net}
       # `META_APP_SECRET` and `META_VERIFY_TOKEN` are deliberately absent: only
       # the API serves the webhook, so only the API verifies a signature or
       # answers a subscription challenge.
@@ -396,6 +400,8 @@ services:
       MEDIA_STORAGE_BACKEND: ${MEDIA_STORAGE_BACKEND:-local}
       MEDIA_STORAGE_PATH: ${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
       MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-26214400}
+      MEDIA_DOWNLOAD_DEADLINE_SECONDS: ${MEDIA_DOWNLOAD_DEADLINE_SECONDS:-90}
+      MEDIA_UNDERSTANDING_DEADLINE_SECONDS: ${MEDIA_UNDERSTANDING_DEADLINE_SECONDS:-120}
       # `${VAR:-}`, never `${VAR:?}`: a deployment that has not switched the
       # object store on must still come up, and the application's own validator
       # is what refuses a *half* configured one (ADR-062).

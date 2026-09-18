@@ -51,18 +51,20 @@ from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 import httpx
 
+from app.core.config import DEFAULT_META_MEDIA_HOST_ROOTS
 from app.core.exceptions import (
     DependencyUnavailableError,
     ExternalServiceError,
     RateLimitedError,
     ValidationError,
 )
+from app.core.hostnames import HostNotAuthorizedError, credential_host, normalize_roots, within
 from app.core.logging import get_logger
 from app.core.net import MAX_REDIRECTS, UnsafeUrlError, build_guarded_client, validate_outbound_url
 from app.core.telemetry import CallOutcome, Provider, ProviderCall
@@ -128,6 +130,18 @@ FORBIDDEN: Final = 403
 # nor the code is trusted on its own.
 META_AUTH_CODE: Final = 190
 MAX_REPLY_BUTTONS: Final = 3
+# How much of a failed media response is ever read (MEDIA-09). Enough for Meta's
+# error envelope, whose code is the only part anything acts on; nothing near a
+# file. The error path must cost less memory than a success, not more - it used
+# to read whatever the far end sent, and a 404 carrying 200 MB was read whole.
+MAX_ERROR_BODY_BYTES: Final = 16 * 1024
+# The Graph API's answer about one file is a handful of fields. Bounded anyway:
+# the host is ours to name, but a buffered read with no ceiling is a ceiling
+# somebody else chooses.
+MAX_DESCRIPTOR_BYTES: Final = 64 * 1024
+# One page of the template registry. A hundred templates with their components
+# is well under a megabyte; four leaves room without leaving it open.
+MAX_TEMPLATE_PAGE_BYTES: Final = 4 * 1024 * 1024
 # How many templates one page of the registry sync asks for, and how many
 # pages it will follow. Meta caps the page size; the page *count* is ours,
 # and it is bounded so a workspace with a pathological template list cannot
@@ -261,6 +275,47 @@ class ProviderAuthError(SendNotAttemptedError):
     message = "WhatsApp refused this number's credentials."
 
 
+class MediaHostRefusedError(ExternalServiceError):
+    """A media hop named a host that may not receive the Meta token (MEDIA-01).
+
+    Refused outright rather than fetched anonymously. A provider response that
+    points outside Meta's own hosts is not a file Meta is serving, and reading
+    it without the token would still be downloading whatever that host chose to
+    send into a customer's conversation.
+    """
+
+    message = "WhatsApp could not return this file."
+
+
+class MediaUnavailableError(ExternalServiceError):
+    """Meta answered, permanently, that this file cannot be had (MEDIA-04).
+
+    A 400, 404 or 410 on the descriptor or the file: an expired handle, a
+    deleted file, one belonging to another account. No retry changes that, so a
+    caller records a decision rather than an attempt.
+    """
+
+    message = "WhatsApp no longer has this file."
+
+
+class MediaCredentialRefusedError(ExternalServiceError):
+    """Meta refused the credential a media read was made with.
+
+    A 401, a 403, or Meta's code 190 on any status. Kept apart from an
+    unavailable file because the remedy is different - reconnecting the number,
+    not asking the customer again - and an operator reading the reason should
+    see which.
+    """
+
+    message = "WhatsApp refused this number's credentials for the file."
+
+
+class MalformedMediaDescriptorError(ExternalServiceError):
+    """Meta's answer about a file could not be used: no location, not JSON, too big."""
+
+    message = "WhatsApp returned an unusable description of this file."
+
+
 class MediaTooLargeError(ExternalServiceError):
     """A download passed the byte cap while it was being read.
 
@@ -316,6 +371,7 @@ class WhatsAppClient:
         backoff_seconds: float = BACKOFF_SECONDS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[], float] | None = None,
+        media_host_roots: Iterable[str] = DEFAULT_META_MEDIA_HOST_ROOTS,
     ) -> None:
         if not access_token:
             # An absent platform credential is our misconfiguration, not the
@@ -331,6 +387,9 @@ class WhatsAppClient:
         # wait is a formula a test should be able to pin exactly, rather than
         # one it has to patch `random` to observe.
         self._jitter = jitter
+        # The hosts the token may be sent to on a read (MEDIA-01). Normalised
+        # once here; `_credential_headers` is the only place it is consulted.
+        self._media_host_roots = normalize_roots(media_host_roots)
 
     async def send_text(
         self,
@@ -494,7 +553,7 @@ class WhatsAppClient:
         templates: list[dict[str, Any]] = []
 
         for _ in range(max(1, max_pages)):
-            body = await self._get_json(url)
+            body = await self._get_json(url, max_bytes=MAX_TEMPLATE_PAGE_BYTES)
             page = body.get("data")
             if not isinstance(page, list):
                 raise ExternalServiceError("WhatsApp returned an unreadable template list.")
@@ -528,11 +587,11 @@ class WhatsAppClient:
         the far end felt like sending. A caller that had to remember to pass a
         limit would be a caller that eventually forgot.
         """
-        descriptor = await self._get_json(f"{GRAPH_BASE_URL}/{self._api_version}/{media_id}")
+        descriptor = await self._describe(media_id)
 
         url = descriptor.get("url")
         if not isinstance(url, str) or not url:
-            raise ExternalServiceError("WhatsApp did not return a location for this file.")
+            raise MalformedMediaDescriptorError()
 
         # The trust boundary. Every other URL this client fetches is built here
         # from `GRAPH_BASE_URL`; this one arrives in a provider response, so it
@@ -548,6 +607,10 @@ class WhatsAppClient:
             )
             raise ExternalServiceError("WhatsApp could not return this file.") from error
 
+        # Two independent questions, and the first hop is asked both. The one
+        # above is whether the address is safe to reach; `_stream_hop` asks
+        # whether the host may be given the token, and refuses before any
+        # request leaves if it may not (MEDIA-01).
         mime_type = descriptor.get("mime_type")
         declared = descriptor.get("file_size")
 
@@ -567,7 +630,7 @@ class WhatsAppClient:
         turns out to be ninety megabytes, and the point of the size cap is not
         to pay for that.
         """
-        descriptor = await self._get_json(f"{GRAPH_BASE_URL}/{self._api_version}/{media_id}")
+        descriptor = await self._describe(media_id)
         mime_type = descriptor.get("mime_type")
         size = descriptor.get("file_size")
         return MediaDescriptor(
@@ -612,6 +675,56 @@ class WhatsAppClient:
         if not isinstance(uploaded, str) or not uploaded:
             raise ExternalServiceError("WhatsApp accepted the upload without an identifier.")
         return uploaded
+
+    async def _describe(self, media_id: str) -> dict[str, Any]:
+        """Meta's descriptor for one file, bounded and classified.
+
+        A body that is not a JSON object, or is larger than a descriptor could
+        honestly be, is a malformed descriptor - a permanent answer about this
+        file, not a transient failure worth another attempt.
+        """
+        try:
+            return await self._get_json(
+                f"{GRAPH_BASE_URL}/{self._api_version}/{media_id}",
+                max_bytes=MAX_DESCRIPTOR_BYTES,
+            )
+        except _BodyTooLargeError as error:
+            raise MalformedMediaDescriptorError() from error
+        except _UnreadableBodyError as error:
+            raise MalformedMediaDescriptorError() from error
+
+    def _credential_headers(self, url: str) -> dict[str, str]:
+        """The bearer header for a read of `url`, or a refusal (MEDIA-01).
+
+        **The one place a read attaches the token.** Every hop - the descriptor,
+        the file, and every redirect between them - builds its headers here, so
+        the rule cannot be forgotten by a new hop, and a hop it refuses is
+        refused before its request exists rather than sent without a header.
+
+        This is not the SSRF check and does not replace it. `validate_outbound_url`
+        and the pinned transport decide whether the destination is safe to
+        reach at all; this decides whether it is Meta. A redirect to a public
+        host that is not Meta passes the first and fails this one - which is
+        exactly the hop that used to receive the platform token.
+        """
+        try:
+            host = credential_host(url)
+        except HostNotAuthorizedError as error:
+            logger.warning(
+                "whatsapp.media_host_refused",
+                extra={"event": "whatsapp.media_host_refused", "reason": str(error)},
+            )
+            raise MediaHostRefusedError() from error
+        if not any(within(host, root) for root in self._media_host_roots):
+            # The host is logged and the rest of the URL is not: a CDN path and
+            # query carry a signature, and the host is what an operator needs
+            # to decide whether the allow-list is missing a Meta family (DV-1).
+            logger.warning(
+                "whatsapp.media_host_refused",
+                extra={"event": "whatsapp.media_host_refused", "host": host},
+            )
+            raise MediaHostRefusedError()
+        return {"Authorization": f"Bearer {self._access_token}"}
 
     async def _stream_capped(self, url: str, *, max_bytes: int) -> bytes:
         """A media body, refused the moment it grows past `max_bytes`.
@@ -658,13 +771,14 @@ class WhatsAppClient:
         operator reading a media-fetch failure rate wants each of them.
         """
         call = ProviderCall(provider=Provider.WHATSAPP, operation=FETCH_MEDIA)
+        headers = self._credential_headers(url)
         attempt = 1
         while True:
             try:
                 async with self._http.stream(
                     "GET",
                     url,
-                    headers={"Authorization": f"Bearer {self._access_token}"},
+                    headers=headers,
                     follow_redirects=False,
                 ) as response:
                     if response.status_code in _REDIRECT_STATUSES:
@@ -682,16 +796,21 @@ class WhatsAppClient:
                         if response.status_code == TOO_MANY_REQUESTS:
                             await call.record(CallOutcome.RATE_LIMITED)
                             raise RateLimitedError("WhatsApp is rate limiting this account.")
-                        if response.status_code >= CLIENT_ERROR_FLOOR:
-                            # Read before logging: the failure log wants the
-                            # provider's error body, and a streamed response has
-                            # not fetched one yet. Bounded by the same cap, so a
-                            # hostile error body is no larger a problem than a
-                            # hostile file.
-                            await response.aread()
-                            self._log_failure(response)
+                        if response.status_code >= SERVER_ERROR_FLOOR:
+                            body = await _read_prefix(response, limit=MAX_ERROR_BODY_BYTES)
+                            self._log_failure_body(response.status_code, body)
                             await call.record(CallOutcome.FAILURE)
                             raise ExternalServiceError("WhatsApp could not return this file.")
+                        if response.status_code >= CLIENT_ERROR_FLOOR:
+                            # Read before logging, because the failure log wants
+                            # Meta's error code - but only the first few
+                            # kilobytes (MEDIA-09). This used to be `aread()`
+                            # under a comment claiming the file cap applied,
+                            # and a 404 carrying 200 MB was read whole.
+                            body = await _read_prefix(response, limit=MAX_ERROR_BODY_BYTES)
+                            code = self._log_failure_body(response.status_code, body)
+                            await call.record(CallOutcome.FAILURE)
+                            raise _read_failure(response.status_code, code)
 
                         body = await self._read_capped(response, max_bytes=max_bytes)
                         await call.record(CallOutcome.SUCCESS)
@@ -727,11 +846,11 @@ class WhatsAppClient:
             chunks.append(chunk)
         return b"".join(chunks)
 
-    async def _get_json(self, url: str) -> dict[str, Any]:
-        response = await self._get(url)
+    async def _get_json(self, url: str, *, max_bytes: int) -> dict[str, Any]:
+        response = await self._get(url, max_bytes=max_bytes)
         return self._decode(response)
 
-    async def _get(self, url: str) -> httpx.Response:
+    async def _get(self, url: str, *, max_bytes: int) -> httpx.Response:
         """A retrying GET carrying the access token.
 
         Wider than the send path deliberately. A repeated read has no
@@ -746,10 +865,15 @@ class WhatsAppClient:
         metadata endpoint, the Redis holding the token denylist, and PostgreSQL;
         the body it fetches is stored as media and can be read back through the
         API. Checking only the first URL would check the one hop that is least
-        likely to be hostile, so the loop below re-validates each `Location`.
+        likely to be hostile, so the loop below re-validates each `Location` -
+        and `_get_once` refuses to send the token to any hop outside Meta's
+        hosts (MEDIA-01).
+
+        The body is read to at most `max_bytes`: this path buffers, and a
+        buffered read with no ceiling is one somebody else sets.
         """
         for _ in range(MAX_REDIRECTS + 1):
-            response = await self._get_once(url)
+            response = await self._get_once(url, max_bytes=max_bytes)
             if response.status_code not in _REDIRECT_STATUSES:
                 return response
             location = response.headers.get("Location")
@@ -767,17 +891,41 @@ class WhatsAppClient:
 
         raise ExternalServiceError("WhatsApp could not return this file.")
 
-    async def _get_once(self, url: str) -> httpx.Response:
-        """One hop, with the retry policy above and no redirect following."""
+    async def _get_once(self, url: str, *, max_bytes: int) -> httpx.Response:
+        """One hop, with the retry policy above and no redirect following.
+
+        Streamed and re-assembled rather than buffered by httpx, so the caps
+        bite while the body arrives: `max_bytes` for a success, and the far
+        smaller error cap for a failure, whose body only ever yields a code.
+        """
         call = ProviderCall(provider=Provider.WHATSAPP, operation=FETCH_MEDIA)
+        headers = self._credential_headers(url)
         attempt = 1
         while True:
+            body: bytes | None
             try:
-                response = await self._http.get(
-                    url,
-                    headers={"Authorization": f"Bearer {self._access_token}"},
-                    follow_redirects=False,
-                )
+                async with self._http.stream(
+                    "GET", url, headers=headers, follow_redirects=False
+                ) as streamed:
+                    status = streamed.status_code
+                    retryable = status == TOO_MANY_REQUESTS or status >= SERVER_ERROR_FLOOR
+                    if retryable and attempt < self._max_attempts:
+                        body = None
+                    elif status >= CLIENT_ERROR_FLOOR:
+                        body = await _read_prefix(streamed, limit=MAX_ERROR_BODY_BYTES)
+                    elif status in _REDIRECT_STATUSES:
+                        body = b""
+                    else:
+                        body = await _read_bounded(streamed, limit=max_bytes)
+                    response = httpx.Response(
+                        status,
+                        headers=streamed.headers,
+                        content=body or b"",
+                        request=streamed.request,
+                    )
+            except _BodyTooLargeError:
+                await call.record(CallOutcome.FAILURE)
+                raise
             except httpx.HTTPError as error:
                 if attempt >= self._max_attempts:
                     logger.warning("whatsapp.media_unreachable", extra={"attempts": attempt})
@@ -787,22 +935,22 @@ class WhatsAppClient:
                 attempt += 1
                 continue
 
-            retryable = (
-                response.status_code == TOO_MANY_REQUESTS
-                or response.status_code >= SERVER_ERROR_FLOOR
-            )
-            if retryable and attempt < self._max_attempts:
+            if body is None:
                 await self._backoff(attempt)
                 attempt += 1
                 continue
 
-            if response.status_code == TOO_MANY_REQUESTS:
+            if status == TOO_MANY_REQUESTS:
                 await call.record(CallOutcome.RATE_LIMITED)
                 raise RateLimitedError("WhatsApp is rate limiting this account.")
-            if response.status_code >= CLIENT_ERROR_FLOOR:
-                self._log_failure(response)
+            if status >= SERVER_ERROR_FLOOR:
+                self._log_failure_body(status, body)
                 await call.record(CallOutcome.FAILURE)
                 raise ExternalServiceError("WhatsApp could not return this file.")
+            if status >= CLIENT_ERROR_FLOOR:
+                code = self._log_failure_body(status, body)
+                await call.record(CallOutcome.FAILURE)
+                raise _read_failure(status, code)
             await call.record(CallOutcome.SUCCESS)
             return response
 
@@ -1016,6 +1164,10 @@ class WhatsAppClient:
         )
         return code if isinstance(code, int) else None
 
+    def _log_failure_body(self, status_code: int, body: bytes) -> int | None:
+        """`_log_failure` for a body read through a cap rather than buffered."""
+        return self._log_failure(httpx.Response(status_code, content=body))
+
     def _decode(self, response: httpx.Response, *, accepted: bool = False) -> dict[str, Any]:
         """Meta's body, or the right kind of failure for not having one.
 
@@ -1037,13 +1189,13 @@ class WhatsAppClient:
                 raise UncertainDeliveryError(
                     "WhatsApp accepted the message but its answer could not be read."
                 ) from error
-            raise ExternalServiceError("WhatsApp returned an unreadable response.") from error
+            raise _UnreadableBodyError() from error
         if not isinstance(body, dict):
             if accepted:
                 raise UncertainDeliveryError(
                     "WhatsApp accepted the message but its answer could not be read."
                 )
-            raise ExternalServiceError("WhatsApp returned an unexpected response.")
+            raise _UnreadableBodyError()
         return body
 
     def _message_id(self, body: dict[str, Any]) -> str:
@@ -1065,3 +1217,62 @@ class WhatsAppClient:
             if isinstance(recipient, str):
                 return recipient
         return None
+
+
+class _UnreadableBodyError(ExternalServiceError):
+    """A non-2xx-classified body that is not a JSON object.
+
+    A subclass, so every caller that caught `ExternalServiceError` still does;
+    its own type so the descriptor path can call it malformed without matching
+    on prose.
+    """
+
+    message = "WhatsApp returned an unreadable response."
+
+
+class _BodyTooLargeError(ExternalServiceError):
+    """A buffered read passed its ceiling."""
+
+    message = "WhatsApp returned an oversized response."
+
+
+async def _read_prefix(response: httpx.Response, *, limit: int) -> bytes:
+    """At most `limit` bytes of a streamed body, then stop reading.
+
+    Stops rather than raises: an error body is read for a code, and a long one
+    is simply cut. Leaving the response context closes the connection, so the
+    rest is never transferred into this process.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        room = limit - total
+        chunks.append(chunk[:room])
+        total += min(len(chunk), room)
+        if total >= limit:
+            break
+    return b"".join(chunks)
+
+
+async def _read_bounded(response: httpx.Response, *, limit: int) -> bytes:
+    """A whole streamed body, refused the moment it passes `limit`."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > limit:
+            raise _BodyTooLargeError()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _read_failure(status_code: int, meta_code: int | None) -> ExternalServiceError:
+    """What a refused media read means, as the type a caller acts on (MEDIA-04).
+
+    A credential refusal and an unavailable file are both permanent, and both
+    differ from the transient failures retried above: repeating either returns
+    the same answer. They are told apart because the remedy is.
+    """
+    if status_code in (UNAUTHORIZED, FORBIDDEN) or meta_code == META_AUTH_CODE:
+        return MediaCredentialRefusedError()
+    return MediaUnavailableError()

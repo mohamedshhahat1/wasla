@@ -21,7 +21,7 @@ from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import PlainTextResponse
-from sqlalchemy.exc import DataError
+from sqlalchemy.exc import DBAPIError
 
 from app.api.route import CommittingRoute
 from app.core.config import Settings
@@ -34,6 +34,7 @@ from app.core.dependencies import (
 from app.core.exceptions import DependencyUnavailableError, PermissionDeniedError
 from app.core.logging import get_logger
 from app.core.telemetry import CallOutcome, Provider, observe_auth_event, record_provider_call
+from app.db.errors import is_data_exception
 from app.integrations.whatsapp.signature import SIGNATURE_HEADER, verify_signature
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.media_queue import MediaQueue
@@ -185,7 +186,7 @@ async def receive_events(
 
     try:
         outcome = await service.ingest(payload)
-    except DataError:
+    except DBAPIError as error:
         # PostgreSQL refused the *content*, not the connection. That is a
         # permanent fact about this delivery: Meta retries a non-2xx for up to
         # seven days and every one of those retries would fail identically,
@@ -193,12 +194,17 @@ async def receive_events(
         # failure rate toward the threshold at which Meta disables it for
         # every workspace on the deployment (MSG-03).
         #
-        # The distinction from a transient failure is the whole point and it
-        # is drawn by the exception class. `OperationalError` and
-        # `InterfaceError` - the database being down, a connection dropping -
-        # are *not* caught here, so they still become a 5xx and Meta still
-        # retries, which is the behaviour that made the PostgreSQL-outage
-        # recovery work.
+        # The last net, not the first. Ingestion already contains a refused
+        # message inside its own savepoint so its siblings are kept; this
+        # catches whatever is refused outside that - and it catches it by
+        # SQLSTATE class 22, because under asyncpg a refused value is never a
+        # `DataError` and the `except DataError` that stood here could not
+        # fire (MEDIA-05). Anything outside class 22 - the database being
+        # down, a dropped connection, a deadlock - is re-raised, still becomes
+        # a 5xx, and Meta still retries, which is the behaviour that made the
+        # PostgreSQL-outage recovery work.
+        if not is_data_exception(error):
+            raise
         #
         # The transaction is unusable after this, so it is rolled back
         # explicitly; the route's commit would otherwise fail on the way out
@@ -228,6 +234,7 @@ async def receive_events(
             "inactive_accounts": outcome.inactive_accounts,
             "ignored": outcome.ignored,
             "queued": outcome.queued,
+            "rejected": outcome.rejected,
         },
     )
     return {"status": "accepted"}

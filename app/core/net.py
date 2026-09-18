@@ -6,9 +6,16 @@ arrives in a provider response rather than being built from configuration - and
 that is exactly the shape server-side request forgery takes: a fetch whose
 destination somebody else chose.
 
-The threat is not "an attacker steals our Meta token". httpx strips
-`Authorization` when a redirect leaves the origin, so a redirect to an attacker
-host receives no credential. It is that **the request happens at all**. A worker
+This module answers one of two questions a credential-bearing hop must pass:
+whether the destination is safe to *reach*. Whether it may be handed a *token*
+is the other, and it is answered separately (`app.core.hostnames`, enforced by
+the WhatsApp client on every hop). This used to claim that httpx strips
+`Authorization` when a redirect leaves the origin, so no redirect could carry a
+credential. That is true only of httpx's own redirect following - which the
+media client disables so it can validate each hop here - and the client
+re-attached the token on every hop by hand, to any public host (MEDIA-01).
+
+The threat this module removes is that **the request happens at all**. A worker
 sitting inside the deployment network can reach things the internet cannot:
 `169.254.169.254` for cloud instance credentials, `127.0.0.1:6379` for the Redis
 that holds the refresh-token denylist and the agent queue, PostgreSQL, and any

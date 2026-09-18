@@ -60,6 +60,7 @@ from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEvent, UsageEventType
 from app.db.models.whatsapp import WhatsAppAccount
 from app.repositories.media_repository import PlatformMediaRepository
+from app.services.media_horizons import claim_lease
 from app.services.media_retention_service import MediaRetentionService
 from app.services.media_service import MediaService, content_hash
 from app.services.media_upload_service import MediaUploadReconciler
@@ -480,16 +481,17 @@ async def test_the_same_job_run_twice_writes_one_object(
     await storage.delete(storage.written[0])
 
 
-async def test_a_retry_after_a_failed_write_reuses_the_committed_key(
+async def test_a_failed_write_is_terminal_and_keeps_its_intent(
     committing: async_sessionmaker[AsyncSession],
     storage: RecordingStore,
     tenant_id: uuid.UUID,
 ) -> None:
-    """The intent is the idempotency key, and it survives the failure.
+    """A store refusing the write is a failed file, never a stored one (M11).
 
-    First attempt: the store refuses, the row keeps its intent. Second attempt:
-    the same key, so the object the first attempt might have written after all
-    - a write can fail on the way back - is the one that ends up owned.
+    The intent survives, so reconciliation can still find whatever the store
+    may have written on the way to failing. And under the locked retry contract
+    (PD-MEDIA-08) the failure is final: a later job for the same file writes
+    nothing - the customer's conversation was answered the first time.
     """
     async with committing() as setup:
         media_id = await _pending_media(setup, tenant_id)
@@ -505,25 +507,73 @@ async def test_a_retry_after_a_failed_write_reuses_the_committed_key(
     async with committing() as check:
         row = await _row(check, media_id)
         assert row.storage_state is MediaStorageState.PENDING
-        first_key = row.storage_key
-        assert first_key is not None
+        assert row.is_stored is False
+        assert row.storage_key is not None
 
     async with committing() as session:
-        await _service(session, tenant=tenant_id, storage=storage).download(
+        again = await _service(session, tenant=tenant_id, storage=storage).download(
             await _row(session, media_id)
         )
         await session.commit()
 
+    assert again.status is MediaStatus.FAILED
+    assert storage.written == []
+
+
+async def test_a_retry_after_a_crashed_write_reuses_the_committed_key(
+    committing: async_sessionmaker[AsyncSession],
+    storage: RecordingStore,
+    tenant_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The intent is the idempotency key, and it survives the attempt dying.
+
+    First attempt: the process dies between committing the intent and writing
+    the object - the row keeps its intent and its claim. Once that claim is
+    older than any attempt can run, the next attempt reuses the same key, so
+    an object the first attempt might have written after all is the one that
+    ends up owned.
+    """
+    async with committing() as setup:
+        media_id = await _pending_media(setup, tenant_id)
+
+    async def die(*_: object, **__: object) -> bool:
+        raise InjectedFailureError()
+
+    with monkeypatch.context() as patched:
+        patched.setattr(MediaService, "_write", die)
+        with pytest.raises(InjectedFailureError):
+            async with committing() as session:
+                await _service(session, tenant=tenant_id, storage=storage).download(
+                    await _row(session, media_id)
+                )
+
+    async with committing() as check:
+        row = await _row(check, media_id)
+        assert row.status is MediaStatus.DOWNLOADING
+        assert row.storage_state is MediaStorageState.PENDING
+        assert row.claim_id is not None
+        first_key = row.storage_key
+        assert first_key is not None
+        # The dead attempt's claim, aged past the longest an attempt can run.
+        row.claimed_at = datetime.now(UTC) - claim_lease(_settings()) - timedelta(seconds=1)
+        await check.commit()
+
+    async with committing() as session:
+        outcome = await _service(session, tenant=tenant_id, storage=storage).download(
+            await _row(session, media_id)
+        )
+        await session.commit()
+
+    assert outcome.status is MediaStatus.STORED
     assert storage.written == [first_key]
     async with committing() as check:
         row = await _row(check, media_id)
         assert row.storage_key == first_key
         assert row.storage_state is MediaStorageState.STORED
+        assert row.attempts == 2
 
     await storage.delete(first_key)
-
-
-# =============================================== GATE 5: the object is not ours
 
 
 async def test_an_object_that_is_not_what_the_row_describes_is_never_adopted(

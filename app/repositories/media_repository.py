@@ -11,19 +11,43 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models.conversation import Conversation
+from app.db.models.conversation import Conversation, Message
+from app.db.models.enums import TenantStatus
 from app.db.models.media import (
     UNRESOLVED_MEDIA_STATUSES,
     MediaStatus,
     MediaStorageState,
     MessageMedia,
 )
+from app.db.models.tenant import Tenant
+from app.db.models.whatsapp import (
+    WhatsAppAccount,
+    WhatsAppAccountStatus,
+    WhatsAppEvent,
+    WhatsAppEventState,
+)
 from app.repositories.base import BaseRepository, TenantScopedRepository
+
+
+@dataclass(frozen=True, slots=True)
+class MediaServing:
+    """Whether the platform is still serving the workspace and number a file came in on.
+
+    Read as columns at the moment it is asked, never from mapped objects: a
+    worker that loaded the conversation before a suspension would otherwise go
+    on seeing the workspace it loaded (the same reasoning as
+    `app.agents.lifecycle`).
+    """
+
+    workspace_active: bool
+    workspace_deleted: bool
+    channel_available: bool
 
 
 class MediaRepository(TenantScopedRepository[MessageMedia]):
@@ -128,6 +152,72 @@ class MediaRepository(TenantScopedRepository[MessageMedia]):
 
         rows = await self._all(self._select().where(MessageMedia.message_id.in_(message_ids)))
         return {row.message_id: row for row in rows}
+
+    async def serving(self, conversation_id: uuid.UUID) -> MediaServing | None:
+        """The lifecycle a file is processed under, read now (MEDIA-08).
+
+        Tenant-scoped on the conversation, so another workspace's conversation
+        reads as missing rather than as somebody else's state.
+        """
+        row = (
+            await self._session.execute(
+                select(
+                    Tenant.status,
+                    Tenant.deleted_at,
+                    WhatsAppAccount.status,
+                    WhatsAppAccount.released_at,
+                )
+                .select_from(Conversation)
+                .join(Tenant, Tenant.id == Conversation.tenant_id)
+                .join(
+                    WhatsAppAccount,
+                    and_(
+                        WhatsAppAccount.id == Conversation.account_id,
+                        WhatsAppAccount.tenant_id == Conversation.tenant_id,
+                    ),
+                )
+                .where(
+                    Conversation.id == conversation_id,
+                    Conversation.tenant_id == self.tenant_id,
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        workspace_status, deleted_at, account_status, released_at = row
+        return MediaServing(
+            workspace_active=workspace_status is TenantStatus.ACTIVE,
+            workspace_deleted=deleted_at is not None,
+            channel_available=(
+                account_status is WhatsAppAccountStatus.ACTIVE and released_at is None
+            ),
+        )
+
+    async def account_for(self, conversation_id: uuid.UUID) -> WhatsAppAccount | None:
+        """The number a conversation's messages arrived on, read fresh.
+
+        The owner of the credential an inbound file is fetched with (MEDIA-13).
+        Decided here from the conversation, server-side - never from anything
+        the job, the customer or a model supplies.
+        """
+        found: WhatsAppAccount | None = (
+            await self._session.execute(
+                select(WhatsAppAccount)
+                .join(
+                    Conversation,
+                    and_(
+                        Conversation.account_id == WhatsAppAccount.id,
+                        Conversation.tenant_id == WhatsAppAccount.tenant_id,
+                    ),
+                )
+                .where(
+                    Conversation.id == conversation_id,
+                    Conversation.tenant_id == self.tenant_id,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        return found
 
     async def count_unresolved(self, conversation_id: uuid.UUID) -> int:
         """How many files on this conversation still owe it an answer."""
@@ -340,3 +430,91 @@ class PlatformMediaRepository(BaseRepository[MessageMedia]):
             .where(MessageMedia.storage_state == MediaStorageState.MISMATCHED)
         )
         return int((await self._session.execute(statement)).scalar_one())
+
+    def _stranded(
+        self, *, claimed_before: datetime, created_before: datetime
+    ) -> ColumnElement[bool]:
+        """Unresolved files no attempt is honouring (MEDIA-03).
+
+        Two kinds, measured against two horizons (`app.services.media_horizons`):
+
+        - **claimed** - a worker took the file up and its claim is older than
+          the longest an attempt can take. Its worker died, or its job was
+          dead-lettered before it could say so.
+        - **unclaimed** - nobody has taken it up (or the sweep last put it back)
+          for longer than the queue's whole retry budget. Its job is lost.
+
+        A file whose inbound event is still `received` is excluded: its media
+        job never reached the queue, and `InboundRecoveryWorker` owns putting
+        it there (ADR-102). Two sweeps racing to enqueue one file is how a
+        conversation gets answered twice.
+        """
+        owed_to_inbound_recovery = exists().where(
+            WhatsAppEvent.tenant_id == MessageMedia.tenant_id,
+            WhatsAppEvent.event_id == Message.wa_message_id,
+            WhatsAppEvent.state == WhatsAppEventState.RECEIVED,
+        )
+        return and_(
+            MessageMedia.status.in_(UNRESOLVED_MEDIA_STATUSES),
+            or_(
+                and_(
+                    MessageMedia.claim_id.is_not(None),
+                    MessageMedia.claimed_at < claimed_before,
+                ),
+                and_(
+                    MessageMedia.claim_id.is_(None),
+                    func.coalesce(MessageMedia.claimed_at, MessageMedia.created_at)
+                    < created_before,
+                ),
+            ),
+            ~owed_to_inbound_recovery,
+        )
+
+    async def claim_stranded(
+        self,
+        *,
+        claimed_before: datetime,
+        created_before: datetime,
+        limit: int,
+    ) -> list[MessageMedia]:
+        """Take the stranded files for one recovery pass, oldest first.
+
+        `FOR UPDATE SKIP LOCKED` on the media rows only, so two sweeps divide
+        the work and a row a live worker is finishing right now - which holds
+        its lock for a few statements - is simply skipped until next time.
+        """
+        statement = (
+            select(MessageMedia)
+            .join(Message, Message.id == MessageMedia.message_id)
+            .where(self._stranded(claimed_before=claimed_before, created_before=created_before))
+            .order_by(MessageMedia.created_at)
+            .limit(limit)
+            .with_for_update(of=MessageMedia, skip_locked=True)
+        )
+        return list((await self._session.execute(statement)).scalars().all())
+
+    async def stranded_backlog(
+        self,
+        *,
+        claimed_before: datetime,
+        created_before: datetime,
+        now: datetime,
+    ) -> tuple[int, float]:
+        """How many files are stranded right now, and how long the oldest has waited.
+
+        The gauge the stranded-media alert reads. Zero is the healthy reading;
+        the recovery sweep drains anything else within one pass, so a number
+        that stays above zero means the sweep is not running or cannot finish.
+        """
+        statement = (
+            select(
+                func.count(),
+                func.min(func.coalesce(MessageMedia.claimed_at, MessageMedia.created_at)),
+            )
+            .select_from(MessageMedia)
+            .join(Message, Message.id == MessageMedia.message_id)
+            .where(self._stranded(claimed_before=claimed_before, created_before=created_before))
+        )
+        count, oldest = (await self._session.execute(statement)).one()
+        age = (now - oldest).total_seconds() if oldest is not None else 0.0
+        return int(count), max(age, 0.0)

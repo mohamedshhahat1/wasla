@@ -65,6 +65,7 @@ async def metrics(redis: RedisDep, database: DatabaseDep, settings: SettingsDep)
         # own and publishes none; the `process_role` label on the series says
         # so rather than leaving a reader to assume otherwise.
         database=database,
+        settings=settings,
         space=EmbeddingSpace(
             provider=OPENAI_PROVIDER,
             model=settings.openai_embedding_model,

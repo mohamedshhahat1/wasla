@@ -45,10 +45,12 @@ from app.core.exceptions import (
     RateLimitedError,
     ValidationError,
 )
+from app.core.filenames import require_storable_filename
 from app.core.logging import get_logger
 from app.core.media_types import SNIFF_BYTES, MediaClass
 from app.core.media_types import resolve as resolve_media_type
 from app.core.storage import EXTENSIONS, MediaStorage, StorageError, build_key
+from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey
 from app.db.models.conversation import (
     Conversation,
@@ -60,6 +62,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.media import MediaStatus, MediaStorageState
 from app.db.models.usage import UsageEventType
+from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount
 from app.db.models.whatsapp_template import TemplateStatus
 from app.db.session import released
@@ -79,6 +82,7 @@ from app.repositories.conversation_repository import (
 from app.repositories.media_repository import MediaRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
+from app.services.audit_service import AuditTrail
 from app.services.credential_service import CredentialService
 from app.services.entitlement_service import EntitlementService
 from app.services.media_service import content_hash as media_content_hash
@@ -448,6 +452,15 @@ class MessagingService:
                 )
                 return replayed
 
+        # Before anything reaches Meta (MEDIA-06). The name used to be stored
+        # raw after the send, so one over 300 characters, or carrying a NUL,
+        # was delivered to the customer and then failed to record: the request
+        # errored, the message stayed `pending`, and a retry sent it twice. A
+        # name that cannot be stored as given is refused here, with nothing
+        # sent; one that can is brought to the canonical form every later step
+        # uses - the row, and the Meta-safe name derived from it.
+        display_name = require_storable_filename(filename)
+
         detected = resolve_media_type(claimed=mime_type, prefix=content[:SNIFF_BYTES])
         canonical = detected.mime_type
         family = _whatsapp_kind(detected.kind)
@@ -473,7 +486,7 @@ class MessagingService:
         if storage is not None:
             await self._entitlements.require(LimitKey.STORAGE_BYTES, additional=len(content))
 
-        upload_name = _safe_filename(filename, mime_type=canonical)
+        upload_name = _safe_filename(display_name, mime_type=canonical)
 
         # The two halves of a media send, split because only the second one can
         # reach a customer. Uploading a file to Meta creates a handle valid for
@@ -524,10 +537,48 @@ class MessagingService:
             message=message,
             content=content,
             mime_type=canonical,
-            filename=filename,
+            filename=display_name,
             storage=storage,
         )
+        await self._audit_attachment_sent(message, sent_by_id=sent_by_id, origin=origin)
         return message
+
+    async def _audit_attachment_sent(
+        self,
+        message: Message,
+        *,
+        sent_by_id: uuid.UUID | None,
+        origin: MessageOrigin,
+    ) -> None:
+        """Record a colleague sending a customer a file (MEDIA-17).
+
+        Only a person's send, and only one that may have reached the customer:
+        a send that provably failed delivered nothing. Internal identifiers
+        only - never the filename, the caption or the file.
+        """
+        if origin is not MessageOrigin.HUMAN or sent_by_id is None:
+            return
+        if message.status is MessageStatus.FAILED:
+            return
+        actor = await self._session.get(User, sent_by_id)
+        if actor is None:
+            return
+        media = await self._media.get_for_message(message.id)
+        meta = {
+            "conversation_id": str(message.conversation_id),
+            "message_id": str(message.id),
+        }
+        if media is not None:
+            meta["media_id"] = str(media.id)
+        AuditTrail(self._session, tenant_id=self._tenant_id).record(
+            AuditAction.MEDIA_SENT,
+            actor=actor,
+            actor_kind=AuditActorKind.USER,
+            target_type="message",
+            target_id=message.id,
+            meta=meta,
+        )
+        await self._session.flush()
 
     async def _record_attachment(
         self,

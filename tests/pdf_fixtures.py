@@ -9,6 +9,7 @@ document.
 from __future__ import annotations
 
 import zlib
+from pathlib import Path
 
 
 def _assemble(objects: list[bytes]) -> bytes:
@@ -80,3 +81,34 @@ def expanding_pdf(lines: int) -> bytes:
 
 #: Characters of extracted text each `expanding_pdf` line produces, measured.
 CHARACTERS_PER_EXPANDING_LINE = 46
+
+
+def amplifying_pdf(inflated_megabytes: float) -> bytes:
+    """The media audit's P5 shape (MEDIA-02): one page, one compressed stream.
+
+    The stream inflates to `inflated_megabytes` of `(A) Tj` operators. At 16 MB
+    the file is about 25 KB, and parsed in-process it stalled the shared event
+    loop for 170 seconds at 763 MB resident.
+    """
+    count = int(inflated_megabytes * 1024 * 1024 / 7)
+    operators = b"BT /F1 1 Tf " + b"(A) Tj " * count + b" ET"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        _stream(operators, compress=True),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    return _assemble(objects)
+
+
+#: The five sub-kilobyte PDFs from the media audit's fuzz run (MEDIA-03), one
+#: per exception class that escaped the old in-process parser's catch list.
+#: Kept byte for byte; `.gitattributes` marks the directory binary.
+POISON_PDF_DIRECTORY = Path(__file__).parent / "media_fixtures" / "poison"
+POISON_PDF_CLASSES = ("AttributeError", "AssertionError", "KeyError", "TypeError", "IndexError")
+
+
+def poison_pdf(escape_class: str) -> bytes:
+    return (POISON_PDF_DIRECTORY / f"{escape_class}.pdf").read_bytes()

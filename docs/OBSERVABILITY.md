@@ -61,6 +61,13 @@ customers.
 | `wasla_unprocessed_inbound_oldest_age_seconds` | gauge | — | Whether that backlog is being drained or is stuck. |
 | `wasla_unresolved_outbound_messages` | gauge | — | **A state invariant**: sends Meta may have delivered, whose outcome is unknown. |
 | `wasla_oldest_unresolved_outbound_age_seconds` | gauge | — | Whether the oldest is a send in flight or one that broke an hour ago. |
+| `wasla_media_outcomes_total` | counter | `outcome` | How inbound attachments ended: `ready` or one of the media reason tokens (closed vocabulary, MEDIA-15). Decisions and failures are both here; the alert reads only the failure subset. |
+| `wasla_media_recovery_total` | counter | `outcome` | What the stranded-media sweep did: `requeued`, `abandoned`, `release_failed`. |
+| `wasla_media_stranded` | gauge | — | **A state invariant**: attachments unresolved past the longest a live attempt or queued job can take, so their conversation's reply is held. Should be zero. |
+| `wasla_media_stranded_oldest_age_seconds` | gauge | — | How long the oldest of those has gone without an attempt. |
+| `wasla_media_purge_deletes_owed` | gauge | — | **A state invariant**: object deletes a workspace purge recorded that the store has not confirmed. Zero once every purged workspace's files are gone. |
+| `wasla_media_purge_deletes_oldest_age_seconds` | gauge | — | Whether the owed deletes are a key in its in-flight grace or a store refusing. |
+| `wasla_media_purge_objects_total` | counter | `outcome` | Purge object deletes, `deleted` or `failed`. |
 
 `wasla_orphaned_workspaces` is worth singling out, and the two messaging
 gauges beside it are the same shape. Every other metric here counts an *event* —
@@ -159,6 +166,25 @@ A quota-blocked turn has no alert of its own. It is a commercial condition
 rather than an operational one, and the conversation has already been handed to
 a person; `wasla_agent_turn_outcomes_total{outcome="quota_blocked"}` is there
 for a dashboard.
+
+### Media
+
+Added by the media remediation (MEDIA-15). A stranded attachment was visible
+only as generic `DeadLetterGrowth`, a failing purge delete only as a warning
+line, and transcription was the one paid provider call counted nowhere.
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `MediaStranded` | An attachment has stayed stranded past the recovery sweep for 15m | critical |
+| `MediaProcessingFailureSpike` | >25% of attachments end `FAILED` over 30m, and at least five did | warning |
+| `MediaPurgeDeletesFailing` | A purged workspace's object delete has been owed for six hours | warning |
+| `TranscriptionFailureRate` | >50% of transcriptions fail after their retries, at least three | warning |
+| `MediaUploadQuarantined` | Reconciliation holds an object that is not what Wasla wrote | critical |
+
+`MediaProcessingFailureSpike` excludes decisions - an oversized, unsupported or
+unreadable file, a suspended workspace - so a customer sending an unsupported
+file never pages anybody; the promtool tests prove it silent on exactly that.
+Alert *delivery* for these rules is deployment verification (DV-7).
 
 **Every rule is tested twice** — once under its threshold and once over it.
 A rule only ever shown firing has not been shown to discriminate, and a

@@ -56,6 +56,12 @@ from app.core.exceptions import ValidationError
 # file never means holding it. Callers that stream may hand over only this much.
 SNIFF_BYTES: Final = 4096
 
+# The widest a declared type may be and still be recorded: `message_media.mime_type`.
+# A declared type is a claim to be checked against the bytes, and one longer than
+# any real media type is not worth recording - it is dropped rather than allowed
+# to fail the webhook's write (MEDIA-05). Defined here and imported by the model.
+MAX_MIME_TYPE_LENGTH: Final = 150
+
 # Types a caller may send that mean "I do not know", as opposed to a claim.
 # Treated as absence rather than as a conflict: a browser that omits the header
 # and one that fills it in with the generic value are saying the same thing.

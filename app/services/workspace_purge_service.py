@@ -82,7 +82,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, select, text
@@ -95,6 +95,9 @@ from app.db.models.audit import AuditAction, AuditActorKind
 from app.services.audit_service import AuditTrail
 
 logger = get_logger(__name__)
+
+# The default for `in_flight_grace`, matching `MEDIA_UPLOAD_GRACE_SECONDS`.
+DEFAULT_IN_FLIGHT_GRACE = timedelta(seconds=900)
 
 # Erased outright, in this order. Children before parents: these are real
 # foreign keys, and most of them cascade - but relying on a cascade to erase
@@ -156,8 +159,42 @@ RETAINED_TABLES: frozenset[str] = frozenset(
         "subscriptions",
         "audit_logs",
         "memberships",
+        # Not erased by the purge because it *is* the purge's record of what it
+        # still owes the object store: one row per customer file whose delete
+        # has not yet been confirmed (MEDIA-07). Each row is removed once its
+        # object is gone, so a fully purged workspace has none.
+        "media_purge_objects",
     }
 )
+
+# The table whose deletion also records what it leaves in the object store.
+MEDIA_TABLE = "message_media"
+
+# `message_media` is deleted by this statement rather than the generic one, so
+# the keys it held are recorded in the same transaction - taken from the rows
+# the DELETE actually removed, not from a read beforehand that an upload could
+# commit between. A key whose upload was still in flight is not deleted before
+# `:deferred`; see `app.db.models.media_purge`.
+_MEDIA_WITH_LEDGER = text("""
+    WITH gone AS (
+        DELETE FROM message_media WHERE tenant_id = :tenant_id
+        RETURNING storage_key, storage_state
+    ),
+    recorded AS (
+        INSERT INTO media_purge_objects
+            (id, tenant_id, storage_key, not_before, attempts, created_at, updated_at)
+        SELECT gen_random_uuid(), CAST(:tenant_id AS uuid), storage_key,
+               CASE WHEN storage_state = 'pending'
+                    THEN CAST(:deferred AS timestamptz)
+                    ELSE CAST(:now AS timestamptz) END,
+               0, CAST(:now AS timestamptz), CAST(:now AS timestamptz)
+        FROM gone
+        WHERE storage_key IS NOT NULL
+        ON CONFLICT (storage_key) DO NOTHING
+        RETURNING 1
+    )
+    SELECT (SELECT count(*) FROM gone), (SELECT count(*) FROM recorded)
+    """)
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,13 +203,22 @@ class PurgeOutcome:
 
     tenant_id: uuid.UUID
     rows_deleted: int
+    objects_recorded: int = 0
 
 
 class WorkspacePurgeService:
     """Erases the operational data of one already-deleted workspace."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        in_flight_grace: timedelta = DEFAULT_IN_FLIGHT_GRACE,
+    ) -> None:
         self._session = session
+        # How long a key whose upload was mid-write at the purge is left before
+        # its delete: the upload grace reconciliation uses (ADR-087).
+        self._in_flight_grace = in_flight_grace
 
     async def claim_due(self, *, now: datetime, limit: int = 20) -> list[Tenant]:
         """Workspaces whose retention has run out and that are not yet purged.
@@ -225,7 +271,22 @@ class WorkspacePurgeService:
             raise ValueError("Refusing to purge a workspace before its retention has passed.")
 
         deleted = 0
+        recorded = 0
         for table in PURGED_TABLES:
+            if table == MEDIA_TABLE:
+                gone, kept = (
+                    await self._session.execute(
+                        _MEDIA_WITH_LEDGER,
+                        {
+                            "tenant_id": tenant.id,
+                            "now": moment,
+                            "deferred": moment + self._in_flight_grace,
+                        },
+                    )
+                ).one()
+                deleted += int(gone)
+                recorded += int(kept)
+                continue
             # Table names come from the module-level tuple above and never from
             # a caller, so the interpolation reaches only names written in this
             # file. The tenant id is bound.
@@ -251,7 +312,7 @@ class WorkspacePurgeService:
             # that erasure inside the workspace's own trail would be filing it
             # in the thing being erased.
             target_label=tenant.slug,
-            meta={"rows_deleted": deleted},
+            meta={"rows_deleted": deleted, "objects_recorded": recorded},
         )
         await self._session.flush()
 
@@ -264,24 +325,4 @@ class WorkspacePurgeService:
                 "rows_deleted": deleted,
             },
         )
-        return PurgeOutcome(tenant_id=tenant.id, rows_deleted=deleted)
-
-
-async def purge_media_objects(session: AsyncSession, tenant_id: uuid.UUID) -> list[str]:
-    """Storage keys the purge is about to orphan, read before the rows go.
-
-    **A database delete does not free an object.** `message_media` holds keys
-    into the object store; deleting the rows leaves the files, which is the
-    difference between a purge and a purge that looks finished.
-
-    Read as keys and handed to the caller rather than deleted here, because
-    object-store deletion is network I/O and this service runs inside a
-    transaction. The worker does the removal after the commit, where a failure
-    can be retried without holding a lock - and where a failure leaves orphaned
-    objects rather than a workspace that is half-erased in the database.
-    """
-    rows = await session.execute(
-        text("SELECT storage_key FROM message_media WHERE tenant_id = :tenant_id"),
-        {"tenant_id": tenant_id},
-    )
-    return [key for (key,) in rows if key]
+        return PurgeOutcome(tenant_id=tenant.id, rows_deleted=deleted, objects_recorded=recorded)

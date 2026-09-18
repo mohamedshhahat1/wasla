@@ -14,10 +14,11 @@ import zlib
 import pytest
 from pypdf import PdfWriter
 
+from app.services import extraction
 from app.services.extraction import (
     UnreadableDocumentError,
     extract_document,
-    extract_pdf,
+    extract_pdf_bounded,
     extract_text,
 )
 
@@ -76,35 +77,44 @@ def _blank_pdf() -> bytes:
     return out.getvalue()
 
 
-def test_a_pdf_gives_up_its_text() -> None:
-    assert "Invoice" in extract_pdf(_pdf_with_text("Invoice 2026"))
+async def test_a_pdf_gives_up_its_text() -> None:
+    assert "Invoice" in await extract_pdf_bounded(_pdf_with_text("Invoice 2026"))
 
 
-def test_a_scan_reads_as_empty_rather_than_failing() -> None:
+async def test_a_scan_reads_as_empty_rather_than_failing() -> None:
     """The distinction that matters to whoever uploaded it.
 
     An empty result means a valid PDF with nothing to read - it needs OCR. A
     raised error means the bytes were not a PDF at all. Collapsing the two
     would tell that person to fix the wrong thing.
     """
-    assert extract_pdf(_blank_pdf()) == ""
+    assert await extract_pdf_bounded(_blank_pdf()) == ""
 
 
-def test_something_that_is_not_a_pdf_is_refused() -> None:
+async def test_something_that_is_not_a_pdf_is_refused() -> None:
     with pytest.raises(UnreadableDocumentError):
-        extract_pdf(b"this is not a pdf at all")
+        await extract_pdf_bounded(b"this is not a pdf at all")
 
 
-def test_an_empty_file_is_refused() -> None:
+async def test_an_empty_file_is_refused() -> None:
     with pytest.raises(UnreadableDocumentError):
-        extract_pdf(b"")
+        await extract_pdf_bounded(b"")
 
 
-def test_a_truncated_pdf_is_refused_rather_than_crashing() -> None:
+async def test_a_truncated_pdf_is_refused_rather_than_crashing() -> None:
     """Half a file is exactly what an interrupted download leaves behind."""
     whole = _pdf_with_text("Invoice")
     with pytest.raises(UnreadableDocumentError):
-        extract_pdf(whole[: len(whole) // 3])
+        await extract_pdf_bounded(whole[: len(whole) // 3])
+
+
+def test_there_is_no_in_process_pdf_parser_left_to_call() -> None:
+    """MEDIA-02. The message path used to call an unbounded `extract_pdf` on
+    the worker's event loop. Nothing of that name, and no `pypdf` import, is
+    left in the parent process's extraction module to be called by mistake."""
+    assert not hasattr(extraction, "extract_pdf")
+    assert "pypdf" not in vars(extraction)
+    assert "PdfReader" not in vars(extraction)
 
 
 def test_utf8_text_is_decoded() -> None:
@@ -121,22 +131,22 @@ def test_decoding_never_raises() -> None:
     assert isinstance(extract_text(bytes(range(256))), str)
 
 
-def test_a_document_is_routed_by_type() -> None:
-    assert extract_document(content=b"hello", mime_type="text/plain") == "hello"
-    assert "Invoice" in extract_document(
+async def test_a_document_is_routed_by_type() -> None:
+    assert await extract_document(content=b"hello", mime_type="text/plain") == "hello"
+    assert "Invoice" in await extract_document(
         content=_pdf_with_text("Invoice"), mime_type="application/pdf"
     )
 
 
-def test_the_type_is_matched_case_insensitively() -> None:
-    assert extract_document(content=b"hello", mime_type="TEXT/PLAIN") == "hello"
+async def test_the_type_is_matched_case_insensitively() -> None:
+    assert await extract_document(content=b"hello", mime_type="TEXT/PLAIN") == "hello"
 
 
-def test_an_unsupported_type_is_refused() -> None:
+async def test_an_unsupported_type_is_refused() -> None:
     with pytest.raises(UnreadableDocumentError):
-        extract_document(content=b"...", mime_type="application/vnd.ms-excel")
+        await extract_document(content=b"...", mime_type="application/vnd.ms-excel")
 
 
-def test_a_missing_type_is_refused() -> None:
+async def test_a_missing_type_is_refused() -> None:
     with pytest.raises(UnreadableDocumentError):
-        extract_document(content=b"...", mime_type=None)
+        await extract_document(content=b"...", mime_type=None)

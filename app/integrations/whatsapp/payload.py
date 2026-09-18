@@ -14,6 +14,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
 
+from app.core.filenames import display_filename
+from app.core.media_types import MAX_MIME_TYPE_LENGTH
+from app.db.models.media import MAX_MEDIA_HANDLE_LENGTH
+
 TEXT_TYPE = "text"
 
 # Meta's media message types. Voice notes arrive as "voice" rather than "audio"
@@ -143,17 +147,24 @@ def _media(message: Mapping[str, Any], message_type: str) -> InboundMedia | None
     parse failure: the message itself is still worth storing, and there is
     nothing to download without the handle.
 
-    The filename is passed through exactly as Meta sent it and is never used to
-    build a path. It arrives from a stranger's phone, and a value like
-    "../../etc/passwd" is a request, not an accident. Storage derives its own
-    key; this is only ever shown to a person.
+    The filename is never used to build a path. It arrives from a stranger's
+    phone, and a value like "../../etc/passwd" is a request, not an accident.
+    Storage derives its own key; this is only ever shown to a person.
+
+    Every string here is brought within its column before anything is stored
+    (MEDIA-05). A 301-character document name used to fail the webhook's write
+    and, because the whole delivery is one transaction, lose every sibling
+    message with it on each of Meta's retries. The name is normalised and
+    bounded (`display_filename`); a declared type too wide to record is dropped,
+    since the bytes decide the type anyway; and a handle longer than any Meta
+    issues is treated as no handle at all.
     """
     if message_type not in MEDIA_TYPES:
         return None
 
     descriptor = _mapping(message.get(message_type))
     media_id = _text(descriptor.get("id"))
-    if media_id is None:
+    if media_id is None or len(media_id) > MAX_MEDIA_HANDLE_LENGTH:
         return None
 
     return InboundMedia(
@@ -161,7 +172,7 @@ def _media(message: Mapping[str, Any], message_type: str) -> InboundMedia | None
         kind=message_type,
         mime_type=_mime_type(descriptor.get("mime_type")),
         sha256=_text(descriptor.get("sha256")),
-        filename=_text(descriptor.get("filename")),
+        filename=display_filename(descriptor.get("filename")),
         # Meta marks a recorded voice note this way; an attached audio file
         # arrives without it. Both are transcribed, but only one is somebody
         # speaking to the business, and that is worth keeping.
@@ -179,7 +190,10 @@ def _mime_type(value: Any) -> str | None:
     text = _text(value)
     if text is None:
         return None
-    return text.split(";", 1)[0].strip() or None
+    declared = text.split(";", 1)[0].strip()
+    if not declared or len(declared) > MAX_MIME_TYPE_LENGTH:
+        return None
+    return declared
 
 
 def _profile_names(value: Mapping[str, Any]) -> dict[str, str]:
