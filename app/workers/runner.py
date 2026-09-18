@@ -45,6 +45,7 @@ from app.workers.heartbeat import (
 from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.ingestion_recovery import IngestionRecoveryWorker
 from app.workers.ingestion_worker import IngestionWorker
+from app.workers.media_recovery import MediaRecoveryWorker
 from app.workers.media_worker import MediaWorker
 from app.workers.purge_worker import PurgeWorker
 from app.workers.queue import LEASE_RENEWAL_FRACTION, ReliableQueue
@@ -176,6 +177,10 @@ def build_workers(
             workers.append(FollowUpWorker(database=database, settings=settings))
         elif kind == MEDIA:
             workers.append(MediaWorker(database=database, redis=redis, settings=settings))
+            # The media worker's own recovery: files a dead worker or a
+            # dead-lettered job left unresolved, which would otherwise hold
+            # their conversation's reply for ever (MEDIA-03).
+            workers.append(MediaRecoveryWorker(database=database, redis=redis, settings=settings))
         elif kind == CAMPAIGN:
             workers.append(CampaignWorker(database=database, settings=settings))
         elif kind == BILLING:

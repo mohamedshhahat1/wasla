@@ -33,11 +33,20 @@ put a job on a queue that a worker could consume before the transcript
 committed. Unlike ADR-089's race the conversation exists, so nothing answers
 `not_found` and nothing retries: the turn reads `[image, not yet read]` and
 answers a photograph it has not seen (ADR-092).
+
+The third hard part is that the gate only works if every file eventually
+resolves. A row left `pending` or `downloading` is a conversation whose reply
+never comes, for this attachment and every later one (MEDIA-03). So every exit
+from a job is terminal or owned: `MediaService` classifies every provider,
+parser and storage failure into a final state, a job that is dead-lettered
+anyway has its file given up on here, and whatever a crashed worker leaves
+behind is found by the claim it left and finished by `MediaRecoveryWorker`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Callable
 
 import httpx
@@ -48,7 +57,7 @@ from app.core.logging import get_logger
 from app.core.redis import RedisClient
 from app.core.storage import MediaStorage, build_media_storage
 from app.core.tracing import JOB_OUTCOME
-from app.db.models.media import MediaStatus, MessageMedia
+from app.db.models.media import MessageMedia
 from app.db.session import Database
 from app.integrations.openai.client import ResponsesClient
 from app.integrations.openai.client import build_http_client as build_openai_client
@@ -111,6 +120,10 @@ class MediaWorker:
         self._queue = MediaQueue(redis.client)
         self._agents = AgentQueue(redis.client)
         self._running = False
+        # The claim each in-flight job's attempt took, so a job that is
+        # dead-lettered can give its file up without mistaking its own claim
+        # for somebody else's live one.
+        self._claims: dict[uuid.UUID, uuid.UUID | None] = {}
 
     @property
     def queue(self) -> MediaQueue:
@@ -197,7 +210,13 @@ class MediaWorker:
                 error=error,
                 policy=IDEMPOTENT_RETRY,
             )
+            if outcome.action == "dead_lettered":
+                # The job is finished with; the file must not be left owing the
+                # conversation an answer for ever (MEDIA-03).
+                await self._abandon(job)
             return outcome.action
+        finally:
+            self._claims.pop(job.media_id, None)
 
         # `_handle` has returned, so its session has committed: the transcript
         # this agent turn exists to read is durable *before* the job that reads
@@ -267,28 +286,64 @@ class MediaWorker:
                     storage=self._storage,
                     whatsapp=self._whatsapp(whatsapp_http),
                 )
-                await self._process(
-                    service=service,
-                    media=media,
-                    reader=self._reader(openai_http),
-                )
+                try:
+                    outcome = await service.process(media, reader=self._reader(openai_http))
+                finally:
+                    self._claims[job.media_id] = service.claim_id
 
+            if outcome.deferred:
+                # Another attempt holds this file. It will release the
+                # conversation when it finishes; releasing here as well is how
+                # one question gets two answers.
+                return None
             return await self._release_conversation(session=session, job=job, media=media)
 
-    async def _process(
-        self,
-        *,
-        service: MediaService,
-        media: MessageMedia,
-        reader: MediaReader,
-    ) -> None:
-        """Fetch the file, then read it. Either step may decide to stop."""
-        outcome = await service.download(media)
-        if outcome.status is not MediaStatus.STORED:
-            # Skipped, failed, or already past this point. Nothing to read.
+    async def _abandon(self, job: MediaJob) -> None:
+        """Give up on a dead-lettered job's file, and release the conversation.
+
+        Terminal-on-exhaustion (MEDIA-03). The row is read fresh; if it is
+        still unresolved it becomes `FAILED` with a fixed reason, and the
+        conversation is re-evaluated exactly as a finished job would re-evaluate
+        it - the agent job is queued only after the terminal state commits.
+
+        Retry-safe and failure-safe. A second call finds the row resolved and
+        writes nothing. A call that itself fails - the database that killed the
+        job may still be down - is logged and left to `MediaRecoveryWorker`,
+        which finds the same row by its claim and finishes it.
+        """
+        follow_up: AgentJob | None = None
+        try:
+            async with self._database.session() as session:
+                service = MediaService(
+                    session=session,
+                    tenant_id=job.tenant_id,
+                    settings=self._settings,
+                    storage=self._storage,
+                )
+                outcome = await service.abandon(
+                    job.media_id, claim_id=self._claims.get(job.media_id)
+                )
+                if not outcome.deferred and outcome.reason is not None:
+                    media = await MediaRepository(session, tenant_id=job.tenant_id).require_by_id(
+                        job.media_id
+                    )
+                    follow_up = await self._release_conversation(
+                        session=session, job=job, media=media
+                    )
+                await session.commit()
+        except Exception:
+            logger.exception(
+                "media.abandon_failed",
+                extra={"event": "media.abandon_failed", "media_id": str(job.media_id)},
+            )
             return
 
-        await service.understand(media, reader=reader)
+        logger.warning(
+            "media.abandoned",
+            extra={"event": "media.abandoned", "media_id": str(job.media_id)},
+        )
+        if follow_up is not None:
+            await self._enqueue_agent(follow_up)
 
     def _whatsapp(self, http: httpx.AsyncClient) -> WhatsAppClient | None:
         """A client for fetching from Meta, or None if there is no token.
@@ -299,9 +354,11 @@ class MediaWorker:
         those jobs too, which is how a deployment without one loses every
         attachment it had already downloaded.
 
-        A job that genuinely needs a download and finds no client is dead-
-        lettered with its row left PENDING, so it can be retried once the token
-        is configured rather than being marked unreadable.
+        A job that genuinely needs a download and finds no client records the
+        file as `FAILED` for want of a credential and releases the
+        conversation. It used to be dead-lettered with the row left `PENDING`
+        "so it could be retried", and nothing ever retried it: the
+        conversation's later attachments waited on it for ever (MEDIA-03).
         """
         if self._whatsapp_factory is not None:
             return self._whatsapp_factory(http)

@@ -459,6 +459,18 @@ class Settings(BaseSettings):
     # downloaded: the point is not to pay to move ninety megabytes in order to
     # discover there was nothing to read.
     media_max_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
+    # The whole of one download - Meta's descriptor, every redirect, the body -
+    # measured on a wall clock (MEDIA-10). The HTTP client's timeouts are per
+    # read, so a host dripping a byte just inside each one never tripped them,
+    # and the download had no end at all. Must be shorter than the queue's
+    # visibility timeout: a download still running when its lease lapsed would
+    # otherwise be started a second time by the job's next holder. Enforced at
+    # start-up (`_validate_media_deadlines`).
+    media_download_deadline_seconds: float = Field(default=90.0, gt=0)
+    # The same for reading a stored file: the store's GET and the vision call,
+    # transcription or bounded PDF child that follows. The parser's own kill
+    # (twenty seconds) is well inside it; a provider stall is what it is for.
+    media_understanding_deadline_seconds: float = Field(default=120.0, gt=0)
 
     # Credential encryption at rest (ADR-034). A key ring: the first key
     # encrypts, every key decrypts, so rotation is prepending one. Each is 32
@@ -994,6 +1006,25 @@ class Settings(BaseSettings):
         default, instead of being lax until somebody remembers to name it.
         """
         return self.environment in DEVELOPER_ENVIRONMENTS
+
+    @model_validator(mode="after")
+    def _validate_media_deadlines(self) -> Settings:
+        """Refuse a download deadline the queue lease cannot cover (MEDIA-10).
+
+        A media job's lease is renewed while its worker lives, so this is not
+        about a healthy worker losing its job. It is about the bound on one
+        download being *meaningful*: a deadline at or past the visibility
+        timeout is one a single stalled host can use to outlast a lease that
+        failed to renew, and the job's next holder would then download the
+        same file alongside it. Every environment, because the relationship is
+        arithmetic rather than hardening.
+        """
+        if self.media_download_deadline_seconds >= self.queue_visibility_timeout_seconds:
+            raise ValueError(
+                "media_download_deadline_seconds must be shorter than "
+                "queue_visibility_timeout_seconds"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_hardening(self) -> Settings:

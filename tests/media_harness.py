@@ -151,7 +151,7 @@ async def attachment(
     session: AsyncSession,
     where: Scene,
     *,
-    mime_type: str = "image/png",
+    mime_type: str | None = "image/png",
     kind: MessageKind = MessageKind.IMAGE,
     filename: str | None = None,
 ) -> MessageMedia:

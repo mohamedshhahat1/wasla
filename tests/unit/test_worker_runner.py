@@ -20,6 +20,7 @@ from app.workers.follow_up_worker import FollowUpWorker
 from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.ingestion_recovery import IngestionRecoveryWorker
 from app.workers.ingestion_worker import IngestionWorker
+from app.workers.media_recovery import MediaRecoveryWorker
 from app.workers.media_worker import MediaWorker
 from app.workers.purge_worker import PurgeWorker
 from app.workers.recovery import RecoveryWorker
@@ -137,6 +138,10 @@ def test_each_kind_builds_its_own_worker(settings: Settings) -> None:
 
     assert [type(worker) for worker in workers] == [
         MediaWorker,
+        # The media worker's own recovery, under the same kind: files a dead
+        # worker or a dead-lettered job left unresolved, which would otherwise
+        # hold their conversation's reply for ever (MEDIA-03).
+        MediaRecoveryWorker,
         AgentWorker,
         IngestionWorker,
         FollowUpWorker,
