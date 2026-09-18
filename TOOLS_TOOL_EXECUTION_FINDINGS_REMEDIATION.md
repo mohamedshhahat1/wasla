@@ -607,6 +607,25 @@ agent handoffs         4
 conversations with two turns   2
 ```
 
+**Why eight tool names and not four.** `distinct tools` counts every `tool_name` a kept-data test persisted, and the adversarial tests deliberately persist names that are not shipped tools. Re-reading `tool_executions` after a fresh kept-data run of the eleven `test_tool_*.py` files (same frozen code, 93 passed, 135 execution rows, 8 distinct names) gives exactly these:
+
+```text
+record_lead_details              production / shipped (§1)
+request_human_handoff            production / shipped (§1)
+schedule_follow_up               production / shipped (§1)
+search_knowledge                 production / shipped (§1)
+stage_then_break                 containment test tool - test-only registry entry that writes and raises
+                                 (test_tool_failure_containment.py)
+refuse_on_domain_grounds         other test-only registry entry - raises a domain ValidationError
+                                 (test_tool_failure_containment.py)
+summon_the_manager               unknown-name probe - a stale grant for a tool this build does not implement
+                                 (test_tool_semantics.py); rejected, never run
+summon_the_manager_<8 hex>       forged-name probe - a model-invented name with a per-run random suffix
+                                 (test_tool_observability.py); rejected, never run
+```
+
+The four extra names exist only in test registries or as refused probes. **The production tool surface remains the four registry tools of §1.**
+
 **Violations.**
 
 ```text
@@ -825,7 +844,7 @@ c2c0483 feat(observability): count agent tool calls, and alert on failures and d
 ca4a81f fix(tools): bound what a model may send, and converge when two turns race
 3d81788 feat(tools): record every tool call in a durable execution table
 36aa357 docs(tools): record the independent tool-execution audit
-<report commit>  docs(tools): record the findings remediation and how each was proved
+5a62cd5 docs(tools): record the findings remediation and how each was proved
 ```
 
 Each is a coherent unit rather than a file. `app/agents/registry.py` carries several findings at once — an argument's bounds, a handler's ownership rule and a handler's change reporting are one contract about what the four tools do — so it lands in one commit whose message names each finding, rather than being split into commits that would each leave the tree inconsistent. The executor's commit is the same shape for the same reason: a per-call authority read, a savepoint, a call budget and an execution record are one method's worth of one decision.
