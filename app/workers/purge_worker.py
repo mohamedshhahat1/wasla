@@ -52,7 +52,7 @@ from typing import Final
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.storage import MediaStorage, build_media_storage
-from app.core.telemetry import observe_lifecycle_event
+from app.core.telemetry import observe_lifecycle_event, record_media_purge_objects
 from app.db.session import Database
 from app.repositories.media_purge_repository import MediaPurgeLedger
 from app.services.workspace_purge_service import WorkspacePurgeService
@@ -224,4 +224,5 @@ class PurgeWorker:
                 await ledger.refused(entry_id, now=now)
             pending = await ledger.outstanding()
             await session.commit()
+        await record_media_purge_objects(deleted=len(deleted), failed=len(refused))
         return len(deleted), len(refused), pending

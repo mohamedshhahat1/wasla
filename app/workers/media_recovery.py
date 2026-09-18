@@ -24,6 +24,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
 from app.core.storage import MediaStorage, build_media_storage
+from app.core.telemetry import record_media_recovery
 from app.db.session import Database
 from app.services.media_recovery_service import MediaRecoveryPass, MediaRecoveryService
 from app.workers.media_queue import MediaQueue
@@ -88,6 +89,7 @@ class MediaRecoveryWorker:
             ).sweep(now=moment)
             await session.commit()
 
+        release_failed = 0
         for job in outcome.requeued:
             try:
                 await self._media_queue.enqueue(job)
@@ -102,6 +104,7 @@ class MediaRecoveryWorker:
             try:
                 await self._agents.enqueue(release)
             except Exception:
+                release_failed += 1
                 logger.error(
                     "media_recovery.release_failed",
                     extra={
@@ -109,6 +112,11 @@ class MediaRecoveryWorker:
                         "conversation_id": str(release.conversation_id),
                     },
                 )
+        await record_media_recovery(
+            requeued=len(outcome.requeued),
+            abandoned=outcome.abandoned,
+            release_failed=release_failed,
+        )
         return outcome
 
 

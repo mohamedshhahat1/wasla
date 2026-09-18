@@ -32,6 +32,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.pool import QueuePool
 
+from app.core.config import Settings
 from app.core.embedding_space import EmbeddingSpace
 from app.core.logging import get_logger
 from app.core.metrics import (
@@ -53,8 +54,11 @@ from app.repositories.agent_turn_repository import (
 )
 from app.repositories.conversation_repository import UnresolvedOutboundDirectory
 from app.repositories.knowledge_repository import IndexingBacklog, IndexingSweep
+from app.repositories.media_purge_repository import MediaPurgeLedger
+from app.repositories.media_repository import PlatformMediaRepository
 from app.repositories.whatsapp_repository import InboundEventSweep
 from app.services.backup_status import read_backup_status
+from app.services.media_horizons import claim_lease, unclaimed_horizon
 from app.workers.heartbeat import heartbeat_key
 from app.workers.inbound_recovery import unprocessed_since
 from app.workers.ingestion_recovery import unindexed_since
@@ -149,8 +153,12 @@ class MetricsService:
         backup_status_path: str | None = None,
         database: Database | None = None,
         space: EmbeddingSpace | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self._redis = redis
+        # For the horizons the stranded-media gauge measures against, which are
+        # derived from this deployment's own timeouts (`media_horizons`).
+        self._settings = settings
         # The space this deployment queries in, so documents embedded in any
         # other one can be counted as needing a re-index (RAG-06).
         self._space = space
@@ -164,7 +172,78 @@ class MetricsService:
         lines.extend(self._backup_lines(now=now))
         lines.extend(await self._consistency_lines())
         lines.extend(await self._messaging_lines(now=now))
+        lines.extend(await self._media_lines(now=now))
         return self._registry.render(extra=lines)
+
+    async def _media_lines(self, *, now: datetime | None) -> list[str]:
+        """The two media backlogs that must drain to zero (MEDIA-15).
+
+        **Stranded attachments** - unresolved past the horizon an attempt, or a
+        queued job, can legitimately take (MEDIA-03). The recovery sweep
+        finishes these within a minute, so a reading that stays above zero is
+        a sweep that is not running or cannot finish, and every such file is a
+        conversation whose reply is held.
+
+        **Object deletes a workspace purge still owes** (MEDIA-07). A key is
+        owed until the store confirms the object is gone; the age of the
+        oldest is what says a store has been refusing deletes, as against a
+        key merely waiting out its in-flight grace.
+
+        No labels, for the reason every gauge here has none: *which* workspace
+        is a question for the database, not a time series per customer.
+        """
+        database = self._database
+        if database is None:
+            return []
+        moment = now or datetime.now(UTC)
+        lines: list[str] = []
+        try:
+            async with database.session() as session:
+                owed, owed_age = await MediaPurgeLedger(session).backlog(now=moment)
+                stranded: tuple[int, float] | None = None
+                if self._settings is not None:
+                    stranded = await PlatformMediaRepository(session).stranded_backlog(
+                        claimed_before=moment - claim_lease(self._settings),
+                        created_before=moment - unclaimed_horizon(self._settings),
+                        now=moment,
+                    )
+        except Exception:
+            logger.warning(
+                "metrics.media_read_failed",
+                extra={"event": "metrics.media_read_failed"},
+            )
+            return []
+
+        gauges: list[tuple[str, str, float]] = [
+            (
+                "wasla_media_purge_deletes_owed",
+                "Object deletes a workspace purge recorded and the store has not yet confirmed.",
+                float(owed),
+            ),
+            (
+                "wasla_media_purge_deletes_oldest_age_seconds",
+                "Age of the oldest object delete a workspace purge still owes.",
+                owed_age,
+            ),
+        ]
+        if stranded is not None:
+            gauges.extend(
+                [
+                    (
+                        "wasla_media_stranded",
+                        "Unresolved attachments past the longest a live attempt or job can take.",
+                        float(stranded[0]),
+                    ),
+                    (
+                        "wasla_media_stranded_oldest_age_seconds",
+                        "How long the oldest stranded attachment has gone without an attempt.",
+                        stranded[1],
+                    ),
+                ]
+            )
+        for name, help_text, value in gauges:
+            lines.extend(render_gauge_lines(name, help_text, [({}, value)]))
+        return lines
 
     async def _messaging_lines(self, *, now: datetime | None) -> list[str]:
         """The two messaging backlogs nobody could previously see.

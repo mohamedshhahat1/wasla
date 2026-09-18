@@ -26,11 +26,14 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.core.logging import get_logger
+from app.core.telemetry import CallOutcome, Provider, ProviderCall
 
 logger = get_logger(__name__)
 
 OPENAI_BASE_URL: Final = "https://api.openai.com/v1"
 TRANSCRIPTION_PATH: Final = "/audio/transcriptions"
+# The operation transcription is counted under in the provider metrics.
+TRANSCRIBE: Final = "transcribe"
 MAX_ATTEMPTS: Final = 3
 BACKOFF_SECONDS: Final = 1.0
 TOO_MANY_REQUESTS: Final = 429
@@ -127,14 +130,21 @@ class TranscriptionClient:
     async def _post(self, *, files: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         url = f"{self._base_url}{TRANSCRIPTION_PATH}"
         headers = {"Authorization": f"Bearer {self._api_key}"}
+        # Counted like every other provider call (MEDIA-15): one final outcome
+        # per recording, one attempt per HTTP request. Transcription was the
+        # one paid provider call with no series at all, so an outage showed as
+        # nothing but unreadable voice notes.
+        call = ProviderCall(provider=Provider.OPENAI, operation=TRANSCRIBE)
 
         attempt = 1
         while True:
             try:
                 response = await self._http.post(url, data=data, files=files, headers=headers)
             except httpx.HTTPError as error:
+                await call.attempt(CallOutcome.UNAVAILABLE)
                 if attempt >= self._max_attempts:
                     logger.warning("transcription.unreachable", extra={"attempts": attempt})
+                    await call.record(CallOutcome.UNAVAILABLE)
                     message = "The transcription service is unavailable."
                     raise ExternalServiceError(message) from error
                 await self._backoff(attempt)
@@ -145,14 +155,17 @@ class TranscriptionClient:
                 response.status_code == TOO_MANY_REQUESTS
                 or response.status_code >= SERVER_ERROR_FLOOR
             )
+            await call.attempt(_attempt_outcome(response.status_code))
             if retryable and attempt < self._max_attempts:
                 await self._backoff(attempt)
                 attempt += 1
                 continue
 
             if response.status_code == TOO_MANY_REQUESTS:
+                await call.record(CallOutcome.RATE_LIMITED)
                 raise RateLimitedError("The transcription service is rate limiting this key.")
             if response.status_code >= CLIENT_ERROR_FLOOR:
+                await call.record(CallOutcome.FAILURE)
                 # The provider's error text can echo the request. Only the
                 # status is logged, and nothing of it reaches the caller.
                 logger.warning(
@@ -161,7 +174,13 @@ class TranscriptionClient:
                 )
                 raise ExternalServiceError("The transcription service rejected this recording.")
 
-            return self._decode(response)
+            try:
+                decoded = self._decode(response)
+            except ExternalServiceError:
+                await call.record(CallOutcome.FAILURE)
+                raise
+            await call.record(CallOutcome.SUCCESS)
+            return decoded
 
     async def _backoff(self, attempt: int) -> None:
         await self._sleep(self._backoff_seconds * attempt)
@@ -175,3 +194,11 @@ class TranscriptionClient:
         if not isinstance(body, dict):
             raise ExternalServiceError("The transcription service returned an unexpected body.")
         return body
+
+
+def _attempt_outcome(status_code: int) -> CallOutcome:
+    if status_code == TOO_MANY_REQUESTS:
+        return CallOutcome.RATE_LIMITED
+    if status_code >= CLIENT_ERROR_FLOOR:
+        return CallOutcome.FAILURE
+    return CallOutcome.SUCCESS

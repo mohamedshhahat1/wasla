@@ -72,6 +72,77 @@ If the backlog is **not** shrinking:
 
 **Do not replay the webhook.** Recovery re-derives rather than replays for a reason: replaying would re-project the message, re-cancel its follow-ups and re-meter the delivery. Running the sweeper twice is safe; feeding Meta's payload back in is not.
 
+### Customer attachments are stranded
+
+**Alert:** `MediaStranded`. **Metric:** `wasla_media_stranded`, `wasla_media_stranded_oldest_age_seconds`.
+
+**Symptom.** Attachments are unresolved (`pending`, `downloading` or `stored`) for longer than any attempt can take. A conversation is answered only once none of its attachments is unresolved, so each of these is a customer whose reply is being held - including for any later file they sent.
+
+**Query.**
+
+```sql
+SELECT id, tenant_id, conversation_id, status, attempts, claimed_at, created_at
+FROM message_media
+WHERE status IN ('pending', 'downloading', 'stored')
+ORDER BY coalesce(claimed_at, created_at)
+LIMIT 50;
+```
+
+**Likely causes.** The `media_recovery` loop runs inside every worker that runs the `media` kind and finishes these within a minute: put back on the queue while attempts remain, given up on (`FAILED`, reason `abandoned`) after three, with the conversation released. A reading that persists means no worker runs the `media` kind (see `WorkerLoopNotBeating`), the sweep is failing (`media_recovery.sweep_failed` in the worker log), or Redis refuses the requeue (`media_recovery.requeue_failed`).
+
+**Safe action.** Fix the worker or Redis; the sweep then drains the backlog on its own. Do not set rows to `ready` by hand - a file marked ready with no transcript is answered as if it had been read. A row whose inbound event is still `received` is inbound recovery's, not this sweep's (see "Inbound stored but never answered").
+
+### Customer attachments are failing
+
+**Alert:** `MediaProcessingFailureSpike`. **Metric:** `wasla_media_outcomes_total{outcome}`.
+
+**Symptom.** More than a quarter of attachments end `FAILED`. Customers are still answered - the agent is told the file could not be read - but it is not read. Decisions (oversize, unsupported type, unreadable document, a suspended workspace) are never counted as failures.
+
+**Query.** `sum by (outcome) (rate(wasla_media_outcomes_total[30m]))`, and in the database `SELECT last_error, count(*) FROM message_media WHERE status = 'failed' AND processed_at > now() - interval '1 hour' GROUP BY 1`.
+
+**Likely causes, by outcome.** `credential_refused` / `credential_unavailable` - a number's token is revoked or missing (see "WhatsApp is refusing this workspace's credential"). `host_refused` - Meta served a file from a host outside `META_MEDIA_HOST_ROOTS`; confirm the host is Meta's (the `whatsapp.media_host_refused` log names it) before adding it to the list. `download_failed` / `timeout` / `rate_limited` - Meta or the network. `provider_failed` - the vision or transcription provider (see `TranscriptionFailureRate`). `storage_failed` - the media store.
+
+**Safe action.** Fix the cause. Failed files are final and are not retried by the queue (PD-MEDIA-08), so an outage costs the files that arrived during it; the customer can send them again.
+
+### Voice notes are not being transcribed
+
+**Alert:** `TranscriptionFailureRate`. **Metric:** `wasla_provider_requests_total{provider="openai", operation="transcribe"}`.
+
+**Symptom.** More than half of transcriptions fail after their retries, so voice notes are answered as unreadable.
+
+**Likely causes.** The OpenAI key or quota, a provider outage, or `OPENAI_TRANSCRIPTION_MODEL` naming a model the key cannot use. The worker logs `transcription.unreachable` (network) or `transcription.rejected` with the status.
+
+**Safe action.** Fix the key, quota or model; nothing needs replaying.
+
+### A purged workspace's files are still in the store
+
+**Alert:** `MediaPurgeDeletesFailing`. **Metric:** `wasla_media_purge_deletes_owed`, `wasla_media_purge_deletes_oldest_age_seconds`, `wasla_media_purge_objects_total{outcome}`.
+
+**Symptom.** A workspace purge recorded object deletes that the store has not confirmed for hours. The workspace's rows are gone, and its customers' files are not.
+
+**Query.**
+
+```sql
+SELECT tenant_id, count(*), max(attempts), min(created_at), max(last_attempt_at)
+FROM media_purge_objects GROUP BY tenant_id;
+```
+
+**Likely causes.** The media store refuses deletes - rotated or narrowed credentials (`MEDIA_S3_*`), a bucket policy, an outage. The purge worker logs `purge.object_delete_failed` for each refusal, without the key.
+
+**Safe action.** Restore delete permission; the purge worker retries every five minutes while anything is owed and removes each row as its delete is confirmed. **Do not delete rows from `media_purge_objects` by hand**: a row is the only record of a file still in the bucket. A key in its in-flight grace (fifteen minutes after the purge, for an upload that was mid-write) is owed by design.
+
+### An attachment object does not match what was written
+
+**Alert:** `MediaUploadQuarantined`. **Metric:** `wasla_media_upload_reconciliation_total{outcome="quarantined"}`.
+
+**Symptom.** Upload reconciliation found an object at a key Wasla owns whose size or hash is not what Wasla recorded, and quarantined it (`storage_state = 'mismatched'`): it is neither served nor deleted.
+
+**Query.** `SELECT id, tenant_id, storage_key, byte_size, content_hash, upload_started_at FROM message_media WHERE storage_state = 'mismatched';`
+
+**Likely causes.** Somebody with bucket write access replaced the object, or a store fault. Nothing in the application writes a different object to an owned key.
+
+**Safe action.** Treat it as a possible bucket compromise: preserve the object, review bucket access logs, and rotate the media credentials if the change is unexplained. Only once explained, delete the object and set the row to `purged` by hand, recording why.
+
 ### An uploaded document is never searchable
 
 **Alert:** `UnindexedDocumentBacklog`. **Metrics:** `wasla_pending_documents`, `wasla_oldest_pending_document_age_seconds`, `wasla_documents_retry_waiting`.
@@ -1001,6 +1072,19 @@ including all of them. Do not.
 
 Provider-side records (Paymob's own transaction history) are not reachable from
 here and need their own request.
+
+**When is a workspace's media really gone?** The purge deletes the media rows
+and, in the same commit, records every storage key they held in
+`media_purge_objects`; the worker then deletes the objects and removes each row
+only once the store confirms. A workspace is fully erased when `purged_at` is
+set **and** `SELECT count(*) FROM media_purge_objects WHERE tenant_id = :id` is
+zero. Anything still owed is covered under "A purged workspace's files are
+still in the store" above.
+
+Objects orphaned by purges that ran before migration 0066 have no row naming
+them. If an erasure must be proven for such a workspace, delete its prefix
+(`{tenant_id}/`) in the bucket directly - keys are tenant-prefixed, so the
+prefix is exactly that workspace's files - and record the action.
 
 ### A workspace was suspended and nobody suspended it
 

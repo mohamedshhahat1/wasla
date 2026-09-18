@@ -70,6 +70,7 @@ from app.core.logging import get_logger
 from app.core.media_types import SNIFF_BYTES, MediaTypeError
 from app.core.media_types import resolve as resolve_media_type
 from app.core.storage import MediaStorage, StorageError, build_key
+from app.core.telemetry import record_media_outcome
 from app.db.models.billing import LimitKey
 from app.db.models.media import (
     MAX_TRANSCRIPT_LENGTH,
@@ -744,6 +745,7 @@ class MediaService:
         media.processed_at = datetime.now(UTC)
         media.claim_id = None
         await self._session.flush()
+        await record_media_outcome("ready")
         return MediaOutcome(media_id=media.id, status=MediaStatus.READY)
 
     # ------------------------------------------------------ giving a file up
@@ -950,6 +952,7 @@ class MediaService:
         row.claim_id = None
         await self._session.flush()
 
+        await record_media_outcome(str(reason))
         log = logger.info if status is MediaStatus.SKIPPED else logger.warning
         log(
             "media.skipped" if status is MediaStatus.SKIPPED else "media.failed",

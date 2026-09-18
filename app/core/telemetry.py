@@ -328,7 +328,65 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Knowledge searches by outcome.",
         ("outcome",),
     ),
+    # How each inbound attachment ended (MEDIA-15). `outcome` is `ready` or one
+    # of the media reason tokens - a closed vocabulary of about two dozen,
+    # enforced by `MEDIA_OUTCOMES` below - and nothing identifying: no
+    # workspace, file, key, URL or filename. The download failure classes are
+    # the subset `unavailable`, `credential_refused`, `credential_unavailable`,
+    # `host_refused`, `malformed_descriptor`, `rate_limited`,
+    # `download_failed` and `timeout`.
+    "wasla_media_outcomes_total": (
+        "Inbound attachments by how processing ended.",
+        ("outcome",),
+    ),
+    # What the media recovery sweep did with files no attempt was finishing
+    # (MEDIA-03): put back on the queue, given up on, or given up on with the
+    # conversation's turn failing to reach the queue. Three values.
+    "wasla_media_recovery_total": (
+        "Stranded attachments the recovery sweep requeued or gave up on.",
+        ("outcome",),
+    ),
+    # Object deletes a workspace purge owed, by how the attempt went
+    # (MEDIA-07). `failed` is a store refusing; the owed level is the gauge
+    # `wasla_media_purge_deletes_owed`.
+    "wasla_media_purge_objects_total": (
+        "Purged workspaces' object deletes, by whether the store accepted them.",
+        ("outcome",),
+    ),
 }
+
+# The closed label domain of `wasla_media_outcomes_total`: `ready` and the
+# media reason tokens (`app.services.media_outcomes.MediaReason`), restated here
+# because `core` imports nothing from `services`; a test holds the two equal.
+# Anything else is counted as `unknown`, so no caller can widen the domain.
+MEDIA_OUTCOMES: Final = frozenset(
+    {
+        "ready",
+        "no_file",
+        "oversize",
+        "unsupported_type",
+        "type_mismatch",
+        "capacity",
+        "unavailable",
+        "nothing_stored",
+        "unreadable",
+        "workspace_suspended",
+        "workspace_deleted",
+        "channel_unavailable",
+        "credential_refused",
+        "credential_unavailable",
+        "host_refused",
+        "malformed_descriptor",
+        "rate_limited",
+        "download_failed",
+        "timeout",
+        "storage_failed",
+        "upload_conflict",
+        "provider_failed",
+        "reader_failed",
+        "abandoned",
+    }
+)
 
 # Distributions written across processes, by metric name: help text, the labels
 # a sample must carry, and the bucket bounds this release declares.
@@ -739,6 +797,32 @@ async def record_retention_pass(*, purged: int, failed: int, pending: int) -> No
         await _increment_by("wasla_media_retention_total", {"outcome": "failed"}, failed)
     if pending:
         await _increment_by("wasla_media_retention_total", {"outcome": "pending"}, pending)
+
+
+async def record_media_outcome(outcome: str) -> None:
+    """One attachment reached its terminal state (MEDIA-15)."""
+    label = outcome if outcome in MEDIA_OUTCOMES else "unknown"
+    await _increment("wasla_media_outcomes_total", {"outcome": label})
+
+
+async def record_media_recovery(*, requeued: int, abandoned: int, release_failed: int) -> None:
+    """One recovery sweep's decisions (MEDIA-03)."""
+    if requeued:
+        await _increment_by("wasla_media_recovery_total", {"outcome": "requeued"}, requeued)
+    if abandoned:
+        await _increment_by("wasla_media_recovery_total", {"outcome": "abandoned"}, abandoned)
+    if release_failed:
+        await _increment_by(
+            "wasla_media_recovery_total", {"outcome": "release_failed"}, release_failed
+        )
+
+
+async def record_media_purge_objects(*, deleted: int, failed: int) -> None:
+    """One purge drain's object deletes (MEDIA-07)."""
+    if deleted:
+        await _increment_by("wasla_media_purge_objects_total", {"outcome": "deleted"}, deleted)
+    if failed:
+        await _increment_by("wasla_media_purge_objects_total", {"outcome": "failed"}, failed)
 
 
 async def record_upload_reconciliation(
