@@ -237,8 +237,8 @@ async def test_a_worker_with_no_credential_fails_the_file_rather_than_holding_it
     letter and a row `pending` for ever."""
     where = await h.scene(db_session)
     media = await h.attachment(db_session, where)
-    worker = h.worker(db_session, tmp_path, settings)
-    worker._whatsapp_factory = lambda http: None
+    worker = h.worker(db_session, tmp_path, _settings(settings, meta_access_token=None))
+    worker._whatsapp_factory = None
 
     job = await h.run(worker, media)
 

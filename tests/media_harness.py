@@ -32,6 +32,7 @@ from app.db.models.media import MediaStatus, MessageMedia
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.integrations.whatsapp.client import DownloadedMedia, MediaDescriptor
+from app.services.media_reader import ReadResult
 from app.workers.media_queue import MediaJob
 from app.workers.media_worker import MediaWorker
 from app.workers.queue import AgentJob
@@ -109,6 +110,18 @@ class StubWhatsApp:
             declared_size=len(self.content),
             sha256=None,
         )
+
+
+class StubReader:
+    """A fixed description, counting reads, without a provider."""
+
+    def __init__(self, transcript: str = "A blue sofa.") -> None:
+        self.transcript = transcript
+        self.reads = 0
+
+    async def read(self, *, content: bytes, mime_type: str | None) -> ReadResult:
+        self.reads += 1
+        return ReadResult(transcript=self.transcript, method="vision")
 
 
 @dataclass

@@ -285,6 +285,7 @@ class MediaWorker:
                     settings=self._settings,
                     storage=self._storage,
                     whatsapp=self._whatsapp(whatsapp_http),
+                    whatsapp_for=self._whatsapp_with(whatsapp_http),
                 )
                 try:
                     outcome = await service.process(media, reader=self._reader(openai_http))
@@ -346,31 +347,30 @@ class MediaWorker:
             await self._enqueue_agent(follow_up)
 
     def _whatsapp(self, http: httpx.AsyncClient) -> WhatsAppClient | None:
-        """A client for fetching from Meta, or None if there is no token.
-
-        None rather than a client that raises on construction. Not every job
-        needs Meta - a file already in the store is read without going near it -
-        and building the client eagerly turns a missing token into a failure for
-        those jobs too, which is how a deployment without one loses every
-        attachment it had already downloaded.
-
-        A job that genuinely needs a download and finds no client records the
-        file as `FAILED` for want of a credential and releases the
-        conversation. It used to be dead-lettered with the row left `PENDING`
-        "so it could be retried", and nothing ever retried it: the
-        conversation's later attachments waited on it for ever (MEDIA-03).
-        """
+        """A pre-built client, only when a test injected a factory for one."""
         if self._whatsapp_factory is not None:
             return self._whatsapp_factory(http)
-        if not self._settings.meta_access_token:
-            logger.warning("media.whatsapp_not_configured")
-            return None
-        return WhatsAppClient(
-            http=http,
-            access_token=self._settings.meta_access_token,
-            api_version=self._settings.meta_api_version,
-            media_host_roots=self._settings.meta_media_host_roots,
-        )
+        return None
+
+    def _whatsapp_with(self, http: httpx.AsyncClient) -> Callable[[str], WhatsAppClient]:
+        """How the service builds a client once it knows whose token to use.
+
+        The token is not the process's: it belongs to the number the file
+        arrived on, and the service resolves it when it claims the file
+        (MEDIA-13). This used to be `settings.meta_access_token` for every
+        file, so a workspace connected under its own Meta app could have no
+        attachment downloaded - and without a platform token none could.
+        """
+
+        def build(token: str) -> WhatsAppClient:
+            return WhatsAppClient(
+                http=http,
+                access_token=token,
+                api_version=self._settings.meta_api_version,
+                media_host_roots=self._settings.meta_media_host_roots,
+            )
+
+        return build
 
     def _reader(self, http: httpx.AsyncClient) -> MediaReader:
         """A reader over the HTTP client this job already opened.

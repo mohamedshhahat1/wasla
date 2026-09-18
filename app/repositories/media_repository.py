@@ -193,6 +193,32 @@ class MediaRepository(TenantScopedRepository[MessageMedia]):
             ),
         )
 
+    async def account_for(self, conversation_id: uuid.UUID) -> WhatsAppAccount | None:
+        """The number a conversation's messages arrived on, read fresh.
+
+        The owner of the credential an inbound file is fetched with (MEDIA-13).
+        Decided here from the conversation, server-side - never from anything
+        the job, the customer or a model supplies.
+        """
+        found: WhatsAppAccount | None = (
+            await self._session.execute(
+                select(WhatsAppAccount)
+                .join(
+                    Conversation,
+                    and_(
+                        Conversation.account_id == WhatsAppAccount.id,
+                        Conversation.tenant_id == WhatsAppAccount.tenant_id,
+                    ),
+                )
+                .where(
+                    Conversation.id == conversation_id,
+                    Conversation.tenant_id == self.tenant_id,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        return found
+
     async def count_unresolved(self, conversation_id: uuid.UUID) -> int:
         """How many files on this conversation still owe it an answer."""
         statement = (

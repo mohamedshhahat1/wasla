@@ -51,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
@@ -58,6 +59,7 @@ from typing import Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.crypto import CredentialDecryptionError
 from app.core.exceptions import (
     ExternalServiceError,
     PlanLimitExceededError,
@@ -86,6 +88,7 @@ from app.integrations.whatsapp.client import (
     WhatsAppClient,
 )
 from app.repositories.media_repository import MediaRepository
+from app.services.credential_service import CredentialService
 from app.services.entitlement_service import EntitlementService
 from app.services.extraction import UnreadableDocumentError
 from app.services.media_horizons import claim_lease
@@ -178,6 +181,8 @@ class MediaService:
         settings: Settings,
         storage: MediaStorage,
         whatsapp: WhatsAppClient | None = None,
+        whatsapp_for: Callable[[str], WhatsAppClient] | None = None,
+        credentials: CredentialService | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
@@ -186,6 +191,11 @@ class MediaService:
         # Optional so the parts of this service that do not touch Meta - reading
         # a stored file back, marking one skipped - work without one.
         self._whatsapp = whatsapp
+        # How a production attempt gets its client: from the credential of the
+        # number the file arrived on, resolved when the file is claimed
+        # (MEDIA-13). `whatsapp` above is the pre-built alternative tests use.
+        self._whatsapp_for = whatsapp_for
+        self._credentials = credentials or CredentialService(settings)
         self._media = MediaRepository(session, tenant_id=tenant_id)
         self._usage = UsageRecorder(session, tenant_id=tenant_id)
         self._entitlements = EntitlementService(
@@ -270,7 +280,12 @@ class MediaService:
             # object, no provider spend for a workspace the platform has
             # stopped serving (MEDIA-08, PD-MEDIA-05).
             return await self._finish(row, refusal)
-        if self._whatsapp is None:
+        whatsapp = self._whatsapp
+        if whatsapp is None:
+            whatsapp = await self._client_for(row)
+        if whatsapp is None:
+            # No credential to fetch with. Terminal and observable rather than
+            # a job dead-lettered with the row left pending (MEDIA-03).
             return await self._finish(row, MediaReason.CREDENTIAL_UNAVAILABLE)
 
         claimed = await self._claim(row, status=MediaStatus.DOWNLOADING)
@@ -282,7 +297,7 @@ class MediaService:
         # TX1 commits here - the claim becomes visible to every other attempt -
         # and the connection goes back to the pool for the whole of the fetch.
         async with released(self._session):
-            fetched = await self._fetch(wa_media_id, announced=announced)
+            fetched = await self._fetch(whatsapp, wa_media_id, announced=announced)
 
         row_or_none = await self._fenced(media.id)
         if row_or_none is None:
@@ -358,7 +373,9 @@ class MediaService:
 
         return await self.finalize(row, key=key)
 
-    async def _fetch(self, wa_media_id: str, *, announced: str | None) -> _Fetched:
+    async def _fetch(
+        self, whatsapp: WhatsAppClient, wa_media_id: str, *, announced: str | None
+    ) -> _Fetched:
         """The network half of a download: Meta's descriptor, then the body.
 
         Called with no transaction open. Returns bytes or a reason, never
@@ -373,9 +390,6 @@ class MediaService:
         permanent answer - the file is gone, the credential is refused, the
         host is not Meta's - was never going to change.
         """
-        whatsapp = self._whatsapp
-        if whatsapp is None:  # pragma: no cover - checked by the caller
-            return _Fetched(refusal=MediaReason.CREDENTIAL_UNAVAILABLE)
         cap = self._settings.media_max_bytes
         try:
             async with asyncio.timeout(self._settings.media_download_deadline_seconds):
@@ -756,6 +770,55 @@ class MediaService:
         if not serving.channel_available:
             return MediaReason.CHANNEL_UNAVAILABLE
         return None
+
+    async def _client_for(self, row: MessageMedia) -> WhatsAppClient | None:
+        """A client carrying the credential of the number this file arrived on.
+
+        The same authority model outbound sends use (ADR-034): a number the
+        workspace connected with its own token is fetched with that token, and
+        one without is fetched with the platform's. A workspace token this
+        process cannot decrypt is **not** downgraded to the platform's -
+        fetching as somebody else is a different act - and ends the file
+        without a fetch. The token lives only in the client built here; it is
+        never written to the row, a log line or anything an agent reads.
+        """
+        if self._whatsapp_for is None:
+            return None
+        account = await self._media.account_for(row.conversation_id)
+        if account is None:
+            return None
+        try:
+            resolved = self._credentials.resolve(account)
+        except CredentialDecryptionError:
+            logger.error(
+                "media.credential_unreadable",
+                extra={
+                    "event": "media.credential_unreadable",
+                    "tenant_id": str(self._tenant_id),
+                    "media_id": str(row.id),
+                },
+            )
+            return None
+        if not resolved.token:
+            logger.warning(
+                "media.credential_missing",
+                extra={
+                    "event": "media.credential_missing",
+                    "tenant_id": str(self._tenant_id),
+                    "media_id": str(row.id),
+                },
+            )
+            return None
+        logger.info(
+            "media.credential_resolved",
+            extra={
+                "event": "media.credential_resolved",
+                "tenant_id": str(self._tenant_id),
+                "media_id": str(row.id),
+                "workspace_credential": resolved.is_own,
+            },
+        )
+        return self._whatsapp_for(resolved.token)
 
     # --------------------------------------------------------------- claims
 
