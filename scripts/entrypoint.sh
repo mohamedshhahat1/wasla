@@ -10,6 +10,10 @@ command="${1:-api}"
 case "${command}" in
   api)
     if [ "${RUN_MIGRATIONS:-false}" = "true" ]; then
+      if [ "${ENVIRONMENT:-local}" = "production" ] || [ "${ENVIRONMENT:-local}" = "staging" ]; then
+        echo "entrypoint: production and staging migrations require the migrate service" >&2
+        exit 1
+      fi
       echo "entrypoint: applying database migrations"
       alembic upgrade head
     fi
@@ -39,7 +43,9 @@ case "${command}" in
     exec python -m app.workers.health
     ;;
   migrate)
-    exec alembic upgrade head
+    : "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL is required}"
+    DATABASE_URL="$MIGRATION_DATABASE_URL" alembic upgrade head
+    exec python -m scripts.provision_runtime_db_role
     ;;
   queues)
     # The operator's view of the queues: depths, dead-letter records, and the

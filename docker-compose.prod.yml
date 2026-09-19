@@ -87,7 +87,10 @@ services:
       - ALL
     environment:
       ENVIRONMENT: production
+      # The migration identity owns DDL; only this one-shot service receives it.
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
     depends_on:
@@ -155,6 +158,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       META_APP_SECRET: ${META_APP_SECRET:?META_APP_SECRET is required to verify webhook signatures}
       META_VERIFY_TOKEN: ${META_VERIFY_TOKEN:-}
       # The API sends too, and this was missing. `POST /conversations/{id}/text`
@@ -225,6 +229,9 @@ services:
       RATE_LIMIT_WORKSPACE_PER_MINUTE: ${RATE_LIMIT_WORKSPACE_PER_MINUTE:-300}
       RATE_LIMIT_CAMPAIGN_PER_MINUTE: ${RATE_LIMIT_CAMPAIGN_PER_MINUTE:-30}
       MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-33554432}
+      MAX_JSON_REQUEST_BYTES: ${MAX_JSON_REQUEST_BYTES:-65536}
+      MAX_AUTHENTICATED_REQUEST_BYTES: ${MAX_AUTHENTICATED_REQUEST_BYTES:-1048576}
+      MAX_DOCUMENT_REQUEST_BYTES: ${MAX_DOCUMENT_REQUEST_BYTES:-5242880}
       REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-60}
       RUN_MIGRATIONS: "false"
 
@@ -378,6 +385,7 @@ services:
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:-}
       # Pinned on both processes, and to the same value: the API and the worker
       # both call the Graph API, and two containers disagreeing about the

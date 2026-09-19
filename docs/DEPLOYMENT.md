@@ -34,6 +34,34 @@ The API and the worker share a volume at `MEDIA_STORAGE_PATH`: the worker downlo
 
 ## Compose
 
+### PostgreSQL identities
+
+Production requires two URLs for the same database. `MIGRATION_DATABASE_URL`
+uses the database owner and is passed only to the one-shot `migrate` service.
+`DATABASE_URL` uses a separate application role and is passed to the API,
+worker, backup, and migrate service. The migrate service applies Alembic and
+then runs `scripts/provision_runtime_db_role.py` to create or rotate the
+application role and grant table and sequence access. New objects created by
+the migration owner inherit the same grants. The API and worker never receive
+the migration URL. The backup reads through the application role; it does not
+need the migration owner or superuser.
+
+On an **existing database**, choose a new runtime username and password, set
+`DATABASE_URL` to it, and retain the current owner in
+`MIGRATION_DATABASE_URL`. Run `docker compose -f docker-compose.prod.yml run
+--rm migrate` before starting the new API and worker. This provisions the role
+on the existing volume; PostgreSQL initialization scripts would only run on a
+fresh volume. The provisioning step refuses a preexisting runtime role with
+elevated flags or memberships. Keep both URLs in the deployment secret store;
+neither belongs in source control. A restore likewise needs the migration
+identity for DDL and must rerun the migrate service to restore runtime grants.
+
+To verify the active API identity, connect using its `DATABASE_URL` and query
+`SELECT current_user, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls FROM
+pg_roles WHERE rolname = current_user`. All four flags must be false. The
+integration test `tests/integration/test_database_runtime_role.py` also proves
+data writes succeed while schema, role, and database creation fail.
+
 `docker-compose.yml` targets local development with reload and mounted source. `docker-compose.prod.yml` targets production with pinned images, no source mounts, and stricter resource and restart policies.
 
 Every secret in the production file is required and interpolated from the deployment environment — compose fails to start rather than falling back to an insecure default. The settings added in phases 13 and 14 are wired through it explicitly, with defaults chosen so that omitting them is a *specific* outcome rather than a vague one:

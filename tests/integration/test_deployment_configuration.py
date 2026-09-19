@@ -337,6 +337,19 @@ def test_the_development_compose_forwards_everything_instead() -> None:
     assert "required: false" in text
 
 
+def test_production_database_owner_secret_reaches_only_migrate() -> None:
+    compose = PROD_COMPOSE.read_text(encoding="utf-8")
+    assert "MIGRATION_DATABASE_URL" in _service_environment(compose, "migrate")
+    for service in ("api", "worker", "backup"):
+        environment = _service_environment(compose, service)
+        assert "MIGRATION_DATABASE_URL" not in environment
+        assert "DATABASE_URL" in environment
+    assert "DATABASE_URL" in _service_environment(compose, "migrate")
+    assert "python -m scripts.provision_runtime_db_role" in (
+        ROOT / "scripts" / "entrypoint.sh"
+    ).read_text(encoding="utf-8")
+
+
 # ----------------------------------------------- the example file documents it
 
 
