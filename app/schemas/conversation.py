@@ -42,15 +42,15 @@ MAX_TEXT_LENGTH = WHATSAPP_TEXT_MAX_CHARS
 class SendTextRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    body: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
+    body: StorableText = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
     preview_url: bool = False
 
 
 class SendTemplateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1, max_length=512)
-    language: str = Field(min_length=2, max_length=16)
+    name: StorableText = Field(min_length=1, max_length=512)
+    language: StorableText = Field(min_length=2, max_length=16)
     # Forwarded to Meta, whose shape this deliberately does not model. Bounded
     # so an oversized structure is refused here rather than after a database
     # write and a Graph API round trip - see `app.schemas.bounds`.

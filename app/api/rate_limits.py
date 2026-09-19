@@ -42,6 +42,8 @@ from typing import Annotated
 from fastapi import Depends, Request
 
 from app.api.dependencies import ActiveWorkspace, ActiveWorkspaceDep
+from app.api.route import BEFORE_BODY_ATTRIBUTE as ROUTE_BEFORE_BODY_ATTRIBUTE
+from app.core.config import Settings
 from app.core.dependencies import RedisDep, SettingsDep
 from app.core.proxy import is_trusted_peer, normalised_address, trusted_networks
 from app.core.rate_limit import RateLimitDecision, RateLimiter, RateLimitPolicy
@@ -132,7 +134,24 @@ def _limit_by_client(
     outright when Redis is down (ADR-051). The two are not inconsistent: a
     degraded limiter still slows an attacker, whereas a process-local
     approximation of a single-use replay control is not weaker but absent.
+
+    **Counted before the body is read (SEC-02).** FastAPI parses a JSON body
+    before it resolves a single dependency, so a guard that only ran as a
+    dependency let a client that was already over its budget make the process
+    parse whatever it sent before being told 429. The route class therefore
+    runs `before_body` - attached to the guard below - ahead of the handler,
+    and the guard itself then returns the decision that was already made. One
+    policy, one counter, one count per request: the early check *is* this
+    guard, moved earlier, not a second budget beside it.
     """
+
+    def policy_for(settings: Settings) -> RateLimitPolicy:
+        return RateLimitPolicy(
+            name=name,
+            limit=per_minute(settings),
+            window_seconds=60,
+            local_fallback=True,
+        )
 
     async def guard(
         request: Request,
@@ -141,16 +160,49 @@ def _limit_by_client(
     ) -> RateLimitDecision | None:
         if not settings.rate_limit_enabled:
             return None
-        policy = RateLimitPolicy(
-            name=name,
-            limit=per_minute(settings),
-            window_seconds=60,
-            local_fallback=True,
-        )
+        counted = _early_decisions(request).get(name)
+        if counted is not None:
+            # Already counted, once, before the body was read.
+            return counted
         identity = client_identity(request, trusted_proxies=settings.trusted_proxy_ips)
-        return await limiter.enforce(policy, identity)
+        return await limiter.enforce(policy_for(settings), identity)
 
+    async def before_body(request: Request) -> None:
+        """The same check, run by the route before anything reads the body.
+
+        Reads the process's own settings and Redis from application state,
+        exactly where the dependencies above get them. Anything it cannot
+        reach leaves the decision to the dependency, which then counts as it
+        always has - so a missing piece degrades to the old ordering rather
+        than to no limit.
+        """
+        settings = getattr(request.app.state, "settings", None)
+        redis = getattr(request.app.state, "redis", None)
+        if not isinstance(settings, Settings) or redis is None:
+            return
+        if not settings.rate_limit_enabled:
+            return
+        identity = client_identity(request, trusted_proxies=settings.trusted_proxy_ips)
+        # Raises `RateLimitedError` - a 429 with `Retry-After` - on refusal.
+        decision = await RateLimiter(redis).enforce(policy_for(settings), identity)
+        _early_decisions(request)[name] = decision
+
+    setattr(guard, BEFORE_BODY_ATTRIBUTE, before_body)
     return guard
+
+
+# Where the route class (`app.api.route`) looks for the check to run before the
+# body, and where the decision it made is left for the dependency to find.
+BEFORE_BODY_ATTRIBUTE = ROUTE_BEFORE_BODY_ATTRIBUTE
+_EARLY_DECISIONS = "early_rate_limit_decisions"
+
+
+def _early_decisions(request: Request) -> dict[str, RateLimitDecision]:
+    decisions: dict[str, RateLimitDecision] | None = getattr(request.state, _EARLY_DECISIONS, None)
+    if decisions is None:
+        decisions = {}
+        setattr(request.state, _EARLY_DECISIONS, decisions)
+    return decisions
 
 
 def _limit_by_workspace(
@@ -208,6 +260,7 @@ WorkspaceRateLimit = Annotated[RateLimitDecision | None, Depends(workspace_rate_
 CampaignRateLimit = Annotated[RateLimitDecision | None, Depends(campaign_rate_limit)]
 
 __all__ = [
+    "BEFORE_BODY_ATTRIBUTE",
     "ActiveWorkspace",
     "AuthRateLimit",
     "CampaignRateLimit",

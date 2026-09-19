@@ -54,7 +54,6 @@ assumes - since Lax withholds the cookie from a genuinely cross-site request.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import re
 import secrets
 from typing import Final
@@ -63,6 +62,7 @@ from fastapi import Request, Response
 
 from app.core.config import Settings
 from app.core.oauth_flow import FLOW_TTL_SECONDS
+from app.core.secure_compare import secrets_match
 
 # 32 bytes, url-safe base64 encoded: 43 characters and 256 bits of entropy, the
 # same sizing as the state and the PKCE verifier next door.
@@ -140,7 +140,7 @@ def matches(*, secret: str | None, expected: str) -> bool:
     """
     if secret is None:
         return False
-    return hmac.compare_digest(hash_binding(secret), expected)
+    return secrets_match(expected, hash_binding(secret))
 
 
 def attach(response: Response, *, secret: str, settings: Settings) -> None:

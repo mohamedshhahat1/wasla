@@ -41,6 +41,7 @@ def _production(**overrides: Any) -> Settings:
         "jwt_secret": VALID_SECRET,
         "docs_enabled": False,
         "meta_app_secret": "an-app-secret",
+        "meta_verify_token": "synthetic-verify-token",
         "email_enabled": True,
         "email_provider": "resend",
         "email_from": "no-reply@example.com",
@@ -100,6 +101,7 @@ def test_a_deployment_that_sends_nothing_is_asked_for_neither() -> None:
         jwt_secret=VALID_SECRET,
         docs_enabled=False,
         meta_app_secret="an-app-secret",
+        meta_verify_token="synthetic-verify-token",
         email_enabled=False,
     )
 

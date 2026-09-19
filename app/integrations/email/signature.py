@@ -25,6 +25,8 @@ import hmac
 import time
 from typing import Final
 
+from app.core.secure_compare import secrets_match
+
 ID_HEADER: Final = "svix-id"
 TIMESTAMP_HEADER: Final = "svix-timestamp"
 SIGNATURE_HEADER: Final = "svix-signature"
@@ -134,7 +136,7 @@ def verify_signature(
         # Deliberately no early return. Every candidate is compared, so the
         # time this takes does not reveal which entry matched or how many
         # were offered.
-        if hmac.compare_digest(expected, value):
+        if secrets_match(expected, value):
             matched = True
     return matched
 

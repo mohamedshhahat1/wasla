@@ -30,10 +30,11 @@ anything.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
 from fastapi import Request, Response
+from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,8 +51,14 @@ class CommittingRoute(APIRoute):
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         handler = super().get_route_handler()
+        before_body = _before_body_hooks(self.dependant)
 
         async def commit_after(request: Request) -> Response:
+            # Ahead of `handler`, which is where FastAPI reads and parses the
+            # body: a caller already over its public budget is refused without
+            # the process parsing what it sent (SEC-02).
+            for hook in before_body:
+                await hook(request)
             response = await handler(request)
             session = getattr(request.state, SESSION_STATE_ATTRIBUTE, None)
             if isinstance(session, AsyncSession) and session.in_transaction():
@@ -63,3 +70,30 @@ class CommittingRoute(APIRoute):
             return response
 
         return commit_after
+
+
+# The attribute a dependency carries when part of it must run before the body is
+# read. Defined here, not in `app.api.rate_limits`, because that module imports
+# the dependency graph this one sits underneath.
+BEFORE_BODY_ATTRIBUTE = "before_body"
+
+
+def _before_body_hooks(dependant: Dependant) -> list[Callable[[Request], Awaitable[None]]]:
+    """Every pre-body hook declared anywhere in this route's dependency tree.
+
+    Found by walking the tree once, when the route is built, so which routes
+    are limited before their body is read is decided by the same declaration
+    that limits them - a route that stops depending on a guard stops running
+    its hook, and there is no second list to keep in step.
+    """
+    hooks: list[Callable[[Request], Awaitable[None]]] = []
+    seen: set[int] = set()
+    stack = [dependant]
+    while stack:
+        current = stack.pop()
+        hook = getattr(current.call, BEFORE_BODY_ATTRIBUTE, None)
+        if hook is not None and id(hook) not in seen:
+            seen.add(id(hook))
+            hooks.append(hook)
+        stack.extend(current.dependencies)
+    return hooks

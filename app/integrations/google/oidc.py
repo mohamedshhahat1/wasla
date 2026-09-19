@@ -35,7 +35,6 @@ generator pointed at Google.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import time
 from dataclasses import dataclass
@@ -55,6 +54,7 @@ from jwt.exceptions import (
 
 from app.core.logging import get_logger
 from app.core.net import UnsafeUrlError, build_guarded_client
+from app.core.secure_compare import secrets_match
 from app.db.models.identity import MAX_PROVIDER_SUBJECT_LENGTH
 from app.db.models.user import MAX_AVATAR_URL_LENGTH, MAX_EMAIL_LENGTH, MAX_FULL_NAME_LENGTH
 
@@ -473,7 +473,7 @@ class GoogleIdTokenVerifier:
         presented = payload.get("nonce")
         if not isinstance(presented, str) or not presented:
             raise GoogleTokenInvalidError("missing_nonce")
-        if not hmac.compare_digest(presented, expected):
+        if not secrets_match(expected, presented):
             raise GoogleTokenInvalidError("wrong_nonce")
 
     @staticmethod

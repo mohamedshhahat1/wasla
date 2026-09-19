@@ -32,6 +32,7 @@ from app.db.models.campaign import (
 )
 from app.db.models.lead import LeadStatus
 from app.repositories.campaign_repository import AudienceFilter, CampaignStatistics
+from app.schemas.text import StorableText
 from app.services.campaign_service import MAX_AUDIENCE_SIZE
 
 # How many variables a template can plausibly want. Meta's own limit is higher;
@@ -59,8 +60,10 @@ class CampaignCreateRequest(_Payload):
 
     account_id: uuid.UUID
     template_id: uuid.UUID
-    name: str = Field(min_length=1, max_length=MAX_CAMPAIGN_NAME_LENGTH)
-    description: str | None = Field(default=None, max_length=MAX_CAMPAIGN_DESCRIPTION_LENGTH)
+    name: StorableText = Field(min_length=1, max_length=MAX_CAMPAIGN_NAME_LENGTH)
+    description: StorableText | None = Field(
+        default=None, max_length=MAX_CAMPAIGN_DESCRIPTION_LENGTH
+    )
     # In the order the template's placeholders appear. Validated against the
     # template's own variable count in the service, which is the only place that
     # knows what the template says.

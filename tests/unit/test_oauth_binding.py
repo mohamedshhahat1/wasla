@@ -45,7 +45,9 @@ def _settings(environment: str) -> Settings:
         log_format="console",
         log_level="WARNING",
         cors_origins=[],
-        rate_limit_enabled=False,
+        rate_limit_enabled=environment in {"staging", "production"},
+        meta_app_secret="synthetic-meta-app-secret",
+        meta_verify_token="synthetic-meta-verify-token",
         # Required outside `test`, and a literal here rather than a fixture
         # because these tests are about cookie attributes and nothing signs a
         # token in them.
@@ -69,6 +71,7 @@ def _production() -> Settings:
         docs_enabled=False,
         cors_origins=["https://app.wasla.test"],
         meta_app_secret="a-meta-app-secret-value",
+        meta_verify_token="synthetic-meta-verify-token",
         jwt_secret="a-random-value-long-enough-to-satisfy-the-minimum-length-check",
     )
 

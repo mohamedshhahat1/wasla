@@ -49,6 +49,7 @@ import httpx
 
 from app.core.logging import get_logger
 from app.core.net import UnsafeUrlError, build_guarded_client
+from app.core.secure_compare import secrets_match
 from app.core.telemetry import CallOutcome, Provider, ProviderCall
 from app.db.models.invoice import PaymentStatus
 from app.integrations.billing.base import ProviderError
@@ -739,7 +740,8 @@ class PaymobProvider:
         match all raise - there is no branch that returns an event for input
         this could not authenticate.
 
-        The comparison is `hmac.compare_digest`, so a near-miss takes the same
+        The comparison is `secrets_match` (constant-time, over bytes, so a
+        non-ASCII value is a mismatch rather than a crash), and a near-miss takes the same
         time as a wild guess. A byte-at-a-time equality check against a
         128-character hex digest is a genuinely practical oracle over enough
         requests.
@@ -750,7 +752,7 @@ class PaymobProvider:
         transaction = _callback_object(payload, expected="TRANSACTION")
 
         expected = hmac_signature(transaction, secret=self._hmac_secret)
-        if not hmac.compare_digest(expected, signature):
+        if not secrets_match(expected, signature):
             # Neither digest is logged. A rejected signature is worth knowing
             # about; the value that would have matched is not something to
             # write down next to the value that did not.
@@ -870,7 +872,7 @@ class PaymobProvider:
         """
         document = _callback_object(payload, expected="TOKEN")
         expected = token_hmac_signature(document, secret=self._hmac_secret)
-        if not signature or not hmac.compare_digest(expected, signature):
+        if not signature or not secrets_match(expected, signature):
             raise CallbackVerificationError("The card token signature did not match.")
 
         token = document.get("token")

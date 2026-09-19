@@ -325,9 +325,13 @@ def test_verification_uses_a_constant_time_comparison() -> None:
     A byte-at-a-time equality against a 128-character hex digest is a practical
     oracle over enough requests, and `==` on two strings is exactly that. This
     pins the call so a refactor to `expected == signature` fails.
+
+    The comparison goes through `secrets_match`, the one constant-time helper
+    (SEC-03); `tests/unit/test_constant_time_comparison.py` pins every verifier
+    and the helper itself structurally.
     """
     source = __import__("inspect").getsource(PaymobProvider.verify_callback)
-    assert "compare_digest" in source
+    assert "secrets_match(" in source
     assert "expected == signature" not in source
 
 

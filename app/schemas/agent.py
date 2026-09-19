@@ -23,6 +23,7 @@ from app.db.models.agent import (
 )
 from app.db.models.sentiment import SentimentLabel
 from app.schemas.bounds import TOOL_CONFIG, check_json
+from app.schemas.text import StorableText
 
 MAX_NAME_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 500
@@ -40,11 +41,11 @@ MAX_OUTPUT_TOKENS = MAX_AGENT_OUTPUT_TOKENS
 MIN_TEMPERATURE = 0.0
 MAX_TEMPERATURE = 2.0
 
-AgentName = Annotated[str, Field(min_length=1, max_length=MAX_NAME_LENGTH)]
-Description = Annotated[str, Field(min_length=1, max_length=MAX_DESCRIPTION_LENGTH)]
-Prompt = Annotated[str, Field(min_length=1, max_length=MAX_PROMPT_LENGTH)]
-ModelName = Annotated[str, Field(min_length=1, max_length=MAX_MODEL_LENGTH)]
-ToolName = Annotated[str, Field(min_length=1, max_length=MAX_TOOL_NAME_LENGTH)]
+AgentName = Annotated[StorableText, Field(min_length=1, max_length=MAX_NAME_LENGTH)]
+Description = Annotated[StorableText, Field(min_length=1, max_length=MAX_DESCRIPTION_LENGTH)]
+Prompt = Annotated[StorableText, Field(min_length=1, max_length=MAX_PROMPT_LENGTH)]
+ModelName = Annotated[StorableText, Field(min_length=1, max_length=MAX_MODEL_LENGTH)]
+ToolName = Annotated[StorableText, Field(min_length=1, max_length=MAX_TOOL_NAME_LENGTH)]
 Temperature = Annotated[float, Field(ge=MIN_TEMPERATURE, le=MAX_TEMPERATURE)]
 MessageLimit = Annotated[int, Field(ge=1, le=MAX_MESSAGE_LIMIT)]
 TokenBudget = Annotated[int, Field(ge=MIN_TOKEN_BUDGET, le=MAX_TOKEN_BUDGET)]

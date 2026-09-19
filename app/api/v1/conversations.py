@@ -40,6 +40,7 @@ from app.schemas.conversation import (
     SendTemplateRequest,
     SendTextRequest,
 )
+from app.schemas.text import StorableText
 from app.services.media_retention_service import purge_reason
 
 # The header a caller sends to say "this is the same request as before", so a
@@ -239,7 +240,7 @@ async def send_media(
     messaging: MessagingServiceDep,
     storage: MediaStorageDep,
     file: Annotated[UploadFile, File()],
-    caption: Annotated[str | None, Form(max_length=MAX_CAPTION_LENGTH)] = None,
+    caption: Annotated[StorableText | None, Form(max_length=MAX_CAPTION_LENGTH)] = None,
     idempotency_key: IdempotencyKeyHeader = None,
 ) -> MessageRead:
     """Send an attachment, which Meta receives as an upload rather than a link.
