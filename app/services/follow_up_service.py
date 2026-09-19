@@ -18,13 +18,24 @@ service window, free text. Outside it, an approved template or nothing at all.
 "Nothing at all" is a recorded outcome (`SKIPPED`) rather than a silent
 discard, because the business needs to know the nudge it configured never went.
 
-**A colleague taking the conversation over stops it, and so does a customer who
-asked not to be marketed at.** Both are re-read at dispatch rather than trusted
-from scheduling, because hours pass between the two moments and both facts
-change in that gap. Neither was checked at all: a follow-up fired underneath a
-person who had taken the conversation over - defeating the product's own
-mechanism for stopping the AI - and fired at somebody who had written STOP
-(MSG-05, MSG-06).
+**A colleague taking the conversation over stops the agent's nudges, and a
+customer who asked not to be marketed at stops every nudge.** Both are re-read
+at dispatch rather than trusted from scheduling, because hours pass between the
+two moments and both facts change in that gap. Neither was checked at all: a
+follow-up fired underneath a person who had taken the conversation over -
+defeating the product's own mechanism for stopping the AI - and fired at
+somebody who had written STOP (MSG-05, MSG-06).
+
+A colleague's *own* reminder is not the AI, and a human-owned conversation is
+exactly where one belongs: it is accepted there, survives a takeover, and is
+sent (PD-CRM-1). It used to be accepted with a 201 and then always skipped,
+which made the documented way to use the feature a guaranteed no-op (CRM-08).
+
+**A follow-up has one honest ending.** The sweep's claim is a token of its own,
+so a reschedule or a cancel that lands while a row is claimed takes it back from
+the sweep instead of racing it; once the send intent has committed, neither is
+possible, and the caller is told so instead of being told "cancelled" about a
+message on the customer's phone (CRM-09, CRM-10).
 
 The opt-out rule needs stating, because the codebase applies it unevenly on
 purpose. A campaign honours it and an AI reply does not, and both are right: a
@@ -37,6 +48,7 @@ conversation has gone quiet. See `docs/CAMPAIGNS.md`.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -49,6 +61,7 @@ from app.core.config import Settings
 from app.core.exceptions import (
     ConflictError,
     ExternalServiceError,
+    NotFoundError,
     RateLimitedError,
     ValidationError,
 )
@@ -77,6 +90,8 @@ from app.repositories.conversation_repository import (
     ConversationRepository,
 )
 from app.repositories.follow_up_repository import FollowUpRepository
+from app.repositories.lead_repository import LeadRepository
+from app.repositories.membership_repository import MembershipRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.services.messaging_service import MessagingService
 from app.services.template_service import refusal_reason_for
@@ -90,6 +105,15 @@ logger = get_logger(__name__)
 MIN_DELAY: Final = timedelta(minutes=1)
 MAX_DELAY: Final = timedelta(days=30)
 DEFAULT_DELAY: Final = timedelta(minutes=30)
+
+#: The `error_code` of a cancel or reschedule that reached a follow-up whose
+#: send has already been committed. The message may be on the customer's phone,
+#: so neither can be honoured - and neither may be reported as done (CRM-10).
+DISPATCH_IN_PROGRESS: Final = "dispatch_in_progress"
+
+#: `cancelled_reason` for the reminders of a colleague removed from the
+#: workspace (PD-CRM-8).
+MEMBER_REVOKED_REASON: Final = "member_revoked"
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +171,8 @@ class FollowUpService:
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._contacts = ContactRepository(session, tenant_id=tenant_id)
         self._templates = WhatsAppTemplateRepository(session, tenant_id=tenant_id)
+        self._leads = LeadRepository(session, tenant_id=tenant_id)
+        self._memberships = MembershipRepository(session, tenant_id=tenant_id)
 
     # ------------------------------------------------------------------ reads
 
@@ -220,8 +246,12 @@ class FollowUpService:
             # conversation back to the AI released it.
             #
             # Only an agent is refused. A colleague scheduling a follow-up on a
-            # conversation they own is the ordinary way to use the feature.
+            # conversation they own is the ordinary way to use the feature, and
+            # it is sent (PD-CRM-1).
             raise ConflictError("This conversation is handled by a colleague.")
+
+        if lead_id is not None:
+            await self._require_lead_of(lead_id, contact_id=conversation.contact_id)
 
         when = self._resolve_time(delay=delay, scheduled_at=scheduled_at)
         text = _validated_body(body)
@@ -251,7 +281,10 @@ class FollowUpService:
             created_by_kind=created_by_kind,
         )
 
-        existing = await self._follow_ups.get_pending_for_conversation(conversation_id)
+        existing = await self._follow_ups.get_pending_for_conversation(
+            conversation_id,
+            for_update=True,
+        )
         if existing is not None:
             return self._reschedule(existing, intention)
 
@@ -267,13 +300,50 @@ class FollowUpService:
         # and the insert (TOOL-02). Its row is the pending follow-up now, and
         # this call carries the newer intention, so the contract is the same one
         # rescheduling has always had: the later decision wins.
-        winner = await self._follow_ups.get_pending_for_conversation(conversation_id)
+        winner = await self._follow_ups.get_pending_for_conversation(
+            conversation_id,
+            for_update=True,
+        )
         if winner is None:  # pragma: no cover - the index says this cannot happen
             raise ConflictError("A follow-up for this conversation could not be resolved.")
         return self._reschedule(winner, intention)
 
+    async def _require_lead_of(self, lead_id: uuid.UUID, *, contact_id: uuid.UUID) -> None:
+        """The lead a follow-up names must be this workspace's, and this customer's.
+
+        Resolved through the workspace's own repository (CRM-01). The id came
+        from a request body and was stored verbatim: another workspace's lead
+        was accepted with a 201, and an id naming nothing surfaced as a 409 -
+        a cross-tenant reference plus an oracle for which lead ids exist. Both
+        are now the same not-found, so the answer says nothing about any
+        workspace but the caller's own.
+
+        A lead of a *different customer in this workspace* is refused too
+        (CRM-14). It is not a leak, so it says what is wrong - but a nudge to
+        one customer filed against another's opportunity is a record that
+        misleads everybody who reads the pipeline.
+        """
+        lead = await self._leads.get_by_id(lead_id)
+        if lead is None:
+            raise NotFoundError()
+        if lead.contact_id != contact_id:
+            raise ValidationError("That lead belongs to a different customer.")
+
     def _reschedule(self, follow_up: FollowUp, intention: _Intention) -> FollowUp:
-        """Point the one pending nudge at what the caller wants now."""
+        """Point the one pending nudge at what the caller wants now.
+
+        The row arrives locked. If its send has already been committed it
+        cannot be moved - the customer may have it - and the caller is told so
+        rather than being told it moved (CRM-09). Otherwise the sweep's claim is
+        cleared with the change, so a worker holding it finds nothing to send
+        and the new time and text are what go out, at the new time.
+        """
+        if follow_up.is_in_flight:
+            raise ConflictError(
+                "This follow-up is being sent and can no longer be changed.",
+                error_code=DISPATCH_IN_PROGRESS,
+            )
+        _release_claim(follow_up)
         follow_up.scheduled_at = intention.scheduled_at
         follow_up.body = intention.body
         follow_up.template_name = intention.template_name
@@ -359,10 +429,21 @@ class FollowUpService:
         delay: timedelta | None,
         scheduled_at: datetime | None,
     ) -> datetime:
-        """Turn a delay or an absolute time into a bounded absolute time."""
+        """Turn a delay or an absolute time into a bounded absolute time.
+
+        An absolute time must say which clock it is on (PD-CRM-9). A naive one
+        used to be read as UTC, so a colleague in Cairo typing "09:00" had the
+        nudge arrive three hours late in summer and two in winter, with
+        nothing to say why (CRM-15). Refused rather than guessed: the only
+        correct zone to assume is one this system does not know.
+        """
         now = datetime.now(UTC)
         if scheduled_at is not None:
-            when = scheduled_at if scheduled_at.tzinfo else scheduled_at.replace(tzinfo=UTC)
+            if scheduled_at.tzinfo is None or scheduled_at.utcoffset() is None:
+                raise ValidationError(
+                    "A scheduled time must include its UTC offset, such as +02:00 or Z."
+                )
+            when = scheduled_at.astimezone(UTC)
         else:
             when = now + (delay if delay is not None else DEFAULT_DELAY)
 
@@ -381,15 +462,30 @@ class FollowUpService:
         follow_up_id: uuid.UUID,
         reason: str | None = None,
     ) -> FollowUp:
-        """Cancel one follow-up by id.
+        """Cancel one follow-up by id, if it can still be stopped.
 
-        A follow-up that already finished is returned untouched rather than
-        raising: cancelling something that has been sent is a race, not a
-        mistake, and the caller's intent is already satisfied.
+        A conditional transition on the row as committed (CRM-10). The cancel
+        used to write `CANCELLED` over whatever it had read, so a cancel racing
+        the sweep answered "cancelled" while the customer received the message,
+        and the row ended `CANCELLED` naming a sent message.
+
+        - Pending and not yet sent: cancelled, and the sweep's claim with it,
+          so a worker holding the claim finds nothing to send.
+        - Its send intent already committed: a 409, because the customer may
+          have it and "cancelled" would be false. The dispatch ends it `SENT`
+          or `FAILED`, and that is what the caller sees next.
+        - Already finished: returned untouched. The status in the response is
+          the truth - `sent` says the nudge went - and there is nothing for the
+          caller to retry.
         """
-        follow_up = await self._follow_ups.require_by_id(follow_up_id)
+        follow_up = await self._follow_ups.lock_by_id(follow_up_id)
         if not follow_up.is_pending:
             return follow_up
+        if follow_up.is_in_flight:
+            raise ConflictError(
+                "This follow-up is already being sent and can no longer be cancelled.",
+                error_code=DISPATCH_IN_PROGRESS,
+            )
         return self._cancel(follow_up, reason=reason)
 
     async def cancel_for_conversation(
@@ -404,7 +500,11 @@ class FollowUpService:
         gone quiet, so their reply removes its reason — sending it anyway would
         read as a system talking over someone who is already talking.
         """
-        pending = await self._follow_ups.list_pending_for_conversation(conversation_id)
+        pending = [
+            follow_up
+            for follow_up in await self._follow_ups.list_pending_for_conversation(conversation_id)
+            if not follow_up.is_in_flight
+        ]
         for follow_up in pending:
             self._cancel(follow_up, reason=reason)
         if pending:
@@ -412,6 +512,48 @@ class FollowUpService:
                 "follow_up.cancelled_on_reply",
                 extra={"conversation_id": str(conversation_id), "cancelled": len(pending)},
             )
+        return len(pending)
+
+    async def cancel_agent_follow_ups_for_conversation(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        reason: str,
+    ) -> int:
+        """Cancel the agent's waiting nudges on one conversation. Returns how many.
+
+        Called by a takeover. Only an agent's: the AI stops when a person takes
+        over, and a colleague's own reminder is a person's, which the takeover
+        must not discard (PD-CRM-1). A nudge whose send has already committed
+        is left to finish - it cannot be recalled, and marking it cancelled
+        would be false.
+        """
+        pending = [
+            follow_up
+            for follow_up in await self._follow_ups.list_pending_for_conversation(conversation_id)
+            if follow_up.created_by_kind is ActorKind.AGENT and not follow_up.is_in_flight
+        ]
+        for follow_up in pending:
+            self._cancel(follow_up, reason=reason)
+        return len(pending)
+
+    async def cancel_member_follow_ups(self, *, user_id: uuid.UUID) -> int:
+        """Cancel the waiting reminders of a colleague who is leaving. Returns how many.
+
+        Inside the removal's transaction (PD-CRM-8). A reminder is a person's
+        intention to say something to a customer, and once that person has
+        left the workspace nobody intends it any more - sending it would be a
+        message from somebody who is gone. What already went out is history
+        and is untouched, as is a send already committed, which cannot be
+        recalled; dispatch re-checks the creator for anything that slips past.
+        """
+        pending = [
+            follow_up
+            for follow_up in await self._follow_ups.lock_pending_created_by(user_id)
+            if not follow_up.is_in_flight
+        ]
+        for follow_up in pending:
+            self._cancel(follow_up, reason=MEMBER_REVOKED_REASON)
         return len(pending)
 
     async def _template_refusal(self, name: str, language: str) -> str | None:
@@ -425,6 +567,7 @@ class FollowUpService:
         return refusal_reason_for(await self._templates.find_anywhere(name=name, language=language))
 
     def _cancel(self, follow_up: FollowUp, *, reason: str | None) -> FollowUp:
+        _release_claim(follow_up)
         follow_up.status = FollowUpStatus.CANCELLED
         follow_up.cancelled_at = datetime.now(UTC)
         follow_up.cancelled_reason = _trimmed(reason)
@@ -444,6 +587,10 @@ class FollowUpService:
         if not follow_up.is_pending:
             # Something else finished it between the claim and now.
             return DispatchOutcome(follow_up, follow_up.status, "Already resolved.")
+
+        # The claim this dispatch runs under. The outcome after the send is
+        # written only while the row still carries it (CRM-09).
+        claim = follow_up.claim_token
 
         if follow_up.message_id is not None:
             # **A pending follow-up naming a message is one whose send did not
@@ -495,27 +642,50 @@ class FollowUpService:
                 "The workspace was not being served when the follow-up came due.",
             )
 
-        conversation = await self._conversations.require_by_id(follow_up.conversation_id)
+        # Share-locked until the send intent commits, so a takeover cannot slip
+        # between the mode read below and the decision to send: it waits for
+        # the intent, and a takeover that committed first is what this reads.
+        conversation = await self._conversations.lock_by_id(
+            follow_up.conversation_id,
+            share=True,
+        )
         if conversation.status is ConversationStatus.CLOSED:
             return self._skip(
                 follow_up, "The conversation was closed before the follow-up was due."
             )
 
-        if conversation.mode is ConversationMode.HUMAN:
-            # A colleague owns this conversation. Handing it over is the
-            # documented way to stop the AI, and a nudge arriving underneath
-            # somebody who is mid-conversation with the customer makes that
-            # promise false in the most visible way available (MSG-05).
+        if conversation.mode is ConversationMode.HUMAN and follow_up.created_by_kind is (
+            ActorKind.AGENT
+        ):
+            # A colleague owns this conversation, and this nudge is the
+            # agent's. Handing it over is the documented way to stop the AI,
+            # and an AI nudge arriving underneath somebody who is
+            # mid-conversation with the customer makes that promise false in
+            # the most visible way available (MSG-05).
             #
-            # The second of two guards. `InboxService.set_mode` cancels pending
+            # The second of two guards. A takeover cancels the agent's pending
             # follow-ups at the moment of handover, which handles the ordinary
             # case; this one handles the race, because the mode can change
-            # between the sweep claiming this row and the send leaving. The
-            # claim commits, so no lock survives to serialise the two.
+            # between the sweep claiming this row and the send leaving.
+            #
+            # A colleague's own reminder is not refused here: it is a person's
+            # message on a conversation a person owns (PD-CRM-1).
             return self._skip(
                 follow_up,
                 "A colleague has taken this conversation over.",
             )
+
+        if follow_up.created_by_kind is ActorKind.USER and not await self._creator_is_member(
+            follow_up
+        ):
+            # The colleague who asked for this reminder has left. Their removal
+            # cancels what it can see; this is the one that a retry or a claim
+            # carried past it (PD-CRM-8).
+            _release_claim(follow_up)
+            follow_up.status = FollowUpStatus.CANCELLED
+            follow_up.cancelled_at = datetime.now(UTC)
+            follow_up.cancelled_reason = MEMBER_REVOKED_REASON
+            return DispatchOutcome(follow_up, FollowUpStatus.CANCELLED, MEMBER_REVOKED_REASON)
 
         contact = await self._contacts.require_by_id(conversation.contact_id)
         if not contact.accepts_campaigns:
@@ -589,8 +759,59 @@ class FollowUpService:
             # (MSG-18).
             raise
         except (ExternalServiceError, RateLimitedError, ValidationError) as error:
-            return self._fail(follow_up, str(error))
+            detail = str(error)
+            return await self._settle(follow_up, claim, lambda row: self._fail(row, detail))
 
+        return await self._settle(
+            follow_up,
+            claim,
+            lambda row: self._record_sent(
+                row, message, used_template=not (window_open and row.body)
+            ),
+        )
+
+    async def _settle(
+        self,
+        follow_up: FollowUp,
+        claim: uuid.UUID | None,
+        outcome: Callable[[FollowUp], DispatchOutcome],
+    ) -> DispatchOutcome:
+        """Write what the send came to, if this row is still the one that was claimed.
+
+        The send commits its intent before Meta is asked, which ends the lock
+        the re-take held, so the outcome lands in a later transaction. Nothing
+        but this dispatch may change a row whose send is committed - cancel and
+        reschedule refuse one - but a lease that ran out while Meta was slow
+        can have handed it to another worker, and the outcome is then that
+        worker's to write. Proved under a fresh lock before anything is written.
+        """
+        current = await self._follow_ups.reacquire(follow_up.id, claim)
+        if current is None:
+            logger.warning(
+                "follow_up.claim_lost",
+                extra={"event": "follow_up.claim_lost", "follow_up_id": str(follow_up.id)},
+            )
+            return DispatchOutcome(follow_up, follow_up.status, "The claim was lost.")
+        return outcome(current)
+
+    async def _creator_is_member(self, follow_up: FollowUp) -> bool:
+        """Whether the colleague who scheduled this is still in the workspace.
+
+        A reminder with no recorded creator - one written before attribution
+        existed, or whose account row is gone - has nobody to have left, and
+        belongs to the workspace.
+        """
+        if follow_up.created_by_id is None:
+            return True
+        return await self._memberships.get_for_user(follow_up.created_by_id) is not None
+
+    def _record_sent(
+        self,
+        follow_up: FollowUp,
+        message: Message,
+        *,
+        used_template: bool,
+    ) -> DispatchOutcome:
         if message.delivery_uncertain:
             # Meta did not answer, and there is no way to ask what it did with
             # the request. Terminal rather than retried: a nudge nobody is sure
@@ -605,6 +826,7 @@ class FollowUpService:
             # so the failure arrives as a row state.
             return self._fail(follow_up, message.failure_reason or "The message was rejected.")
 
+        _release_claim(follow_up)
         follow_up.status = FollowUpStatus.SENT
         follow_up.sent_at = datetime.now(UTC)
         follow_up.message_id = message.id
@@ -613,8 +835,8 @@ class FollowUpService:
             "follow_up.sent",
             extra={
                 "follow_up_id": str(follow_up.id),
-                "conversation_id": str(conversation.id),
-                "used_template": not (window_open and follow_up.body),
+                "conversation_id": str(follow_up.conversation_id),
+                "used_template": used_template,
             },
         )
         return DispatchOutcome(follow_up, FollowUpStatus.SENT)
@@ -654,7 +876,11 @@ class FollowUpService:
         their work, and a suspension that silently discarded it would lose
         something a person did rather than something a model decided.
         """
-        pending = await self._follow_ups.list_pending_by_actor(ActorKind.AGENT)
+        pending = [
+            follow_up
+            for follow_up in await self._follow_ups.list_pending_by_actor(ActorKind.AGENT)
+            if not follow_up.is_in_flight
+        ]
         for follow_up in pending:
             self._cancel(follow_up, reason=reason)
         if pending:
@@ -674,6 +900,7 @@ class FollowUpService:
         Terminal on purpose. The service window does not reopen by itself, so a
         retry would be a message that can never legally go out.
         """
+        _release_claim(follow_up)
         follow_up.status = FollowUpStatus.SKIPPED
         follow_up.last_error = detail[:500]
         logger.info(
@@ -691,6 +918,7 @@ class FollowUpService:
         phone - the row names it - and that Wasla declined to send another
         (ADR-093).
         """
+        _release_claim(follow_up)
         follow_up.attempts += 1
         follow_up.status = FollowUpStatus.FAILED
         follow_up.last_error = detail[:500]
@@ -711,6 +939,9 @@ class FollowUpService:
         `FAILED` and stops, so a permanently broken follow-up is not retried
         forever against a customer who might eventually receive all of them.
         """
+        # Released whatever happens next: a retry is claimed afresh when its
+        # backoff elapses, and a final failure holds no claim at all.
+        _release_claim(follow_up)
         follow_up.attempts += 1
         follow_up.last_error = detail[:500]
         # The message this attempt staged, if it staged one, is a finished
@@ -735,6 +966,12 @@ class FollowUpService:
             extra={"follow_up_id": str(follow_up.id), "attempts": follow_up.attempts},
         )
         return DispatchOutcome(follow_up, FollowUpStatus.PENDING, detail)
+
+
+def _release_claim(follow_up: FollowUp) -> None:
+    """Take the sweep's claim off a row, so no worker holding it can send."""
+    follow_up.claim_token = None
+    follow_up.claimed_until = None
 
 
 def _backoff(attempts: int) -> timedelta:
@@ -778,8 +1015,10 @@ def _trimmed(value: str | None) -> str | None:
 
 __all__ = [
     "DEFAULT_DELAY",
+    "DISPATCH_IN_PROGRESS",
     "MAX_ATTEMPTS",
     "MAX_DELAY",
+    "MEMBER_REVOKED_REASON",
     "MIN_DELAY",
     "DispatchOutcome",
     "FollowUpService",

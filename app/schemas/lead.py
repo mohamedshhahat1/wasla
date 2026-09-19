@@ -31,6 +31,7 @@ from app.db.models.lead import (
 )
 from app.repositories.lead_repository import LeadStatistics
 from app.schemas.bounds import LEAD_CUSTOM_FIELDS, check_json
+from app.schemas.text import StorableText
 from app.services.lead_service import (
     MAX_INTEREST_LENGTH,
     MAX_NOTE_LENGTH,
@@ -46,20 +47,20 @@ class LeadCreateRequest(BaseModel):
 
     contact_id: uuid.UUID | None = None
     conversation_id: uuid.UUID | None = None
-    name: str | None = Field(default=None, max_length=200)
-    phone: str | None = Field(default=None, max_length=32)
-    email: str | None = Field(default=None, max_length=320)
-    interest: str | None = Field(default=None, max_length=MAX_INTEREST_LENGTH)
+    name: StorableText | None = Field(default=None, max_length=200)
+    phone: StorableText | None = Field(default=None, max_length=32)
+    email: StorableText | None = Field(default=None, max_length=320)
+    interest: StorableText | None = Field(default=None, max_length=MAX_INTEREST_LENGTH)
     # `max_digits` matches `leads.budget_amount`, which is `Numeric(14, 2)`.
     # Without it a caller could post a million-digit number, which pydantic
     # parses before PostgreSQL rejects it.
     budget_amount: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
-    budget_currency: str | None = Field(default=None, min_length=3, max_length=3)
+    budget_currency: StorableText | None = Field(default=None, min_length=3, max_length=3)
     source: LeadSource = LeadSource.MANUAL
     assigned_to_id: uuid.UUID | None = None
     # The per-tag bound restates what the service already enforces, so a caller
     # gets a 422 naming the field rather than a 400 naming the rule.
-    tags: list[Annotated[str, Field(max_length=MAX_TAG_LENGTH)]] | None = Field(
+    tags: list[Annotated[StorableText, Field(max_length=MAX_TAG_LENGTH)]] | None = Field(
         default=None, max_length=MAX_TAGS
     )
     custom_fields: dict[str, Any] | None = None
@@ -82,13 +83,13 @@ class LeadUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str | None = Field(default=None, max_length=200)
-    phone: str | None = Field(default=None, max_length=32)
-    email: str | None = Field(default=None, max_length=320)
-    interest: str | None = Field(default=None, max_length=MAX_INTEREST_LENGTH)
+    name: StorableText | None = Field(default=None, max_length=200)
+    phone: StorableText | None = Field(default=None, max_length=32)
+    email: StorableText | None = Field(default=None, max_length=320)
+    interest: StorableText | None = Field(default=None, max_length=MAX_INTEREST_LENGTH)
     budget_amount: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
-    budget_currency: str | None = Field(default=None, min_length=3, max_length=3)
-    tags: list[Annotated[str, Field(max_length=MAX_TAG_LENGTH)]] | None = Field(
+    budget_currency: StorableText | None = Field(default=None, min_length=3, max_length=3)
+    tags: list[Annotated[StorableText, Field(max_length=MAX_TAG_LENGTH)]] | None = Field(
         default=None, max_length=MAX_TAGS
     )
     custom_fields: dict[str, Any] | None = None
@@ -122,17 +123,35 @@ class LeadUpdateRequest(BaseModel):
 
 
 class LeadStatusRequest(BaseModel):
+    """Move a lead through the pipeline.
+
+    `expected_status` is the status the caller is moving the lead *from*. When
+    it is given and the lead is no longer in it - a colleague moved it first -
+    the answer is 409 `stale_lead_status` and nothing changes (CRM-07). Without
+    it the move is judged against the lead as it is when the request lands, and
+    an illegal one is 422 as before.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     status: LeadStatus
-    reason: str | None = Field(default=None, max_length=300)
+    expected_status: LeadStatus | None = None
+    reason: StorableText | None = Field(default=None, max_length=300)
 
 
 class LeadAssignmentRequest(BaseModel):
+    """Give a lead to a colleague, or clear its owner.
+
+    `expected_assigned_to_id` is required, and null is a value: who the caller
+    believes owns the lead now. A mismatch is 409 `stale_assignment` and
+    changes nothing (PD-CRM-4).
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    # Null clears the assignment. A value must belong to this workspace.
+    # Null clears the assignment. A value must be an active member here.
     assigned_to_id: uuid.UUID | None = None
+    expected_assigned_to_id: uuid.UUID | None
 
 
 class LeadScoreRequest(BaseModel):
@@ -144,7 +163,7 @@ class LeadScoreRequest(BaseModel):
 class LeadNoteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    body: str = Field(min_length=1, max_length=MAX_NOTE_LENGTH)
+    body: StorableText = Field(min_length=1, max_length=MAX_NOTE_LENGTH)
 
 
 class TagList(BaseModel):

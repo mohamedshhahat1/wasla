@@ -450,6 +450,11 @@ class AgentOrchestrator:
                 escalation_sentiment=resolved.escalation_sentiment,
                 subject=subject,
             )
+            if mood.superseded:
+                # A colleague took the conversation over while the classifier
+                # was reading it. Their takeover stands and this turn made no
+                # handoff, so it must not be filed as one (CRM-02).
+                return _nothing(agent_id=resolved.id, outcome=TurnOutcome.SUPPRESSED_HUMAN)
             if mood.blocks_reply:
                 logger.info(
                     "agent.escalated_before_reply",
@@ -582,6 +587,33 @@ class AgentOrchestrator:
                 # only produce a reply that must not be sent.
                 break
 
+            if await self._taken_over(conversation_id):
+                # A colleague took the conversation over while this round's
+                # tools ran - the handoff tool refused because the takeover
+                # won its write, or it landed between two calls. Another
+                # inference would be paid for only to be discarded, and the
+                # turn must say who owns the customer now rather than claim a
+                # handoff it did not make (CRM-02).
+                logger.info(
+                    "agent.taken_over_during_tools",
+                    extra={
+                        "event": "agent.taken_over_during_tools",
+                        "conversation_id": str(conversation_id),
+                        "rounds": round_number,
+                    },
+                )
+                return self._suppressed(
+                    resolved,
+                    tools_run=tools_run,
+                    rounds=round_number,
+                    usage=TokenUsage(
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        total_tokens=total_tokens,
+                    ),
+                    response_id=response_id,
+                )
+
         if pending and not handed_off:
             # It kept asking for tools until the budget ran out. Whatever text it
             # produced along the way is still worth sending.
@@ -609,19 +641,15 @@ class AgentOrchestrator:
                     "rounds": rounds,
                 },
             )
-            return AgentOutcome(
-                reply=None,
-                handed_off=True,
-                tools_run=tuple(tools_run),
+            return self._suppressed(
+                resolved,
+                tools_run=tools_run,
+                rounds=rounds,
                 usage=TokenUsage(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     total_tokens=total_tokens,
                 ),
-                rounds=rounds,
-                agent_id=resolved.id,
-                model=resolved.model,
-                outcome=TurnOutcome.SUPPRESSED_HUMAN,
                 response_id=response_id,
             )
 
@@ -660,6 +688,28 @@ class AgentOrchestrator:
             agent_id=resolved.id,
             model=resolved.model,
             outcome=ending,
+            response_id=response_id,
+        )
+
+    @staticmethod
+    def _suppressed(
+        agent: Agent,
+        *,
+        tools_run: Sequence[str],
+        rounds: int,
+        usage: TokenUsage,
+        response_id: str | None,
+    ) -> AgentOutcome:
+        """A turn a colleague's takeover overtook: nothing to send, nothing handed off by us."""
+        return AgentOutcome(
+            reply=None,
+            handed_off=True,
+            tools_run=tuple(tools_run),
+            usage=usage,
+            rounds=rounds,
+            agent_id=agent.id,
+            model=agent.model,
+            outcome=TurnOutcome.SUPPRESSED_HUMAN,
             response_id=response_id,
         )
 

@@ -46,6 +46,46 @@ class MembershipRepository(TenantScopedRepository[Membership]):
         """
         return await self._require(self._active().where(Membership.user_id == user_id))
 
+    async def hold_active_for_user(self, user_id: uuid.UUID) -> Membership:
+        """This user's active membership, share-locked until the transaction ends, or a 404.
+
+        For writes that hand work *to* somebody - an assignment, a takeover
+        that makes the taker the owner (CRM-11). An unlocked read of "active"
+        followed by the write let a removal commit in between, and the
+        conversation landed on somebody who could no longer open it.
+
+        `FOR SHARE` conflicts with the `UPDATE` a removal makes to this row, so
+        the two serialise in whichever order they reach it. If the assignment
+        is first, the removal waits and then unassigns what it finds - including
+        this. If the removal is first, this waits, re-evaluates the row against
+        `status = 'active'` once the removal commits, finds nothing, and answers
+        not-found. Two assignments to one person share the lock and do not
+        queue behind each other.
+
+        The workspace row is key-share-locked first, and the order is the
+        point. A removal locks the workspace (`TenantRepository.lock`) and then
+        the membership; the assignment's own audit and activity rows take a
+        key-share on the workspace through their foreign keys. Locking the
+        membership first and the workspace second would be the opposite order,
+        and PostgreSQL proved it with a deadlock. Taking the workspace first
+        puts both in one queue: whichever arrives second waits for the other
+        to commit.
+        """
+        # Staged changes first: sessions here do not autoflush, and the
+        # re-read below would otherwise overwrite them with the database's copy.
+        await self.session.flush()
+        await self.session.execute(
+            select(Tenant.id)
+            .where(Tenant.id == self.tenant_id)
+            .with_for_update(read=True, key_share=True)
+        )
+        return await self._require(
+            self._active()
+            .where(Membership.user_id == user_id)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+
     async def get_any_for_user(self, user_id: uuid.UUID) -> Membership | None:
         """Including revoked rows. For administration, never for access.
 

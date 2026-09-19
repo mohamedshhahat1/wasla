@@ -19,6 +19,15 @@ and a decision is not something to infer from one message.
 **Everything is on the record.** Each change writes a `LeadActivity` naming the
 actor and carrying the previous value, so "why does this lead say the budget is
 half a million" always has an answer.
+
+**Every mutation is judged against the lead as committed.** Each one locks the
+lead row and re-reads it before deciding anything (CRM-06, CRM-07). The rules
+above held in sequence and not under concurrency: an extraction applied over a
+correction a colleague committed mid-call, two colleagues editing different
+fields each rewrote the verified list whole and one lost its protection, and
+two status moves from the same state both succeeded - a won deal returned to
+the pipeline. The agent's values are composed by the model with no lock held;
+only their application takes one, and never across a provider call.
 """
 
 from __future__ import annotations
@@ -64,6 +73,14 @@ from app.repositories.membership_repository import MembershipRepository
 from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
+
+#: The `error_code` of a status move whose `expected_status` is no longer the
+#: lead's status: a colleague moved it first (CRM-07).
+STALE_LEAD_STATUS = "stale_lead_status"
+#: Shared with conversation assignment: the owner changed since the caller read it.
+STALE_ASSIGNMENT = "stale_assignment"
+#: A reopened lead would be the customer's second open one (CRM-13).
+OPEN_LEAD_EXISTS = "open_lead_exists"
 
 # Deliberately permissive. This rejects text that is obviously not an address
 # rather than trying to decide deliverability, which no regular expression can.
@@ -253,9 +270,14 @@ class LeadService:
                     "Update it, or close it before opening another."
                 )
         if conversation_id is not None:
-            await self._conversations.require_by_id(conversation_id)
+            conversation = await self._conversations.require_by_id(conversation_id)
+            if contact_id is not None and conversation.contact_id != contact_id:
+                # Same workspace, different customer (CRM-14). Not a leak, so
+                # the answer says what is wrong - and the database refuses the
+                # row as well, through the three-column key on `leads`.
+                raise ValidationError("That conversation is with a different customer.")
         if assigned_to_id is not None:
-            await self._memberships.require_for_user(assigned_to_id)
+            await self._memberships.hold_active_for_user(assigned_to_id)
 
         fields = _validated(
             {
@@ -307,8 +329,14 @@ class LeadService:
         actor_id: uuid.UUID,
         update: LeadUpdate,
     ) -> Lead:
-        """Apply a person's edit, marking every field they touched as verified."""
-        lead = await self._leads.require_by_id(lead_id)
+        """Apply a person's edit, marking every field they touched as verified.
+
+        The lead is locked and re-read first, so the verified list extended
+        here is the one the previous writer committed: two colleagues editing
+        different fields at once end with both fields verified, never one
+        (CRM-06).
+        """
+        lead = await self._leads.lock_by_id(lead_id)
 
         raw = {
             name: value
@@ -341,6 +369,9 @@ class LeadService:
         # must respect that. Includes a field they deliberately cleared: "this
         # customer has no email" is knowledge, and an agent guessing one back in
         # would erase it.
+        #
+        # A union with the list as committed, under the row lock - never a
+        # whole-list overwrite from a stale read (CRM-06).
         lead.human_verified_fields = sorted(set(lead.human_verified_fields) | set(fields))
 
         if not changes:
@@ -366,17 +397,41 @@ class LeadService:
         actor_id: uuid.UUID | None,
         actor_kind: ActorKind = ActorKind.USER,
         reason: str | None = None,
+        expected_status: LeadStatus | None = None,
     ) -> Lead:
         """Move a lead through the pipeline, refusing illegal moves.
 
         A no-op is allowed and does nothing, so a retried request is safe.
+
+        Judged against the status as committed, under the lead's row lock
+        (CRM-07). Two moves from `qualified` - one to `won`, one to `proposal`
+        - used to both succeed, returning a won deal to the pipeline with its
+        closing date still set and two exits from one state in its timeline.
+        Now the second is judged against what the first committed: with
+        `expected_status` it is a 409; without it, a move the graph forbids
+        from the new status is refused as any illegal move is.
         """
-        lead = await self._leads.require_by_id(lead_id)
+        lead = await self._leads.lock_by_id(lead_id)
+        if expected_status is not None and lead.status is not expected_status:
+            raise ConflictError(
+                f"This lead is now {lead.status.value}. Refresh and try again.",
+                error_code=STALE_LEAD_STATUS,
+            )
         if status is lead.status:
             return lead
 
         if not lead.can_transition_to(status):
             raise ValidationError(f"A lead cannot move from {lead.status.value} to {status.value}.")
+
+        if lead.is_closed and lead.contact_id is not None:
+            # Reopening. The customer may have a newer open lead by now, and
+            # `uq_leads_active_contact` allows one - which used to escape as a
+            # 500 (CRM-13). Checked here for the ordinary case and caught
+            # below for the race, because a newer lead can be opened between
+            # this read and the write.
+            newer = await self._leads.get_active_for_contact(lead.contact_id)
+            if newer is not None and newer.id != lead.id:
+                raise _open_lead_exists()
 
         previous = lead.status
         lead.status = status
@@ -392,6 +447,9 @@ class LeadService:
             # reversed, so leaving it would misreport the pipeline.
             lead.closed_at = None
 
+        if previous in TERMINAL_STATUSES:
+            await self._reopen(lead)
+
         self._activities.record(
             lead_id=lead.id,
             kind=LeadActivityKind.STATUS_CHANGED,
@@ -406,22 +464,50 @@ class LeadService:
         )
         return lead
 
+    async def _reopen(self, lead: Lead) -> None:
+        """Write a reopened lead now, so the one-open-lead index speaks here.
+
+        Inside a savepoint: a newer lead opened between the pre-check and this
+        write makes `uq_leads_active_contact` refuse it, and the request
+        answers 409 having changed nothing instead of failing as a 500 at
+        commit (CRM-13). Refreshed afterwards, because the flush leaves the
+        server-maintained `updated_at` expired and the response reads it.
+        """
+        try:
+            async with self._session.begin_nested():
+                await self._session.flush()
+        except IntegrityError as error:
+            if "uq_leads_active_contact" not in str(error.orig):
+                raise
+            raise _open_lead_exists() from error
+        await self._session.refresh(lead)
+
     async def assign(
         self,
         *,
         lead_id: uuid.UUID,
         assigned_to_id: uuid.UUID | None,
         actor_id: uuid.UUID,
+        expected_assigned_to_id: uuid.UUID | None,
     ) -> Lead:
         """Assign to a member of this workspace, or clear the assignment.
 
-        Membership is verified rather than assumed: the id arrives in a request
-        body, and an unchecked one would hand a workspace's lead to someone
-        outside it.
+        Membership is verified, and share-locked, rather than assumed: the id
+        arrives in a request body, and it must not be somebody outside the
+        workspace or somebody whose removal is committing now (CRM-11).
+
+        `expected_assigned_to_id` is the owner the caller is replacing; if it is
+        not the owner when the write lands, a 409 that changes nothing
+        (PD-CRM-4).
         """
-        lead = await self._leads.require_by_id(lead_id)
         if assigned_to_id is not None:
-            await self._memberships.require_for_user(assigned_to_id)
+            await self._memberships.hold_active_for_user(assigned_to_id)
+        lead = await self._leads.lock_by_id(lead_id)
+        if lead.assigned_to_id != expected_assigned_to_id:
+            raise ConflictError(
+                "This lead's owner changed since you looked. Refresh and try again.",
+                error_code=STALE_ASSIGNMENT,
+            )
 
         if assigned_to_id == lead.assigned_to_id:
             return lead
@@ -447,6 +533,28 @@ class LeadService:
         )
         return lead
 
+    async def release_member(self, *, user_id: uuid.UUID, actor_id: uuid.UUID | None) -> int:
+        """Unassign every lead a departing member owns here. Returns how many.
+
+        Inside the removal's transaction, after the membership row is revoked
+        (PD-CRM-2). The lead goes to nobody rather than to whoever removed the
+        member, and its timeline records why.
+        """
+        released = await self._leads.lock_assigned_to(user_id)
+        now = datetime.now(UTC)
+        for lead in released:
+            lead.assigned_to_id = None
+            lead.last_activity_at = now
+            self._activities.record(
+                lead_id=lead.id,
+                kind=LeadActivityKind.UNASSIGNED,
+                summary="Assignment cleared: the owner left the workspace.",
+                actor_id=actor_id,
+                actor_kind=ActorKind.USER if actor_id is not None else ActorKind.SYSTEM,
+                data={"from": str(user_id), "to": None, "cause": "member_revoked"},
+            )
+        return len(released)
+
     async def set_score(
         self,
         *,
@@ -456,7 +564,7 @@ class LeadService:
         actor_kind: ActorKind = ActorKind.USER,
     ) -> Lead:
         """Set the qualification score, clamped to its bounds."""
-        lead = await self._leads.require_by_id(lead_id)
+        lead = await self._leads.lock_by_id(lead_id)
         value = clamp_score(score)
         if value == lead.score:
             return lead
@@ -484,7 +592,7 @@ class LeadService:
         author_kind: ActorKind = ActorKind.USER,
     ) -> LeadNote:
         """Attach an internal note. Never sent to the customer."""
-        lead = await self._leads.require_by_id(lead_id)
+        lead = await self._leads.lock_by_id(lead_id)
 
         text = body.strip()
         if not text:
@@ -543,7 +651,12 @@ class LeadService:
             # them by a model working from older messages.
             raise ConflictError("This conversation is handled by a colleague.")
 
-        lead = await self._leads.get_active_for_contact(conversation.contact_id)
+        # Locked and re-read: the values were composed by the model before a
+        # colleague may have corrected them, and they are applied against the
+        # lead as it is now, including the fields that correction just
+        # verified (CRM-06). The lock is released by the turn's next commit,
+        # which `released` takes before any provider call.
+        lead = await self._leads.get_active_for_contact(conversation.contact_id, for_update=True)
 
         if lead is None:
             created = await self._create_from_conversation(conversation, extracted)
@@ -551,7 +664,10 @@ class LeadService:
                 return created
             # Somebody else opened the customer's lead between the read above
             # and the insert. Fall through and update theirs.
-            lead = await self._leads.get_active_for_contact(conversation.contact_id)
+            lead = await self._leads.get_active_for_contact(
+                conversation.contact_id,
+                for_update=True,
+            )
             if lead is None:  # pragma: no cover - the index says this cannot happen
                 raise ConflictError("This customer's lead could not be resolved.")
 
@@ -656,6 +772,8 @@ class LeadService:
         extracted: ExtractedLead,
     ) -> LeadCapture:
         proposed = _agent_writable(extracted.as_fields())
+        # Read from the row as locked, never from a copy loaded earlier: this
+        # is the list a colleague's correction may have extended a moment ago.
         protected = set(lead.human_verified_fields)
         # The core rule: a human's entry wins over a model's inference.
         allowed = {key: value for key, value in proposed.items() if key not in protected}
@@ -689,6 +807,13 @@ class LeadService:
             },
         )
         return LeadCapture(lead=lead, created=False, changed_fields=frozenset(changes))
+
+
+def _open_lead_exists() -> ConflictError:
+    return ConflictError(
+        "This customer already has a newer open lead. Update that one instead.",
+        error_code=OPEN_LEAD_EXISTS,
+    )
 
 
 def _agent_writable(fields: dict[str, Any]) -> dict[str, Any]:
@@ -836,6 +961,9 @@ def _serialisable(value: Any) -> Any:
 __all__ = [
     "MAX_SCORE",
     "MIN_SCORE",
+    "OPEN_LEAD_EXISTS",
+    "STALE_ASSIGNMENT",
+    "STALE_LEAD_STATUS",
     "UNSET",
     "ExtractedLead",
     "LeadService",

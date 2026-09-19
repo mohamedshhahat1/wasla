@@ -39,6 +39,7 @@ from app.repositories.conversation_repository import ConversationRepository, Mes
 from app.repositories.media_repository import MediaRepository
 from app.repositories.sentiment_repository import SentimentRepository
 from app.services.analytics_service import AnalyticsRecorder
+from app.services.inbox_service import InboxService
 from app.services.sentiment_reader import SentimentAnalyzer, SentimentReading
 from app.services.usage_service import AI_PURPOSE_SENTIMENT, UsageRecorder
 
@@ -70,11 +71,15 @@ class SentimentOutcome:
     # analysed just now" from "this message was analysed on an earlier attempt",
     # which is what stops a retried job paying for a second inference.
     analysed: bool = False
+    # True when this reading would have escalated but a colleague took the
+    # conversation over while the classifier was reading it. The takeover
+    # stands, and the turn is the colleague's rather than an escalation (CRM-02).
+    superseded: bool = False
 
     @property
     def blocks_reply(self) -> bool:
         """Whether the agent must stay silent because a person now owns this."""
-        return self.escalated
+        return self.escalated or self.superseded
 
 
 class SentimentService:
@@ -252,23 +257,31 @@ class SentimentService:
             )
             return SentimentOutcome(escalated=stored.escalated)
 
-        self._apply(conversation, reading)
+        superseded = False
         if escalated:
-            conversation.mode = ConversationMode.HUMAN
-            conversation.handoff_reason = _reason(reading)
-            # Unconditional, and safe to be: a conversation a person already
-            # owns returned right at the top of this method, so reaching here
-            # means the mode really did change.
+            # Through the one transition every handoff uses, and *before* the
+            # reading is applied: the transition re-reads the conversation under
+            # a lock, which is the point, and would overwrite unflushed fields.
             #
-            # Recorded here rather than through the inbox service, which is the
-            # funnel for handoffs somebody *asked* for. This one is decided by a
-            # reading, and it is the source a business most wants to see on its
-            # own: the count of how often the product judged a customer angry.
-            self._analytics.handoff(
+            # "Not human" was checked at the top of this method, a whole
+            # provider call ago. A colleague who took the conversation over
+            # while the classifier was reading used to have their reason
+            # replaced by "Escalated automatically" and a second handoff
+            # counted (CRM-02). The transition succeeds only if the row is
+            # still the AI's; if it is not, the colleague's takeover stands and
+            # this reading records that it escalated nothing.
+            transition = await InboxService(
+                session=self._session, tenant_id=self._tenant_id
+            ).hand_off(
                 conversation_id=conversation_id,
+                reason=_reason(reading),
                 source=AnalyticsSource.SENTIMENT,
-                reason=conversation.handoff_reason,
             )
+            if not transition.changed:
+                escalated = False
+                superseded = True
+                stored.escalated = False
+        self._apply(conversation, reading)
 
         logger.info(
             "sentiment.escalated" if escalated else "sentiment.recorded",
@@ -281,7 +294,12 @@ class SentimentService:
                 "escalated": escalated,
             },
         )
-        return SentimentOutcome(reading=reading, escalated=escalated, analysed=True)
+        return SentimentOutcome(
+            reading=reading,
+            escalated=escalated,
+            analysed=True,
+            superseded=superseded,
+        )
 
     async def set_priority(
         self,

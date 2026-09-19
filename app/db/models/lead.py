@@ -23,11 +23,14 @@ from typing import Any, Final
 from sqlalchemy import (
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
     String,
     Text,
+    UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
@@ -172,18 +175,32 @@ class Lead(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
                 "contact_id IS NOT NULL AND status <> 'won' AND status <> 'lost'"
             ),
         ),
+        # Redundant as a uniqueness claim and required as a target: follow-ups,
+        # notes and activities point here through `(tenant_id, lead_id)`
+        # (ADR-100, CRM-01).
+        UniqueConstraint("tenant_id", "id", name="uq_leads_tenant_id_id"),
+        # The customer and the conversation a lead names belong to its own
+        # workspace - and, when both are set, the conversation is with that
+        # customer (CRM-14). The second key is three columns wide for exactly
+        # that: a lead cannot say "customer X" while pointing at customer Y's
+        # conversation. `SET NULL (column)` clears the one reference, never the
+        # tenant beside it.
+        ForeignKeyConstraint(
+            ["tenant_id", "contact_id"],
+            ["contacts.tenant_id", "contacts.id"],
+            name="fk_leads_tenant_contact",
+            ondelete="SET NULL (contact_id)",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "contact_id"],
+            ["conversations.tenant_id", "conversations.id", "conversations.contact_id"],
+            name="fk_leads_tenant_conversation_contact",
+            ondelete="SET NULL (conversation_id)",
+        ),
     )
 
-    contact_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("contacts.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("conversations.id", ondelete="SET NULL"),
-        nullable=True,
-    )
+    contact_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -270,13 +287,15 @@ class LeadNote(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_lead_notes_tenant_id", "tenant_id"),
         Index("ix_lead_notes_lead_id_created_at", "lead_id", "created_at"),
+        ForeignKeyConstraint(
+            ["tenant_id", "lead_id"],
+            ["leads.tenant_id", "leads.id"],
+            name="fk_lead_notes_tenant_lead",
+            ondelete="CASCADE",
+        ),
     )
 
-    lead_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("leads.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    lead_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     author_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -306,13 +325,27 @@ class LeadActivity(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
     __table_args__ = (
         Index("ix_lead_activities_tenant_id", "tenant_id"),
         Index("ix_lead_activities_lead_id_created_at", "lead_id", "created_at"),
+        ForeignKeyConstraint(
+            ["tenant_id", "lead_id"],
+            ["leads.tenant_id", "leads.id"],
+            name="fk_lead_activities_tenant_lead",
+            ondelete="CASCADE",
+        ),
     )
 
-    lead_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("leads.id", ondelete="CASCADE"),
+    # When the row was written, not when its transaction began (CRM-16).
+    # `now()` is the transaction's start, so a change that waited for another
+    # one's lock - and was therefore decided *after* it - sorted *before* it,
+    # and the timeline disagreed with the lead's final state. The same lesson
+    # AI-01 taught for messages. Lead mutations are serialised on the lead row,
+    # so insertion order here is the order the changes were applied in; `id`
+    # breaks the tie deterministically should two rows share a microsecond.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
         nullable=False,
+        server_default=func.clock_timestamp(),
     )
+    lead_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     kind: Mapped[LeadActivityKind] = mapped_column(LEAD_ACTIVITY_KIND_TYPE, nullable=False)
     actor_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

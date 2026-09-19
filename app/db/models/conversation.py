@@ -269,6 +269,14 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
             ondelete="CASCADE",
         ),
         UniqueConstraint("tenant_id", "id", name="uq_conversations_tenant_id_id"),
+        # Also redundant as uniqueness, and the target of the lead key that
+        # makes a lead's conversation agree with the lead's customer (CRM-14).
+        UniqueConstraint(
+            "tenant_id",
+            "id",
+            "contact_id",
+            name="uq_conversations_tenant_id_id_contact_id",
+        ),
     )
 
     contact_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)

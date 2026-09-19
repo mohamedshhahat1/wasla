@@ -797,6 +797,28 @@ the rest mechanically would buy write-path cost on the highest-volume tables in
 the schema — `usage_events`, `analytics_events` — for relations whose worst case
 is a wrong number on a dashboard.
 
+**CRM relations, added by migration 0068 (CRM-01, CRM-14).** The premise above -
+"no API path builds such a row" - turned out to be false for one CRM relation:
+`POST /follow-ups` stored another workspace's `lead_id` verbatim. So the
+relations a CRM write can name are now composite too:
+
+| Child | Column(s) | Parent | On delete |
+|---|---|---|---|
+| `follow_ups` | `lead_id` | `leads` | `SET NULL (lead_id)` |
+| `follow_ups` | `conversation_id` | `conversations` | `CASCADE` |
+| `leads` | `contact_id` | `contacts` | `SET NULL (contact_id)` |
+| `leads` | `conversation_id`, `contact_id` | `conversations(tenant_id, id, contact_id)` | `SET NULL (conversation_id)` |
+| `lead_notes` | `lead_id` | `leads` | `CASCADE` |
+| `lead_activities` | `lead_id` | `leads` | `CASCADE` |
+
+`SET NULL (column)` nulls only the reference, never `tenant_id` beside it. The
+three-column key on `leads` also makes "a lead's conversation is with that
+lead's customer" a database fact whenever both are set. A follow-up's lead and
+conversation agreeing on the customer is enforced by the service (it would need
+the contact copied onto every follow-up) and checked by the invariant queries in
+`docs/RUNBOOK.md`. That an assignee is an *active* member is dynamic and belongs
+to the transaction, not to a static key (`hold_active_for_user`).
+
 The parents carry a `UNIQUE (tenant_id, id)` that looks redundant and is not: a
 composite foreign key can only reference a uniquely constrained set of columns.
 The single-column keys were dropped rather than kept alongside, since the

@@ -29,6 +29,7 @@ from app.db.models.media import MediaStatus, MessageMedia
 from app.db.models.sentiment import ConversationPriority, MessageSentiment, SentimentLabel
 from app.integrations.openai.types import TokenUsage
 from app.services import sentiment_service as service_module
+from app.services.inbox_service import ModeTransition
 from app.services.sentiment_reader import SentimentReading
 from app.services.sentiment_service import (
     MIN_ESCALATION_CONFIDENCE,
@@ -139,6 +140,44 @@ class FakeAnalytics:
         self.handoffs.append(fields)
 
 
+class FakeInbox:
+    """The handoff transition, reduced to its rule: only an AI conversation moves.
+
+    The real one locks and re-reads the row (`InboxService.hand_off`), and its
+    concurrency is proved against PostgreSQL in the integration suites. What
+    this service owns is what it does with the answer, which is what these
+    tests drive - including the answer "a colleague got there first".
+    """
+
+    def __init__(
+        self,
+        conversation: Conversation,
+        analytics: FakeAnalytics,
+        *,
+        taken_over_meanwhile: bool = False,
+    ) -> None:
+        self._conversation = conversation
+        self._analytics = analytics
+        self._taken_over_meanwhile = taken_over_meanwhile
+        self.requests: list[dict[str, Any]] = []
+
+    async def hand_off(self, **fields: Any) -> ModeTransition:
+        self.requests.append(fields)
+        if self._taken_over_meanwhile:
+            self._conversation.mode = ConversationMode.HUMAN
+            self._conversation.handoff_reason = "VIP - call personally"
+        if self._conversation.mode is ConversationMode.HUMAN:
+            return ModeTransition(self._conversation, changed=False)
+        self._conversation.mode = ConversationMode.HUMAN
+        self._conversation.handoff_reason = fields["reason"]
+        self._analytics.handoff(
+            conversation_id=fields["conversation_id"],
+            source=fields["source"],
+            reason=fields["reason"],
+        )
+        return ModeTransition(self._conversation, changed=True)
+
+
 def _inbound(body: str | None = "this is unacceptable") -> Message:
     return Message(
         id=MESSAGE,
@@ -218,15 +257,23 @@ def _build(
     usage: FakeUsage | None = None,
     analytics: FakeAnalytics | None = None,
     session: AsyncSession | None = None,
+    taken_over_meanwhile: bool = False,
 ) -> SentimentService:
+    analytics = analytics if analytics is not None else FakeAnalytics()
+    conversation = (
+        conversation
+        if conversation is not None
+        else Conversation(mode=ConversationMode.AI, priority=ConversationPriority.NORMAL)
+    )
     fakes = {
         "UsageRecorder": usage if usage is not None else FakeUsage(),
-        "AnalyticsRecorder": analytics if analytics is not None else FakeAnalytics(),
-        "ConversationRepository": FakeConversations(
-            conversation
-            if conversation is not None
-            else Conversation(mode=ConversationMode.AI, priority=ConversationPriority.NORMAL)
+        "AnalyticsRecorder": analytics,
+        "InboxService": FakeInbox(
+            conversation,
+            analytics,
+            taken_over_meanwhile=taken_over_meanwhile,
         ),
+        "ConversationRepository": FakeConversations(conversation),
         "MessageRepository": FakeMessages(_inbound() if message is DEFAULT else message),
         "MediaRepository": FakeMedia(media),
         "SentimentRepository": readings if readings is not None else FakeReadings(stored),
@@ -819,3 +866,39 @@ async def test_a_classifier_failure_still_leaves_the_connection_released(
 
     assert outcome.escalated is False
     assert session.commits == 1
+
+
+async def test_a_takeover_during_the_reading_is_not_overwritten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The colleague's takeover wins its write, and this reading escalates nothing (CRM-02).
+
+    The conversation was the AI's when the reading started and a colleague's by
+    the time it landed. The reading still describes the customer's mood; it
+    does not hand anything over, record a handoff, or claim it escalated - and
+    the turn is told a person owns the conversation, so it stays silent.
+    """
+    conversation = Conversation(mode=ConversationMode.AI, priority=ConversationPriority.NORMAL)
+    analytics = FakeAnalytics()
+    readings = FakeReadings()
+    service = _build(
+        monkeypatch,
+        analyzer=StubAnalyzer(),
+        conversation=conversation,
+        analytics=analytics,
+        readings=readings,
+        taken_over_meanwhile=True,
+    )
+
+    outcome = await service.assess(
+        conversation_id=CONVERSATION,
+        escalation_sentiment=SentimentLabel.ANGRY,
+    )
+
+    assert outcome.escalated is False
+    assert outcome.superseded is True
+    assert outcome.blocks_reply is True
+    assert conversation.handoff_reason == "VIP - call personally"
+    assert analytics.handoffs == []
+    # The mood is still recorded - it is true - and raised the priority.
+    assert conversation.priority is ConversationPriority.URGENT

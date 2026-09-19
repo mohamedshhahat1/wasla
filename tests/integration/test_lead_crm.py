@@ -185,6 +185,7 @@ async def test_a_lead_cannot_be_assigned_to_someone_outside_the_workspace(
         await _service(db_session, acme).assign(
             lead_id=lead.id,
             assigned_to_id=outsider.id,
+            expected_assigned_to_id=None,
             actor_id=owner.id,
         )
 
@@ -562,7 +563,9 @@ async def test_every_change_leaves_an_auditable_trace(db_session: AsyncSession) 
         update=LeadUpdate(interest="Apartment finishing"),
     )
     await service.change_status(lead_id=lead.id, status=LeadStatus.CONTACTED, actor_id=owner.id)
-    await service.assign(lead_id=lead.id, assigned_to_id=owner.id, actor_id=owner.id)
+    await service.assign(
+        lead_id=lead.id, assigned_to_id=owner.id, expected_assigned_to_id=None, actor_id=owner.id
+    )
     await service.add_note(lead_id=lead.id, body="Called, will call back.", author_id=owner.id)
     await db_session.flush()
 
@@ -707,8 +710,12 @@ async def test_an_assignment_can_be_cleared(db_session: AsyncSession) -> None:
 
     lead = await service.create_lead(actor_id=owner.id, name="Ahmed")
     await db_session.flush()
-    await service.assign(lead_id=lead.id, assigned_to_id=owner.id, actor_id=owner.id)
-    await service.assign(lead_id=lead.id, assigned_to_id=None, actor_id=owner.id)
+    await service.assign(
+        lead_id=lead.id, assigned_to_id=owner.id, expected_assigned_to_id=None, actor_id=owner.id
+    )
+    await service.assign(
+        lead_id=lead.id, assigned_to_id=None, expected_assigned_to_id=owner.id, actor_id=owner.id
+    )
     await db_session.flush()
 
     assert lead.assigned_to_id is None
@@ -727,7 +734,12 @@ async def test_filters_narrow_by_status_and_assignment(db_session: AsyncSession)
     assigned = await service.create_lead(actor_id=owner.id, name="Assigned")
     unassigned = await service.create_lead(actor_id=owner.id, name="Unassigned")
     await db_session.flush()
-    await service.assign(lead_id=assigned.id, assigned_to_id=owner.id, actor_id=owner.id)
+    await service.assign(
+        lead_id=assigned.id,
+        assigned_to_id=owner.id,
+        expected_assigned_to_id=None,
+        actor_id=owner.id,
+    )
     await service.change_status(
         lead_id=unassigned.id,
         status=LeadStatus.CONTACTED,
@@ -825,7 +837,9 @@ async def test_statistics_report_the_pipeline(db_session: AsyncSession) -> None:
     await db_session.flush()
     await service.change_status(lead_id=won.id, status=LeadStatus.QUALIFIED, actor_id=owner.id)
     await service.change_status(lead_id=won.id, status=LeadStatus.WON, actor_id=owner.id)
-    await service.assign(lead_id=won.id, assigned_to_id=owner.id, actor_id=owner.id)
+    await service.assign(
+        lead_id=won.id, assigned_to_id=owner.id, expected_assigned_to_id=None, actor_id=owner.id
+    )
     await db_session.flush()
 
     statistics = await service.statistics()

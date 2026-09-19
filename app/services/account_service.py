@@ -74,6 +74,7 @@ from app.repositories import (
 from app.services.audit_service import AuditTrail
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
+from app.services.member_departure import release_departing_member
 
 logger = get_logger(__name__)
 
@@ -520,12 +521,25 @@ class AccountService:
                     outcome="success",
                 )
 
+        withdrawn: list[uuid.UUID] = []
         for membership in await memberships.list_all_for_user(user.id):
             if membership.status is MembershipStatus.ACTIVE:
                 membership.status = MembershipStatus.REVOKED
                 membership.revoked_at = moment
                 membership.revoked_by_id = user.id
+                withdrawn.append(membership.tenant_id)
         await self._session.flush()
+        # A closed account leaves every workspace it was in, and its open work
+        # is released exactly as a removal releases it (PD-CRM-2, PD-CRM-8).
+        # After the flush, so each membership row is already locked against a
+        # concurrent assignment to this person.
+        for tenant_id in sorted(withdrawn):
+            await release_departing_member(
+                self._session,
+                tenant_id=tenant_id,
+                user_id=user.id,
+                actor=actor,
+            )
         return orphaned
 
     async def _tombstone(self, user: User) -> User:

@@ -41,6 +41,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Final
 
+from app.core.text_safety import storable_problem
+
 # Per-node overhead in compact JSON: the braces or brackets around a container,
 # the quotes around a string, the separator after an entry. Counted so the
 # accumulated total is never below what `json.dumps` would produce.
@@ -153,6 +155,8 @@ def check_json(value: Any, bounds: JsonBounds, *, field: str) -> None:
                     raise ValueError(
                         f"{field} has a key longer than {bounds.max_string} characters."
                     )
+                if storable_problem(key) is not None:
+                    raise ValueError(f"{field} has a key that cannot be stored as text.")
                 total += _QUOTES + len(key.encode("utf-8")) + _SEPARATOR
                 stack.append((item, depth + 1))
         elif isinstance(node, list):
@@ -167,6 +171,10 @@ def check_json(value: Any, bounds: JsonBounds, *, field: str) -> None:
                 raise ValueError(
                     f"{field} contains a value longer than {bounds.max_string} characters."
                 )
+            if isinstance(node, str) and storable_problem(node) is not None:
+                # PostgreSQL's JSONB refuses `\u0000` exactly as its text type
+                # refuses NUL, and the insert failed as a 500 (CRM-12).
+                raise ValueError(f"{field} contains a value that cannot be stored as text.")
             total += _scalar_cost(node)
 
         # Checked inside the loop rather than after it: a value that has

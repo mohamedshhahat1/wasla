@@ -35,7 +35,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Final, Literal
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, ValidationError
@@ -43,7 +42,6 @@ from app.core.logging import get_logger
 from app.core.text_safety import storable_problem
 from app.db.models.analytics import AnalyticsSource
 from app.db.models.audit import AuditAction, AuditActorKind
-from app.db.models.conversation import Conversation, ConversationMode
 from app.db.models.follow_up import MAX_BODY_LENGTH, MAX_REASON_LENGTH
 from app.db.models.lead import ActorKind
 from app.db.models.tool_execution import ToolExecutionReason
@@ -408,17 +406,33 @@ async def _request_human_handoff(context: ToolContext, arguments: dict[str, Any]
     did not perform, and the analytics counter that exists to report handovers
     counted one conversation twice.
 
-    Read as a column rather than through the repository, and read here as well
-    as in the executor's own lifecycle gate: the executor is the guard, this is
-    the one the service keeps if a future caller arrives by another route.
+    Decided at the write, not at a read (CRM-02). The executor's lifecycle
+    gate refuses a conversation that was already human when the call began;
+    `InboxService.hand_off` is what settles one a colleague takes over while
+    the call is running, because it moves the row only if it is still the
+    AI's when it is locked. A separate read here used to be the first of
+    those checks, and once the transition itself refused the same case it
+    decided nothing the transition does not.
     """
-    mode = await context.session.scalar(
-        select(Conversation.mode).where(
-            Conversation.id == context.conversation_id,
-            Conversation.tenant_id == context.tenant_id,
-        )
+    reason = str(arguments["reason"])[:MAX_HANDOFF_REASON_LENGTH]
+    inbox = InboxService(session=context.session, tenant_id=context.tenant_id)
+    transition = await inbox.hand_off(
+        conversation_id=context.conversation_id,
+        reason=reason,
+        # The agent asked for this one. A colleague taking a conversation over
+        # and an agent giving up on it are the same row on `conversations` and
+        # very different facts about the product.
+        source=AnalyticsSource.AGENT,
     )
-    if mode is ConversationMode.HUMAN:
+    if not transition.changed:
+        # A colleague owns the conversation - since before the call, or since
+        # a takeover that committed while it ran. Their reason, their event
+        # and their ownership stand; this call handed nothing over.
+        #
+        # Raised rather than returned, so the executor records that no handoff
+        # happened. A string here would read as a successful handoff and the
+        # turn would be filed as `handed_off` - claiming the agent did
+        # something a colleague had already done.
         logger.info(
             "agent.handoff_already_human",
             extra={
@@ -426,23 +440,7 @@ async def _request_human_handoff(context: ToolContext, arguments: dict[str, Any]
                 "conversation_id": str(context.conversation_id),
             },
         )
-        # Raised rather than returned, so the executor records that no handoff
-        # happened. A string here would read as a successful handoff and the
-        # turn would be filed as `handed_off` - claiming the agent did
-        # something a colleague had already done.
         raise ConflictError("This conversation is already handled by a colleague.")
-
-    reason = str(arguments["reason"])[:MAX_HANDOFF_REASON_LENGTH]
-    inbox = InboxService(session=context.session, tenant_id=context.tenant_id)
-    await inbox.set_mode(
-        conversation_id=context.conversation_id,
-        mode=ConversationMode.HUMAN,
-        handoff_reason=reason,
-        # The agent asked for this one. A colleague taking a conversation over
-        # and an agent giving up on it are the same row on `conversations` and
-        # very different facts about the product.
-        source=AnalyticsSource.AGENT,
-    )
     # After the mode change, never before: a handoff that raised must not leave
     # a row saying the conversation was handed over. The reason itself is not
     # recorded here - it is a sentence about a customer, it is already on the
