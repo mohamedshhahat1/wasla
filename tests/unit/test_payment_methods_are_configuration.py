@@ -38,6 +38,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from app.core.crypto import generate_key
 from app.integrations.billing import build_checkout_provider
 from app.integrations.billing.checkout import CheckoutRequest
 from app.integrations.billing.paymob import PaymobProvider
@@ -63,6 +64,8 @@ BASE = {
     "paymob_public_key": "pk_test_notreal000000",
     "paymob_hmac_secret": "a-test-hmac-secret",
     "app_public_url": "https://app.example.com",
+    "credential_encryption_keys": [generate_key()],
+    "payment_token_fingerprint_key": generate_key(),
 }
 
 

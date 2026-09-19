@@ -62,7 +62,7 @@ from app.db.models.conversation import (
     MessageStatus,
 )
 from app.db.models.invoice import Invoice, InvoiceStatus, Payment
-from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
+from app.db.models.payment_method import PaymentMethodStatus
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEventType
 from app.db.models.whatsapp import WhatsAppAccount
@@ -74,6 +74,7 @@ from app.services.entitlement_service import EntitlementService
 from app.services.metrics_service import API_ROLE, MetricsService
 from app.services.recurring_service import RecurringService
 from tests.fakes import as_recurring, as_responses
+from tests.payment_tokens import PROTECTOR, saved_card
 
 pytestmark = pytest.mark.integration
 
@@ -691,10 +692,10 @@ async def renewals(one_connection: Database) -> AsyncIterator[list[uuid.UUID]]:
                 )
             )
             session.add(
-                PaymentMethod(
+                saved_card(
                     tenant_id=tenant.id,
                     provider="paymob",
-                    provider_token=f"tok-{uuid.uuid4().hex[:12]}",
+                    token=f"tok-{uuid.uuid4().hex[:12]}",
                     provider_token_id="15978654",
                     masked_pan="**** 2346",
                     brand="MasterCard",
@@ -731,6 +732,7 @@ async def _collect(
             session,
             tenant_id=tenant_id,
             provider=as_recurring(provider),
+            payment_tokens=PROTECTOR,
         )
         outcome = await service.collect(invoice, subscription=owners.scalars().one())
         await session.commit()

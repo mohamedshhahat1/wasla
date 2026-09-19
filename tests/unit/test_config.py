@@ -409,6 +409,8 @@ PAYMOB: dict[str, Any] = {
     "paymob_hmac_secret": "a-test-hmac-secret",
     "paymob_integration_ids": [4097558],
     "app_public_url": "https://app.example.com",
+    "credential_encryption_keys": [generate_key()],
+    "payment_token_fingerprint_key": generate_key(),
 }
 
 
@@ -444,6 +446,8 @@ def test_a_deployment_taking_payments_accepts_a_complete_configuration() -> None
         "paymob_secret_key",
         "paymob_public_key",
         "paymob_hmac_secret",
+        "credential_encryption_keys",
+        "payment_token_fingerprint_key",
         "app_public_url",
     ],
 )

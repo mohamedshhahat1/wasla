@@ -53,6 +53,7 @@ from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
 from app.integrations.billing import paymob
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
+from tests.payment_tokens import saved_card
 
 pytestmark = pytest.mark.integration
 
@@ -519,10 +520,10 @@ async def test_a_requested_refund_says_pending_rather_than_refunded(
 
 
 async def _saved_card(session: AsyncSession, tenant: Tenant, *, token: str) -> PaymentMethod:
-    method = PaymentMethod(
+    method = saved_card(
         tenant_id=tenant.id,
         provider="paymob",
-        provider_token=token,
+        token=token,
         provider_token_id="15978654",
         masked_pan="xxxx-xxxx-xxxx-2346",
         brand="MasterCard",
@@ -626,3 +627,5 @@ async def test_the_card_token_never_leaves_through_the_api(
 
     for body in bodies:
         assert token not in body
+        assert method.provider_token not in body
+        assert method.token_fingerprint not in body

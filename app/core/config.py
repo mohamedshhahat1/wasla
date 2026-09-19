@@ -7,6 +7,7 @@ while placeholder values are still in place.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from functools import lru_cache
@@ -591,6 +592,22 @@ class Settings(BaseSettings):
     # comma-separated value - the only thing a container environment can
     # comfortably express - fails at start-up.
     credential_encryption_keys: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Independent HMAC key for deduplicating reusable Paymob tokens without
+    # retaining or indexing their plaintext. Base64 of 32 random bytes.
+    payment_token_fingerprint_key: str | None = None
+
+    @field_validator("payment_token_fingerprint_key")
+    @classmethod
+    def validate_payment_token_fingerprint_key(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return None
+        try:
+            decoded = base64.b64decode(value, validate=True)
+        except (ValueError, TypeError) as error:
+            raise ValueError("PAYMENT_TOKEN_FINGERPRINT_KEY must be base64") from error
+        if len(decoded) != 32:
+            raise ValueError("PAYMENT_TOKEN_FINGERPRINT_KEY must encode 32 bytes")
+        return value
 
     # Request limits, enforced by the application rather than only by nginx.
     # nginx is one deployment topology, not a property of the software: run the
@@ -1321,6 +1338,14 @@ class Settings(BaseSettings):
                 # reasoning; the two are now symmetric (ADR-063).
 
         if self.billing_provider == "paymob" and not self.is_testing:
+            if not self.credential_encryption_keys:
+                problems.append(
+                    "CREDENTIAL_ENCRYPTION_KEYS must be set when BILLING_PROVIDER is paymob"
+                )
+            if not self.payment_token_fingerprint_key:
+                problems.append(
+                    "PAYMENT_TOKEN_FINGERPRINT_KEY must be set when BILLING_PROVIDER is paymob"
+                )
             # Fail closed where money is involved, and in every environment
             # rather than only production: a staging deployment configured to
             # take payments and missing its HMAC secret would answer 503 to

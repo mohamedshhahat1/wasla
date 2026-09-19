@@ -43,7 +43,7 @@ from app.db.models.invoice import (
     Payment,
     PaymentStatus,
 )
-from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
+from app.db.models.payment_method import PaymentMethodStatus
 from app.db.models.tenant import Tenant
 from app.integrations.billing.paymob import PaymobProvider
 from app.services.recurring_service import (
@@ -56,6 +56,7 @@ from app.services.recurring_service import (
     PROVIDER_REFUSED,
     RecurringService,
 )
+from tests.payment_tokens import PROTECTOR, saved_card
 
 pytestmark = pytest.mark.integration
 
@@ -134,6 +135,7 @@ def _service(
         session,
         tenant_id=tenant.id,
         provider=_provider(transport, moto=moto),
+        payment_tokens=PROTECTOR,
     )
 
 
@@ -197,10 +199,10 @@ async def _workspace(
     session.add(invoice)
     await session.flush()
     session.add(
-        PaymentMethod(
+        saved_card(
             tenant_id=tenant.id,
             provider="paymob",
-            provider_token=f"{CARD_TOKEN}-{uuid.uuid4().hex[:6]}",
+            token=f"{CARD_TOKEN}-{uuid.uuid4().hex[:6]}",
             provider_token_id="15978654",
             masked_pan="xxxx-xxxx-xxxx-2346",
             brand="MasterCard",
@@ -235,7 +237,7 @@ async def _sweep(
 ) -> str | None:
     """One billing poll, as `BillingWorker` performs it."""
     service = (
-        RecurringService(session, tenant_id=tenant.id, provider=provider)
+        RecurringService(session, tenant_id=tenant.id, provider=provider, payment_tokens=PROTECTOR)
         if provider is not None
         else _service(session, tenant, transport=transport, moto=moto)
     )

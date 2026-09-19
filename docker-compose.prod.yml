@@ -91,6 +91,9 @@ services:
       MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      # Migration 0069 encrypts existing saved cards before traffic resumes.
+      CREDENTIAL_ENCRYPTION_KEYS: ${CREDENTIAL_ENCRYPTION_KEYS:-}
+      PAYMENT_TOKEN_FINGERPRINT_KEY: ${PAYMENT_TOKEN_FINGERPRINT_KEY:-}
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
     depends_on:
@@ -220,6 +223,7 @@ services:
       # workspace sends through META_ACCESS_TOKEN, and a workspace trying to
       # store its own is refused rather than having it written in the clear.
       CREDENTIAL_ENCRYPTION_KEYS: ${CREDENTIAL_ENCRYPTION_KEYS:-}
+      PAYMENT_TOKEN_FINGERPRINT_KEY: ${PAYMENT_TOKEN_FINGERPRINT_KEY:-}
       DEFAULT_PLAN_CODE: ${DEFAULT_PLAN_CODE:-starter}
       # Limits default to sensible values in the application; they are exposed
       # here because the right number depends on the deployment, and finding out
@@ -440,6 +444,7 @@ services:
       # decrypts a workspace's credential to send with it, so a worker missing a
       # key the API used cannot send for that workspace at all.
       CREDENTIAL_ENCRYPTION_KEYS: ${CREDENTIAL_ENCRYPTION_KEYS:-}
+      PAYMENT_TOKEN_FINGERPRINT_KEY: ${PAYMENT_TOKEN_FINGERPRINT_KEY:-}
       DEFAULT_PLAN_CODE: ${DEFAULT_PLAN_CODE:-starter}
       # Empty runs every kind. Set to a comma-separated subset to scale the
       # loops apart - "campaign" during a large broadcast, or media and agent

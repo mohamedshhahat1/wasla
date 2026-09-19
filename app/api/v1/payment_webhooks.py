@@ -37,6 +37,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.route import CommittingRoute
+from app.core.config import Settings
 from app.core.dependencies import SessionDep, SettingsDep
 from app.core.exceptions import DependencyUnavailableError, PermissionDeniedError
 from app.core.logging import get_logger
@@ -103,7 +104,9 @@ async def receive_payment_callback(
     # is still checked against the card-token signature, so lying about the
     # type only changes which way it is refused.
     if callback_type(body) == SAVED_CARD_CALLBACK:
-        return await _receive_saved_method(session, provider, body=body, signature=signature)
+        return await _receive_saved_method(
+            session, provider, settings=settings, body=body, signature=signature
+        )
 
     try:
         event = provider.verify_callback(payload=body, signature=signature)
@@ -205,6 +208,7 @@ async def _receive_saved_method(
     session: AsyncSession,
     provider: CheckoutProvider,
     *,
+    settings: Settings,
     body: bytes,
     signature: str | None,
 ) -> dict[str, str]:
@@ -248,6 +252,7 @@ async def _receive_saved_method(
 
     _, created = await remember_saved_method(
         session,
+        settings=settings,
         tenant_id=tenant_id,
         provider=provider.name,
         saved=saved,

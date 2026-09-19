@@ -52,16 +52,20 @@ class PaymentMethodRepository(TenantScopedRepository[PaymentMethod]):
         *,
         provider: str,
         provider_token: str,
+        token_fingerprint: str,
         provider_token_id: str | None,
         masked_pan: str | None,
         brand: str | None,
         is_default: bool,
+        method_id: uuid.UUID,
     ) -> PaymentMethod:
         return self.add(
             PaymentMethod(
                 tenant_id=self.tenant_id,
+                id=method_id,
                 provider=provider,
                 provider_token=provider_token,
+                token_fingerprint=token_fingerprint,
                 provider_token_id=provider_token_id,
                 masked_pan=masked_pan,
                 brand=brand,
@@ -83,7 +87,7 @@ class PlatformPaymentMethodRepository(BaseRepository[PaymentMethod]):
 
     model = PaymentMethod
 
-    async def get_by_token(self, *, provider: str, token: str) -> PaymentMethod | None:
+    async def get_by_fingerprint(self, *, provider: str, fingerprint: str) -> PaymentMethod | None:
         """An existing card by the provider's token.
 
         What makes a repeated saved-card notification a no-op rather than a
@@ -93,5 +97,5 @@ class PlatformPaymentMethodRepository(BaseRepository[PaymentMethod]):
         return await self._first(
             self._select()
             .where(PaymentMethod.provider == provider)
-            .where(PaymentMethod.provider_token == token)
+            .where(PaymentMethod.token_fingerprint == fingerprint)
         )

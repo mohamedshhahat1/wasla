@@ -57,6 +57,7 @@ from app.services.recurring_service import (
     PROVIDER_REFUSED,
     RecurringService,
 )
+from tests.payment_tokens import PROTECTOR, saved_card
 
 pytestmark = pytest.mark.integration
 
@@ -154,10 +155,10 @@ async def _workspace(
 
     if with_card:
         session.add(
-            PaymentMethod(
+            saved_card(
                 tenant_id=tenant.id,
                 provider="paymob",
-                provider_token=f"{CARD_TOKEN}-{uuid.uuid4().hex[:6]}",
+                token=f"{CARD_TOKEN}-{uuid.uuid4().hex[:6]}",
                 provider_token_id="15978654",
                 masked_pan="xxxx-xxxx-xxxx-2346",
                 brand="MasterCard",
@@ -180,6 +181,7 @@ def _service(
         session,
         tenant_id=tenant.id,
         provider=_provider(transport, moto=moto),
+        payment_tokens=PROTECTOR,
     )
 
 
@@ -251,7 +253,7 @@ async def test_the_card_token_is_sent_and_never_the_card_number(db_session: Asyn
         await db_session.execute(select(PaymentMethod).where(PaymentMethod.tenant_id == tenant.id))
     ).scalar_one()
     pay = next(item for item in seen if item["url"].endswith("/payments/pay"))
-    assert pay["body"]["source"]["identifier"] == method.provider_token
+    assert pay["body"]["source"]["identifier"] == PROTECTOR.open(method)
     assert "5123456789012346" not in json.dumps(seen)
 
 

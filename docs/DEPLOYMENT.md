@@ -62,6 +62,17 @@ pg_roles WHERE rolname = current_user`. All four flags must be false. The
 integration test `tests/integration/test_database_runtime_role.py` also proves
 data writes succeed while schema, role, and database creation fail.
 
+Migration `0069` encrypts any existing reusable Paymob card tokens before the
+new API and worker start. The migrate service therefore receives
+`CREDENTIAL_ENCRYPTION_KEYS` and the independent
+`PAYMENT_TOKEN_FINGERPRINT_KEY`. Set them before running a release with saved
+cards. If either is absent, the migration fails in one transaction and leaves
+the prior schema and tokens intact. The first encryption key writes new
+ciphertext; retain earlier keys in the ring for decryption during rotation.
+Keep the fingerprint key stable: changing it requires an explicit rehash of
+every payment method under the new key. A downgrade with saved cards is refused
+because returning to the old schema would restore plaintext token storage.
+
 `docker-compose.yml` targets local development with reload and mounted source. `docker-compose.prod.yml` targets production with pinned images, no source mounts, and stricter resource and restart policies.
 
 Every secret in the production file is required and interpolated from the deployment environment — compose fails to start rather than falling back to an insecure default. The settings added in phases 13 and 14 are wired through it explicitly, with defaults chosen so that omitting them is a *specific* outcome rather than a vague one:

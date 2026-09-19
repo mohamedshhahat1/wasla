@@ -60,6 +60,7 @@ from app.repositories.billing_repository import (
 )
 from app.repositories.invoice_repository import PlatformInvoiceRepository
 from tests.conftest import AllowingEntitlements
+from tests.payment_tokens import saved_card
 
 pytestmark = pytest.mark.integration
 
@@ -207,10 +208,10 @@ async def _workspace(
 
 
 async def _card(session: AsyncSession, tenant: Tenant) -> PaymentMethod:
-    method = PaymentMethod(
+    method = saved_card(
         tenant_id=tenant.id,
         provider="paymob",
-        provider_token="tok_" + tenant.slug,
+        token="tok_" + tenant.slug,
         status=PaymentMethodStatus.ACTIVE,
         is_default=True,
     )

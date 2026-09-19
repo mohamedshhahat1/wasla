@@ -66,6 +66,7 @@ from typing import Final
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import DependencyUnavailableError
 from app.core.logging import get_logger
 from app.db.models.billing import Subscription
 from app.db.models.invoice import (
@@ -84,6 +85,7 @@ from app.integrations.billing.checkout import (
 )
 from app.repositories.invoice_repository import InvoiceRepository, PaymentRepository
 from app.repositories.payment_method_repository import PaymentMethodRepository
+from app.services.payment_token_service import PaymentTokenProtector
 
 logger = get_logger(__name__)
 
@@ -169,10 +171,12 @@ class RecurringService:
         *,
         tenant_id: uuid.UUID,
         provider: RecurringProvider | None = None,
+        payment_tokens: PaymentTokenProtector | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self._provider = provider
+        self._payment_tokens = payment_tokens
         self._invoices = InvoiceRepository(session, tenant_id=tenant_id)
         self._payments = PaymentRepository(session, tenant_id=tenant_id)
         self._methods = PaymentMethodRepository(session, tenant_id=tenant_id)
@@ -203,6 +207,9 @@ class RecurringService:
         method = await self._methods.default_method()
         if method is None:
             return CollectionOutcome(charged=False, reason=NO_CARD)
+        if self._payment_tokens is None:
+            raise DependencyUnavailableError("Payment token protection is not configured.")
+        card_token = self._payment_tokens.open(method)
 
         # `_refusal` returned None, which it only does when a provider is
         # present and able. Read into a local so the narrowing survives without
@@ -228,7 +235,7 @@ class RecurringService:
             # reconciliation - the name is the same either way, and it does not
             # change if this process is replaced.
             reference=str(payment_id),
-            token=method.provider_token,
+            token=card_token,
             amount=payment.amount,
             currency=payment.currency,
             description=f"{invoice.plan_code} plan",

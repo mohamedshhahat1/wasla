@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
@@ -31,6 +32,7 @@ from app.repositories.payment_method_repository import (
     PaymentMethodRepository,
     PlatformPaymentMethodRepository,
 )
+from app.services.payment_token_service import PaymentTokenProtector
 
 logger = get_logger(__name__)
 
@@ -118,6 +120,7 @@ class PaymentMethodService:
 async def remember_saved_method(
     session: AsyncSession,
     *,
+    settings: Settings,
     tenant_id: uuid.UUID,
     provider: str,
     saved: SavedPaymentMethod,
@@ -139,19 +142,30 @@ async def remember_saved_method(
     payment is a surprise nobody asked for.
     """
     del now  # timestamps are database-managed; kept for a uniform signature
+    protector = PaymentTokenProtector.from_settings(settings)
+    fingerprint = protector.fingerprint(provider=provider, token=saved.token)
     unscoped = PlatformPaymentMethodRepository(session)
-    existing = await unscoped.get_by_token(provider=provider, token=saved.token)
+    existing = await unscoped.get_by_fingerprint(provider=provider, fingerprint=fingerprint)
     if existing is not None:
         return existing, False
 
     methods = PaymentMethodRepository(session, tenant_id=tenant_id)
     is_first = await methods.default_method() is None
+    method_id = uuid.uuid4()
+    protected = protector.seal(
+        saved.token,
+        provider=provider,
+        tenant_id=tenant_id,
+        method_id=method_id,
+    )
 
     try:
         async with session.begin_nested():
             created = methods.create(
+                method_id=method_id,
                 provider=provider,
-                provider_token=saved.token,
+                provider_token=protected.ciphertext,
+                token_fingerprint=protected.fingerprint,
                 provider_token_id=saved.provider_token_id or None,
                 masked_pan=saved.masked_pan,
                 brand=saved.brand,
@@ -161,7 +175,7 @@ async def remember_saved_method(
     except IntegrityError:
         # Another delivery of the same notification won. Re-read rather than
         # raise: the caller answers 200 either way, and the card exists.
-        found = await unscoped.get_by_token(provider=provider, token=saved.token)
+        found = await unscoped.get_by_fingerprint(provider=provider, fingerprint=fingerprint)
         if found is None:  # pragma: no cover - the row that just blocked us
             raise
         return found, False

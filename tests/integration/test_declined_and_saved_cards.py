@@ -39,6 +39,7 @@ from app.services.checkout_service import APPLIED, DUPLICATE, NO_CHANGE, Checkou
 from app.services.entitlement_service import EntitlementService
 from app.services.payment_method_service import PaymentMethodService, remember_saved_method
 from tests.fakes import as_table
+from tests.payment_tokens import PROTECTOR, SETTINGS
 
 pytestmark = pytest.mark.integration
 
@@ -357,6 +358,7 @@ async def _save(
     )
     return await remember_saved_method(
         session,
+        settings=SETTINGS,
         tenant_id=tenant.id,
         provider="paymob",
         saved=saved,
@@ -369,7 +371,8 @@ async def test_a_saved_card_stores_a_token_and_no_card_number(db_session: AsyncS
     method, created = await _save(db_session, tenant, _token(order="ord-1"))
 
     assert created
-    assert method.provider_token == "tok-aaaa"
+    assert method.provider_token != "tok-aaaa"
+    assert PROTECTOR.open(method) == "tok-aaaa"
     assert method.masked_pan == "xxxx-xxxx-xxxx-2346"
     assert method.brand == "MasterCard"
     # The first card a workspace saves becomes the one renewals use.
