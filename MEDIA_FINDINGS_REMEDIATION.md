@@ -12,7 +12,7 @@ The invariant the brief set is now held and tested: **every inbound attachment e
 
 | | Before | After |
 |---|---|---|
-| Media reliability & security score | 5.7 / 10 | **8.7 / 10** (§8) |
+| Media reliability & security score | 5.7 / 10 | **8.7 / 10** (§8); **8.8 / 10** after the §13 release-recovery closure |
 | Mutations killed | 18 / 30 (12 survivors) | **64 / 64** (all 12 original survivors killed) |
 | Model-built whole `tests/` | 4,815 passed, 16 skipped | **5,073 passed, 17 skipped, 0 failed** |
 | Migration-built integration + e2e | 2,406 passed, 2 skipped | **2,511 passed, 2 skipped, 0 failed** |
@@ -299,7 +299,7 @@ Populations include success, failure, skip, lifecycle-refused, crash-recovered, 
 * **R21 hung rather than failed** on its first run (the drip test had no bound of its own); the test now bounds itself and the rerun killed it.
 * **The first final gate run failed** 5 deployment-configuration guard tests: the three new settings were missing from `.env.example` and `docker-compose.prod.yml`. Fixed in `8218c49`; the stack was recreated and everything rerun. The compose default for `META_MEDIA_HOST_ROOTS` is the documented list rather than empty, because an empty list is refused at start-up.
 * **Graph is asked twice per download** (probe, then fetch). Pre-existing, bounded, left as is.
-* **Residual:** if Redis refuses the recovery sweep's agent enqueue at that moment, the terminal row is committed but the turn is only logged and counted (`wasla_media_recovery_total{outcome="release_failed"}`). The requeue path self-heals; the release path does not.
+* **Residual (closed after merge, §13):** as merged, if Redis refused the agent enqueue after a file became terminal, the terminal row was committed but the turn was only logged and counted (`wasla_media_recovery_total{outcome="release_failed"}`); the requeue path self-healed and the release path did not. The release now owes the turn durably and the recovery sweep republishes it, so both paths self-heal.
 * **Behavioural consequences, by locked decision:** customer PDFs over 300 KB are stored but not read; a worker that dies mid-download delays that file by up to the claim lease (330 s); failed files are final.
 
 ---
@@ -319,13 +319,13 @@ Populations include success, failure, skip, lifecycle-refused, crash-recovered, 
 | Idempotency / replay | 0.05 | 8 | 9 | 0.450 | Graph descriptor asked twice |
 | Lifecycle / deletion | 0.07 | 4 | 8.5 | 0.595 | versioned buckets (DV-6); pre-0066 orphans not derivable |
 | Privacy / logging | 0.05 | 8.5 | 9 | 0.450 | EXIF preserved by decision |
-| Failure containment | 0.08 | 2 | 9 | 0.720 | release-enqueue residual during a Redis outage |
+| Failure containment | 0.08 | 2 | 9 → **9.5** (§13) | 0.720 → **0.760** | a reply owed during a Redis outage waits up to one release horizon (~20 min) after Redis returns |
 | Observability | 0.03 | 3 | 8.5 | 0.255 | alert delivery unverified (DV-7) |
 | Testing | 0.02 | 5 | 9.5 | 0.190 | real Meta never exercised |
 | Operational readiness | 0.02 | 4 | 5 | 0.100 | DV-1 … DV-8 outstanding |
-| **Total** | **1.00** | **5.7** | | **8.74** | |
+| **Total** | **1.00** | **5.7** | | **8.74** → **8.78** (§13) | |
 
-**Media Reliability & Security Score: 5.7 → 8.7 / 10.** Not higher, because deployment-only uncertainty (DV-1 … DV-8) and deliberately deferred capabilities remain visible.
+**Media Reliability & Security Score: 5.7 → 8.7 / 10** at merge; **8.8 / 10** after the §13 closure, whose only scored change is Failure containment losing its stated deduction. Not higher, because deployment-only uncertainty (DV-1 … DV-8) and deliberately deferred capabilities remain visible.
 
 ---
 
@@ -386,3 +386,42 @@ mutations                               64 applied, 64 killed, 0 survived
 Skips: 11 real-provider tests (no key), 3 schema-parity tests (migration-only), 1 each AI/tool keep-data invariants, 1 tmpfs test outside a size-limited filesystem (run separately above).
 
 Not merged, not pushed. Awaiting merge instructions.
+
+---
+
+## 13. Post-Remediation Closure: Media Release Recovery
+
+Applied after the merge (`6799f45`) as one targeted patch, `a46a9aa` — `fix(media): recover agent release after queue failure`. No other finding was reopened. §1–§12 above are the evidence as it was frozen at `8218c49`, except for the §7 residual note and the §8 Failure containment row, which point here.
+
+**Residual found.** The §7 residual: once a conversation's last attachment became terminal, the only record that an agent turn was owed was a job pushed to Redis *after* the commit. If Redis refused it, or the process died before it, the file was final, nothing was unresolved, and the reply was lost with only a log line and `release_failed` to show for it. The same shape existed at all three release points: the media worker's success path, its dead-letter abandon path, and the recovery sweep.
+
+**Patch.** The existing turn identity, not new state (Option A in the brief). In the transaction that makes the file terminal, under the conversation gate, `AgentTurnRepository.owe` stages the `AgentTurn` keyed on `(tenant_id, trigger_message_id)` — the same identity the agent worker uses to answer once (WQ-01) — as `CLAIMED`, holder `media-release`, with a lease that has already lapsed. The agent worker's existing `claim` finds the row and adopts it through its expired-lease branch; nothing in the agent worker changed. `MediaRecoveryWorker` now also republishes, each pass, every owed turn no agent worker has adopted within the release horizon (`release_horizon` = the unclaimed horizon, 1,175 s by default): rows taken with `SKIP LOCKED`, stamped (`claim_expires_at` as "last published") and committed before the publish, so racing sweeps publish once and a refused or interrupted publish is found again one horizon later. The media row is never touched: a terminal file stays `READY` / `SKIPPED` / `FAILED`. **No migration**; Alembic stays at `0067`.
+
+**Observability.** `wasla_media_recovery_total` keeps `release_failed` (an owed turn the queue refused, still owed) and gains `release_recovered` (republished); closed label domain, no identifiers. New unlabelled gauges `wasla_media_release_owed` and `wasla_media_release_owed_oldest_age_seconds` count owed turns past the horizon, measured from the release so republishing into a refusing Redis does not reset them. They drive the new `MediaReleaseOwed` alert (critical, 15 m) with a runbook entry; `MediaStranded` reads unresolved files and could not see this state. `promtool check config`: SUCCESS, 40 rules; `promtool test rules`: SUCCESS, including a fire-and-clear case for the new alert.
+
+**Proof.** `tests/integration/test_media_release_recovery.py`, real PostgreSQL + real Redis, production media worker, recovery sweep and agent worker; only OpenAI and Meta faked. 8 tests:
+
+* **Refused release, two failure classes** (connection refused to a port with no listener; timeout on a socket that never answers). The enqueue is proven attempted and failed with redis-py's own `ConnectionError` / `TimeoutError`; the row is committed `FAILED`; no reply and nothing queued; one owed turn keyed on the trigger message; a pass inside the horizon republishes nothing; after the horizon one pass queues exactly one job; the agent worker answers once (`COMPLETED`, `REPLIED`); three further passes, however late, queue and send nothing.
+* **Crash after commit, media worker:** the real `_handle` commits the file `READY` with the turn owed and the job is dropped. A fresh recovery worker (nothing in memory) republishes it; one reply, and the file is not read again.
+* **Crash after commit, recovery worker:** a `BaseException` at the publish, in both the release and the republish, leaves the turn owed; a later pass by a new worker ends with one reply.
+* **Concurrency:** two recovery workers on separate connection pools race one owed turn: one job queued, a following pass queues none, and two agent workers racing yield one reply. A republish racing a still-queued original (two envelopes, one trigger) is also one turn and one reply.
+* **Gauge:** a turn refused twice (release and republish) reads above zero with its age past the horizon, then clears once answered.
+* **Invariant, presence first:** three conversations whose release Redis refused plus one released normally. The schema-level invariant — conversations whose attachments are all terminal with no engaged or completed turn at or after the newest attachment's message — counts **4** before any agent runs and **3** after the normal one is answered (the population is real), then **0** after Redis returns and recovery and the agent worker run; 4 replies, 4 completed turns, all files still `FAILED`.
+
+**Mutation.** 7 applied, 7 killed, 0 survived, each against the new suite:
+
+| ID | Mutation | Killed by |
+|---|---|---|
+| RM1 | drop `owe` at the recovery sweep's release (the bridge) | refused-release test |
+| RM2 | drop `owe` at the media worker's release | worker crash test |
+| RM3 | republish ignores owed turns | refused-release test |
+| RM4 | republish does not stamp | racing-recovery test (second pass republishes) |
+| RM5 | recovery never republishes | refused-release test |
+| RM6 | owed turn written with a live lease (unadoptable) | invariant test |
+| RM7 | republish without `SKIP LOCKED` | racing-recovery test (2 jobs queued); killed on 3 of 3 reruns |
+
+**Focused regression (patched tree, fresh isolated stack).** New suite 8 passed; media-targeted model-built 775 passed, 1 skipped; media-targeted migration-built plus the new suite 366 passed; agent-turn / dedupe / worker / inbound-recovery / AI (21 files) 300 passed; observability, metrics, documentation and deployment (8 files) 174 passed; 0 failed. `ruff` clean, `black` 580 files unchanged, `mypy` no issues in 580 files, `alembic heads` 0067 single head, `alembic check` clean, 0067 → 0064 → 0067 clean. Whole-suite gates and the 64-mutation matrix were not rerun: no migration, no generic queue or turn semantics changed, and the focused suites did not regress.
+
+**Final invariant:** 0 settled conversations left owed a turn after recovery; 0 owed releases stranded.
+
+**Still true:** real inbound WhatsApp media has not been verified against Meta; DV-1 … DV-8 remain deferred.
