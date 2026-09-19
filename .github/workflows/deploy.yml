@@ -9,6 +9,18 @@ name: deploy
 # to conclude on the same commit and the first step refuses anything that did
 # not succeed, which is the "do not deploy if tests fail" rule expressed as a
 # dependency rather than as a duplicated test job.
+#
+# **Who may trigger a release is decided by provenance, never by a branch name
+# (SEC-01).** `workflow_run`'s `branches: [main]` filter is matched against the
+# triggering run's *head branch name*, and on a public repository a fork pull
+# request from a branch the contributor called `main` satisfies it - with the
+# fork's commit as `head_sha`. So the filter below is a cost saving, not a
+# control. Every privileged job instead requires the triggering CI run to be a
+# `push`, to this repository, to `main`, that succeeded. A pull request - from a
+# fork or not - is never a `push` event in this repository, so it cannot reach
+# a job that checks out its commit, holds `packages: write`, writes the release
+# build cache or touches the production host. The `production` environment's
+# reviewers are defence in depth on top of this, not the control itself.
 
 on:
   workflow_run:
@@ -50,9 +62,17 @@ jobs:
     # A CI run that failed produces no image. The condition covers the
     # `workflow_run` path only; a tag push and a manual run have no CI run
     # attached and are gated by their own triggers.
+    #
+    # The `workflow_run` clause is the provenance guard (SEC-01): a successful
+    # CI run triggered by a push to this repository's own `main`. Branch name
+    # alone is attacker-chosen; event and head repository are not. A tag push
+    # and a manual dispatch can only be made by somebody with write access.
     if: >-
       github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     outputs:
       image: ${{ steps.reference.outputs.image }}
       digest: ${{ steps.build.outputs.digest }}
@@ -64,6 +84,10 @@ jobs:
           # finishing and this starting, main may have moved - publishing the
           # newer commit would ship something no test ever saw.
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          # Nothing after this pushes to git. A token persisted into the
+          # checkout's config is a write credential sitting next to whatever
+          # the build runs.
+          persist-credentials: false
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -139,10 +163,18 @@ jobs:
     needs: publish
     # Only a deliberate act deploys: the default branch after a green CI run, a
     # release tag, or a manual dispatch that ticked the box.
+    #
+    # The same provenance guard as `publish`, repeated rather than inherited
+    # through `needs`: this job holds the production SSH key, and its own
+    # condition must not depend on a sibling's staying correct.
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'workflow_dispatch' && inputs.deploy) ||
-      github.event_name == 'workflow_run'
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     # The environment is where the approval gate and the deployment secrets
     # live. An unconfigured environment means this job waits rather than
     # deploying into nothing.
@@ -173,6 +205,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
 
       - name: Open an SSH connection
         run: |
