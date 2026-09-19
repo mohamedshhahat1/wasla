@@ -86,6 +86,7 @@ from app.db.models import Base
 # found in a conftest namespace, and redefining them per module would be six
 # copies of the transport that has to dispatch through a closure.
 from tests.integration.ai_harness import ai_providers, ai_turns  # noqa: F401
+from tests.integration.crm_harness import crm  # noqa: F401
 from tests.integration.rag_harness import indexing  # noqa: F401
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
