@@ -55,10 +55,11 @@ def production_settings() -> Settings:
         environment="production",
         jwt_secret="x" * 40,
         meta_app_secret="an-app-secret",
+        meta_verify_token="synthetic-verify-token",
         docs_enabled=False,
         cors_origins=[],
         log_level="CRITICAL",
-        rate_limit_enabled=False,
+        rate_limit_enabled=True,
     )
 
 
@@ -257,7 +258,8 @@ async def test_hsts_is_sent_when_a_trusted_proxy_reports_https() -> None:
         docs_enabled=False,
         cors_origins=[],
         log_level="CRITICAL",
-        rate_limit_enabled=False,
+        rate_limit_enabled=True,
+        meta_verify_token="test-verify-token",
         # The ASGI transport reports this as the peer address.
         trusted_proxy_ips=["127.0.0.1"],
     )
@@ -288,7 +290,8 @@ async def test_hsts_is_sent_when_the_proxy_is_named_by_a_network() -> None:
         docs_enabled=False,
         cors_origins=[],
         log_level="CRITICAL",
-        rate_limit_enabled=False,
+        rate_limit_enabled=True,
+        meta_verify_token="test-verify-token",
         trusted_proxy_ips=["127.0.0.0/8"],
     )
     app = create_app(settings)
