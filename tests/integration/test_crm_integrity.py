@@ -698,3 +698,22 @@ async def test_a_colleague_can_schedule_on_a_conversation_a_person_owns(
     )
     assert response.status_code == 201
     assert response.json()["created_by_kind"] == "user"
+
+
+def test_the_request_schema_refuses_a_naive_time_on_its_own() -> None:
+    """R20: the boundary layer of PD-CRM-9, pinned apart from the service's.
+
+    Both refuse a naive time, so an HTTP test passes with either removed. This
+    one proves the schema's half: the 422 names the field before any service
+    code runs.
+    """
+    from pydantic import ValidationError as SchemaError
+
+    from app.schemas.follow_up import FollowUpCreateRequest
+
+    naive = (datetime.now(UTC) + timedelta(days=1)).replace(tzinfo=None)
+    with pytest.raises(SchemaError) as refused:
+        FollowUpCreateRequest.model_validate(
+            {"conversation_id": str(uuid.uuid4()), "scheduled_at": naive.isoformat(), "body": "hi"}
+        )
+    assert refused.value.errors()[0]["loc"] == ("scheduled_at",)

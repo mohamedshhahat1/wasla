@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ConflictError
 from app.db.models.conversation import (
     Conversation,
+    ConversationMode,
     Message,
     MessageDirection,
     MessageKind,
@@ -40,6 +41,7 @@ from app.db.models.follow_up import FollowUp, FollowUpStatus
 from app.db.models.lead import ActorKind
 from app.repositories.follow_up_repository import DueFollowUpClaim
 from app.services.follow_up_service import DISPATCH_IN_PROGRESS, FollowUpService
+from app.services.inbox_service import InboxService
 from app.workers.follow_up_worker import FollowUpWorker
 from tests.integration.crm_harness import CrmWorld, World
 
@@ -57,10 +59,13 @@ class GatedMessaging:
     """
 
     def __init__(self) -> None:
+        self.hold_before_stage = asyncio.Event()
         self.hold_before_intent = asyncio.Event()
         self.hold_before_meta = asyncio.Event()
+        self.hold_before_stage.set()
         self.hold_before_intent.set()
         self.hold_before_meta.set()
+        self.reached_stage = asyncio.Event()
         self.reached_intent = asyncio.Event()
         self.intent_committed = asyncio.Event()
         self.sends = 0
@@ -87,6 +92,10 @@ class _Bound:
         link: Any = None,
         **_: Any,
     ) -> Message:
+        # Before anything is written for the send: only a lock the dispatch
+        # took on purpose can be holding the conversation here.
+        self._gate.reached_stage.set()
+        await asyncio.wait_for(self._gate.hold_before_stage.wait(), timeout=20)
         message = Message(
             tenant_id=self._tenant_id,
             conversation_id=conversation_id,
@@ -366,3 +375,45 @@ async def test_the_claim_no_longer_moves_the_scheduled_time(crm: CrmWorld) -> No
     assert row.claimed_until is not None and row.claimed_until > datetime.now(UTC)
     # A second sweep inside the lease does not claim it again.
     assert follow_up_id not in await _claim(crm)
+
+
+async def test_a_takeover_waits_for_a_nudge_the_sweep_has_decided_to_send(
+    crm: CrmWorld,
+) -> None:
+    """The dispatch share-locks the conversation from its mode check to the send intent.
+
+    Without it a takeover could commit between the sweep reading "AI" and the
+    agent's nudge being staged, and the nudge would go out underneath the
+    colleague. With it the takeover waits, the nudge that was already decided
+    goes out first, and the takeover then lands - an order the record tells
+    truthfully.
+    """
+    world = await crm.world()
+    follow_up_id = await _due(crm, world, kind=ActorKind.AGENT)
+    tokens = await _claim(crm)
+    gate = GatedMessaging()
+    gate.hold_before_stage.clear()
+
+    dispatch = asyncio.create_task(
+        _worker(crm, gate)._dispatch_one(follow_up_id, world.tenant_id, tokens[follow_up_id])
+    )
+    await asyncio.wait_for(gate.reached_stage.wait(), timeout=20)
+
+    async def take_over() -> None:
+        async with crm.session() as colleague:
+            await InboxService(session=colleague, tenant_id=world.tenant_id).take_over(
+                conversation_id=world.conversation_id, actor=world.alice, reason="mine"
+            )
+            await colleague.commit()
+
+    racing = asyncio.create_task(take_over())
+    try:
+        await crm.lock_waiter()
+    finally:
+        gate.hold_before_stage.set()
+    assert await dispatch is True
+    await racing
+
+    row = await crm.follow_up(follow_up_id)
+    assert row.status is FollowUpStatus.SENT
+    assert (await crm.conversation(world)).mode is ConversationMode.HUMAN

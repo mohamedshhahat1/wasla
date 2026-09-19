@@ -408,6 +408,31 @@ async def test_two_colleagues_editing_different_fields_both_stay_verified(
     assert capture.changed_fields == frozenset()
 
 
+async def test_an_edit_and_a_status_move_in_one_unit_of_work_both_land(
+    crm: CrmWorld,
+) -> None:
+    """The lock re-read never discards what the same session already staged.
+
+    Sessions here do not autoflush, and every lock re-reads the row with
+    `populate_existing` - which, unflushed, would overwrite the edit with the
+    database's copy and commit the status move alone.
+    """
+    world = await crm.world()
+    async with crm.session() as session:
+        service = LeadService(session=session, tenant_id=world.tenant_id)
+        await service.update_lead(
+            lead_id=world.lead_id, actor_id=world.alice.id, update=LeadUpdate(name="A. Hassan")
+        )
+        await service.change_status(
+            lead_id=world.lead_id, status=LeadStatus.CONTACTED, actor_id=world.alice.id
+        )
+        await session.commit()
+
+    lead = await crm.lead(world)
+    assert (lead.name, lead.status) == ("A. Hassan", LeadStatus.CONTACTED)
+    assert "name" in lead.human_verified_fields
+
+
 # ------------------------------------------------------------ lead status
 
 
