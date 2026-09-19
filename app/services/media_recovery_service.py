@@ -37,6 +37,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.storage import MediaStorage
 from app.db.models.media import MediaStatus, MessageMedia
+from app.repositories.agent_turn_repository import AgentTurnRepository
 from app.repositories.media_repository import (
     ConversationMediaGate,
     MediaRepository,
@@ -144,6 +145,12 @@ class MediaRecoveryService:
         )
         if remaining:
             return None
+        # Owed in the transaction that made the file terminal, as the worker
+        # does: the caller's enqueue after the commit may be refused, and the
+        # turn must outlive that.
+        await AgentTurnRepository(self._session, tenant_id=tenant_id).owe(
+            conversation_id=conversation_id, trigger_message_id=trigger
+        )
         return AgentJob(
             tenant_id=tenant_id,
             conversation_id=conversation_id,

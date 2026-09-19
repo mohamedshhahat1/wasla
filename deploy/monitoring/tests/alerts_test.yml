@@ -1082,6 +1082,38 @@ tests:
 
   # ================================================================== media
   - interval: 30s
+    name: an owed media release fires when no agent worker takes it up and clears when one does
+    input_series:
+      - series: 'wasla_media_release_owed{job="wasla-api"}'
+        values: "0+0x20 1+0x60 0+0x20"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: MediaReleaseOwed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: MediaReleaseOwed
+        # Owed for ten minutes: not yet the fifteen the rule waits.
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: MediaReleaseOwed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: media
+            exp_annotations:
+              summary: "Replies owed after customer attachments are not being taken up"
+              description: >-
+                One or more conversations had every attachment finished and an agent turn owed, and no agent worker has taken that turn up. The media recovery sweep keeps republishing them; the reply is held until one is consumed. Check that Redis accepts writes (media_recovery.release_failed in the worker log) and that a worker runs the agent kind (WorkerLoopNotBeating).
+              runbook: docs/RUNBOOK.md
+      - eval_time: 50m
+        alertname: MediaReleaseOwed
+        exp_alerts: []
+      - eval_time: 35m
+        # The stranded-file alert reads a different gauge and stays silent.
+        alertname: MediaStranded
+        exp_alerts: []
+
+  - interval: 30s
     name: stranded media fires when it persists and clears when the sweep finishes it
     input_series:
       - series: 'wasla_media_stranded{job="wasla-api"}'

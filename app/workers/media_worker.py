@@ -64,6 +64,7 @@ from app.integrations.openai.client import build_http_client as build_openai_cli
 from app.integrations.openai.transcription import TranscriptionClient
 from app.integrations.whatsapp.client import WhatsAppClient
 from app.integrations.whatsapp.client import build_http_client as build_whatsapp_client
+from app.repositories.agent_turn_repository import AgentTurnRepository
 from app.repositories.media_repository import ConversationMediaGate, MediaRepository
 from app.services.media_reader import MediaReader
 from app.services.media_service import MediaService
@@ -234,9 +235,11 @@ class MediaWorker:
         """Ask an agent to answer, without letting a queue failure undo the read.
 
         Logged rather than raised. Everything the turn needs is committed by
-        now, and a Redis outage that costs the reply must not also cost the
-        transcript by turning a finished job into a retry that re-reads the
-        file at a provider's expense.
+        now - the turn itself included, owed in the transaction that released
+        it - and a Redis outage must not cost the transcript by turning a
+        finished job into a retry that re-reads the file at a provider's
+        expense. The reply is delayed, not lost: `MediaRecoveryWorker`
+        republishes an owed turn no agent worker has taken up.
         """
         try:
             await self._agents.enqueue(job)
@@ -456,6 +459,13 @@ class MediaWorker:
             )
             return None
 
+        # Owed durably, in this transaction, before anything is queued: a
+        # Redis that refuses the job after the commit then delays the reply
+        # rather than losing it, because `MediaRecoveryWorker` republishes any
+        # owed turn no agent worker has taken up.
+        await AgentTurnRepository(session, tenant_id=job.tenant_id).owe(
+            conversation_id=media.conversation_id, trigger_message_id=media.message_id
+        )
         return AgentJob(
             tenant_id=job.tenant_id,
             conversation_id=media.conversation_id,

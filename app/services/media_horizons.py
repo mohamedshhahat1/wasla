@@ -58,4 +58,16 @@ def unclaimed_horizon(settings: Settings) -> timedelta:
     return timedelta(seconds=(reclaim + longest_backoff) * IDEMPOTENT_RETRY.max_attempts)
 
 
-__all__ = ["CLAIM_MARGIN_SECONDS", "claim_lease", "unclaimed_horizon"]
+def release_horizon(settings: Settings) -> timedelta:
+    """How long an owed agent turn may wait for a worker before it is republished.
+
+    The same reasoning as the unclaimed horizon, applied to the other queue: a
+    job still alive somewhere has been claimed, reclaimed and retried within
+    it, so a turn the media release owed that no agent worker has adopted by
+    then has a job nobody is holding. Republishing earlier is harmless - the
+    turn's identity makes a second envelope one turn - but it is noise.
+    """
+    return unclaimed_horizon(settings)
+
+
+__all__ = ["CLAIM_MARGIN_SECONDS", "claim_lease", "release_horizon", "unclaimed_horizon"]

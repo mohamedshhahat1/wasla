@@ -62,7 +62,9 @@ customers.
 | `wasla_unresolved_outbound_messages` | gauge | — | **A state invariant**: sends Meta may have delivered, whose outcome is unknown. |
 | `wasla_oldest_unresolved_outbound_age_seconds` | gauge | — | Whether the oldest is a send in flight or one that broke an hour ago. |
 | `wasla_media_outcomes_total` | counter | `outcome` | How inbound attachments ended: `ready` or one of the media reason tokens (closed vocabulary, MEDIA-15). Decisions and failures are both here; the alert reads only the failure subset. |
-| `wasla_media_recovery_total` | counter | `outcome` | What the stranded-media sweep did: `requeued`, `abandoned`, `release_failed`. |
+| `wasla_media_recovery_total` | counter | `outcome` | What the media recovery sweep did: `requeued`, `abandoned`, `release_failed` (an owed agent turn the queue refused - still owed, retried), `release_recovered` (an owed turn republished after nobody took it up). |
+| `wasla_media_release_owed` | gauge | — | **A state invariant**: agent turns a media release owed that no agent worker took up within the release horizon, so the conversation's reply is held. Should be zero. |
+| `wasla_media_release_owed_oldest_age_seconds` | gauge | — | How long ago the oldest of those was released. Measured from the release, so republishing into a refusing Redis does not reset it. |
 | `wasla_media_stranded` | gauge | — | **A state invariant**: attachments unresolved past the longest a live attempt or queued job can take, so their conversation's reply is held. Should be zero. |
 | `wasla_media_stranded_oldest_age_seconds` | gauge | — | How long the oldest of those has gone without an attempt. |
 | `wasla_media_purge_deletes_owed` | gauge | — | **A state invariant**: object deletes a workspace purge recorded that the store has not confirmed. Zero once every purged workspace's files are gone. |
@@ -176,6 +178,7 @@ line, and transcription was the one paid provider call counted nowhere.
 | Alert | Fires when | Severity |
 |---|---|---|
 | `MediaStranded` | An attachment has stayed stranded past the recovery sweep for 15m | critical |
+| `MediaReleaseOwed` | A turn owed after a conversation's attachments settled has gone untaken for 15m | critical |
 | `MediaProcessingFailureSpike` | >25% of attachments end `FAILED` over 30m, and at least five did | warning |
 | `MediaPurgeDeletesFailing` | A purged workspace's object delete has been owed for six hours | warning |
 | `TranscriptionFailureRate` | >50% of transcriptions fail after their retries, at least three | warning |

@@ -340,10 +340,11 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         ("outcome",),
     ),
     # What the media recovery sweep did with files no attempt was finishing
-    # (MEDIA-03): put back on the queue, given up on, or given up on with the
-    # conversation's turn failing to reach the queue. Three values.
+    # (MEDIA-03): put back on the queue, given up on, an owed agent turn the
+    # queue refused (still owed, retried), or an owed turn republished after
+    # nobody took it up. Four values.
     "wasla_media_recovery_total": (
-        "Stranded attachments the recovery sweep requeued or gave up on.",
+        "Stranded attachments and owed agent turns the media recovery sweep handled.",
         ("outcome",),
     ),
     # Object deletes a workspace purge owed, by how the attempt went
@@ -805,8 +806,10 @@ async def record_media_outcome(outcome: str) -> None:
     await _increment("wasla_media_outcomes_total", {"outcome": label})
 
 
-async def record_media_recovery(*, requeued: int, abandoned: int, release_failed: int) -> None:
-    """One recovery sweep's decisions (MEDIA-03)."""
+async def record_media_recovery(
+    *, requeued: int, abandoned: int, release_failed: int, release_recovered: int = 0
+) -> None:
+    """One recovery sweep's decisions (MEDIA-03), and its owed-turn republishing."""
     if requeued:
         await _increment_by("wasla_media_recovery_total", {"outcome": "requeued"}, requeued)
     if abandoned:
@@ -814,6 +817,10 @@ async def record_media_recovery(*, requeued: int, abandoned: int, release_failed
     if release_failed:
         await _increment_by(
             "wasla_media_recovery_total", {"outcome": "release_failed"}, release_failed
+        )
+    if release_recovered:
+        await _increment_by(
+            "wasla_media_recovery_total", {"outcome": "release_recovered"}, release_recovered
         )
 
 

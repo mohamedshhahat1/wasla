@@ -335,7 +335,8 @@ Without an OpenAI key, documents are still read — extraction needs no provider
 | --- | --- | --- |
 | `wasla_media_outcomes_total{outcome}` | counter | `ready` or a reason token; the failure subset drives `MediaProcessingFailureSpike` |
 | `wasla_media_stranded`, `…_oldest_age_seconds` | gauge (scrape) | above zero for 15 minutes: `MediaStranded` |
-| `wasla_media_recovery_total{outcome}` | counter | `requeued`, `abandoned`, `release_failed` |
+| `wasla_media_recovery_total{outcome}` | counter | `requeued`, `abandoned`, `release_failed` (an owed turn the queue refused; still owed), `release_recovered` (an owed turn republished) |
+| `wasla_media_release_owed`, `…_oldest_age_seconds` | gauge (scrape) | above zero for 15 minutes: `MediaReleaseOwed` |
 | `wasla_media_purge_deletes_owed`, `…_oldest_age_seconds` | gauge (scrape) | owed for six hours: `MediaPurgeDeletesFailing` |
 | `wasla_media_purge_objects_total{outcome}` | counter | `failed` is a store refusing deletes |
 | `wasla_provider_requests_total{operation="transcribe"}` | counter | `TranscriptionFailureRate` |

@@ -900,6 +900,29 @@ groups:
             for media_recovery.sweep_failed in its logs.
           runbook: docs/RUNBOOK.md
 
+      - alert: MediaReleaseOwed
+        # Every file is final and the agent turn is recorded as owed, but no
+        # agent worker has taken it up within the release horizon. The media
+        # recovery sweep republishes these every minute, so one that persists
+        # is a queue still refusing the job or no agent worker consuming it.
+        # Measured from the release, so republishing into a refusing Redis
+        # does not reset it.
+        expr: max(wasla_media_release_owed) > 0
+        for: 15m
+        labels:
+          severity: critical
+          component: media
+        annotations:
+          summary: "Replies owed after customer attachments are not being taken up"
+          description: >-
+            One or more conversations had every attachment finished and an
+            agent turn owed, and no agent worker has taken that turn up. The
+            media recovery sweep keeps republishing them; the reply is held
+            until one is consumed. Check that Redis accepts writes
+            (media_recovery.release_failed in the worker log) and that a worker
+            runs the agent kind (WorkerLoopNotBeating).
+          runbook: docs/RUNBOOK.md
+
       - alert: MediaProcessingFailureSpike
         # Attachments that ended because something broke, against all that
         # ended. Decisions - oversize, unsupported, unreadable, a suspended

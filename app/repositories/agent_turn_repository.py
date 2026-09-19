@@ -36,6 +36,13 @@ DEFAULT_CLAIM_SECONDS = 120.0
 #: still remembers writing in.
 STRANDED_TURN_AFTER: Final = timedelta(minutes=15)
 
+#: Who holds a turn the media release has owed and no agent worker has yet
+#: taken up. Not a worker id - nothing runs under it - but the mark that makes
+#: the obligation findable: the first agent worker to reach the turn adopts it
+#: and writes its own id here, so a turn still carrying this one is a turn whose
+#: job never arrived.
+MEDIA_RELEASE_HOLDER: Final = "media-release"
+
 
 class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
     """The durable identity of one agent turn, within one workspace."""
@@ -107,6 +114,53 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
             moment=moment,
             expires=expires,
         )
+
+    async def owe(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        trigger_message_id: uuid.UUID,
+        now: datetime | None = None,
+    ) -> bool:
+        """Record that this turn is owed, in the transaction that decided it.
+
+        The media release decides a conversation is answerable in the same
+        transaction that makes its last file terminal, and until this existed
+        the only record of that decision was a job put on Redis after the
+        commit. A refused enqueue lost the turn: the file was final, nothing
+        was unresolved, and nothing anywhere said a reply was owed.
+
+        Staged as the turn itself rather than as a second ledger, because the
+        turn already carries the identity that makes it happen once. `CLAIMED`
+        with a lease that has already lapsed is exactly "nothing has run this
+        and anybody may": the agent worker's `claim` finds the row, adopts it
+        through its existing expired-lease branch, and proceeds as it would
+        have on a fresh insert. `OwedReleaseSweep` finds the ones nobody came
+        for.
+
+        Returns whether this call recorded the obligation. A turn already there
+        for this message is left untouched: it is either owed already or
+        somebody's, and neither is improved by writing over it.
+        """
+        moment = now or datetime.now(UTC)
+        statement = (
+            insert(AgentTurn)
+            .values(
+                id=uuid.uuid4(),
+                tenant_id=self._tenant_id,
+                conversation_id=conversation_id,
+                trigger_message_id=trigger_message_id,
+                state=AgentTurnState.CLAIMED,
+                claimed_by=MEDIA_RELEASE_HOLDER,
+                claim_expires_at=moment,
+            )
+            .on_conflict_do_nothing(
+                constraint="uq_agent_turns_tenant_id_trigger_message_id",
+            )
+            .returning(AgentTurn.id)
+        )
+        recorded: uuid.UUID | None = (await self._session.execute(statement)).scalar_one_or_none()
+        return recorded is not None
 
     async def id_for(self, *, trigger_message_id: uuid.UUID) -> uuid.UUID | None:
         """This turn's durable id, for the records its tools will write.
@@ -266,9 +320,76 @@ class EngagedTurnSweep(BaseRepository[AgentTurn]):
         return int(count), max((datetime.now(UTC) - oldest).total_seconds(), 0.0)
 
 
+class OwedReleaseSweep(BaseRepository[AgentTurn]):
+    """Turns the media release owed that no agent worker has taken up.
+
+    Unscoped, like `EngagedTurnSweep`: the caller is the media recovery loop
+    and the metrics exposition, both platform-wide. What makes a row one of
+    these is `MEDIA_RELEASE_HOLDER` still in `claimed_by` - the first agent
+    worker to reach the turn replaces it - so the set is exactly the owed
+    turns whose job was refused by Redis, lost with a crashed process, or is
+    still waiting behind a backlog.
+
+    `claim_expires_at` doubles as "last published": the lease on these rows
+    has lapsed from the moment they were written, so the column carries no
+    other meaning, and stamping it on each publish is what keeps one
+    obligation from being published every pass while its job is merely
+    queued.
+    """
+
+    model = AgentTurn
+
+    def _owed(self) -> ColumnElement[bool]:
+        return (AgentTurn.state == AgentTurnState.CLAIMED) & (
+            AgentTurn.claimed_by == MEDIA_RELEASE_HOLDER
+        )
+
+    async def claim_owed(
+        self, *, published_before: datetime, now: datetime, limit: int = 100
+    ) -> list[AgentTurn]:
+        """Take the owed turns not published since `published_before`, and stamp them.
+
+        `SKIP LOCKED`, and stamped in the caller's transaction, so two sweeps
+        divide the rows between them and a row one of them has just published
+        is not old enough for the other. The caller commits, then publishes -
+        a publish that fails, or a process that dies before it, leaves the row
+        stamped and owed, and the pass after the horizon tries again.
+        """
+        rows = await self._all(
+            self._select()
+            .where(self._owed(), AgentTurn.claim_expires_at < published_before)
+            .order_by(AgentTurn.claim_expires_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        for row in rows:
+            row.claim_expires_at = now
+        await self._session.flush()
+        return rows
+
+    async def backlog(self, *, older_than: datetime, now: datetime) -> tuple[int, float]:
+        """How many owed turns were released before `older_than`, and the oldest's age.
+
+        Measured from when the release was owed, not from the last publish:
+        a sweep republishing into a Redis that keeps refusing re-stamps every
+        pass, and the reading must keep climbing through exactly that.
+        """
+        rows = await self._session.execute(
+            select(func.count(AgentTurn.id), func.min(AgentTurn.created_at)).where(
+                self._owed(), AgentTurn.created_at < older_than
+            )
+        )
+        count, oldest = rows.one()
+        if not count or oldest is None:
+            return 0, 0.0
+        return int(count), max((now - oldest).total_seconds(), 0.0)
+
+
 __all__ = [
     "DEFAULT_CLAIM_SECONDS",
+    "MEDIA_RELEASE_HOLDER",
     "STRANDED_TURN_AFTER",
     "AgentTurnRepository",
     "EngagedTurnSweep",
+    "OwedReleaseSweep",
 ]

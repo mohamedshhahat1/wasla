@@ -92,6 +92,26 @@ LIMIT 50;
 
 **Safe action.** Fix the worker or Redis; the sweep then drains the backlog on its own. Do not set rows to `ready` by hand - a file marked ready with no transcript is answered as if it had been read. A row whose inbound event is still `received` is inbound recovery's, not this sweep's (see "Inbound stored but never answered").
 
+### Replies owed after attachments are not being taken up
+
+**Alert:** `MediaReleaseOwed`. **Metric:** `wasla_media_release_owed`, `wasla_media_release_owed_oldest_age_seconds`, `wasla_media_recovery_total{outcome="release_failed"}`.
+
+**Symptom.** Every attachment in a conversation reached a final state, the agent turn it was owed is recorded, and no agent worker has taken that turn up within the release horizon. The customer is waiting for a reply.
+
+**Query.**
+
+```sql
+SELECT tenant_id, conversation_id, trigger_message_id, created_at, claim_expires_at AS last_published
+FROM agent_turns
+WHERE state = 'claimed' AND claimed_by = 'media-release'
+ORDER BY created_at
+LIMIT 50;
+```
+
+**Likely causes.** The media release records the turn in the transaction that finishes the last file, then queues the agent job; if Redis refuses that job, or the process dies first, the turn stays owed. The `media_recovery` loop republishes each owed turn once per release horizon (`media_recovery.releases_republished`, `outcome="release_recovered"`). A reading that persists means Redis is still refusing (`media_recovery.release_failed` in the worker log), no worker runs the `agent` kind (`WorkerLoopNotBeating`), or no worker runs the `media` kind to republish.
+
+**Safe action.** Fix Redis or the workers; the sweep republishes on its own and the agent worker answers each turn once - a turn is keyed on its trigger message, so a republished job that races an original that was only slow is still one reply. Do not delete these rows or mark them `completed` by hand: either one silences a customer who is owed an answer.
+
 ### Customer attachments are failing
 
 **Alert:** `MediaProcessingFailureSpike`. **Metric:** `wasla_media_outcomes_total{outcome}`.

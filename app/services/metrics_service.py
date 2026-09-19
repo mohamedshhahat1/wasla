@@ -51,6 +51,7 @@ from app.db.session import Database
 from app.repositories.agent_turn_repository import (
     STRANDED_TURN_AFTER,
     EngagedTurnSweep,
+    OwedReleaseSweep,
 )
 from app.repositories.conversation_repository import UnresolvedOutboundDirectory
 from app.repositories.knowledge_repository import IndexingBacklog, IndexingSweep
@@ -58,7 +59,7 @@ from app.repositories.media_purge_repository import MediaPurgeLedger
 from app.repositories.media_repository import PlatformMediaRepository
 from app.repositories.whatsapp_repository import InboundEventSweep
 from app.services.backup_status import read_backup_status
-from app.services.media_horizons import claim_lease, unclaimed_horizon
+from app.services.media_horizons import claim_lease, release_horizon, unclaimed_horizon
 from app.workers.heartbeat import heartbeat_key
 from app.workers.inbound_recovery import unprocessed_since
 from app.workers.ingestion_recovery import unindexed_since
@@ -184,6 +185,13 @@ class MetricsService:
         a sweep that is not running or cannot finish, and every such file is a
         conversation whose reply is held.
 
+        **Agent turns the media release owed that nobody took up**. Every file
+        is final, the turn is recorded, and no agent worker has adopted it
+        within the release horizon - Redis refused the job, or a process died
+        before publishing it. The recovery sweep republishes these each pass,
+        so a reading that stays above zero is a queue still refusing, or no
+        agent worker consuming, and each is a conversation whose reply is held.
+
         **Object deletes a workspace purge still owes** (MEDIA-07). A key is
         owed until the store confirms the object is gone; the age of the
         oldest is what says a store has been refusing deletes, as against a
@@ -201,11 +209,15 @@ class MetricsService:
             async with database.session() as session:
                 owed, owed_age = await MediaPurgeLedger(session).backlog(now=moment)
                 stranded: tuple[int, float] | None = None
+                releases: tuple[int, float] | None = None
                 if self._settings is not None:
                     stranded = await PlatformMediaRepository(session).stranded_backlog(
                         claimed_before=moment - claim_lease(self._settings),
                         created_before=moment - unclaimed_horizon(self._settings),
                         now=moment,
+                    )
+                    releases = await OwedReleaseSweep(session).backlog(
+                        older_than=moment - release_horizon(self._settings), now=moment
                     )
         except Exception:
             logger.warning(
@@ -238,6 +250,21 @@ class MetricsService:
                         "wasla_media_stranded_oldest_age_seconds",
                         "How long the oldest stranded attachment has gone without an attempt.",
                         stranded[1],
+                    ),
+                ]
+            )
+        if releases is not None:
+            gauges.extend(
+                [
+                    (
+                        "wasla_media_release_owed",
+                        "Agent turns released by media that no agent worker took up in time.",
+                        float(releases[0]),
+                    ),
+                    (
+                        "wasla_media_release_owed_oldest_age_seconds",
+                        "How long ago the oldest of those turns was released.",
+                        releases[1],
                     ),
                 ]
             )

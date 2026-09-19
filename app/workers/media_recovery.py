@@ -11,7 +11,12 @@ rows are taken with `SKIP LOCKED`, so they divide the work.
 
 Commit, then enqueue - never the reverse (ADR-092). An enqueue that fails after
 the commit costs nothing permanent: a requeued file is still unclaimed and the
-next pass finds it again; a released conversation's turn is logged and counted.
+next pass finds it again; a released conversation's turn was owed durably in the
+transaction that released it (`AgentTurnRepository.owe`), and this loop
+republishes every owed turn no agent worker has taken up within the release
+horizon - whichever release point owed it, the worker's or this sweep's.
+Republishing is safe to repeat: the turn is keyed on its trigger message, so
+any number of envelopes for it are one turn and one reply.
 """
 
 from __future__ import annotations
@@ -26,9 +31,11 @@ from app.core.redis import RedisClient
 from app.core.storage import MediaStorage, build_media_storage
 from app.core.telemetry import record_media_recovery
 from app.db.session import Database
+from app.repositories.agent_turn_repository import OwedReleaseSweep
+from app.services.media_horizons import release_horizon
 from app.services.media_recovery_service import MediaRecoveryPass, MediaRecoveryService
 from app.workers.media_queue import MediaQueue
-from app.workers.queue import AgentQueue
+from app.workers.queue import AgentJob, AgentQueue
 
 logger = get_logger(__name__)
 
@@ -101,23 +108,72 @@ class MediaRecoveryWorker:
                     extra={"event": "media_recovery.requeue_failed", "media_id": str(job.media_id)},
                 )
         for release in outcome.releases:
-            try:
-                await self._agents.enqueue(release)
-            except Exception:
+            if not await self._publish(release):
                 release_failed += 1
-                logger.error(
-                    "media_recovery.release_failed",
-                    extra={
-                        "event": "media_recovery.release_failed",
-                        "conversation_id": str(release.conversation_id),
-                    },
-                )
+
+        release_recovered, republish_failed = await self._republish_owed(moment)
         await record_media_recovery(
             requeued=len(outcome.requeued),
             abandoned=outcome.abandoned,
-            release_failed=release_failed,
+            release_failed=release_failed + republish_failed,
+            release_recovered=release_recovered,
         )
         return outcome
+
+    async def _republish_owed(self, moment: datetime) -> tuple[int, int]:
+        """Publish again every owed turn no agent worker has taken up.
+
+        Its own transaction, committed before anything is published, for the
+        same reason as the sweep above: the stamp is what stops the next pass
+        publishing the same turn while this job is still queued, and a process
+        that dies between the commit and the publish leaves the turn owed and
+        stamped, found again one horizon later.
+        """
+        async with self._database.session() as session:
+            owed = await OwedReleaseSweep(session).claim_owed(
+                published_before=moment - release_horizon(self._settings), now=moment
+            )
+            jobs = [
+                AgentJob(
+                    tenant_id=turn.tenant_id,
+                    conversation_id=turn.conversation_id,
+                    trigger_message_id=turn.trigger_message_id,
+                )
+                for turn in owed
+            ]
+            await session.commit()
+
+        recovered = failed = 0
+        for job in jobs:
+            if await self._publish(job):
+                recovered += 1
+            else:
+                failed += 1
+        if jobs:
+            logger.warning(
+                "media_recovery.releases_republished",
+                extra={
+                    "event": "media_recovery.releases_republished",
+                    "republished": recovered,
+                    "failed": failed,
+                },
+            )
+        return recovered, failed
+
+    async def _publish(self, job: AgentJob) -> bool:
+        """Queue one owed turn; a refusal leaves it owed, not lost."""
+        try:
+            await self._agents.enqueue(job)
+        except Exception:
+            logger.error(
+                "media_recovery.release_failed",
+                extra={
+                    "event": "media_recovery.release_failed",
+                    "conversation_id": str(job.conversation_id),
+                },
+            )
+            return False
+        return True
 
 
 __all__ = ["POLL_SECONDS", "MediaRecoveryWorker"]
