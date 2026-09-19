@@ -28,7 +28,7 @@ from app.db.models.email import OutboundEmail
 from app.db.models.password_reset import PasswordResetToken
 from app.db.models.user import User
 from app.services.email_service import open_email_context
-from app.services.email_templates import EmailTemplate
+from app.services.email_templates import EmailTemplate, render
 from app.services.password_reset_service import PasswordResetService
 from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY, as_redis_client
 
@@ -174,6 +174,53 @@ async def test_requesting_a_reset_queues_one_email(
     assert len(queued) == 1
     assert queued[0].recipient == EMAIL
     assert queued[0].user_id == user.id
+
+
+async def test_hostile_request_hosts_cannot_poison_queued_reset_link(
+    http: AsyncClient,
+    db_session: AsyncSession,
+    reset_settings: Settings,
+    user: User,
+) -> None:
+    response = await http.post(
+        f"{API}/auth/password-reset/request",
+        json={"email": user.email},
+        headers={
+            "Host": "attacker.example",
+            "X-Forwarded-Host": "forwarded.attacker.example",
+            "Forwarded": "host=standard.attacker.example;proto=http",
+            "X-Forwarded-Proto": "http",
+        },
+    )
+    assert response.status_code == 202
+
+    queued = (
+        (
+            await db_session.execute(
+                select(OutboundEmail).where(
+                    OutboundEmail.template == EmailTemplate.PASSWORD_RESET.value
+                )
+            )
+        )
+        .scalars()
+        .one()
+    )
+    context = open_email_context(queued, reset_settings)
+    rendered = render(
+        EmailTemplate.PASSWORD_RESET,
+        context,
+        public_url=reset_settings.app_public_url or "",
+    )
+    expected = f"https://app.example.com/reset-password?token={context['token']}"
+    assert expected in rendered.text
+    assert expected.replace("&", "&amp;") in rendered.html
+    for attacker_host in (
+        "attacker.example",
+        "forwarded.attacker.example",
+        "standard.attacker.example",
+    ):
+        assert attacker_host not in rendered.text
+        assert attacker_host not in rendered.html
 
 
 async def test_the_response_never_contains_the_token(

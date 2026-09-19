@@ -399,9 +399,22 @@ class GoogleIdTokenVerifier:
 
         # From here the signature is verified, so - and only so - the claims can
         # be read. `aud` and `exp` were checked inside `_decode`.
+        self._check_audience_shape(payload)
         self._check_issuer(payload)
         self._check_nonce(payload, expected=nonce)
         return self._extract(payload)
+
+    def _check_audience_shape(self, payload: dict[str, Any]) -> None:
+        """Trust only this client, including when PyJWT accepts an audience array.
+
+        PyJWT accepts an array containing our client ID. OpenID Connect also
+        requires trust in every additional audience; Wasla has no such trust
+        list. An ``azp`` claim, when present, must name this client.
+        """
+        if payload.get("aud") != self._client_id:
+            raise GoogleTokenInvalidError("wrong_audience")
+        if "azp" in payload and payload["azp"] != self._client_id:
+            raise GoogleTokenInvalidError("wrong_authorized_party")
 
     @staticmethod
     def _header(id_token: str) -> dict[str, Any]:
