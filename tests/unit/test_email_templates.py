@@ -29,6 +29,7 @@ CONTEXTS: dict[EmailTemplate, dict[str, str]] = {
     EmailTemplate.WORKSPACE_INVITATION: {"workspace_name": "Acme", "token": "tok-1"},
     EmailTemplate.PASSWORD_RESET: {"token": "tok-2"},
     EmailTemplate.PASSWORD_CHANGED: {},
+    EmailTemplate.REGISTRATION_ATTEMPT: {},
     EmailTemplate.SESSIONS_REVOKED: {},
     EmailTemplate.ACCOUNT_DISABLED: {},
     EmailTemplate.ACCOUNT_ENABLED: {},

@@ -34,6 +34,7 @@ class EmailTemplate(StrEnum):
     WORKSPACE_INVITATION = "workspace_invitation"
     PASSWORD_RESET = "password_reset"  # noqa: S105 - a template name
     PASSWORD_CHANGED = "password_changed"  # noqa: S105 - a template name
+    REGISTRATION_ATTEMPT = "registration_attempt"
     SESSIONS_REVOKED = "sessions_revoked"
     ACCOUNT_DISABLED = "account_disabled"
     ACCOUNT_ENABLED = "account_enabled"
@@ -69,6 +70,7 @@ _SUBJECTS: Final[dict[EmailTemplate, str]] = {
     EmailTemplate.WORKSPACE_INVITATION: "You have been invited to a workspace on Wasla",
     EmailTemplate.PASSWORD_RESET: "Reset your Wasla password",
     EmailTemplate.PASSWORD_CHANGED: "Your Wasla password was changed",
+    EmailTemplate.REGISTRATION_ATTEMPT: "A registration was attempted with your Wasla email",
     EmailTemplate.SESSIONS_REVOKED: "You were signed out of every Wasla session",
     EmailTemplate.ACCOUNT_DISABLED: "Your Wasla account has been suspended",
     EmailTemplate.ACCOUNT_ENABLED: "Your Wasla account has been restored",
@@ -87,6 +89,7 @@ _REQUIRED_KEYS: Final[dict[EmailTemplate, frozenset[str]]] = {
     EmailTemplate.WORKSPACE_INVITATION: frozenset({"workspace_name", "token"}),
     EmailTemplate.PASSWORD_RESET: frozenset({"token"}),
     EmailTemplate.PASSWORD_CHANGED: frozenset(),
+    EmailTemplate.REGISTRATION_ATTEMPT: frozenset(),
     EmailTemplate.SESSIONS_REVOKED: frozenset(),
     EmailTemplate.ACCOUNT_DISABLED: frozenset(),
     EmailTemplate.ACCOUNT_ENABLED: frozenset(),
@@ -211,6 +214,23 @@ def render(
                 "changed. Wasla will never ask for your password by email.",
             ],
             (link, "Reset your password"),
+        )
+    elif template is EmailTemplate.REGISTRATION_ATTEMPT:
+        text = (
+            "Someone attempted to register a Wasla account with this email address. "
+            "You already have an account, and nothing about it was changed.\n\n"
+            "If this was you, sign in or use password reset from the Wasla sign-in page. "
+            "If it was not, you can ignore this notice."
+        )
+        html_body = _layout(
+            subject,
+            [
+                "Someone attempted to register a Wasla account with this email address. "
+                "You already have an account, and nothing about it was changed.",
+                "If this was you, sign in or use password reset from the Wasla sign-in "
+                "page. If it was not, you can ignore this notice.",
+            ],
+            None,
         )
     elif template is EmailTemplate.PASSWORD_CHANGED:
         text = (

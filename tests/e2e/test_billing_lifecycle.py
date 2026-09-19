@@ -191,6 +191,12 @@ async def _mark_registered_account_verified(engine: AsyncEngine, email: str) -> 
         )
 
 
+async def _login_after_signup(client: httpx.AsyncClient, email: str) -> dict[str, str]:
+    response = await client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD})
+    assert response.status_code == 200, response.text
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
 async def _forget(engine: AsyncEngine, *, slug: str, email: str, plan_code: str) -> None:
     """Remove what the server committed.
 
@@ -299,9 +305,9 @@ async def test_paying_a_plan_settles_the_invoice_and_moves_the_entitlements(
                     "workspace_slug": slug,
                 },
             )
-            assert registered.status_code == 201
+            assert registered.status_code == 202
             await _mark_registered_account_verified(scratch_engine, email)
-            auth = {"Authorization": f"Bearer {registered.json()['access_token']}"}
+            auth = await _login_after_signup(client, email)
 
             # The plan cannot simply be asked for (ADR-059). A real
             # authorization decision happens first - this token is a workspace
@@ -398,7 +404,7 @@ async def test_a_declined_payment_leaves_the_workspace_exactly_as_it_was(
             _serving(prepared_database) as base_url,
             httpx.AsyncClient(base_url=base_url, timeout=30) as client,
         ):
-            registered = await client.post(
+            await client.post(
                 "/api/v1/auth/register",
                 json={
                     "email": email,
@@ -408,7 +414,7 @@ async def test_a_declined_payment_leaves_the_workspace_exactly_as_it_was(
                 },
             )
             await _mark_registered_account_verified(scratch_engine, email)
-            auth = {"Authorization": f"Bearer {registered.json()['access_token']}"}
+            auth = await _login_after_signup(client, email)
             # No plan selection: a priced plan is only ever granted by
             # settlement, so the checkout below is the whole of the request.
             checkout = (
@@ -476,7 +482,7 @@ async def test_a_forged_callback_cannot_settle_anything_over_a_real_socket(
             _serving(prepared_database) as base_url,
             httpx.AsyncClient(base_url=base_url, timeout=30) as client,
         ):
-            registered = await client.post(
+            await client.post(
                 "/api/v1/auth/register",
                 json={
                     "email": email,
@@ -486,7 +492,7 @@ async def test_a_forged_callback_cannot_settle_anything_over_a_real_socket(
                 },
             )
             await _mark_registered_account_verified(scratch_engine, email)
-            auth = {"Authorization": f"Bearer {registered.json()['access_token']}"}
+            auth = await _login_after_signup(client, email)
             # No plan selection: a priced plan is only ever granted by
             # settlement, so the checkout below is the whole of the request.
             checkout = (
@@ -586,7 +592,7 @@ async def test_a_retried_callback_settles_the_invoice_once(
             _serving(prepared_database) as base_url,
             httpx.AsyncClient(base_url=base_url, timeout=30) as client,
         ):
-            registered = await client.post(
+            await client.post(
                 "/api/v1/auth/register",
                 json={
                     "email": email,
@@ -596,7 +602,7 @@ async def test_a_retried_callback_settles_the_invoice_once(
                 },
             )
             await _mark_registered_account_verified(scratch_engine, email)
-            auth = {"Authorization": f"Bearer {registered.json()['access_token']}"}
+            auth = await _login_after_signup(client, email)
             # No plan selection: a priced plan is only ever granted by
             # settlement, so the checkout below is the whole of the request.
             checkout = (

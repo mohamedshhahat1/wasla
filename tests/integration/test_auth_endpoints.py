@@ -136,18 +136,14 @@ def authenticated(app: FastAPI, user: User, workspace: WorkspaceContext) -> Curr
     return current
 
 
-async def test_registration_returns_a_session_and_the_new_workspace(
+async def test_registration_returns_only_a_generic_accepted_response(
     client: AsyncClient, service: StubAuthService
 ) -> None:
     response = await client.post("/api/v1/auth/register", json=REGISTRATION)
 
-    assert response.status_code == 201
-    body = response.json()
-    assert body["access_token"] == "access-value"
-    assert body["refresh_token"] == "refresh-value"
-    assert body["token_type"] == "bearer"
-    assert body["active_workspace"]["slug"] == "acme"
-    assert body["active_workspace"]["role"] == "tenant_owner"
+    assert response.status_code == 202
+    assert response.json() == {"status": "accepted"}
+    assert service.calls[0][0] == "register"
 
 
 async def test_a_short_password_never_reaches_the_service(

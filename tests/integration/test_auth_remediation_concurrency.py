@@ -90,7 +90,7 @@ async def _client(database_url: str, *, email: bool = True) -> AsyncIterator[Asy
         ("space.race@example.com", " space.race@example.com "),
     ],
 )
-async def test_concurrent_duplicate_registration_is_created_and_conflict(
+async def test_concurrent_duplicate_registration_is_created_with_matching_public_answers(
     prepared_database: str,
     monkeypatch: pytest.MonkeyPatch,
     first_email: str,
@@ -129,7 +129,7 @@ async def test_concurrent_duplicate_registration_is_created_and_conflict(
             register(first_email, slugs[0]),
             register(second_email, slugs[1]),
         )
-        assert sorted(outcomes) == [201, 409]
+        assert sorted(outcomes) == [202, 202]
 
         async with maker() as session:
             user_count = await session.scalar(
@@ -165,7 +165,7 @@ async def test_concurrent_duplicate_registration_is_created_and_conflict(
                     .join(User)
                     .where(User.email == canonical)
                 )
-                == 1
+                == 2
             )
     finally:
         async with maker() as cleanup:
@@ -210,7 +210,7 @@ async def test_concurrent_workspace_slug_registration_is_controlled(
     maker = database.session_factory
     try:
         outcomes = await asyncio.gather(*(register(email) for email in emails))
-        assert sorted(outcomes) == [201, 409]
+        assert sorted(outcomes) == [202, 409]
         async with maker() as session:
             assert (
                 await session.scalar(
