@@ -265,14 +265,15 @@ All conversation routes are available to any member of the workspace. Restrictin
 | POST | `/api/v1/conversations/{conversation_id}/messages/template` | Send an approved template (`201`) |
 | POST | `/api/v1/conversations/{conversation_id}/messages/media` | Send an attachment, multipart (`201`) |
 | GET | `/api/v1/conversations/{conversation_id}/media/{media_id}` | Download a stored attachment |
-| POST | `/api/v1/conversations/{conversation_id}/mode` | Switch between AI and human handling |
+| POST | `/api/v1/conversations/{conversation_id}/mode` | Take over (you become the owner) or release to the AI |
 | POST | `/api/v1/conversations/{conversation_id}/priority` | Set priority by hand |
-| POST | `/api/v1/conversations/{conversation_id}/assignment` | Assign, or clear the assignment |
+| POST | `/api/v1/conversations/{conversation_id}/assignment` | Assign or clear; requires `expected_assigned_to_id` (`409 stale_assignment` if stale) |
 | POST | `/api/v1/conversations/{conversation_id}/close` | Close the conversation |
 | POST | `/api/v1/conversations/{conversation_id}/reopen` | Reopen it |
 
 Four behaviours worth knowing before integrating:
 
+- **Ownership writes are conditional.** Assignment needs the owner you are replacing as `expected_assigned_to_id` (the `assigned_to_id` you read; null is a value) and answers `409` with code `stale_assignment` if somebody changed it first. Taking over a conversation that is already human changes nothing and returns it as it is. See [CRM.md](CRM.md).
 - **Free text is only accepted inside the 24-hour service window.** Outside it, Meta accepts approved templates only, so the free-text route answers `422` and the template route still works. Every conversation read includes `service_window_open`, so a client can disable its composer instead of discovering the rule by failing a send.
 - **A rejected send answers `201`, with the message in `failed` state.** The message row is written before Meta is called, and a rejection is recorded on that row. Raising instead would roll the request back and destroy the only evidence the attempt was made. A missing platform credential does raise `503`, because nothing was attempted. Callers should read `status` rather than relying on the response code.
 
@@ -349,7 +350,8 @@ Listing filters by `status` (repeatable), `conversation_id` and `lead_id`, paged
 
 Four behaviours worth knowing:
 
-- **Supply exactly one of `delay_minutes` or `scheduled_at`.** Both, or neither, answers `422`. Accepting both would leave the server silently choosing.
+- **Supply exactly one of `delay_minutes` or `scheduled_at`.** Both, or neither, answers `422`. Accepting both would leave the server silently choosing. `scheduled_at` must carry a UTC offset; a naive time is `422`.
+- **A follow-up already being sent cannot be changed.** Rescheduling or cancelling it answers `409` with code `dispatch_in_progress`; the row then ends `sent` or `failed`. `lead_id` must be this workspace's lead of the conversation's customer (another workspace's or a nonexistent one is `404`, another customer's `422`).
 - **Supply a `body`, a template, or both.** A template needs both `template_name` and `template_language`; half a template answers `422`.
 - **Scheduling a second follow-up on one conversation replaces the first.** It answers `201` either way, and there is no route that edits one in place.
 - **Cancelling one already sent or cancelled succeeds and changes nothing.** Losing that race is not the caller's mistake.

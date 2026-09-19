@@ -439,6 +439,9 @@ The activity log carries the previous value because the protection is not suffic
 Consequences:
 An extra array column and an activity row per change — the log grows faster than the leads do, which is the expected cost of an audit trail. A person who typed a value wrongly must correct it themselves; the AI will not fix it for them. Extraction that is refused is recorded rather than silent, so the skip is visible in the timeline instead of looking like the model never tried.
 
+Addendum (2026-09-19, CRM-06, PD-CRM-7):
+The rule held in sequence and not under concurrency. An extraction applied over a correction a colleague committed while the tool was running, and two colleagues editing different fields each rewrote `human_verified_fields` whole, so one field lost its protection and the next extraction overwrote it. Both paths now take the lead's row lock and re-read the lead before applying anything: the model's values are composed with no lock held and applied against the lead as committed, and a person's verified fields are a union with the committed list. Human verification permanently outranks AI until a person changes or clears the field. See ADR-111.
+
 ## ADR-022 — Follow-ups Are Polled From PostgreSQL, Not Queued in Redis
 
 Date:
@@ -5276,6 +5279,16 @@ would pass. A last test runs the migration's own six counting queries against a
 populated schema, so the code that guards a deployment at three in the morning
 has been executed at least once.
 
+**Addendum (2026-09-19, CRM-01).** The premise that no API path builds a
+crossed row was false for `follow_ups.lead_id`: `POST /follow-ups` stored another
+workspace's lead and answered 201, and a nonexistent id answered 409 - a
+cross-tenant reference and an existence oracle. Migration 0068 makes the CRM
+relations composite as well (follow-up to lead and conversation, lead to contact
+and conversation, note and activity to lead; `docs/AUTHORIZATION.md` §6.19), with
+`ON DELETE SET NULL (column)` for the nullable ones so the tenant is never nulled
+with the reference. The lesson generalises: a relation whose child id can arrive
+in a request body is not "defence in depth" territory, and belongs in the set.
+
 ---
 
 ## ADR-101 — Inbound Is Attributed To Who Held The Number, Not Who Holds It
@@ -5660,3 +5673,61 @@ sentiment write is what keeps that case safe meanwhile.
 8. A workspace purge writes every key it removes to `media_purge_objects` in the deleting statement; rows are removed only when the store confirms the delete, and keys whose upload was mid-write wait out the upload grace.
 
 **Consequences.** A worker that dies mid-download delays that file until the claim lease (330 s by default) passes. A failed file stays failed; the customer is answered and can resend. PDFs over 300 KB are kept but not read. The production Meta host list is a deployment verification item (DV-1), changed by configuration rather than release.
+
+## ADR-111 — CRM Ownership, Lead And Follow-Up Transitions Are Judged Against The Committed Row
+
+**Context.** The CRM/handoff audit (`crm-c4h7`) found not one lock, version or
+state precondition on any human CRM write. The customer-facing guarantee held -
+no stale AI message reached a customer after a takeover - but the record did
+not: stale automation overwrote a colleague's handoff reason and counted a
+second handoff (CRM-02/03); two colleagues self-assigning were both told they
+owned the customer and a stale unassign erased a newer reassignment (CRM-04);
+human-verified lead data was overwritten concurrently (CRM-06); a won deal went
+back into the pipeline (CRM-07); a reschedule inside the sweep's lease was sent
+at the old time with the new text, and a cancel racing the send answered
+"cancelled" for a delivered message (CRM-09/10); an assignment could land on a
+member whose removal was committing (CRM-11); and none of the ownership changes
+left an audit row (CRM-05).
+
+**Decision.**
+
+1. **One transition primitive per aggregate.** A conversation, lead or
+   follow-up transition locks its row (`FOR NO KEY UPDATE`, so the `FOR KEY
+   SHARE` every child insert takes through a foreign key never queues behind
+   it), re-reads it with `populate_existing` after flushing what the session
+   has staged (sessions do not autoflush), and decides from that. The loser of
+   a race is judged against the winner's result.
+2. **Every mode writer goes through `InboxService`.** A colleague's takeover
+   (`take_over`: assigns the taker), automation (`hand_off`: sentiment, the
+   handoff tool, empty response, exhausted allowance - never assigns) and the
+   release. `AI -> HUMAN` happens only if the row is still `AI`; the reason is
+   written by that winner only; `HUMAN -> HUMAN` changes nothing.
+3. **Only the winner writes side effects** - the analytics handoff, the
+   ownership audit row, the agent's handoff audit row, the follow-up
+   cancellation, the `handed_off` turn outcome. A losing tool call is refused;
+   a losing sentiment reading records that it escalated nothing; the turn ends
+   `suppressed_human`.
+4. **Ownership writes carry the expected owner** (`expected_assigned_to_id`,
+   required, null a value) and a mismatch is 409 `stale_assignment`. A lead
+   status move may carry `expected_status` (409 `stale_lead_status`). The
+   precondition is the smallest explicit contract the API already exposed:
+   `assigned_to_id` is on every read, so no ownership version column exists.
+5. **Assignment and removal serialise** through the workspace row (key-share)
+   and the assignee's membership (share); a removal unassigns the member's
+   conversations and leads and cancels their pending reminders in its own
+   transaction.
+6. **A follow-up claim is its own columns** (`claim_token`, `claimed_until`). A
+   worker sends only while the row carries its token; reschedule and cancel
+   clear it; once the send intent is committed they are refused with 409
+   `dispatch_in_progress`, so the row's final state is what happened.
+7. **Ownership changes are audited** in `audit_logs` with identifiers and
+   states only - never the reason text or customer content.
+
+**Consequences.** A takeover or assignment can wait, in database time, behind
+another transition on the same row; no lock is held across a provider call,
+because every one goes through `released`, which commits first. The follow-up
+sweep share-locks the conversation between its mode read and the send intent,
+so a takeover in that window waits for the intent and then finds a committed
+send. Clients must send `expected_assigned_to_id` and handle 409s; that UI
+behaviour is a deployment verification item. The residual race between the
+AI's last read and Meta's socket (CRM-17) is unchanged and remains accepted.

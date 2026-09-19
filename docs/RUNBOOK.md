@@ -1262,6 +1262,62 @@ must not become undeletable by owning a workspace. If the workspace should keep
 running, promote somebody there *first* — otherwise expect to run the ownership
 repair above afterwards.
 
+### CRM relational invariants (before and after deploying 0068)
+
+Migration 0068 adds tenant-agreed keys to the CRM relations and refuses to run
+if existing rows would violate them, naming how many of each. It never repairs:
+a crossed row is evidence, and attaching it to a guessed customer or workspace
+would destroy it. Run these first, on a replica if you have one; every one must
+return 0.
+
+```sql
+-- follow-up naming another workspace's lead (CRM-01)
+SELECT f.id, f.tenant_id, l.tenant_id AS lead_tenant FROM follow_ups f
+JOIN leads l ON l.id = f.lead_id WHERE l.tenant_id <> f.tenant_id;
+-- lead whose conversation is with a different customer (CRM-14)
+SELECT l.id FROM leads l JOIN conversations c ON c.id = l.conversation_id
+WHERE l.contact_id IS NOT NULL AND c.contact_id <> l.contact_id;
+-- lead contact / conversation, note and activity in another workspace
+SELECT l.id FROM leads l JOIN contacts c ON c.id = l.contact_id WHERE c.tenant_id <> l.tenant_id;
+SELECT l.id FROM leads l JOIN conversations c ON c.id = l.conversation_id WHERE c.tenant_id <> l.tenant_id;
+SELECT n.id FROM lead_notes n JOIN leads l ON l.id = n.lead_id WHERE l.tenant_id <> n.tenant_id;
+SELECT a.id FROM lead_activities a JOIN leads l ON l.id = a.lead_id WHERE l.tenant_id <> a.tenant_id;
+```
+
+If any returns rows: look at who created them and when (`created_at`,
+`created_by_id`, the audit trail), decide with the workspace owner what the row
+should have said, and correct or remove it deliberately. Then run the migration.
+
+These are not blockers for the migration but should be 0 after it, and are worth
+reviewing once on existing data because the rules they check were not enforced
+before (CRM-11, CRM-07, CRM-10, CRM-02):
+
+```sql
+-- conversations / leads owned by somebody no longer an active member
+SELECT c.id FROM conversations c JOIN tenants t ON t.id = c.tenant_id AND t.deleted_at IS NULL
+WHERE c.assigned_to_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memberships m
+  WHERE m.tenant_id = c.tenant_id AND m.user_id = c.assigned_to_id AND m.status = 'active');
+SELECT l.id FROM leads l JOIN tenants t ON t.id = l.tenant_id AND t.deleted_at IS NULL
+WHERE l.assigned_to_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memberships m
+  WHERE m.tenant_id = l.tenant_id AND m.user_id = l.assigned_to_id AND m.status = 'active');
+-- pending reminders of somebody who has left
+SELECT f.id FROM follow_ups f WHERE f.status = 'pending' AND f.created_by_kind = 'user'
+  AND f.created_by_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memberships m
+  WHERE m.tenant_id = f.tenant_id AND m.user_id = f.created_by_id AND m.status = 'active');
+-- lead status contradicting closed_at
+SELECT id FROM leads WHERE status NOT IN ('won','lost') AND closed_at IS NOT NULL;
+SELECT id FROM leads WHERE status IN ('won','lost') AND closed_at IS NULL;
+-- cancelled follow-up that names a sent message
+SELECT id FROM follow_ups WHERE status = 'cancelled' AND (message_id IS NOT NULL OR sent_at IS NOT NULL);
+```
+
+Rows from before the remediation are history, not a live defect: the first two
+are fixed by assigning the conversation or lead to somebody current (the API,
+with `expected_assigned_to_id`), the third by cancelling the follow-up, and the
+last three need a person to read the row's activity or message and decide what
+really happened. The same queries, scoped to a test's own workspaces, are the
+permanent sweep in `tests/integration/crm_invariants.py`.
+
 ## What to watch
 
 **Start with the metrics.** `/metrics` publishes request rates and latency,
