@@ -390,7 +390,12 @@ def _attacks(target: Workspace) -> list[Attack]:
         ),
         ("POST", f"{API}/conversations/{conversation}/mode", {"mode": "human"}, None),
         ("POST", f"{API}/conversations/{conversation}/priority", {"priority": "urgent"}, None),
-        ("POST", f"{API}/conversations/{conversation}/assignment", {}, None),
+        (
+            "POST",
+            f"{API}/conversations/{conversation}/assignment",
+            {"expected_assigned_to_id": None},
+            None,
+        ),
         ("POST", f"{API}/conversations/{conversation}/close", None, None),
         ("POST", f"{API}/conversations/{conversation}/reopen", None, None),
         # --- analytics for one conversation
@@ -406,7 +411,12 @@ def _attacks(target: Workspace) -> list[Attack]:
         # --- leads
         ("GET", f"{API}/leads/{lead}", None, None),
         ("POST", f"{API}/leads/{lead}/status", {"status": "won"}, None),
-        ("POST", f"{API}/leads/{lead}/assignment", {}, None),
+        (
+            "POST",
+            f"{API}/leads/{lead}/assignment",
+            {"expected_assigned_to_id": None},
+            None,
+        ),
         ("POST", f"{API}/leads/{lead}/score", {"score": 90}, None),
         ("GET", f"{API}/leads/{lead}/notes", None, None),
         ("POST", f"{API}/leads/{lead}/notes", {"body": "mine now"}, None),
@@ -653,7 +663,7 @@ async def test_a_workspace_cannot_assign_its_work_to_an_outsider(
     Getting it wrong would attach a workspace's conversations and pipeline to a
     person outside it, and expose that person's id back through the response.
     """
-    outsider = {"assigned_to_id": str(victim.user.id)}
+    outsider = {"assigned_to_id": str(victim.user.id), "expected_assigned_to_id": None}
 
     conversation = await http.post(
         f"{API}/conversations/{attacker.conversation.id}/assignment",

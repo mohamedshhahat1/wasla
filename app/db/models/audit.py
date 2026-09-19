@@ -252,6 +252,32 @@ class AuditAction(StrEnum):
     AGENT_TOOL_GRANTED = "agent_tool_granted"
     AGENT_TOOL_REVOKED = "agent_tool_revoked"
 
+    # Who owns a customer conversation, and who decided (CRM-05,
+    # docs/CRM.md). "Who took this customer from whom, and when" had no answer:
+    # takeover and release left only an analytics count with no previous state,
+    # and assignment, close and reopen left nothing at all.
+    #
+    # Written by the winner of a real transition and by nobody else. A request
+    # that changed nothing - taking over a conversation a colleague already
+    # owns, assigning it to the person who has it - and a writer that lost a
+    # race to a newer one leave no row, so the trail never reports a change
+    # that did not happen. `actor_kind` says whether a person, an agent or the
+    # system decided, and `meta["source"]` separates a sentiment escalation from
+    # the platform's own fallbacks inside `SYSTEM`.
+    #
+    # `meta` carries the conversation, the previous and new mode, the previous
+    # and new assignee, the source and whether a reason was given. Never the
+    # reason's text: it is a sentence about a customer, it stays on the
+    # conversation row, and this trail answers "who and when", not "what was
+    # said" - the same line the agent's own handoff entry already draws.
+    CONVERSATION_TAKEN_OVER = "conversation_taken_over"
+    CONVERSATION_RELEASED_TO_AI = "conversation_released_to_ai"
+    CONVERSATION_ASSIGNED = "conversation_assigned"
+    CONVERSATION_REASSIGNED = "conversation_reassigned"
+    CONVERSATION_UNASSIGNED = "conversation_unassigned"
+    CONVERSATION_CLOSED = "conversation_closed"
+    CONVERSATION_REOPENED = "conversation_reopened"
+
     # The channel a business talks to its customers through
     WHATSAPP_ACCOUNT_CONNECTED = "whatsapp_account_connected"
     WHATSAPP_ACCOUNT_DISABLED = "whatsapp_account_disabled"

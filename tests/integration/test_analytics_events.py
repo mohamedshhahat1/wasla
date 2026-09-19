@@ -27,6 +27,8 @@ from app.db.models.conversation import (
     MessageOrigin,
     MessageStatus,
 )
+from app.db.models.enums import TenantRole
+from app.db.models.membership import Membership
 from app.db.models.sentiment import SentimentLabel
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
@@ -84,6 +86,16 @@ async def _conversation(session: AsyncSession, *, slug: str = "acme") -> tuple[A
     return tenant, conversation
 
 
+async def _colleague(session: AsyncSession, tenant: Tenant) -> User:
+    """A member of the workspace, who a takeover makes the owner (PD-CRM-3)."""
+    user = User(email=f"rep-{uuid.uuid4().hex[:8]}@acme.test", hashed_password="x")
+    session.add(user)
+    await session.flush()
+    session.add(Membership(tenant_id=tenant.id, user_id=user.id, role=TenantRole.MEMBER))
+    await session.flush()
+    return user
+
+
 async def _events(session: AsyncSession, tenant: Tenant) -> Sequence[Any]:
     return await AnalyticsEventRepository(session, tenant_id=tenant.id).counts()
 
@@ -92,16 +104,14 @@ async def test_a_colleague_taking_over_is_recorded_with_their_name(
     db_session: AsyncSession,
 ) -> None:
     tenant, conversation = await _conversation(db_session)
-    user = User(email="rep@acme.test", hashed_password="x", full_name="Rep")
-    db_session.add(user)
-    await db_session.flush()
+    user = await _colleague(db_session, tenant)
 
     inbox = InboxService(session=db_session, tenant_id=tenant.id)
     await inbox.set_mode(
         conversation_id=conversation.id,
         mode=ConversationMode.HUMAN,
         handoff_reason="Customer asked for a person.",
-        actor_id=user.id,
+        actor=user,
     )
     await db_session.flush()
 
@@ -119,10 +129,9 @@ async def test_an_agent_giving_up_is_a_different_source(db_session: AsyncSession
     tenant, conversation = await _conversation(db_session)
     inbox = InboxService(session=db_session, tenant_id=tenant.id)
 
-    await inbox.set_mode(
+    await inbox.hand_off(
         conversation_id=conversation.id,
-        mode=ConversationMode.HUMAN,
-        handoff_reason="I cannot help with refunds.",
+        reason="I cannot help with refunds.",
         source=AnalyticsSource.AGENT,
     )
     await db_session.flush()
@@ -171,29 +180,41 @@ async def test_an_escalation_is_recorded_as_the_classifier_deciding(
 async def test_setting_a_mode_it_already_has_is_not_a_second_handoff(
     db_session: AsyncSession,
 ) -> None:
-    """Editing the reason on a conversation a colleague already owns is not a
-    handoff, and counting it would inflate the one number this table reports."""
+    """Taking over a conversation a colleague already owns is not a handoff,
+    and counting it would inflate the one number this table reports. Nor does it
+    rewrite the reason the first colleague gave (PD-CRM-5)."""
     tenant, conversation = await _conversation(db_session)
+    first = await _colleague(db_session, tenant)
+    second = await _colleague(db_session, tenant)
     inbox = InboxService(session=db_session, tenant_id=tenant.id)
 
-    await inbox.set_mode(conversation_id=conversation.id, mode=ConversationMode.HUMAN)
+    await inbox.set_mode(
+        conversation_id=conversation.id,
+        mode=ConversationMode.HUMAN,
+        handoff_reason="Pricing question.",
+        actor=first,
+    )
     await inbox.set_mode(
         conversation_id=conversation.id,
         mode=ConversationMode.HUMAN,
         handoff_reason="Actually, a billing question.",
+        actor=second,
     )
     await db_session.flush()
 
     counts = await _events(db_session, tenant)
     assert [row.count for row in counts] == [1]
+    assert conversation.handoff_reason == "Pricing question."
+    assert conversation.assigned_to_id == first.id
 
 
 async def test_giving_a_conversation_back_is_its_own_event(db_session: AsyncSession) -> None:
     tenant, conversation = await _conversation(db_session)
+    actor = await _colleague(db_session, tenant)
     inbox = InboxService(session=db_session, tenant_id=tenant.id)
 
-    await inbox.set_mode(conversation_id=conversation.id, mode=ConversationMode.HUMAN)
-    await inbox.set_mode(conversation_id=conversation.id, mode=ConversationMode.AI)
+    await inbox.set_mode(conversation_id=conversation.id, mode=ConversationMode.HUMAN, actor=actor)
+    await inbox.set_mode(conversation_id=conversation.id, mode=ConversationMode.AI, actor=actor)
     await db_session.flush()
 
     counts = {row.event_type: row.count for row in await _events(db_session, tenant)}
@@ -209,11 +230,14 @@ async def test_a_conversation_handed_over_twice_is_one_conversation(
     """Events and conversations are different counts, and both are wanted: a
     resolution rate built on events would punish the same conversation twice."""
     tenant, conversation = await _conversation(db_session)
+    actor = await _colleague(db_session, tenant)
     inbox = InboxService(session=db_session, tenant_id=tenant.id)
 
     for _ in range(2):
-        await inbox.set_mode(conversation_id=conversation.id, mode=ConversationMode.HUMAN)
-        await inbox.set_mode(conversation_id=conversation.id, mode=ConversationMode.AI)
+        await inbox.set_mode(
+            conversation_id=conversation.id, mode=ConversationMode.HUMAN, actor=actor
+        )
+        await inbox.set_mode(conversation_id=conversation.id, mode=ConversationMode.AI, actor=actor)
     await db_session.flush()
 
     repository = AnalyticsEventRepository(db_session, tenant_id=tenant.id)
@@ -230,6 +254,7 @@ async def test_one_workspace_cannot_see_anothers_handoffs(db_session: AsyncSessi
     await InboxService(session=db_session, tenant_id=acme.id).set_mode(
         conversation_id=acme_conversation.id,
         mode=ConversationMode.HUMAN,
+        actor=await _colleague(db_session, acme),
     )
     await db_session.flush()
 
@@ -246,16 +271,20 @@ async def test_another_workspaces_conversation_cannot_be_handed_over(
     _, conversation = await _conversation(db_session, slug="acme")
     rival, _ = await _conversation(db_session, slug="rival")
 
+    rival_member = await _colleague(db_session, rival)
+
     with pytest.raises(TenantIsolationError):
         await InboxService(session=db_session, tenant_id=rival.id).set_mode(
             conversation_id=conversation.id,
             mode=ConversationMode.HUMAN,
+            actor=rival_member,
         )
 
 
 async def test_an_event_belongs_to_the_transaction_that_caused_it(db_session: AsyncSession) -> None:
     """A handoff that rolled back did not happen."""
     tenant, conversation = await _conversation(db_session)
+    actor = await _colleague(db_session, tenant)
     # Held as values: a rollback expires the instances, and reading an
     # attribute off one afterwards would try to reload it outside the loop.
     tenant_id, conversation_id = tenant.id, conversation.id
@@ -264,6 +293,7 @@ async def test_an_event_belongs_to_the_transaction_that_caused_it(db_session: As
     await InboxService(session=db_session, tenant_id=tenant_id).set_mode(
         conversation_id=conversation_id,
         mode=ConversationMode.HUMAN,
+        actor=actor,
     )
     await db_session.flush()
     await db_session.rollback()
@@ -273,11 +303,13 @@ async def test_an_event_belongs_to_the_transaction_that_caused_it(db_session: As
 
 async def test_an_unknown_conversation_records_nothing(db_session: AsyncSession) -> None:
     tenant, _ = await _conversation(db_session)
+    actor = await _colleague(db_session, tenant)
     from app.core.exceptions import TenantIsolationError
 
     with pytest.raises(TenantIsolationError):
         await InboxService(session=db_session, tenant_id=tenant.id).set_mode(
             conversation_id=uuid.uuid4(),
             mode=ConversationMode.HUMAN,
+            actor=actor,
         )
     assert await _events(db_session, tenant) == []

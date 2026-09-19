@@ -12,7 +12,14 @@ import uuid
 from datetime import datetime
 from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from app.db.models.follow_up import (
     MAX_BODY_LENGTH,
@@ -22,6 +29,7 @@ from app.db.models.follow_up import (
 )
 from app.db.models.lead import ActorKind
 from app.schemas.bounds import TEMPLATE_COMPONENTS, check_json
+from app.schemas.text import StorableText
 from app.services.follow_up_service import MAX_DELAY, MIN_DELAY
 
 MIN_DELAY_MINUTES = int(MIN_DELAY.total_seconds() // 60)
@@ -37,11 +45,14 @@ class FollowUpCreateRequest(BaseModel):
         ge=MIN_DELAY_MINUTES,
         le=MAX_DELAY_MINUTES,
     )
-    scheduled_at: datetime | None = None
+    # Must carry its UTC offset (PD-CRM-9). A naive time used to be read as
+    # UTC, so a colleague in Cairo typing 09:00 got the nudge at noon or 11:00
+    # depending on the season (CRM-15). Stored normalised to UTC.
+    scheduled_at: AwareDatetime | None = None
 
-    body: str | None = Field(default=None, max_length=MAX_BODY_LENGTH)
-    template_name: str | None = Field(default=None, max_length=512)
-    template_language: str | None = Field(default=None, min_length=2, max_length=16)
+    body: StorableText | None = Field(default=None, max_length=MAX_BODY_LENGTH)
+    template_name: StorableText | None = Field(default=None, max_length=512)
+    template_language: StorableText | None = Field(default=None, min_length=2, max_length=16)
     # Forwarded to Meta when the follow-up fires, so it is bounded on the way
     # in rather than on the way out - see `app.schemas.bounds`.
     template_components: list[dict[str, Any]] | None = None
@@ -53,7 +64,8 @@ class FollowUpCreateRequest(BaseModel):
             check_json(value, TEMPLATE_COMPONENTS, field="template_components")
         return value
 
-    reason: str | None = Field(default=None, max_length=MAX_REASON_LENGTH)
+    reason: StorableText | None = Field(default=None, max_length=MAX_REASON_LENGTH)
+    # This workspace's lead of this conversation's customer, or 404/422.
     lead_id: uuid.UUID | None = None
 
     @model_validator(mode="after")
@@ -78,7 +90,7 @@ class FollowUpCreateRequest(BaseModel):
 class FollowUpCancelRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    reason: str | None = Field(default=None, max_length=MAX_REASON_LENGTH)
+    reason: StorableText | None = Field(default=None, max_length=MAX_REASON_LENGTH)
 
 
 class FollowUpRead(BaseModel):

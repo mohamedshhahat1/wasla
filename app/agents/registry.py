@@ -434,15 +434,27 @@ async def _request_human_handoff(context: ToolContext, arguments: dict[str, Any]
 
     reason = str(arguments["reason"])[:MAX_HANDOFF_REASON_LENGTH]
     inbox = InboxService(session=context.session, tenant_id=context.tenant_id)
-    await inbox.set_mode(
+    transition = await inbox.hand_off(
         conversation_id=context.conversation_id,
-        mode=ConversationMode.HUMAN,
-        handoff_reason=reason,
+        reason=reason,
         # The agent asked for this one. A colleague taking a conversation over
         # and an agent giving up on it are the same row on `conversations` and
         # very different facts about the product.
         source=AnalyticsSource.AGENT,
     )
+    if not transition.changed:
+        # The read above said AI, and a colleague's takeover committed before
+        # this write landed (CRM-02). Their reason, their event and their
+        # ownership stand; this call handed nothing over, so it is refused
+        # like the read-time case and leaves no audit row.
+        logger.info(
+            "agent.handoff_already_human",
+            extra={
+                "event": "agent.handoff_already_human",
+                "conversation_id": str(context.conversation_id),
+            },
+        )
+        raise ConflictError("This conversation is already handled by a colleague.")
     # After the mode change, never before: a handoff that raised must not leave
     # a row saying the conversation was handed over. The reason itself is not
     # recorded here - it is a sentence about a customer, it is already on the

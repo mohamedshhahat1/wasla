@@ -28,6 +28,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.sentiment import ConversationPriority, SentimentLabel
 from app.schemas.bounds import TEMPLATE_COMPONENTS, check_json
+from app.schemas.text import StorableText
 from app.services.messaging_service import WHATSAPP_TEXT_MAX_CHARS
 
 # Meta's own limit for a text body, taken from the service that enforces it
@@ -64,10 +65,17 @@ class SendTemplateRequest(BaseModel):
 
 
 class ModeUpdateRequest(BaseModel):
+    """Take a conversation over, or give it back to the AI.
+
+    Taking over an AI conversation makes the caller its owner and records
+    `handoff_reason`. On a conversation already human it changes nothing - use
+    the assignment endpoint to move it between colleagues (PD-CRM-3, PD-CRM-5).
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     mode: ConversationMode
-    handoff_reason: str | None = Field(default=None, max_length=200)
+    handoff_reason: StorableText | None = Field(default=None, max_length=200)
 
 
 class PriorityUpdateRequest(BaseModel):
@@ -84,10 +92,21 @@ class PriorityUpdateRequest(BaseModel):
 
 
 class AssignmentRequest(BaseModel):
+    """Give a conversation to a colleague, or clear its owner.
+
+    `expected_assigned_to_id` is required, and null is a value: it is who the
+    caller believes owns the conversation now - `assigned_to_id` from the
+    `ConversationRead` they are looking at. The write happens only if that is
+    still the owner; otherwise the answer is 409 `stale_assignment` and nothing
+    changes (PD-CRM-4). Last-writer-wins let two colleagues both be told they
+    owned a customer, and let a stale screen undo a manager's reassignment.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    # Null clears the assignment. A value must belong to this workspace.
+    # Null clears the assignment. A value must be an active member here.
     assigned_to_id: uuid.UUID | None = None
+    expected_assigned_to_id: uuid.UUID | None
 
 
 class CursorPage[ItemT](BaseModel):

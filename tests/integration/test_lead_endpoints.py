@@ -138,6 +138,7 @@ class StubLeads:
         status: LeadStatus,
         actor_id: uuid.UUID,
         reason: str | None = None,
+        expected_status: LeadStatus | None = None,
     ) -> Lead:
         self._guard()
         if self.invalid:
@@ -151,6 +152,7 @@ class StubLeads:
         lead_id: uuid.UUID,
         assigned_to_id: uuid.UUID | None,
         actor_id: uuid.UUID,
+        expected_assigned_to_id: uuid.UUID | None,
     ) -> Lead:
         self._guard()
         self.assigned.append({"lead_id": lead_id, "assigned_to_id": assigned_to_id})
@@ -342,7 +344,7 @@ async def test_an_admin_can_assign_a_lead(
 
     response = await client.post(
         f"{PATH}/{LEAD_ID}/assignment",
-        json={"assigned_to_id": str(USER_ID)},
+        json={"assigned_to_id": str(USER_ID), "expected_assigned_to_id": None},
     )
 
     assert response.status_code == 200
@@ -357,7 +359,7 @@ async def test_a_member_cannot_assign_a_lead(
 
     response = await client.post(
         f"{PATH}/{LEAD_ID}/assignment",
-        json={"assigned_to_id": str(USER_ID)},
+        json={"assigned_to_id": str(USER_ID), "expected_assigned_to_id": None},
     )
 
     assert response.status_code == 403

@@ -92,7 +92,32 @@ class LeadRepository(TenantScopedRepository[Lead]):
     async def require_by_id(self, lead_id: uuid.UUID) -> Lead:
         return await self._require(self._select().where(Lead.id == lead_id))
 
-    async def get_active_for_contact(self, contact_id: uuid.UUID) -> Lead | None:
+    async def lock_by_id(self, lead_id: uuid.UUID) -> Lead:
+        """This workspace's lead as committed now, locked until the transaction ends.
+
+        Every lead mutation - a person's edit, an agent's extraction, a status
+        move, an assignment - takes this before it decides anything (CRM-06,
+        CRM-07). The row is re-read with `populate_existing`, so what the
+        decision is judged against is what the previous writer committed rather
+        than a copy loaded before it: the verified-field list a person has just
+        extended, the status another colleague has just moved.
+        """
+        # Staged changes first: sessions here do not autoflush, and the
+        # re-read below would otherwise overwrite them with the database's copy.
+        await self.session.flush()
+        return await self._require(
+            self._select()
+            .where(Lead.id == lead_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+
+    async def get_active_for_contact(
+        self,
+        contact_id: uuid.UUID,
+        *,
+        for_update: bool = False,
+    ) -> Lead | None:
         """The customer's open opportunity, if they have one.
 
         This is the deterministic match that keeps an agent from opening a new
@@ -102,12 +127,36 @@ class LeadRepository(TenantScopedRepository[Lead]):
 
         The partial unique index makes at most one row possible, so this cannot
         quietly pick between several.
+
+        `for_update` locks the row and re-reads it, for the agent's extraction:
+        the model composed its values before a colleague may have corrected
+        them, and they are applied against the lead as it is when they land
+        (CRM-06).
         """
-        return await self._first(
-            self._select().where(
-                Lead.contact_id == contact_id,
-                Lead.status.not_in(tuple(TERMINAL_STATUSES)),
+        # Staged changes first: sessions here do not autoflush, and the
+        # re-read below would otherwise overwrite them with the database's copy.
+        await self.session.flush()
+        statement = self._select().where(
+            Lead.contact_id == contact_id,
+            Lead.status.not_in(tuple(TERMINAL_STATUSES)),
+        )
+        if for_update:
+            statement = statement.with_for_update(key_share=True).execution_options(
+                populate_existing=True
             )
+        return await self._first(statement)
+
+    async def lock_assigned_to(self, user_id: uuid.UUID) -> list[Lead]:
+        """Every lead here assigned to `user_id`, locked, as committed now."""
+        # Staged changes first: sessions here do not autoflush, and the
+        # re-read below would otherwise overwrite them with the database's copy.
+        await self.session.flush()
+        return await self._all(
+            self._select()
+            .where(Lead.assigned_to_id == user_id)
+            .order_by(Lead.id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
         )
 
     def _filtered(self, filters: LeadFilters) -> Select[tuple[Lead]]:

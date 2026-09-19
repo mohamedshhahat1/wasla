@@ -22,6 +22,7 @@ from typing import Any, Final
 from sqlalchemy import (
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -115,21 +116,34 @@ class FollowUp(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             unique=True,
             postgresql_where=text("status = 'pending'"),
         ),
+        # The conversation and the lead a follow-up names belong to its own
+        # workspace, and the database is what says so (ADR-100, CRM-01). The
+        # lead key was a plain `lead_id -> leads.id`, and `POST /follow-ups`
+        # stored another workspace's lead through it and answered 201 - the one
+        # cross-tenant write the CRM audit found. `SET NULL (lead_id)` nulls
+        # the reference alone when the lead goes, not the tenant beside it.
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"],
+            ["conversations.tenant_id", "conversations.id"],
+            name="fk_follow_ups_tenant_conversation",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "lead_id"],
+            ["leads.tenant_id", "leads.id"],
+            name="fk_follow_ups_tenant_lead",
+            ondelete="SET NULL (lead_id)",
+        ),
     )
 
-    conversation_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("conversations.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     # Optional: a follow-up may be about an opportunity, or may simply be a
     # conversation nobody wants to drop. Nulled rather than cascaded if the lead
-    # goes, because the nudge is still owed to the customer either way.
-    lead_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("leads.id", ondelete="SET NULL"),
-        nullable=True,
-    )
+    # goes, because the nudge is still owed to the customer either way. When
+    # set it is the lead of this conversation's own customer - checked by the
+    # service, because the database would need the contact copied here to say
+    # it (CRM-14).
+    lead_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[FollowUpStatus] = mapped_column(
@@ -171,6 +185,16 @@ class FollowUp(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancelled_reason: Mapped[str | None] = mapped_column(String(MAX_REASON_LENGTH), nullable=True)
 
+    # The sweep's claim on this row, apart from when it is due (CRM-09, CRM-10).
+    # The claim used to be `scheduled_at` pushed forward by a lease, which made
+    # a colleague's reschedule indistinguishable from the lease: the sweep's
+    # re-take could not tell "still mine" from "moved to Thursday", and sent
+    # Thursday's text now. A worker may send only while the row still carries
+    # the exact token it was claimed with; rescheduling or cancelling a row
+    # clears the token, so a stale worker finds nothing to send.
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    claimed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # The message actually sent, once there is one. Nulled rather than cascaded
     # so deleting a message cannot erase the record that a nudge went out.
     message_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -182,6 +206,17 @@ class FollowUp(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     @property
     def is_pending(self) -> bool:
         return self.status is FollowUpStatus.PENDING
+
+    @property
+    def is_in_flight(self) -> bool:
+        """Whether a send for this row has been committed and not yet resolved.
+
+        A pending follow-up naming a message is one whose send intent committed
+        before Meta was asked (ADR-093). From that moment the customer may
+        receive it, so nothing may cancel or reschedule it: doing so would
+        report "cancelled" about a message on somebody's phone (CRM-10).
+        """
+        return self.is_pending and self.message_id is not None
 
     @property
     def has_template(self) -> bool:

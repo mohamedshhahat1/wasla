@@ -343,15 +343,21 @@ async def set_mode(
     inbox: InboxServiceDep,
     messaging: MessagingServiceDep,
 ) -> ConversationRead:
-    """Hand the conversation to a human, or return it to the AI."""
+    """Take the conversation over, or return it to the AI.
+
+    Taking over an AI conversation makes you its owner. On a conversation a
+    colleague already owns it changes nothing - neither the owner nor the
+    reason - and answers the conversation as it is; move it between colleagues
+    with `/assignment`. Returning it to the AI clears the handoff reason and
+    does not answer what the customer said while a person owned it.
+    """
     conversation = await inbox.set_mode(
         conversation_id=conversation_id,
         mode=payload.mode,
         handoff_reason=payload.handoff_reason,
-        # Recorded against the person who did it. The conversation row keeps
-        # only the current state, so without this nobody can say afterwards who
-        # took it over or when.
-        actor_id=workspace.user.id,
+        # Recorded against the person who did it, in the analytics event and
+        # the audit trail, and made the owner of what they took over.
+        actor=workspace.user,
     )
     return ConversationRead.from_model(
         conversation,
@@ -386,13 +392,21 @@ async def set_priority(
 async def assign(
     conversation_id: uuid.UUID,
     payload: AssignmentRequest,
+    workspace: ActiveWorkspaceDep,
     inbox: InboxServiceDep,
     messaging: MessagingServiceDep,
 ) -> ConversationRead:
-    """Assign to a member of this workspace, or clear the assignment."""
+    """Assign to a member of this workspace, or clear the assignment.
+
+    Any member may do this. Send the owner you are replacing as
+    `expected_assigned_to_id`; if somebody changed it first the answer is 409
+    `stale_assignment`, nothing changes, and a fresh read shows who has it.
+    """
     conversation = await inbox.assign(
         conversation_id=conversation_id,
         assigned_to_id=payload.assigned_to_id,
+        expected_assigned_to_id=payload.expected_assigned_to_id,
+        actor=workspace.user,
     )
     return ConversationRead.from_model(
         conversation,
@@ -403,10 +417,11 @@ async def assign(
 @router.post("/{conversation_id}/close", response_model=ConversationRead)
 async def close_conversation(
     conversation_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
     inbox: InboxServiceDep,
     messaging: MessagingServiceDep,
 ) -> ConversationRead:
-    conversation = await inbox.close(conversation_id)
+    conversation = await inbox.close(conversation_id, actor=workspace.user)
     return ConversationRead.from_model(
         conversation,
         service_window_open=messaging.window_open(conversation),
@@ -416,10 +431,11 @@ async def close_conversation(
 @router.post("/{conversation_id}/reopen", response_model=ConversationRead)
 async def reopen_conversation(
     conversation_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
     inbox: InboxServiceDep,
     messaging: MessagingServiceDep,
 ) -> ConversationRead:
-    conversation = await inbox.reopen(conversation_id)
+    conversation = await inbox.reopen(conversation_id, actor=workspace.user)
     return ConversationRead.from_model(
         conversation,
         service_window_open=messaging.window_open(conversation),

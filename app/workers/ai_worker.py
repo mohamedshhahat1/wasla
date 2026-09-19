@@ -65,7 +65,7 @@ from app.db.models.agent import Agent
 from app.db.models.agent_turn import TurnOutcome
 from app.db.models.analytics import AnalyticsSource
 from app.db.models.billing import LimitKey
-from app.db.models.conversation import ConversationMode, MessageOrigin
+from app.db.models.conversation import MessageOrigin
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.db.models.usage import UsageEventType
 from app.db.session import Database
@@ -489,19 +489,16 @@ class AgentWorker:
         the business's plan.
 
         A colleague who took the conversation over since the turn was planned
-        keeps their own reason; only an AI-owned conversation is handed over.
+        keeps their own reason; only an AI-owned conversation is handed over,
+        and that is decided at the write rather than from an earlier read
+        (CRM-02).
         """
         async with self._database.session() as blocked:
-            conversation = await ConversationRepository(
-                blocked, tenant_id=job.tenant_id
-            ).require_by_id(job.conversation_id)
-            if conversation.mode is ConversationMode.AI:
-                await InboxService(session=blocked, tenant_id=job.tenant_id).set_mode(
-                    conversation_id=job.conversation_id,
-                    mode=ConversationMode.HUMAN,
-                    handoff_reason=QUOTA_HANDOFF_REASON,
-                    source=AnalyticsSource.SYSTEM,
-                )
+            await InboxService(session=blocked, tenant_id=job.tenant_id).hand_off(
+                conversation_id=job.conversation_id,
+                reason=QUOTA_HANDOFF_REASON,
+                source=AnalyticsSource.SYSTEM,
+            )
             if job.trigger_message_id is not None:
                 await AgentTurnRepository(blocked, tenant_id=job.tenant_id).complete(
                     trigger_message_id=job.trigger_message_id,
@@ -802,10 +799,11 @@ class AgentWorker:
             origin=MessageOrigin.AGENT,
             idempotency_key=self._reply_key(job),
         )
-        await InboxService(session=session, tenant_id=job.tenant_id).set_mode(
+        # Conditional like every automated handoff (CRM-02): a colleague who
+        # took the conversation over meanwhile keeps their reason and owns it.
+        await InboxService(session=session, tenant_id=job.tenant_id).hand_off(
             conversation_id=job.conversation_id,
-            mode=ConversationMode.HUMAN,
-            handoff_reason=EMPTY_RESPONSE_HANDOFF_REASON,
+            reason=EMPTY_RESPONSE_HANDOFF_REASON,
             source=AnalyticsSource.SYSTEM,
         )
         logger.warning(

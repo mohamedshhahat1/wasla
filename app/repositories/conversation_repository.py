@@ -283,6 +283,59 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
             statement = statement.execution_options(populate_existing=True)
         return await self._require(statement)
 
+    async def lock_by_id(self, conversation_id: uuid.UUID, *, share: bool = False) -> Conversation:
+        """This workspace's conversation as committed now, locked until the transaction ends.
+
+        The primitive every ownership transition stands on (CRM-02/03/04). A
+        transition - taking a conversation over, releasing it, assigning it -
+        is only correct against the row as it is *at the write*, so the row is
+        locked, re-read with `populate_existing` (the identity map may hold a
+        copy loaded before an inference or before somebody else committed),
+        and only then judged. Whoever locks second waits, then reads what the
+        first committed, and is judged against that.
+
+        `share` takes `FOR SHARE`: enough to stop the row changing under a
+        reader that is about to act on it - the follow-up sweep deciding
+        whether a conversation is still the AI's - without queueing behind
+        other readers.
+
+        Callers hold it only across database work. Every provider call in this
+        codebase goes through `released`, which commits, so no lock taken here
+        can survive into a request to OpenAI or Meta.
+        """
+        # Staged changes first: sessions here do not autoflush, and the
+        # re-read below would otherwise overwrite them with the database's copy.
+        await self.session.flush()
+        statement = (
+            self._select()
+            .where(Conversation.id == conversation_id)
+            # `FOR NO KEY UPDATE`, not `FOR UPDATE`: every insert that names
+            # this conversation - a message, a tool execution, a follow-up -
+            # takes `FOR KEY SHARE` on it through its foreign key, and a plain
+            # `FOR UPDATE` would queue a takeover behind every one of them.
+            # Nothing here changes a key. `share` is a plain `FOR SHARE`, which
+            # does conflict with a transition's lock, and that is its purpose.
+            .with_for_update(read=share, key_share=not share)
+            .execution_options(populate_existing=True)
+        )
+        return await self._require(statement)
+
+    async def lock_assigned_to(self, user_id: uuid.UUID) -> list[Conversation]:
+        """Every conversation here assigned to `user_id`, locked, as committed now.
+
+        For a member's removal, which unassigns them (PD-CRM-2).
+        """
+        # Staged changes first: sessions here do not autoflush, and the
+        # re-read below would otherwise overwrite them with the database's copy.
+        await self.session.flush()
+        return await self._all(
+            self._select()
+            .where(Conversation.assigned_to_id == user_id)
+            .order_by(Conversation.id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+
     async def get_for_contact(
         self,
         *,

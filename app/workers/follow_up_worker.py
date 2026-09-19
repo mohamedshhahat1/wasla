@@ -16,10 +16,11 @@ holding state that a restart could lose.
 **Concurrency is settled by the database.** Rows are claimed with ``FOR UPDATE
 SKIP LOCKED``, so a second replica sweeping at the same instant steps over what
 the first has taken rather than sending the customer the same message twice.
-The claim also pushes each row's ``scheduled_at`` out by a lease and commits
-it, because a row lock ends where its transaction does and the send now commits
-part-way through (ADR-093). The lock settles the claim; the lease is what
-survives it.
+The claim also stamps each row with a claim token and a lease and commits
+them, because a row lock ends where its transaction does and the send now
+commits part-way through (ADR-093). The lock settles the claim; the lease is
+what survives it; the token is what a colleague's reschedule or cancel clears
+to take the row back before it is sent (CRM-09, CRM-10).
 """
 
 from __future__ import annotations
@@ -121,7 +122,7 @@ class FollowUpWorker:
         would drop every remaining lock at the first send and let a second
         replica take the rows behind it.
 
-            TX1  claim the due rows, push each one's `scheduled_at` out by a
+            TX1  claim the due rows, stamp each with a claim token and a
                  lease                                              -> COMMIT
             --   the lock is gone; the lease is what keeps others off
             TXn  one transaction per follow-up
@@ -140,7 +141,7 @@ class FollowUpWorker:
                 limit=self._claim_limit,
                 lease_until=moment + self._lease,
             )
-            identifiers = [(row.id, row.tenant_id) for row in claimed]
+            identifiers = [(row.id, row.tenant_id, row.claim_token) for row in claimed]
 
         if not identifiers:
             return 0
@@ -153,10 +154,10 @@ class FollowUpWorker:
         # starts working without anybody restarting the worker.
         refused: set[uuid.UUID] = set()
 
-        for follow_up_id, tenant_id in identifiers:
+        for follow_up_id, tenant_id, claim_token in identifiers:
             if tenant_id in refused:
                 continue
-            outcome = await self._dispatch_one(follow_up_id, tenant_id)
+            outcome = await self._dispatch_one(follow_up_id, tenant_id, claim_token)
             if outcome is _CREDENTIAL_REFUSED:
                 refused.add(tenant_id)
                 continue
@@ -173,6 +174,7 @@ class FollowUpWorker:
         self,
         follow_up_id: uuid.UUID,
         tenant_id: uuid.UUID,
+        claim_token: uuid.UUID | None,
     ) -> bool | object:
         """One follow-up, in a transaction of its own. Returns whether it ran.
 
@@ -181,9 +183,13 @@ class FollowUpWorker:
         snapshot and the row may have been cancelled by an inbound message
         since. `SKIP LOCKED` means a worker that somehow overlaps steps over it
         instead of waiting.
+
+        Only while the row still carries this sweep's `claim_token`. A
+        colleague who rescheduled or cancelled it since the claim cleared the
+        token, and the row is theirs again: nothing is sent (CRM-09, CRM-10).
         """
         async with self._database.session() as session:
-            follow_up = await DueFollowUpClaim(session).claim_by_id(follow_up_id)
+            follow_up = await DueFollowUpClaim(session).claim_by_id(follow_up_id, claim_token)
             if follow_up is None:
                 return False
 

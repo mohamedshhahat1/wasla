@@ -35,6 +35,7 @@ from app.db.models import Membership, MembershipStatus, TenantRole, User
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.repositories import MembershipRepository, TenantRepository, UserRepository
 from app.services.audit_service import AuditTrail
+from app.services.member_departure import release_departing_member
 
 logger = get_logger(__name__)
 
@@ -158,7 +159,17 @@ class MembershipService:
         membership.status = MembershipStatus.REVOKED
         membership.revoked_at = datetime.now(UTC)
         membership.revoked_by_id = actor.id
+        # Flushed first: the UPDATE is what locks the membership row, and an
+        # assignment to this person share-locks it, so from here on nothing
+        # new can be handed to them and the release below sees everything that
+        # was (CRM-11).
         await self._session.flush()
+        await release_departing_member(
+            self._session,
+            tenant_id=self._tenant_id,
+            user_id=user_id,
+            actor=actor,
+        )
 
         target = await self._users.get_by_id(user_id)
         self._audit.record(

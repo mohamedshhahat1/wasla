@@ -71,7 +71,15 @@ async def schedule_follow_up(
 
     Answers 201 either way. A conversation holds at most one pending follow-up,
     so scheduling a second reschedules the first rather than queueing another
-    message at the same customer.
+    message at the same customer. A follow-up already being sent cannot be
+    replaced: 409 `dispatch_in_progress`.
+
+    `scheduled_at` must carry a UTC offset. `lead_id`, when given, must be this
+    workspace's lead of this conversation's customer: another workspace's or a
+    nonexistent id is 404, another customer's is 422.
+
+    A follow-up you schedule on a conversation a colleague owns is sent - it is
+    a person's reminder, not the AI's.
     """
     follow_up = await follow_ups.schedule(
         conversation_id=payload.conversation_id,
@@ -104,11 +112,12 @@ async def cancel_follow_up(
     payload: FollowUpCancelRequest,
     follow_ups: FollowUpServiceDep,
 ) -> FollowUpRead:
-    """Cancel a scheduled follow-up.
+    """Cancel a scheduled follow-up, if it can still be stopped.
 
-    Cancelling one that has already been sent or cancelled succeeds and changes
-    nothing: losing that race is not the caller's mistake, and their intent — no
-    further nudge — already holds.
+    A follow-up whose send has already been committed answers 409
+    `dispatch_in_progress`: the customer may have it, and "cancelled" would be
+    false. One that already finished is returned untouched with its real
+    status - `sent` says the nudge went out.
     """
     follow_up = await follow_ups.cancel(follow_up_id=follow_up_id, reason=payload.reason)
     return FollowUpRead.from_model(follow_up)

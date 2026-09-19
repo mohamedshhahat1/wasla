@@ -213,10 +213,16 @@ async def change_status(
     Answers 422 for a move the pipeline does not allow - a won lead reopening,
     for instance. Setting the status it already has succeeds and changes
     nothing, so a retried request is safe.
+
+    Send the status you are moving from as `expected_status`: if a colleague
+    moved the lead first, the answer is 409 `stale_lead_status` and nothing
+    changes. Reopening a lost lead while the customer has a newer open one is
+    409 as well.
     """
     lead = await leads.change_status(
         lead_id=lead_id,
         status=payload.status,
+        expected_status=payload.expected_status,
         actor_id=workspace.user.id,
         reason=payload.reason,
     )
@@ -230,10 +236,15 @@ async def assign_lead(
     workspace: TenantAdminDep,
     leads: LeadServiceDep,
 ) -> LeadRead:
-    """Assign to a member of this workspace, or clear it. Administrators only."""
+    """Assign to a member of this workspace, or clear it. Administrators only.
+
+    Send the owner you are replacing as `expected_assigned_to_id`; a mismatch
+    is 409 `stale_assignment` and changes nothing.
+    """
     lead = await leads.assign(
         lead_id=lead_id,
         assigned_to_id=payload.assigned_to_id,
+        expected_assigned_to_id=payload.expected_assigned_to_id,
         actor_id=workspace.user.id,
     )
     return LeadRead.from_model(lead)
