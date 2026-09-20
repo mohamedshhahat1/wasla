@@ -200,6 +200,45 @@ MUTANTS = (
         '.where(Payment.provider == "paymob")',
         f"{PAYMOB}::test_card_token_hmac_or_order_mismatch_stores_nothing",
     ),
+    Mutant(
+        "S04",
+        "app/integrations/whatsapp/signature.py",
+        "return secrets_match(expected, header.strip())",
+        "return expected == header.strip()",
+        "tests/unit/test_constant_time_comparison.py::"
+        "test_every_verifier_compares_through_the_constant_time_helper",
+    ),
+    Mutant(
+        "S04b",
+        "app/api/v1/webhooks.py",
+        "matches = secrets_match(expected, token)",
+        "matches = expected == token",
+        "tests/unit/test_constant_time_comparison.py::"
+        "test_every_verifier_compares_through_the_constant_time_helper",
+    ),
+    Mutant(
+        "S10",
+        "app/core/config.py",
+        "    problems: list[str] = []\n    for origin in origins:",
+        "    return []\n    problems: list[str] = []\n    for origin in origins:",
+        CONFIG,
+    ),
+    Mutant(
+        "S11",
+        "app/integrations/whatsapp/ownership.py",
+        "follow_redirects=False,",
+        "follow_redirects=True,",
+        "tests/unit/test_security_structural_regressions.py::"
+        "test_graph_redirect_never_receives_the_bearer_at_a_second_host",
+    ),
+    Mutant(
+        "S19",
+        "app/api/v1/leads.py",
+        "LimitQuery = Annotated[int, Query(ge=1, le=100)]",
+        "LimitQuery = Annotated[int, Query(ge=1, le=1000000000)]",
+        "tests/unit/test_security_structural_regressions.py::"
+        "test_lead_page_limit_is_enforced_at_the_http_boundary",
+    ),
 )
 
 
