@@ -7,7 +7,7 @@ name: wasla-prod
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     # Docker gives a container 64MB of /dev/shm, and PostgreSQL puts a
     # parallel query's shared tuple store there. An aggregate big enough to be
     # worth parallelising then dies with "could not resize shared memory
@@ -31,7 +31,7 @@ services:
     restart: always
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     # A password, and it is required rather than optional.
     #
     # The network is private, which is the usual argument for leaving Redis
@@ -589,7 +589,7 @@ services:
     restart: "no"
 
   nginx:
-    image: nginx:1.27-alpine
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       # Certbot's webroot and its certificates. Both are host paths rather than
@@ -633,7 +633,7 @@ services:
   # operational shape, and a published Alertmanager is an unauthenticated way
   # to silence alerts.
   prometheus:
-    image: prom/prometheus:v3.1.0
+    image: prom/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
     volumes:
       - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
@@ -659,7 +659,7 @@ services:
       retries: 3
 
   alertmanager:
-    image: prom/alertmanager:v0.28.0
+    image: prom/alertmanager:v0.28.0@sha256:d5155cfac40a6d9250ffc97c19db2c5e190c7bc57c6b67125c94903358f8c7d8
     volumes:
       - ./deploy/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager-data:/alertmanager

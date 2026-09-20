@@ -57,7 +57,21 @@ Privileged and administrative actions are recorded in an audit log, including pl
 
 ## Supply chain
 
-Controlled dependency versions, dependency vulnerability scanning, secret scanning, and container scanning where practical.
+Production Python dependencies and the build backend are resolved in
+`requirements.lock` and `requirements-build.lock`, with hashes checked by pip
+in the Docker builder. The application wheel is then installed without
+dependency resolution or build isolation. The Python, PostgreSQL/pgvector,
+Redis, nginx, Prometheus, and Alertmanager production inputs use registry
+digests. `security.yml` continues to run pip-audit, secret scanning, and Trivy.
+
+Review updates at least monthly and promptly after a relevant advisory. With
+uv, regenerate both locks using the command recorded at the top of each lock
+file (Python 3.12, Linux x86-64), review the complete version and hash diff,
+and build the Docker image. Resolve new image digests from the upstream
+registry; do not guess or copy a digest from another tag. Update the matching
+Dockerfile and production Compose references together. Run CI and the security
+workflow before release. A digest pin controls which image is pulled; it does
+not replace vulnerability scanning or scheduled updates.
 
 ## Request limits
 
