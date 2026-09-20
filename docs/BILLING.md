@@ -756,7 +756,9 @@ period ends
     │       ├─ no  →  invoice emailed and chased, exactly as before
     │       │
     │       └─ yes →  intention on the Moto integration
-    │                 POST /api/acceptance/payments/pay  { token, payment_token }
+    │                 POST /api/acceptance/payments/pay
+    │                   { source: { identifier: card_token, subtype: TOKEN },
+    │                     payment_token }
     │                        │
     │                        └─ callback → the same settlement path as a link
     │
