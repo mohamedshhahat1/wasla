@@ -38,6 +38,19 @@ Check `/health/ready`. It names each dependency and how long it took.
 - **postgresql down** — the database is unreachable or refusing connections. Check the container, then connection limits: each API replica holds a pool, and a worker mid-inference holds a connection for the length of that call ([ARCHITECTURE.md §14](../ARCHITECTURE.md)).
 - **redis down** — the API keeps serving. Rate limiting fails **open** (requests are allowed), refresh-token revocation cannot be checked, and no new background jobs can be enqueued. Inbound messages are still stored: the webhook logs `agent.enqueue_failed` and returns 200 so Meta does not retry. Each such event stays `received` in `whatsapp_events` with a bounded reason, and `InboundRecoveryWorker` finishes them once Redis is back — see *Inbound stored but never answered*. Nothing is lost and nothing needs a person, but check that the backlog actually drains.
 
+### The migrate service refuses a release
+
+Check the migrate service logs for the failing validation or migration revision.
+`MIGRATION_DATABASE_URL` must be the schema owner, and API and worker
+`DATABASE_URL` must name a separate, non-superuser runtime role. Migration
+`0069` also needs `CREDENTIAL_ENCRYPTION_KEYS` and the separate, stable
+`PAYMENT_TOKEN_FINGERPRINT_KEY` before it can protect existing saved-card
+tokens. Correct the secret-store configuration, rerun the migrate service,
+then start the new API and worker. A failed `0069` transaction leaves the
+previous schema intact; do not copy card tokens into logs or manually rewrite
+payment-method rows. See [DEPLOYMENT.md](DEPLOYMENT.md) for role provisioning,
+key rotation, and rollback constraints.
+
 ### Customers' messages are not arriving
 
 The webhook is the one path that must never be refused. Work backwards:

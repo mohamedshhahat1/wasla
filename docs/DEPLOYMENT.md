@@ -525,7 +525,15 @@ Run it by hand after any deployment you did not watch:
 docker compose -f docker-compose.prod.yml exec -T api scripts/check_readiness.sh
 ```
 
-**Deployment is gated on CI rather than repeating it.** `deploy.yml` triggers on `workflow_run` and refuses any conclusion other than success, which is "do not deploy if tests fail" expressed as a dependency instead of a second copy of the test job that could drift from the first.
+**Deployment is gated on CI rather than repeating it.** For a `workflow_run`,
+both privileged jobs require a successful CI run caused by a `push` to this
+repository's own `main`. A fork pull request whose branch is named `main`
+cannot publish or deploy. The checkout uses the CI run's `head_sha` with
+`persist-credentials: false`; a tag push or manual dispatch is a separate
+write-access path. The published image is scanned and deployment uses its digest.
+GitHub's fork approval policy, production environment reviewers and branch
+restrictions, and live GHCR tag provenance still need deployment verification
+(DV-S1 in [SECURITY_AUDIT.md](../SECURITY_AUDIT.md)).
 
 **It checks out the commit CI verified**, not the branch head. Between CI finishing and deployment starting, `main` may have moved, and publishing the newer commit would ship something no test ever saw.
 
