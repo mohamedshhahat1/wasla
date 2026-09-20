@@ -114,9 +114,9 @@ def _run(
     environment = {
         key: value
         for key, value in os.environ.items()
-        # Start from a copy without either database variable, so the parent
-        # run's configuration cannot decide the child's outcome.
-        if key not in {"TEST_DATABASE_URL", "DATABASE_URL"}
+        # Start from a copy without the parent's database policy and URLs, so
+        # the child can exercise each configuration independently.
+        if key not in {"TEST_DATABASE_URL", "DATABASE_URL", "WASLA_SECURITY_TESTS"}
     }
     environment["ENVIRONMENT"] = "test"
     environment.setdefault("JWT_SECRET", "database-safety-probe-secret-value-not-deployed")
