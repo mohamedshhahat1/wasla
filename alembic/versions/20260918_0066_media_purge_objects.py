@@ -64,9 +64,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id", name=op.f("pk_media_purge_objects")),
         sa.UniqueConstraint("storage_key", name="uq_media_purge_objects_storage_key"),
     )
-    op.create_index(
-        "ix_media_purge_objects_not_before", "media_purge_objects", ["not_before"]
-    )
+    op.create_index("ix_media_purge_objects_not_before", "media_purge_objects", ["not_before"])
     op.create_index("ix_media_purge_objects_tenant_id", "media_purge_objects", ["tenant_id"])
 
 
