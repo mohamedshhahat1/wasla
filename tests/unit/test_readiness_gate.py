@@ -35,7 +35,9 @@ import yaml
 pytestmark = pytest.mark.integration
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check_readiness.sh"
-SHELL = shutil.which("sh") or shutil.which("bash")
+# Windows can expose the WSL `bash.exe` launcher even when no distribution is
+# installed. The deployment script is POSIX sh, and CI runs it with sh.
+SHELL = shutil.which("sh")
 
 # What the application answers when every dependency it needs is reachable.
 READY = {
