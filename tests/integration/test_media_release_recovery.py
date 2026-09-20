@@ -347,7 +347,13 @@ async def test_a_refused_release_is_owed_durably_and_answered_once_redis_returns
     # The enqueue was really attempted, and really failed the way Redis fails.
     assert refusing.attempts == 1
     assert len(refusing.errors) == 1
-    expected = RedisConnectionError if failure == "connection_refused" else RedisTimeoutError
+    # Windows can report an unreachable loopback port as a connect timeout.
+    # Both errors exercise the same failed-enqueue recovery path.
+    expected = (
+        (RedisConnectionError, RedisTimeoutError)
+        if failure == "connection_refused"
+        else RedisTimeoutError
+    )
     assert isinstance(refusing.errors[0], expected), refusing.errors[0]
     assert isinstance(refusing.errors[0], RedisError)
     assert _total(scene, "release_failed") == 1
