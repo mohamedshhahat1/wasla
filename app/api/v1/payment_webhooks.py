@@ -262,7 +262,7 @@ async def _receive_saved_method(
         extra={
             "event": "billing.card_token_processed",
             "tenant_id": str(tenant_id),
-            "created": created,
+            "payment_method_created": created,
         },
     )
     return {"status": "received"}

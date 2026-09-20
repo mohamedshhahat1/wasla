@@ -14,6 +14,7 @@ a signing secret for *some* payload, not that they own anything.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from decimal import Decimal
@@ -32,10 +33,12 @@ from app.core.dependencies import get_session
 from app.db.models.billing import BillingInterval, LimitKey, Plan
 from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.payment_event import PaymentEvent
+from app.db.models.payment_method import PaymentMethod
 from app.db.models.tenant import Tenant
-from app.integrations.billing.paymob import hmac_signature
+from app.integrations.billing.paymob import hmac_signature, token_hmac_signature
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
+from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, PROTECTOR
 
 pytestmark = pytest.mark.integration
 
@@ -82,6 +85,8 @@ def _settings(**overrides: Any) -> Settings:
         "paymob_hmac_secret": HMAC_SECRET,
         "paymob_integration_ids": [4097558],
         "app_public_url": "https://app.example.com",
+        "credential_encryption_keys": [ENCRYPTION_KEY],
+        "payment_token_fingerprint_key": FINGERPRINT_KEY,
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)  # type: ignore[arg-type]
@@ -196,6 +201,99 @@ def _body(transaction: dict[str, Any]) -> tuple[dict[str, Any], str]:
         {"type": "TRANSACTION", "obj": transaction},
         hmac_signature(transaction, secret=HMAC_SECRET),
     )
+
+
+def _card_token(*, order: str, token: str) -> dict[str, Any]:
+    return {
+        "id": 15978654,
+        "token": token,
+        "masked_pan": "xxxx-xxxx-xxxx-2346",
+        "merchant_id": 1053928,
+        "card_subtype": "MasterCard",
+        "created_at": "2026-08-29T13:28:31.015314",
+        "email": "untrusted-callback-email@example.com",
+        "order_id": order,
+    }
+
+
+async def test_signed_card_token_is_stored_encrypted_and_retries_once(
+    http: AsyncClient, db_session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    _, payment = await _paid_checkout(db_session)
+    order = f"paymob-order-{uuid.uuid4().hex}"
+    payment.provider_intent_reference = order
+    await db_session.flush()
+    raw_token = f"synthetic-card-token-{uuid.uuid4().hex}"
+    card = _card_token(order=order, token=raw_token)
+    body = {"type": "TOKEN", "obj": card}
+    signature = token_hmac_signature(card, secret=HMAC_SECRET)
+
+    with caplog.at_level(logging.DEBUG):
+        first = await http.post(WEBHOOK, json=body, params={"hmac": signature})
+        duplicate = await http.post(WEBHOOK, json=body, params={"hmac": signature})
+    assert first.status_code == duplicate.status_code == 200
+    assert first.json() == duplicate.json() == {"status": "received"}
+    methods = (
+        await db_session.scalars(
+            select(PaymentMethod).where(PaymentMethod.tenant_id == payment.tenant_id)
+        )
+    ).all()
+    assert len(methods) == 1
+    assert methods[0].provider_token != raw_token
+    assert raw_token not in methods[0].provider_token
+    assert PROTECTOR.open(methods[0]) == raw_token
+    assert raw_token not in caplog.text
+
+
+async def test_card_token_hmac_or_order_mismatch_stores_nothing(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
+    _, payment = await _paid_checkout(db_session)
+    order = f"paymob-order-{uuid.uuid4().hex}"
+    payment.provider_intent_reference = order
+    await db_session.flush()
+    card = _card_token(order=order, token="synthetic-valid-token")
+    signature = token_hmac_signature(card, secret=HMAC_SECRET)
+
+    tampered = {"type": "TOKEN", "obj": {**card, "token": "synthetic-forged-token"}}
+    refused = await http.post(WEBHOOK, json=tampered, params={"hmac": signature})
+    assert refused.status_code == 403
+
+    unknown = _card_token(order=f"unknown-{uuid.uuid4().hex}", token="synthetic-other-token")
+    unmatched = await http.post(
+        WEBHOOK,
+        json={"type": "TOKEN", "obj": unknown},
+        params={"hmac": token_hmac_signature(unknown, secret=HMAC_SECRET)},
+    )
+    assert unmatched.status_code == 200
+    assert unmatched.json() == {"status": "received"}
+    assert (
+        await db_session.scalars(
+            select(PaymentMethod).where(PaymentMethod.tenant_id == payment.tenant_id)
+        )
+    ).all() == []
+
+
+async def test_card_token_attaches_to_order_owner_not_callback_email(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
+    _, first_payment = await _paid_checkout(db_session)
+    _, second_payment = await _paid_checkout(db_session)
+    order = f"paymob-order-{uuid.uuid4().hex}"
+    second_payment.provider_intent_reference = order
+    await db_session.flush()
+    # The email is callback data and may name a different Wasla customer.
+    card = _card_token(order=order, token=f"synthetic-card-{uuid.uuid4().hex}")
+    response = await http.post(
+        WEBHOOK,
+        json={"type": "TOKEN", "obj": card},
+        params={"hmac": token_hmac_signature(card, secret=HMAC_SECRET)},
+    )
+    assert response.status_code == 200
+    methods = (await db_session.scalars(select(PaymentMethod))).all()
+    assert len(methods) == 1
+    assert methods[0].tenant_id == second_payment.tenant_id
+    assert methods[0].tenant_id != first_payment.tenant_id
 
 
 # ------------------------------------------------------------- the happy path
