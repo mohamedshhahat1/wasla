@@ -30,6 +30,7 @@ from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import _enum_type
 
 MAX_TOKEN_LENGTH: Final = 512
+MAX_PROVIDER_TOKEN_ID_LENGTH: Final = 200
 MAX_MASKED_PAN_LENGTH: Final = 40
 MAX_BRAND_LENGTH: Final = 40
 
@@ -78,7 +79,7 @@ class PaymentMethod(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # The provider's own id for the token record, which is the number their
     # dashboard and a support conversation use.
     provider_token_id: Mapped[str | None] = mapped_column(
-        String(MAX_TOKEN_LENGTH),
+        String(MAX_PROVIDER_TOKEN_ID_LENGTH),
         nullable=True,
     )
     # Last four digits as the provider masks them, so a customer can tell one
