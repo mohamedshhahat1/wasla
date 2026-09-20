@@ -151,6 +151,7 @@ def test_production_accepts_hardened_configuration() -> None:
         jwt_secret=VALID_SECRET,
         docs_enabled=False,
         meta_app_secret="an-app-secret",
+        meta_verify_token="synthetic-verify-token",
     )
     assert settings is not None
 
@@ -257,6 +258,7 @@ def _email_production(**overrides: Any) -> Settings:
         "jwt_secret": VALID_SECRET,
         "docs_enabled": False,
         "meta_app_secret": "an-app-secret",
+        "meta_verify_token": "synthetic-verify-token",
         "email_enabled": True,
         "email_provider": "resend",
         "email_from": "no-reply@example.com",
@@ -276,6 +278,7 @@ def test_email_off_needs_no_email_configuration() -> None:
         jwt_secret=VALID_SECRET,
         docs_enabled=False,
         meta_app_secret="an-app-secret",
+        meta_verify_token="synthetic-verify-token",
         email_enabled=False,
     )
     assert settings is not None
@@ -406,6 +409,8 @@ PAYMOB: dict[str, Any] = {
     "paymob_hmac_secret": "a-test-hmac-secret",
     "paymob_integration_ids": [4097558],
     "app_public_url": "https://app.example.com",
+    "credential_encryption_keys": [generate_key()],
+    "payment_token_fingerprint_key": generate_key(),
 }
 
 
@@ -441,6 +446,8 @@ def test_a_deployment_taking_payments_accepts_a_complete_configuration() -> None
         "paymob_secret_key",
         "paymob_public_key",
         "paymob_hmac_secret",
+        "credential_encryption_keys",
+        "payment_token_fingerprint_key",
         "app_public_url",
     ],
 )
@@ -505,6 +512,7 @@ def test_matching_live_keys_are_accepted_in_production() -> None:
         jwt_secret=secrets.token_urlsafe(32),
         docs_enabled=False,
         meta_app_secret="meta-secret",
+        meta_verify_token="synthetic-verify-token",
         **{
             **PAYMOB,
             "paymob_secret_key": "sk_live_realone00000",
@@ -529,6 +537,7 @@ def test_test_keys_are_refused_in_production() -> None:
             jwt_secret=secrets.token_urlsafe(32),
             docs_enabled=False,
             meta_app_secret="meta-secret",
+            meta_verify_token="synthetic-verify-token",
             **PAYMOB,
         )
 
@@ -564,6 +573,7 @@ def test_a_callback_url_must_not_be_plain_http_in_production() -> None:
             jwt_secret=secrets.token_urlsafe(32),
             docs_enabled=False,
             meta_app_secret="meta-secret",
+            meta_verify_token="synthetic-verify-token",
             **{
                 **PAYMOB,
                 "paymob_secret_key": "sk_live_realone00000",
@@ -690,6 +700,7 @@ def test_google_requires_https_in_production() -> None:
             debug=False,
             docs_enabled=False,
             meta_app_secret="an-app-secret",
+            meta_verify_token="synthetic-verify-token",
             google_redirect_uri="http://app.example.com/auth/google/callback",
         )
 

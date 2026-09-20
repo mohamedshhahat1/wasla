@@ -96,7 +96,7 @@ def _settings(environment: str, *, app_secret: str | None = APP_SECRET) -> Setti
         cors_origins=["https://app.example.com"],
         docs_enabled=False,
         debug=False,
-        rate_limit_enabled=False,
+        rate_limit_enabled=environment in INTERNET_REACHABLE,
     )
 
 

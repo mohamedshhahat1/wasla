@@ -44,6 +44,7 @@ from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
 from app.services.invoice_service import InvoiceService
 from app.services.payment_reconciliation_service import PaymentReconciler
+from app.services.payment_token_service import PaymentTokenProtector
 from app.services.recurring_service import MAX_COLLECTION_ATTEMPTS, RecurringService
 from app.services.subscription_service import roll_over
 
@@ -420,6 +421,7 @@ class BillingWorker:
                 session,
                 tenant_id=invoice.tenant_id,
                 provider=provider,
+                payment_tokens=PaymentTokenProtector.from_settings(self._settings),
             )
             try:
                 outcome = await service.collect(invoice, subscription=subscription, now=now)

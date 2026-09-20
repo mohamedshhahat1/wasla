@@ -40,14 +40,18 @@ from app.schemas.lead import (
     LeadStatusRequest,
     LeadUpdateRequest,
 )
+from app.schemas.text import StorableText
 
 router = APIRouter(route_class=CommittingRoute, prefix="/leads", tags=["leads"])
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]
 # Bounded so a long query string is rejected before it reaches a LIKE pattern.
-SearchQuery = Annotated[str | None, Query(min_length=1, max_length=200)]
-TagQuery = Annotated[list[str] | None, Query(max_length=10)]
+# Refused with a 422 when it holds a NUL, which PostgreSQL cannot compare
+# against and which used to surface as a 500 `DBAPIError` (SEC-04). Nothing
+# else is refused: Arabic, emoji and `%`/`_`/`'` are ordinary search text.
+SearchQuery = Annotated[StorableText | None, Query(min_length=1, max_length=200)]
+TagQuery = Annotated[list[StorableText] | None, Query(max_length=10)]
 
 
 def _filters(

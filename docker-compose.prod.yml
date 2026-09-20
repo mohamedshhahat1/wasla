@@ -7,7 +7,7 @@ name: wasla-prod
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     # Docker gives a container 64MB of /dev/shm, and PostgreSQL puts a
     # parallel query's shared tuple store there. An aggregate big enough to be
     # worth parallelising then dies with "could not resize shared memory
@@ -31,7 +31,7 @@ services:
     restart: always
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     # A password, and it is required rather than optional.
     #
     # The network is private, which is the usual argument for leaving Redis
@@ -87,7 +87,13 @@ services:
       - ALL
     environment:
       ENVIRONMENT: production
+      # The migration identity owns DDL; only this one-shot service receives it.
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      # Migration 0069 encrypts existing saved cards before traffic resumes.
+      CREDENTIAL_ENCRYPTION_KEYS: ${CREDENTIAL_ENCRYPTION_KEYS:-}
+      PAYMENT_TOKEN_FINGERPRINT_KEY: ${PAYMENT_TOKEN_FINGERPRINT_KEY:-}
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
     depends_on:
@@ -155,6 +161,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       META_APP_SECRET: ${META_APP_SECRET:?META_APP_SECRET is required to verify webhook signatures}
       META_VERIFY_TOKEN: ${META_VERIFY_TOKEN:-}
       # The API sends too, and this was missing. `POST /conversations/{id}/text`
@@ -216,6 +223,7 @@ services:
       # workspace sends through META_ACCESS_TOKEN, and a workspace trying to
       # store its own is refused rather than having it written in the clear.
       CREDENTIAL_ENCRYPTION_KEYS: ${CREDENTIAL_ENCRYPTION_KEYS:-}
+      PAYMENT_TOKEN_FINGERPRINT_KEY: ${PAYMENT_TOKEN_FINGERPRINT_KEY:-}
       DEFAULT_PLAN_CODE: ${DEFAULT_PLAN_CODE:-starter}
       # Limits default to sensible values in the application; they are exposed
       # here because the right number depends on the deployment, and finding out
@@ -225,6 +233,9 @@ services:
       RATE_LIMIT_WORKSPACE_PER_MINUTE: ${RATE_LIMIT_WORKSPACE_PER_MINUTE:-300}
       RATE_LIMIT_CAMPAIGN_PER_MINUTE: ${RATE_LIMIT_CAMPAIGN_PER_MINUTE:-30}
       MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-33554432}
+      MAX_JSON_REQUEST_BYTES: ${MAX_JSON_REQUEST_BYTES:-65536}
+      MAX_AUTHENTICATED_REQUEST_BYTES: ${MAX_AUTHENTICATED_REQUEST_BYTES:-1048576}
+      MAX_DOCUMENT_REQUEST_BYTES: ${MAX_DOCUMENT_REQUEST_BYTES:-5242880}
       REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-60}
       RUN_MIGRATIONS: "false"
 
@@ -378,6 +389,7 @@ services:
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:-}
       # Pinned on both processes, and to the same value: the API and the worker
       # both call the Graph API, and two containers disagreeing about the
@@ -432,6 +444,7 @@ services:
       # decrypts a workspace's credential to send with it, so a worker missing a
       # key the API used cannot send for that workspace at all.
       CREDENTIAL_ENCRYPTION_KEYS: ${CREDENTIAL_ENCRYPTION_KEYS:-}
+      PAYMENT_TOKEN_FINGERPRINT_KEY: ${PAYMENT_TOKEN_FINGERPRINT_KEY:-}
       DEFAULT_PLAN_CODE: ${DEFAULT_PLAN_CODE:-starter}
       # Empty runs every kind. Set to a comma-separated subset to scale the
       # loops apart - "campaign" during a large broadcast, or media and agent
@@ -576,7 +589,7 @@ services:
     restart: "no"
 
   nginx:
-    image: nginx:1.27-alpine
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       # Certbot's webroot and its certificates. Both are host paths rather than
@@ -620,7 +633,7 @@ services:
   # operational shape, and a published Alertmanager is an unauthenticated way
   # to silence alerts.
   prometheus:
-    image: prom/prometheus:v3.1.0
+    image: prom/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
     volumes:
       - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
@@ -646,7 +659,7 @@ services:
       retries: 3
 
   alertmanager:
-    image: prom/alertmanager:v0.28.0
+    image: prom/alertmanager:v0.28.0@sha256:d5155cfac40a6d9250ffc97c19db2c5e190c7bc57c6b67125c94903358f8c7d8
     volumes:
       - ./deploy/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager-data:/alertmanager

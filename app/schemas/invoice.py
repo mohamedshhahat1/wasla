@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.payment_method import PaymentMethod
+from app.schemas.text import StorableText
 
 
 def _money(amount: Decimal) -> str:
@@ -136,7 +137,7 @@ class RefundRequestPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    reason: str | None = Field(default=None, max_length=300)
+    reason: StorableText | None = Field(default=None, max_length=300)
 
 
 class InvoiceRead(BaseModel):
@@ -201,8 +202,8 @@ class PaymentRecordRequest(BaseModel):
     # A string, for the same reason amounts leave as strings: a float here would
     # be a rounding error somebody has to reconcile.
     amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
-    provider: str = Field(min_length=1, max_length=50)
-    reference: str | None = Field(default=None, max_length=200)
+    provider: StorableText = Field(min_length=1, max_length=50)
+    reference: StorableText | None = Field(default=None, max_length=200)
 
 
 class InvoiceVoidRequest(BaseModel):
@@ -210,7 +211,7 @@ class InvoiceVoidRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    reason: str | None = Field(default=None, max_length=300)
+    reason: StorableText | None = Field(default=None, max_length=300)
 
 
 __all__ = [

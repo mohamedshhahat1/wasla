@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from app.core.security import MAXIMUM_PASSWORD_LENGTH, MINIMUM_PASSWORD_LENGTH
 from app.db.models import PlatformRole, TenantRole
+from app.schemas.text import StorableText
 
 # Letters, digits and internal hyphens. Case is accepted and normalised on the
 # way in, so a workspace address is never case-sensitive.
@@ -47,8 +48,8 @@ class RegistrationRequest(_Payload):
         min_length=MINIMUM_PASSWORD_LENGTH,
         max_length=MAXIMUM_PASSWORD_LENGTH,
     )
-    full_name: str | None = Field(default=None, max_length=MAXIMUM_NAME_LENGTH)
-    workspace_name: str = Field(min_length=1, max_length=MAXIMUM_NAME_LENGTH)
+    full_name: StorableText | None = Field(default=None, max_length=MAXIMUM_NAME_LENGTH)
+    workspace_name: StorableText = Field(min_length=1, max_length=MAXIMUM_NAME_LENGTH)
     workspace_slug: str = Field(
         min_length=MINIMUM_SLUG_LENGTH,
         max_length=MAXIMUM_SLUG_LENGTH,
@@ -61,12 +62,12 @@ class LoginRequest(_Payload):
     # No minimum here: password policy is enforced when a password is set, and
     # restating it on login would only describe the rules to an attacker.
     password: str = Field(min_length=1, max_length=MAXIMUM_PASSWORD_LENGTH)
-    workspace_slug: str | None = Field(default=None, max_length=MAXIMUM_SLUG_LENGTH)
+    workspace_slug: StorableText | None = Field(default=None, max_length=MAXIMUM_SLUG_LENGTH)
 
 
 class RefreshRequest(_Payload):
     refresh_token: str = Field(min_length=1, max_length=MAXIMUM_TOKEN_LENGTH)
-    workspace_slug: str | None = Field(default=None, max_length=MAXIMUM_SLUG_LENGTH)
+    workspace_slug: StorableText | None = Field(default=None, max_length=MAXIMUM_SLUG_LENGTH)
 
 
 class LogoutRequest(_Payload):
@@ -74,7 +75,9 @@ class LogoutRequest(_Payload):
 
 
 class WorkspaceSwitchRequest(_Payload):
-    workspace_slug: str = Field(min_length=MINIMUM_SLUG_LENGTH, max_length=MAXIMUM_SLUG_LENGTH)
+    workspace_slug: StorableText = Field(
+        min_length=MINIMUM_SLUG_LENGTH, max_length=MAXIMUM_SLUG_LENGTH
+    )
 
 
 class PasswordChangeRequest(_Payload):

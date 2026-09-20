@@ -206,7 +206,7 @@ async def _register(
             "workspace_slug": slug,
         },
     )
-    assert response.status_code == 201, response.text
+    assert response.status_code == 202, response.text
     payload: dict[str, Any] = response.json()
     return payload
 

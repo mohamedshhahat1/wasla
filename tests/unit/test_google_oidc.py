@@ -242,6 +242,19 @@ async def test_a_token_for_another_audience_is_refused() -> None:
     assert await _reject(verifier, _sign(_claims(aud=other))) == "wrong_audience"
 
 
+async def test_multiple_audiences_are_refused_even_when_ours_is_included() -> None:
+    verifier, _ = _verifier()
+    other = "9999-other.apps.googleusercontent.com"
+    token = _sign(_claims(aud=[CLIENT_ID, other], azp=CLIENT_ID))
+    assert await _reject(verifier, token) == "wrong_audience"
+
+
+async def test_foreign_authorized_party_is_refused() -> None:
+    verifier, _ = _verifier()
+    other = "9999-other.apps.googleusercontent.com"
+    assert await _reject(verifier, _sign(_claims(azp=other))) == "wrong_authorized_party"
+
+
 async def test_an_expired_token_is_refused() -> None:
     verifier, _ = _verifier()
     stale = datetime.now(UTC) - timedelta(hours=2)

@@ -21,6 +21,7 @@ from app.db.models.billing import (
     Subscription,
     SubscriptionStatus,
 )
+from app.schemas.text import StorableText
 from app.services.entitlement_service import Entitlement
 
 MAX_PLAN_CODE_INPUT = 50
@@ -134,7 +135,7 @@ class PlanSelectionRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    plan_code: str = Field(min_length=1, max_length=MAX_PLAN_CODE_INPUT)
+    plan_code: StorableText = Field(min_length=1, max_length=MAX_PLAN_CODE_INPUT)
 
 
 class CheckoutRequestPayload(BaseModel):
@@ -159,9 +160,11 @@ class CheckoutRequestPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    plan_code: str | None = Field(default=None, min_length=1, max_length=MAX_PLAN_CODE_INPUT)
+    plan_code: StorableText | None = Field(
+        default=None, min_length=1, max_length=MAX_PLAN_CODE_INPUT
+    )
     invoice_id: uuid.UUID | None = None
-    idempotency_key: str | None = Field(default=None, min_length=1, max_length=100)
+    idempotency_key: StorableText | None = Field(default=None, min_length=1, max_length=100)
 
     @model_validator(mode="after")
     def _exactly_one_subject(self) -> Self:

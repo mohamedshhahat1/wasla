@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 
+from app.core.secure_compare import secrets_match
+
 SIGNATURE_HEADER = "X-Hub-Signature-256"
 SIGNATURE_PREFIX = "sha256="
 
@@ -34,4 +36,4 @@ def verify_signature(*, payload: bytes, header: str | None, app_secret: str) -> 
         return False
 
     expected = compute_signature(payload=payload, app_secret=app_secret)
-    return hmac.compare_digest(expected, header.strip())
+    return secrets_match(expected, header.strip())

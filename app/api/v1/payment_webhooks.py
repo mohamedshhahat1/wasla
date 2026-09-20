@@ -37,9 +37,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.route import CommittingRoute
+from app.core.config import Settings
 from app.core.dependencies import SessionDep, SettingsDep
 from app.core.exceptions import DependencyUnavailableError, PermissionDeniedError
 from app.core.logging import get_logger
+from app.core.telemetry import observe_auth_event
 from app.db.models.invoice import Payment
 from app.integrations.billing import build_checkout_provider
 from app.integrations.billing.checkout import (
@@ -102,7 +104,9 @@ async def receive_payment_callback(
     # is still checked against the card-token signature, so lying about the
     # type only changes which way it is refused.
     if callback_type(body) == SAVED_CARD_CALLBACK:
-        return await _receive_saved_method(session, provider, body=body, signature=signature)
+        return await _receive_saved_method(
+            session, provider, settings=settings, body=body, signature=signature
+        )
 
     try:
         event = provider.verify_callback(payload=body, signature=signature)
@@ -114,6 +118,7 @@ async def receive_payment_callback(
             "billing.callback_rejected",
             extra={"event": "billing.callback_rejected", "reason": str(error)},
         )
+        _count_refusal()
         raise PermissionDeniedError("The callback could not be verified.") from error
 
     tenant_id = await _tenant_for(session, event.reference)
@@ -145,6 +150,17 @@ async def receive_payment_callback(
         },
     )
     return {"status": "received"}
+
+
+def _count_refusal() -> None:
+    """A callback that failed authentication, counted like the other two.
+
+    The same series the Meta and Resend webhooks use, so one alert covers a
+    provider secret that has drifted - or somebody posting forgeries - on any
+    of them. Before SEC-03 a non-ASCII `hmac` crashed instead and was counted,
+    if at all, as an unhandled error.
+    """
+    observe_auth_event(event="paymob_webhook", outcome="blocked", reason="invalid_signature")
 
 
 def _signature_from_body(body: bytes) -> str | None:
@@ -192,6 +208,7 @@ async def _receive_saved_method(
     session: AsyncSession,
     provider: CheckoutProvider,
     *,
+    settings: Settings,
     body: bytes,
     signature: str | None,
 ) -> dict[str, str]:
@@ -217,6 +234,7 @@ async def _receive_saved_method(
             "billing.card_token_rejected",
             extra={"event": "billing.card_token_rejected", "reason": str(error)},
         )
+        _count_refusal()
         raise PermissionDeniedError("The callback could not be verified.") from error
 
     tenant_id = await _tenant_for_order(session, saved.order_reference)
@@ -234,6 +252,7 @@ async def _receive_saved_method(
 
     _, created = await remember_saved_method(
         session,
+        settings=settings,
         tenant_id=tenant_id,
         provider=provider.name,
         saved=saved,
@@ -243,7 +262,7 @@ async def _receive_saved_method(
         extra={
             "event": "billing.card_token_processed",
             "tenant_id": str(tenant_id),
-            "created": created,
+            "payment_method_created": created,
         },
     )
     return {"status": "received"}

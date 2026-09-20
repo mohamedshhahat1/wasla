@@ -33,6 +33,17 @@ FETCH = ROOT / "scripts" / "fetch_backup.sh"
 BACKUP = ROOT / "scripts" / "backup_postgres.sh"
 
 SHELL = shutil.which("sh") or shutil.which("bash")
+if SHELL is not None:
+    try:
+        if (
+            subprocess.run(  # noqa: S603 - fixed shell with a constant no-op command
+                [SHELL, "-c", "exit 0"], capture_output=True, timeout=5, check=False
+            ).returncode
+            != 0
+        ):
+            SHELL = None
+    except (OSError, subprocess.TimeoutExpired):
+        SHELL = None
 needs_shell = pytest.mark.skipif(SHELL is None, reason="No POSIX shell available.")
 
 SECRET = "drill-secret-must-never-be-printed"

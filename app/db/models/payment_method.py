@@ -1,10 +1,8 @@
 """Cards a workspace has saved, as the provider describes them.
 
-**Nothing here is card data.** `provider_token` is an opaque handle the
-processor issued: it is not a card number, it is useless outside this merchant
-account, and it exists so a renewal can be collected without this application
-ever seeing a PAN. `masked_pan` is the last four digits the provider already
-prints on a receipt, kept so a customer can tell which of their cards this is.
+`provider_token` holds an AES-GCM envelope for the provider's reusable card
+credential. `token_fingerprint` is a keyed HMAC used only for retry deduplication.
+`masked_pan` is the last four digits the provider already prints on a receipt.
 
 There is deliberately no column for a card number, an expiry date or a security
 code. Those never arrive: the customer types them into the provider's own page,
@@ -31,7 +29,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import _enum_type
 
-MAX_TOKEN_LENGTH: Final = 200
+MAX_TOKEN_LENGTH: Final = 512
+MAX_PROVIDER_TOKEN_ID_LENGTH: Final = 200
 MAX_MASKED_PAN_LENGTH: Final = 40
 MAX_BRAND_LENGTH: Final = 40
 
@@ -61,9 +60,7 @@ class PaymentMethod(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         # if it does not get a 2xx - so the insert has to be the claim here
         # too, or a retried notification becomes a second card.
         UniqueConstraint(
-            "provider",
-            "provider_token",
-            name="uq_payment_methods_provider_provider_token",
+            "provider", "token_fingerprint", name="uq_payment_methods_token_fingerprint"
         ),
         Index("ix_payment_methods_tenant_id", "tenant_id"),
         # Renewals read "this workspace's default card" on every attempt.
@@ -76,13 +73,13 @@ class PaymentMethod(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=False,
     )
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
-    # The processor's opaque handle for the card. Not a card number; it cannot
-    # be used anywhere but this merchant account.
+    # Authenticated encryption of the reusable card token, bound to this row.
     provider_token: Mapped[str] = mapped_column(String(MAX_TOKEN_LENGTH), nullable=False)
+    token_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     # The provider's own id for the token record, which is the number their
     # dashboard and a support conversation use.
     provider_token_id: Mapped[str | None] = mapped_column(
-        String(MAX_TOKEN_LENGTH),
+        String(MAX_PROVIDER_TOKEN_ID_LENGTH),
         nullable=True,
     )
     # Last four digits as the provider masks them, so a customer can tell one

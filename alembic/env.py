@@ -8,6 +8,7 @@ the models the application actually uses.
 from __future__ import annotations
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -23,8 +24,6 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-settings = get_settings()
-
 # A caller that drives Alembic as a library - the integration suite building a
 # migration-built schema - passes the database it means explicitly. Nothing
 # else sets this, so a command-line `alembic upgrade head` still takes the URL
@@ -33,7 +32,11 @@ settings = get_settings()
 # Passed as an attribute rather than read from the environment on purpose: the
 # environment is where the developer's own `DATABASE_URL` lives, and a test
 # fixture that could not out-argue it would migrate their working database.
-database_url = config.attributes.get("wasla_database_url") or settings.database_url
+database_url = (
+    config.attributes.get("wasla_database_url")
+    or os.getenv("MIGRATION_DATABASE_URL")
+    or get_settings().database_url
+)
 
 # Escape % so ConfigParser interpolation cannot mangle credentials.
 config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))

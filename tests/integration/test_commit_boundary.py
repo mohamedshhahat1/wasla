@@ -147,7 +147,7 @@ def scratch_engine(prepared_database: str) -> AsyncEngine:
     return create_async_engine(prepared_database, poolclass=NullPool)
 
 
-async def test_a_token_from_register_works_on_the_very_first_request(
+async def test_login_after_register_works_on_the_very_first_request(
     prepared_database: str,
     scratch_engine: AsyncEngine,
 ) -> None:
@@ -166,8 +166,12 @@ async def test_a_token_from_register_works_on_the_very_first_request(
             httpx.AsyncClient(base_url=base, timeout=30) as client,
         ):
             registered = await _register(client, email=email, slug=slug)
-            assert registered.status_code == 201
-            token = registered.json()["access_token"]
+            assert registered.status_code == 202
+            login = await client.post(
+                "/api/v1/auth/login", json={"email": email, "password": PASSWORD}
+            )
+            assert login.status_code == 200
+            token = login.json()["access_token"]
 
             profile = await client.get(
                 "/api/v1/auth/me",
@@ -202,7 +206,7 @@ async def test_the_row_exists_the_moment_the_response_lands(
             httpx.AsyncClient(base_url=base, timeout=30) as client,
         ):
             registered = await _register(client, email=email, slug=slug)
-            assert registered.status_code == 201
+            assert registered.status_code == 202
 
             async with scratch_engine.connect() as connection:
                 found = await connection.execute(
@@ -236,7 +240,7 @@ async def test_a_failed_request_commits_nothing(
             httpx.AsyncClient(base_url=base, timeout=30) as client,
         ):
             first = await _register(client, email=email, slug=slug)
-            assert first.status_code == 201
+            assert first.status_code == 202
 
             clash = await _register(client, email=second_email, slug=slug)
             assert clash.status_code >= 400

@@ -72,6 +72,7 @@ from app.schemas.invoice import (
     PaymentRecordRequest,
 )
 from app.schemas.platform import PlatformOverviewRead, WorkspacePageRead
+from app.schemas.text import StorableText
 from app.schemas.workspace import OwnershipRepairRequest, WorkspaceSuspendRequest
 from app.schemas.workspace import WorkspaceRead as WorkspaceStateRead
 
@@ -79,7 +80,8 @@ router = APIRouter(route_class=CommittingRoute, prefix="/platform", tags=["platf
 
 SinceQuery = Annotated[datetime | None, Query(description="Start of the window, inclusive (UTC)")]
 UntilQuery = Annotated[datetime | None, Query(description="End of the window, exclusive (UTC)")]
-SearchQuery = Annotated[str | None, Query(min_length=1, max_length=200)]
+# NUL refused with a 422 before it reaches SQL (SEC-04), as on `/leads`.
+SearchQuery = Annotated[StorableText | None, Query(min_length=1, max_length=200)]
 LimitQuery = Annotated[int, Query(ge=1, le=MAX_PAGE)]
 OffsetQuery = Annotated[int, Query(ge=0)]
 

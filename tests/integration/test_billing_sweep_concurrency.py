@@ -49,7 +49,7 @@ from app.db.models.email import OutboundEmail
 from app.db.models.enums import TenantRole
 from app.db.models.invoice import Invoice, InvoiceStatus, Payment
 from app.db.models.membership import Membership
-from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
+from app.db.models.payment_method import PaymentMethodStatus
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.integrations.billing.checkout import SavedMethodCharge
@@ -58,6 +58,7 @@ from app.services.recurring_service import MAX_COLLECTION_ATTEMPTS
 from app.workers import billing_worker as worker_module
 from app.workers.billing_worker import BillingWorker
 from tests.fakes import as_database
+from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, saved_card
 
 pytestmark = pytest.mark.integration
 
@@ -76,6 +77,8 @@ def _settings(**overrides: Any) -> Settings:
         "log_level": "WARNING",
         "cors_origins": [],
         "jwt_secret": secrets.token_urlsafe(32),
+        "credential_encryption_keys": [ENCRYPTION_KEY],
+        "payment_token_fingerprint_key": FINGERPRINT_KEY,
         # On, and faked: the notices are what could double under concurrency,
         # so a deployment with email off would assert nothing here.
         "email_enabled": True,
@@ -302,12 +305,12 @@ async def _open_invoice(
 async def _card(committing: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> None:
     async with committing() as session:
         session.add(
-            PaymentMethod(
+            saved_card(
                 tenant_id=tenant_id,
                 status=PaymentMethodStatus.ACTIVE,
                 is_default=True,
                 provider="paymob",
-                provider_token=f"tok-{uuid.uuid4().hex[:12]}",
+                token=f"tok-{uuid.uuid4().hex[:12]}",
                 provider_token_id="15978654",
                 brand="MasterCard",
                 masked_pan="**** 2346",

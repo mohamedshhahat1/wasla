@@ -34,6 +34,45 @@ The API and the worker share a volume at `MEDIA_STORAGE_PATH`: the worker downlo
 
 ## Compose
 
+### PostgreSQL identities
+
+Production requires two URLs for the same database. `MIGRATION_DATABASE_URL`
+uses the database owner and is passed only to the one-shot `migrate` service.
+`DATABASE_URL` uses a separate application role and is passed to the API,
+worker, backup, and migrate service. The migrate service applies Alembic and
+then runs `scripts/provision_runtime_db_role.py` to create or rotate the
+application role and grant table and sequence access. New objects created by
+the migration owner inherit the same grants. The API and worker never receive
+the migration URL. The backup reads through the application role; it does not
+need the migration owner or superuser.
+
+On an **existing database**, choose a new runtime username and password, set
+`DATABASE_URL` to it, and retain the current owner in
+`MIGRATION_DATABASE_URL`. Run `docker compose -f docker-compose.prod.yml run
+--rm migrate` before starting the new API and worker. This provisions the role
+on the existing volume; PostgreSQL initialization scripts would only run on a
+fresh volume. The provisioning step refuses a preexisting runtime role with
+elevated flags or memberships. Keep both URLs in the deployment secret store;
+neither belongs in source control. A restore likewise needs the migration
+identity for DDL and must rerun the migrate service to restore runtime grants.
+
+To verify the active API identity, connect using its `DATABASE_URL` and query
+`SELECT current_user, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls FROM
+pg_roles WHERE rolname = current_user`. All four flags must be false. The
+integration test `tests/integration/test_database_runtime_role.py` also proves
+data writes succeed while schema, role, and database creation fail.
+
+Migration `0069` encrypts any existing reusable Paymob card tokens before the
+new API and worker start. The migrate service therefore receives
+`CREDENTIAL_ENCRYPTION_KEYS` and the independent
+`PAYMENT_TOKEN_FINGERPRINT_KEY`. Set them before running a release with saved
+cards. If either is absent, the migration fails in one transaction and leaves
+the prior schema and tokens intact. The first encryption key writes new
+ciphertext; retain earlier keys in the ring for decryption during rotation.
+Keep the fingerprint key stable: changing it requires an explicit rehash of
+every payment method under the new key. A downgrade with saved cards is refused
+because returning to the old schema would restore plaintext token storage.
+
 `docker-compose.yml` targets local development with reload and mounted source. `docker-compose.prod.yml` targets production with pinned images, no source mounts, and stricter resource and restart policies.
 
 Every secret in the production file is required and interpolated from the deployment environment — compose fails to start rather than falling back to an insecure default. The settings added in phases 13 and 14 are wired through it explicitly, with defaults chosen so that omitting them is a *specific* outcome rather than a vague one:
@@ -486,7 +525,15 @@ Run it by hand after any deployment you did not watch:
 docker compose -f docker-compose.prod.yml exec -T api scripts/check_readiness.sh
 ```
 
-**Deployment is gated on CI rather than repeating it.** `deploy.yml` triggers on `workflow_run` and refuses any conclusion other than success, which is "do not deploy if tests fail" expressed as a dependency instead of a second copy of the test job that could drift from the first.
+**Deployment is gated on CI rather than repeating it.** For a `workflow_run`,
+both privileged jobs require a successful CI run caused by a `push` to this
+repository's own `main`. A fork pull request whose branch is named `main`
+cannot publish or deploy. The checkout uses the CI run's `head_sha` with
+`persist-credentials: false`; a tag push or manual dispatch is a separate
+write-access path. The published image is scanned and deployment uses its digest.
+GitHub's fork approval policy, production environment reviewers and branch
+restrictions, and live GHCR tag provenance still need deployment verification
+(DV-S1 in [SECURITY_AUDIT.md](../SECURITY_AUDIT.md)).
 
 **It checks out the commit CI verified**, not the branch head. Between CI finishing and deployment starting, `main` may have moved, and publishing the newer commit would ship something no test ever saw.
 

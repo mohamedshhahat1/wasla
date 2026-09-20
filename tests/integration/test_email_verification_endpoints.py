@@ -764,7 +764,7 @@ async def test_registering_queues_a_verification_code_in_the_same_transaction(
             "workspace_slug": "fresh",
         },
     )
-    assert response.status_code == 201, response.text
+    assert response.status_code == 202, response.text
 
     user = (
         (
@@ -818,7 +818,7 @@ async def test_registration_does_not_return_the_code(
             "workspace_slug": "silent",
         },
     )
-    assert response.status_code == 201
+    assert response.status_code == 202
 
     user = (
         (await db_session.execute(select(User).where(User.email == "silent@acme-example.com")))

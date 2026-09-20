@@ -567,7 +567,8 @@ async def test_the_address_is_not_released_for_re_registration(
         },
     )
 
-    assert response.status_code == 409, response.text
+    assert response.status_code == 202, response.text
+    assert response.json() == {"status": "accepted"}
 
 
 async def test_closing_one_account_leaves_everybody_else_signed_in(

@@ -45,6 +45,8 @@ re-runnable.
 
 from __future__ import annotations
 
+import os
+
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
@@ -73,9 +75,9 @@ AUDIT_LABELS = (
 
 
 def _configured_embedding_model() -> str:
-    from app.core.config import get_settings
-
-    return get_settings().openai_embedding_model
+    # A migration only needs this one value. Loading the complete application
+    # Settings would make a schema change depend on unrelated API credentials.
+    return os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
 
 def upgrade() -> None:

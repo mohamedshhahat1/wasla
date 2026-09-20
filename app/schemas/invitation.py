@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from app.core.security import MAXIMUM_PASSWORD_LENGTH, MINIMUM_PASSWORD_LENGTH
 from app.db.models import InvitationStatus, TenantRole
 from app.schemas.auth import MAXIMUM_TOKEN_LENGTH, WorkspaceSummary
+from app.schemas.text import StorableText
 
 MAXIMUM_NAME_LENGTH: Final = 200
 
@@ -39,7 +40,7 @@ class InvitationAcceptRequest(_Payload):
         min_length=MINIMUM_PASSWORD_LENGTH,
         max_length=MAXIMUM_PASSWORD_LENGTH,
     )
-    full_name: str | None = Field(default=None, max_length=MAXIMUM_NAME_LENGTH)
+    full_name: StorableText | None = Field(default=None, max_length=MAXIMUM_NAME_LENGTH)
 
 
 class InvitationResponse(BaseModel):

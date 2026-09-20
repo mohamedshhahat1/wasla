@@ -54,9 +54,8 @@ place to decide what it was. ``docs/RUNBOOK.md`` has the queries.
 from __future__ import annotations
 
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
-
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision = "0068"
 down_revision = "0067"

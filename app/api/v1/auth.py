@@ -34,7 +34,11 @@ from app.schemas.password_reset import (
     PasswordResetRequestedResponse,
     PasswordResetRequestPayload,
 )
-from app.services.auth_service import AuthenticatedSession, WorkspaceContext
+from app.services.auth_service import (
+    AuthenticatedSession,
+    EmailAlreadyRegisteredError,
+    WorkspaceContext,
+)
 from app.services.password_reset_service import (
     RESET_REQUESTED_MESSAGE,
     PasswordResetService,
@@ -63,9 +67,8 @@ def _session_response(result: AuthenticatedSession) -> SessionResponse:
 
 @router.post(
     "/register",
-    response_model=SessionResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Create an account and its first workspace",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Request account registration",
 )
 async def register(
     payload: RegistrationRequest,
@@ -73,15 +76,21 @@ async def register(
     # Counted per client address: a caller creating an account has no
     # identity yet, so where the request came from is all there is.
     limit: AuthRateLimit,
-) -> SessionResponse:
-    result = await service.register(
-        email=payload.email,
-        password=payload.password,
-        full_name=payload.full_name,
-        workspace_name=payload.workspace_name,
-        workspace_slug=payload.workspace_slug,
-    )
-    return _session_response(result)
+) -> dict[str, str]:
+    try:
+        await service.register(
+            email=payload.email,
+            password=payload.password,
+            full_name=payload.full_name,
+            workspace_name=payload.workspace_name,
+            workspace_slug=payload.workspace_slug,
+        )
+    except EmailAlreadyRegisteredError:
+        await service.notify_existing_registration(payload.email)
+    # A new account can sign in with the password it chose, then enter the
+    # verification code delivered to its mailbox. No token in this response:
+    # handing out one only for new addresses would disclose account existence.
+    return {"status": "accepted"}
 
 
 @router.post(

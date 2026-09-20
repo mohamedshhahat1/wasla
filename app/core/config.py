@@ -7,6 +7,7 @@ while placeholder values are still in place.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from functools import lru_cache
@@ -158,12 +159,116 @@ def _public_url_problems(value: str) -> list[str]:
         ]
     if not parsed.netloc:
         return ["APP_PUBLIC_URL must include a host, such as https://app.example.com"]
+    if parsed.username is not None or parsed.password is not None:
+        # `https://app.example.com@attacker.example` reads as our host and
+        # *is* attacker.example: everything before the `@` is userinfo. Every
+        # reset and invitation link would carry its token there (SEC-06).
+        # Refused in every environment - there is no legitimate use.
+        return [
+            "APP_PUBLIC_URL must not contain credentials or an '@'; the host a "
+            "link opens is whatever follows it"
+        ]
     if parsed.query or parsed.fragment:
         # Templates append their own path and query. A base carrying either
         # produces a malformed link rather than an unsafe one, but a malformed
         # reset link is a reset that cannot be completed.
         return ["APP_PUBLIC_URL must be an origin and optional path, with no query or fragment"]
     return []
+
+
+def _internet_origin_problems(value: str) -> list[str]:
+    """APP_PUBLIC_URL on an internet-facing deployment (SEC-06).
+
+    Decided on the *parsed* URL, never on its prefix: a string check for
+    `https://` accepts `https://app.example.com@attacker.example`, which is a
+    link to attacker.example. The scheme must be https, the host present, the
+    port the default, and there may be no userinfo, query or fragment.
+    """
+    parsed = urlsplit(value.strip())
+    problems: list[str] = []
+    if parsed.scheme.lower() != "https":
+        problems.append(
+            "APP_PUBLIC_URL must be https in staging and production: reset and "
+            "invitation tokens and payment callbacks travel in these links"
+        )
+    if not parsed.hostname:
+        problems.append("APP_PUBLIC_URL must name a host")
+    if parsed.username is not None or parsed.password is not None:
+        problems.append("APP_PUBLIC_URL must not contain credentials or an '@'")
+    try:
+        port = parsed.port
+    except ValueError:
+        port = -1
+    if port not in (None, 443):
+        problems.append("APP_PUBLIC_URL must use the default https port")
+    if parsed.query or parsed.fragment:
+        problems.append("APP_PUBLIC_URL must have no query or fragment")
+    return problems
+
+
+def _cors_problems(origins: list[str]) -> list[str]:
+    """CORS origins an internet-facing deployment may name (SEC-06, PD-1).
+
+    The middleware runs with `allow_credentials=True`, so each entry is an
+    origin trusted to read authenticated responses. Each must therefore be one
+    exact https origin: not `*` (Starlette echoes any `Origin` back), not
+    `null` (every sandboxed iframe and `file:` page sends it), not `http://`,
+    and not a pattern such as `https://*.example.com` - Starlette compares
+    literally, so that one matches nothing while reading as if it matched a
+    great deal.
+    """
+    problems: list[str] = []
+    for origin in origins:
+        text = origin.strip()
+        if text == "*":
+            problems.append(
+                "CORS_ORIGINS must name each allowed origin explicitly; "
+                "'*' is not permitted with credentialed requests"
+            )
+            continue
+        parsed = urlsplit(text)
+        try:
+            port = parsed.port
+        except ValueError:
+            port = -1
+        if (
+            text.lower() == "null"
+            or parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or "*" in text
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in (None, 443)
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            problems.append(
+                f"CORS_ORIGINS entry {text!r} is not allowed in staging or "
+                "production: each entry must be exactly https://host, with no "
+                "wildcard, port, path, credentials, or the literal 'null'"
+            )
+    return problems
+
+
+def _proxy_breadth_problems(entries: list[str]) -> list[str]:
+    """Trusted proxies an internet-facing deployment may name (SEC-06).
+
+    A trusted peer may set `X-Real-IP`, which is the identity the per-address
+    authentication limit counts by. Trusting `0.0.0.0/0` - or any public range
+    - lets every client on the internet choose its own bucket. Only loopback
+    and private networks are accepted: the proxy is infrastructure this
+    deployment runs, and a Docker or VPC network is private address space.
+    """
+    problems: list[str] = []
+    for network in parse_trusted_proxies(entries):
+        if network.prefixlen == 0 or not (network.is_private or network.is_loopback):
+            problems.append(
+                f"TRUSTED_PROXY_IPS entry {str(network)!r} is not allowed in "
+                "staging or production: name the reverse proxy's own private or "
+                "loopback address or network, never a public or all-address range"
+            )
+    return problems
 
 
 def _google_problems(
@@ -274,6 +379,10 @@ class Settings(BaseSettings):
     environment: Environment = "local"
     debug: bool = False
     api_v1_prefix: str = "/api/v1"
+    # The interactive reference. When unset it follows the environment: on in
+    # `local` and `test`, off everywhere else - staging is internet-reachable
+    # and is held to production's rule (PD-1). Set explicitly it is refused in
+    # staging and production; see `_validate_hardening`.
     docs_enabled: bool = True
 
     # Observability
@@ -483,6 +592,22 @@ class Settings(BaseSettings):
     # comma-separated value - the only thing a container environment can
     # comfortably express - fails at start-up.
     credential_encryption_keys: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Independent HMAC key for deduplicating reusable Paymob tokens without
+    # retaining or indexing their plaintext. Base64 of 32 random bytes.
+    payment_token_fingerprint_key: str | None = None
+
+    @field_validator("payment_token_fingerprint_key")
+    @classmethod
+    def validate_payment_token_fingerprint_key(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return None
+        try:
+            decoded = base64.b64decode(value, validate=True)
+        except (ValueError, TypeError) as error:
+            raise ValueError("PAYMENT_TOKEN_FINGERPRINT_KEY must be base64") from error
+        if len(decoded) != 32:
+            raise ValueError("PAYMENT_TOKEN_FINGERPRINT_KEY must encode 32 bytes")
+        return value
 
     # Request limits, enforced by the application rather than only by nginx.
     # nginx is one deployment topology, not a property of the software: run the
@@ -495,6 +620,19 @@ class Settings(BaseSettings):
     # can reach - the 32 MB above exists for media uploads by signed-in
     # colleagues, which is not what arrives here.
     webhook_max_request_bytes: int = Field(default=1024 * 1024, gt=0)
+    # What a caller with no verifiable access token may send to any route
+    # (SEC-02). JSON is parsed in full - at about nine times its size - before
+    # validation and before the rate limiter, so this, not the 32 MB above, is
+    # the pre-authentication memory bound. The largest public body is a
+    # registration: a few hundred bytes.
+    max_json_request_bytes: int = Field(default=64 * 1024, gt=0)
+    # A signed-in caller, on any route not named in `UPLOAD_ALLOWANCES`. Holds
+    # the largest current schema at its maximum even fully `\u`-escaped: an
+    # agent's 20 000-character prompts, a campaign's 1 000 contacts.
+    max_authenticated_request_bytes: int = Field(default=1024 * 1024, gt=0)
+    # Knowledge-document submission: 400 000 characters as JSON, which is up to
+    # twelve bytes each when a client escapes astral characters.
+    max_document_request_bytes: int = Field(default=5 * 1024 * 1024, gt=0)
     # How long a handler may take. Bounds a pooled database connection being
     # held, not the client's patience. The WhatsApp webhook is exempt.
     request_timeout_seconds: float = Field(default=60.0, gt=0)
@@ -1007,6 +1145,30 @@ class Settings(BaseSettings):
         """
         return self.environment in DEVELOPER_ENVIRONMENTS
 
+    @model_validator(mode="before")
+    @classmethod
+    def _default_docs_by_environment(cls, data: Any) -> Any:
+        """Give `DOCS_ENABLED` a default that depends on where this runs (PD-1).
+
+        Resolved from the environment only when nothing set it, so an explicit
+        `DOCS_ENABLED=true` in staging is still visible to the validator below
+        and refused there, rather than silently overridden.
+        """
+        if not isinstance(data, dict):
+            return data
+        if any(str(key).lower() == "docs_enabled" for key in data):
+            return data
+        environment = next(
+            (value for key, value in data.items() if str(key).lower() == "environment"),
+            "local",
+        )
+        return {**data, "docs_enabled": str(environment).strip() in DEVELOPER_ENVIRONMENTS}
+
+    @property
+    def is_internet_facing(self) -> bool:
+        """Staging and production: reachable by strangers, held to one policy."""
+        return not self.is_developer_environment
+
     @model_validator(mode="after")
     def _validate_media_deadlines(self) -> Settings:
         """Refuse a download deadline the queue lease cannot cover (MEDIA-10).
@@ -1076,30 +1238,46 @@ class Settings(BaseSettings):
                 "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
             )
 
-        if self.is_production:
-            if self.debug:
-                problems.append("DEBUG must be disabled")
+        if self.is_internet_facing:
+            # Staging and production share one policy (PD-1, SEC-06): staging
+            # is internet-reachable - Meta delivers webhooks to it - and its
+            # data is real enough to protect.
             if self.docs_enabled:
                 problems.append(
                     "DOCS_ENABLED must be false: the interactive reference publishes "
                     "every route and schema, including platform administration"
                 )
+            # The middleware is configured with `allow_credentials=True`, so
+            # every entry is an origin trusted to read authenticated answers.
+            problems.extend(_cors_problems(self.cors_origins))
+            problems.extend(_proxy_breadth_problems(self.trusted_proxy_ips))
+            if not self.rate_limit_enabled:
+                # The per-address and per-account limits are the only
+                # anti-automation control in front of `/auth/login`. There is
+                # no emergency-bypass architecture, so there is no off switch.
+                problems.append(
+                    "RATE_LIMIT_ENABLED must be true in staging and production: it "
+                    "is the only brute-force control in front of authentication"
+                )
+            if self.app_public_url:
+                problems.extend(_internet_origin_problems(self.app_public_url))
+
+        if self.is_production:
+            if self.debug:
+                problems.append("DEBUG must be disabled")
             if not self.meta_app_secret:
                 # Without it the webhook cannot verify a Meta signature, and the
                 # endpoint answers 503 to every delivery - a silent integration
                 # outage that looks like Meta's fault.
                 problems.append("META_APP_SECRET must be set so webhook signatures can be verified")
-            if "*" in self.cors_origins:
-                # The middleware is configured with `allow_credentials=True`, and
-                # Starlette answers a wildcard-plus-credentials configuration by
-                # echoing whatever `Origin` arrives - so every site on the
-                # internet becomes an allowed origin. This API authenticates with
-                # a bearer token rather than a cookie, which limits the damage,
-                # but "the other control saves us" is not a reason to ship the
-                # combination. Name the origins.
+            if not self.meta_verify_token:
+                # Without it the subscription handshake answers 503 (fail
+                # closed), so Meta can never be pointed at this deployment.
+                # Production requires Meta already - the app secret above - so
+                # it requires the other half of the webhook contract too
+                # (SEC-13).
                 problems.append(
-                    "CORS_ORIGINS must name each allowed origin explicitly; "
-                    "'*' is not permitted with credentialed requests"
+                    "META_VERIFY_TOKEN must be set so Meta can verify the webhook subscription"
                 )
 
         if self.tracing_enabled and not self.otel_exporter_otlp_endpoint:
@@ -1145,17 +1323,11 @@ class Settings(BaseSettings):
                     "credentials may not be stored in plaintext"
                 )
 
-            if self.is_production:
-                if self.email_provider != "resend":
-                    problems.append(
-                        "EMAIL_PROVIDER must be a real provider in production; "
-                        "the fake delivers nothing and says it succeeded"
-                    )
-                if self.app_public_url and not self.app_public_url.startswith("https://"):
-                    problems.append(
-                        "APP_PUBLIC_URL must be https in production: reset and "
-                        "invitation tokens travel in these links"
-                    )
+            if self.is_production and self.email_provider != "resend":
+                problems.append(
+                    "EMAIL_PROVIDER must be a real provider in production; "
+                    "the fake delivers nothing and says it succeeded"
+                )
                 # RESEND_WEBHOOK_SECRET is deliberately *not* required here.
                 # It is still required in production - by
                 # `integrations.email.require_delivery_verification`, called
@@ -1166,6 +1338,14 @@ class Settings(BaseSettings):
                 # reasoning; the two are now symmetric (ADR-063).
 
         if self.billing_provider == "paymob" and not self.is_testing:
+            if not self.credential_encryption_keys:
+                problems.append(
+                    "CREDENTIAL_ENCRYPTION_KEYS must be set when BILLING_PROVIDER is paymob"
+                )
+            if not self.payment_token_fingerprint_key:
+                problems.append(
+                    "PAYMENT_TOKEN_FINGERPRINT_KEY must be set when BILLING_PROVIDER is paymob"
+                )
             # Fail closed where money is involved, and in every environment
             # rather than only production: a staging deployment configured to
             # take payments and missing its HMAC secret would answer 503 to
@@ -1195,10 +1375,6 @@ class Settings(BaseSettings):
                 problems.append(
                     "APP_PUBLIC_URL must be set when BILLING_PROVIDER is paymob: "
                     "the callback URL is built from it"
-                )
-            elif self.is_production and not self.app_public_url.startswith("https://"):
-                problems.append(
-                    "APP_PUBLIC_URL must be https in production: payment callbacks travel to it"
                 )
 
             problems.extend(self._paymob_key_problems())

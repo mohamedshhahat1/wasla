@@ -8,6 +8,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db.models import WhatsAppAccountStatus
+from app.schemas.text import StorableText
 
 
 class _Payload(BaseModel):
@@ -32,20 +33,20 @@ class WhatsAppAccountConnectRequest(_Payload):
     it and a mismatch is refused, omit it and Meta's answer is used.
     """
 
-    phone_number_id: str = Field(min_length=1, max_length=64)
+    phone_number_id: StorableText = Field(min_length=1, max_length=64)
     # Required. The claim is proven by reading the phone number node with this
     # credential, and there is no other proof: a request without one cannot
     # establish that this workspace controls this number, and the platform
     # credential deliberately does not count - it can read every number the
     # platform is connected to.
-    access_token: str = Field(min_length=1, max_length=512)
+    access_token: StorableText = Field(min_length=1, max_length=512)
     # Optional, and checked rather than trusted. Meta names the owning business
     # account; supplying a different one fails the claim instead of being
     # quietly corrected.
-    waba_id: str | None = Field(default=None, min_length=1, max_length=64)
+    waba_id: StorableText | None = Field(default=None, min_length=1, max_length=64)
     # The workspace's own label for the number - "Support", "Sales". Purely
     # cosmetic and purely local, which is why it is still an input.
-    display_name: str | None = Field(default=None, max_length=200)
+    display_name: StorableText | None = Field(default=None, max_length=200)
 
 
 class WhatsAppAccountVerifyRequest(_Payload):
@@ -55,7 +56,7 @@ class WhatsAppAccountVerifyRequest(_Payload):
     cannot be used to move a claim. Only `connect` claims a number.
     """
 
-    access_token: str = Field(min_length=1, max_length=512)
+    access_token: StorableText = Field(min_length=1, max_length=512)
 
 
 class WhatsAppAccountResponse(BaseModel):

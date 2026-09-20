@@ -21,6 +21,7 @@ from app.schemas.auth import (
     MINIMUM_SLUG_LENGTH,
     SLUG_PATTERN,
 )
+from app.schemas.text import StorableText
 
 # What an operator may write when suspending a workspace. Bounded because it is
 # free text from a person that lands in an audit row, and audit metadata is read
@@ -48,7 +49,7 @@ class WorkspaceCreateRequest(_Payload):
     decision the server has already made.
     """
 
-    name: str = Field(min_length=1, max_length=MAXIMUM_NAME_LENGTH)
+    name: StorableText = Field(min_length=1, max_length=MAXIMUM_NAME_LENGTH)
     slug: str = Field(
         min_length=MINIMUM_SLUG_LENGTH,
         max_length=MAXIMUM_SLUG_LENGTH,
@@ -66,7 +67,7 @@ class WorkspaceUpdateRequest(_Payload):
     carry the same authority.
     """
 
-    name: str | None = Field(default=None, min_length=1, max_length=MAXIMUM_NAME_LENGTH)
+    name: StorableText | None = Field(default=None, min_length=1, max_length=MAXIMUM_NAME_LENGTH)
     slug: str | None = Field(
         default=None,
         min_length=MINIMUM_SLUG_LENGTH,
@@ -117,7 +118,7 @@ class OwnershipRepairRequest(_Payload):
 class WorkspaceSuspendRequest(_Payload):
     """Why the workspace is being suspended. Optional, and recorded verbatim."""
 
-    reason: str | None = Field(default=None, max_length=MAXIMUM_SUSPENSION_REASON_LENGTH)
+    reason: StorableText | None = Field(default=None, max_length=MAXIMUM_SUSPENSION_REASON_LENGTH)
 
 
 class WorkspaceRead(BaseModel):

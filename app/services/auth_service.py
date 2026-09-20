@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Final
 
 from sqlalchemy.exc import IntegrityError
@@ -46,6 +47,8 @@ from app.repositories import (
     UserRepository,
 )
 from app.services.audit_service import AuditTrail
+from app.services.email_service import EmailOutbox
+from app.services.email_templates import EmailTemplate
 from app.services.email_verification_service import EmailVerificationService
 from app.services.subscription_service import bootstrap_default_subscription
 
@@ -56,6 +59,12 @@ logger = get_logger(__name__)
 INVALID_CREDENTIALS: Final = "The email address or password is incorrect."
 USER_EMAIL_CONSTRAINT: Final = "uq_users_email"
 TENANT_SLUG_CONSTRAINT: Final = "uq_tenants_slug"
+
+
+class EmailAlreadyRegisteredError(ConflictError):
+    """Internal distinction used to keep the public signup answer generic."""
+
+    message = "An account with that email address already exists."
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +142,10 @@ class AuthService:
                     workspace_slug=workspace_slug,
                     full_name=full_name,
                 )
+        except ConflictError as error:
+            if str(error) == EmailAlreadyRegisteredError.message:
+                raise EmailAlreadyRegisteredError() from error
+            raise
         except IntegrityError as error:
             # A failed PostgreSQL statement aborts its transaction. The
             # savepoint above contains that abort so the controlled conflict
@@ -141,10 +154,22 @@ class AuthService:
             # remains a 500 and therefore visible as a defect.
             constraint = str(error.orig)
             if USER_EMAIL_CONSTRAINT in constraint:
-                raise ConflictError("An account with that email address already exists.") from error
+                raise EmailAlreadyRegisteredError() from error
             if TENANT_SLUG_CONSTRAINT in constraint:
                 raise ConflictError("That workspace address is already in use.") from error
             raise
+
+    async def notify_existing_registration(self, email: str) -> None:
+        """Notify the mailbox owner once per day, without changing the account."""
+        user = await self._users.get_by_email(email)
+        if user is None:
+            return
+        await EmailOutbox(self._session, self._settings).enqueue(
+            template=EmailTemplate.REGISTRATION_ATTEMPT,
+            recipient=user.email,
+            idempotency_key=f"registration-attempt:{user.id}:{datetime.now(UTC).date().isoformat()}",
+            user_id=user.id,
+        )
 
     async def _register(
         self,

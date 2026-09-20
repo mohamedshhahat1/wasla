@@ -15,7 +15,7 @@
 # deployment is likely to choose without this repository choosing one for it.
 # It signs, it uses TLS, and it reads its credentials from the environment -
 # all three of which a hand-rolled `curl` uploader would have to reimplement.
-FROM pgvector/pgvector:pg16
+FROM pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
 
 ARG WASLA_VERSION="0.0.0-local"
 ARG WASLA_REVISION="unknown"

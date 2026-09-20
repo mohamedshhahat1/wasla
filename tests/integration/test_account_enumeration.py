@@ -11,14 +11,9 @@ cannot quietly undo it.
 **Invitation acceptance: no.** Unknown, spent, revoked and expired tokens all
 answer identically.
 
-**Registration: yes, and it is accepted rather than fixed.** A duplicate address
-answers 409. Merging the message with the slug conflict would be theatre - the
-attacker chooses the slug, so a unique slug makes a 409 mean "the address
-exists" whatever the wording says, while a merged message would leave a real
-person unable to tell which of their two fields was wrong. The only actual fix
-is not to create the account synchronously and to confirm through the address
-instead, which needs a delivery channel this deployment does not have. See
-ADR-040 and `docs/SECURITY.md`.
+**Registration: no.** A new and an existing address receive the same 202 body.
+The existing mailbox owner receives a bounded outbox notice, and the account
+remains unchanged.
 
 What that leaves is a bounded oracle: 10 probes per minute per client address,
 and the bound now survives a Redis outage. The tests below assert the bound is
@@ -36,10 +31,14 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.crypto import generate_key
 from app.core.dependencies import get_session
+from app.db.models import User
+from app.db.models.email import OutboundEmail
 from app.main import create_app
 from tests.conftest import FakeDependency
 
@@ -56,6 +55,11 @@ def settings() -> Settings:
         _env_file=None,
         environment="test",
         rate_limit_enabled=False,
+        email_enabled=True,
+        email_provider="fake",
+        email_from="no-reply@example.com",
+        app_public_url="https://app.example.com",
+        credential_encryption_keys=[generate_key()],
     )
 
 
@@ -191,30 +195,50 @@ async def test_invitation_acceptance_says_nothing_about_which_token_failed(
 # ------------------------------------------------------------ registration
 
 
-async def test_registration_still_discloses_a_taken_address(
+async def test_registration_never_discloses_a_taken_address(
     client: AsyncClient,
+    db_session: AsyncSession,
 ) -> None:
-    """The accepted leak, pinned so it cannot silently get *worse*.
-
-    This is a documented deferral, not an oversight: closing it needs the
-    account not to be created synchronously, which needs email. What this test
-    guards is the blast radius - a 409 and nothing else. If a future change
-    started returning the existing account's id, name or workspace, this fails.
-    """
     stamp = uuid.uuid4().hex[:10]
     known = f"known-{stamp}@example.com"
     first = await _register(client, known, f"enum-{stamp}")
-    assert first.status_code == 201
+    assert first.status_code == 202
+
+    user = (await db_session.execute(select(User).where(User.email == known))).scalar_one()
+    original_hash = user.hashed_password
+    original_version = user.token_version
 
     again = await _register(client, known, f"enum-{stamp}-different")
+    duplicate = await _register(client, known, f"enum-{stamp}-another")
 
-    assert again.status_code == 409
-    body = again.json()
-    assert set(body["error"]) <= {"code", "message", "request_id", "details"}
-    # Nothing about the account that exists.
-    text = again.text.lower()
-    for leak in ("tenant", "workspace_id", "user_id", "owner", str(first.json())[:20].lower()):
-        assert leak not in text
+    assert first.status_code == again.status_code == duplicate.status_code == 202
+    assert first.json() == again.json() == duplicate.json() == {"status": "accepted"}
+    for name in ("content-type", "cache-control", "x-content-type-options"):
+        assert first.headers.get(name) == again.headers.get(name)
+
+    await db_session.refresh(user)
+    assert user.hashed_password == original_hash
+    assert user.token_version == original_version
+    matching_users = (
+        (await db_session.execute(select(User).where(User.email == known))).scalars().all()
+    )
+    assert len(matching_users) == 1
+
+    notices = (
+        (
+            await db_session.execute(
+                select(OutboundEmail).where(
+                    OutboundEmail.user_id == user.id,
+                    OutboundEmail.template == "registration_attempt",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(notices) == 1
+    assert notices[0].recipient == known
+    assert notices[0].context == {}
 
 
 async def test_a_taken_workspace_slug_is_a_separate_answer(

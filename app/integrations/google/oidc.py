@@ -35,7 +35,6 @@ generator pointed at Google.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import time
 from dataclasses import dataclass
@@ -55,6 +54,7 @@ from jwt.exceptions import (
 
 from app.core.logging import get_logger
 from app.core.net import UnsafeUrlError, build_guarded_client
+from app.core.secure_compare import secrets_match
 from app.db.models.identity import MAX_PROVIDER_SUBJECT_LENGTH
 from app.db.models.user import MAX_AVATAR_URL_LENGTH, MAX_EMAIL_LENGTH, MAX_FULL_NAME_LENGTH
 
@@ -399,9 +399,22 @@ class GoogleIdTokenVerifier:
 
         # From here the signature is verified, so - and only so - the claims can
         # be read. `aud` and `exp` were checked inside `_decode`.
+        self._check_audience_shape(payload)
         self._check_issuer(payload)
         self._check_nonce(payload, expected=nonce)
         return self._extract(payload)
+
+    def _check_audience_shape(self, payload: dict[str, Any]) -> None:
+        """Trust only this client, including when PyJWT accepts an audience array.
+
+        PyJWT accepts an array containing our client ID. OpenID Connect also
+        requires trust in every additional audience; Wasla has no such trust
+        list. An ``azp`` claim, when present, must name this client.
+        """
+        if payload.get("aud") != self._client_id:
+            raise GoogleTokenInvalidError("wrong_audience")
+        if "azp" in payload and payload["azp"] != self._client_id:
+            raise GoogleTokenInvalidError("wrong_authorized_party")
 
     @staticmethod
     def _header(id_token: str) -> dict[str, Any]:
@@ -473,7 +486,7 @@ class GoogleIdTokenVerifier:
         presented = payload.get("nonce")
         if not isinstance(presented, str) or not presented:
             raise GoogleTokenInvalidError("missing_nonce")
-        if not hmac.compare_digest(presented, expected):
+        if not secrets_match(expected, presented):
             raise GoogleTokenInvalidError("wrong_nonce")
 
     @staticmethod

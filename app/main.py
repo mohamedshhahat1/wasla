@@ -142,6 +142,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         BodySizeLimitMiddleware,
         max_bytes=resolved.max_request_bytes,
         webhook_max_bytes=resolved.webhook_max_request_bytes,
+        json_max_bytes=resolved.max_json_request_bytes,
+        authenticated_max_bytes=resolved.max_authenticated_request_bytes,
+        document_max_bytes=resolved.max_document_request_bytes,
+        api_prefix=resolved.api_v1_prefix,
+        settings=resolved,
     )
     if resolved.cors_origins:
         app.add_middleware(

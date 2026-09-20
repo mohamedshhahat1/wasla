@@ -732,6 +732,17 @@ this section describes.
 
 ### Automatic renewal (ADR-046)
 
+Saved-card callbacks contain a reusable Paymob card token. Wasla verifies the
+card-token HMAC and correlates the order to its own checkout before saving it.
+The token is stored as a row-bound AES-GCM envelope, with a separate
+HMAC-SHA-256 fingerprint for callback deduplication. Only the renewal path
+decrypts it, immediately before building Paymob's merchant-initiated pay
+request. The masked PAN, brand, and provider token record ID remain presentation
+metadata. The card token is never returned by the API or included in audit
+metadata. `CREDENTIAL_ENCRYPTION_KEYS` supports encryption-key rotation;
+`PAYMENT_TOKEN_FINGERPRINT_KEY` is a separate stable lookup key. See the
+`0069` rollout instructions in [DEPLOYMENT.md](DEPLOYMENT.md).
+
 When the provider can charge a saved card, the sweep collects a due renewal
 without anybody present:
 
@@ -745,7 +756,9 @@ period ends
     │       ├─ no  →  invoice emailed and chased, exactly as before
     │       │
     │       └─ yes →  intention on the Moto integration
-    │                 POST /api/acceptance/payments/pay  { token, payment_token }
+    │                 POST /api/acceptance/payments/pay
+    │                   { source: { identifier: card_token, subtype: TOKEN },
+    │                     payment_token }
     │                        │
     │                        └─ callback → the same settlement path as a link
     │

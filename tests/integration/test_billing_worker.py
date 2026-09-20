@@ -45,6 +45,7 @@ from app.services.subscription_service import SubscriptionService
 from app.workers.billing_worker import BillingWorker
 from tests.fakes import as_database, as_redis_client
 from tests.integration.plan_catalogue import own_plan
+from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, saved_card
 
 pytestmark = pytest.mark.integration
 
@@ -87,6 +88,8 @@ def _settings(**overrides: Any) -> Settings:
         # and a literal long enough to satisfy the setting is also long enough to
         # look like a leaked credential to a secret scanner.
         "jwt_secret": secrets.token_urlsafe(32),
+        "credential_encryption_keys": [ENCRYPTION_KEY],
+        "payment_token_fingerprint_key": FINGERPRINT_KEY,
     }
     values.update(overrides)
     return Settings(**values)
@@ -729,10 +732,10 @@ async def _card(
     *,
     token: str = "tok-worker",  # noqa: S107 - a fixture handle, not a credential
 ) -> PaymentMethod:
-    method = PaymentMethod(
+    method = saved_card(
         tenant_id=tenant.id,
         provider="paymob",
-        provider_token=token,
+        token=token,
         provider_token_id="15978654",
         masked_pan="xxxx-xxxx-xxxx-2346",
         brand="MasterCard",

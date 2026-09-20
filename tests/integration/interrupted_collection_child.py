@@ -40,6 +40,7 @@ from app.db.models.billing import Subscription
 from app.db.models.invoice import Invoice, InvoiceStatus
 from app.integrations.billing.checkout import SavedMethodCharge, SavedPaymentMethod
 from app.services.recurring_service import RecurringService
+from tests.payment_tokens import PROTECTOR
 
 
 class ReportingProvider:
@@ -100,6 +101,7 @@ async def _main() -> None:
             session,
             tenant_id=tenant_id,
             provider=ReportingProvider(port),
+            payment_tokens=PROTECTOR,
         )
         # The real service, the real protocol, the real commits. What is faked
         # is only the far end of the socket.

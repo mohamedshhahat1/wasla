@@ -255,18 +255,16 @@ class CheckoutProvider(Protocol):
 class SavedPaymentMethod:
     """A card a customer chose to keep, as the provider describes it.
 
-    Everything here is safe to store. `token` is the provider's opaque handle -
-    it is not a card number, it cannot be used anywhere but this merchant
-    account, and it is what makes charging a renewal possible without anybody
-    holding a PAN. `masked_pan` is the last four digits the provider already
-    prints on receipts.
+    `token` is a reusable merchant credential. It is encrypted before storage
+    and omitted from this object's diagnostic representation. `masked_pan` is
+    the last four digits the provider already prints on receipts.
 
     There is deliberately no field for a card number, an expiry or a CVV.
     Those never reach this application: the customer types them into the
     provider's own page, and what comes back is this.
     """
 
-    token: str
+    token: str = field(repr=False)
     provider_token_id: str
     masked_pan: str | None = None
     brand: str | None = None
@@ -287,7 +285,7 @@ class SavedMethodCharge:
     """
 
     reference: str
-    token: str
+    token: str = field(repr=False)
     amount: Decimal
     currency: str
     description: str

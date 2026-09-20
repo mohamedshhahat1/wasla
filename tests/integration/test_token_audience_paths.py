@@ -189,11 +189,11 @@ async def test_login_issues_a_pair_addressed_to_their_own_consumers(
     assert _payload(body["refresh_token"])["aud"] == TokenType.REFRESH.audience
 
 
-async def test_registration_issues_a_pair_with_the_audiences(
+async def test_login_after_registration_issues_a_pair_with_the_audiences(
     http: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
-    """The other entry point, which mints before any row exists to log in against."""
+    """Signup itself returns no credential; the subsequent login mints the pair."""
     response = await http.post(
         f"{API}/auth/register",
         json={
@@ -205,8 +205,13 @@ async def test_registration_issues_a_pair_with_the_audiences(
         },
     )
 
-    assert response.status_code == 201, response.text
-    body = response.json()
+    assert response.status_code == 202, response.text
+    assert response.json() == {"status": "accepted"}
+    login = await http.post(
+        f"{API}/auth/login", json={"email": "brand-new@example.com", "password": PASSWORD}
+    )
+    assert login.status_code == 200
+    body = login.json()
     assert _payload(body["access_token"])["aud"] == TokenType.ACCESS.audience
     assert _payload(body["refresh_token"])["aud"] == TokenType.REFRESH.audience
 

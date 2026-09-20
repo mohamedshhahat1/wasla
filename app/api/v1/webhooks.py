@@ -15,7 +15,6 @@ queue; the worker calls the model.
 
 from __future__ import annotations
 
-import hmac
 import json
 from typing import Annotated, Any, cast
 
@@ -33,6 +32,7 @@ from app.core.dependencies import (
 )
 from app.core.exceptions import DependencyUnavailableError, PermissionDeniedError
 from app.core.logging import get_logger
+from app.core.secure_compare import secrets_match
 from app.core.telemetry import CallOutcome, Provider, observe_auth_event, record_provider_call
 from app.db.errors import is_data_exception
 from app.integrations.whatsapp.signature import SIGNATURE_HEADER, verify_signature
@@ -147,9 +147,14 @@ async def verify_subscription(
         raise DependencyUnavailableError("WhatsApp webhook verification is not configured.")
 
     # Constant-time, and the challenge is never echoed to a failed attempt.
-    matches = token is not None and hmac.compare_digest(token, expected)
+    matches = secrets_match(expected, token)
     if mode != SUBSCRIBE_MODE or not matches or challenge is None:
         logger.warning("whatsapp.verification_rejected", extra={"mode": mode})
+        observe_auth_event(
+            event="whatsapp_verification",
+            outcome="blocked",
+            reason="invalid_token",
+        )
         raise PermissionDeniedError("Webhook verification failed.")
 
     logger.info("whatsapp.verification_succeeded")
