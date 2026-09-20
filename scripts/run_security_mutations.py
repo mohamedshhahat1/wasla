@@ -181,8 +181,8 @@ MUTANTS = (
     Mutant(
         "R20",
         "app/api/v1/payment_webhooks.py",
-        '            "billing.card_token_processed",',
-        '            f"billing.card_token_processed {saved.token}",',
+        '        "billing.card_token_processed",',
+        '        f"billing.card_token_processed {saved.token}",',
         f"{PAYMOB}::test_signed_card_token_is_stored_encrypted_and_retries_once",
     ),
     Mutant(
@@ -191,7 +191,7 @@ MUTANTS = (
         "if not signature or not secrets_match(expected, signature):",
         "if False:",
         "tests/unit/test_paymob_card_tokens.py::test_changing_any_signed_field_invalidates_the_token",
-        occurrence=2,
+        occurrence=1,
     ),
     Mutant(
         "R22",
@@ -253,6 +253,7 @@ def run(mutant: Mutant) -> dict[str, object]:
     if result is None:
         raise RuntimeError(f"{mutant.identifier}: test process did not run")
     output = result.stdout + result.stderr
+    failure = next((line for line in output.splitlines() if line.startswith("FAILED ")), "")
     return {
         "id": mutant.identifier,
         "property_removed": mutant.old[:90],
@@ -263,12 +264,13 @@ def run(mutant: Mutant) -> dict[str, object]:
         "killer_test": mutant.test,
         "sha256_restored": restored,
         "exit_code": result.returncode,
-        "test_tail": output[-500:],
+        "failure": failure,
     }
 
 
 def main() -> int:
     selected = set(sys.argv[1:])
+    incomplete = False
     for mutant in MUTANTS:
         if selected and mutant.identifier not in selected:
             continue
@@ -276,8 +278,9 @@ def main() -> int:
             result = run(mutant)
         except (OSError, ValueError, subprocess.TimeoutExpired) as error:
             result = {"id": mutant.identifier, "applied": False, "error": str(error)}
+        incomplete = incomplete or not result.get("killed", False)
         print(json.dumps(result, ensure_ascii=False), flush=True)  # noqa: T201 - CLI output
-    return 0
+    return 1 if incomplete else 0
 
 
 if __name__ == "__main__":
