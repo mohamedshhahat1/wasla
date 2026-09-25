@@ -10,9 +10,13 @@ Operator procedures: [docs/BILLING_OPERATIONS.md](docs/BILLING_OPERATIONS.md).
 |---|---|
 | Starting HEAD | `e7c604e` on `billing-findings-remediation` (worktree `E:\wasla-billing-remediation`, clean; `alembic heads` `0071`, `alembic check` clean) |
 | Branch / worktree | `custom-plans-topups` / `E:\wasla-custom-plans-topups` |
-| Final code/test HEAD | `d3103ac` (every gate in section 11 ran from this commit) |
+| Part I final code/test HEAD (historical) | `d3103ac2a033b8e31bf8ba76ac82b12dd12ff20a` (every gate in section 11 ran from this commit) |
+| Part II final code/test HEAD | `e85f88326699c173f66c0fbd515b15ef3e7ecbaf` (the section 22 gates ran on exactly this code and these tests) |
+| Part II report/docs HEAD | `09ba2adefa061680b106d54980967eb5caecaeab` |
+| Current feature branch HEAD | the commit that carries this corrected report (`docs(billing): correct custom-plan Paymob verification report`); see `git log` |
+| Current migration head / API operations | **`0073`** / **192** (Part I ended at `0072` / 186) |
 | Alembic | `0071` → **`0072`** (Part I) → **`0073`** (Part II), single head, `alembic check` clean |
-| Merge / push | **Not merged, not pushed.** Paymob **Live** never used. |
+| Merge / push | Not merged or pushed when Parts I and II were written; the merge and push are recorded in [CUSTOM_PLANS_TOPUPS_MERGE_VERIFICATION.md](CUSTOM_PLANS_TOPUPS_MERGE_VERIFICATION.md). Paymob **Live** never used. |
 
 **Part I** (sections 1-13) is the ADR-113 implementation as delivered at `d3103ac`.
 **Part II** (sections 14-23) binds custom plans and top-ups to the current
@@ -56,7 +60,7 @@ documentation, the Test dashboard and real Test-mode payments.
 
 `ba004db` carries the existing-test and registry updates the feature makes
 necessary, plus only the two documented numbers the documentation-truth test pins
-(186 operations, migrations `0001`–`0072`). Its tree was verified in isolation
+(at the time 186 operations and migrations `0001`–`0072`; Part II took them to 192 and `0073`). Its tree was verified in isolation
 (ruff, black, mypy over 637 files; 3,135 unit and billing-adjacent tests) before
 it was committed. The rest of the documentation is its own commit.
 
@@ -137,7 +141,7 @@ custom plan, `is_custom`), `GET /entitlements` (the breakdown), `GET /topups`
 `GET|POST /topups`, `GET|PATCH|DELETE /topups/{id}`, `POST /topups/{id}/activate|deactivate`,
 `GET /topup-purchases`, `GET /topup-purchases/{id}` and
 `POST /topup-purchases/{id}/refund-review`. `GET /plans` also takes `scope` and
-`tenant_id`. The production shape now serves **186 operations** (was 168).
+`tenant_id`. At the end of Part I the production shape served **186 operations** (was 168); Part II brings it to **192**.
 
 Custom plan creation requires all seven limits (`null` = unlimited, `0` = none;
 omission is refused) and inherits `agents` and `owned_workspaces` from the current
@@ -378,14 +382,23 @@ no Live.
 * **Renewal follows the optional saved card:** saved → the existing MOTO/MIT
   path at the custom version's price; not saved → a renewal invoice the owner
   pays at a hosted checkout, never an automatic charge.
-* **Verified against real Paymob Test** (section 20): 8 real Test payments,
-  6,590 EGP (Test). Initial custom plan with Save Card, the real TOKEN callback,
+* **Verified against real Paymob Test** (section 20): 8 real Paymob Test
+  transactions, 7,940 EGP (Test), plus one real TOKEN callback. Initial custom plan with Save Card, the real TOKEN callback,
   a real MOTO/MIT renewal, a no-card renewal paid at checkout, callback replay,
   two lost callbacks recovered by Transaction Inquiry, and three real top-ups.
   All 21 ledger invariants are 0. No secret, client secret, payment key or card
   token appears in any log.
 * **One provider-contract difference was found and fixed** (section 16):
   Transaction Inquiry now documents `auth_token` as a body field.
+
+### Part II commits
+
+| Commit | Message | Purpose |
+|---|---|---|
+| `60bed7c6cc3a61e1ca1bbadeffb2d071bdc8ce22` | fix(billing): send the documented auth_token in Paymob transaction inquiry | Paymob Transaction Inquiry contract fix (P-1) |
+| `1ff0fb5db385ab842820e02b48c3c01ac6040dd6` | feat(billing): make priced custom plans offers the customer accepts and pays | Custom plan offer implementation, migration `0073`, APIs, registries |
+| `e85f88326699c173f66c0fbd515b15ef3e7ecbaf` | test(billing): prove custom plan offers and every top-up key end to end | Offer suite and per-key top-up application E2E |
+| `09ba2adefa061680b106d54980967eb5caecaeab` | docs(billing): record ADR-114 and the real Paymob Test custom plan E2E | ADR-114, billing docs, this Part II with the Paymob Test evidence |
 
 ## 15. Official Paymob documentation reviewed (2026-09-25)
 
@@ -552,7 +565,8 @@ all callbacks `is_live: false`):
 | R-8 | 16:08:49 | D custom offer, **callback lost** | `ccae9c0a…` | `efd5a92c…` | 617882326 | 541703186 | 5885262 | 1,500.00 | **502** (API down) → inquiry | offer **active** via reconciliation |
 | R-9 | 16:08:51 | C Team Members +5, **callback lost** | `8c49be83…` | `9f0fe2ad…` | 617882375 | 541703582 | 5885262 | 90.00 | **502** (API down) → inquiry | 10 → **15** via reconciliation |
 
-Totals: 8 real Test transactions, 6,590 EGP (Test), plus one real TOKEN
+Totals: 8 real Paymob Test transactions, 7,940 EGP (Test)
+(1,500 + 1,500 + 200 + 150 + 1,500 + 1,500 + 1,500 + 90), plus one real TOKEN
 callback. No Live key, integration or transaction was used.
 
 **Scenario results.**
