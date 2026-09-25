@@ -568,8 +568,12 @@ async def test_a_signed_callback_cannot_be_re_aimed_or_cross_environments(
     wrong_integration = _callback(victim, transaction=700_110_002, integration=999_999)
     live_on_test = _callback(victim, transaction=700_110_003, is_live=True)
     moto_on_hosted = _callback(victim, transaction=700_110_004, integration=MOTO_INTEGRATION_ID)
+    # Our reference on an order Wasla never created - another intention on the
+    # same merchant account, echoing our id. Found by the unsigned reference
+    # alone, so only the order comparison refuses it (mutation R-BILL-11).
+    foreign_order = _callback(victim, transaction=700_110_006, order="999000111")
 
-    for signed in (retargeted, wrong_integration, live_on_test, moto_on_hosted):
+    for signed in (retargeted, wrong_integration, live_on_test, moto_on_hosted, foreign_order):
         assert await _apply(db_session, tenant.id, provider, signed, now=T0) == MISMATCHED
 
     assert victim.status is PaymentStatus.PENDING
@@ -579,7 +583,7 @@ async def test_a_signed_callback_cannot_be_re_aimed_or_cross_environments(
             select(BillingIncident.kind).where(BillingIncident.tenant_id == tenant.id)
         )
     ).all()
-    assert incidents == [BillingIncidentKind.MISMATCHED_CALLBACK] * 4
+    assert incidents == [BillingIncidentKind.MISMATCHED_CALLBACK] * 5
 
     genuine = _callback(victim, transaction=700_110_005)
     assert await _apply(db_session, tenant.id, provider, genuine, now=T0) == APPLIED
