@@ -178,3 +178,21 @@ async def test_a_tenant_with_a_financial_ledger_cannot_be_deleted(
         text("SELECT count(*) FROM payments WHERE id = :id"), {"id": payment.id}
     )
     assert survivors == 1
+
+
+async def test_an_invoice_alone_keeps_its_tenant_row(db_session: AsyncSession) -> None:
+    """BILL-19 (mutation R-BILL-19): the invoice's own foreign key refuses the delete.
+
+    With a payment present, the payment's RESTRICT would refuse it anyway and
+    hide a cascading invoice key. An unpaid invoice with nothing under it is
+    where only `invoices.tenant_id` stands between a stray DELETE and the bill.
+    """
+    tenant = await _tenant(db_session)
+    invoice = await _invoice(db_session, tenant)
+
+    await _refused(db_session, "DELETE FROM tenants WHERE id = :id", {"id": tenant.id})
+
+    survivors = await db_session.scalar(
+        text("SELECT count(*) FROM invoices WHERE id = :id"), {"id": invoice.id}
+    )
+    assert survivors == 1
