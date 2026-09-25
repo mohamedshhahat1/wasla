@@ -352,6 +352,36 @@ class AuditAction(StrEnum):
     BILLING_RECONCILIATION_STARTED = "billing_reconciliation_started"
     BILLING_RECONCILIATION_RESOLVED = "billing_reconciliation_resolved"
     BILLING_INCIDENT_RESOLVED = "billing_incident_resolved"
+    # Custom plans (ADR-113): a plan written for one workspace, its versions,
+    # and putting that workspace on it now or at its next renewal.
+    BILLING_CUSTOM_PLAN_CREATED = "billing_custom_plan_created"
+    BILLING_CUSTOM_PLAN_VERSION_CREATED = "billing_custom_plan_version_created"
+    BILLING_CUSTOM_PLAN_ASSIGNED = "billing_custom_plan_assigned"
+    BILLING_CUSTOM_PLAN_ASSIGNMENT_SCHEDULED = "billing_custom_plan_assignment_scheduled"
+    # Custom plan offers (ADR-114): offered by the platform, accepted (a
+    # checkout opened) or declined by the customer, activated only by a
+    # settled payment, withdrawn by staff, or expired by the sweep.
+    BILLING_CUSTOM_PLAN_OFFERED = "billing_custom_plan_offered"
+    BILLING_CUSTOM_PLAN_OFFER_ACCEPTED = "billing_custom_plan_offer_accepted"
+    BILLING_CUSTOM_PLAN_OFFER_DECLINED = "billing_custom_plan_offer_declined"
+    BILLING_CUSTOM_PLAN_OFFER_ACTIVATED = "billing_custom_plan_offer_activated"
+    BILLING_CUSTOM_PLAN_OFFER_CANCELLED = "billing_custom_plan_offer_cancelled"
+    BILLING_CUSTOM_PLAN_OFFER_EXPIRED = "billing_custom_plan_offer_expired"
+    # Top-ups (ADR-113): the catalogue, a customer's purchase from checkout to
+    # grant to expiry, an operator's complimentary grant, and the operator's
+    # decision after a refund.
+    BILLING_TOPUP_CREATED = "billing_topup_created"
+    BILLING_TOPUP_UPDATED = "billing_topup_updated"
+    BILLING_TOPUP_ACTIVATED = "billing_topup_activated"
+    BILLING_TOPUP_DEACTIVATED = "billing_topup_deactivated"
+    BILLING_TOPUP_DELETED = "billing_topup_deleted"
+    BILLING_TOPUP_CHECKOUT_CREATED = "billing_topup_checkout_created"
+    BILLING_TOPUP_PAYMENT_SETTLED = "billing_topup_payment_settled"
+    BILLING_TOPUP_GRANTED = "billing_topup_granted"
+    BILLING_TOPUP_EXPIRED = "billing_topup_expired"
+    BILLING_TOPUP_CANCELLED = "billing_topup_cancelled"
+    BILLING_TOPUP_PLATFORM_GRANTED = "billing_topup_platform_granted"
+    BILLING_TOPUP_REFUND_REVIEWED = "billing_topup_refund_reviewed"
 
     # The workspace itself (docs/AUTHORIZATION.md).
     #

@@ -17,12 +17,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
 
 from app.db.models.billing import (
     BillingAdjustment,
     BillingAdjustmentKind,
     Plan,
+    PlanScope,
     PlanVersion,
     PlanVersionMigration,
     Subscription,
@@ -55,17 +56,33 @@ class PlanRepository(BaseRepository[Plan]):
     async def get_by_code(self, code: str) -> Plan | None:
         return await self._first(self._select().where(Plan.code == code.strip().lower()))
 
-    async def list_plans(self, *, public_only: bool = True, active_only: bool = True) -> list[Plan]:
+    async def list_plans(
+        self,
+        *,
+        public_only: bool = True,
+        active_only: bool = True,
+        for_tenant: uuid.UUID | None = None,
+    ) -> list[Plan]:
         """The catalogue, in the order a pricing page shows it.
 
         `public_only` excludes plans written for one customer. `active_only`
         excludes retired ones - which are kept rather than deleted, because
         subscriptions still point at them and their history has to keep meaning
         what it meant.
+
+        `for_tenant` adds that one workspace's own custom plans to a public
+        listing (ADR-113). Another workspace's custom plan is never included:
+        the filter is on the plan's owner, not on anything the caller sends.
         """
         statement = self._select()
         if public_only:
-            statement = statement.where(Plan.is_public.is_(True))
+            visible: ColumnElement[bool] = Plan.is_public.is_(True)
+            if for_tenant is not None:
+                visible = or_(
+                    visible,
+                    and_(Plan.scope == PlanScope.TENANT, Plan.tenant_id == for_tenant),
+                )
+            statement = statement.where(visible)
         if active_only:
             statement = statement.where(Plan.is_active.is_(True))
         return await self._all(statement.order_by(Plan.sort_order, Plan.price, Plan.name))

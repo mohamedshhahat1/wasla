@@ -15,20 +15,31 @@ that a good API.
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
     CheckoutServiceDep,
+    CustomPlanOfferServiceDep,
     EntitlementServiceDep,
     PaymentMethodServiceDep,
     PlanCatalogDep,
     RefundServiceDep,
     SubscriptionServiceDep,
     TenantOwnerDep,
+    TopupServiceDep,
 )
 from app.api.route import CommittingRoute
+from app.core.dependencies import SessionDep, SettingsDep
+from app.db.models.billing import TOPUP_LIMITS, LimitKey
+from app.db.models.invoice import Payment
+from app.db.models.topup import TopupEntitlement, TopupPurchase
+from app.integrations.billing import build_checkout_provider
+from app.repositories.invoice_repository import InvoiceRepository
+from app.repositories.payment_method_repository import PaymentMethodRepository
 from app.schemas.billing import (
     CancellationRequest,
     CheckoutRequestPayload,
@@ -39,12 +50,28 @@ from app.schemas.billing import (
     SubscriptionRead,
     SubscriptionStateRead,
 )
+from app.schemas.custom_plan import (
+    CustomPlanOfferAccept,
+    CustomPlanOfferCheckoutStarted,
+    CustomPlanOfferDecline,
+    CustomPlanOfferRead,
+)
 from app.schemas.invoice import (
     PaymentMethodRead,
     PaymentRead,
     RefundRequestPayload,
     RefundReviewRequested,
 )
+from app.schemas.topup import (
+    PaymentRequiredRead,
+    TenantBillingSummary,
+    TopupCheckoutRequest,
+    TopupCheckoutStarted,
+    TopupProductRead,
+    TopupPurchasePage,
+    TopupPurchaseRead,
+)
+from app.services.custom_plan_offer_service import offer_read
 from app.services.entitlement_service import EntitlementService
 from app.services.subscription_service import SubscriptionService
 
@@ -83,11 +110,15 @@ async def list_plans(
 ) -> list[PlanRead]:
     """The catalogue a workspace may choose from.
 
-    Bespoke plans and retired ones are excluded: one is not on offer to anybody
-    but the customer it was written for, and the other is kept only so existing
-    subscriptions keep meaning what they meant.
+    Retired plans are excluded, and so is every plan written for another
+    customer. This workspace's *own* custom plan is included and marked
+    `is_custom` (ADR-113): it is on offer to exactly one customer, and this is
+    that customer.
     """
-    return [PlanRead.from_model(plan, version) for plan, version in await catalog.offered()]
+    return [
+        PlanRead.from_model(plan, version)
+        for plan, version in await catalog.offered(tenant_id=workspace.tenant.id)
+    ]
 
 
 @router.get("/subscription", response_model=SubscriptionStateRead)
@@ -382,3 +413,218 @@ async def revoke_payment_method(
     card twice has got what they wanted both times.
     """
     return PaymentMethodRead.from_model(await methods.revoke(method_id))
+
+
+# ----------------------------------------------------------------- top-ups
+
+_TOPUP_KEYS = tuple(key for key in LimitKey if key in TOPUP_LIMITS)
+_SUMMARY_RECENT = 10
+
+
+async def _purchase_read(session: AsyncSession, purchase: TopupPurchase) -> TopupPurchaseRead:
+    """A purchase with its payment's status. The purchase was read tenant-scoped."""
+    status_value = None
+    if purchase.payment_id is not None:
+        payment = await session.get(Payment, purchase.payment_id)
+        status_value = payment.status if payment is not None else None
+    return TopupPurchaseRead.from_model(purchase, payment_status=status_value)
+
+
+@router.get("/topups", response_model=list[TopupProductRead])
+async def list_topups(
+    workspace: ActiveWorkspaceDep,
+    topups: TopupServiceDep,
+    entitlement_key: TopupEntitlement | None = None,
+) -> list[TopupProductRead]:
+    """Top-ups this workspace may buy: active global ones and its own.
+
+    Open to any member, like the plan catalogue. Another workspace's own
+    products never appear.
+    """
+    return [
+        TopupProductRead.from_model(product)
+        for product in await topups.catalogue(entitlement=entitlement_key)
+    ]
+
+
+@router.post(
+    "/topups/{topup_id}/checkout",
+    response_model=TopupCheckoutStarted,
+    status_code=status.HTTP_201_CREATED,
+    summary="Start a hosted checkout for a top-up",
+)
+async def start_topup_checkout(
+    topup_id: uuid.UUID,
+    payload: TopupCheckoutRequest,
+    workspace: TenantOwnerDep,
+    topups: TopupServiceDep,
+) -> TopupCheckoutStarted:
+    """Buy extra allowance until the current period ends. Owners only.
+
+    The request names a product and nothing that could price it. A one-time
+    payment at a hosted page - never recurring, never charged to a saved card;
+    the allowance is granted once, when the provider's signed callback confirms
+    the money. The same `idempotency_key` again is 409 naming the purchase it
+    already opened, never a second payment page.
+    """
+    started = await topups.start_checkout(
+        topup_id, actor=workspace.user, idempotency_key=payload.idempotency_key
+    )
+    return TopupCheckoutStarted(
+        redirect_url=started.redirect_url,
+        purchase_id=started.purchase_id,
+        invoice_id=started.invoice_id,
+        payment_id=started.payment_id,
+        amount=f"{started.amount:.2f}",
+        currency=started.currency,
+        entitlement_key=started.entitlement_key,
+        quantity=started.quantity,
+        expires_at=started.expires_at,
+    )
+
+
+@router.get("/topup-purchases", response_model=TopupPurchasePage)
+async def list_topup_purchases(
+    workspace: TenantOwnerDep,
+    topups: TopupServiceDep,
+    session: SessionDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
+) -> TopupPurchasePage:
+    """This workspace's top-ups, bought and granted, newest first. Owners only."""
+    rows, total = await topups.history(limit=limit, offset=offset)
+    return TopupPurchasePage(
+        items=[await _purchase_read(session, row) for row in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/summary", response_model=TenantBillingSummary)
+async def billing_summary(
+    workspace: TenantOwnerDep,
+    subscriptions: SubscriptionServiceDep,
+    entitlements: EntitlementServiceDep,
+    topups: TopupServiceDep,
+    offers: CustomPlanOfferServiceDep,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> TenantBillingSummary:
+    """Billing -> Usage & Top-ups in one request. Owners only.
+
+    The plan, the seven entitlements broken into base, top-ups and platform
+    grants against usage, live top-ups and recent purchases. Nothing a
+    platform operator alone should see.
+    """
+    subscription = await subscriptions.get()
+    read = None
+    if subscription is not None:
+        plan = await subscriptions.plan_for(subscription)
+        read = SubscriptionRead.from_model(
+            subscription, plan=plan, version=await subscriptions.version_for(subscription)
+        )
+    recent, _ = await topups.history(limit=_SUMMARY_RECENT, offset=0)
+    open_offer = await offers.open_offer()
+    renewals = await InvoiceRepository(session, tenant_id=workspace.tenant.id).open_renewals()
+    provider = build_checkout_provider(settings)
+    saved = await PaymentMethodRepository(session, tenant_id=workspace.tenant.id).default_method()
+    return TenantBillingSummary(
+        open_offer=(
+            await offer_read(session, open_offer, now=offers.now()) if open_offer else None
+        ),
+        payment_required=[
+            PaymentRequiredRead(
+                invoice_id=invoice.id,
+                plan_code=invoice.plan_code,
+                amount_due=f"{invoice.outstanding:.2f}",
+                currency=invoice.currency,
+                period_start=invoice.period_start,
+                period_end=invoice.period_end,
+                issued_at=invoice.issued_at,
+            )
+            for invoice in renewals
+        ],
+        automatic_renewal=bool(
+            saved is not None
+            and saved.is_chargeable
+            and provider is not None
+            and getattr(provider, "can_charge_saved_methods", False)
+        ),
+        subscription=read,
+        entitlements=[
+            EntitlementRead.from_entitlement(item)
+            for item in await entitlements.snapshot(_TOPUP_KEYS)
+        ],
+        active_topups=[await _purchase_read(session, row) for row in await topups.active()],
+        recent_purchases=[await _purchase_read(session, row) for row in recent],
+        topups_available=len(await topups.catalogue()),
+    )
+
+
+# -------------------------------------------------------- custom plan offers
+
+
+@router.get("/custom-offers", response_model=list[CustomPlanOfferRead])
+async def list_custom_offers(
+    workspace: TenantOwnerDep,
+    offers: CustomPlanOfferServiceDep,
+    session: SessionDep,
+) -> list[CustomPlanOfferRead]:
+    """Custom plans offered to this workspace, newest first. Owners only.
+
+    Each carries everything to decide on before paying: price, currency,
+    interval, all seven limits and the period the terms would cover.
+    """
+    now = offers.now()
+    return [await offer_read(session, offer, now=now) for offer in await offers.offers()]
+
+
+@router.post(
+    "/custom-offers/{offer_id}/accept",
+    response_model=CustomPlanOfferCheckoutStarted,
+    status_code=status.HTTP_201_CREATED,
+    summary="Accept a custom plan offer and pay for it",
+)
+async def accept_custom_offer(
+    offer_id: uuid.UUID,
+    payload: CustomPlanOfferAccept,
+    workspace: TenantOwnerDep,
+    offers: CustomPlanOfferServiceDep,
+) -> CustomPlanOfferCheckoutStarted:
+    """Accept & Pay. Owners only. **Changes no plan by itself.**
+
+    Opens a hosted payment page for exactly the offered version's price. The
+    plan applies when the provider's signed callback confirms the money
+    (ADR-044, ADR-114). The request carries nothing that could price it.
+    """
+    accepted = await offers.accept(
+        offer_id, actor=workspace.user, idempotency_key=payload.idempotency_key
+    )
+    started = accepted.checkout
+    return CustomPlanOfferCheckoutStarted(
+        offer_id=accepted.offer.id,
+        redirect_url=started.redirect_url,
+        invoice_id=started.invoice_id,
+        payment_id=started.payment_id,
+        amount=f"{started.amount:.2f}",
+        currency=started.currency,
+        plan_version_id=accepted.version.id,
+    )
+
+
+@router.post(
+    "/custom-offers/{offer_id}/decline",
+    response_model=CustomPlanOfferRead,
+    summary="Decline a custom plan offer",
+)
+async def decline_custom_offer(
+    offer_id: uuid.UUID,
+    payload: CustomPlanOfferDecline,
+    workspace: TenantOwnerDep,
+    offers: CustomPlanOfferServiceDep,
+    session: SessionDep,
+) -> CustomPlanOfferRead:
+    """Decline. Owners only. The workspace stays on the plan it holds."""
+    offer = await offers.decline(offer_id, actor=workspace.user, reason=payload.reason)
+    return await offer_read(session, offer, now=offers.now())

@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -52,6 +52,7 @@ from app.db.models.agent import Agent
 from app.db.models.billing import (
     ACCOUNT_LIMITS,
     RESOURCE_LIMITS,
+    TOPUP_LIMITS,
     LimitKey,
     Plan,
     PlanVersion,
@@ -62,9 +63,11 @@ from app.db.models.invitation import TenantInvitation
 from app.db.models.knowledge import Document
 from app.db.models.media import OCCUPYING_STORAGE_STATES, MessageMedia
 from app.db.models.membership import Membership
+from app.db.models.topup import TopupSource
 from app.db.models.usage import UsageEventType
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
+from app.repositories.topup_repository import TopupPurchaseRepository
 from app.repositories.usage_repository import UsageEventRepository
 from app.services.plan_catalog import PlanCatalog
 from app.services.usage_service import UsageRecorder
@@ -93,9 +96,18 @@ PERIOD_METERS: Final[dict[LimitKey, tuple[UsageEventType, ...]]] = {
 class Entitlement:
     """What a workspace is allowed for one key, and where it currently stands.
 
-    `limit` is None for unlimited. `remaining` is None for the same reason
-    rather than a large number, because a client that renders "999999 left" has
-    been told something false.
+    `limit` is the **effective** limit, and None for unlimited. `remaining` is
+    None for the same reason rather than a large number, because a client that
+    renders "999999 left" has been told something false.
+
+    The effective limit is built from three parts (ADR-113), each kept so a
+    billing page can show where the allowance comes from:
+
+        limit = base_limit + topup_limit + grant_limit
+
+    `base_limit` is the pinned plan version's; `topup_limit` what live paid
+    top-ups add; `grant_limit` what live platform grants add. An unlimited base
+    stays unlimited - a top-up cannot make unlimited more unlimited.
     """
 
     key: LimitKey
@@ -103,6 +115,11 @@ class Entitlement:
     used: int
     allowed: bool = True
     plan_code: str | None = None
+    base_limit: int | None = None
+    topup_limit: int = 0
+    grant_limit: int = 0
+    period_start: datetime | None = None
+    period_end: datetime | None = None
 
     @property
     def is_unlimited(self) -> bool:
@@ -114,10 +131,27 @@ class Entitlement:
             return None
         return max(self.limit - self.used, 0)
 
+    @property
+    def over_limit(self) -> bool:
+        """Whether the workspace already holds or used more than it is allowed.
+
+        The state a capacity reaches when a top-up expires or a plan shrinks:
+        nothing is deleted, `remaining` reads zero rather than a negative
+        number, and adding more is refused until usage fits again.
+        """
+        return self.limit is not None and self.used > self.limit
+
 
 def _refusal(entitlement: Entitlement) -> str:
     """A message that tells somebody what to do, not merely what went wrong."""
     noun = entitlement.key.value.removeprefix("period_").replace("_", " ")
+    if entitlement.topup_limit or entitlement.grant_limit:
+        return (
+            f"This workspace's plan and top-ups allow {entitlement.limit} {noun}"
+            + (" per billing period" if entitlement.key not in RESOURCE_LIMITS else "")
+            + f", and {entitlement.used} have been used. Upgrade the plan or buy a "
+            "top-up to continue."
+        )
     return (
         f"This workspace's plan allows {entitlement.limit} {noun}"
         + (" per billing period" if entitlement.key not in RESOURCE_LIMITS else "")
@@ -148,6 +182,17 @@ def _lock_id(tenant_id: uuid.UUID, key: LimitKey) -> int:
     return int.from_bytes(digest, "big", signed=True)
 
 
+async def hold_limit_lock(session: AsyncSession, *, tenant_id: uuid.UUID, key: LimitKey) -> None:
+    """Take the workspace's advisory lock on one limit until the transaction ends.
+
+    The lock `consume`, `reserve` and `reserve_period` take. A top-up grant
+    takes it too (ADR-113), so a grant and the consumption it races with are
+    ordered: a turn counted before the grant was checked against the old limit,
+    one counted after it against the new, and none against a half-applied one.
+    """
+    await session.execute(select(func.pg_advisory_xact_lock(_lock_id(tenant_id, key))))
+
+
 class EntitlementService:
     """Answers limit questions for one workspace."""
 
@@ -157,14 +202,19 @@ class EntitlementService:
         *,
         tenant_id: uuid.UUID,
         default_plan_code: str | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self._default_plan_code = default_plan_code
+        # What "now" is for top-up expiry. Injected only by tests that need to
+        # stand either side of a period boundary; production reads the clock.
+        self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
         self._subscriptions = SubscriptionRepository(session, tenant_id=tenant_id)
         self._plans = PlanRepository(session)
         self._catalog = PlanCatalog(session)
         self._usage = UsageEventRepository(session, tenant_id=tenant_id)
+        self._topups = TopupPurchaseRepository(session, tenant_id=tenant_id)
         # Resolved at most once per request: every check needs the same plan,
         # and a page rendering five of them should not read it five times.
         self._resolved: tuple[Plan | None, Subscription | None] | None = None
@@ -240,16 +290,47 @@ class EntitlementService:
             return Entitlement(key=key, limit=None, used=0, allowed=True)
 
         terms = self._terms
-        limit = terms.limit_for(key) if terms is not None else plan.limit_for(key)
+        base = terms.limit_for(key) if terms is not None else plan.limit_for(key)
+        purchased, granted = await self._topped_up(key)
+        # The effective limit (ADR-113). Unlimited stays unlimited; otherwise
+        # the plan's figure plus whatever live top-ups and grants add. Nothing
+        # here writes to the plan version - a top-up is an addition beside it.
+        limit = None if base is None else base + purchased + granted
         used = await self._used(key, subscription=subscription)
         allowed = limit is None or used + max(additional, 0) <= limit
+        since, until = _period(subscription)
         return Entitlement(
             key=key,
             limit=limit,
             used=used,
             allowed=allowed,
             plan_code=plan.code,
+            base_limit=base,
+            topup_limit=purchased,
+            grant_limit=granted,
+            period_start=since if key not in RESOURCE_LIMITS else None,
+            period_end=until if key not in RESOURCE_LIMITS else None,
         )
+
+    async def _topped_up(self, key: LimitKey) -> tuple[int, int]:
+        """What live top-ups add to `key`: (purchased, granted by the platform).
+
+        Read afresh on every check rather than cached for the request: `consume`
+        and `reserve` call `check` *under* the workspace's advisory lock, and a
+        figure remembered from before the lock would be one a concurrent grant
+        or expiry had already changed.
+        """
+        if key not in TOPUP_LIMITS:
+            return 0, 0
+        purchased = granted = 0
+        for total in await self._topups.active_totals(at=self._clock()):
+            if total.entitlement.limit_key is not key:
+                continue
+            if total.source is TopupSource.PLATFORM_GRANT:
+                granted += total.quantity
+            else:
+                purchased += total.quantity
+        return purchased, granted
 
     async def require(self, key: LimitKey, *, additional: int = 1) -> Entitlement:
         """Refuse the action if the plan does not allow it.

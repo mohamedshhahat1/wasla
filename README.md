@@ -14,7 +14,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Documentation protocol (`Documentation_Protocol.md`) | Implemented |
 | Project memory (`README` / `ARCHITECTURE` / `TASKS` / `DECISIONS`, `docs/`) | Implemented |
 | Application foundation (FastAPI, config, logging, errors, DB, Redis, health, Docker, CI) | Implemented |
-| Domain models and migrations (`0001`–`0071`) | Implemented |
+| Domain models and migrations (`0001`–`0073`) | Implemented |
 | Multi-tenancy, authentication, workspace RBAC, invitations | Implemented |
 | WhatsApp Cloud API (webhook, signatures, idempotency, outbound client) | Implemented |
 | Conversations, inbox, human handoff, templates, cursor paging | Implemented |
@@ -29,6 +29,7 @@ Wasla is not a chatbot demo. It is designed from day one as a scalable, secure, 
 | Platform owner view across every workspace (read-only) | Implemented |
 | Plans, subscriptions, entitlements enforced against usage, invoices and payment records | Implemented |
 | Dunning: an unpaid renewal becomes `past_due`, then `suspended`, and the paid plan stops applying | Implemented |
+| Custom plans for one company, and one-time top-ups of seven entitlements that expire with the billing period (ADR-113) | Implemented |
 | Transactional email (outbox, Resend provider, delivery webhooks, bounce suppression) | Implemented |
 | Password reset, invitation delivery and account security notices | Implemented |
 | Google sign-in (OIDC, PKCE, identity linking, profile name and picture) | Implemented |
@@ -92,7 +93,7 @@ Also in use:
 | [docs/MEDIA.md](docs/MEDIA.md) | Attachments: storage, understanding, sending |
 | [docs/SENTIMENT.md](docs/SENTIMENT.md) | Sentiment, priority, automatic escalation |
 | [docs/CAMPAIGNS.md](docs/CAMPAIGNS.md) | Templates, campaigns, audiences, marketing opt-out |
-| [docs/BILLING.md](docs/BILLING.md) | Plans, subscriptions, entitlements, invoicing |
+| [docs/BILLING.md](docs/BILLING.md) | Plans, subscriptions, entitlements, custom plans, top-ups, invoicing |
 | [docs/ANALYTICS.md](docs/ANALYTICS.md) | Analytics events, usage tracking, dashboards |
 | [docs/EMAIL.md](docs/EMAIL.md) | Transactional email: outbox, provider, webhooks, suppression |
 | [docs/API.md](docs/API.md) | API conventions and endpoint catalogue |

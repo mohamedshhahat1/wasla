@@ -55,7 +55,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.db.base import Base, RevisionedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import _enum_type
@@ -156,6 +156,49 @@ RESOURCE_LIMITS: Final[frozenset[LimitKey]] = frozenset(
 ACCOUNT_LIMITS: Final[frozenset[LimitKey]] = frozenset({LimitKey.OWNED_WORKSPACES})
 
 PERIOD_LIMITS: Final[frozenset[LimitKey]] = frozenset(LimitKey) - RESOURCE_LIMITS - ACCOUNT_LIMITS
+
+# The seven keys a custom plan is written in and a top-up can raise (ADR-113).
+# Written out rather than derived: which limits are sold as add-ons is a product
+# decision, and `AGENTS` and `OWNED_WORKSPACES` are deliberately not among them.
+# The period keys reset with the billing period; the rest are capacities.
+TOPUP_LIMITS: Final[frozenset[LimitKey]] = frozenset(
+    {
+        LimitKey.PERIOD_MESSAGES,
+        LimitKey.PERIOD_AI_TURNS,
+        LimitKey.PERIOD_CAMPAIGN_MESSAGES,
+        LimitKey.STORAGE_BYTES,
+        LimitKey.WHATSAPP_NUMBERS,
+        LimitKey.TEAM_MEMBERS,
+        LimitKey.KNOWLEDGE_DOCUMENTS,
+    }
+)
+
+# The one key a plan names and nothing refuses: an inbound customer message is
+# never turned away for a business's billing (ADR-030). A top-up raises the
+# allowance it is *measured* against, and says so, rather than inventing an
+# enforcement that does not exist.
+METER_ONLY_LIMITS: Final[frozenset[LimitKey]] = frozenset({LimitKey.PERIOD_MESSAGES})
+
+
+class PlanScope(StrEnum):
+    """Who a plan may be sold or assigned to (ADR-113).
+
+    ``PUBLIC``
+        On the catalogue every workspace sees.
+    ``PRIVATE``
+        Off the catalogue - Enterprise, a negotiated tier - and assignable to
+        any workspace by platform staff.
+    ``TENANT``
+        Written for exactly one workspace, named by `plans.tenant_id`, and
+        never assignable to another. Enforced by the service layer and again
+        by a trigger on every table that points a workspace at a plan, so no
+        code path - a request, an operator, the billing sweep - can hand one
+        company another company's commercial terms.
+    """
+
+    PUBLIC = "public"
+    PRIVATE = "private"
+    TENANT = "tenant"
 
 
 class BillingInterval(StrEnum):
@@ -259,6 +302,7 @@ class BillingAdjustmentKind(StrEnum):
 
 
 BILLING_INTERVAL_TYPE = _enum_type(BillingInterval, name="billing_interval")
+PLAN_SCOPE_TYPE = _enum_type(PlanScope, name="plan_scope")
 SUBSCRIPTION_STATUS_TYPE = _enum_type(SubscriptionStatus, name="subscription_status")
 SCHEDULED_CHANGE_SOURCE_TYPE = _enum_type(ScheduledChangeSource, name="scheduled_change_source")
 BILLING_ADJUSTMENT_KIND_TYPE = _enum_type(BillingAdjustmentKind, name="billing_adjustment_kind")
@@ -306,6 +350,14 @@ class Plan(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         CheckConstraint("price >= 0", name="price_non_negative"),
         CheckConstraint("trial_days >= 0", name="trial_days_non_negative"),
         CheckConstraint(CURRENCY_CHECK_SQL, name="currency_supported"),
+        # A tenant plan names its one workspace, and nothing else names one
+        # (ADR-113). A TENANT plan without an owner would be assignable to
+        # anybody, which is the opposite of what it is for.
+        CheckConstraint("(scope = 'tenant') = (tenant_id IS NOT NULL)", name="scope_tenant"),
+        # `is_public` is what the catalogue has always filtered on; it now
+        # means exactly "scope is public", so the two cannot disagree.
+        CheckConstraint("(scope = 'public') = is_public", name="scope_visibility"),
+        Index("ix_plans_tenant_id", "tenant_id"),
     )
 
     # A stable identifier for the plan, safe to write in configuration and in a
@@ -334,6 +386,47 @@ class Plan(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     # Display order on a pricing page. Stored because "cheapest first" stops
     # being right the moment a plan is priced by usage rather than by month.
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Who this plan may be sold to - see `PlanScope`. Derived for the
+    # catalogue's older reader: `is_public` is true exactly when this is PUBLIC.
+    scope: Mapped[PlanScope] = mapped_column(
+        PLAN_SCOPE_TYPE, nullable=False, default=PlanScope.PUBLIC
+    )
+    # The one workspace a TENANT plan belongs to; NULL for every other scope.
+    # RESTRICT, like every commercial record (BILL-19), and immutable once
+    # written (a trigger refuses the change): a custom plan re-pointed at a
+    # second company would carry the first company's subscribers with it.
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+
+    @validates("is_public")
+    def _follow_visibility(self, _key: str, value: bool) -> bool:
+        """Keep a non-tenant plan's scope in step with `is_public`.
+
+        `is_public` predates scopes and is still what every older caller sets,
+        so setting it moves a PUBLIC/PRIVATE plan between the two. A TENANT
+        plan is left alone, and making one public is refused by the
+        `scope_visibility` constraint rather than silently widening it.
+        """
+        if self.scope is not PlanScope.TENANT:
+            self.scope = PlanScope.PUBLIC if value else PlanScope.PRIVATE
+        return value
+
+    @property
+    def is_custom(self) -> bool:
+        """Whether this plan was written for one workspace."""
+        return self.scope is PlanScope.TENANT
+
+    def available_to(self, tenant_id: uuid.UUID) -> bool:
+        """Whether `tenant_id` may hold this plan at all, whoever assigns it.
+
+        The binding rule and nothing else - activity and visibility are the
+        caller's separate questions. PUBLIC and PRIVATE plans may be held by
+        anybody; a TENANT plan only by its owner.
+        """
+        return self.scope is not PlanScope.TENANT or self.tenant_id == tenant_id
 
     def limit_for(self, key: LimitKey) -> int | None:
         """The ceiling for one key, or None for unlimited.
@@ -426,6 +519,89 @@ _PLAN_VERSION_IMMUTABLE_TRIGGER = DDL(  # type: ignore[no-untyped-call]
 )
 event.listen(PlanVersion.__table__, "after_create", _PLAN_VERSION_IMMUTABLE_FUNCTION)
 event.listen(PlanVersion.__table__, "after_create", _PLAN_VERSION_IMMUTABLE_TRIGGER)
+
+# The TENANT binding (ADR-113), as a property of the tables rather than of the
+# services that write them today. Every row that points a workspace at a plan -
+# a subscription's plan, its pinned version and its scheduled version, an
+# invoice's version - is refused if that plan is another workspace's custom
+# plan. The services refuse first, with a proper error; this is what makes the
+# rule hold for the billing sweep, a migration and a hand-written statement too.
+# Restated verbatim by migration 0072; `create_all` gets it from here.
+CUSTOM_PLAN_SCOPE_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION billing_refuse_foreign_custom_plan() RETURNS trigger AS $$
+    DECLARE
+        foreign_plan uuid;
+    BEGIN
+        IF TG_TABLE_NAME = 'subscriptions' THEN
+            SELECT p.id INTO foreign_plan FROM plans p
+             WHERE p.tenant_id IS NOT NULL
+               AND p.tenant_id <> NEW.tenant_id
+               AND (p.id = NEW.plan_id
+                    OR p.id IN (SELECT v.plan_id FROM plan_versions v
+                                 WHERE v.id = NEW.plan_version_id
+                                    OR v.id = NEW.scheduled_plan_version_id))
+             LIMIT 1;
+        ELSE
+            SELECT p.id INTO foreign_plan FROM plans p
+              JOIN plan_versions v ON v.plan_id = p.id
+             WHERE v.id = NEW.plan_version_id
+               AND p.tenant_id IS NOT NULL
+               AND p.tenant_id <> NEW.tenant_id
+             LIMIT 1;
+        END IF;
+        IF foreign_plan IS NOT NULL THEN
+            RAISE EXCEPTION 'custom_plan_not_available_for_workspace'
+                USING ERRCODE = 'integrity_constraint_violation',
+                      DETAIL = 'The plan belongs to another workspace.';
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+    """
+SUBSCRIPTIONS_CUSTOM_PLAN_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER subscriptions_custom_plan_scope BEFORE INSERT OR UPDATE OF "
+    "tenant_id, plan_id, plan_version_id, scheduled_plan_version_id ON subscriptions "
+    "FOR EACH ROW EXECUTE FUNCTION billing_refuse_foreign_custom_plan()"
+)
+# A custom plan's owner never changes. Re-pointing one would move its existing
+# subscribers' commercial terms to a company that never agreed to them.
+PLAN_TENANT_IMMUTABLE_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION plans_refuse_tenant_change() RETURNS trigger AS $$
+    BEGIN
+        IF OLD.tenant_id IS DISTINCT FROM NEW.tenant_id THEN
+            RAISE EXCEPTION 'a custom plan belongs to one workspace for ever'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+    """
+PLAN_TENANT_IMMUTABLE_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER plans_tenant_immutable BEFORE UPDATE OF tenant_id, scope ON plans "
+    "FOR EACH ROW EXECUTE FUNCTION plans_refuse_tenant_change()"
+)
+# A row written without a scope - by SQL, a seed, an older script - takes the one
+# `is_public` implies, so `is_public` stays the authority on public versus
+# private for every writer, not only the ORM (ADR-113). A BEFORE trigger runs
+# ahead of the NOT NULL check, which is what lets it fill the column.
+PLAN_DERIVE_SCOPE_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION plans_derive_scope() RETURNS trigger AS $$
+    BEGIN
+        IF NEW.scope IS NULL THEN
+            NEW.scope := CASE WHEN NEW.is_public THEN 'public' ELSE 'private' END;
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+    """
+PLAN_DERIVE_SCOPE_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER plans_derive_scope BEFORE INSERT ON plans "
+    "FOR EACH ROW EXECUTE FUNCTION plans_derive_scope()"
+)
+event.listen(Plan.__table__, "after_create", DDL(PLAN_DERIVE_SCOPE_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Plan.__table__, "after_create", DDL(PLAN_DERIVE_SCOPE_TRIGGER_SQL))  # type: ignore[no-untyped-call]
+event.listen(Plan.__table__, "after_create", DDL(PLAN_TENANT_IMMUTABLE_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Plan.__table__, "after_create", DDL(PLAN_TENANT_IMMUTABLE_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 
 
 class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
@@ -572,6 +748,10 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
         return f"Subscription(tenant_id={self.tenant_id!r}, status={self.status!r})"
+
+
+event.listen(Subscription.__table__, "after_create", DDL(CUSTOM_PLAN_SCOPE_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Subscription.__table__, "after_create", DDL(SUBSCRIPTIONS_CUSTOM_PLAN_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 
 
 class PlanVersionMigration(Base, UUIDPrimaryKeyMixin, TimestampMixin):

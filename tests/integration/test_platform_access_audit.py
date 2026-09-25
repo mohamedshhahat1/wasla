@@ -301,6 +301,8 @@ async def test_every_platform_read_route_records_one_entry(
         f"{PATH}/billing/plans",
         f"{PATH}/billing/reconciliation",
         f"{PATH}/billing/subscriptions",
+        f"{PATH}/billing/topup-purchases",
+        f"{PATH}/billing/topups",
     ]
     # The billing reads of one row need a row to name; each is audited by the
     # same `billing_read` call as the lists, proved in
@@ -312,6 +314,10 @@ async def test_every_platform_read_route_records_one_entry(
         f"{PATH}/billing/plans/{{plan_id}}/versions",
         f"{PATH}/billing/subscriptions/{{subscription_id}}",
         f"{PATH}/billing/subscriptions/{{subscription_id}}/timeline",
+        f"{PATH}/billing/tenants/{{tenant_id}}/custom-offers",
+        f"{PATH}/billing/tenants/{{tenant_id}}/summary",
+        f"{PATH}/billing/topup-purchases/{{purchase_id}}",
+        f"{PATH}/billing/topups/{{topup_id}}",
     ]
     assert read_routes == sorted(
         [f"{PATH}/audit-logs", f"{PATH}/overview", f"{PATH}/tenants", *billing_lists, *billing_rows]

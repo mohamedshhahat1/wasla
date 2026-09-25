@@ -138,14 +138,20 @@ REFUND_PATH: Final = "/api/acceptance/void_refund/refund"
 # `payment_keys[0].key` from the response, then POST the card token and that
 # payment token here.
 PAY_PATH: Final = "/api/acceptance/payments/pay"
-# Asking what became of a reference we sent. Paymob's own published Postman
-# collection (github.com/PaymobAccept/API-Postman-Collections, "Transaction
-# Inquiry API", read 2026-09-04) documents exactly two steps and this
-# integration performs both:
+# Asking what became of a reference we sent. Two steps, both documented at
+# developers.paymob.com/paymob-docs/developers/transaction-inquiry-apis/
+# transaction-inquiry/by-order-id-or-reference (last updated 2026-06-28, read
+# 2026-09-25), and at .../authentication-request-generate-auth-token-1:
 #
 #   POST /api/auth/tokens                       {"api_key": ...}   -> token
 #   POST /api/ecommerce/orders/transaction_inquiry
-#        Authorization: Bearer <token>          {"merchant_order_id": ...}
+#        {"auth_token": <token>, "merchant_order_id": ...}
+#
+# The page documents `auth_token` as a required body field. The earlier
+# implementation followed Paymob's Postman collection, which sent the token as
+# `Authorization: Bearer` instead; that header is still sent beside it (see
+# `inquire_charge`), and the difference is recorded in
+# CUSTOM_PLANS_TOPUPS_IMPLEMENTATION.md.
 #
 # `merchant_order_id` is the `special_reference` sent when the intention was
 # created, which is the payment id - so the question asked is keyed on an
@@ -705,7 +711,10 @@ class PaymobProvider:
         would be guessing. Both are checked because an error about the wrong
         key is exactly the error most likely to quote it.
         """
-        for secret in (self._secret_key, self._hmac_secret, self._api_key):
+        # The inquiry token travels in a request body now, so an error quoting
+        # that body could carry it back out.
+        bearer = self._auth[0] if self._auth is not None else None
+        for secret in (self._secret_key, self._hmac_secret, self._api_key, bearer):
             if secret and secret in text:
                 text = text.replace(secret, "[redacted]")
         return text
@@ -1209,7 +1218,13 @@ class PaymobProvider:
             token = await self._auth_token()
             payload = await self._post(
                 INQUIRY_PATH,
-                {"merchant_order_id": reference},
+                # `auth_token` in the body is the current documented contract
+                # ("Transaction Inquiry by Order ID or Reference", last updated
+                # 2026-06-28). The bearer header is what Paymob's Postman
+                # collection sent and what the real Test API accepted on
+                # 2026-09-04; both carry the same short-lived token, so
+                # sending both keeps either reading of the contract working.
+                {"auth_token": token, "merchant_order_id": reference},
                 operation=INQUIRY,
                 headers={"Authorization": f"Bearer {token}"},
             )

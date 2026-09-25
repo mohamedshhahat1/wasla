@@ -20,11 +20,13 @@ constraint keeps one, and the loser re-reads it.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import CustomPlanNotAvailableError, NotFoundError
 from app.core.logging import get_logger
 from app.db.models.billing import Plan, PlanVersion, Subscription
 from app.repositories.billing_repository import PlanRepository, PlanVersionRepository
@@ -48,10 +50,16 @@ class PlanCatalog:
         self._plans = PlanRepository(session)
         self._versions = PlanVersionRepository(session)
 
-    async def offered(self) -> list[tuple[Plan, PlanVersion]]:
-        """The public, active catalogue at the terms a new customer would buy."""
+    async def offered(
+        self, *, tenant_id: uuid.UUID | None = None
+    ) -> list[tuple[Plan, PlanVersion]]:
+        """The active catalogue at the terms a new customer would buy.
+
+        Public plans, plus - when `tenant_id` is given - that workspace's own
+        custom plans, and never anybody else's (ADR-113).
+        """
         listed: list[tuple[Plan, PlanVersion]] = []
-        for plan in await self._plans.list_plans():
+        for plan in await self._plans.list_plans(for_tenant=tenant_id):
             version = await self.current_version(plan)
             if version is not None:
                 listed.append((plan, version))
@@ -61,6 +69,38 @@ class PlanCatalog:
         if version_id is None:
             return None
         return await self._versions.get_by_id(version_id)  # type: ignore[arg-type]
+
+    async def require_available(
+        self,
+        target: Plan | PlanVersion,
+        *,
+        tenant_id: uuid.UUID,
+    ) -> Plan:
+        """The plan behind `target`, if `tenant_id` may hold it at all (ADR-113).
+
+        The service-side half of the TENANT binding, called by every path that
+        points a workspace at a plan: starting, changing, scheduling, granting
+        a purchase and adopting a renewal. A trigger enforces the same rule on
+        the tables; this one answers first, with an error an operator can read.
+
+        Raises `CustomPlanNotAvailableError`. Tenant-facing callers translate
+        it into the ordinary "No such plan." so a workspace probing codes
+        learns nothing.
+        """
+        plan = target if isinstance(target, Plan) else await self._plans.get_by_id(target.plan_id)
+        if plan is None:  # pragma: no cover - RESTRICT makes this unreachable
+            raise NotFoundError("No such plan.")
+        if not plan.available_to(tenant_id):
+            logger.warning(
+                "billing.custom_plan_scope_refused",
+                extra={
+                    "event": "billing.custom_plan_scope_refused",
+                    "tenant_id": str(tenant_id),
+                    "plan": plan.code,
+                },
+            )
+            raise CustomPlanNotAvailableError()
+        return plan
 
     async def current_version(
         self, plan: Plan, *, at: datetime | None = None

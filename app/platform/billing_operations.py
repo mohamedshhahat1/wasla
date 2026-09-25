@@ -79,6 +79,7 @@ from app.schemas.platform_billing import (
 from app.services import billing_calendar
 from app.services.invoice_service import InvoiceService
 from app.services.payment_reconciliation_service import PaymentReconciler
+from app.services.plan_catalog import PlanCatalog
 from app.services.refund_service import RefundService
 from app.services.subscription_service import SubscriptionService
 
@@ -263,8 +264,25 @@ class PlatformBillingOperations:
         version = await self._session.get(PlanVersion, payload.plan_version_id)
         if version is None:
             raise NotFoundError("No such plan version.")
+        # Another workspace's custom plan is refused before anything else is
+        # considered (ADR-113): 422 `custom_plan_not_available_for_workspace`.
+        await PlanCatalog(self._session).require_available(
+            version, tenant_id=subscription.tenant_id
+        )
         before = _subscription_state(subscription)
         service = SubscriptionService(self._session, tenant_id=subscription.tenant_id)
+
+        if payload.mode is ChangeMode.NEXT_RENEWAL and await self._is_unaccepted_custom_plan(
+            version, subscription=subscription
+        ):
+            # A priced custom plan the workspace does not already hold reaches
+            # it only through an offer its owner accepts and pays (ADR-114).
+            # Scheduling it would bill a price nobody agreed to at the next
+            # renewal - and, with a saved card, charge it.
+            raise ValidationError(
+                "A priced custom plan is offered to the workspace, not scheduled onto it. "
+                "Make an offer with POST /platform/billing/tenants/{id}/custom-offers."
+            )
 
         if payload.mode is ChangeMode.NEXT_RENEWAL:
             await service.schedule_change(
@@ -369,6 +387,19 @@ class PlatformBillingOperations:
             },
         )
         return await self._read_subscription(subscription)
+
+    async def _is_unaccepted_custom_plan(
+        self, version: PlanVersion, *, subscription: Subscription
+    ) -> bool:
+        """A priced version of a custom plan the subscription is not already on.
+
+        Moving a subscriber between versions of the custom plan it already
+        holds is an ordinary migration (ADR-112) and stays allowed.
+        """
+        if version.price <= 0 or subscription.plan_id == version.plan_id:
+            return False
+        plan = await self._session.get(Plan, version.plan_id)
+        return plan is not None and plan.is_custom
 
     async def cancel_subscription(
         self,

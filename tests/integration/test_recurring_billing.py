@@ -349,6 +349,34 @@ async def test_a_revoked_card_is_not_charged(db_session: AsyncSession) -> None:
     assert seen == []
 
 
+async def test_a_revoked_card_still_marked_default_is_not_charged(
+    db_session: AsyncSession,
+) -> None:
+    """Revoking clears the default flag, but nothing in the schema makes it so.
+
+    A row that is revoked yet still `is_default` - an import, a manual fix, a
+    future code path - must be refused by the lookup itself, not by the
+    discipline of every writer.
+    """
+    tenant, subscription, invoice = await _workspace(db_session)
+    card = await db_session.scalar(
+        select(PaymentMethod).where(PaymentMethod.tenant_id == tenant.id)
+    )
+    assert card is not None and card.is_default
+    card.status = PaymentMethodStatus.REVOKED
+    await db_session.flush()
+    seen: list[dict[str, Any]] = []
+
+    outcome = await _service(db_session, tenant, transport=_transport(seen)).collect(
+        invoice,
+        subscription=subscription,
+        now=NOW,
+    )
+
+    assert outcome.reason == NO_CARD
+    assert seen == []
+
+
 async def test_a_paid_invoice_is_not_charged_again(db_session: AsyncSession) -> None:
     tenant, subscription, invoice = await _workspace(db_session)
     invoice.status = InvoiceStatus.PAID

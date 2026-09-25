@@ -43,11 +43,13 @@ from app.db.models.billing import (
     SERVING_STATUSES,
     LimitKey,
     Plan,
+    PlanScope,
     PlanVersion,
     PlanVersionMigration,
     Subscription,
 )
 from app.db.models.invoice import Invoice
+from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.platform.billing_audit import record_platform_billing
 from app.repositories.billing_repository import (
@@ -194,6 +196,8 @@ def _identity(plan: Plan) -> dict[str, Any]:
         "code": plan.code,
         "name": plan.name,
         "description": plan.description,
+        "scope": plan.scope.value if plan.scope is not None else None,
+        "tenant_id": str(plan.tenant_id) if plan.tenant_id else None,
         "is_public": plan.is_public,
         "is_active": plan.is_active,
         "sort_order": plan.sort_order,
@@ -229,6 +233,8 @@ class PlanCatalogAdmin:
         public: bool | None = None,
         code: str | None = None,
         currency: str | None = None,
+        scope: PlanScope | None = None,
+        tenant_id: uuid.UUID | None = None,
         limit: int,
         offset: int,
     ) -> PlanPage:
@@ -237,6 +243,10 @@ class PlanCatalogAdmin:
             statement = statement.where(Plan.is_active.is_(active))
         if public is not None:
             statement = statement.where(Plan.is_public.is_(public))
+        if scope is not None:
+            statement = statement.where(Plan.scope == scope)
+        if tenant_id is not None:
+            statement = statement.where(Plan.tenant_id == tenant_id)
         if code:
             statement = statement.where(Plan.code == code.strip().lower())
         if currency:
@@ -280,11 +290,21 @@ class PlanCatalogAdmin:
     async def create(
         self, payload: PlanCreate, *, actor: User, now: datetime | None = None
     ) -> PlatformPlanRead:
-        """A new plan and its version 1. `code` is permanent."""
+        """A new plan and its version 1. `code` is permanent.
+
+        A `tenant` plan is a custom plan (ADR-113): it names one existing
+        workspace, is never public, and can never be held by another.
+        """
         moment = now if now is not None else datetime.now(UTC)
         code = payload.code.strip().lower()
         if await self._session.scalar(select(Plan.id).where(Plan.code == code)) is not None:
             raise ConflictError("A plan with that code already exists.")
+        scope = payload.resolved_scope
+        if (
+            payload.tenant_id is not None
+            and await self._session.get(Tenant, payload.tenant_id) is None
+        ):
+            raise NotFoundError("No such workspace.")
         effective = self._effective(payload.effective_at, moment)
         plan = Plan(
             code=code,
@@ -295,7 +315,9 @@ class PlanCatalogAdmin:
             interval=payload.interval,
             trial_days=payload.trial_days,
             limits=dict(payload.limits),
-            is_public=payload.is_public,
+            scope=scope,
+            tenant_id=payload.tenant_id,
+            is_public=scope is PlanScope.PUBLIC,
             is_active=True,
             sort_order=payload.sort_order,
         )
@@ -323,11 +345,16 @@ class PlanCatalogAdmin:
         await self._session.flush()
         record_platform_billing(
             self._session,
-            AuditAction.BILLING_PLAN_CREATED,
+            (
+                AuditAction.BILLING_CUSTOM_PLAN_CREATED
+                if plan.is_custom
+                else AuditAction.BILLING_PLAN_CREATED
+            ),
             actor=actor,
             reason=payload.reason,
             target_type="plan",
             target_id=plan.id,
+            tenant_id=plan.tenant_id,
             target_label=plan.code,
             after={**_identity(plan), "terms": _terms(version)},
         )
@@ -338,6 +365,10 @@ class PlanCatalogAdmin:
     ) -> PlatformPlanRead:
         """Presentation only: name, description, visibility, order."""
         plan = await self._lock(plan_id, expected_revision=payload.expected_revision)
+        if plan.is_custom and payload.is_public:
+            # A custom plan is one workspace's; publishing it would offer one
+            # company's negotiated terms to every other (ADR-113).
+            raise ValidationError("A custom plan is never public.")
         before = _identity(plan)
         if payload.name is not None:
             plan.name = payload.name
@@ -500,11 +531,16 @@ class PlanCatalogAdmin:
         await self._session.flush()
         record_platform_billing(
             self._session,
-            AuditAction.BILLING_PLAN_VERSION_CREATED,
+            (
+                AuditAction.BILLING_CUSTOM_PLAN_VERSION_CREATED
+                if plan.is_custom
+                else AuditAction.BILLING_PLAN_VERSION_CREATED
+            ),
             actor=actor,
             reason=payload.reason,
             target_type="plan",
             target_id=plan.id,
+            tenant_id=plan.tenant_id,
             target_label=plan.code,
             before=before,
             after=_terms(version),

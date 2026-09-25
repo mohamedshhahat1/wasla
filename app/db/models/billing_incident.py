@@ -65,6 +65,27 @@ class BillingIncidentKind(StrEnum):
     ``REFUND_REQUESTED``
         A workspace owner asked for money back. The request moves nothing; a
         platform operator decides (BILL-13).
+
+    The top-up and custom-plan kinds (ADR-113):
+
+    ``TOPUP_PAID_BUT_NOT_GRANTED``
+        A top-up was paid and its allowance could not be granted - the period
+        it was bought for had already ended, or the subscription is no longer
+        serving. Money held, nothing granted; an operator refunds or grants.
+    ``TOPUP_DUPLICATE_PAYMENT``
+        Money arrived for a top-up invoice that was already settled.
+    ``TOPUP_REFUND_AFTER_CONSUMPTION``
+        A granted top-up was refunded after part of the allowance it added was
+        already used. Nothing is withdrawn automatically; an operator decides.
+    ``TOPUP_ENTITLEMENT_REVERSAL_BLOCKED``
+        A granted top-up was refunded and its allowance was *not* withdrawn,
+        because withdrawal is never automatic. An operator decides.
+    ``TOPUP_UNKNOWN_CALLBACK``
+        A top-up invoice was settled with no purchase behind it - a state the
+        checkout path cannot produce, raised rather than ignored.
+    ``CUSTOM_PLAN_SCOPE_MISMATCH``
+        Something tried to put a workspace on another workspace's custom plan
+        and was refused.
     """
 
     DUPLICATE_PAYMENT = "duplicate_payment"
@@ -74,6 +95,12 @@ class BillingIncidentKind(StrEnum):
     PERMANENT_PROVIDER_ERROR = "permanent_provider_error"
     RECOVERED_BY_RECONCILIATION = "recovered_by_reconciliation"
     REFUND_REQUESTED = "refund_requested"
+    TOPUP_PAID_BUT_NOT_GRANTED = "topup_paid_but_not_granted"
+    TOPUP_DUPLICATE_PAYMENT = "topup_duplicate_payment"
+    TOPUP_REFUND_AFTER_CONSUMPTION = "topup_refund_after_consumption"
+    TOPUP_ENTITLEMENT_REVERSAL_BLOCKED = "topup_entitlement_reversal_blocked"
+    TOPUP_UNKNOWN_CALLBACK = "topup_unknown_callback"
+    CUSTOM_PLAN_SCOPE_MISMATCH = "custom_plan_scope_mismatch"
 
 
 class BillingIncidentStatus(StrEnum):

@@ -349,6 +349,7 @@ class StubSubscriptions:
     """Records the calls a route makes, without touching a database."""
 
     def __init__(self) -> None:
+        self.plans: StubPlans = StubPlans()
         self.started: list[str] = []
         self.changed: list[str] = []
         self.cancelled: list[bool] = []
@@ -461,7 +462,12 @@ class StubPlans:
             limits={LimitKey.AGENTS.value: 5},
         )
 
-    async def offered(self) -> list[Any]:
+        self.asked_for: list[uuid.UUID | None] = []
+
+    async def offered(self, *, tenant_id: uuid.UUID | None = None) -> list[Any]:
+        # The route must ask for *its own* workspace's catalogue: that is what
+        # adds the workspace's custom plans and never another's (ADR-113).
+        self.asked_for.append(tenant_id)
         return [(self.plan, None)]
 
 
@@ -482,7 +488,7 @@ def subscriptions(app: FastAPI) -> StubSubscriptions:
     stub = StubSubscriptions()
     app.dependency_overrides[get_subscription_service] = lambda: stub
     app.dependency_overrides[get_entitlement_service] = lambda: StubEntitlements()
-    app.dependency_overrides[get_plan_catalog] = lambda: StubPlans()
+    app.dependency_overrides[get_plan_catalog] = lambda: stub.plans
     return stub
 
 
@@ -501,6 +507,8 @@ async def test_any_member_can_read_the_catalogue(
     limits = {row["key"]: row["limit"] for row in plan["limits"]}
     assert limits["agents"] == 5
     assert limits["period_messages"] is None
+    # Asked for this workspace's own catalogue, never another's (ADR-113).
+    assert subscriptions.plans.asked_for == [TENANT_ID]
 
 
 async def test_a_member_sees_where_the_workspace_stands(

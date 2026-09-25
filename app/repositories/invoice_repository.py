@@ -196,6 +196,8 @@ class InvoiceRepository(TenantScopedRepository[Invoice]):
             self._select()
             .where(Invoice.id != invoice_id)
             .where(Invoice.plan_code == plan_code)
+            # A top-up is extra allowance, never cover for a plan (ADR-113).
+            .where(Invoice.purpose != InvoicePurpose.TOPUP)
             .where(Invoice.status != InvoiceStatus.VOID)
             .where(Invoice.amount_paid > 0)
             .where(Invoice.period_start <= at)
@@ -218,6 +220,17 @@ class InvoiceRepository(TenantScopedRepository[Invoice]):
                 | ((Invoice.period_start == after.sort_value) & (Invoice.id < after.id))
             )
         return await self._all(statement.limit(limit))
+
+    async def open_renewals(self) -> list[Invoice]:
+        """Issued renewals still owed, oldest first - what "Pay Renewal" pays."""
+        return await self._all(
+            self._select()
+            .where(Invoice.purpose == InvoicePurpose.RENEWAL)
+            .where(Invoice.status == InvoiceStatus.OPEN)
+            .where(Invoice.issued_at.is_not(None))
+            .where(Invoice.amount_paid < Invoice.amount_due)
+            .order_by(Invoice.period_start)
+        )
 
     def create(
         self,

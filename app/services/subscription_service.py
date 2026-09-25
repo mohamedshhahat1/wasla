@@ -282,7 +282,7 @@ class SubscriptionService:
         moment = now if now is not None else datetime.now(UTC)
         subscription = await self._require_subscription()
         plan = await self._plans.get_by_code(plan_code)
-        if plan is None or not plan.is_active or not plan.is_public:
+        if plan is None or not self._on_offer(plan):
             raise ValidationError("No such plan.")
         if subscription.plan_id == plan.id:
             raise ConflictError("This workspace is already on that plan.")
@@ -331,6 +331,7 @@ class SubscriptionService:
             raise ConflictError(_unusable_reason(subscription))
         if subscription.plan_version_id == version.id:
             raise ConflictError("This subscription is already on that version.")
+        await self._catalog.require_available(version, tenant_id=self._tenant_id)
 
         before = str(subscription.scheduled_plan_version_id or "")
         subscription.scheduled_plan_version_id = version.id
@@ -409,6 +410,7 @@ class SubscriptionService:
         opening the payment page they then paid: they receive the period they
         paid for and it does not renew.
         """
+        await self._catalog.require_available(version, tenant_id=self._tenant_id)
         subscription = await self._subscriptions.get()
         previous: SubscriptionStatus | None = None
         period_end = billing_calendar.add_interval(now, version.interval)
@@ -544,6 +546,17 @@ class SubscriptionService:
         )
         return subscription
 
+    def _on_offer(self, plan: Plan) -> bool:
+        """Whether this workspace's customer may choose `plan` themselves.
+
+        Active, and either on the public catalogue or this workspace's own
+        custom plan (ADR-113). Another workspace's custom plan is not on offer
+        and is refused exactly like a code that does not exist.
+        """
+        if not plan.is_active:
+            return False
+        return plan.is_public or (plan.is_custom and plan.tenant_id == self._tenant_id)
+
     async def _require_subscription(self) -> Subscription:
         subscription = await self._subscriptions.get()
         if subscription is None:
@@ -580,11 +593,15 @@ class SubscriptionService:
         plan = await self._plans.get_by_code(plan_code)
         if plan is None or not plan.is_active:
             raise ValidationError("No such plan.")
-        if self_service and not plan.is_public:
+        if self_service and not self._on_offer(plan):
             # Deliberately the same refusal as a plan that does not exist. A
             # distinct message would confirm that a private plan code is real,
-            # which is exactly what somebody guessing codes wants to learn.
+            # which is exactly what somebody guessing codes wants to learn -
+            # and that includes another workspace's custom plan (ADR-113).
             raise ValidationError("No such plan.")
+        # The platform may assign what a customer may not choose, but never
+        # another workspace's custom plan (ADR-113).
+        await self._catalog.require_available(plan, tenant_id=self._tenant_id)
         current = await self._catalog.current_version(plan) if self_service else None
         if self_service and current is not None and current.price > 0:
             # The commercial invariant, enforced in the one place both doors
