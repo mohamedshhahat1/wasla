@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **139 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **168 operations**, of which
 17 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -737,6 +737,49 @@ Platform authority is a property of the user, not of a membership. Owning a work
 - **`/tenants` uses offset paging**, unlike the cursors elsewhere: the list is sorted by name and searched by hand, so an operator wants page three of forty results rather than a stable feed. `total` is the number matching the filter. `search` matches name or address and is escaped, so `%` finds a workspace called "100%" rather than everything.
 - **Each row carries the same counters that workspace sees on its own `/usage`**, so an operator and a customer quote the same number.
 
+## Platform billing
+
+`/api/v1/platform/billing`. The procedures are in
+[BILLING_OPERATIONS.md](BILLING_OPERATIONS.md). Every route requires
+`PLATFORM_OWNER` or `PLATFORM_ADMIN`; `DELETE /plans/{id}` requires
+`PLATFORM_OWNER`. Every write takes a `reason` and the `expected_revision` (or
+`expected_version`) it was based on, answers `409` if that is stale, and is
+audited with actor, role, reason, before and after. Lists are offset-paged:
+`limit` (maximum 100), `offset`, `total`. No response carries a secret, a card
+token or a raw provider payload.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/features` | The entitlement keys, their units and how each is enforced |
+| GET | `/plans` | The catalogue, with the current and latest version and subscriber counts |
+| POST | `/plans` | Create a plan and its version 1 |
+| GET | `/plans/{plan_id}` | One plan |
+| PATCH | `/plans/{plan_id}` | Name, description, visibility, order |
+| POST | `/plans/{plan_id}/activate` | Offer it to new customers |
+| POST | `/plans/{plan_id}/deactivate` | Stop offering it; existing subscribers keep it |
+| DELETE | `/plans/{plan_id}` | Delete a plan nothing has referenced (owner only) |
+| GET | `/plans/{plan_id}/versions` | Every version, with subscribers per version |
+| POST | `/plans/{plan_id}/versions` | Publish new terms for new customers |
+| POST | `/plans/{plan_id}/versions/preview` | What publishing would mean; writes nothing |
+| POST | `/plans/{plan_id}/migrations` | Count (`confirm: false`) or schedule (`confirm: true`) a cohort move at next renewal |
+| GET | `/subscriptions` | Filter by workspace, plan, status, renewal window |
+| GET | `/subscriptions/{id}` | One subscription |
+| GET | `/subscriptions/{id}/timeline` | Its audit, invoices and payments in order |
+| POST | `/subscriptions/{id}/change-plan` | `next_renewal`, or `now` with a named financial basis |
+| POST | `/subscriptions/{id}/cancel` | At period end, or `immediately` |
+| POST | `/subscriptions/{id}/resume` | Undo a pending cancellation |
+| GET | `/invoices` | Filter by workspace, subscription, status, purpose, plan, dates |
+| GET | `/invoices/{id}` | One invoice |
+| POST | `/invoices/{id}/payments` | Record a manual payment, settled like any other |
+| POST | `/invoices/{id}/void` | Withdraw an invoice with an explicit subscription policy |
+| GET | `/payments` | Filter by workspace, status, provider |
+| GET | `/payments/{id}` | Provider facts: transaction, order, intention, integration, mode |
+| POST | `/payments/{id}/refund` | Full or partial refund; confirmed only by a signed callback |
+| GET | `/reconciliation` | What needs attention, counted by category |
+| POST | `/reconciliation/{payment_id}/run` | Ask the provider about one payment now; never charges |
+| GET | `/incidents` | Durable billing incidents |
+| POST | `/incidents/{id}/resolve` | Close one with an audited note |
+
 ## Planned platform endpoints
 
-`/api/v1/platform/tenants/{tenant_id}`, `/api/v1/platform/billing`, `/api/v1/platform/plans`, `/api/v1/platform/audit-logs`, `/api/v1/platform/system-health`.
+`/api/v1/platform/tenants/{tenant_id}`, `/api/v1/platform/plans`, `/api/v1/platform/audit-logs`, `/api/v1/platform/system-health`.
