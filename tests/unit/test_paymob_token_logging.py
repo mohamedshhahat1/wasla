@@ -136,3 +136,20 @@ async def test_the_sentinel_search_would_see_a_leak(caplog: pytest.LogCaptureFix
             "billing.paymob_saved_method_charged", extra={"token": CARD_TOKEN}
         )
     assert _leaks(caplog.records) != []
+
+
+async def test_an_order_without_a_saved_card_is_no_card_not_a_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Paymob's real answer for an order nobody saved a card on (Test API, 2026-09-25)."""
+
+    def answers(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(CARD_TOKEN_INQUIRY_PATH):
+            return httpx.Response(404, json={"message": "No card tokens found for this order"})
+        return _answers(request)
+
+    with caplog.at_level(logging.DEBUG):
+        method = await _paymob(answers).inquire_saved_method(str(ORDER_ID))
+
+    assert method is None
+    assert not any("card_token_inquiry_failed" in r.getMessage() for r in caplog.records)

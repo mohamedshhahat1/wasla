@@ -1317,7 +1317,13 @@ class PaymobProvider:
                 {"auth_token": token, "order_id": order_id},
                 operation=CARD_TOKEN_INQUIRY,
             )
-        except ProviderError:
+        except ProviderError as error:
+            if self._is_absent(error):
+                # Paymob answers 404 "No card tokens found for this order" for
+                # every checkout where the customer did not save the card -
+                # observed on the real Test API. That is the ordinary answer,
+                # not a failure worth a warning.
+                return None
             logger.warning(
                 "billing.paymob_card_token_inquiry_failed",
                 extra={"event": "billing.paymob_card_token_inquiry_failed"},
