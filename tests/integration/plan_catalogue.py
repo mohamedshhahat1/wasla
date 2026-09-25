@@ -28,13 +28,15 @@ that is rolled back, so a seeded row is never left modified for the next one.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models.billing import BillingInterval, Plan
+from app.db.models.billing import BillingInterval, Plan, PlanVersion
+from app.services.plan_catalog import ORIGINAL_TERMS_EFFECTIVE_AT
 
 #: What a plan is when the caller did not say. Matches the model defaults rather
 #: than the migration's catalogue, so a fixture that names only a code gets a
@@ -75,7 +77,56 @@ async def own_plan(session: AsyncSession, *, code: str, **fields: Any) -> Plan:
     for attribute, value in values.items():
         setattr(existing, attribute, value)
     await session.flush()
+    await _publish_matching_version(session, existing)
     return existing
+
+
+async def _publish_matching_version(session: AsyncSession, plan: Plan) -> None:
+    """Make the plan's *terms* say what the caller asked for, too.
+
+    Money and limits come from plan versions (BILL-12), and a migration-built
+    database already carries a seeded version 1 for `pro`, `starter` and
+    `business` with the seed's terms. Rewriting the row alone would leave every
+    subscription resolving the seed's limits, so when the latest version does
+    not match, a new one is published - effective from the epoch, like every
+    first version, so it is current for any `now` a test passes. Versions are
+    immutable; this adds a row and changes none.
+    """
+    latest = (
+        await session.execute(
+            select(PlanVersion)
+            .where(PlanVersion.plan_id == plan.id)
+            .order_by(PlanVersion.version.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if latest is None:
+        return
+    same = (
+        latest.price == plan.price
+        and latest.currency == plan.currency
+        and latest.interval == plan.interval
+        and latest.trial_days == plan.trial_days
+        and dict(latest.limits or {}) == dict(plan.limits or {})
+    )
+    if same:
+        return
+    session.add(
+        PlanVersion(
+            plan_id=plan.id,
+            version=latest.version + 1,
+            name=plan.name,
+            price=plan.price,
+            currency=plan.currency,
+            interval=plan.interval,
+            trial_days=plan.trial_days,
+            limits=dict(plan.limits or {}),
+            effective_at=ORIGINAL_TERMS_EFFECTIVE_AT,
+            created_at=datetime.now(UTC),
+            reason="Test fixture terms.",
+        )
+    )
+    await session.flush()
 
 
 __all__ = ["DEFAULTS", "own_plan"]

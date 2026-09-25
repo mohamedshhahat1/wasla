@@ -23,7 +23,7 @@ from app.api.dependencies import (
     CheckoutServiceDep,
     EntitlementServiceDep,
     PaymentMethodServiceDep,
-    PlanRepositoryDep,
+    PlanCatalogDep,
     RefundServiceDep,
     SubscriptionServiceDep,
     TenantOwnerDep,
@@ -39,7 +39,12 @@ from app.schemas.billing import (
     SubscriptionRead,
     SubscriptionStateRead,
 )
-from app.schemas.invoice import PaymentMethodRead, PaymentRead, RefundRequestPayload
+from app.schemas.invoice import (
+    PaymentMethodRead,
+    PaymentRead,
+    RefundRequestPayload,
+    RefundReviewRequested,
+)
 from app.services.entitlement_service import EntitlementService
 from app.services.subscription_service import SubscriptionService
 
@@ -60,7 +65,9 @@ async def _state(
     read = None
     if subscription is not None:
         plan = await subscriptions.plan_for(subscription)
-        read = SubscriptionRead.from_model(subscription, plan=plan)
+        read = SubscriptionRead.from_model(
+            subscription, plan=plan, version=await subscriptions.version_for(subscription)
+        )
 
     snapshot = await entitlements.snapshot()
     return SubscriptionStateRead(
@@ -72,7 +79,7 @@ async def _state(
 @router.get("/plans", response_model=list[PlanRead])
 async def list_plans(
     workspace: ActiveWorkspaceDep,
-    plans: PlanRepositoryDep,
+    catalog: PlanCatalogDep,
 ) -> list[PlanRead]:
     """The catalogue a workspace may choose from.
 
@@ -80,7 +87,7 @@ async def list_plans(
     but the customer it was written for, and the other is kept only so existing
     subscriptions keep meaning what they meant.
     """
-    return [PlanRead.from_model(plan) for plan in await plans.list_plans()]
+    return [PlanRead.from_model(plan, version) for plan, version in await catalog.offered()]
 
 
 @router.get("/subscription", response_model=SubscriptionStateRead)
@@ -116,7 +123,9 @@ async def start_subscription(
         actor=workspace.user,
     )
     plan = await subscriptions.plan_for(subscription)
-    return SubscriptionRead.from_model(subscription, plan=plan)
+    return SubscriptionRead.from_model(
+        subscription, plan=plan, version=await subscriptions.version_for(subscription)
+    )
 
 
 @router.post("/subscription/plan", response_model=SubscriptionRead)
@@ -125,25 +134,27 @@ async def change_plan(
     workspace: TenantOwnerDep,
     subscriptions: SubscriptionServiceDep,
 ) -> SubscriptionRead:
-    """Move to another **free** plan, effective now. Owners only.
+    """Ask for a cheaper or free plan. Owners only.
 
-    A priced plan is not obtainable here and answers 402 (ADR-059): buying one
-    means `POST /billing/checkout`, and the plan applies when the provider's
-    signed callback says the invoice is paid. What is left here is the move
-    that costs nothing - a downgrade to the free tier, and any deployment whose
-    catalogue is free.
+    - From a **paid** plan, the change is *scheduled* for the end of the period
+      already paid for: the response carries `scheduled_change`, and the
+      renewal at the boundary is billed at the new plan's price. Nothing paid
+      for is forfeited.
+    - From a **free** plan to another free plan, it takes effect now.
+    - A **pricier** plan answers 402: buying one is `POST /billing/checkout`,
+      and it applies when the provider confirms the payment (ADR-059).
 
-    The billing period restarts, which cuts both ways: the new plan's allowances
-    start now, and so does its period. No proration — a downgrade does not
-    refund the remainder, and inventing a credit no invoice reflects would be
-    worse than not having one.
+    Resources above the new plan's limits are never deleted; creating more is
+    refused until usage fits again.
     """
-    subscription = await subscriptions.change_plan(
+    subscription = await subscriptions.request_plan(
         plan_code=payload.plan_code,
         actor=workspace.user,
     )
     plan = await subscriptions.plan_for(subscription)
-    return SubscriptionRead.from_model(subscription, plan=plan)
+    return SubscriptionRead.from_model(
+        subscription, plan=plan, version=await subscriptions.version_for(subscription)
+    )
 
 
 @router.post("/subscription/cancel", response_model=SubscriptionRead)
@@ -162,7 +173,22 @@ async def cancel_subscription(
         actor=workspace.user,
     )
     plan = await subscriptions.plan_for(subscription)
-    return SubscriptionRead.from_model(subscription, plan=plan)
+    return SubscriptionRead.from_model(
+        subscription, plan=plan, version=await subscriptions.version_for(subscription)
+    )
+
+
+@router.post("/subscription/scheduled-change/cancel", response_model=SubscriptionRead)
+async def cancel_scheduled_change(
+    workspace: TenantOwnerDep,
+    subscriptions: SubscriptionServiceDep,
+) -> SubscriptionRead:
+    """Withdraw a plan change that has not taken effect yet. Owners only."""
+    subscription = await subscriptions.cancel_scheduled_change(actor=workspace.user)
+    plan = await subscriptions.plan_for(subscription)
+    return SubscriptionRead.from_model(
+        subscription, plan=plan, version=await subscriptions.version_for(subscription)
+    )
 
 
 @router.post("/subscription/resume", response_model=SubscriptionRead)
@@ -173,7 +199,9 @@ async def resume_subscription(
     """Undo a cancellation that has not taken effect yet. Owners only."""
     subscription = await subscriptions.resume(actor=workspace.user)
     plan = await subscriptions.plan_for(subscription)
-    return SubscriptionRead.from_model(subscription, plan=plan)
+    return SubscriptionRead.from_model(
+        subscription, plan=plan, version=await subscriptions.version_for(subscription)
+    )
 
 
 @router.post(
@@ -250,35 +278,31 @@ async def read_payment(
 
 @router.post(
     "/payments/{payment_id}/refund",
-    response_model=PaymentRead,
+    response_model=RefundReviewRequested,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Refund a payment",
+    summary="Ask for a payment to be refunded",
 )
 async def refund_payment(
     payment_id: uuid.UUID,
     payload: RefundRequestPayload,
     workspace: TenantOwnerDep,
     refunds: RefundServiceDep,
-) -> PaymentRead:
-    """Give a customer back what is left of one payment. Owners only.
+) -> RefundReviewRequested:
+    """Ask the platform to refund a payment. Owners only. **Moves no money.**
 
-    **202, not 200, and the status in the response still says `succeeded`.**
-    This records that the provider accepted the reversal; the money has not
-    moved yet, and it is confirmed by a callback the same way a payment is. A
-    client rendering "refunded" from this response would be telling a customer
-    something that is not true yet - `refund_pending` is the field that says
-    where it actually stands.
-
-    There is no amount in the request. It is the payment's own unreturned
-    balance, computed on the server, so no client can ask for more back than
-    was ever paid.
+    This used to reverse the payment at the provider immediately, which let a
+    workspace refund service it had already used in full (BILL-13). It now
+    files a refund request that a platform operator reviews; an approved
+    refund is issued from `POST /platform/billing/payments/{id}/refund` and
+    confirmed by the provider's callback, after which the payment and the
+    subscription reflect it.
     """
-    payment = await refunds.refund(
+    payment = await refunds.request_review(
         payment_id,
         actor=workspace.user,
         reason=payload.reason,
     )
-    return PaymentRead.from_model(payment)
+    return RefundReviewRequested(payment_id=payment.id, status="review_requested")
 
 
 @router.get("/entitlements", response_model=list[EntitlementRead])

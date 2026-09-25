@@ -15,6 +15,16 @@ Two kinds of question, answered by two different queries:
   from `usage_events`. They reset when the period rolls over, which is what
   makes "1,000 messages a month" mean anything at all.
 
+**Limits come from the subscription's pinned plan version** (BILL-12), never
+from the live `plans` row. A catalogue edit reaches an existing subscriber only
+through an explicit migration, so publishing "Pro now allows 3 agents" cannot
+silently take two agents' worth of capacity away from somebody who bought 5.
+
+**Every count-based limit is checked under a lock** (BILL-08). Two requests
+creating the last agent both used to read "one left" and both succeeded; the
+guard now takes a per-workspace advisory lock in the creating transaction, so
+the second one counts the first one's row and is refused.
+
 What happens when a workspace has no subscription is a decision, not an
 oversight. It is treated as being on the configured default plan, because every
 workspace that predates billing has none and a product that stopped working for
@@ -44,9 +54,11 @@ from app.db.models.billing import (
     RESOURCE_LIMITS,
     LimitKey,
     Plan,
+    PlanVersion,
     Subscription,
 )
-from app.db.models.enums import MembershipStatus
+from app.db.models.enums import InvitationStatus, MembershipStatus
+from app.db.models.invitation import TenantInvitation
 from app.db.models.knowledge import Document
 from app.db.models.media import OCCUPYING_STORAGE_STATES, MessageMedia
 from app.db.models.membership import Membership
@@ -54,6 +66,7 @@ from app.db.models.usage import UsageEventType
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
 from app.repositories.usage_repository import UsageEventRepository
+from app.services.plan_catalog import PlanCatalog
 from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
@@ -150,10 +163,17 @@ class EntitlementService:
         self._default_plan_code = default_plan_code
         self._subscriptions = SubscriptionRepository(session, tenant_id=tenant_id)
         self._plans = PlanRepository(session)
+        self._catalog = PlanCatalog(session)
         self._usage = UsageEventRepository(session, tenant_id=tenant_id)
         # Resolved at most once per request: every check needs the same plan,
         # and a page rendering five of them should not read it five times.
         self._resolved: tuple[Plan | None, Subscription | None] | None = None
+        self._terms: PlanVersion | None = None
+
+    async def terms(self) -> PlanVersion | None:
+        """The plan version this workspace is enforced against right now."""
+        await self._resolve()
+        return self._terms
 
     async def _resolve(self) -> tuple[Plan | None, Subscription | None]:
         if self._resolved is not None:
@@ -191,6 +211,10 @@ class EntitlementService:
                     "tenant_id": str(self._tenant_id),
                 },
             )
+        elif subscription is not None:
+            self._terms = await self._catalog.pinned_version(subscription)
+        else:
+            self._terms = await self._catalog.current_version(plan)
         self._resolved = (plan, subscription)
         return self._resolved
 
@@ -215,7 +239,8 @@ class EntitlementService:
             # Unenforced, and already logged in `_resolve`.
             return Entitlement(key=key, limit=None, used=0, allowed=True)
 
-        limit = plan.limit_for(key)
+        terms = self._terms
+        limit = terms.limit_for(key) if terms is not None else plan.limit_for(key)
         used = await self._used(key, subscription=subscription)
         allowed = limit is None or used + max(additional, 0) <= limit
         return Entitlement(
@@ -381,6 +406,45 @@ class EntitlementService:
             )
         return entitlement
 
+    async def reserve_or_refuse(self, key: LimitKey, *, additional: int = 1) -> Entitlement:
+        """`reserve` for a resource limit, raising when the plan does not allow it.
+
+        What every creating route's guard calls (BILL-08). The lock is held
+        until the request's transaction ends - which is after the route has
+        written the new row - so N simultaneous creations against a limit of N
+        leave at most N rows. Serialises only the one workspace and the one
+        limit that are actually contended.
+        """
+        entitlement = await self.reserve(key, additional=additional)
+        if not entitlement.allowed:
+            raise PlanLimitExceededError(_refusal(entitlement))
+        return entitlement
+
+    async def reserve_period(self, key: LimitKey, *, additional: int, reserved: int) -> Entitlement:
+        """Take the lock on a period limit and answer, counting work already promised.
+
+        For a period allowance whose usage is recorded later than it is
+        committed to - a campaign's audience is sent over minutes, and each
+        send is metered when it happens. `reserved` is what is already
+        scheduled and not yet sent, so two campaigns launched together cannot
+        both fit into one remaining allowance.
+        """
+        await self._session.execute(
+            select(func.pg_advisory_xact_lock(_lock_id(self._tenant_id, key)))
+        )
+        entitlement = await self.check(key, additional=additional + max(reserved, 0))
+        if not entitlement.allowed:
+            logger.info(
+                "billing.reservation_refused",
+                extra={
+                    "event": "billing.reservation_refused",
+                    "tenant_id": str(self._tenant_id),
+                    "key": key.value,
+                },
+            )
+            raise PlanLimitExceededError(_refusal(entitlement))
+        return entitlement
+
     async def allows(self, key: LimitKey, *, additional: int = 1) -> bool:
         """Whether the action is allowed, without raising.
 
@@ -457,12 +521,26 @@ class EntitlementService:
                     .where(Agent.tenant_id == self._tenant_id)
                 )
             case LimitKey.TEAM_MEMBERS:
-                statement = (
+                # Active members plus the open invitations that will become
+                # members: an invitation reserves its seat (BILL-08). Counting
+                # only memberships let any number of invitations be issued
+                # against the last seat, and every one of them accepted.
+                members = (
                     select(func.count())
                     .select_from(Membership)
                     .where(Membership.tenant_id == self._tenant_id)
                     .where(Membership.status == MembershipStatus.ACTIVE)
+                    .scalar_subquery()
                 )
+                invited = (
+                    select(func.count())
+                    .select_from(TenantInvitation)
+                    .where(TenantInvitation.tenant_id == self._tenant_id)
+                    .where(TenantInvitation.status == InvitationStatus.PENDING)
+                    .where(TenantInvitation.expires_at > func.now())
+                    .scalar_subquery()
+                )
+                statement = select(members + invited)
             case LimitKey.KNOWLEDGE_DOCUMENTS:
                 statement = (
                     select(func.count())

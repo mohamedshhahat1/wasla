@@ -57,7 +57,9 @@ from app.services.recurring_service import (
     PROVIDER_REFUSED,
     RecurringService,
 )
+from tests.billing_fixtures import add_owner, renewal_invoice
 from tests.payment_tokens import PROTECTOR, saved_card
+from tests.paymob_orders import order_for, order_from_request
 
 pytestmark = pytest.mark.integration
 
@@ -81,6 +83,7 @@ def _transport(
                 json={
                     "id": "pi_auto_1",
                     "client_secret": "csk_auto_1",
+                    "intention_order_id": order_from_request(request),
                     "payment_keys": [{"key": "a-payment-token", "integration": MOTO_INTEGRATION}],
                 },
             )
@@ -137,21 +140,15 @@ async def _workspace(
     session.add(subscription)
     await session.flush()
 
-    invoice = Invoice(
-        tenant_id=tenant.id,
-        subscription_id=subscription.id,
-        status=InvoiceStatus.OPEN,
-        plan_code=plan.code,
-        amount_due=Decimal("25.00"),
-        amount_paid=Decimal("0.00"),
-        currency="EGP",
-        period_start=NOW - timedelta(days=35),
-        period_end=NOW - timedelta(days=5),
+    await add_owner(session, tenant)
+    # Billed in advance for the period the workspace is in (BILL-03), at the
+    # version it is pinned to - the only shape automatic collection may take.
+    invoice = await renewal_invoice(
+        session,
+        subscription=subscription,
+        plan=plan,
         issued_at=NOW - timedelta(days=5),
-        lines=[],
-        collection_attempts=0,
     )
-    session.add(invoice)
 
     if with_card:
         session.add(
@@ -212,7 +209,11 @@ async def test_a_due_renewal_is_taken_from_the_saved_card(db_session: AsyncSessi
     assert payment.status is PaymentStatus.PENDING
     assert payment.is_automatic is True
     assert payment.payment_method_id is not None
-    assert payment.provider_intent_reference == "700000123"
+    # One identifier, one column (BILL-04): the intention id, the Paymob order
+    # the callback will be bound to, and the pay request's transaction.
+    assert payment.provider_intent_reference == "pi_auto_1"
+    assert payment.provider_order_id == str(order_for(payment.id))
+    assert payment.provider_reference == "700000123"
 
 
 async def test_the_charge_uses_the_moto_integration_and_our_own_reference(
@@ -515,7 +516,12 @@ async def test_a_timed_out_charge_is_unknown_rather_than_failed(
         if "intention" in str(request.url):
             return httpx.Response(
                 201,
-                json={"id": "pi_1", "client_secret": "c", "payment_keys": [{"key": "k"}]},
+                json={
+                    "id": "pi_1",
+                    "client_secret": "c",
+                    "intention_order_id": order_from_request(request),
+                    "payment_keys": [{"key": "k"}],
+                },
             )
         raise httpx.ReadTimeout("no answer", request=request)
 

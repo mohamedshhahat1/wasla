@@ -30,7 +30,7 @@ from app.api.dependencies import (
 )
 from app.core.exceptions import ConflictError, TenantIsolationError
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, TenantStatus, User
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 
 pytestmark = pytest.mark.integration
 
@@ -53,6 +53,7 @@ def _invoice(**overrides: Any) -> Invoice:
         "amount_due": Decimal("99.00"),
         "amount_paid": Decimal("0.00"),
         "currency": "EGP",
+        "purpose": InvoicePurpose.RENEWAL,
         "period_start": PERIOD_START,
         "period_end": NOW,
         "issued_at": NOW,

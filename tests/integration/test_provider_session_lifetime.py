@@ -61,7 +61,7 @@ from app.db.models.conversation import (
     MessageOrigin,
     MessageStatus,
 )
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment
+from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment
 from app.db.models.payment_method import PaymentMethodStatus
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEventType
@@ -73,6 +73,7 @@ from app.repositories.billing_repository import SubscriptionRepository
 from app.services.entitlement_service import EntitlementService
 from app.services.metrics_service import API_ROLE, MetricsService
 from app.services.recurring_service import RecurringService
+from tests.billing_fixtures import erase_ledger
 from tests.fakes import as_recurring, as_responses
 from tests.payment_tokens import PROTECTOR, saved_card
 
@@ -681,6 +682,7 @@ async def renewals(one_connection: Database) -> AsyncIterator[list[uuid.UUID]]:
                     tenant_id=tenant.id,
                     subscription_id=subscription.id,
                     status=InvoiceStatus.OPEN,
+                    purpose=InvoicePurpose.RENEWAL,
                     plan_code=plan.code,
                     amount_due=Decimal("42.00"),
                     amount_paid=Decimal("0.00"),
@@ -710,6 +712,7 @@ async def renewals(one_connection: Database) -> AsyncIterator[list[uuid.UUID]]:
     yield tenants
 
     async with factory() as session:
+        await erase_ledger(session, list(tenants))
         await session.execute(delete(Tenant).where(Tenant.id.in_(tenants)))
         await session.execute(delete(Plan).where(Plan.id.in_(plans)))
         await session.commit()

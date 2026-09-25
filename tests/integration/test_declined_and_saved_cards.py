@@ -31,15 +31,23 @@ from app.db.models.billing import (
     Subscription,
     SubscriptionStatus,
 )
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import (
+    CollectionState,
+    Invoice,
+    InvoicePurpose,
+    InvoiceStatus,
+    Payment,
+    PaymentStatus,
+)
 from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
 from app.db.models.tenant import Tenant
 from app.integrations.billing.paymob import PaymobProvider, hmac_signature, token_hmac_signature
-from app.services.checkout_service import APPLIED, DUPLICATE, NO_CHANGE, CheckoutService
+from app.services.checkout_service import APPLIED, DECLINED, DUPLICATE, NO_CHANGE, CheckoutService
 from app.services.entitlement_service import EntitlementService
 from app.services.payment_method_service import PaymentMethodService, remember_saved_method
 from tests.fakes import as_table
 from tests.payment_tokens import PROTECTOR, SETTINGS
+from tests.paymob_orders import MOTO_INTEGRATION_ID, order_for
 
 pytestmark = pytest.mark.integration
 
@@ -53,6 +61,7 @@ def _provider() -> PaymobProvider:
         public_key="pk_test_notreal",
         hmac_secret=HMAC_SECRET,
         integration_ids=[4097558],
+        moto_integration_id=MOTO_INTEGRATION_ID,
     )
 
 
@@ -72,7 +81,8 @@ def _transaction(
         "is_3d_secure": True,
         "integration_id": 4097558,
         "has_parent_transaction": False,
-        "order": {"id": 1, "merchant_order_id": reference},
+        "order": {"id": order_for(reference), "merchant_order_id": reference},
+        "is_live": False,
         "created_at": "2026-08-29T11:33:44.592345",
         "currency": "EGP",
         "source_data": {"pan": "2346", "type": "card", "sub_type": "MasterCard"},
@@ -83,7 +93,14 @@ def _transaction(
     return body
 
 
-async def _apply(session: AsyncSession, tenant: Tenant, transaction: dict[str, Any]) -> str:
+async def _apply(
+    session: AsyncSession,
+    tenant: Tenant,
+    transaction: dict[str, Any],
+    *,
+    moto: bool = False,
+) -> str:
+    del moto  # the provider always knows both integrations; kept for readability
     payload = json.dumps({"type": "TRANSACTION", "obj": transaction}).encode("utf-8")
     event = _provider().verify_callback(
         payload=payload,
@@ -124,12 +141,16 @@ async def _workspace(
         tenant_id=tenant.id,
         subscription_id=subscription.id,
         status=InvoiceStatus.OPEN,
+        # The renewal a past-due workspace is paying on a hosted page: billed
+        # in advance for the period it is in (BILL-03).
+        purpose=InvoicePurpose.RENEWAL,
         plan_code=plan.code,
         amount_due=Decimal("25.00"),
         amount_paid=Decimal("0.00"),
         currency="EGP",
-        period_start=NOW - timedelta(days=35),
-        period_end=NOW - timedelta(days=5),
+        period_start=NOW - timedelta(days=5),
+        period_end=NOW + timedelta(days=25),
+        issued_at=NOW - timedelta(days=5),
         lines=[],
     )
     session.add(invoice)
@@ -145,6 +166,8 @@ async def _workspace(
         refunded_amount=Decimal("0.00"),
     )
     session.add(payment)
+    await session.flush()
+    payment.provider_order_id = str(order_for(payment.id))
     await session.flush()
     return tenant, subscription, invoice, payment
 
@@ -172,8 +195,11 @@ async def test_a_declined_payment_changes_nothing_it_should_not(db_session: Asyn
         ),
     )
 
-    assert outcome == APPLIED, "the event is recorded; what it did is the assertion below"
-    assert payment.status is PaymentStatus.FAILED
+    # Recorded as a declined *transaction*: the hosted page can still be paid
+    # by another one on the same order, so the logical payment stays pending
+    # and the decline is history (BILL-07).
+    assert outcome == DECLINED, "the event is recorded; what it did is the assertion below"
+    assert payment.status is PaymentStatus.PENDING
     assert payment.failure_reason == "Insufficient funds"
     assert invoice.status is InvoiceStatus.OPEN
     assert invoice.amount_paid == Decimal("0.00")
@@ -231,32 +257,94 @@ async def test_a_repeated_decline_is_idempotent(db_session: AsyncSession) -> Non
     first = await _apply(db_session, tenant, declined)
     second = await _apply(db_session, tenant, declined)
 
-    assert (first, second) == (APPLIED, DUPLICATE)
+    assert (first, second) == (DECLINED, DUPLICATE)
     assert invoice.amount_paid == Decimal("0.00")
 
 
-async def test_a_declined_payment_cannot_later_succeed(db_session: AsyncSession) -> None:
-    """`failed -> succeeded` is refused, so a late success cannot resurrect it.
+async def test_a_success_after_a_decline_on_the_same_page_settles_once(
+    db_session: AsyncSession,
+) -> None:
+    """BILL-07: decline, then success, on one Paymob order.
 
-    A customer retrying produces another attempt and another row; this row
-    keeps the decline, which is what a dispute turns on.
+    This test used to pin the opposite - "a customer retrying produces another
+    attempt and another row" - which is true of an automatic charge and false
+    of a hosted page: Paymob's checkout lets the customer try again, and the
+    retry is another *transaction* on the same order and the same payment row.
+    The customer was charged and the invoice stayed open.
+
+    Now: the invoice is paid exactly once, the plan outcome is granted exactly
+    once, and both transactions stay in the ledger.
     """
-    tenant, _, invoice, payment = await _workspace(db_session)
-    await _apply(
+    from app.db.models.payment_event import PaymentEvent
+
+    tenant, subscription, invoice, payment = await _workspace(db_session)
+    declined = await _apply(
         db_session,
         tenant,
         _transaction(reference=str(payment.id), success=False, error_occured=True),
+    )
+    assert declined == DECLINED
+    assert payment.status in {PaymentStatus.PENDING}, "the decline leaves it payable"
+
+    succeeded = await _apply(
+        db_session,
+        tenant,
+        _transaction(reference=str(payment.id), transaction=800000002),
+    )
+    replayed = await _apply(
+        db_session,
+        tenant,
+        _transaction(reference=str(payment.id), transaction=800000002),
+    )
+
+    assert (succeeded, replayed) == (APPLIED, DUPLICATE)
+    assert payment.status is PaymentStatus.SUCCEEDED
+    assert payment.provider_reference == "800000002"
+    assert invoice.status is InvoiceStatus.PAID
+    assert invoice.amount_paid == Decimal("25.00")
+    assert subscription.status is SubscriptionStatus.ACTIVE
+    events = (
+        await db_session.scalars(
+            select(PaymentEvent.provider_event_id).where(PaymentEvent.payment_id == payment.id)
+        )
+    ).all()
+    assert sorted(events) == ["800000001:failed", "800000002:succeeded"]
+
+
+async def test_an_automatic_charge_declined_stays_declined(db_session: AsyncSession) -> None:
+    """The other half of BILL-07's rule: one MIT is one transaction.
+
+    A merchant-initiated charge is a single pay request, so its decline is
+    final and a later "success" naming it is refused - the budget is spent and
+    the next attempt is a new row with a new reference.
+    """
+    tenant, _, invoice, payment = await _workspace(db_session)
+    payment.is_automatic = True
+    payment.collection_state = CollectionState.REQUESTED
+    await db_session.flush()
+
+    await _apply(
+        db_session,
+        tenant,
+        _transaction(
+            reference=str(payment.id),
+            success=False,
+            error_occured=True,
+            integration_id=MOTO_INTEGRATION_ID,
+        ),
+        moto=True,
     )
     assert payment.status is PaymentStatus.FAILED
 
     outcome = await _apply(
         db_session,
         tenant,
-        _transaction(reference=str(payment.id), transaction=800000002),
+        _transaction(
+            reference=str(payment.id), transaction=800000002, integration_id=MOTO_INTEGRATION_ID
+        ),
+        moto=True,
     )
-
     assert outcome == "refused"
-    assert payment.status is PaymentStatus.FAILED
     assert invoice.status is InvoiceStatus.OPEN
 
 

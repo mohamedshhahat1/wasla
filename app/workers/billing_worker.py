@@ -8,8 +8,11 @@ It sweeps far less often than the others, and deliberately. Nothing here is
 urgent to the minute — a trial that ends at 09:00 and is noticed at 09:55 has
 cost nobody anything, because entitlements are computed from the row on every
 request and the *row* already says the period is over. What this loop does is
-make that state explicit and durable: a trial becomes `expired`, a pending
-cancellation takes effect, an active subscription opens its next period.
+make that state explicit and durable: a pending cancellation takes effect, a
+scheduled plan change is applied, an active subscription opens its next period
+- and **that next period is billed in advance**, at the terms of the version
+that governs it (BILL-03). The period that just ended was already paid for by
+the invoice that opened it.
 
 The rules themselves are in `roll_over`, which is a pure function over a row.
 This module is the query, the loop and the commit, and nothing else.
@@ -29,12 +32,17 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.telemetry import record_payment_reconciliation
 from app.db.models.audit import AuditAction, AuditActorKind
-from app.db.models.billing import Plan, Subscription, SubscriptionStatus
+from app.db.models.billing import (
+    PlanVersion,
+    ScheduledChangeSource,
+    Subscription,
+    SubscriptionStatus,
+)
 from app.db.session import Database
 from app.integrations.billing import build_checkout_provider
 from app.integrations.billing.checkout import RecurringProvider
 from app.repositories.billing_repository import (
-    PlanRepository,
+    PlanVersionMigrationRepository,
     PlatformSubscriptionRepository,
 )
 from app.repositories.invoice_repository import PlatformInvoiceRepository
@@ -45,7 +53,9 @@ from app.services.email_templates import EmailTemplate
 from app.services.invoice_service import InvoiceService
 from app.services.payment_reconciliation_service import PaymentReconciler
 from app.services.payment_token_service import PaymentTokenProtector
+from app.services.plan_catalog import PlanCatalog
 from app.services.recurring_service import MAX_COLLECTION_ATTEMPTS, RecurringService
+from app.services.settlement_service import InvoiceSettlement
 from app.services.subscription_service import roll_over
 
 logger = get_logger(__name__)
@@ -245,9 +255,10 @@ class BillingWorker:
                 # in this same pass may already have rolled it.
                 return 0
 
-            plan = await PlanRepository(session).get_by_id(subscription.plan_id)
-            if plan is None:
-                # RESTRICT on the foreign key makes this unreachable, and it is
+            catalog = PlanCatalog(session)
+            current = await catalog.pinned_version(subscription, at=now)
+            if current is None:
+                # RESTRICT on the foreign keys makes this unreachable, and it is
                 # logged rather than crashed on: one impossible row must not
                 # strand every other workspace's renewal behind it.
                 logger.warning(
@@ -257,18 +268,32 @@ class BillingWorker:
                 return 0
 
             previous = subscription.status
-            # Billed for the period that is ending, *before* it is rolled over:
-            # after the roll the row's bounds describe the next month, and the
-            # invoice would cover the wrong window.
-            await self._invoice(session, subscription=subscription, plan=plan, now=now)
-            await roll_over(subscription, plan=plan, now=now)
+            ended_start = subscription.current_period_start
+            switch_now, bill_at = await self._next_terms(session, subscription, current=current)
+            await roll_over(subscription, plan=current, now=now, next_version=switch_now)
+            if not subscription.is_terminal:
+                if switch_now is not None:
+                    self._record_applied_change(session, subscription, version=switch_now)
+                # Billed *after* the roll and for the period that has just
+                # opened: advance billing (BILL-03). The bounds now describe the
+                # new period, and the terms are the version it is billed at.
+                await self._invoice(
+                    session,
+                    subscription=subscription,
+                    # The terms of the period that opened: a pending migration's
+                    # target, else a downgrade just applied, else unchanged.
+                    version=bill_at or switch_now or current,
+                    now=now,
+                    usage_since=ended_start,
+                )
             if (
                 previous is SubscriptionStatus.TRIALING
                 and subscription.status is SubscriptionStatus.EXPIRED
             ):
                 # The one transition nobody chose, so the owners are the last to
                 # know unless they are told. Queued on this transaction, so the
-                # notice and the expiry commit together (ADR-042).
+                # notice and the expiry commit together (ADR-042). Only a
+                # *priced* trial can expire now: a free plan never does.
                 await self._notify_trial_expired(session, subscription=subscription)
             logger.info(
                 "billing.subscription_advanced",
@@ -310,6 +335,7 @@ class BillingWorker:
                 session=session,
                 provider=provider,
                 default_plan_code=self._settings.default_plan_code,
+                settings=self._settings,
             )
             if not reconciler.available:
                 return 0
@@ -322,6 +348,15 @@ class BillingWorker:
             )
             pending = await reconciler.unresolved_count()
             oldest = await reconciler.oldest_unresolved_seconds(now=now)
+            # Hosted checkouts whose callback never came (BILL-09): the same
+            # provider, the same lease protocol, the same settlement path.
+            hosted = await reconciler.run_hosted(
+                now=now,
+                grace_seconds=self._settings.billing_reconciliation_grace_seconds,
+                lease_seconds=self._settings.billing_reconciliation_lease_seconds,
+                max_age_seconds=self._settings.billing_hosted_reconciliation_max_age_seconds,
+                limit=self._settings.billing_reconciliation_batch_size,
+            )
 
         await record_payment_reconciliation(
             settled=outcome.settled,
@@ -348,7 +383,7 @@ class BillingWorker:
                     "pending": pending,
                 },
             )
-        return outcome.examined
+        return outcome.examined + sum(hosted.values())
 
     async def _collect_batch(self, *, now: datetime) -> int:
         """Take due renewals from saved cards, where that is possible at all.
@@ -683,43 +718,121 @@ class BillingWorker:
             )
             return 1
 
+    async def _next_terms(
+        self,
+        session: AsyncSession,
+        subscription: Subscription,
+        *,
+        current: PlanVersion,
+    ) -> tuple[PlanVersion | None, PlanVersion | None]:
+        """What the opening period runs on, and what it is billed at.
+
+        Returns `(switch_now, bill_at)`: the version the subscription moves to
+        at the boundary, if any, and the version the renewal invoice charges,
+        if different from the current one. Three sources, one of them at most:
+
+        - **A downgrade** the customer scheduled, or an operator change to a
+          plan that costs no more: applied at the boundary. The customer has
+          already chosen to have less, and the renewal is billed at the lower
+          price.
+        - **A migration**, or an operator change to a pricier plan: *billed* at
+          the boundary and adopted only when that renewal is paid
+          (`InvoiceSettlement.adopt_renewal_version`). Entitlements never move
+          ahead of the money behind them (spec: scheduled version migration).
+        - **A cohort migration** out of the current version that nobody has
+          scheduled on this row individually: treated exactly as the above.
+        """
+        catalog = PlanCatalog(session)
+        target: PlanVersion | None = None
+        source = subscription.scheduled_change_source
+        if subscription.scheduled_plan_version_id is not None:
+            target = await catalog.get_version(subscription.scheduled_plan_version_id)
+        if target is None:
+            migration = await PlanVersionMigrationRepository(session).live_from(current.id)
+            if migration is not None:
+                target = await catalog.get_version(migration.to_version_id)
+                source = ScheduledChangeSource.MIGRATION
+        if target is None or target.id == current.id:
+            return None, None
+        if source is ScheduledChangeSource.DOWNGRADE or (
+            source is ScheduledChangeSource.OPERATOR and target.price <= current.price
+        ):
+            return target, None
+        return None, target
+
+    @staticmethod
+    def _record_applied_change(
+        session: AsyncSession,
+        subscription: Subscription,
+        *,
+        version: PlanVersion,
+    ) -> None:
+        """The audit row for a scheduled change taking effect at the boundary."""
+        subscription.clear_scheduled_change()
+        AuditTrail(session, tenant_id=subscription.tenant_id).record(
+            AuditAction.SUBSCRIPTION_PLAN_CHANGED,
+            actor=None,
+            actor_kind=AuditActorKind.SYSTEM,
+            target_type="subscription",
+            target_id=subscription.id,
+            meta={
+                "to_version_id": str(version.id),
+                "reason": "scheduled_change_applied",
+                "effective_at": subscription.current_period_start.isoformat(),
+            },
+        )
+
     async def _invoice(
         self,
         session: AsyncSession,
         *,
         subscription: Subscription,
-        plan: Plan,
+        version: PlanVersion,
         now: datetime,
+        usage_since: datetime | None = None,
     ) -> None:
-        """Bill the period that has just ended, if it should be billed.
+        """Bill the period that has just opened, in advance.
 
-        A trial is not invoiced. Nobody agreed to pay for it, and an invoice
-        saying "Pro plan" for a period the customer was told was free is a bill
-        for something nobody sold.
+        A trial is not invoiced. Nobody agreed to pay for it.
+
+        A free renewal is issued already paid - "you were on Starter and used
+        this much" is still worth a record - and, being paid, it lets the
+        subscription adopt the version it was issued for at once.
 
         Failures are contained. An invoice that could not be issued is worth a
         loud log and a retry on the next sweep; letting it escape would stop the
-        subscription rolling over at all, turning a billing problem into a
-        customer whose plan never renews.
+        subscription rolling over at all.
         """
         if subscription.status is SubscriptionStatus.TRIALING:
             return
 
+        plan_code = await self._plan_code(session, version)
         service = InvoiceService(session, tenant_id=subscription.tenant_id)
         try:
-            invoice, created = await service.issue_for_period(
-                subscription=subscription,
-                plan=plan,
-                period_start=subscription.current_period_start,
-                period_end=subscription.current_period_end,
-                now=now,
-            )
+            async with session.begin_nested():
+                invoice, created = await service.issue_for_period(
+                    subscription=subscription,
+                    plan=version,
+                    plan_code=plan_code,
+                    period_start=subscription.current_period_start,
+                    period_end=subscription.current_period_end,
+                    now=now,
+                    usage_since=usage_since,
+                )
+                if created and invoice.status.value == "paid":
+                    await InvoiceSettlement(
+                        session, tenant_id=subscription.tenant_id
+                    ).adopt_renewal_version(invoice, subscription=subscription)
         except Exception:
             logger.exception(
                 "billing.invoice_failed",
                 extra={"subscription_id": str(subscription.id)},
             )
             return
+        if created:
+            from app.core.telemetry import record_billing_renewal
+
+            await record_billing_renewal("invoiced")
 
         if created:
             # Keyed to the invoice row, so a sweep that runs twice over the
@@ -747,6 +860,13 @@ class BillingWorker:
                     "invoice_id": str(invoice.id),
                 },
             )
+
+    @staticmethod
+    async def _plan_code(session: AsyncSession, version: PlanVersion) -> str:
+        from app.repositories.billing_repository import PlanRepository
+
+        plan = await PlanRepository(session).get_by_id(version.plan_id)
+        return plan.code if plan is not None else "unknown"
 
     async def _notify_trial_expired(
         self,

@@ -37,6 +37,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
@@ -48,12 +49,13 @@ from app.core.config import Settings
 from app.core.dependencies import get_session
 from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.db.models.billing import BillingInterval, LimitKey, Plan
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
 from app.integrations.billing import paymob
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
 from tests.payment_tokens import saved_card
+from tests.paymob_orders import order_from_request
 
 pytestmark = pytest.mark.integration
 
@@ -121,7 +123,11 @@ def provider_transport(monkeypatch: pytest.MonkeyPatch) -> None:
                 lambda request: (
                     httpx.Response(
                         201,
-                        json={"id": "pi_test_1", "client_secret": CLIENT_SECRET},
+                        json={
+                            "id": "pi_test_1",
+                            "client_secret": CLIENT_SECRET,
+                            "intention_order_id": order_from_request(request),
+                        },
                     )
                     if "intention" in str(request.url)
                     else httpx.Response(200, json={"id": 579305, "success": True})
@@ -206,6 +212,7 @@ async def _collected(session: AsyncSession, tenant: Tenant) -> tuple[Invoice, Pa
     invoice = Invoice(
         tenant_id=tenant.id,
         status=InvoiceStatus.PAID,
+        purpose=InvoicePurpose.CHECKOUT,
         plan_code="pro",
         amount_due=Decimal("99.00"),
         amount_paid=Decimal("99.00"),
@@ -495,14 +502,18 @@ async def test_a_polled_payment_reports_pending_rather_than_pretending(
     assert polled["invoice_id"] == started["invoice_id"]
 
 
-async def test_a_requested_refund_says_pending_rather_than_refunded(
+async def test_an_owner_refund_is_a_request_that_moves_no_money(
     http: AsyncClient, app: FastAPI, db_session: AsyncSession
 ) -> None:
-    """202 and `refund_pending`, because the money has not moved yet.
+    """BILL-13: the owner's route files a request; only the platform refunds.
 
-    A client rendering "refunded" from this response would tell a customer
-    their money is back before the provider has confirmed anything.
+    It used to reverse the payment at Paymob immediately, so an owner could
+    take back a whole month's price after using the month. Now the answer is
+    202 `review_requested`, the provider is never called, the payment is
+    untouched, and an open refund-request incident is waiting for an operator.
     """
+    from app.db.models.billing_incident import BillingIncident, BillingIncidentKind
+
     tenant, user = await _workspace_rows(db_session, "acme")
     _, payment = await _collected(db_session, tenant)
     _act_as(app, tenant, user, TenantRole.TENANT_OWNER)
@@ -510,10 +521,17 @@ async def test_a_requested_refund_says_pending_rather_than_refunded(
     response = await http.post(f"{BILLING}/payments/{payment.id}/refund", json={})
 
     assert response.status_code == 202
-    body = response.json()
-    assert body["status"] == "succeeded"
-    assert body["refund_pending"] is True
-    assert body["refunded_amount"] == "0.00"
+    assert response.json() == {"payment_id": str(payment.id), "status": "review_requested"}
+    await db_session.refresh(payment)
+    assert payment.refund_requested_at is None
+    assert payment.refund_reference is None
+    assert payment.refunded_amount == 0
+    incident = (
+        await db_session.scalars(
+            select(BillingIncident).where(BillingIncident.payment_id == payment.id)
+        )
+    ).one()
+    assert incident.kind is BillingIncidentKind.REFUND_REQUESTED
 
 
 # ---------------------------------------------------------- saved cards

@@ -18,6 +18,8 @@ from app.db.models.billing import (
     BillingInterval,
     LimitKey,
     Plan,
+    PlanVersion,
+    ScheduledChangeSource,
     Subscription,
     SubscriptionStatus,
 )
@@ -35,12 +37,19 @@ class PlanLimitRead(BaseModel):
 
 
 class PlanRead(BaseModel):
-    """A plan as a pricing page shows it."""
+    """A plan as a pricing page shows it, at the terms of one version.
+
+    `version` names which immutable terms these are (BILL-12). On the
+    catalogue it is the version a new customer would buy; on a subscription it
+    is the version that subscriber is held to - which is not necessarily the
+    same thing, and that is the point.
+    """
 
     id: str
     code: str
     name: str
     description: str | None
+    version: int | None
     price: Decimal
     currency: str
     interval: BillingInterval
@@ -48,20 +57,22 @@ class PlanRead(BaseModel):
     limits: list[PlanLimitRead]
 
     @classmethod
-    def from_model(cls, plan: Plan) -> Self:
+    def from_model(cls, plan: Plan, version: PlanVersion | None = None) -> Self:
+        terms: Plan | PlanVersion = version if version is not None else plan
         return cls(
             id=str(plan.id),
             code=plan.code,
-            name=plan.name,
+            name=version.name if version is not None else plan.name,
             description=plan.description,
-            price=plan.price,
-            currency=plan.currency,
-            interval=plan.interval,
-            trial_days=plan.trial_days,
+            version=version.version if version is not None else None,
+            price=terms.price,
+            currency=terms.currency,
+            interval=terms.interval,
+            trial_days=terms.trial_days,
             # Every key, including the ones this plan does not limit, so a
             # comparison table renders "unlimited" rather than a blank cell it
             # has to guess the meaning of.
-            limits=[PlanLimitRead(key=key, limit=plan.limit_for(key)) for key in LimitKey],
+            limits=[PlanLimitRead(key=key, limit=terms.limit_for(key)) for key in LimitKey],
         )
 
 
@@ -90,31 +101,62 @@ class EntitlementRead(BaseModel):
         )
 
 
+class ScheduledChangeRead(BaseModel):
+    """A plan change waiting for the current period to end."""
+
+    plan_version_id: str
+    source: ScheduledChangeSource
+    effective_at: datetime
+
+
 class SubscriptionRead(BaseModel):
-    """A workspace's subscription, with the plan it is on."""
+    """A workspace's subscription, with the terms it is held to."""
 
     id: str
     status: SubscriptionStatus
     plan: PlanRead
+    plan_version_id: str | None
     current_period_start: datetime
     current_period_end: datetime
+    billing_anchor_at: datetime | None
     trial_ends_at: datetime | None
     cancel_at_period_end: bool
     cancelled_at: datetime | None
     ended_at: datetime | None
+    scheduled_change: ScheduledChangeRead | None
+    revision: int
 
     @classmethod
-    def from_model(cls, subscription: Subscription, *, plan: Plan) -> Self:
+    def from_model(
+        cls,
+        subscription: Subscription,
+        *,
+        plan: Plan,
+        version: PlanVersion | None = None,
+    ) -> Self:
+        scheduled = None
+        if subscription.scheduled_plan_version_id is not None:
+            scheduled = ScheduledChangeRead(
+                plan_version_id=str(subscription.scheduled_plan_version_id),
+                source=subscription.scheduled_change_source or ScheduledChangeSource.OPERATOR,
+                effective_at=subscription.current_period_end,
+            )
         return cls(
             id=str(subscription.id),
             status=subscription.status,
-            plan=PlanRead.from_model(plan),
+            plan=PlanRead.from_model(plan, version),
+            plan_version_id=(
+                str(subscription.plan_version_id) if subscription.plan_version_id else None
+            ),
             current_period_start=subscription.current_period_start,
             current_period_end=subscription.current_period_end,
+            billing_anchor_at=subscription.billing_anchor_at,
             trial_ends_at=subscription.trial_ends_at,
             cancel_at_period_end=subscription.cancel_at_period_end,
             cancelled_at=subscription.cancelled_at,
             ended_at=subscription.ended_at,
+            scheduled_change=scheduled,
+            revision=subscription.revision or 1,
         )
 
 

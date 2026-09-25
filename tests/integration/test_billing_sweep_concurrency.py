@@ -47,16 +47,18 @@ from app.db.models.billing import (
 )
 from app.db.models.email import OutboundEmail
 from app.db.models.enums import TenantRole
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment
+from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment
 from app.db.models.membership import Membership
 from app.db.models.payment_method import PaymentMethodStatus
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.integrations.billing.checkout import SavedMethodCharge
 from app.repositories.invoice_repository import PlatformInvoiceRepository
+from app.services.plan_catalog import PlanCatalog
 from app.services.recurring_service import MAX_COLLECTION_ATTEMPTS
 from app.workers import billing_worker as worker_module
 from app.workers.billing_worker import BillingWorker
+from tests.billing_fixtures import erase_ledger
 from tests.fakes import as_database
 from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, saved_card
 
@@ -214,6 +216,7 @@ async def tenants(committing: async_sessionmaker[AsyncSession]) -> AsyncIterator
     finally:
         async with committing() as session:
             await session.execute(delete(AuditLog).where(AuditLog.tenant_id.in_(created)))
+            await erase_ledger(session, list(created))
             await session.execute(delete(Tenant).where(Tenant.id.in_(created)))
             await session.commit()
 
@@ -284,10 +287,16 @@ async def _open_invoice(
     issued_at: datetime,
 ) -> uuid.UUID:
     async with committing() as session:
+        subscription = await session.get(Subscription, subscription_id)
+        assert subscription is not None
+        version = await PlanCatalog(session).pinned_version(subscription)
+        assert version is not None
         invoice = Invoice(
             tenant_id=tenant_id,
             subscription_id=subscription_id,
+            plan_version_id=version.id,
             status=InvoiceStatus.OPEN,
+            purpose=InvoicePurpose.RENEWAL,
             plan_code="sweep",
             amount_due=Decimal("99.00"),
             amount_paid=Decimal("0.00"),
@@ -347,8 +356,9 @@ async def test_two_workers_advance_every_subscription_exactly_once(
 
     Seven subscriptions, a claim limit of two, two workers. Every one is
     advanced, exactly one invoice exists per workspace for the period that
-    ended, and the two workers between them did all seven - which is only
-    possible if each claim excluded the other worker.
+    *opened* - renewals are billed in advance (BILL-03) - and the two workers
+    between them did all seven, which is only possible if each claim excluded
+    the other worker.
     """
     for tenant_id in tenants:
         await _subscribe(committing, tenant_id, plan)
@@ -365,7 +375,7 @@ async def test_two_workers_advance_every_subscription_exactly_once(
         select(func.count())
         .select_from(Invoice)
         .where(Invoice.tenant_id.in_(tenants))
-        .where(Invoice.period_start == PERIOD_START),
+        .where(Invoice.period_start == PERIOD_END),
     )
     assert invoices == COHORT
 
@@ -460,6 +470,7 @@ async def test_two_workers_make_one_collection_attempt_per_invoice(
     plan: uuid.UUID,
     tenants: list[uuid.UUID],
     monkeypatch: pytest.MonkeyPatch,
+    owner: Callable[[uuid.UUID], Awaitable[None]],
 ) -> None:
     """GATE: no duplicate Paymob charge, counted at the provider.
 
@@ -481,6 +492,7 @@ async def test_two_workers_make_one_collection_attempt_per_invoice(
             end=PERIOD_END + timedelta(days=30),
         )
         await _card(committing, tenant_id)
+        await owner(tenant_id)
         invoices.append(
             await _open_invoice(
                 committing,
@@ -527,6 +539,7 @@ async def test_one_workspaces_provider_failure_does_not_strand_the_others(
     plan: uuid.UUID,
     tenants: list[uuid.UUID],
     monkeypatch: pytest.MonkeyPatch,
+    owner: Callable[[uuid.UUID], Awaitable[None]],
 ) -> None:
     """A failure is contained to its own claim, not to the pass.
 
@@ -542,6 +555,7 @@ async def test_one_workspaces_provider_failure_does_not_strand_the_others(
             end=PERIOD_END + timedelta(days=30),
         )
         await _card(committing, tenant_id)
+        await owner(tenant_id)
         await _open_invoice(
             committing,
             tenant_id,
@@ -588,10 +602,9 @@ async def test_one_workspaces_provider_failure_does_not_strand_the_others(
 
     referenced = await _count(
         committing,
-        select(func.count())
-        .select_from(Payment)
-        .where(Payment.tenant_id.in_(tenants))
-        .where(Payment.provider_intent_reference.is_not(None)),
+        select(func.count()).select_from(Payment).where(Payment.tenant_id.in_(tenants))
+        # The pay request's transaction id (BILL-04: one column, one meaning).
+        .where(Payment.provider_reference.is_not(None)),
     )
     assert referenced == COHORT - 1, "only the six that answered should carry a reference"
 

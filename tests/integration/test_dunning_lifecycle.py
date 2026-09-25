@@ -76,6 +76,7 @@ from app.services.entitlement_service import EntitlementService
 from app.workers.billing_worker import BillingWorker
 from tests.conftest import AllowingEntitlements
 from tests.integration.plan_catalogue import own_plan
+from tests.paymob_orders import order_for, order_from_request
 
 pytestmark = pytest.mark.integration
 
@@ -181,7 +182,11 @@ def provider_transport(monkeypatch: pytest.MonkeyPatch) -> None:
         if "intention" in str(request.url):
             return httpx.Response(
                 201,
-                json={"id": "pi_test_recovery", "client_secret": CLIENT_SECRET},
+                json={
+                    "id": "pi_test_recovery",
+                    "client_secret": CLIENT_SECRET,
+                    "intention_order_id": order_from_request(request),
+                },
             )
         return httpx.Response(200, json={"id": 579305, "success": True, "pending": False})
 
@@ -311,8 +316,9 @@ async def _unpaid_invoice(
         plan_code="pro",
         amount_due=Decimal("99.00"),
         currency="EGP",
-        period_start=NOW - timedelta(days=40),
-        period_end=NOW - timedelta(days=10),
+        # Billed in advance for the period the subscription is in (BILL-03).
+        period_start=subscription.current_period_start,
+        period_end=subscription.current_period_end,
         lines=[],
     )
     await session.flush()
@@ -362,7 +368,8 @@ def _transaction(*, reference: str, amount_cents: int = 9900, **overrides: Any) 
         "is_3d_secure": True,
         "integration_id": 4097558,
         "has_parent_transaction": False,
-        "order": {"id": 217503754, "merchant_order_id": reference},
+        "order": {"id": order_for(reference), "merchant_order_id": reference},
+        "is_live": False,
         "created_at": "2026-08-27T11:33:44.592345",
         "currency": "EGP",
         "source_data": {"pan": "2346", "type": "card", "sub_type": "MasterCard"},
@@ -437,6 +444,8 @@ async def _pending_payment(
         provider="paymob",
     )
     session.add(payment)
+    await session.flush()
+    payment.provider_order_id = str(order_for(payment.id))
     await session.flush()
     return payment
 
@@ -1157,7 +1166,9 @@ async def test_a_suspended_owner_cannot_select_the_paid_plan_instead_of_paying(
 
     refused = await http.post("/api/v1/billing/subscription/plan", json={"plan_code": "pro"})
 
-    assert refused.status_code == 402
+    # Refused as "already on that plan": the way back is paying the invoice,
+    # never selecting the plan again.
+    assert refused.status_code == 409
     await db_session.refresh(subscription)
     assert subscription.status is SubscriptionStatus.SUSPENDED
     assert await _agent_limit(db_session, tenant) == FREE_AGENTS
@@ -1187,20 +1198,24 @@ async def test_a_suspended_owner_cannot_downgrade_out_of_the_bill_over_http(
     "status",
     [SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED],
 )
-async def test_an_ended_subscription_is_not_revived_by_a_fresh_checkout(
+async def test_a_fresh_checkout_after_the_subscription_ended_grants_the_plan(
     http: AsyncClient,
     app: FastAPI,
     db_session: AsyncSession,
     status: SubscriptionStatus,
 ) -> None:
-    """The distinction SUSPENDED exists to express, proved the reachable way.
+    """BILL-01, proved the reachable way, with real routes.
 
-    Section 4 already shows an *old* callback failing to revive an ended
-    subscription. This is the stronger form: the customer opens a brand-new
-    checkout through the real route and pays it, and the subscription still
-    does not come back - because ending was a decision, not a debt. The money
-    is recorded truthfully either way; the ledger and the entitlements are
-    different questions.
+    This test used to pin the defect: a customer whose subscription had ended
+    opened a brand-new checkout, paid it, and "the subscription stays where
+    the customer left it" - the money taken and nothing granted. The audit
+    reproduced it with real Paymob money (txn 541139493).
+
+    Ending was a decision; choosing to buy again *after* it is a new one. The
+    purchase now brings the workspace back on exactly what it paid for, from
+    the moment the payment settled. (An *old* payment - a page opened before
+    the cancellation, or a renewal - still revives nothing; see section 4 and
+    `test_paymob_checkout.py`.)
     """
     tenant = await _tenant(db_session)
     user = await _owner(db_session, tenant)
@@ -1220,10 +1235,12 @@ async def test_an_ended_subscription_is_not_revived_by_a_fresh_checkout(
             select(Invoice).where(Invoice.id == uuid.UUID(checkout["invoice_id"]))
         )
     ).scalar_one()
-    # The ledger is honest...
     assert invoice.status is InvoiceStatus.PAID
-    # ...and the subscription stays where the customer left it.
     await db_session.refresh(subscription)
-    assert subscription.status is status
-    assert subscription.is_serving is False
-    assert await _agent_limit(db_session, tenant) == FREE_AGENTS
+    assert subscription.status is SubscriptionStatus.ACTIVE
+    assert subscription.plan_id == paid.id
+    assert (subscription.current_period_start, subscription.current_period_end) == (
+        invoice.period_start,
+        invoice.period_end,
+    )
+    assert await _agent_limit(db_session, tenant) == PAID_AGENTS

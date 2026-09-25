@@ -25,7 +25,7 @@ from app.api.dependencies import (
     ActiveWorkspace,
     get_active_workspace,
     get_entitlement_service,
-    get_plan_repository,
+    get_plan_catalog,
     get_subscription_service,
 )
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
@@ -385,6 +385,18 @@ class StubSubscriptions:
     async def plan_for(self, subscription: Subscription) -> Plan:
         return self.plan
 
+    async def version_for(self, subscription: Subscription) -> None:
+        return None
+
+    async def request_plan(
+        self,
+        *,
+        plan_code: str,
+        now: datetime | None = None,
+        actor: User | None = None,
+    ) -> Subscription:
+        return await self.change_plan(plan_code=plan_code, now=now, actor=actor)
+
     async def start(
         self,
         *,
@@ -449,8 +461,8 @@ class StubPlans:
             limits={LimitKey.AGENTS.value: 5},
         )
 
-    async def list_plans(self, *, public_only: bool = True, active_only: bool = True) -> list[Any]:
-        return [self.plan]
+    async def offered(self) -> list[Any]:
+        return [(self.plan, None)]
 
 
 def _workspace(role: TenantRole) -> ActiveWorkspace:
@@ -470,7 +482,7 @@ def subscriptions(app: FastAPI) -> StubSubscriptions:
     stub = StubSubscriptions()
     app.dependency_overrides[get_subscription_service] = lambda: stub
     app.dependency_overrides[get_entitlement_service] = lambda: StubEntitlements()
-    app.dependency_overrides[get_plan_repository] = lambda: StubPlans()
+    app.dependency_overrides[get_plan_catalog] = lambda: StubPlans()
     return stub
 
 

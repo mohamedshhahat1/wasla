@@ -70,7 +70,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.enums import InvitationStatus, TenantStatus
 from app.db.models.follow_up import FollowUp, FollowUpStatus
-from app.db.models.invoice import Invoice, InvoiceStatus
+from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus
 from app.db.models.knowledge import (
     Document,
     DocumentSource,
@@ -262,6 +262,7 @@ async def _seed(session: AsyncSession, settings: Settings, *, slug: str) -> Work
         subscription_id=None,
         plan_code="starter",
         status=InvoiceStatus.OPEN,
+        purpose=InvoicePurpose.RENEWAL,
         amount_due=Decimal("100.00"),
         currency="EGP",
         period_start=MOMENT,

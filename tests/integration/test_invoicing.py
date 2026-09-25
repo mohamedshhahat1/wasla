@@ -357,21 +357,29 @@ async def test_a_part_payment_leaves_the_invoice_open(db_session: AsyncSession) 
     assert status is InvoiceStatus.PAID
 
 
-async def test_an_overpayment_leaves_nothing_outstanding_rather_than_a_negative(
+async def test_an_overpayment_is_refused_before_anything_is_written(
     db_session: AsyncSession,
 ) -> None:
+    """BILL-20: overpayment is not a feature of this system.
+
+    Recording 150 against 99 used to leave a paid invoice holding 51 that
+    nobody knew to refund. It is refused now, and `amount_paid <= amount_due`
+    is a database constraint as well.
+    """
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
     invoice, _ = await _issue(db_session, tenant, plan)
 
-    await _service(db_session, tenant).record_payment(
-        invoice_id=invoice.id,
-        amount=Decimal("150.00"),
-        provider=MANUAL_PROVIDER,
-        now=NOW,
-    )
+    with pytest.raises(ValidationError):
+        await _service(db_session, tenant).record_payment(
+            invoice_id=invoice.id,
+            amount=Decimal("150.00"),
+            provider=MANUAL_PROVIDER,
+            now=NOW,
+        )
 
-    assert invoice.outstanding == Decimal("0.00")
+    assert invoice.amount_paid == Decimal("0.00")
+    assert invoice.status is InvoiceStatus.OPEN
 
 
 async def test_a_payment_for_nothing_is_refused(db_session: AsyncSession) -> None:
@@ -509,25 +517,31 @@ async def test_platform_revenue_counts_only_what_was_paid(db_session: AsyncSessi
 
 
 async def test_revenue_is_grouped_by_currency(db_session: AsyncSession) -> None:
-    """Adding dollars to euros produces a number that is wrong in a way nobody
-    can see."""
-    acme = await _tenant(db_session, "acme")
-    rival = await _tenant(db_session, "rival")
-    dollars = await _plan(db_session, code="EGP-plan")
-    euros = await _plan(db_session, code="eur-plan")
-    euros.currency = "EUR"
-    await db_session.flush()
+    """Grouped by currency, and only a supported currency can reach it.
 
-    first, _ = await _issue(db_session, acme, dollars)
-    second, _ = await _issue(db_session, rival, euros)
-    for tenant, invoice in ((acme, first), (rival, second)):
-        await _service(db_session, tenant).record_payment(
-            invoice_id=invoice.id,
-            amount=Decimal("99.00"),
-            provider=MANUAL_PROVIDER,
-            now=NOW,
-        )
+    Adding dollars to euros produces a number that is wrong in a way nobody
+    can see, so revenue is always grouped. And until multi-currency billing is
+    designed, EGP is the only currency the database accepts on a plan at all
+    (BILL-12) - so the grouping has exactly one bucket.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    acme = await _tenant(db_session, "acme")
+    pounds = await _plan(db_session, code="egp-plan")
+    first, _ = await _issue(db_session, acme, pounds)
+    await _service(db_session, acme).record_payment(
+        invoice_id=first.id,
+        amount=Decimal("99.00"),
+        provider=MANUAL_PROVIDER,
+        now=NOW,
+    )
     await db_session.flush()
 
     revenue = await PlatformInvoiceRepository(db_session).revenue()
-    assert {row.currency for row in revenue} == {"EGP", "EUR"}
+    assert {row.currency for row in revenue} == {"EGP"}
+
+    euros = await _plan(db_session, code="eur-plan")
+    euros.currency = "EUR"
+    with pytest.raises(IntegrityError):
+        async with db_session.begin_nested():
+            await db_session.flush()

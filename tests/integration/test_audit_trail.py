@@ -288,7 +288,7 @@ async def test_a_platform_payment_appears_in_the_workspaces_own_trail(
     db_session: AsyncSession,
 ) -> None:
     """The customer is entitled to see who marked their invoice paid."""
-    from app.db.models.invoice import Invoice, InvoiceStatus
+    from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus
     from app.platform.platform_billing import PlatformBillingService
 
     tenant = await _tenant(db_session)
@@ -296,6 +296,7 @@ async def test_a_platform_payment_appears_in_the_workspaces_own_trail(
     invoice = Invoice(
         tenant_id=tenant.id,
         status=InvoiceStatus.OPEN,
+        purpose=InvoicePurpose.CHECKOUT,
         plan_code="pro",
         amount_due=Decimal("99.00"),
         amount_paid=Decimal("0.00"),
@@ -315,8 +316,10 @@ async def test_a_platform_payment_appears_in_the_workspaces_own_trail(
     )
     await db_session.flush()
 
-    entry = (await _entries(db_session, tenant))[0]
-    assert entry.action is AuditAction.PAYMENT_RECORDED
+    # Settled like any other payment (BILL-10), so a paid checkout also grants
+    # its plan and the trail holds that too, written in the same instant.
+    entries = await _entries(db_session, tenant)
+    entry = next(e for e in entries if e.action is AuditAction.PAYMENT_RECORDED)
     assert entry.actor_kind is AuditActorKind.PLATFORM_STAFF
     assert entry.actor_label == "staff@example.com"
 

@@ -31,7 +31,7 @@ from app.api.dependencies import get_entitlement_service
 from app.core.config import Settings
 from app.core.dependencies import get_session
 from app.db.models.billing import BillingInterval, LimitKey, Plan
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.payment_event import PaymentEvent
 from app.db.models.payment_method import PaymentMethod
 from app.db.models.tenant import Tenant
@@ -39,6 +39,7 @@ from app.integrations.billing.paymob import hmac_signature, token_hmac_signature
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
 from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, PROTECTOR
+from tests.paymob_orders import order_for
 
 pytestmark = pytest.mark.integration
 
@@ -145,6 +146,7 @@ async def _paid_checkout(session: AsyncSession) -> tuple[Invoice, Payment]:
         tenant_id=tenant.id,
         subscription_id=None,
         status=InvoiceStatus.OPEN,
+        purpose=InvoicePurpose.CHECKOUT,
         plan_code=plan.code,
         amount_due=Decimal("99.00"),
         amount_paid=Decimal("0.00"),
@@ -166,6 +168,11 @@ async def _paid_checkout(session: AsyncSession) -> tuple[Invoice, Payment]:
     )
     session.add(payment)
     await session.flush()
+    # As `CheckoutService.start` records them: Paymob's intention id and the
+    # order under it, which every callback about this payment is bound to.
+    payment.provider_intent_reference = f"pi_test_{uuid.uuid4().hex}"
+    payment.provider_order_id = str(order_for(payment.id))
+    await session.flush()
     return invoice, payment
 
 
@@ -185,7 +192,8 @@ def _transaction(
         "is_3d_secure": True,
         "integration_id": 4097558,
         "has_parent_transaction": False,
-        "order": {"id": 217503754, "merchant_order_id": reference},
+        "order": {"id": order_for(reference), "merchant_order_id": reference},
+        "is_live": False,
         "created_at": "2026-08-27T11:33:44.592345",
         "currency": "EGP",
         "source_data": {"pan": "2346", "type": "card", "sub_type": "MasterCard"},
@@ -220,8 +228,7 @@ async def test_signed_card_token_is_stored_encrypted_and_retries_once(
     http: AsyncClient, db_session: AsyncSession, caplog: pytest.LogCaptureFixture
 ) -> None:
     _, payment = await _paid_checkout(db_session)
-    order = f"paymob-order-{uuid.uuid4().hex}"
-    payment.provider_intent_reference = order
+    order = str(payment.provider_order_id)
     await db_session.flush()
     raw_token = f"synthetic-card-token-{uuid.uuid4().hex}"
     card = _card_token(order=order, token=raw_token)
@@ -249,8 +256,7 @@ async def test_card_token_hmac_or_order_mismatch_stores_nothing(
     http: AsyncClient, db_session: AsyncSession
 ) -> None:
     _, payment = await _paid_checkout(db_session)
-    order = f"paymob-order-{uuid.uuid4().hex}"
-    payment.provider_intent_reference = order
+    order = str(payment.provider_order_id)
     await db_session.flush()
     card = _card_token(order=order, token="synthetic-valid-token")
     signature = token_hmac_signature(card, secret=HMAC_SECRET)
@@ -274,13 +280,57 @@ async def test_card_token_hmac_or_order_mismatch_stores_nothing(
     ).all() == []
 
 
+async def test_a_card_token_is_matched_on_the_paymob_order_not_the_intention(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
+    """BILL-04's regression, observed rather than asserted.
+
+    Paymob's TOKEN callback carries `order_id` - the *order* under the checkout
+    intention. Wasla used to look it up against `provider_intent_reference`,
+    which holds the intention id (`pi_test_...`), so two real, HMAC-verified
+    TOKEN callbacks in the audit were both `card_token_unmatched`. A callback
+    naming the intention id must match nothing; one naming the order must
+    attach the card to the order's workspace.
+    """
+    _, payment = await _paid_checkout(db_session)
+
+    by_intention = _card_token(
+        order=str(payment.provider_intent_reference), token=f"synthetic-{uuid.uuid4().hex}"
+    )
+    await http.post(
+        WEBHOOK,
+        json={"type": "TOKEN", "obj": by_intention},
+        params={"hmac": token_hmac_signature(by_intention, secret=HMAC_SECRET)},
+    )
+    assert (
+        await db_session.scalars(
+            select(PaymentMethod).where(PaymentMethod.tenant_id == payment.tenant_id)
+        )
+    ).all() == []
+
+    by_order = _card_token(
+        order=str(payment.provider_order_id), token=f"synthetic-{uuid.uuid4().hex}"
+    )
+    response = await http.post(
+        WEBHOOK,
+        json={"type": "TOKEN", "obj": by_order},
+        params={"hmac": token_hmac_signature(by_order, secret=HMAC_SECRET)},
+    )
+    assert response.status_code == 200
+    saved = (
+        await db_session.scalars(
+            select(PaymentMethod).where(PaymentMethod.tenant_id == payment.tenant_id)
+        )
+    ).all()
+    assert len(saved) == 1
+
+
 async def test_card_token_attaches_to_order_owner_not_callback_email(
     http: AsyncClient, db_session: AsyncSession
 ) -> None:
     _, first_payment = await _paid_checkout(db_session)
     _, second_payment = await _paid_checkout(db_session)
-    order = f"paymob-order-{uuid.uuid4().hex}"
-    second_payment.provider_intent_reference = order
+    order = str(second_payment.provider_order_id)
     await db_session.flush()
     # The email is callback data and may name a different Wasla customer.
     card = _card_token(order=order, token=f"synthetic-card-{uuid.uuid4().hex}")

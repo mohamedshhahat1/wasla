@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ConflictError, NotFoundError
 from app.db.models.audit import AuditAction, AuditLog
 from app.db.models.billing import BillingInterval, LimitKey
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.payment_event import PaymentEvent
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
@@ -49,6 +49,7 @@ from app.services.checkout_service import (
 )
 from app.services.refund_service import RefundService
 from tests.integration.plan_catalogue import own_plan
+from tests.paymob_orders import order_for
 
 pytestmark = pytest.mark.integration
 
@@ -125,6 +126,7 @@ async def _paid(
     invoice = Invoice(
         tenant_id=tenant.id,
         status=InvoiceStatus.PAID if status is PaymentStatus.SUCCEEDED else InvoiceStatus.OPEN,
+        purpose=InvoicePurpose.CHECKOUT,
         plan_code="pro",
         amount_due=Decimal(amount),
         amount_paid=Decimal(amount) if status is PaymentStatus.SUCCEEDED else Decimal("0.00"),
@@ -149,6 +151,9 @@ async def _paid(
     )
     session.add(payment)
     await session.flush()
+    # The Paymob order its checkout was created under, as `start` records it.
+    payment.provider_order_id = str(order_for(payment.id))
+    await session.flush()
     return invoice, payment
 
 
@@ -161,6 +166,7 @@ def _reversal(
     parent: str | None = None,
     currency: str = "EGP",
     voided: bool = False,
+    order: int | None = None,
 ) -> dict[str, Any]:
     """A callback shaped like the documented reversal notification."""
     body = {
@@ -177,7 +183,13 @@ def _reversal(
         "integration_id": 4097558,
         "has_parent_transaction": parent is not None,
         "parent_transaction": int(parent) if parent else None,
-        "order": {"id": 217503754, "merchant_order_id": reference},
+        # A reversal is reported on the order of the transaction it reverses,
+        # whether or not our own reference travels with it.
+        "order": {
+            "id": order if order is not None else order_for(reference),
+            "merchant_order_id": reference,
+        },
+        "is_live": False,
         "created_at": "2026-08-29T11:33:44.592345",
         "currency": currency,
         "source_data": {"pan": "2346", "type": "card", "sub_type": "MasterCard"},
@@ -527,6 +539,7 @@ async def test_a_reversal_is_matched_by_the_transaction_it_reverses(
             transaction=REVERSAL_TRANSACTION,
             parent=PAID_TRANSACTION,
             amount_cents=9900,
+            order=order_for(payment.id),
         ),
     )
 

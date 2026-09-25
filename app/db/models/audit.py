@@ -321,6 +321,37 @@ class AuditAction(StrEnum):
     # decision rather than the customer's, and an investigation asking "did
     # they leave or did we cut them off" must be able to tell the two apart.
     SUBSCRIPTION_SUSPENDED = "subscription_suspended"
+    # A terminal subscription brought back by a purchase the customer chose to
+    # make after it ended (BILL-01). Kept apart from `SUBSCRIPTION_PLAN_CHANGED`
+    # because "the platform took money from an ended subscription" and "a
+    # customer came back" must be told apart by whoever reads the trail.
+    SUBSCRIPTION_REACTIVATED = "subscription_reactivated"
+    # A plan change waiting for the period to end - a downgrade, an operator's
+    # change, a cohort migration reaching this subscription - and its removal.
+    SUBSCRIPTION_PLAN_CHANGE_SCHEDULED = "subscription_plan_change_scheduled"
+    SUBSCRIPTION_SCHEDULED_CHANGE_CANCELLED = "subscription_scheduled_change_cancelled"
+    # Service granted or restored without money, by an operator, with a reason
+    # (spec: complimentary grant). Never a payment.
+    SUBSCRIPTION_COMPLIMENTARY_GRANT = "subscription_complimentary_grant"
+    # A workspace owner asked for money back. The request moves nothing; the
+    # platform decides and `PAYMENT_REFUND_REQUESTED` records the decision.
+    PAYMENT_REFUND_REVIEW_REQUESTED = "payment_refund_review_requested"
+    # The plan catalogue (BILL-12). Every change to what the platform sells is
+    # an operator's decision about every future customer's bill, and "who
+    # changed the Pro price, from what, and why" must have one answer.
+    BILLING_PLAN_CREATED = "billing_plan_created"
+    BILLING_PLAN_UPDATED = "billing_plan_updated"
+    BILLING_PLAN_VERSION_CREATED = "billing_plan_version_created"
+    BILLING_PLAN_ACTIVATED = "billing_plan_activated"
+    BILLING_PLAN_DEACTIVATED = "billing_plan_deactivated"
+    BILLING_PLAN_DELETED = "billing_plan_deleted"
+    BILLING_PLAN_MIGRATION_SCHEDULED = "billing_plan_migration_scheduled"
+    # An operator asked the provider what became of a payment, and what that
+    # inquiry resolved (BILL-09). Nothing here can charge anybody; the entries
+    # exist so a recovered payment is attributable.
+    BILLING_RECONCILIATION_STARTED = "billing_reconciliation_started"
+    BILLING_RECONCILIATION_RESOLVED = "billing_reconciliation_resolved"
+    BILLING_INCIDENT_RESOLVED = "billing_incident_resolved"
 
     # The workspace itself (docs/AUTHORIZATION.md).
     #
@@ -410,6 +441,9 @@ class AuditAction(StrEnum):
     PLATFORM_OVERVIEW_READ = "platform_overview_read"
     PLATFORM_WORKSPACES_READ = "platform_workspaces_read"
     PLATFORM_AUDIT_LOG_READ = "platform_audit_log_read"
+    # The billing control plane (BILL-12): plans, subscriptions, invoices,
+    # payments, reconciliation and incidents across workspaces.
+    PLATFORM_BILLING_READ = "platform_billing_read"
 
     # A colleague opened a customer's file, or sent one (MEDIA-17, PD-MEDIA-06).
     # Audited because a customer's photographs, voice notes and documents are

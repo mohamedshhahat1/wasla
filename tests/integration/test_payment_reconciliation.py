@@ -48,6 +48,7 @@ from app.db.models.billing import (
 from app.db.models.invoice import (
     CollectionState,
     Invoice,
+    InvoicePurpose,
     InvoiceStatus,
     Payment,
     PaymentStatus,
@@ -56,6 +57,8 @@ from app.db.models.payment_event import PaymentEvent
 from app.db.models.tenant import Tenant
 from app.integrations.billing.paymob import PaymobProvider
 from app.services.payment_reconciliation_service import PaymentReconciler
+from tests.billing_fixtures import erase_ledger
+from tests.paymob_orders import order_for
 
 pytestmark = pytest.mark.integration
 
@@ -83,7 +86,10 @@ def _transaction(reference: str, **overrides: Any) -> dict[str, Any]:
         "is_voided": False,
         "amount_cents": int(AMOUNT * 100),
         "currency": "EGP",
-        "order": {"id": 4242, "merchant_order_id": reference},
+        "order": {"id": order_for(reference), "merchant_order_id": reference},
+        "is_live": False,
+        # An automatic renewal runs on the MOTO integration (BILL-11).
+        "integration_id": 9900001,
     }
     document.update(overrides)
     return document
@@ -183,6 +189,7 @@ async def attempt(
             tenant_id=tenant.id,
             subscription_id=subscription.id,
             status=InvoiceStatus.OPEN,
+            purpose=InvoicePurpose.RENEWAL,
             plan_code=plan.code,
             amount_due=AMOUNT,
             amount_paid=Decimal("0.00"),
@@ -211,6 +218,8 @@ async def attempt(
         )
         session.add(payment)
         await session.flush()
+        # The MOTO intention's order, committed before the pay request is sent.
+        payment.provider_order_id = str(order_for(payment.id))
 
         # Older than the grace period, so it is nobody's live work. Written
         # directly because `created_at` is a server default.
@@ -227,6 +236,7 @@ async def attempt(
             # here would otherwise leave rows behind for the dunning suites to
             # count as their own.
             await session.execute(delete(AuditLog).where(AuditLog.tenant_id == identifiers[0]))
+            await erase_ledger(session, [identifiers[0]])
             await session.execute(delete(Tenant).where(Tenant.id == identifiers[0]))
             await session.execute(
                 delete(Plan).where(Plan.code.like("recon-%")).where(Plan.name == "Recon")

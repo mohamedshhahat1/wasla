@@ -41,6 +41,7 @@ from app.core.net import GuardedTransport, UnsafeUrlError
 from app.integrations.billing.base import ProviderError
 from app.integrations.billing.checkout import CheckoutRequest
 from app.integrations.billing.paymob import REGIONS, PaymobProvider
+from tests.paymob_orders import order_from_request
 
 SECRET_KEY = "sk_test_notreal000000000000"
 PUBLIC_KEY = "pk_test_notreal000000000000"
@@ -315,7 +316,11 @@ async def test_a_normal_request_still_works_through_the_guarded_construction() -
         captured.append(request)
         return httpx.Response(
             201,
-            json={"client_secret": "egy_csk_test_0123456789abcdef", "id": 99},
+            json={
+                "client_secret": "egy_csk_test_0123456789abcdef",
+                "intention_order_id": order_from_request(request),
+                "id": 99,
+            },
         )
 
     provider = _provider(transport=httpx.MockTransport(answering))

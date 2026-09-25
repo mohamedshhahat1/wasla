@@ -43,9 +43,11 @@ from app.repositories.invoice_repository import InvoiceRepository
 from app.services.auth_service import AuthService
 from app.services.subscription_service import SubscriptionService
 from app.workers.billing_worker import BillingWorker
+from tests.billing_fixtures import add_owner, renewal_invoice
 from tests.fakes import as_database, as_redis_client
 from tests.integration.plan_catalogue import own_plan
 from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, saved_card
+from tests.paymob_orders import order_from_request
 
 pytestmark = pytest.mark.integration
 
@@ -391,9 +393,14 @@ async def test_a_workspace_created_before_billing_can_still_subscribe(
 # ------------------------------------------------------------- invoicing
 
 
-async def test_the_sweep_invoices_the_period_it_closes(db_session: AsyncSession) -> None:
-    """Billed before the roll-over, not after: afterwards the row describes the
-    next month and the invoice would cover the wrong window."""
+async def test_the_sweep_bills_the_period_it_opens(db_session: AsyncSession) -> None:
+    """Billed in advance, for the period that has just started (BILL-03).
+
+    The period that ended was paid for by the invoice that opened it - the
+    checkout, or the previous renewal. Billing it again in arrears is how the
+    first paid month came to be charged twice.
+    """
+    from app.db.models.invoice import InvoicePurpose
     from app.repositories.invoice_repository import InvoiceRepository
 
     tenant = await _tenant(db_session)
@@ -404,15 +411,16 @@ async def test_the_sweep_invoices_the_period_it_closes(db_session: AsyncSession)
         plan,
         status=SubscriptionStatus.ACTIVE,
     )
-    closing_period_start = subscription.current_period_start
 
     await _worker(db_session).run_once(now=NOW)
     await db_session.flush()
 
     invoices = await InvoiceRepository(db_session, tenant_id=tenant.id).list_invoices()
     assert len(invoices) == 1
-    assert invoices[0].period_start == closing_period_start
-    assert invoices[0].period_end == ENDED
+    assert invoices[0].purpose is InvoicePurpose.RENEWAL
+    assert invoices[0].period_start == ENDED
+    assert invoices[0].period_end == subscription.current_period_end
+    assert invoices[0].plan_version_id == subscription.plan_version_id
     assert invoices[0].plan_code == "pro"
 
 
@@ -762,7 +770,12 @@ def _charging_worker(
         if "intention" in str(request.url):
             return httpx.Response(
                 201,
-                json={"id": "pi_w", "client_secret": "c", "payment_keys": [{"key": "k"}]},
+                json={
+                    "id": "pi_w",
+                    "client_secret": "c",
+                    "intention_order_id": order_from_request(request),
+                    "payment_keys": [{"key": "k"}],
+                },
             )
         return httpx.Response(200, json={"id": 910000001, "success": True, "pending": False})
 
@@ -786,8 +799,10 @@ async def test_the_sweep_charges_a_saved_card_for_a_due_renewal(
     tenant = await _tenant(db_session)
     plan = await _plan(db_session)
     subscription = await _renewing(db_session, tenant, plan)
-    invoice = await _overdue_invoice(db_session, tenant, subscription, issued=NOW)
-    await _issued(db_session, invoice, at=NOW - timedelta(days=1))
+    await add_owner(db_session, tenant)
+    invoice = await renewal_invoice(
+        db_session, subscription=subscription, plan=plan, issued_at=NOW - timedelta(days=1)
+    )
     await _card(db_session, tenant)
     seen: list[str] = []
 

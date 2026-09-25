@@ -51,7 +51,7 @@ from app.db.models.billing import (
     SubscriptionStatus,
 )
 from app.db.models.enums import TenantStatus
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.payment_method import PaymentMethod, PaymentMethodStatus
 from app.main import create_app
 from app.repositories.billing_repository import (
@@ -59,6 +59,7 @@ from app.repositories.billing_repository import (
     SubscriptionRepository,
 )
 from app.repositories.invoice_repository import PlatformInvoiceRepository
+from tests.billing_fixtures import renewal_invoice
 from tests.conftest import AllowingEntitlements
 from tests.payment_tokens import saved_card
 
@@ -428,6 +429,7 @@ async def test_invoices_and_payments_survive_deletion(
     invoice = Invoice(
         tenant_id=tenant.id,
         status=InvoiceStatus.PAID,
+        purpose=InvoicePurpose.CHECKOUT,
         plan_code=plan.code,
         amount_due=Decimal("75.00"),
         amount_paid=Decimal("75.00"),
@@ -503,20 +505,7 @@ async def test_automatic_collection_will_not_claim_a_deleted_workspaces_invoice(
     tenant = await _workspace(db_session, slug="collect-co", owner=owner, plan=plan)
     subscription = await SubscriptionRepository(db_session, tenant_id=tenant.id).get()
     assert subscription is not None
-    invoice = Invoice(
-        tenant_id=tenant.id,
-        subscription_id=subscription.id,
-        status=InvoiceStatus.OPEN,
-        plan_code=plan.code,
-        amount_due=Decimal("45.00"),
-        amount_paid=Decimal("0.00"),
-        currency="EGP",
-        period_start=NOW - timedelta(days=30),
-        period_end=NOW,
-        lines=[],
-    )
-    db_session.add(invoice)
-    await db_session.flush()
+    invoice = await renewal_invoice(db_session, subscription=subscription, plan=plan)
 
     invoices = PlatformInvoiceRepository(db_session)
     claimed = await invoices.claim_collectible(before=NOW, max_attempts=3)

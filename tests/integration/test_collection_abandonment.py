@@ -53,10 +53,11 @@ from app.services.recurring_service import (
     NOT_DUE,
     NOT_SENT,
     NOT_SUPPORTED,
-    PROVIDER_REFUSED,
     RecurringService,
 )
+from tests.billing_fixtures import add_owner, renewal_invoice
 from tests.payment_tokens import PROTECTOR, saved_card
+from tests.paymob_orders import order_from_request
 
 pytestmark = pytest.mark.integration
 
@@ -100,6 +101,7 @@ def _transport(calls: Calls, *, intention_status: int = 201) -> httpx.MockTransp
                 json={
                     "id": "pi_auto_1",
                     "client_secret": "csk_auto_1",
+                    "intention_order_id": order_from_request(request),
                     "payment_keys": [{"key": "a-payment-token", "integration": MOTO_INTEGRATION}],
                 },
             )
@@ -183,21 +185,12 @@ async def _workspace(
     session.add(subscription)
     await session.flush()
 
-    invoice = Invoice(
-        tenant_id=tenant.id,
-        subscription_id=subscription.id,
-        status=InvoiceStatus.OPEN,
-        plan_code=plan.code,
-        amount_due=Decimal("25.00"),
-        amount_paid=Decimal("0.00"),
-        currency="EGP",
-        period_start=NOW - timedelta(days=35),
-        period_end=NOW - timedelta(days=5),
-        issued_at=NOW - timedelta(days=5),
-        lines=[],
+    await add_owner(session, tenant)
+    # Billed in advance for the current period, at the pinned version - the
+    # only renewal automatic collection may claim (BILL-02, BILL-03).
+    invoice = await renewal_invoice(
+        session, subscription=subscription, plan=plan, issued_at=NOW - timedelta(days=5)
     )
-    session.add(invoice)
-    await session.flush()
     session.add(
         saved_card(
             tenant_id=tenant.id,
@@ -275,7 +268,7 @@ async def test_a_persistent_not_sent_failure_does_not_run_once_per_poll(
     """
     tenant, subscription, invoice = await _workspace(db_session)
     calls = Calls()
-    transport = _transport(calls, intention_status=400)
+    transport = _transport(calls, intention_status=503)
     reasons = []
 
     for poll in range(8):
@@ -294,10 +287,10 @@ async def test_a_persistent_not_sent_failure_does_not_run_once_per_poll(
     # t=0 abandons and waits 15 minutes; t=15 abandons again and waits an hour.
     # Everything else in the thirty-five minutes is refused as not due.
     assert reasons == [
-        PROVIDER_REFUSED,
+        NOT_SENT,
         NOT_DUE,
         NOT_DUE,
-        PROVIDER_REFUSED,
+        NOT_SENT,
         NOT_DUE,
         NOT_DUE,
         NOT_DUE,
@@ -324,7 +317,7 @@ async def test_the_attempt_budget_is_still_returned(db_session: AsyncSession) ->
         tenant,
         subscription,
         invoice,
-        transport=_transport(calls, intention_status=400),
+        transport=_transport(calls, intention_status=503),
         now=NOW,
     )
 
@@ -349,7 +342,7 @@ async def test_the_backoff_widens_with_each_abandonment(db_session: AsyncSession
     """
     tenant, subscription, invoice = await _workspace(db_session)
     calls = Calls()
-    transport = _transport(calls, intention_status=400)
+    transport = _transport(calls, intention_status=503)
     delays = []
 
     moment = NOW
@@ -378,7 +371,7 @@ async def test_a_days_worth_of_polls_produces_a_handful_of_rows(
     """
     tenant, subscription, invoice = await _workspace(db_session)
     calls = Calls()
-    transport = _transport(calls, intention_status=400)
+    transport = _transport(calls, intention_status=503)
 
     for poll in range(288):
         await _sweep(
@@ -419,7 +412,7 @@ async def test_an_invoice_recovers_once_the_cause_is_fixed(
         tenant,
         subscription,
         invoice,
-        transport=_transport(calls, intention_status=400),
+        transport=_transport(calls, intention_status=503),
         now=NOW,
     )
     assert invoice.collection_attempts == 0
@@ -552,6 +545,7 @@ async def test_a_real_decline_still_spends_an_attempt_and_still_exhausts(
                 json={
                     "id": "pi_auto_1",
                     "client_secret": "csk_auto_1",
+                    "intention_order_id": order_from_request(request),
                     "payment_keys": [{"key": "a-payment-token", "integration": MOTO_INTEGRATION}],
                 },
             )
@@ -582,7 +576,7 @@ async def test_a_settled_invoice_stops_being_collected(db_session: AsyncSession)
     """
     tenant, subscription, invoice = await _workspace(db_session)
     calls = Calls()
-    transport = _transport(calls, intention_status=400)
+    transport = _transport(calls, intention_status=503)
     await _sweep(db_session, tenant, subscription, invoice, transport=transport, now=NOW)
 
     invoice.status = InvoiceStatus.PAID
@@ -609,7 +603,7 @@ async def test_one_workspaces_backoff_does_not_delay_another(
     tenant, subscription, invoice = await _workspace(db_session)
     other_tenant, other_subscription, other_invoice = await _workspace(db_session, slug="other")
     calls = Calls()
-    transport = _transport(calls, intention_status=400)
+    transport = _transport(calls, intention_status=503)
 
     await _sweep(db_session, tenant, subscription, invoice, transport=transport, now=NOW)
     reason = await _sweep(
@@ -621,7 +615,7 @@ async def test_one_workspaces_backoff_does_not_delay_another(
         now=NOW,
     )
 
-    assert reason == PROVIDER_REFUSED
+    assert reason == NOT_SENT
     assert await _payment_rows(db_session, other_invoice) == 1
 
 
@@ -639,7 +633,7 @@ async def test_the_abandonment_is_logged_with_its_running_count(
     """
     tenant, subscription, invoice = await _workspace(db_session)
     calls = Calls()
-    transport = _transport(calls, intention_status=400)
+    transport = _transport(calls, intention_status=503)
 
     # Both sweeps inside the capture. Only the second one is what the test is
     # about, but a level raised by whatever ran before this decides whether an
@@ -669,4 +663,4 @@ async def test_the_abandonment_is_logged_with_its_running_count(
     fields = [vars(entry) for entry in entries]
     assert [field["abandoned_attempts"] for field in fields] == [1, 2]
     assert fields[-1]["next_collection_at"] is not None
-    assert fields[-1]["reason"] == PROVIDER_REFUSED
+    assert fields[-1]["reason"] == NOT_SENT

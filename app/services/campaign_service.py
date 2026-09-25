@@ -347,9 +347,13 @@ class CampaignService:
             # goes out. Refusing halfway through a broadcast would leave a
             # workspace having written to some of its customers and not others,
             # which is worse than refusing it outright (ADR-030).
-            await self._entitlements.require(
+            # Under the workspace's lock for this allowance, counting what
+            # other live campaigns have already been promised (BILL-08): two
+            # campaigns scheduled together used to fit into one remainder.
+            await self._entitlements.reserve_period(
                 LimitKey.PERIOD_CAMPAIGN_MESSAGES,
                 additional=pending,
+                reserved=await self._recipients.pending_in_other_live_campaigns(campaign.id),
             )
 
         now = datetime.now(UTC)

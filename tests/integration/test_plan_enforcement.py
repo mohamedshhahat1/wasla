@@ -46,6 +46,9 @@ class ExhaustedEntitlements:
         self.asked.append(key)
         return Entitlement(key=key, limit=1, used=1, allowed=False, plan_code="starter")
 
+    async def reserve_or_refuse(self, key: LimitKey, *, additional: int = 1) -> Entitlement:
+        return await self.require(key, additional=additional)
+
     async def require(self, key: LimitKey, *, additional: int = 1) -> Entitlement:
         # Recorded, then refused: the real service does the same.
         await self.check(key, additional=additional)

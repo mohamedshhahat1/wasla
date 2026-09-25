@@ -11,16 +11,31 @@ generated, and the payment is only settled by a callback whose signature
 checked out. A customer returning to the site with `?success=true` changes
 nothing; there is deliberately no endpoint that would let it.
 
-Every state change goes through the transition tables in
-`db/models/invoice.py`. That is not ceremony: the statuses on the applying side
-arrive from *outside*, and a late, out-of-order or forged-but-signed callback
-claiming a payment succeeded after it was refunded would otherwise settle an
-invoice twice.
+**A checkout is a frozen purchase** (BILL-06). Each one opens its own `CHECKOUT`
+invoice naming an immutable plan version, its price, currency and interval, and
+that invoice is never re-pointed at another plan. Opening a Business page after
+a Pro page therefore leaves the Pro page buying Pro, whichever is paid first;
+before, the second checkout re-priced the shared invoice and paying the cheaper
+page bought the pricier plan.
 
-The word "Paymob" appears nowhere below. This service talks to a
-`CheckoutProvider`, which is a protocol in `integrations/billing/checkout.py`,
-and the day a second processor is added it is constructed instead (ADR-031,
-ADR-044).
+**A callback is bound, not merely signed** (BILL-11). The event must name the
+Paymob order this system recorded when it created the intention - `order.id`,
+which Paymob signs - and must have run on one of this deployment's integrations
+in this deployment's mode. `merchant_order_id`, which Paymob does not sign, is
+only a cross-check.
+
+**One payment page, several transactions** (BILL-07). A customer whose card is
+declined can try again on the same page; that is another transaction on the
+same order. A decline is recorded as history and the payment stays pending, so
+a later success on the same order settles it.
+
+Settlement itself - what paying an invoice grants - lives in
+`app.services.settlement_service`, shared with reconciliation and with manual
+payments so the three cannot disagree (BILL-10, BILL-20).
+
+The word "Paymob" appears nowhere below outside comments. This service talks to
+a `CheckoutProvider`, which is a protocol in `integrations/billing/checkout.py`
+(ADR-031, ADR-044).
 """
 
 from __future__ import annotations
@@ -29,7 +44,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Final
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,11 +55,18 @@ from app.core.exceptions import (
     WaslaError,
 )
 from app.core.logging import get_logger
+from app.core.telemetry import (
+    record_billing_callback,
+    record_billing_checkout,
+    record_billing_payment,
+)
 from app.db.models.audit import AuditAction, AuditActorKind
-from app.db.models.billing import Plan, Subscription, SubscriptionStatus
+from app.db.models.billing import Plan, PlanVersion, Subscription
+from app.db.models.billing_incident import BillingIncidentKind
 from app.db.models.invoice import (
     CollectionState,
     Invoice,
+    InvoicePurpose,
     InvoiceStatus,
     Payment,
     PaymentStatus,
@@ -62,39 +83,40 @@ from app.integrations.billing.checkout import (
 )
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
 from app.repositories.invoice_repository import InvoiceRepository, PaymentRepository
+from app.services import billing_calendar
 from app.services.audit_service import AuditTrail
-from app.services.subscription_service import SubscriptionService, add_interval
+from app.services.billing_incident_service import raise_incident
+from app.services.plan_catalog import PlanCatalog
+from app.services.settlement_service import (
+    APPLIED,
+    DECLINED,
+    DUPLICATE,
+    MISMATCHED,
+    NO_CHANGE,
+    REFUSED,
+    UNMATCHED,
+    InvoiceSettlement,
+    record_provider_outcome,
+)
+from app.services.subscription_service import SubscriptionService
 
 logger = get_logger(__name__)
 
-# What a recorded callback did, in one word. Read by filtering, so a closed
-# vocabulary rather than a message; `PaymentEvent.detail` carries the why.
-#
-# The distinction between the last three is the one worth keeping straight.
-# `MISMATCHED` means the provider told us something about money that disagrees
-# with what we asked for. `NO_CHANGE` means we believed it and it said nothing
-# new. `REFUSED` means we believed it and it asked for a move the rules forbid,
-# which is the interesting one: a signed callback trying to un-refund a payment
-# lands here, and so does a genuine late delivery arriving out of order.
-APPLIED: Final = "applied"
-DUPLICATE: Final = "duplicate"
-UNMATCHED: Final = "unmatched"
-MISMATCHED: Final = "mismatched"
-NO_CHANGE: Final = "no_change"
-REFUSED: Final = "refused"
+__all__ = [
+    "APPLIED",
+    "DECLINED",
+    "DUPLICATE",
+    "MISMATCHED",
+    "NO_CHANGE",
+    "REFUSED",
+    "UNMATCHED",
+    "CheckoutService",
+    "StartedCheckout",
+]
 
-# The two subscription statuses a settled payment lifts, and nothing else
-# (ADR-059, ADR-061). Both mean the platform is waiting for exactly this money:
-# `PAST_DUE` is a workspace being chased, `SUSPENDED` is one whose grace ran
-# out. A cancellation and an expiry are decisions somebody made, and a payment
-# against an old invoice must not undo one - which is why this is a closed set
-# rather than "any status that is not active".
-_RECOVERABLE_STATUSES: Final[frozenset[SubscriptionStatus]] = frozenset(
-    {
-        SubscriptionStatus.PAST_DUE,
-        SubscriptionStatus.SUSPENDED,
-    }
-)
+# How many microseconds a new checkout invoice's provisional period start may
+# be nudged to stay distinct from another opened in the same instant.
+_PERIOD_NUDGE_ATTEMPTS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,22 +149,21 @@ class CheckoutService:
         self._session = session
         self._tenant_id = tenant_id
         self._provider = provider
-        # Where a workspace lands when a settlement is reversed (ADR-096). It
-        # is the same string `EntitlementService` falls back to, passed in for
-        # the same reason: a service reading `Settings` itself is a service
-        # that cannot be constructed in a test without one.
-        #
-        # `None` is a real state rather than an oversight - the reconciliation
-        # sweep builds this service to resolve *collections*, never reversals -
-        # and it is loud rather than silent: a reversal that needs a plan to
-        # fall back to and has none logs and leaves the subscription alone,
-        # exactly as a missing catalogue row does in the other direction.
+        # Where a workspace lands when a settlement is reversed (ADR-096).
+        # `None` is a real state - a reversal that needs a plan to fall back to
+        # and has none logs and leaves the subscription alone.
         self._default_plan_code = default_plan_code
         self._invoices = InvoiceRepository(session, tenant_id=tenant_id)
         self._payments = PaymentRepository(session, tenant_id=tenant_id)
         self._plans = PlanRepository(session)
+        self._catalog = PlanCatalog(session)
         self._subscriptions = SubscriptionRepository(session, tenant_id=tenant_id)
         self._audit = AuditTrail(session)
+        self._settlement = InvoiceSettlement(
+            session,
+            tenant_id=tenant_id,
+            provider_name=provider.name if provider is not None else None,
+        )
 
     # ------------------------------------------------------------- starting
 
@@ -158,20 +179,13 @@ class CheckoutService:
         """Open a payment page, either for a plan or for an invoice already due.
 
         Exactly one of `plan_code` and `invoice_id`. Naming a plan is somebody
-        choosing what to buy; naming an invoice is somebody paying a renewal
-        this system issued for them, and the second is what makes the billing
-        cycle actually collectible rather than merely recorded.
+        choosing what to buy; naming an invoice is somebody paying a bill this
+        system issued them.
 
-        The order matters. The invoice and the pending payment are written
-        *before* the provider is called, so the reference handed to the
-        provider is a row that already exists: a callback can never arrive for
-        a payment this system has not heard of because the customer was fast.
-
-        The provider call is the last thing, and the caller commits afterwards.
-        A provider that succeeds and a commit that then fails leaves an
-        intention nobody will pay against, which costs nothing; the reverse
-        ordering would leave a customer at a payment page for an invoice that
-        does not exist.
+        The invoice and the pending payment are written *before* the provider
+        is called, so the reference handed to the provider is a row that
+        already exists. The provider call is the last thing, and the caller
+        commits afterwards.
         """
         if self._provider is None:
             raise ValidationError("No payment provider is configured.")
@@ -185,19 +199,14 @@ class CheckoutService:
             invoice = await self._collectible_invoice(invoice_id)
             description = f"{invoice.plan_code} plan"
         else:
-            plan = await self._priced_plan(str(plan_code))
+            plan, version = await self._priced_plan(str(plan_code), now=moment)
             subscription = await self._subscriptions.get()
+            await self._refuse_purchase(plan, version=version, subscription=subscription)
             invoice = await self._open_invoice(
-                plan=plan,
-                subscription=subscription,
-                now=moment,
+                plan=plan, version=version, subscription=subscription, now=moment
             )
-            description = f"{plan.name} plan"
+            description = f"{version.name} plan"
 
-        # Flushed before `outstanding` is read. Column defaults are applied at
-        # INSERT, so a freshly added invoice has `amount_paid` of None until
-        # then and the subtraction inside `outstanding` fails - which is a
-        # confusing way to learn that the row is not real yet.
         await self._session.flush()
 
         payment = await self._new_attempt(
@@ -208,24 +217,21 @@ class CheckoutService:
 
         session = await self._provider.create_checkout(
             CheckoutRequest(
-                # Our id, quoted back by the provider, and the whole mapping
-                # from a callback to this row. Fresh for every attempt because
-                # the provider documents this reference as unique - which is
-                # also why a retried request cannot reuse an earlier page and
-                # is refused instead. See `_refuse_repeat`.
+                # Our id, quoted back by the provider as `merchant_order_id`.
+                # Fresh for every attempt, which is why a retried request cannot
+                # reuse an earlier page and is refused instead.
                 reference=str(payment.id),
-                amount=invoice.outstanding,
-                currency=invoice.currency,
+                amount=payment.amount,
+                currency=payment.currency,
                 description=description,
                 customer_email=actor.email if actor else None,
                 customer_name=actor.full_name if actor else None,
-                # Correlation only, and nothing that would matter if disclosed:
-                # this travels to a third party and comes back through a
-                # request anybody can send at our webhook.
                 metadata={"invoice_id": str(invoice.id)},
             )
         )
         payment.provider_intent_reference = session.provider_reference
+        payment.provider_order_id = session.order_reference
+        payment.provider_mode = session.mode
         invoice.provider = self._provider.name
         await self._session.flush()
 
@@ -237,17 +243,18 @@ class CheckoutService:
                 "invoice_id": str(invoice.id),
                 "payment_id": str(payment.id),
                 "provider": self._provider.name,
-                "amount": str(invoice.outstanding),
-                "currency": invoice.currency,
+                "amount": str(payment.amount),
+                "currency": payment.currency,
                 # Never the redirect URL: it carries the client secret.
             },
         )
+        await record_billing_checkout("created")
         return StartedCheckout(
             redirect_url=session.redirect_url,
             payment_id=payment.id,
             invoice_id=invoice.id,
-            amount=invoice.outstanding,
-            currency=invoice.currency,
+            amount=payment.amount,
+            currency=payment.currency,
         )
 
     async def _new_attempt(
@@ -259,16 +266,9 @@ class CheckoutService:
     ) -> Payment:
         """The pending payment this checkout will collect against.
 
-        Written before the provider is called, so the reference handed over is
-        a row that already exists.
-
-        The savepoint is here for the idempotency key. `_refuse_repeat` reads
-        first and produces the good error message, but a read cannot decide two
-        requests that arrive together - both see nothing and both proceed, and
-        the constraint catches the loser at flush. Left unhandled that surfaces
-        as an integrity error and a 500, which is the wrong answer to a
-        customer whose browser retried: the request was refused for a reason
-        the API has a word for.
+        The savepoint is for the idempotency key: `_refuse_repeat` reads first
+        and produces the good error message, and the unique constraint decides
+        two requests that arrive together.
         """
         try:
             async with self._session.begin_nested():
@@ -278,20 +278,12 @@ class CheckoutService:
                     amount=invoice.outstanding,
                     currency=invoice.currency,
                     provider=provider_name,
-                    # No reference yet. It is the *transaction* id, which does
-                    # not exist until somebody actually pays; the unique
-                    # constraint on (provider, provider_reference) treats NULLs
-                    # as distinct, so several abandoned attempts can coexist.
                     provider_reference=None,
                     idempotency_key=idempotency_key,
                 )
                 await self._session.flush()
         except IntegrityError:
             if not idempotency_key:
-                # Nothing else on this row is unique while it is pending, so a
-                # violation here with no key is something unexplained rather
-                # than the race this handles. Re-raised rather than reported as
-                # a conflict, because a conflict would be a guess.
                 raise
             raise ConflictError(
                 "A checkout has already been started for this request. "
@@ -302,22 +294,10 @@ class CheckoutService:
     async def _refuse_repeat(self, idempotency_key: str | None) -> None:
         """Stop a retried request from becoming a second payment page.
 
-        Refused rather than replayed, and that is forced by a decision made
-        earlier: the response contains a URL carrying the provider's client
-        secret, and that secret is deliberately never stored (ADR-044). A
-        replay would therefore have to fetch a *new* page from the provider
-        under the same reference, and the provider documents that reference as
-        unique - so there is no honest replay available.
-
-        Refusing is the better half of the trade anyway. The caller learns its
-        first request was accepted and can read the payment's status, which is
-        the thing it actually wanted to know; creating a second intention would
-        leave two live payment pages for one invoice and no way to tell a
-        customer which of them to use.
-
-        The read below is a courtesy that produces the good error message. The
-        guarantee is the unique constraint on `(tenant_id, idempotency_key)`,
-        which is what decides two simultaneous retries.
+        Refused rather than replayed: the response carries a client secret that
+        is deliberately never stored (ADR-044), so an honest replay does not
+        exist. The unique constraint on `(tenant_id, idempotency_key)` is the
+        guarantee; this read only produces the better message.
         """
         if not idempotency_key:
             return
@@ -328,41 +308,66 @@ class CheckoutService:
                 "Read its status rather than starting another."
             )
 
-    async def _priced_plan(self, plan_code: str) -> Plan:
-        """The plan a customer may pay for, priced by us.
+    async def _priced_plan(self, plan_code: str, *, now: datetime) -> tuple[Plan, PlanVersion]:
+        """The plan a customer may pay for, and the version they would buy.
 
-        `is_public` is enforced here as it is in `SubscriptionService`: a
-        checkout is another door onto plan selection, and a door that skipped
-        the check would let somebody pay the Enterprise price - or, worse, the
-        Enterprise *limits* at whatever price that row happens to carry.
+        Inactive, private and not-yet-effective plans are refused alike, so the
+        refusal confirms nothing about which private codes are real.
         """
         plan = await self._plans.get_by_code(plan_code)
         if plan is None or not plan.is_active or not plan.is_public:
-            # The same refusal for all three, as elsewhere: distinguishing them
-            # confirms which private codes are real.
             raise ValidationError("No such plan.")
-        if plan.price <= 0:
-            # A free plan has nothing to collect. Sending somebody to a payment
-            # page for zero is a confusing dead end, and providers refuse it.
+        version = await self._catalog.current_version(plan, at=now)
+        if version is None:
+            raise ValidationError("No such plan.")
+        if version.price <= 0:
             raise ValidationError("That plan does not require payment.")
-        return plan
+        return plan, version
+
+    async def _refuse_purchase(
+        self,
+        plan: Plan,
+        *,
+        version: PlanVersion,
+        subscription: Subscription | None,
+    ) -> None:
+        """Refuse, before any money moves, a purchase that cannot be granted.
+
+        Two, and both answer 409 with the way forward:
+
+        - **The plan the workspace is already serving on.** There is nothing to
+          buy; a workspace behind on that plan pays the open renewal instead.
+        - **A cheaper plan while a pricier paid period runs.** Downgrades take
+          effect at the period end so nothing paid for is forfeited, and they
+          are scheduled, not bought (spec: downgrades).
+        """
+        if subscription is None or not subscription.is_serving:
+            return
+        if subscription.plan_id == plan.id:
+            raise ConflictError(
+                "This workspace is already on that plan. To settle what it owes, "
+                "pay its open invoice instead."
+            )
+        current = await self._catalog.pinned_version(subscription)
+        if current is not None and current.price > 0 and version.price < current.price:
+            raise ConflictError(
+                "A cheaper plan starts when the current paid period ends. "
+                "Schedule it with POST /billing/subscription/plan."
+            )
 
     async def _collectible_invoice(self, invoice_id: uuid.UUID) -> Invoice:
-        """One of this workspace's invoices, if there is money left on it.
+        """One of this workspace's invoices, if a customer may pay it.
 
-        Tenant-scoped through the repository, so another workspace's invoice id
-        is indistinguishable from one that does not exist - a caller must not
-        learn which invoice ids are real by being told a different refusal.
+        Tenant-scoped, so another workspace's invoice id is indistinguishable
+        from one that does not exist. An invoice written off as uncollectible
+        is recovered only by an operator (spec: invoice state machine).
         """
         invoice = await self._invoices.get_by_id(invoice_id)
         if invoice is None:
             raise NotFoundError("No such invoice.")
         if invoice.status is InvoiceStatus.PAID:
             raise ConflictError("This invoice has already been paid.")
-        if invoice.status in (InvoiceStatus.VOID, InvoiceStatus.DRAFT):
-            # A withdrawn bill and an unissued one are both things nobody has
-            # been asked for. Collecting against either would be charging for
-            # something we never sent.
+        if invoice.status is not InvoiceStatus.OPEN:
             raise ConflictError("This invoice cannot be collected.")
         if invoice.outstanding <= 0:
             raise ConflictError("Nothing is outstanding on this invoice.")
@@ -372,97 +377,58 @@ class CheckoutService:
         self,
         *,
         plan: Plan,
+        version: PlanVersion,
         subscription: Subscription | None,
         now: datetime,
     ) -> Invoice:
-        """The invoice this checkout collects, reusing one if it is already open.
+        """A new, immutable `CHECKOUT` invoice for exactly this version.
 
-        Reuse rather than issue-per-attempt, and the constraint decides it
-        either way: `UNIQUE(tenant_id, period_start)` means a second attempt at
-        the same period cannot create a second invoice. Somebody who abandons a
-        checkout and starts another gets a second *payment* against one
-        invoice, which is exactly what the payments table is for - attempts are
-        rows, and the history is what a dispute turns on.
+        Always new: two checkouts are two independent purchases. The period is
+        provisional - one interval from now - and is fixed at settlement, when
+        it is known when the paid period actually starts (BILL-03).
         """
-        if subscription is not None:
-            period_start = subscription.current_period_start
-            period_end = subscription.current_period_end
-        else:
-            # Truncated to the day, and that is the whole reason this branch
-            # exists. `UNIQUE(tenant_id, period_start)` is what stops a
-            # workspace being billed twice for one period, and a period start
-            # of `now` defeats it completely: two checkouts a second apart get
-            # timestamps differing by microseconds, so the constraint sees two
-            # different periods and every abandoned attempt leaves an invoice.
-            period_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            period_end = add_interval(period_start, plan.interval)
-
-        existing = await self._invoices.get_for_period(period_start=period_start)
-        if existing is not None:
-            return self._reprice(existing, plan=plan, period_end=period_end)
-
-        try:
-            async with self._session.begin_nested():
-                created = self._invoices.create(
-                    subscription_id=subscription.id if subscription else None,
-                    status=InvoiceStatus.OPEN,
-                    plan_code=plan.code,
-                    amount_due=plan.price,
-                    currency=plan.currency,
-                    period_start=period_start,
-                    period_end=period_end,
-                    lines=self._lines(plan),
+        period_start = now
+        for _ in range(_PERIOD_NUDGE_ATTEMPTS):
+            try:
+                async with self._session.begin_nested():
+                    created = self._invoices.create(
+                        subscription_id=subscription.id if subscription else None,
+                        status=InvoiceStatus.OPEN,
+                        plan_code=plan.code,
+                        amount_due=version.price,
+                        currency=version.currency,
+                        period_start=period_start,
+                        period_end=billing_calendar.add_interval(period_start, version.interval),
+                        lines=self._lines(version),
+                        purpose=InvoicePurpose.CHECKOUT,
+                        plan_version_id=version.id,
+                    )
+                    # When the customer opened this page, in the same clock the
+                    # cancellation is written with - settlement compares the two.
+                    created.created_at = now
+                    await self._session.flush()
+                return created
+            except IntegrityError:
+                period_start = period_start.replace(
+                    microsecond=(period_start.microsecond + 1) % 10**6
                 )
-                await self._session.flush()
-        except IntegrityError:
-            # Two checkouts started at once and the other one won the period.
-            # The constraint is doing exactly its job; this re-reads rather
-            # than failing, so the loser collects against the same invoice
-            # instead of answering 500 to a customer who did nothing wrong.
-            existing = await self._invoices.get_for_period(period_start=period_start)
-            if existing is None:  # pragma: no cover - the row that just blocked us
-                raise
-            return self._reprice(existing, plan=plan, period_end=period_end)
-        return created
-
-    def _reprice(self, invoice: Invoice, *, plan: Plan, period_end: datetime) -> Invoice:
-        """Point an untouched invoice at the plan the customer actually chose.
-
-        Only while nothing has been collected. Once money has arrived the
-        invoice is a record of what was paid rather than a statement of what
-        will be owed, and re-pricing it would silently move somebody's money
-        from one thing onto another - which this system cannot undo, because it
-        does not issue credits.
-        """
-        if invoice.status is InvoiceStatus.PAID:
-            raise ConflictError("This period has already been paid.")
-        if invoice.is_terminal:
-            raise ConflictError("This invoice is settled and cannot be collected.")
-        if invoice.plan_code != plan.code:
-            if invoice.amount_paid > 0:
-                raise ConflictError(
-                    "This period has a part-paid invoice for another plan.",
-                )
-            invoice.plan_code = plan.code
-            invoice.amount_due = plan.price
-            invoice.currency = plan.currency
-            invoice.period_end = period_end
-            invoice.lines = self._lines(plan)
-        return invoice
+        raise ConflictError("Another checkout was opened at the same instant. Try again.")
 
     @staticmethod
-    def _lines(plan: Plan) -> list[dict[str, object]]:
-        """The invoice as it will be read back, with the price copied in.
+    def _lines(version: PlanVersion) -> list[dict[str, object]]:
+        """The invoice as it will be read back, with the terms copied in.
 
-        Copied rather than joined, following the invoice model: a plan repriced
-        next month must not change what this month's invoice says.
+        Enough to answer "why was I charged this" without joining anything:
+        the plan, its version, the price and what it buys a period of.
         """
         return [
             {
                 "kind": "subscription",
-                "description": f"{plan.name} plan",
-                "amount": str(plan.price),
+                "description": f"{version.name} plan",
+                "amount": str(version.price),
                 "quantity": 1,
+                "plan_version": version.version,
+                "interval": version.interval.value,
             }
         ]
 
@@ -472,32 +438,44 @@ class CheckoutService:
         """Apply one verified callback, exactly once, and say what it did.
 
         The caller has already authenticated the event; everything here is
-        about whether it may be *believed*, which is a different question. Five
-        refusals stand between a verified callback and a settled invoice:
+        about whether it may be *believed*:
 
-        1. **It must be new.** The `payment_events` insert is the claim, and
-           the unique constraint decides races rather than a preceding read.
-        2. **It must name a payment we issued**, by a reference we generated.
-        3. **That payment must belong to this workspace.** A callback cannot
-           reach across a tenant boundary even if a reference leaked.
-        4. **The figures must match what we asked for.** A provider reporting a
-           different amount or currency is not settling this invoice, whatever
-           it says.
-        5. **The move it asks for must be legal.** A signed callback claiming a
-           refunded payment succeeded is refused by the transition table rather
-           than believed because it was signed.
-
-        Returns the outcome word, which the endpoint turns into a response that
-        is the same for all of them.
+        1. **It must be new.** The `payment_events` insert is the claim.
+        2. **It must name a payment we issued**, by the order we recorded.
+        3. **That payment must belong to this workspace.**
+        4. **It must be bound to us**: our order, our integration, our mode.
+        5. **The figures must match what we asked for.**
+        6. **The move it asks for must be legal.**
         """
         moment = now if now is not None else datetime.now(UTC)
-        payment = await self._matching_payment(event)
+        payment, retargeted = await self._matching_payment(event)
 
         record = await self._claim(event, payment=payment, now=moment)
         if record is None:
+            await record_billing_callback(DUPLICATE)
             return DUPLICATE
 
-        outcome, detail = await self._decide(event, payment=payment, now=moment)
+        outcome: str
+        detail: str | None
+        if retargeted:
+            outcome, detail = MISMATCHED, "The unsigned reference disagrees with the signed order."
+        else:
+            outcome, detail = await self._decide(event, payment=payment, now=moment)
+        if outcome == MISMATCHED and payment is not None:
+            await raise_incident(
+                self._session,
+                kind=BillingIncidentKind.MISMATCHED_CALLBACK,
+                dedupe_key=event.event_id,
+                tenant_id=self._tenant_id,
+                payment_id=payment.id,
+                invoice_id=payment.invoice_id,
+                provider=self._provider_name(),
+                provider_transaction_id=event.provider_transaction_id,
+                amount=event.amount,
+                currency=event.currency or None,
+                detail=detail,
+                now=moment,
+            )
         record.outcome = outcome
         record.detail = detail[:MAX_DETAIL_LENGTH] if detail else None
         record.processed_at = moment
@@ -515,6 +493,7 @@ class CheckoutService:
                 "detail": detail,
             },
         )
+        await record_billing_callback(outcome)
         return outcome
 
     async def _decide(
@@ -530,10 +509,19 @@ class CheckoutService:
 
         invoice = await self._invoices.get_by_id(payment.invoice_id)
         if invoice is None or invoice.tenant_id != self._tenant_id:
-            # Belt and braces: the payment repository is already tenant-scoped,
-            # so reaching here means the two disagree, and a disagreement about
-            # who owns money is not something to resolve in favour of acting.
             return UNMATCHED, "The payment's invoice is not this workspace's."
+
+        problem = self._binding_problem(event, payment=payment)
+        if problem is not None:
+            logger.warning(
+                "billing.callback_unbound",
+                extra={
+                    "event": "billing.callback_unbound",
+                    "payment_id": str(payment.id),
+                    "reason": problem,
+                },
+            )
+            return MISMATCHED, problem
 
         if event.currency.upper() != invoice.currency.upper():
             return MISMATCHED, f"Expected {invoice.currency}, was told {event.currency}."
@@ -541,6 +529,35 @@ class CheckoutService:
         if event.kind in (EventKind.REFUNDED, EventKind.VOIDED):
             return await self._apply_reversal(event, payment=payment, invoice=invoice, now=now)
         return await self._apply_collection(event, payment=payment, invoice=invoice, now=now)
+
+    def _binding_problem(self, event: CallbackEvent, *, payment: Payment) -> str | None:
+        """Why this event cannot be about this payment (BILL-11), or None.
+
+        The order comes first. A payment created before orders were recorded
+        (migration 0071) has none to compare with; a *collection* on one is
+        refused - the fail-safe answer for a stale page, which an operator can
+        reconcile - while a *reversal* of money it already holds is still
+        applied, because refusing to record a refund would leave the ledger
+        claiming money the customer has been given back.
+        """
+        reversal = event.kind in (EventKind.REFUNDED, EventKind.VOIDED)
+        if payment.provider_order_id is None:
+            if not reversal:
+                return "This payment predates order binding; reconcile it instead."
+        elif event.order_id != payment.provider_order_id:
+            return (
+                f"The callback is for order {event.order_id}, "
+                f"this payment's order is {payment.provider_order_id}."
+            )
+
+        # A provider that can bind callbacks says so by implementing
+        # `CallbackBindingProvider`; Paymob does. One that cannot (a test
+        # double) is bound by the order check above alone.
+        check = getattr(self._provider, "callback_binding_problem", None)
+        if check is None:
+            return None
+        problem: str | None = check(event, automatic=payment.is_automatic)
+        return problem
 
     async def _apply_collection(
         self,
@@ -552,9 +569,6 @@ class CheckoutService:
     ) -> tuple[str, str | None]:
         """A callback reporting what happened to an attempt at collecting."""
         if event.amount != payment.amount:
-            # A provider that says it collected a different amount than we
-            # asked for has done something we do not understand, and settling
-            # the invoice anyway would paper over it.
             logger.warning(
                 "billing.callback_amount_mismatch",
                 extra={
@@ -565,9 +579,48 @@ class CheckoutService:
                 },
             )
             payment.failure_reason = "The provider reported a different amount."
+            await record_billing_payment("mismatched")
             return MISMATCHED, f"Expected {payment.amount}, was told {event.amount}."
 
+        if (
+            event.status is PaymentStatus.FAILED
+            and not payment.is_automatic
+            and payment.status is PaymentStatus.PENDING
+        ):
+            # A declined transaction on a hosted page (BILL-07). The customer can
+            # try again on the same page - another transaction on the same order
+            # - so the logical payment stays pending and the decline is history:
+            # the event row keeps it, and `failure_reason` tells the customer.
+            payment.failure_reason = event.failure_reason or "The card was declined."
+            await record_billing_payment("declined")
+            await record_billing_checkout("failed")
+            return DECLINED, "Transaction declined; the payment page can still be paid."
+
         if event.status is payment.status:
+            if (
+                payment.status is PaymentStatus.SUCCEEDED
+                and event.provider_transaction_id
+                and payment.provider_reference
+                and event.provider_transaction_id != payment.provider_reference
+            ):
+                # A *second* successful transaction on an order that was already
+                # paid: the customer was charged twice for one page (BILL-15).
+                await raise_incident(
+                    self._session,
+                    kind=BillingIncidentKind.DUPLICATE_PAYMENT,
+                    dedupe_key=f"{payment.id}:{event.provider_transaction_id}",
+                    tenant_id=self._tenant_id,
+                    payment_id=payment.id,
+                    invoice_id=invoice.id,
+                    provider=self._provider_name(),
+                    provider_transaction_id=event.provider_transaction_id,
+                    amount=event.amount,
+                    currency=event.currency,
+                    detail="A second successful transaction on an order already paid.",
+                    now=now,
+                )
+                await record_billing_payment("duplicate")
+                return REFUSED, "A second success on an order that was already paid."
             return NO_CHANGE, f"Already {payment.status.value}."
         if not payment_may_move(payment.status, event.status):
             logger.warning(
@@ -581,26 +634,24 @@ class CheckoutService:
             )
             return REFUSED, f"{payment.status.value} cannot become {event.status.value}."
 
-        payment.status = event.status
-        payment.provider_reference = event.provider_transaction_id
-        payment.failure_reason = event.failure_reason
-        payment.processed_at = now
+        record_provider_outcome(payment, event, now=now)
         if payment.is_unresolved_collection:
             # An automatic attempt has just learned its outcome, so the invoice
-            # behind it stops being blocked. Written here rather than by the
-            # collection path because *this* is where the answer arrives - the
-            # charge request only ever asked (ADR-088).
-            #
-            # A callback that reaches a still-`claimed` attempt is unusual and
-            # not impossible: the worker committed its claim, was killed before
-            # marking it requested, and Paymob answered a request it had
-            # already received. Closing it is right in both cases, and the
-            # attempt count stays spent because a charge demonstrably happened.
+            # behind it stops being blocked. Written here because *this* is
+            # where the answer arrives - the charge request only ever asked
+            # (ADR-088).
             payment.collection_state = CollectionState.SETTLED
 
         if not event.succeeded:
+            await record_billing_payment("failed")
             return APPLIED, f"Payment {event.status.value}."
-        return await self._settle(invoice, payment=payment, now=now)
+        await record_billing_payment("succeeded")
+        outcome, detail = await self._settlement.settle(invoice, payment=payment, now=now)
+        if outcome == APPLIED and invoice.purpose is InvoicePurpose.CHECKOUT:
+            await record_billing_checkout("settled")
+        elif outcome == REFUSED:
+            await record_billing_payment("refused")
+        return outcome, detail
 
     async def _apply_reversal(
         self,
@@ -613,15 +664,20 @@ class CheckoutService:
         """A callback reporting that money we collected has gone back.
 
         Arrives whether or not this system asked for it: a refund issued from
-        the provider's own dashboard produces the same notification as one
-        `RefundService` requested, and both have to land in the same place or
-        the ledger stops matching the bank.
+        the provider's dashboard and one an operator approved here produce the
+        same notification, and both must land in the same place.
 
-        The refunded total is taken from the provider's running total where it
-        gives one, because a payment can be reversed in parts and each
-        notification carries the cumulative figure. Falling back to the
-        reversal's own amount covers the callback about the refund transaction
-        itself, which reports what *that* transaction moved.
+        Three shapes, and the difference is who decided (BILL-13):
+
+        - **An operator's partial refund** is a goodwill credit. The invoice
+          stays paid, the customer keeps the period, and nobody is billed for
+          the difference.
+        - **A full refund**, however it was asked for, empties the invoice; the
+          plan it bought is withdrawn if nothing else pays for it (ADR-096),
+          and an operator's full refund voids the invoice as well, so no sweep
+          ever tries to collect money that was deliberately given back.
+        - **An unrequested partial reversal** - a chargeback, a dashboard
+          refund - leaves a genuine debt: the invoice reopens and is dunned.
         """
         refunded = event.refunded_amount if event.refunded_amount else event.amount
         if refunded <= 0 or refunded > payment.amount:
@@ -631,39 +687,41 @@ class CheckoutService:
         if refunded <= payment.refunded_amount:
             return NO_CHANGE, f"Already refunded {payment.refunded_amount}."
 
+        requested = payment.refund_requested_amount
+        operator_requested = requested is not None and refunded <= requested
         returned = refunded - payment.refunded_amount
         payment.refunded_amount = refunded
         payment.refunded_at = now
+        if requested is not None and refunded >= requested:
+            # The standing request is fulfilled. Cleared so the next request -
+            # for what is left - is not refused as a duplicate of this one.
+            payment.refund_requested_amount = None
         if refunded >= payment.amount and payment_may_move(payment.status, PaymentStatus.REFUNDED):
             payment.status = PaymentStatus.REFUNDED
 
-        # The invoice holds less money than it did. `amount_paid` is what we
-        # have, not what was once sent, so an invoice no longer covered stops
-        # being paid - see `INVOICE_TRANSITIONS`.
-        invoice.amount_paid = invoice.amount_paid - returned
-        if invoice.amount_paid < 0:  # pragma: no cover - guarded by the checks above
-            invoice.amount_paid = Decimal("0.00")
+        invoice.amount_paid = max(invoice.amount_paid - returned, Decimal("0.00"))
+        full = invoice.amount_paid <= 0
+        goodwill = operator_requested and not full
         if (
             invoice.status is InvoiceStatus.PAID
             and invoice.amount_paid < invoice.amount_due
+            and not goodwill
             and invoice_may_move(invoice.status, InvoiceStatus.OPEN)
         ):
             invoice.status = InvoiceStatus.OPEN
             invoice.paid_at = None
 
         if invoice.status is InvoiceStatus.OPEN:
-            if invoice.amount_paid <= 0:
+            if full:
                 await self._withdraw_purchased_plan(invoice, now=now)
+                if operator_requested and invoice_may_move(invoice.status, InvoiceStatus.VOID):
+                    invoice.status = InvoiceStatus.VOID
+                    invoice.voided_at = now
+                    invoice.notes = "Refunded in full at the platform's decision."
             elif invoice.issued_at is None:
-                # A part-reversed invoice is the one shape in which a checkout
-                # row becomes a genuine debt: the customer keeps what they
-                # bought and owes the difference, so the dunning clock starts
-                # here (ADR-096). `issued_at` is written once and never
-                # rewritten, so this cannot restart somebody's grace period,
-                # and it is deliberately not written on the branch above -
-                # somebody who was fully repaid owes nothing, and chasing them
-                # for the sum they were just refunded would be a worse defect
-                # than the one this fixes.
+                # An unrequested part-reversal is the one shape in which a
+                # checkout row becomes a genuine debt, so the dunning clock
+                # starts here (ADR-096).
                 invoice.issued_at = now
 
         self._audit.record(
@@ -678,6 +736,8 @@ class CheckoutService:
                 "refunded_total": str(refunded),
                 "currency": invoice.currency,
                 "kind": event.kind.value,
+                "operator_requested": operator_requested,
+                "provider_reference": event.provider_transaction_id,
             },
         )
         logger.info(
@@ -690,26 +750,35 @@ class CheckoutService:
                 "amount": str(returned),
             },
         )
+        from app.core.telemetry import record_billing_refund
+
+        await record_billing_refund("confirmed")
         return APPLIED, f"Refunded {returned}."
 
     def _provider_name(self) -> str:
         return self._provider.name if self._provider is not None else "unknown"
 
-    async def _matching_payment(self, event: CallbackEvent) -> Payment | None:
-        """The payment this callback names, if it is ours.
+    async def _matching_payment(self, event: CallbackEvent) -> tuple[Payment | None, bool]:
+        """The payment this callback names, and whether it was re-aimed.
 
-        By our own reference first, and never by anything the provider chose to
-        put in a field we do not control. The tenant filter on the repository
-        is what stops a callback naming another workspace's payment from being
-        applied to this one.
+        By the provider's **order** first - the signed identifier, recorded
+        when this system created the intention (BILL-11). The unsigned
+        `merchant_order_id` must then agree with it; a callback whose signed
+        order is ours but whose reference names a different payment has been
+        edited, and is reported as re-aimed rather than applied to either.
 
-        The fallback matters for reversals. A refund produces a callback about
-        the transaction it reverses, and that notification is documented to
-        carry the parent's id rather than necessarily carrying our reference
-        home - so a payment is also findable by the transaction id we recorded
-        ourselves when the money arrived. Both routes go through identifiers
-        this system wrote down; neither trusts a name the caller invented.
+        A payment created before orders were recorded is found by our own
+        reference, and the binding check refuses a collection on it. A
+        reversal is also findable by the transaction id recorded when the money
+        arrived, because a refund names the transaction it reverses.
         """
+        provider = self._provider_name()
+        if event.order_id:
+            found = await self._payments.get_by_order(provider=provider, order_id=event.order_id)
+            if found is not None:
+                retargeted = bool(event.reference) and event.reference != str(found.id)
+                return found, retargeted
+
         if event.reference:
             try:
                 payment_id = uuid.UUID(event.reference)
@@ -718,18 +787,18 @@ class CheckoutService:
             if payment_id is not None:
                 found = await self._payments.get_by_id(payment_id)
                 if found is not None:
-                    return found
+                    return found, False
 
         for transaction_id in (event.parent_transaction_id, event.provider_transaction_id):
             if not transaction_id:
                 continue
             found = await self._payments.get_by_transaction(
-                provider=self._provider_name(),
+                provider=provider,
                 transaction_id=transaction_id,
             )
             if found is not None:
-                return found
-        return None
+                return found, False
+        return None, False
 
     async def _claim(
         self,
@@ -740,17 +809,8 @@ class CheckoutService:
     ) -> PaymentEvent | None:
         """Take ownership of this event, or report that somebody already has.
 
-        Returns the row to fill in, or None when another delivery owns it.
-
-        The outcome is written as unresolved and corrected once there is one.
-        Claiming first is what makes two simultaneous deliveries safe, and it
-        is why a crash between the claim and the decision leaves a row saying
-        nothing happened - which is exactly what did happen.
-
         A savepoint, because a unique violation poisons the transaction it
-        happens in and this one has an invoice to settle afterwards. The nested
-        block is released on success and rolled back on the collision, leaving
-        the outer transaction usable either way.
+        happens in and this one has an invoice to settle afterwards.
         """
         record = PaymentEvent(
             provider=self._provider_name(),
@@ -777,147 +837,20 @@ class CheckoutService:
             return None
         return record
 
-    async def _settle(
-        self,
-        invoice: Invoice,
-        *,
-        payment: Payment,
-        now: datetime,
-    ) -> tuple[str, str | None]:
-        """Money arrived: mark the invoice paid, and grant what it was for.
-
-        **This is the authoritative point at which a paid plan is granted**
-        (ADR-059). Nothing a client sends can reach it: the only caller is
-        `apply`, which runs behind an HMAC over the provider's own payload, and
-        the plan it grants is read from the invoice this system wrote before
-        the customer was ever sent to a payment page.
-
-        Still deliberately narrow. Paying settles an invoice; it does not
-        resubscribe, revive or extend anything. See `_apply_purchased_plan` for
-        exactly which subscriptions move and which are left alone.
-        """
-        if invoice.is_terminal:
-            # A second payment against an invoice that is already finished.
-            # Recorded and refused rather than added: it means the customer has
-            # paid twice, which is a refund to issue rather than a balance to
-            # increase.
-            logger.warning(
-                "billing.settlement_refused",
-                extra={
-                    "event": "billing.settlement_refused",
-                    "invoice_id": str(invoice.id),
-                    "payment_id": str(payment.id),
-                    "status": invoice.status.value,
-                },
-            )
-            return REFUSED, f"Invoice is already {invoice.status.value}."
-
-        invoice.amount_paid = invoice.amount_paid + payment.amount
-        invoice.provider_reference = payment.provider_reference
-        if invoice.amount_paid >= invoice.amount_due and invoice_may_move(
-            invoice.status, InvoiceStatus.PAID
-        ):
-            invoice.status = InvoiceStatus.PAID
-            invoice.paid_at = now
-
-        subscription = await self._subscriptions.get()
-        if (
-            subscription is not None
-            and subscription.id == invoice.subscription_id
-            and subscription.status in _RECOVERABLE_STATUSES
-        ):
-            # The only two statuses a payment changes on its own, and the list
-            # is closed on purpose. Both mean "the platform is waiting for this
-            # money": `PAST_DUE` is a workspace being chased, `SUSPENDED` is
-            # one whose grace ran out (ADR-061). Settling the bill is precisely
-            # the condition each was waiting on, so lifting them is the whole
-            # point of the payment rather than a side effect of it.
-            #
-            # A trial stays a trial, a cancellation stays cancelled and an
-            # expiry stays expired: paying an invoice is not a request to
-            # resubscribe, and treating it as one would revive a subscription
-            # somebody deliberately ended (ADR-059). That is why this reads a
-            # closed set rather than "not active".
-            #
-            # Ordered before `_apply_purchased_plan` so a suspended workspace
-            # that pays for a *different* plan gets it: the row is no longer
-            # terminal by the time the plan transition is considered.
-            previous = subscription.status
-            subscription.status = SubscriptionStatus.ACTIVE
-            logger.info(
-                "billing.subscription_restored",
-                extra={
-                    "event": "billing.subscription_restored",
-                    "tenant_id": str(self._tenant_id),
-                    "invoice_id": str(invoice.id),
-                    "from_status": previous.value,
-                },
-            )
-
-        await self._apply_purchased_plan(invoice, subscription=subscription, now=now)
-
-        self._audit.record(
-            AuditAction.PAYMENT_RECORDED,
-            actor=None,
-            actor_kind=AuditActorKind.SYSTEM,
-            tenant_id=self._tenant_id,
-            target_type="invoice",
-            target_id=invoice.id,
-            meta={
-                "payment_id": str(payment.id),
-                "amount": str(payment.amount),
-                "currency": invoice.currency,
-                "provider": payment.provider,
-            },
-        )
-        logger.info(
-            "billing.payment_applied",
-            extra={
-                "event": "billing.payment_applied",
-                "tenant_id": str(self._tenant_id),
-                "payment_id": str(payment.id),
-                "invoice_id": str(invoice.id),
-                "status": invoice.status.value,
-            },
-        )
-        return APPLIED, f"Invoice {invoice.status.value}."
-
     async def _withdraw_purchased_plan(self, invoice: Invoice, *, now: datetime) -> None:
         """Take back the plan an invoice bought, now that nothing paid for it.
 
-        The mirror of `_apply_purchased_plan`, and the answer to the question
-        that method never asked: **what commercial grant survives when the
-        settlement behind it is fully reversed?** (ADR-096). Nothing did, which
-        is how a workspace owner could refund their own payment through the
-        self-service endpoint and keep the plan it bought - permanently, since
-        no later sweep looks at a grant nobody is paying for.
+        The mirror of settlement's grant, reached only when every unit
+        collected against the invoice has gone back (ADR-096). A partial
+        reversal leaves the plan alone. Four conditions:
 
-        Reached only when the invoice has been emptied: every unit collected
-        against it has gone back. A partial reversal leaves the plan alone,
-        because the customer has still paid for most of it and taking a month
-        of Pro away over one unit returned is not the trade anybody wants. What
-        the partial case gets instead is a dunning clock, set by the caller.
+        - there is a subscription, and a plan to fall back to;
+        - it is not terminal;
+        - the workspace is still on the plan this invoice bought;
+        - nothing else covers the plan right now.
 
-        Four conditions, and each excludes a downgrade that would be wrong:
-
-        - **There is a subscription, and a plan to fall back to.** Neither is
-          guaranteed by a misconfigured deployment, and inventing one in a
-          settlement path is how a second billing machine gets built.
-        - **It is not terminal.** Cancelled and expired stay as they are - the
-          same rule `_apply_purchased_plan` follows in the other direction, and
-          `EntitlementService` already resolves those to the default plan, so
-          there is nothing to take away either.
-        - **The workspace is still on the plan this invoice bought.** A refund
-          withdraws what it granted and never what somebody else did, so a
-          workspace that has since moved on is left where it moved to.
-        - **Nothing else covers the plan right now.** A second settled invoice
-          whose period contains this moment is somebody's money holding the
-          plan up, and the reversal of a different invoice must not spend it.
-
-        Failure is contained in the same way settlement is: the money is the
-        part that must never be rolled back. A grant that could not be
-        withdrawn is an operator's problem; losing the record that a customer
-        was repaid is a customer's.
+        Failure is contained: the record that a customer was repaid is the
+        part that must never be rolled back.
         """
         subscription = await self._subscriptions.get()
         if subscription is None or subscription.is_terminal:
@@ -934,9 +867,6 @@ class CheckoutService:
             )
             return
         if invoice.plan_code == self._default_plan_code:
-            # The free plan is what a withdrawal moves *to*. Reversing a
-            # zero-priced invoice grants nothing back and would otherwise raise
-            # `ConflictError` out of `change_plan` for being already there.
             return
 
         current = await self._plans.get_by_id(subscription.plan_id)
@@ -962,9 +892,6 @@ class CheckoutService:
             await SubscriptionService(self._session, tenant_id=self._tenant_id).change_plan(
                 plan_code=self._default_plan_code,
                 now=now,
-                # The platform withdrawing a grant, not a customer choosing -
-                # which is also what lets the transition through `_require_plan`
-                # if the default plan is ever made non-public.
                 self_service=False,
                 actor=None,
             )
@@ -980,10 +907,6 @@ class CheckoutService:
             )
             return
 
-        # Beside the entry `change_plan` writes rather than instead of it. That
-        # one records the movement; this one records the *reason*, and without
-        # it a downgrade read from the trail is indistinguishable from the
-        # customer having chosen the free plan themselves.
         self._audit.record(
             AuditAction.SUBSCRIPTION_PLAN_WITHDRAWN,
             actor=None,
@@ -1009,111 +932,8 @@ class CheckoutService:
             },
         )
 
-    async def _apply_purchased_plan(
-        self,
-        invoice: Invoice,
-        *,
-        subscription: Subscription | None,
-        now: datetime,
-    ) -> None:
-        """Move the workspace onto the plan this invoice was raised for.
-
-        The counterpart to the self-service refusal in `SubscriptionService`:
-        a priced plan cannot be asked for, so this is where one is granted. The
-        plan is named by `invoice.plan_code`, which `_open_invoice` copied from
-        the plan the customer chose *before* the provider was called - so the
-        grant is decided by a row this system wrote, never by anything in the
-        callback. The callback says only that the money arrived.
-
-        The transition itself is `SubscriptionService.change_plan`, called with
-        `self_service=False`. Reused rather than reimplemented, and that is the
-        point: period arithmetic, trial clearing, the cancellation reset and the
-        audit entry are one state machine with one owner, and a second copy here
-        would be the parallel billing machine this fix exists to avoid.
-
-        Four cases are deliberately left alone:
-
-        - **No subscription.** There is nothing to move and creating one here
-          would mean inventing trial and period rules in a settlement path.
-          Every workspace gets one at registration, so this is the misconfigured
-          deployment where `DEFAULT_PLAN_CODE` names no plan - and where limits
-          are already unenforced. Logged loudly rather than guessed at.
-        - **A renewal.** The invoice names the plan the workspace is already on,
-          so there is no transition; the period rolls over in the billing sweep,
-          which is the thing that understands periods.
-        - **A terminal subscription.** Cancelled and expired stay that way.
-          Paying an old invoice is not a request to resubscribe, which is the
-          rule `_settle` already follows for status.
-        - **A retired plan code.** The catalogue row is gone, so there is
-          nothing to grant. The invoice is still paid and the money is still
-          recorded.
-
-        Failure is contained. A plan that cannot be applied must not undo a
-        settlement that has already happened: the customer's money arrived, the
-        invoice says so, and a grant that did not land is something an operator
-        can put right - whereas an exception here would roll back the record of
-        the payment itself.
-        """
-        if subscription is None:
-            logger.warning(
-                "billing.paid_plan_without_subscription",
-                extra={
-                    "event": "billing.paid_plan_without_subscription",
-                    "tenant_id": str(self._tenant_id),
-                    "invoice_id": str(invoice.id),
-                    "plan_code": invoice.plan_code,
-                },
-            )
-            return
-        if subscription.is_terminal:
-            return
-
-        plan = await self._plans.get_by_code(invoice.plan_code)
-        if plan is None or plan.id == subscription.plan_id:
-            return
-
-        try:
-            await SubscriptionService(self._session, tenant_id=self._tenant_id).change_plan(
-                plan_code=invoice.plan_code,
-                now=now,
-                # The platform granting what was paid for, not a customer
-                # choosing. This is the only caller besides registration that
-                # passes it, and it is what lets a priced plan through the gate
-                # in `_require_plan`.
-                self_service=False,
-                # No actor: nobody pressed anything. A callback is the provider
-                # telling us money moved, so the audit entry `change_plan`
-                # writes is a system observation.
-                actor=None,
-            )
-        except WaslaError:
-            logger.exception(
-                "billing.paid_plan_not_applied",
-                extra={
-                    "event": "billing.paid_plan_not_applied",
-                    "tenant_id": str(self._tenant_id),
-                    "invoice_id": str(invoice.id),
-                    "plan_code": invoice.plan_code,
-                },
-            )
-            return
-
-        logger.info(
-            "billing.paid_plan_applied",
-            extra={
-                "event": "billing.paid_plan_applied",
-                "tenant_id": str(self._tenant_id),
-                "invoice_id": str(invoice.id),
-                "plan_code": invoice.plan_code,
-            },
-        )
-
     async def require_payment(self, payment_id: uuid.UUID) -> Payment:
-        """One payment of this workspace's, or a 404.
-
-        Tenant-scoped through the repository, so another workspace's payment id
-        is indistinguishable from one that does not exist.
-        """
+        """One payment of this workspace's, or a 404."""
         payment = await self._payments.get_by_id(payment_id)
         if payment is None:
             raise NotFoundError("No such payment.")

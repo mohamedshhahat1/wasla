@@ -28,7 +28,7 @@ is where that raising stops.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from time import perf_counter, time_ns
@@ -311,6 +311,43 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Unresolved collection attempts by how reconciliation settled them.",
         ("outcome",),
     ),
+    # Commercial billing outcomes (BILL-14). Before these, a checkout started, a
+    # payment that succeeded, a renewal that failed and a callback that was
+    # refused were each a log line and nothing an alert could fire on. Every
+    # label is one closed word from `BILLING_OUTCOMES` - never a workspace, an
+    # invoice, a payment, a provider reference, an amount or an e-mail - so the
+    # cardinality of each series is fixed for ever.
+    "wasla_billing_checkouts_total": (
+        "Hosted checkouts by lifecycle step: created, settled, failed.",
+        ("outcome",),
+    ),
+    "wasla_billing_payments_total": (
+        "Payment outcomes as settlement decided them.",
+        ("outcome",),
+    ),
+    "wasla_billing_renewals_total": (
+        "Automatic renewal steps by outcome.",
+        ("outcome",),
+    ),
+    "wasla_billing_callbacks_total": (
+        "Payment provider callbacks by what settlement did with them.",
+        ("outcome",),
+    ),
+    "wasla_billing_refunds_total": (
+        "Refunds by stage: requested, refused, confirmed, review_requested.",
+        ("outcome",),
+    ),
+    "wasla_billing_hosted_reconciliation_total": (
+        "Pending hosted-checkout payments by what a provider inquiry found.",
+        ("outcome",),
+    ),
+    # Every durable billing incident as it is raised: duplicate payments,
+    # mismatched and unknown callbacks, permanent provider refusals. `kind` is
+    # `BillingIncidentKind`, seven values.
+    "wasla_billing_incidents_total": (
+        "Billing incidents raised, by kind.",
+        ("kind",),
+    ),
     # How ingestion jobs ended (RAG-05). `outcome` is one of `IndexingOutcome`'s
     # seven fixed values - published, retry scheduled, failed, exhausted, stale,
     # suspended, skipped - and nothing identifying: no workspace, no document,
@@ -426,6 +463,15 @@ REDIS_HISTOGRAMS: Final[dict[str, tuple[str, tuple[str, ...], tuple[float, ...]]
     ),
     "wasla_oldest_pending_payment_age_seconds": (
         "Age of the oldest collection attempt whose provider outcome is unknown.",
+        (),
+        PENDING_PAYMENT_AGE_BUCKETS,
+    ),
+    # The hosted-checkout half of the same question (BILL-09, BILL-14): a
+    # customer who paid on a Paymob page whose callback never arrived. Observed
+    # by each reconciliation pass; an hour-old value means callbacks are not
+    # reaching the deployment.
+    "wasla_oldest_pending_hosted_payment_age_seconds": (
+        "Age of the oldest hosted-checkout payment still pending past the grace period.",
         (),
         PENDING_PAYMENT_AGE_BUCKETS,
     ),
@@ -918,6 +964,121 @@ async def record_payment_reconciliation(
     if oldest_pending_seconds > 0:
         metric = "wasla_oldest_pending_payment_age_seconds"
         await _observe(metric, {}, oldest_pending_seconds, REDIS_HISTOGRAMS[metric][2])
+
+
+# The closed label domains of the billing outcome counters (BILL-14). A value
+# outside its metric's set is counted as `other`, so no caller - and nothing a
+# provider sends - can widen a label domain.
+BILLING_OUTCOMES: Final[dict[str, frozenset[str]]] = {
+    "wasla_billing_checkouts_total": frozenset({"created", "settled", "failed"}),
+    "wasla_billing_payments_total": frozenset(
+        {"succeeded", "declined", "failed", "refused", "mismatched", "duplicate"}
+    ),
+    "wasla_billing_renewals_total": frozenset(
+        {
+            "invoiced",
+            "charge_requested",
+            "not_sent",
+            "provider_refused",
+            "outcome_unknown",
+            "permanent_failure",
+            "skipped",
+        }
+    ),
+    "wasla_billing_callbacks_total": frozenset(
+        {
+            "applied",
+            "duplicate",
+            "unmatched",
+            "mismatched",
+            "no_change",
+            "refused",
+            "declined",
+            "rejected_signature",
+        }
+    ),
+    "wasla_billing_refunds_total": frozenset(
+        {"requested", "refused", "confirmed", "review_requested"}
+    ),
+    "wasla_billing_hosted_reconciliation_total": frozenset(
+        {"settled", "declined", "still_pending", "not_found", "unreachable", "expired"}
+    ),
+    "wasla_billing_incidents_total": frozenset(
+        {
+            "duplicate_payment",
+            "refused_settlement",
+            "mismatched_callback",
+            "unknown_callback",
+            "permanent_provider_error",
+            "recovered_by_reconciliation",
+            "refund_requested",
+        }
+    ),
+}
+
+
+def _closed(metric: str, value: str) -> str:
+    """`value` if it is in the metric's closed domain, else `other`."""
+    return value if value in BILLING_OUTCOMES[metric] else "other"
+
+
+async def _tolerate(recording: Awaitable[None]) -> None:
+    """Await a recording; a metric sink that fails loses the sample, not the caller."""
+    try:
+        await recording
+    except Exception:
+        logger.warning("metrics.record_failed", extra={"event": "metrics.record_failed"})
+
+
+async def record_billing_checkout(outcome: str) -> None:
+    """A hosted checkout was created, settled or failed (BILL-14)."""
+    metric = "wasla_billing_checkouts_total"
+    await _tolerate(_increment(metric, {"outcome": _closed(metric, outcome)}))
+
+
+async def record_billing_payment(outcome: str) -> None:
+    """What settlement decided about one provider payment (BILL-14)."""
+    metric = "wasla_billing_payments_total"
+    await _tolerate(_increment(metric, {"outcome": _closed(metric, outcome)}))
+
+
+async def record_billing_renewal(outcome: str) -> None:
+    """One step of automatic renewal (BILL-14)."""
+    metric = "wasla_billing_renewals_total"
+    await _tolerate(_increment(metric, {"outcome": _closed(metric, outcome)}))
+
+
+async def record_billing_callback(outcome: str) -> None:
+    """What happened to one provider callback (BILL-14)."""
+    metric = "wasla_billing_callbacks_total"
+    await _tolerate(_increment(metric, {"outcome": _closed(metric, outcome)}))
+
+
+async def record_billing_refund(outcome: str) -> None:
+    """A refund was requested, refused, confirmed or asked for review (BILL-13)."""
+    metric = "wasla_billing_refunds_total"
+    await _tolerate(_increment(metric, {"outcome": _closed(metric, outcome)}))
+
+
+async def record_billing_incident(kind: str) -> None:
+    """A durable billing incident was raised (BILL-15)."""
+    metric = "wasla_billing_incidents_total"
+    await _tolerate(_increment(metric, {"kind": _closed(metric, kind)}))
+
+
+async def record_hosted_reconciliation(
+    outcomes: dict[str, int],
+    *,
+    oldest_pending_seconds: float,
+) -> None:
+    """One hosted-checkout reconciliation pass (BILL-09)."""
+    metric = "wasla_billing_hosted_reconciliation_total"
+    for label, amount in outcomes.items():
+        if amount:
+            await _tolerate(_increment_by(metric, {"outcome": _closed(metric, label)}, amount))
+    if oldest_pending_seconds > 0:
+        name = "wasla_oldest_pending_hosted_payment_age_seconds"
+        await _tolerate(_observe(name, {}, oldest_pending_seconds, REDIS_HISTOGRAMS[name][2]))
 
 
 async def read_redis_counters(redis: Redis) -> dict[str, list[tuple[dict[str, str], float]]]:

@@ -91,11 +91,13 @@ class PaymentEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # `transaction.succeeded`, `transaction.refunded`. Stored so the ledger can
     # be read without re-deriving meaning from flags that have since changed.
     event_type: Mapped[str] = mapped_column(String(MAX_EVENT_TYPE_LENGTH), nullable=False)
-    # CASCADE: the record of a callback about a deleted payment is a record
-    # about nothing. Nullable for an event that matched no payment at all.
+    # RESTRICT (BILL-19). This is the provider's own statement about money,
+    # and the ledger of what a processor told us must not disappear because a
+    # payment row was deleted - it is exactly the evidence a dispute needs.
+    # Nullable for an event that matched no payment at all.
     payment_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("payments.id", ondelete="CASCADE"),
+        ForeignKey("payments.id", ondelete="RESTRICT"),
         nullable=True,
     )
     # What this system decided, in one word - see `checkout_service`'s outcome

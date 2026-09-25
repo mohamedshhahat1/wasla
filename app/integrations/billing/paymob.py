@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import time
 from decimal import Decimal
 from typing import Any, Final
@@ -62,6 +63,7 @@ from app.integrations.billing.checkout import (
     CheckoutSession,
     EventKind,
     InquiryVerdict,
+    PreparedCharge,
     RecurringUnavailableError,
     RefundOutcome,
     RefundRequest,
@@ -96,11 +98,22 @@ RATE_LIMITED_STATUS: Final = 429
 # enough that nobody stores a payload in it.
 MAX_FAILURE_REASON_LENGTH: Final = 200
 
-# Stands in for a billing field Paymob requires and this product does not
-# collect. Spelled to be unmistakable in the provider's dashboard: somebody
-# reading a transaction must not take it for a customer's real telephone
-# number. See `PaymobProvider._billing_data`.
-UNKNOWN_BILLING_FIELD: Final = "NOT_COLLECTED"
+# Neutral stand-ins for billing fields Paymob requires and this product does
+# not collect (BILL-22). They used to read `NOT_COLLECTED`, which the customer
+# saw on the hosted page as their own name. `NA` is what Paymob's own callback
+# sample carries for an absent field; the name is the product's, so a payment
+# page never addresses a customer by a string that looks like an error.
+UNKNOWN_PHONE: Final = "NA"
+UNKNOWN_FIRST_NAME: Final = "Wasla"
+UNKNOWN_LAST_NAME: Final = "Customer"
+# The shape Paymob's validator accepts for `billing_data.email`. Deliberately a
+# loose check - one `@`, something either side, a dot in the domain - because
+# its job is to refuse a placeholder before it reaches Paymob, not to police
+# addresses the account system already verified.
+_EMAIL_SHAPE: Final = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# The two environments Paymob keys belong to (see `Settings._paymob_key_problems`).
+TEST_MODE: Final = "test"
+LIVE_MODE: Final = "live"
 
 # The regions Paymob publishes, each with its API base and its checkout host.
 # Both are needed and they are not the same host - see the module docstring.
@@ -147,6 +160,18 @@ INQUIRY_AUTH_PATH: Final = "/api/auth/tokens"
 INQUIRY_PATH: Final = "/api/ecommerce/orders/transaction_inquiry"
 INQUIRY: Final = "transaction_inquiry"
 INQUIRY_AUTH: Final = "inquiry_auth"
+# Card Token Inquiry - the saved card created under one order, documented at
+# developers.paymob.com/paymob-docs/developers/transaction-inquiry-apis/
+# card-token-inquiry (last updated 2026-08-04, read 2026-09-24):
+#
+#   POST /api/acceptance/order_card_tokens {"auth_token": ..., "order_id": N}
+#   -> [{"type": "TOKEN", "obj": {id, token, masked_pan, card_subtype,
+#        order_id, email, ...}}]
+#
+# The recovery path for a TOKEN callback that never arrived. Never the primary
+# one: the authenticated callback is.
+CARD_TOKEN_INQUIRY_PATH: Final = "/api/acceptance/order_card_tokens"  # noqa: S105 - a path
+CARD_TOKEN_INQUIRY: Final = "card_token_inquiry"  # noqa: S105 - a metric label
 # Paymob's auth token is documented as lasting an hour. Re-minted well inside
 # that, because a reconciliation pass that starts at fifty-nine minutes and
 # runs for two would otherwise fail on a token that expired mid-pass.
@@ -380,6 +405,54 @@ def _from_cents(value: Any) -> Decimal:
     return Decimal(value) / 100
 
 
+def _intention_order_id(intention: dict[str, Any]) -> str | None:
+    """The order Paymob created under an intention - `intention_order_id`.
+
+    Documented on the Create Intention response (read 2026-09-24). Read
+    defensively, falling back to the order id Paymob also writes on each
+    payment key, because a 2xx lacking both is a response nothing can be bound
+    to and the caller treats it as a failure.
+    """
+    value = intention.get("intention_order_id")
+    if isinstance(value, bool):
+        value = None
+    if value in (None, ""):
+        keys = intention.get("payment_keys")
+        if isinstance(keys, list) and keys and isinstance(keys[0], dict):
+            value = keys[0].get("order_id")
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    return str(value)
+
+
+def _is_integer_id(entry: int | str) -> bool:
+    if isinstance(entry, bool):
+        return False
+    if isinstance(entry, int):
+        return True
+    return entry.isdigit()
+
+
+def _is_email(value: str | None) -> bool:
+    return bool(value) and _EMAIL_SHAPE.match(value or "") is not None
+
+
+def _billing_block(*, email: str | None, name: str | None) -> dict[str, str]:
+    """The billing block Paymob requires, with neutral stand-ins (BILL-22).
+
+    The e-mail is sent as held and never replaced; a missing one is left empty
+    so Paymob's own validation refuses a hosted checkout, and an automatic
+    charge refuses itself before it gets this far.
+    """
+    first, _, last = (name or "").strip().partition(" ")
+    return {
+        "email": email or "",
+        "first_name": first or UNKNOWN_FIRST_NAME,
+        "last_name": last.strip() or UNKNOWN_LAST_NAME,
+        "phone_number": UNKNOWN_PHONE,
+    }
+
+
 class PaymobProvider:
     """Creates Paymob intentions and authenticates Paymob callbacks."""
 
@@ -397,6 +470,7 @@ class PaymobProvider:
         redirection_url: str | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         transport: httpx.AsyncBaseTransport | None = None,
+        callback_integration_ids: list[int] | None = None,
     ) -> None:
         if region not in REGIONS:
             raise ProviderError(f"Unknown Paymob region: {region}.")
@@ -414,6 +488,15 @@ class PaymobProvider:
         # - it exists solely so a renewal can be taken from a saved card, and
         # Paymob issues it as a distinct integration type.
         self._moto_integration_id = moto_integration_id
+        # The integrations a *customer-facing* transaction may legitimately run
+        # on (BILL-11): every numeric entry of `integration_ids`, plus any the
+        # deployment names explicitly. An entry configured by name ("card")
+        # has no id to compare with, which is what the explicit list is for;
+        # with neither, the binding refuses rather than accepts anything.
+        self._hosted_integration_ids = frozenset(
+            {str(entry) for entry in integration_ids if _is_integer_id(entry)}
+            | {str(entry) for entry in (callback_integration_ids or [])}
+        )
         # The legacy API key, which is what the transaction-inquiry API takes -
         # not the secret key, and not interchangeable with it. Optional,
         # because a deployment can collect money perfectly well without being
@@ -434,6 +517,58 @@ class PaymobProvider:
     @property
     def name(self) -> str:
         return PAYMOB_PROVIDER
+
+    @property
+    def mode(self) -> str | None:
+        """`test` or `live`, read from the secret key; None when it does not say.
+
+        Paymob documents that the keys decide the environment - there is no
+        sandbox host - so the key is the only honest source. A key that
+        declares neither leaves this None, and callback binding then refuses
+        every transaction rather than guessing which environment it is in.
+        """
+        for mode in (TEST_MODE, LIVE_MODE):
+            if f"sk_{mode}_" in self._secret_key:
+                return mode
+        return None
+
+    def callback_binding_problem(self, event: CallbackEvent, *, automatic: bool) -> str | None:
+        """Why a verified transaction cannot belong to this deployment (BILL-11).
+
+        Two checks, both against configuration rather than against anything a
+        caller controls:
+
+        - **Integration.** An automatic renewal runs on the MOTO integration and
+          nothing else; a customer's checkout runs on one of the customer-facing
+          integrations. `integration_id` is inside the HMAC, and Test and Live
+          integrations have different ids - so this is the check that actually
+          stops a validly signed Test transaction settling a Live payment.
+        - **Mode.** `is_live` must match the environment the keys declare.
+          Paymob does not sign `is_live`, so on its own this is a guard against
+          a misconfigured or mixed deployment rather than against an attacker;
+          the integration check is the cryptographic one.
+
+        Refunds and voids arrive on the same integration as the transaction
+        they reverse, so the rule is the same for every event kind.
+        """
+        if event.integration_id is None:
+            return "The callback named no integration."
+        if automatic:
+            if self._moto_integration_id is None or event.integration_id != str(
+                self._moto_integration_id
+            ):
+                return f"Integration {event.integration_id} is not the MOTO integration."
+        elif event.integration_id not in self._hosted_integration_ids:
+            return f"Integration {event.integration_id} is not a configured checkout integration."
+
+        mode = self.mode
+        if mode is None:
+            return "The deployment's Paymob mode cannot be determined from its keys."
+        if event.is_live is None:
+            return "The callback did not say whether it was live."
+        if event.is_live != (mode == LIVE_MODE):
+            return f"A {'live' if event.is_live else 'test'} callback reached a {mode} deployment."
+        return None
 
     def __repr__(self) -> str:  # pragma: no cover - stops a key reaching a log
         return f"PaymobProvider(region={self._api_base!r})"
@@ -486,6 +621,13 @@ class PaymobProvider:
             # a checkout URL built from a missing secret is a broken page and a
             # payment that can never arrive.
             raise ProviderError("Paymob did not return a client secret.")
+        order_id = _intention_order_id(payload)
+        if order_id is None:
+            # Just as fatal, for a quieter reason. Every callback about this
+            # payment is bound to this order (BILL-11) and a saved card finds
+            # its workspace by it (BILL-04); a checkout without one could be
+            # paid and never settle.
+            raise ProviderError("Paymob did not return the intention's order id.")
 
         logger.info(
             "billing.paymob_intention_created",
@@ -493,6 +635,7 @@ class PaymobProvider:
                 "event": "billing.paymob_intention_created",
                 "reference": request.reference,
                 "intention_id": str(intention_id) if intention_id else None,
+                "order_id": order_id,
                 # Never the client secret: it is a bearer value for this
                 # payment page, and a log is not where it belongs.
             },
@@ -500,6 +643,8 @@ class PaymobProvider:
         return CheckoutSession(
             redirect_url=self.checkout_url(client_secret),
             provider_reference=str(intention_id) if intention_id else request.reference,
+            order_reference=order_id,
+            mode=self.mode,
         )
 
     def checkout_url(self, client_secret: str) -> str:
@@ -538,14 +683,13 @@ class PaymobProvider:
         Wasla collects no address and no telephone number for a billing
         contact, and this is not the place to start: an address field here
         would be a data-protection question, not a payments one.
+
+        **The e-mail is never a placeholder** (BILL-05). Paymob validates it,
+        and a hosted checkout without a real address is the account holder's
+        problem to see, not something to paper over. An automatic charge
+        refuses to be built without one - see `charge_saved_method`.
         """
-        first, _, last = (request.customer_name or "").partition(" ")
-        return {
-            "email": request.customer_email or UNKNOWN_BILLING_FIELD,
-            "first_name": first or UNKNOWN_BILLING_FIELD,
-            "last_name": last or UNKNOWN_BILLING_FIELD,
-            "phone_number": UNKNOWN_BILLING_FIELD,
-        }
+        return _billing_block(email=request.customer_email, name=request.customer_name)
 
     def _redacted(self, text: str) -> str:
         """This deployment's own secrets taken back out of a provider's text.
@@ -713,6 +857,7 @@ class PaymobProvider:
             raise ProviderError(
                 f"Paymob refused the request ({response.status_code}): {detail}",
                 retryable=retryable,
+                provider_status=response.status_code,
             )
 
         try:
@@ -804,6 +949,11 @@ class PaymobProvider:
 
         order = transaction.get("order")
         reference = order.get("merchant_order_id") if isinstance(order, dict) else None
+        # Signed (it is `order.id` in the HMAC field list), unlike the
+        # `merchant_order_id` beside it - which is why settlement binds on this.
+        order_id = order.get("id") if isinstance(order, dict) else None
+        integration = transaction.get("integration_id")
+        is_live = transaction.get("is_live")
 
         transaction_id = str(transaction.get("id"))
         parent = transaction.get("parent_transaction")
@@ -836,6 +986,13 @@ class PaymobProvider:
                 else None
             ),
             failure_reason=failure_reason,
+            order_id=str(order_id) if order_id not in (None, "") else None,
+            integration_id=(
+                str(integration)
+                if integration not in (None, "") and not isinstance(integration, bool)
+                else None
+            ),
+            is_live=is_live if isinstance(is_live, bool) else None,
         )
 
     @property
@@ -913,6 +1070,16 @@ class PaymobProvider:
                 "This Paymob account has no Moto integration, which is what "
                 "merchant-initiated charges require."
             )
+        if not _is_email(request.customer_email):
+            # Paymob refuses a MOTO intention whose billing e-mail is not an
+            # address - the real Test API answered 400 to `NOT_COLLECTED`, and
+            # every automatic renewal failed on it (BILL-05). Refused here,
+            # before anything is sent, and as a *permanent* refusal: retrying
+            # changes nothing until somebody fixes the workspace's owner.
+            raise ChargeNotSentError(
+                "The workspace has no billing e-mail to send with the charge.",
+                provider_status=422,
+            )
 
         try:
             intention = await self._post(
@@ -929,12 +1096,10 @@ class PaymobProvider:
                             "quantity": 1,
                         }
                     ],
-                    "billing_data": {
-                        "email": UNKNOWN_BILLING_FIELD,
-                        "first_name": UNKNOWN_BILLING_FIELD,
-                        "last_name": UNKNOWN_BILLING_FIELD,
-                        "phone_number": UNKNOWN_BILLING_FIELD,
-                    },
+                    "billing_data": _billing_block(
+                        email=request.customer_email,
+                        name=request.customer_name,
+                    ),
                     **(
                         {"notification_url": self._notification_url}
                         if self._notification_url
@@ -948,11 +1113,32 @@ class PaymobProvider:
             # describes a payment, it does not take one. Re-raised with the
             # same message and the same retryability so only the *class*
             # changes, which is the one thing the caller needs.
-            raise ChargeNotSentError(str(error), retryable=error.retryable) from error
+            raise ChargeNotSentError(
+                str(error), retryable=error.retryable, provider_status=error.provider_status
+            ) from error
 
         payment_token = _first_payment_key(intention)
         if payment_token is None:
             raise ChargeNotSentError("Paymob did not return a payment token for the saved card.")
+
+        if request.on_prepared is not None:
+            # The identifiers the callback will be bound to, made durable by
+            # the caller *before* the request that moves money (BILL-11). A
+            # failure here is still before the pay request, so it leaves as
+            # "not sent" like everything else in this half.
+            intention_id = intention.get("id")
+            try:
+                await request.on_prepared(
+                    PreparedCharge(
+                        intention_reference=str(intention_id) if intention_id else None,
+                        order_reference=_intention_order_id(intention),
+                    )
+                )
+            except Exception as error:
+                raise ChargeNotSentError(
+                    "The charge could not be recorded before it was sent.",
+                    retryable=True,
+                ) from error
 
         paid = await self._post(
             PAY_PATH,
@@ -1105,6 +1291,99 @@ class PaymobProvider:
         never heard of this" into "we could not tell", or the reverse.
         """
         return "(404)" in str(error)
+
+    async def inquire_saved_method(self, order_reference: str) -> SavedPaymentMethod | None:
+        """The card saved under one of our orders, if Paymob has one (spec: BILL-04).
+
+        Card Token Inquiry by order id. The recovery path for a TOKEN callback
+        that never arrived - the authenticated callback stays primary, and this
+        is only asked about an order this system created and recorded.
+
+        None for "no card on that order" and for anything that cannot be
+        answered: a missing inquiry credential, a refusal, an unreachable
+        provider. Recovery is best effort; a card that is not recovered is a
+        customer invoiced by e-mail, never a charge.
+        """
+        if self._api_key is None:
+            return None
+        try:
+            order_id: int | str = int(order_reference)
+        except ValueError:
+            return None
+        try:
+            token = await self._auth_token()
+            payload = await self._post_any(
+                CARD_TOKEN_INQUIRY_PATH,
+                {"auth_token": token, "order_id": order_id},
+                operation=CARD_TOKEN_INQUIRY,
+            )
+        except ProviderError:
+            logger.warning(
+                "billing.paymob_card_token_inquiry_failed",
+                extra={"event": "billing.paymob_card_token_inquiry_failed"},
+            )
+            return None
+
+        entries = payload if isinstance(payload, list) else [payload]
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("type") != "TOKEN":
+                continue
+            obj = entry.get("obj")
+            if not isinstance(obj, dict):
+                continue
+            if str(obj.get("order_id")) != str(order_reference):
+                # Paymob answering about a different order is not a card for
+                # this one, however the lookup went.
+                continue
+            card = obj.get("token")
+            if not isinstance(card, str) or not card:
+                continue
+            return SavedPaymentMethod(
+                token=card,
+                provider_token_id=str(obj.get("id") or ""),
+                masked_pan=_optional_str(obj.get("masked_pan")),
+                brand=_optional_str(obj.get("card_subtype")),
+                order_reference=_optional_str(obj.get("order_id")),
+                email=_optional_str(obj.get("email")),
+            )
+        return None
+
+    async def _post_any(self, path: str, body: dict[str, Any], *, operation: str) -> Any:
+        """A POST whose 2xx body may be a list - Card Token Inquiry answers with one.
+
+        `_post` insists on an object because every other response here is
+        one; rather than loosen that for every caller, the one endpoint that
+        answers with an array wraps its body so `_post`'s handling of errors,
+        redaction and metrics applies unchanged.
+        """
+        call = ProviderCall(provider=Provider.PAYMOB, operation=operation)
+        try:
+            async with self._client() as client:
+                response = await client.post(
+                    f"{self._api_base}{path}",
+                    json=body,
+                    headers={"Content-Type": "application/json"},
+                )
+        except httpx.HTTPError as error:
+            await call.record(CallOutcome.UNAVAILABLE)
+            raise ProviderError("Paymob could not be reached.", retryable=True) from error
+        except UnsafeUrlError as error:
+            await call.record(CallOutcome.FAILURE)
+            raise ProviderError("Paymob could not be reached.") from error
+        if response.status_code >= 400:
+            await call.record(CallOutcome.FAILURE)
+            raise ProviderError(
+                f"Paymob refused the request ({response.status_code}).",
+                retryable=response.status_code >= 500 or response.status_code == 429,
+                provider_status=response.status_code,
+            )
+        try:
+            payload = response.json()
+        except ValueError as error:
+            await call.record(CallOutcome.FAILURE)
+            raise ProviderError("Paymob returned a response that was not JSON.") from error
+        await call.record(CallOutcome.SUCCESS)
+        return payload
 
     async def refund(self, request: RefundRequest) -> RefundOutcome:
         """Reverse a collected payment through the documented refund endpoint.

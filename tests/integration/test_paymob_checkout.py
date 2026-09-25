@@ -46,6 +46,7 @@ from app.repositories.billing_repository import SubscriptionRepository
 from app.repositories.invoice_repository import InvoiceRepository
 from app.services.checkout_service import (
     APPLIED,
+    DECLINED,
     DUPLICATE,
     MISMATCHED,
     NO_CHANGE,
@@ -54,8 +55,10 @@ from app.services.checkout_service import (
     CheckoutService,
     StartedCheckout,
 )
+from tests.billing_fixtures import renewal_invoice
 from tests.fakes import as_table
 from tests.integration.plan_catalogue import own_plan
+from tests.paymob_orders import order_for, order_from_request
 
 pytestmark = pytest.mark.integration
 
@@ -79,7 +82,7 @@ def _intention_transport(captured: list[dict[str, Any]] | None = None) -> httpx.
             json={
                 "id": INTENTION_ID,
                 "client_secret": CLIENT_SECRET,
-                "intention_order_id": 265715202,
+                "intention_order_id": order_from_request(request),
             },
         )
 
@@ -159,7 +162,8 @@ def _transaction(
         "is_3d_secure": True,
         "integration_id": 4097558,
         "has_parent_transaction": False,
-        "order": {"id": 217503754, "merchant_order_id": reference},
+        "order": {"id": order_for(reference), "merchant_order_id": reference},
+        "is_live": False,
         "created_at": "2026-08-27T11:33:44.592345",
         "currency": "EGP",
         "source_data": {"pan": "2346", "type": "card", "sub_type": "MasterCard"},
@@ -273,39 +277,47 @@ async def test_a_free_plan_is_not_sent_to_a_payment_page(db_session: AsyncSessio
         await _service(db_session, tenant).start(plan_code="free", actor=user)
 
 
-async def test_a_second_attempt_reuses_the_invoice_rather_than_billing_twice(
+async def test_a_second_checkout_leaves_the_first_ones_snapshot_alone(
     db_session: AsyncSession,
 ) -> None:
-    """`UNIQUE(tenant_id, period_start)` decides this either way.
+    """Mutation survivor B17, and the shape of BILL-06's fix.
 
-    Somebody who abandons a checkout and starts another gets a second payment
-    against one invoice - attempts are rows, which is what the payments table
-    is for.
+    Two checkouts are two independent purchases, each with its own immutable
+    invoice: plan, version, price, currency and interval frozen when the page
+    was opened. Neither may rewrite the other - re-pricing a shared invoice is
+    how a 99 EGP page came to buy the 299 EGP plan.
     """
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     await _plan(db_session)
+    await _plan(db_session, code="business", price="299.00")
     service = _service(db_session, tenant)
 
     first = await service.start(plan_code="pro", actor=user)
-    second = await service.start(plan_code="pro", actor=user)
+    before = await db_session.get(Invoice, first.invoice_id)
+    assert before is not None
+    frozen = (before.plan_code, before.amount_due, before.plan_version_id, list(before.lines))
 
-    assert first.invoice_id == second.invoice_id
-    assert first.payment_id != second.payment_id
+    again = await service.start(plan_code="pro", actor=user)
+    other = await service.start(plan_code="business", actor=user)
+    await db_session.flush()
+
+    assert len({first.invoice_id, again.invoice_id, other.invoice_id}) == 3
+    after = await db_session.get(Invoice, first.invoice_id)
+    assert after is not None
+    assert (after.plan_code, after.amount_due, after.plan_version_id, list(after.lines)) == frozen
+    assert after.purpose.value == "checkout"
+    assert first.payment_id != again.payment_id
 
 
-async def test_a_paid_period_is_not_charged_again(db_session: AsyncSession) -> None:
+async def test_a_plan_already_held_cannot_be_bought_again(db_session: AsyncSession) -> None:
+    """Refused before any money moves: there is nothing to buy (BILL-15)."""
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     await _plan(db_session)
     service = _service(db_session, tenant)
     started = await service.start(plan_code="pro", actor=user)
-
-    invoice = (
-        await db_session.execute(select(Invoice).where(Invoice.id == started.invoice_id))
-    ).scalar_one()
-    invoice.status = InvoiceStatus.PAID
-    await db_session.flush()
+    await service.apply(await _verified(_transaction(reference=str(started.payment_id))))
 
     with pytest.raises(ConflictError):
         await service.start(plan_code="pro", actor=user)
@@ -467,7 +479,9 @@ async def test_a_failed_payment_does_not_settle_anything(db_session: AsyncSessio
             data={"message": "Declined"},
         ),
     )
-    assert await _service(db_session, tenant).apply(event) == APPLIED
+    # A declined transaction on a hosted page is history, not a verdict: the
+    # customer may still pay on the same page (BILL-07).
+    assert await _service(db_session, tenant).apply(event) == DECLINED
 
     payment = (
         await db_session.execute(select(Payment).where(Payment.id == started.payment_id))
@@ -475,7 +489,7 @@ async def test_a_failed_payment_does_not_settle_anything(db_session: AsyncSessio
     invoice = (
         await db_session.execute(select(Invoice).where(Invoice.id == started.invoice_id))
     ).scalar_one()
-    assert payment.status is PaymentStatus.FAILED
+    assert payment.status is PaymentStatus.PENDING
     assert payment.failure_reason == "Declined"
     assert invoice.status is InvoiceStatus.OPEN
 
@@ -514,20 +528,72 @@ async def test_a_payment_revives_a_past_due_subscription(db_session: AsyncSessio
         current_period_end=now + timedelta(days=25),
     )
     await db_session.flush()
+    renewal = await renewal_invoice(db_session, subscription=subscription, plan=plan)
 
-    started = await _service(db_session, tenant).start(plan_code="pro", actor=user)
+    # A workspace behind on its plan pays the open renewal; it cannot buy the
+    # plan it already holds.
+    started = await _service(db_session, tenant).start(invoice_id=renewal.id, actor=user)
     event = await _verified(_transaction(reference=str(started.payment_id)))
     await _service(db_session, tenant).apply(event)
 
     await db_session.refresh(subscription)
     assert subscription.status is SubscriptionStatus.ACTIVE
+    assert renewal.status is InvoiceStatus.PAID
 
 
 async def test_a_payment_does_not_revive_a_cancelled_subscription(db_session: AsyncSession) -> None:
-    """Paying an invoice is not a request to resubscribe.
+    """A page opened *before* a cancellation does not undo it when paid.
 
-    Reviving here would undo a decision somebody made deliberately, on the
-    strength of a payment for a period they had already been billed for.
+    The customer cancelled after starting this checkout; paying the page
+    afterwards is not an instruction to resubscribe (spec: callbacks after
+    cancellation). The money is held and a durable incident asks an operator
+    to refund it - never silently taken for nothing (BILL-01).
+    """
+    from app.db.models.billing_incident import BillingIncident, BillingIncidentKind
+
+    tenant = await _tenant(db_session)
+    user = await _user(db_session)
+    plan = await _plan(db_session)
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    starter = await own_plan(db_session, code="starter", price=Decimal("0.00"))
+    subscription = SubscriptionRepository(db_session, tenant_id=tenant.id).create(
+        plan_id=starter.id,
+        status=SubscriptionStatus.ACTIVE,
+        current_period_start=now - timedelta(days=5),
+        current_period_end=now + timedelta(days=25),
+    )
+    await db_session.flush()
+
+    started = await _service(db_session, tenant).start(plan_code="pro", actor=user, now=now)
+    subscription.status = SubscriptionStatus.CANCELLED
+    subscription.cancelled_at = now + timedelta(minutes=1)
+    await db_session.flush()
+
+    event = await _verified(_transaction(reference=str(started.payment_id)))
+    outcome = await _service(db_session, tenant).apply(event, now=now + timedelta(minutes=2))
+
+    await db_session.refresh(subscription)
+    assert outcome == REFUSED
+    assert subscription.status is SubscriptionStatus.CANCELLED
+    assert subscription.plan_id != plan.id
+    incidents = (
+        await db_session.scalars(
+            select(BillingIncident).where(BillingIncident.tenant_id == tenant.id)
+        )
+    ).all()
+    assert [incident.kind for incident in incidents] == [BillingIncidentKind.REFUSED_SETTLEMENT]
+
+
+async def test_a_purchase_after_cancelling_brings_the_workspace_back(
+    db_session: AsyncSession,
+) -> None:
+    """BILL-01: money taken for a plan always grants that plan.
+
+    A customer who cancelled and later *chooses* to buy again gets exactly what
+    they paid for, from the moment it settled. Before, the subscription stayed
+    terminal and the paid plan was never granted.
     """
     tenant = await _tenant(db_session)
     user = await _user(db_session)
@@ -538,17 +604,22 @@ async def test_a_payment_does_not_revive_a_cancelled_subscription(db_session: As
     subscription = SubscriptionRepository(db_session, tenant_id=tenant.id).create(
         plan_id=plan.id,
         status=SubscriptionStatus.CANCELLED,
-        current_period_start=now - timedelta(days=5),
-        current_period_end=now + timedelta(days=25),
+        current_period_start=now - timedelta(days=40),
+        current_period_end=now - timedelta(days=10),
     )
+    subscription.cancelled_at = now - timedelta(days=12)
     await db_session.flush()
 
-    started = await _service(db_session, tenant).start(plan_code="pro", actor=user)
+    started = await _service(db_session, tenant).start(plan_code="pro", actor=user, now=now)
     event = await _verified(_transaction(reference=str(started.payment_id)))
-    await _service(db_session, tenant).apply(event)
+    outcome = await _service(db_session, tenant).apply(event, now=now)
 
     await db_session.refresh(subscription)
-    assert subscription.status is SubscriptionStatus.CANCELLED
+    assert outcome == APPLIED
+    assert subscription.status is SubscriptionStatus.ACTIVE
+    assert subscription.plan_id == plan.id
+    assert subscription.current_period_start == now
+    assert subscription.cancelled_at is None
 
 
 # ----------------------------------------------------------- tenant isolation
@@ -752,11 +823,14 @@ async def test_a_second_payment_against_a_settled_invoice_is_refused(
     Without the invoice transition table this added `amount_paid` a second
     time, leaving an invoice recording 198.00 collected against 99.00 due.
     """
+    from app.db.models.billing_incident import BillingIncident, BillingIncidentKind
+
     tenant = await _tenant(db_session)
     user = await _user(db_session)
     await _plan(db_session)
     first = await _service(db_session, tenant).start(plan_code="pro", actor=user)
-    second = await _service(db_session, tenant).start(plan_code="pro", actor=user)
+    # A second page for the same invoice - "pay this invoice" opened twice.
+    second = await _service(db_session, tenant).start(invoice_id=first.invoice_id, actor=user)
     assert first.invoice_id == second.invoice_id
 
     await _service(db_session, tenant).apply(
@@ -771,6 +845,14 @@ async def test_a_second_payment_against_a_settled_invoice_is_refused(
     invoice = await db_session.get(Invoice, first.invoice_id)
     assert invoice is not None
     assert invoice.amount_paid == Decimal("99.00")
+    # BILL-15: not a log line - a durable incident an operator can list.
+    incident = (
+        await db_session.scalars(
+            select(BillingIncident).where(BillingIncident.payment_id == second.payment_id)
+        )
+    ).one()
+    assert incident.kind is BillingIncidentKind.DUPLICATE_PAYMENT
+    assert incident.amount == Decimal("99.00")
 
 
 # ------------------------------------------------------- paying a renewal

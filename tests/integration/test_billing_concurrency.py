@@ -43,7 +43,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.exceptions import ConflictError
 from app.db.models.billing import BillingInterval, LimitKey, Plan
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.payment_event import PaymentEvent
 from app.db.models.tenant import Tenant
 from app.integrations.billing.paymob import PaymobProvider, hmac_signature
@@ -53,6 +53,8 @@ from app.services.checkout_service import (
     CheckoutService,
     StartedCheckout,
 )
+from tests.billing_fixtures import erase_ledger
+from tests.paymob_orders import order_for, order_from_request
 
 pytestmark = pytest.mark.integration
 
@@ -71,7 +73,11 @@ def _provider() -> PaymobProvider:
         index = next(counter)
         return httpx.Response(
             201,
-            json={"id": f"pi_test_{index}", "client_secret": f"csk_test_{index}"},
+            json={
+                "id": f"pi_test_{index}",
+                "client_secret": f"csk_test_{index}",
+                "intention_order_id": order_from_request(request),
+            },
         )
 
     return PaymobProvider(
@@ -129,6 +135,7 @@ async def workspace(
         async with committing() as session:
             # Tenant cascades to invoices and payments; payment_events cascade
             # from payments. The plan is platform-wide and goes by hand.
+            await erase_ledger(session, [ids[0]])
             await session.execute(delete(Tenant).where(Tenant.id == ids[0]))
             await session.execute(delete(Plan).where(Plan.id == ids[1]))
             await session.commit()
@@ -146,6 +153,7 @@ async def _committed_invoice(
         invoice = Invoice(
             tenant_id=tenant_id,
             status=InvoiceStatus.OPEN,
+            purpose=InvoicePurpose.CHECKOUT,
             plan_code="pro",
             amount_due=Decimal(amount),
             amount_paid=Decimal("0.00"),
@@ -166,6 +174,8 @@ async def _committed_invoice(
             refunded_amount=Decimal("0.00"),
         )
         session.add(payment)
+        await session.flush()
+        payment.provider_order_id = str(order_for(payment.id))
         await session.commit()
         return invoice.id, payment.id
 
@@ -184,7 +194,8 @@ def _transaction(reference: str, *, amount_cents: int = 9900) -> dict[str, Any]:
         "is_3d_secure": True,
         "integration_id": 4097558,
         "has_parent_transaction": False,
-        "order": {"id": 217503754, "merchant_order_id": reference},
+        "order": {"id": order_for(reference), "merchant_order_id": reference},
+        "is_live": False,
         "created_at": "2026-08-29T11:33:44.592345",
         "currency": "EGP",
         "source_data": {"pan": "2346", "type": "card", "sub_type": "MasterCard"},
@@ -283,18 +294,16 @@ async def test_the_one_that_wins_is_the_one_that_records_the_work(
 # -------------------------------------------------------------- the checkout
 
 
-async def test_two_checkouts_started_at_once_bill_the_period_once(
+async def test_two_checkouts_started_at_once_are_two_independent_purchases(
     committing: async_sessionmaker[AsyncSession], workspace: tuple[uuid.UUID, uuid.UUID]
 ) -> None:
-    """`UNIQUE(tenant_id, period_start)` decides it, and the loser recovers.
+    """Two owners clicking at once, or one double-clicking.
 
-    Two owners clicking at the same moment, or one double-clicking. Both may
-    open a payment page - each attempt is its own row, which is what the
-    payments table is for - but there must be exactly one invoice, or the
-    workspace is billed twice for one month.
-
-    The loser re-reads rather than raising: an integrity error surfacing as a
-    500 to somebody who did nothing wrong is a bug, not a guarantee.
+    Each opens its own page and its own immutable `CHECKOUT` invoice (BILL-06):
+    a shared invoice is what let one checkout re-price another. Neither answers
+    500. "Billed once" is enforced where money arrives - a second payment for a
+    plan already paid this period becomes a duplicate-payment incident
+    (BILL-15) - and the renewal period uniqueness still protects the sweep.
     """
     tenant_id, _ = workspace
     plan_code = await _plan_code(committing, workspace)
@@ -308,15 +317,18 @@ async def test_two_checkouts_started_at_once_bill_the_period_once(
 
     first, second = await asyncio.gather(start(), start())
 
-    assert first == second
+    assert first != second
     async with committing() as session:
         invoices = await session.scalar(
-            select(func.count()).select_from(Invoice).where(Invoice.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(Invoice)
+            .where(Invoice.tenant_id == tenant_id)
+            .where(Invoice.purpose == InvoicePurpose.CHECKOUT)
         )
         payments = await session.scalar(
             select(func.count()).select_from(Payment).where(Payment.tenant_id == tenant_id)
         )
-    assert invoices == 1
+    assert invoices == 2
     assert payments == 2
 
 
@@ -383,7 +395,7 @@ async def test_different_keys_are_different_attempts(
             select(func.count()).select_from(Invoice).where(Invoice.tenant_id == tenant_id)
         )
     assert payments == 2
-    assert invoices == 1
+    assert invoices == 2
 
 
 async def test_one_workspaces_key_does_not_block_anothers(
@@ -421,6 +433,7 @@ async def test_one_workspaces_key_does_not_block_anothers(
         assert payments == 2
     finally:
         async with committing() as session:
+            await erase_ledger(session, [other_id])
             await session.execute(delete(Tenant).where(Tenant.id == other_id))
             await session.commit()
 

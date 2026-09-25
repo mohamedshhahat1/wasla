@@ -228,6 +228,9 @@ class AllowingEntitlements:
     async def require(self, key: LimitKey, *, additional: int = 1) -> Entitlement:
         return await self.check(key, additional=additional)
 
+    async def reserve_or_refuse(self, key: LimitKey, *, additional: int = 1) -> Entitlement:
+        return await self.check(key, additional=additional)
+
     async def allows(self, key: LimitKey, *, additional: int = 1) -> bool:
         return True
 

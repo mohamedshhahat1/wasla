@@ -57,6 +57,7 @@ from app.services.media_service import MediaService
 from app.services.membership_service import MembershipService
 from app.services.messaging_service import MessagingService
 from app.services.payment_method_service import PaymentMethodService
+from app.services.plan_catalog import PlanCatalog
 from app.services.refund_service import RefundService
 from app.services.sentiment_service import SentimentService
 from app.services.subscription_service import SubscriptionService
@@ -584,6 +585,14 @@ def get_plan_repository(session: SessionDep) -> PlanRepository:
 PlanRepositoryDep = Annotated[PlanRepository, Depends(get_plan_repository)]
 
 
+def get_plan_catalog(session: SessionDep) -> PlanCatalog:
+    """The plan catalogue as customers see it: plans at their current versions."""
+    return PlanCatalog(session)
+
+
+PlanCatalogDep = Annotated[PlanCatalog, Depends(get_plan_catalog)]
+
+
 def get_subscription_service(
     session: SessionDep,
     workspace: ActiveWorkspaceDep,
@@ -759,7 +768,11 @@ def require_entitlement(
     """
 
     async def guard(entitlements: EntitlementServiceDep) -> Entitlement:
-        return await entitlements.require(key)
+        # Under the workspace's advisory lock for this limit, held until the
+        # request commits - after the route has written the row it is
+        # creating (BILL-08). A plain count-then-create let two simultaneous
+        # requests both take the last slot.
+        return await entitlements.reserve_or_refuse(key)
 
     return guard
 
