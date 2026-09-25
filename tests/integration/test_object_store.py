@@ -14,7 +14,8 @@ convention the PostgreSQL tests use:
     TEST_S3_BUCKET=wasla-media \\
     TEST_S3_ACCESS_KEY_ID=... TEST_S3_SECRET_ACCESS_KEY=... pytest
 
-`docker run -p 9100:9000 quay.io/minio/minio server /data` is enough to make them run,
+A MinIO container is enough to make them run - the CI step and the `minio`
+service in `docker-compose.yml` both start one -
 and they are worth running: what they prove is that the SigV4 signing in
 `object_store.py` is correct, and no amount of mocking a `boto` call proves
 that. A signing bug is a 403 from a real store and a green test against a fake
