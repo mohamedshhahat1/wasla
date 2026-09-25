@@ -1014,3 +1014,177 @@ groups:
             Find it with storage_state = 'mismatched' in message_media and
             follow the quarantine procedure in the runbook.
           runbook: docs/RUNBOOK.md
+
+  # Commercial billing (BILL-14). Every figure here is a closed-label counter or
+  # the hosted-payment age histogram from app/core/telemetry.py; none carries a
+  # workspace, an invoice, a payment, an amount or a provider reference. The
+  # durable record of each money incident is the billing_incidents table - the
+  # alert says one exists, /api/v1/platform/billing/incidents says which.
+  - name: wasla-billing
+    interval: 30s
+    rules:
+      - alert: BillingDuplicatePayment
+        # Money arrived for something already paid, or twice for one purchase.
+        # Settlement refuses to grant anything twice and raises an incident; a
+        # person has to decide on the refund. One is enough to page.
+        expr: sum(increase(wasla_billing_incidents_total{kind="duplicate_payment"}[30m])) > 0
+        labels:
+          severity: critical
+          component: billing
+        annotations:
+          summary: "A customer has been charged twice"
+          description: >-
+            Settlement recorded a successful payment for an invoice that was
+            already paid or a purchase that was already served. Nothing was
+            granted twice, but the customer holds a charge that needs a refund
+            decision. Open the duplicate_payment incident under
+            /api/v1/platform/billing/incidents and follow the duplicate payment
+            procedure in the billing operator guide.
+          runbook: docs/BILLING_OPERATIONS.md
+
+      - alert: BillingMismatchedCallback
+        # A signed callback whose order, integration, mode, amount or currency
+        # does not match the payment it names. Either the account is shared
+        # with another system or someone is replaying signed payloads.
+        expr: sum(increase(wasla_billing_incidents_total{kind="mismatched_callback"}[30m])) > 0
+        labels:
+          severity: critical
+          component: billing
+        annotations:
+          summary: "A signed payment callback did not match its payment"
+          description: >-
+            A correctly signed Paymob callback named a payment it does not
+            belong to - a different order, integration, test/live mode, amount
+            or currency - and settlement refused it. Check whether another
+            system shares the Paymob account or the HMAC secret, and inspect
+            the mismatched_callback incident.
+          runbook: docs/BILLING_OPERATIONS.md
+
+      - alert: BillingPermanentChargeFailure
+        # The provider refused a saved-card renewal in a way no retry changes:
+        # a missing billing e-mail, a rejected integration, a revoked token.
+        # The attempt is stopped and the invoice left for dunning.
+        expr: sum(increase(wasla_billing_incidents_total{kind="permanent_provider_error"}[1h])) > 0
+        labels:
+          severity: warning
+          component: billing
+        annotations:
+          summary: "A saved-card renewal was permanently refused"
+          description: >-
+            Paymob refused a MOTO renewal charge permanently, so automatic
+            collection stopped for that invoice instead of retrying. The
+            customer will fall into dunning unless they pay by hosted checkout.
+            Check the permanent_provider_error incident for the cause (billing
+            contact, integration, token) before the grace period ends.
+          runbook: docs/BILLING_OPERATIONS.md
+
+      - alert: BillingInvalidCallbackSpike
+        # Callbacks refused for their signature or naming no known payment.
+        # One or two are the internet; a steady stream is a rotated HMAC secret
+        # or a changed callback URL, and every refused callback is a payment
+        # the reconciler will have to find the slow way.
+        expr: |
+          sum(increase(wasla_billing_callbacks_total{outcome=~"rejected_signature|unmatched"}[15m])) >= 10
+        for: 10m
+        labels:
+          severity: warning
+          component: billing
+        annotations:
+          summary: "Payment callbacks are being refused"
+          description: >-
+            Paymob callbacks are failing signature verification or naming no
+            payment Wasla created. If the HMAC secret was rotated, update
+            PAYMOB_HMAC_SECRET; if not, somebody is posting to the callback URL.
+            Paid checkouts still settle through hosted reconciliation, late.
+          runbook: docs/BILLING_OPERATIONS.md
+
+      - alert: BillingRenewalFailureSpike
+        # Renewal charges that did not reach a verdict, against all renewal
+        # charges. Declines are the customer's card and not counted here; these
+        # are Wasla or Paymob failing to charge at all. A floor keeps one
+        # failure on a quiet night quiet.
+        expr: |
+          (
+            sum(rate(wasla_billing_renewals_total{outcome=~"not_sent|provider_refused|outcome_unknown|permanent_failure"}[30m]))
+            /
+            clamp_min(sum(rate(wasla_billing_renewals_total{outcome=~"charge_requested|not_sent|provider_refused|outcome_unknown|permanent_failure"}[30m])), 0.001)
+          ) > 0.25
+          and
+          sum(increase(wasla_billing_renewals_total{outcome=~"not_sent|provider_refused|outcome_unknown|permanent_failure"}[30m])) >= 5
+        for: 15m
+        labels:
+          severity: warning
+          component: billing
+        annotations:
+          summary: "Automatic renewals are failing to charge"
+          description: >-
+            More than a quarter of saved-card renewal charges are not reaching
+            Paymob or not coming back with an answer. Workspaces will drift
+            into dunning. Check the recurring.* log lines, the MOTO integration
+            and Paymob status; outcome_unknown attempts are resolved by the
+            payment reconciler, never charged again.
+          runbook: docs/BILLING_OPERATIONS.md
+
+      - alert: BillingCheckoutProviderFailing
+        # Checkouts that could not be created. Customers see "try again later"
+        # on the upgrade button; nobody can buy.
+        expr: |
+          sum(increase(wasla_billing_checkouts_total{outcome="failed"}[15m])) >= 3
+          unless
+          sum(increase(wasla_billing_checkouts_total{outcome="created"}[15m])) > 0
+        for: 10m
+        labels:
+          severity: critical
+          component: billing
+        annotations:
+          summary: "Customers cannot start a checkout"
+          description: >-
+            Every checkout attempt in the last quarter hour failed to create a
+            Paymob intention. Check the Paymob secret key, the card integration
+            id and Paymob status, and the checkout.provider_failed log lines.
+          runbook: docs/BILLING_OPERATIONS.md
+
+      - alert: BillingHostedReconciliationFailing
+        # The reconciler could not ask Paymob about pending hosted payments.
+        # While this holds, a customer whose callback was lost stays unpaid.
+        expr: |
+          sum(increase(wasla_billing_hosted_reconciliation_total{outcome="unreachable"}[30m])) >= 3
+          unless
+          sum(increase(wasla_billing_hosted_reconciliation_total{outcome=~"settled|declined|still_pending|not_found|expired"}[30m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: billing
+        annotations:
+          summary: "Pending checkout payments cannot be reconciled"
+          description: >-
+            Every transaction inquiry the hosted reconciler made in the last
+            half hour failed, so payments whose callback was lost are not being
+            recovered. Check Paymob reachability and the API key, and the
+            payment_reconciliation.hosted_* log lines.
+          runbook: docs/BILLING_OPERATIONS.md
+
+      - alert: BillingHostedPaymentStuck
+        # The reconciler observes the age of the oldest hosted payment still
+        # pending past its grace period on every pass. Observations above an
+        # hour mean a customer paid (or abandoned) and neither a callback nor
+        # an inquiry has settled it.
+        expr: |
+          (
+            sum(increase(wasla_oldest_pending_hosted_payment_age_seconds_count[30m]))
+            -
+            sum(increase(wasla_oldest_pending_hosted_payment_age_seconds_bucket{le="3600"}[30m]))
+          ) > 0
+        for: 30m
+        labels:
+          severity: warning
+          component: billing
+        annotations:
+          summary: "A checkout payment has been pending for over an hour"
+          description: >-
+            A hosted-checkout payment has stayed pending for more than an hour
+            after its grace period. Either callbacks are not reaching the
+            deployment (check the public callback URL and ingress) or the
+            reconciler cannot resolve it. See the reconciliation view under
+            /api/v1/platform/billing/reconciliation.
+          runbook: docs/BILLING_OPERATIONS.md
