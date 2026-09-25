@@ -11,7 +11,7 @@ Operator procedures: [docs/BILLING_OPERATIONS.md](docs/BILLING_OPERATIONS.md).
 | Starting HEAD | `e7c604e` on `billing-findings-remediation` (worktree `E:\wasla-billing-remediation`, clean; `alembic heads` `0071`, `alembic check` clean) |
 | Branch / worktree | `custom-plans-topups` / `E:\wasla-custom-plans-topups` |
 | Part I final code/test HEAD (historical) | `d3103ac2a033b8e31bf8ba76ac82b12dd12ff20a` (every gate in section 11 ran from this commit) |
-| Part II final code/test HEAD | `e85f88326699c173f66c0fbd515b15ef3e7ecbaf` (the section 22 gates ran on exactly this code and these tests) |
+| Part II final code/test HEAD | `adb82a8d341ab6a0144f7f285d139d94496a32bc` (three mutation killer tests, section 22a; application code unchanged since `1ff0fb5`). The section 22 gates first ran at `e85f88326699c173f66c0fbd515b15ef3e7ecbaf`; the source-final gates are in CUSTOM_PLANS_TOPUPS_MERGE_VERIFICATION.md |
 | Part II report/docs HEAD | `09ba2adefa061680b106d54980967eb5caecaeab` |
 | Current feature branch HEAD | the commit that carries this corrected report (`docs(billing): correct custom-plan Paymob verification report`); see `git log` |
 | Current migration head / API operations | **`0073`** / **192** (Part I ended at `0072` / 186) |
@@ -632,6 +632,54 @@ so the populated ledger holds an open offer and the sweep checks O01-O05 too. A
 second pass had been invalidated by my own concurrent test run on the same
 database; the figures above are from clean, non-overlapping runs.
 
+## 22a. Part II mutation verification (ADR-114)
+
+Detached temporary worktree at the corrected source, its own database
+(`wasla_offermut`), the Part I protocol: one textual change per mutant on a
+unique anchor, compiled in memory with bytecode writing disabled, the named
+killer first and then the rest of the killer suite (offers, commercial API,
+custom plan lifecycle, recurring billing, invariants, Paymob checkout) with
+`-x`, KILLED only on a real test failure, every file restored and its sha256
+compared. Unmutated baseline: passing.
+
+**First run (at `9501a6d`): 10 killed, 3 survived.** Each survivor was a real
+test gap, not an equivalent mutant, and got the smallest killer test
+(commit `adb82a8d341ab6a0144f7f285d139d94496a32bc`):
+
+* **OFFER-03** (grant the plan's latest version, not the pinned one): the
+  1,500/1,800 test published version 2 with a future effective time, so the
+  plan's current version was still version 1 when the old page was paid.
+  Version 2 is now effective at once.
+* **OFFER-11** (price the checkout from the plan's latest version): no test
+  published a new version *before* acceptance. New:
+  `test_accepting_after_a_new_version_still_buys_the_offered_version`.
+* **OFFER-07** (drop the `ACTIVE` filter from the saved-card lookup): the
+  fixture's revoked card was never the default. New:
+  `test_a_revoked_card_still_marked_default_is_not_charged`.
+
+The new tests pass on the model-built and the migration-built schema.
+
+**Final run (at `adb82a8`): 13 applied, 13 killed, 0 equivalent, 0 survived;
+13/13 files restored byte for byte.**
+
+| ID | Property removed | File | Result | Killer test | sha256 before → after |
+|---|---|---|---|---|---|
+| OFFER-01 | a paid offer is not granted before an authoritative payment | `app/services/custom_plan_offer_service.py` | **KILLED** | `test_custom_plan_offers.py::test_an_offer_activates_exactly_its_version_once_and_only_when_paid` | `dd2e81fe5d00d09e` → `dd2e81fe5d00d09e` |
+| OFFER-02 | another workspace cannot read or accept an offer | `app/repositories/custom_plan_offer_repository.py` | **KILLED** | `test_commercial_api.py::test_one_workspace_cannot_see_accept_decline_or_pay_anothers_offer` | `fd960aef347afe1e` → `fd960aef347afe1e` |
+| OFFER-03 | settlement grants the pinned offered version, not the plan's latest | `app/services/settlement_service.py` | **KILLED** | `test_custom_plan_offers.py::test_the_page_opened_at_1500_buys_version_1_after_version_2_at_1800` | `d5f14ba5baf4426c` → `d5f14ba5baf4426c` |
+| OFFER-04 | a declined offer never becomes the workspace's plan | `app/services/custom_plan_offer_ledger.py` | **KILLED** | `test_custom_plan_offers.py::test_money_for_an_offer_declined_or_withdrawn_after_opening_is_held[declined]` | `35cc70c7900551f4` → `35cc70c7900551f4` |
+| OFFER-05 | a withdrawn (cancelled) offer never becomes the workspace's plan | `app/services/custom_plan_offer_ledger.py` | **KILLED** | `test_custom_plan_offers.py::test_money_for_an_offer_declined_or_withdrawn_after_opening_is_held[cancelled]` | `35cc70c7900551f4` → `35cc70c7900551f4` |
+| OFFER-06 | a priced custom plan is not scheduled onto a renewal without acceptance | `app/platform/billing_operations.py` | **KILLED** | `test_custom_plan_offers.py::test_a_priced_custom_plan_is_offered_never_scheduled_or_free` | `112b4dba78714c12` → `112b4dba78714c12` |
+| OFFER-07 | a workspace without a usable saved card never enters MOTO/MIT (revoked card) | `app/repositories/payment_method_repository.py` | **KILLED** | `test_recurring_billing.py::test_a_revoked_card_still_marked_default_is_not_charged` | `4b39892ef982093f` → `4b39892ef982093f` |
+| OFFER-07b | a workspace with no saved card never enters MOTO/MIT | `app/services/recurring_service.py` | **KILLED** | `test_recurring_billing.py::test_a_workspace_with_no_card_is_not_charged` | `eab6d93f889c9480` → `eab6d93f889c9480` |
+| OFFER-08 | a replayed callback is claimed once and changes nothing | `app/services/checkout_service.py` | **KILLED** | `test_custom_plan_offers.py::test_an_offer_activates_exactly_its_version_once_and_only_when_paid` | `8af59cd7bb7e6867` → `8af59cd7bb7e6867` |
+| OFFER-09 | offer settlement is bound to the Paymob order Wasla recorded | `app/services/checkout_service.py` | **KILLED** | `test_custom_plan_offers.py::test_a_callback_that_disagrees_with_the_snapshot_is_refused[order]` | `8af59cd7bb7e6867` → `8af59cd7bb7e6867` |
+| OFFER-10 | Transaction Inquiry sends the documented auth_token body field | `app/integrations/billing/paymob.py` | **KILLED** | `test_custom_plan_offers.py::test_a_lost_offer_callback_is_recovered_by_inquiry_through_the_sweep` | `8efa2faca09b48f5` → `8efa2faca09b48f5` |
+| OFFER-11 | an offer's invoice is pinned to the offered version, not the plan's latest | `app/services/custom_plan_offer_service.py` | **KILLED** | `test_custom_plan_offers.py::test_accepting_after_a_new_version_still_buys_the_offered_version` | `dd2e81fe5d00d09e` → `dd2e81fe5d00d09e` |
+| OFFER-12 | a successful payment for a declined or withdrawn offer is held, not granted | `app/services/settlement_service.py` | **KILLED** | `test_custom_plan_offers.py::test_money_for_an_offer_declined_or_withdrawn_after_opening_is_held[declined]` | `d5f14ba5baf4426c` → `d5f14ba5baf4426c` |
+
+OFFER-07b extends the spec's OFFER-07: 07b removes the no-card refusal itself,
+07 lets a revoked card through the lookup.
 ## 23. Decisions, deviations and remaining gaps
 
 * **No `DRAFT` state.** A custom plan nobody has offered is a plan with no
