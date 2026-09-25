@@ -950,3 +950,63 @@ async def test_a_topup_purchase_stays_after_a_mid_period_plan_change(
     assert (
         await standing(db_session, tenant, LimitKey.PERIOD_AI_TURNS, at=first_end)
     ).limit == 25_000
+
+
+PER_KEY_QUANTITY = {
+    TopupEntitlement.PERIOD_MESSAGES: 50_000,
+    TopupEntitlement.PERIOD_AI_TURNS: 10_000,
+    TopupEntitlement.PERIOD_CAMPAIGN_MESSAGES: 5_000,
+    TopupEntitlement.STORAGE_BYTES: 25 * GIB,
+    TopupEntitlement.WHATSAPP_NUMBERS: 2,
+    TopupEntitlement.TEAM_MEMBERS: 5,
+    TopupEntitlement.KNOWLEDGE_DOCUMENTS: 500,
+}
+
+
+@pytest.mark.parametrize("key", list(TopupEntitlement), ids=lambda key: key.value)
+async def test_each_topup_raises_its_own_limit_once_and_leaves_the_plan_alone(
+    db_session: AsyncSession, key: TopupEntitlement
+) -> None:
+    """Spec 30, application E2E for every one of the seven keys.
+
+    One generic path - frozen purchase, TOPUP invoice, hosted checkout, signed
+    callback, settlement, grant - with only the key, quantity and price
+    differing. Before: effective = base. After: base + quantity, exactly once
+    (the same callback again is a duplicate), and the plan, its version and
+    its recurring price are what they were.
+    """
+    now = base_now()
+    await catalogue(db_session)
+    tenant, owner, subscription = await workspace(db_session, now=now)
+    paymob = Paymob()
+    before = await standing(db_session, tenant, key.limit_key, at=now)
+    assert (before.topup_limit, before.limit) == (0, before.base_limit)
+    plan_before = (subscription.plan_id, subscription.plan_version_id)
+    terms = await PlanCatalog(db_session).pinned_version(subscription)
+    assert terms is not None
+    price_before = terms.price
+
+    item = await product(db_session, entitlement=key, quantity=PER_KEY_QUANTITY[key])
+    _, payment = await buy(db_session, tenant, owner, paymob, item, now=now)
+    signed = callback(payment, transaction=930_000_000 + list(TopupEntitlement).index(key))
+    assert await apply(db_session, tenant.id, paymob.provider(), signed, now=now) == APPLIED
+    assert await apply(db_session, tenant.id, paymob.provider(), signed, now=now) == DUPLICATE
+
+    after = await standing(db_session, tenant, key.limit_key, at=now)
+    assert before.base_limit is not None
+    assert (after.base_limit, after.topup_limit, after.limit) == (
+        before.base_limit,
+        PER_KEY_QUANTITY[key],
+        before.base_limit + PER_KEY_QUANTITY[key],
+    )
+    await db_session.refresh(subscription)
+    assert (subscription.plan_id, subscription.plan_version_id) == plan_before
+    pinned = await PlanCatalog(db_session).pinned_version(subscription)
+    assert pinned is not None and pinned.price == price_before
+    grants = await db_session.scalar(
+        select(func.count())
+        .select_from(TopupPurchase)
+        .where(TopupPurchase.tenant_id == tenant.id)
+        .where(TopupPurchase.status == TopupStatus.GRANTED)
+    )
+    assert grants == 1
