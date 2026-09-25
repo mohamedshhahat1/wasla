@@ -5796,3 +5796,64 @@ decides on the refund. Operators no longer need database access to run billing.
 Trials are no longer supported for any plan; reintroducing them is a new
 decision. Checkout invoices accumulate one per attempt; abandoned ones stay
 `open` and are never chased, because `issued_at` is not set.
+
+## ADR-113 — Custom Plans Are Tenant-Scoped Plan Versions; Top-Ups Are Expiring Additions To The Effective Limit
+
+**Context.** Sales needed two things the catalogue could not express: terms
+negotiated for one company, and extra allowance bought mid-period without
+changing plan. Both touch the money path ADR-112 had just made strict - pinned
+plan versions, one settlement engine, bound Paymob callbacks, strict MIT
+eligibility - and both could undo it: a "custom plan" held on the subscription
+would be a second answer to "what is this workspace allowed", a top-up stored as
+a plan edit would re-price or re-limit a pinned version, and a top-up charged
+like a renewal would be an unauthorised merchant-initiated charge.
+
+**Decision.**
+
+1. **A custom plan is a plan with `scope = tenant`.** `plans.scope` is `public`,
+   `private` or `tenant`; a `tenant` plan names its workspace in
+   `plans.tenant_id`, which never changes. It uses ordinary immutable plan
+   versions, ordinary migrations and ordinary settlement. There is no second
+   plan model.
+2. **The TENANT binding is enforced twice.** `PlanCatalog.require_available` on
+   every assignment path (platform error `custom_plan_not_available_for_workspace`;
+   a tenant naming another's plan gets "No such plan."), and triggers on
+   `subscriptions` and `invoices` so no writer - the sweep, a migration, SQL -
+   can point a workspace at another's custom plan.
+3. **Seven keys, and only seven,** are custom-plan terms and top-up targets:
+   `period_messages`, `period_ai_turns`, `period_campaign_messages`,
+   `storage_bytes`, `whatsapp_numbers`, `team_members`, `knowledge_documents`.
+   A custom plan inherits every other limit from the plan the workspace holds.
+4. **The effective limit is computed, never stored:** pinned version + active
+   paid top-ups + active platform grants, in `EntitlementService.check`, which
+   every enforcement path already reads - so existing advisory locks and
+   meters apply unchanged, and no plan version is ever modified. Unlimited
+   stays unlimited; zero is zero.
+5. **A top-up is a frozen purchase that expires with its period.**
+   `topup_products` is the catalogue; `topup_purchases` freezes key, quantity,
+   price, period and expiry at checkout (a trigger refuses changes). Usage and
+   capacity top-ups alike expire at the current period's end in v1, with no
+   carry-over. Expiry is decided by the clock; the sweep only records it.
+   Capacity expiry deletes nothing: the workspace is `over_limit` and new
+   creation is refused.
+6. **Buying one is an ordinary hosted checkout** through
+   `CheckoutService.open_page`, a `topup` invoice purpose and
+   `InvoiceSettlement`, granted exactly once under a row lock by `TopupLedger`.
+   A `topup` invoice is never MIT-collectible (the sweep's predicate,
+   `RecurringService`, and a trigger on `payments`), never issued and never
+   dunned.
+7. **A platform grant is not a sale.** It is a `topup_purchases` row with
+   `source = platform_grant` and, by CHECK constraint, no invoice, payment or
+   price.
+8. **Refunds never subtract on their own.** Before the grant, a full refund
+   cancels; after it, the purchase keeps counting in `refund_review` until an
+   operator keeps or withdraws it, with an incident either way.
+9. **`period_messages` stays metered, not enforced** (ADR-030). A top-up raises
+   the allowance it is reported against, and the API says `enforced: false`.
+
+**Consequences.** A company's negotiated terms cannot leak to another company
+through any code path. Top-ups can never raise a renewal price, change a plan,
+renew or be charged to a saved card. A refunded top-up that was used is an
+operator decision, not a silent limit drop. Top-ups do not carry over and
+cannot be bought for a key the plan leaves unlimited; both are v1 product
+rules, and relaxing either is a new decision.

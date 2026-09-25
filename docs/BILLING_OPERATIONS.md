@@ -1,8 +1,8 @@
 # Billing operations
 
-**Status: Implemented** (ADR-112). This guide is for platform staff running
-billing. It covers the catalogue, subscribers, invoices, payments, refunds,
-reconciliation and incidents. Everything here goes through
+**Status: Implemented** (ADR-112, ADR-113). This guide is for platform staff
+running billing. It covers the catalogue, custom plans, top-ups, subscribers,
+invoices, payments, refunds, reconciliation and incidents. Everything here goes through
 `/api/v1/platform/billing/*`. None of it needs SQL, and none of it should be done
 with SQL.
 
@@ -12,7 +12,7 @@ and the endpoint list is in [API.md](API.md#platform-billing).
 ## Before you change anything
 
 - **Roles.** `PLATFORM_OWNER` or `PLATFORM_ADMIN` for everything. Only
-  `PLATFORM_OWNER` can delete a plan.
+  `PLATFORM_OWNER` can delete a plan or a top-up product.
 - **Every change needs a `reason`.** It is between 3 and 500 characters and goes
   into the audit log with your identity, your role, the request id, and the
   values before and after.
@@ -40,6 +40,57 @@ and the endpoint list is in [API.md](API.md#platform-billing).
 
 A version cannot be edited once published, not even with SQL: a database
 trigger refuses any `UPDATE`. To correct a mistake, publish another version.
+
+## Custom plans (ADR-113)
+
+A custom plan is a normal plan with `scope: tenant`, restricted to one company
+for ever. Everything about plans above applies to it; this is the one-screen
+flow for creating one.
+
+| Task | Call | Notes |
+| --- | --- | --- |
+| See the company first | `GET /tenants/{tenant_id}/summary` | Plan, version, price, period, next renewal, the seven limits with usage, live top-ups and grants, recent invoices, payments, incidents and timeline. |
+| Preview the terms | `POST /tenants/{tenant_id}/custom-plan/preview` | Writes nothing. Shows current versus proposed for each of the seven keys, what is in use, which proposals are already below usage, the limits inherited from the current plan (`agents`, `owned_workspaces`), when it would take effect and the next charge. |
+| Create it | `POST /tenants/{tenant_id}/custom-plan` | `code`, `name`, `price`, `currency` (EGP), `billing_interval` and **all seven limits** are required. `null` is unlimited, `0` is none, and leaving a key out is refused. Storage is in bytes (GiB x 1024^3). |
+| Create and assign at renewal | the same, with `assign_to_tenant: true`, `assignment_mode: "next_renewal"` and `expected_subscription_revision` | A scheduled change: cheaper applies at the boundary; pricier is billed at the boundary and adopted once paid. |
+| Create and assign now | `assignment_mode: "now"` | A free custom plan applies at once. A priced one needs `financial_basis`: `customer_checkout` (nothing is assigned; the owner buys it at checkout), `manual_payment` (with the payment details you have seen) or `complimentary` (with `complimentary_until`). |
+| Change its terms | `POST /plans/{id}/versions` | A new immutable version. The company stays on its version until you migrate it (`POST /plans/{id}/migrations` or `change-plan` with `next_renewal`). |
+| Stop offering it | `POST /plans/{id}/deactivate` | The company keeps it and keeps renewing on it. |
+| List a company's custom plans | `GET /plans?scope=tenant&tenant_id=…` | |
+
+A custom plan cannot be assigned to another company: `change-plan` answers
+`422 custom_plan_not_available_for_workspace`, and the database refuses it even
+by SQL. It cannot be made public (`PATCH` with `is_public: true` is `422`), and
+its owning company cannot be changed.
+
+## Top-ups (ADR-113)
+
+A top-up adds allowance to one of the seven keys until the end of the current
+billing period. It never changes the plan, its price or the renewal, and it
+never renews.
+
+### The catalogue
+
+| Task | Call | Notes |
+| --- | --- | --- |
+| List products | `GET /topups?scope=…&tenant_id=…&entitlement_key=…&active=…` | |
+| Create a product | `POST /topups` | `code` (permanent), `name`, `entitlement_key` (one of the seven), `quantity` (> 0; storage in bytes), `price`, `currency` (EGP), `scope` (`global`, or `tenant` with `tenant_id`), `is_public`, `reason`. A `tenant` product is visible, purchasable and grantable to that company only. |
+| Change price, quantity, name or visibility | `PATCH /topups/{id}` with `expected_revision` | For new purchases only. Every existing purchase keeps what it was bought at. |
+| Stop selling it | `POST /topups/{id}/deactivate` | Existing purchases and grants are untouched. |
+| Delete it | `DELETE /topups/{id}` (owner only) | Refused with `409` once anybody has bought it. Deactivate instead. |
+
+### Purchases, grants and refunds
+
+| Task | Call | Notes |
+| --- | --- | --- |
+| Find purchases | `GET /topup-purchases?tenant_id=…&status=…&source=…&entitlement_key=…` | `status=paid` lists money taken and not granted - each has an incident and needs a refund. |
+| Give allowance without payment | `POST /tenants/{tenant_id}/topups/grant` | `entitlement_key`, `quantity`, `valid_until: "current_period_end"`, `reason`, `expected_subscription_revision`. Recorded as `source: platform_grant` with no invoice, payment or price. Refused for a key the plan leaves unlimited. |
+| Decide a refunded top-up | `POST /topup-purchases/{id}/refund-review` | Only for `status: refund_review`. `decision: keep` leaves the allowance; `withdraw` removes it from the limit from now on. Withdrawing deletes nothing and never makes usage negative - the company is just over its limit until it fits again. |
+
+To refund a top-up, refund its payment with `POST /payments/{id}/refund` as
+usual. Nothing is withdrawn automatically: before the grant a full refund cancels
+the purchase, after it the purchase waits in `refund_review` for your decision.
+A top-up refund never changes the plan and never starts dunning.
 
 ## Subscribers
 
@@ -112,13 +163,20 @@ workspace, payment, invoice, amount and provider transaction.
 | `permanent_provider_error` | Paymob permanently refused a saved-card renewal, for example because the workspace has no billing e-mail or the integration was rejected. | Fix the cause (usually the owner's e-mail address). The invoice waits in dunning and the customer can still pay by checkout. |
 | `recovered_by_reconciliation` | A payment whose callback never arrived was found and settled by the reconciler. | Nothing is needed for the payment. If there are many, check the callback URL. |
 | `refund_requested` | A workspace owner asked for a refund. | Decide, and refund or reply. |
+| `topup_paid_but_not_granted` | A top-up was paid but could not be granted: its period had ended, or the subscription was not active. The customer holds nothing for their money. | Refund the payment, or - if the customer agrees - give the allowance as a platform grant and refund anyway. |
+| `topup_duplicate_payment` | Money arrived twice for one top-up page, or for a top-up invoice already paid. Nothing was granted twice. | Refund the second transaction. |
+| `topup_refund_after_consumption` | A granted top-up was refunded after some of its allowance was used. Nothing was withdrawn. | Decide with `refund-review`: usually keep it. |
+| `topup_entitlement_reversal_blocked` | A granted top-up was refunded before any of it was used. Nothing was withdrawn, because that is never automatic. | Decide with `refund-review`: usually withdraw it. |
+| `topup_unknown_callback` | A top-up invoice was paid with no purchase behind it. The checkout path cannot produce this. | Treat as a bug; refund and report it. |
+| `custom_plan_scope_mismatch` | Money arrived for an invoice that would put a company on another company's custom plan. It was held. | Treat as a bug or tampering; refund and investigate. |
 
 Resolve an incident with `POST /incidents/{id}/resolve` and a `note`. The note
 is audited.
 
 ## Alerts
 
-The rules are in the `wasla-billing` group of `deploy/monitoring/alerts.yml`.
+The rules are in the `wasla-billing` and `wasla-billing-topups` groups of
+`deploy/monitoring/alerts.yml`. None of them fires on an ordinary card decline.
 
 | Alert | Severity | First look |
 | --- | --- | --- |
@@ -130,6 +188,11 @@ The rules are in the `wasla-billing` group of `deploy/monitoring/alerts.yml`.
 | `BillingRenewalFailureSpike` | warning | MOTO integration; `recurring.*` log lines |
 | `BillingHostedReconciliationFailing` | warning | `PAYMOB_API_KEY`; Paymob reachability |
 | `BillingHostedPaymentStuck` | warning | The public callback URL; `GET /reconciliation` |
+| `BillingTopupPaidNotGranted` | critical | `topup_paid_but_not_granted` incidents; refund the payment |
+| `BillingTopupSettlementFailure` | warning | `topup_duplicate_payment` and `topup_unknown_callback` incidents |
+| `BillingTopupCallbackMismatchSpike` | warning | Mismatched callback incidents on top-up payments |
+| `BillingTopupReconciliationStuck` | warning | `GET /topup-purchases?status=paid` |
+| `BillingCustomPlanFailureSpike` | warning | API error logs for `/tenants/*/custom-plan` |
 
 ## Configuration you may need
 
