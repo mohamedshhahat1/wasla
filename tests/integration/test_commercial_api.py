@@ -893,7 +893,13 @@ async def test_the_platform_company_summary_is_one_complete_read(
     _clean(summary)
     assert summary["tenant"]["id"] == str(tenant.id)
     assert summary["plan"]["code"] == "pro" and summary["custom_plan"] is False
-    assert summary["plan_version"]["version"] == 1
+    # The version the subscription is pinned to - 1 on a model-built schema,
+    # 2 on a migration-built one, where `pro` is seeded before the fixture
+    # publishes its own terms.
+    pinned = await db_session.get(PlanVersion, subscription.plan_version_id)
+    assert pinned is not None
+    assert summary["plan_version"]["id"] == str(pinned.id)
+    assert summary["plan_version"]["version"] == pinned.version
     assert summary["price"] == "99.00"
     assert summary["next_renewal_at"] is not None
     team = next(row for row in summary["entitlements"] if row["key"] == "team_members")
