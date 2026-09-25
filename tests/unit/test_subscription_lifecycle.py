@@ -144,6 +144,26 @@ async def test_an_active_subscription_opens_the_next_period() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_month_end_anchor_survives_february_through_roll_over() -> None:
+    """BILL-18 (mutation R-BILL-18): the sweep counts from the anchor, not the last end.
+
+    Bought on 31 January, renewed on 28 February: the next period must end on
+    31 March. Chaining from 28 February used to fix it on the 28th for ever.
+    """
+    subscription = _subscription(
+        start=datetime(2026, 1, 31, 9, tzinfo=UTC),
+        end=datetime(2026, 2, 28, 9, tzinfo=UTC),
+    )
+    subscription.billing_anchor_at = datetime(2026, 1, 31, 9, tzinfo=UTC)
+
+    await roll_over(subscription, plan=_plan(), now=datetime(2026, 2, 28, 9, 5, tzinfo=UTC))
+    assert subscription.current_period_end == datetime(2026, 3, 31, 9, tzinfo=UTC)
+
+    await roll_over(subscription, plan=_plan(), now=datetime(2026, 3, 31, 9, 5, tzinfo=UTC))
+    assert subscription.current_period_end == datetime(2026, 4, 30, 9, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
 async def test_an_unpaid_subscription_keeps_its_state_into_the_next_period() -> None:
     """A new period does not settle an old debt, and quietly marking it active
     would lose the fact that somebody still owes money."""
