@@ -36,6 +36,7 @@ from app.db.models.knowledge import Document, KnowledgeBase
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.services.entitlement_service import EntitlementService
+from app.services.plan_catalog import PlanCatalog
 from tests.billing_fixtures import erase_ledger
 
 pytestmark = pytest.mark.integration
@@ -73,11 +74,18 @@ async def workspace(maker: async_sessionmaker[AsyncSession]) -> AsyncIterator[uu
         )
         session.add_all([tenant, plan])
         await session.flush()
+        # Published and pinned here, before the race. Left to the racing
+        # requests, both would materialise version 1 at once and the second
+        # would wait on the first's uncommitted row - serialising them by
+        # accident and hiding a missing lock (mutation R-BILL-08).
+        version = await PlanCatalog(session).current_version(plan)
+        assert version is not None
         now = datetime.now(UTC)
         session.add(
             Subscription(
                 tenant_id=tenant.id,
                 plan_id=plan.id,
+                plan_version_id=version.id,
                 status=SubscriptionStatus.ACTIVE,
                 current_period_start=now,
                 current_period_end=now + timedelta(days=30),
