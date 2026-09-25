@@ -1188,3 +1188,98 @@ groups:
             reconciler cannot resolve it. See the reconciliation view under
             /api/v1/platform/billing/reconciliation.
           runbook: docs/BILLING_OPERATIONS.md
+
+  # Top-ups and custom plans (ADR-113). The same closed-label counters: an
+  # entitlement is one of seven words, never a workspace, product, invoice,
+  # payment or amount. Ordinary customer declines are deliberately not here - a
+  # declined card is the customer's business, not an incident.
+  - name: wasla-billing-topups
+    interval: 30s
+    rules:
+      - alert: BillingTopupPaidNotGranted
+        # A customer paid for extra allowance and did not get it: the period it
+        # was bought for had ended, or the subscription had stopped. Settlement
+        # held the money and raised an incident; somebody must refund it.
+        expr: sum(increase(wasla_billing_incidents_total{kind="topup_paid_but_not_granted"}[30m])) > 0
+        labels:
+          severity: critical
+          component: billing
+        annotations:
+          summary: "A paid top-up was not granted"
+          description: >-
+            A top-up payment settled but its allowance could not be granted,
+            so the customer has paid for nothing. Open the
+            topup_paid_but_not_granted incident under
+            /api/v1/platform/billing/incidents and refund the payment, or grant
+            the allowance as a platform grant if the customer agrees.
+          runbook: docs/BILLING_OPERATIONS.md
+
+      - alert: BillingTopupSettlementFailure
+        # Top-up money that settlement could not apply: a second charge on one
+        # page, or a paid top-up invoice with no purchase behind it.
+        expr: |
+          sum(increase(wasla_billing_incidents_total{kind=~"topup_duplicate_payment|topup_unknown_callback"}[1h])) > 0
+        labels:
+          severity: warning
+          component: billing
+        annotations:
+          summary: "Top-up money could not be settled"
+          description: >-
+            Money arrived for a top-up that settlement refused: the customer
+            was charged twice on one page, or a top-up invoice was paid with no
+            purchase behind it. Nothing was granted twice. Inspect the
+            topup_duplicate_payment or topup_unknown_callback incident and
+            decide on the refund.
+          runbook: docs/BILLING_OPERATIONS.md
+
+      - alert: BillingTopupCallbackMismatchSpike
+        # Signed callbacks about top-up payments that did not match them -
+        # order, integration, mode, amount or currency.
+        expr: |
+          sum(increase(wasla_billing_topup_purchase_total{outcome="callback_mismatched"}[15m])) >= 3
+        for: 5m
+        labels:
+          severity: warning
+          component: billing
+        annotations:
+          summary: "Top-up payment callbacks do not match their payments"
+          description: >-
+            Several signed Paymob callbacks for top-up payments were refused
+            because they named another order, integration, mode, amount or
+            currency. Check for a shared Paymob account or replayed payloads,
+            and the mismatched_callback incidents.
+          runbook: docs/BILLING_OPERATIONS.md
+
+      - alert: BillingTopupReconciliationStuck
+        # The billing sweep counts, on every pass, top-ups paid more than an
+        # hour ago and still not granted. Increasing for half an hour means
+        # nobody has resolved one.
+        expr: sum(increase(wasla_billing_topup_purchase_total{outcome="stuck"}[30m])) > 0
+        for: 30m
+        labels:
+          severity: warning
+          component: billing
+        annotations:
+          summary: "A paid top-up has sat ungranted for over an hour"
+          description: >-
+            At least one top-up has been paid for more than an hour without
+            being granted or refunded. Find it under
+            /api/v1/platform/billing/topup-purchases?status=paid and resolve its
+            topup_paid_but_not_granted incident.
+          runbook: docs/BILLING_OPERATIONS.md
+
+      - alert: BillingCustomPlanFailureSpike
+        # Custom-plan operations that failed unexpectedly - not a stale revision
+        # or a validation refusal, which are an operator's to fix, but errors.
+        expr: sum(increase(wasla_billing_custom_plan_total{outcome="failed"}[30m])) >= 3
+        labels:
+          severity: warning
+          component: billing
+        annotations:
+          summary: "Custom-plan operations are failing"
+          description: >-
+            Creating or assigning custom plans has failed with an unexpected
+            error three or more times in half an hour. Operators cannot set up
+            negotiated plans. Check the API error logs for the
+            /platform/billing/tenants/*/custom-plan routes.
+          runbook: docs/BILLING_OPERATIONS.md

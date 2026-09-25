@@ -1441,3 +1441,178 @@ tests:
               description: >-
                 A hosted-checkout payment has stayed pending for more than an hour after its grace period. Either callbacks are not reaching the deployment (check the public callback URL and ingress) or the reconciler cannot resolve it. See the reconciliation view under /api/v1/platform/billing/reconciliation.
               runbook: docs/BILLING_OPERATIONS.md
+
+  # ------------------------------------------- top-ups and custom plans (ADR-113)
+  - interval: 1m
+    name: a paid top-up that was not granted pages, and clears once it is old
+    input_series:
+    - series: wasla_billing_incidents_total{job="wasla-worker", kind="topup_paid_but_not_granted"}
+      values: 0+0x10 1+0x60
+    - series: wasla_billing_topup_checkout_total{job="wasla-worker", entitlement="period_ai_turns", outcome="failed"}
+      values: 0+2x70
+    alert_rule_test:
+    - eval_time: 9m
+      alertname: BillingTopupPaidNotGranted
+      exp_alerts: []
+    - eval_time: 12m
+      alertname: BillingTopupPaidNotGranted
+      exp_alerts:
+      - exp_labels:
+          severity: critical
+          component: billing
+        exp_annotations:
+          summary: A paid top-up was not granted
+          description: A top-up payment settled but its allowance could not be granted, so the customer has paid for nothing. Open the topup_paid_but_not_granted incident under /api/v1/platform/billing/incidents and refund the payment, or grant the allowance as a platform grant if the customer agrees.
+          runbook: docs/BILLING_OPERATIONS.md
+    - eval_time: 60m
+      alertname: BillingTopupPaidNotGranted
+      exp_alerts: []
+  - interval: 1m
+    name: customer declines and refusals never raise a top-up alert
+    input_series:
+    - series: wasla_billing_topup_checkout_total{job="wasla-worker", entitlement="period_ai_turns", outcome="failed"}
+      values: 0+5x60
+    - series: wasla_billing_topup_checkout_total{job="wasla-worker", entitlement="team_members", outcome="refused"}
+      values: 0+5x60
+    - series: wasla_billing_payments_total{job="wasla-worker", outcome="declined"}
+      values: 0+5x60
+    alert_rule_test:
+    - eval_time: 20m
+      alertname: BillingTopupPaidNotGranted
+      exp_alerts: []
+    - eval_time: 20m
+      alertname: BillingTopupSettlementFailure
+      exp_alerts: []
+    - eval_time: 20m
+      alertname: BillingTopupCallbackMismatchSpike
+      exp_alerts: []
+    - eval_time: 20m
+      alertname: BillingTopupReconciliationStuck
+      exp_alerts: []
+    - eval_time: 20m
+      alertname: BillingCustomPlanFailureSpike
+      exp_alerts: []
+    - eval_time: 50m
+      alertname: BillingTopupPaidNotGranted
+      exp_alerts: []
+    - eval_time: 50m
+      alertname: BillingTopupSettlementFailure
+      exp_alerts: []
+    - eval_time: 50m
+      alertname: BillingTopupCallbackMismatchSpike
+      exp_alerts: []
+    - eval_time: 50m
+      alertname: BillingTopupReconciliationStuck
+      exp_alerts: []
+    - eval_time: 50m
+      alertname: BillingCustomPlanFailureSpike
+      exp_alerts: []
+  - interval: 1m
+    name: a double-charged top-up warns
+    input_series:
+    - series: wasla_billing_incidents_total{job="wasla-worker", kind="topup_duplicate_payment"}
+      values: 0+0x10 1+0x80
+    alert_rule_test:
+    - eval_time: 9m
+      alertname: BillingTopupSettlementFailure
+      exp_alerts: []
+    - eval_time: 12m
+      alertname: BillingTopupSettlementFailure
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: billing
+        exp_annotations:
+          summary: Top-up money could not be settled
+          description: 'Money arrived for a top-up that settlement refused: the customer was charged twice on one page, or a top-up invoice was paid with no purchase behind it. Nothing was granted twice. Inspect the topup_duplicate_payment or topup_unknown_callback incident and decide on the refund.'
+          runbook: docs/BILLING_OPERATIONS.md
+    - eval_time: 80m
+      alertname: BillingTopupSettlementFailure
+      exp_alerts: []
+  - interval: 1m
+    name: a stream of mismatched top-up callbacks warns, a single one does not
+    input_series:
+    - series: wasla_billing_topup_purchase_total{job="wasla-worker", entitlement="period_ai_turns", outcome="callback_mismatched"}
+      values: 0+0x10 0+1x30
+    - series: wasla_billing_topup_purchase_total{job="wasla-worker", entitlement="team_members", outcome="callback_mismatched"}
+      values: 0+0x10 1+0x30
+    alert_rule_test:
+    - eval_time: 9m
+      alertname: BillingTopupCallbackMismatchSpike
+      exp_alerts: []
+    - eval_time: 25m
+      alertname: BillingTopupCallbackMismatchSpike
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: billing
+        exp_annotations:
+          summary: Top-up payment callbacks do not match their payments
+          description: Several signed Paymob callbacks for top-up payments were refused because they named another order, integration, mode, amount or currency. Check for a shared Paymob account or replayed payloads, and the mismatched_callback incidents.
+          runbook: docs/BILLING_OPERATIONS.md
+  - interval: 1m
+    name: a single mismatched top-up callback stays quiet
+    input_series:
+    - series: wasla_billing_topup_purchase_total{job="wasla-worker", entitlement="period_ai_turns", outcome="callback_mismatched"}
+      values: 0+0x10 1+0x40
+    alert_rule_test:
+    - eval_time: 12m
+      alertname: BillingTopupCallbackMismatchSpike
+      exp_alerts: []
+    - eval_time: 20m
+      alertname: BillingTopupCallbackMismatchSpike
+      exp_alerts: []
+    - eval_time: 40m
+      alertname: BillingTopupCallbackMismatchSpike
+      exp_alerts: []
+  - interval: 1m
+    name: a paid top-up left ungranted for half an hour of sweeps warns
+    input_series:
+    - series: wasla_billing_topup_purchase_total{job="wasla-worker", entitlement="whatsapp_numbers", outcome="stuck"}
+      values: 0+0x10 0+1x100
+    alert_rule_test:
+    - eval_time: 35m
+      alertname: BillingTopupReconciliationStuck
+      exp_alerts: []
+    - eval_time: 60m
+      alertname: BillingTopupReconciliationStuck
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: billing
+        exp_annotations:
+          summary: A paid top-up has sat ungranted for over an hour
+          description: At least one top-up has been paid for more than an hour without being granted or refunded. Find it under /api/v1/platform/billing/topup-purchases?status=paid and resolve its topup_paid_but_not_granted incident.
+          runbook: docs/BILLING_OPERATIONS.md
+  - interval: 1m
+    name: failing custom-plan operations warn, refusals do not
+    input_series:
+    - series: wasla_billing_custom_plan_total{job="wasla-worker", operation="create", outcome="failed"}
+      values: 0+0x5 0+1x20
+    - series: wasla_billing_custom_plan_total{job="wasla-worker", operation="assign", outcome="refused"}
+      values: 0+10x30
+    alert_rule_test:
+    - eval_time: 5m
+      alertname: BillingCustomPlanFailureSpike
+      exp_alerts: []
+    - eval_time: 12m
+      alertname: BillingCustomPlanFailureSpike
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: billing
+        exp_annotations:
+          summary: Custom-plan operations are failing
+          description: Creating or assigning custom plans has failed with an unexpected error three or more times in half an hour. Operators cannot set up negotiated plans. Check the API error logs for the /platform/billing/tenants/*/custom-plan routes.
+          runbook: docs/BILLING_OPERATIONS.md
+  - interval: 1m
+    name: refused custom-plan operations alone stay quiet
+    input_series:
+    - series: wasla_billing_custom_plan_total{job="wasla-worker", operation="assign", outcome="refused"}
+      values: 0+10x30
+    - series: wasla_billing_custom_plan_total{job="wasla-worker", operation="preview", outcome="succeeded"}
+      values: 0+10x30
+    alert_rule_test:
+    - eval_time: 20m
+      alertname: BillingCustomPlanFailureSpike
+      exp_alerts: []
