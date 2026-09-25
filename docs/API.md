@@ -180,10 +180,11 @@ Accepting an invitation for an address that already has an account adds or reins
 | Method | Path | Purpose | Access |
 | --- | --- | --- | --- |
 | POST | `/api/v1/billing/subscription` | Choose a **free** plan for a workspace that has none (`201`); a priced plan answers `402` | Workspace **owner** |
-| POST | `/api/v1/billing/subscription/plan` | Move to another **free** plan; a priced plan answers `402` | Workspace **owner** |
+| POST | `/api/v1/billing/subscription/plan` | Move to another **free** plan; a cheaper plan while on a paid one is **scheduled for the period end**; a pricier one answers `402` | Workspace **owner** |
+| POST | `/api/v1/billing/subscription/scheduled-change/cancel` | Withdraw a scheduled downgrade | Workspace **owner** |
 | POST | `/api/v1/billing/checkout` | Open a hosted payment page for a plan or an outstanding invoice (`201`) | Workspace **owner** |
 | GET | `/api/v1/billing/payments/{id}` | Where one payment attempt has got to | Workspace **owner** |
-| POST | `/api/v1/billing/payments/{id}/refund` | Give back what is left of a payment (`202`) | Workspace **owner** |
+| POST | `/api/v1/billing/payments/{id}/refund` | **Ask** platform staff for a refund (`202`); no money moves (ADR-112) | Workspace **owner** |
 | POST | `/api/v1/webhooks/paymob` | Receive a payment provider callback | Public, HMAC-verified |
 
 ```
@@ -225,15 +226,14 @@ Keep polling; the callback is what resolves it.
 
 ```
 POST /api/v1/billing/payments/{payment_id}/refund   {"reason": "..."}
-  -> 202 {"status": "succeeded", "refund_pending": true,
-          "refunded_amount": "0.00", ...}
+  -> 202 {"payment_id": "...", "status": "review_requested"}
 ```
 
-**202, and the status still says `succeeded`.** This records that the provider
-accepted the reversal; the money moves later and is confirmed by a callback,
-exactly as a payment is. There is no amount in the request — it is the
-payment's own unreturned balance, so no client can ask for more back than was
-paid. Render `refund_pending`, never "refunded", until `refunded_at` is set.
+**A request, not a refund** (ADR-112, BILL-13). A workspace owner used to be able
+to refund their own payment and keep the plan it bought. Now this records the
+request, audits it and raises a `refund_requested` incident for platform staff.
+The payment does not change. Refunds are made through
+`POST /api/v1/platform/billing/payments/{id}/refund`.
 
 The webhook is unauthenticated by necessity and answers `200 {"status":
 "received"}` to everything it verified — applied, duplicate, unmatched or

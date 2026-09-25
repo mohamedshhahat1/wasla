@@ -5731,3 +5731,68 @@ so a takeover in that window waits for the intent and then finds a committed
 send. Clients must send `expected_assigned_to_id` and handle 409s; that UI
 behaviour is a deployment verification item. The residual race between the
 AI's last read and Meta's socket (CRM-17) is unchanged and remains accepted.
+
+## ADR-112 — Billing Has One Commercial Model, One Settlement Engine And An Operator Control Plane
+
+**Context.** The billing audit (`billing-03bb13b1`) found the money path strict
+(signed callbacks, idempotent events, durable MIT attempts) and the commercial
+model around it undefined. The free Starter plan expired after a fourteen-day
+trial and a later payment granted nothing (BILL-01). A saved card could be
+charged for an abandoned checkout invoice (BILL-02). The sweep invoiced the
+period that had just ended, so a purchase's first month was billed twice
+(BILL-03). Real TOKEN callbacks never attached a card, because the stored
+reference was the intention id rather than the order id (BILL-04). Every real
+MOTO renewal was refused because the billing e-mail was a placeholder, and the
+refusal was retried for ever (BILL-05). Callbacks were bound only to an unsigned
+merchant reference, not to Paymob's order, integration or mode (BILL-11). A
+checkout whose callback was lost was never recovered (BILL-09). A checkout re-pointed an existing invoice at a new plan
+(BILL-06), a decline closed a checkout that could still succeed (BILL-07), and
+count limits could be exceeded by concurrent requests (BILL-08). Plans could be
+changed only by SQL, and a price edit silently repriced every subscriber
+(BILL-12). A manual payment, a callback and a reconciliation each settled money
+differently (BILL-10, BILL-20). Tenant owners could refund themselves and keep
+the plan (BILL-13). Anomalies were log lines (BILL-15), and periods drifted after
+the 31st (BILL-18).
+
+**Decision.**
+
+1. **Commercial rules.** Free plans are permanent: no trial, no expiry
+   (migration `0070`). Priced plans are billed in advance. An upgrade takes
+   effect on settlement and starts a full new period, with no credit. A
+   downgrade is scheduled for the period end. Cancellation is at period end by
+   default.
+2. **Versioned catalogue.** Commercial terms live in immutable `plan_versions`
+   (enforced by a trigger). Subscriptions and invoices are pinned to a version.
+   A new version applies to new checkouts only. Existing subscribers move by an
+   explicit migration, applied at each subscriber's renewal and adopted only
+   once that renewal is paid.
+3. **Invoices have a purpose** (`checkout`, `renewal`, `manual`, `adjustment`).
+   Only renewals are unique per period, and only a renewal that passes the
+   strict eligibility predicate can be charged to a saved card. Every checkout
+   is a new invoice that freezes the version, price, currency and interval.
+4. **One settlement engine.** `InvoiceSettlement` is the only code that applies
+   money to an invoice or voids one. It enforces the invoice state machine and
+   turns every refusal into a durable, deduplicated `billing_incidents` row.
+5. **Paymob binding.** The intention id and the order id are stored separately.
+   A transaction callback must match the stored order, an allowed integration
+   and the payment's test/live mode. A TOKEN callback is correlated by order
+   id, and a lost one is recovered by Card Token Inquiry. MOTO charges carry
+   the owner's e-mail address. Provider errors are classified as permanent,
+   retryable or ambiguous, and each class has one handling rule.
+6. **Concurrency.** Count-based entitlements are reserved under a per-workspace
+   advisory lock held to commit. Financial rows reference their tenant with
+   `ON DELETE RESTRICT`. The database checks money invariants.
+7. **Operator control plane.** `/api/v1/platform/billing/*` manages plans,
+   versions, migrations, subscriptions, invoices, payments, refunds,
+   reconciliation and incidents, under platform RBAC, with optimistic
+   concurrency and a full audit trail. A tenant's refund endpoint only files a
+   request.
+8. **Observability.** Closed-label billing counters and a pending-age histogram
+   feed eight alert rules, each with a promtool test.
+
+**Consequences.** A price change reaches existing subscribers only when somebody
+decides it should. A customer who pays twice is never granted twice; a person
+decides on the refund. Operators no longer need database access to run billing.
+Trials are no longer supported for any plan; reintroducing them is a new
+decision. Checkout invoices accumulate one per attempt; abandoned ones stay
+`open` and are never chased, because `issued_at` is not set.
