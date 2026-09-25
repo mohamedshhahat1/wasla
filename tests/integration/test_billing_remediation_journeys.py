@@ -1065,6 +1065,40 @@ async def test_a_hosted_payment_whose_callback_was_lost_is_recovered_by_inquiry(
     assert len(cards) == 1
 
 
+async def test_the_billing_sweep_itself_recovers_a_lost_hosted_payment(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BILL-09 through the worker (mutation R-BILL-09), not the reconciler alone.
+
+    Recovery that nothing schedules is recovery that never happens: the
+    billing sweep's reconcile phase must find the pending hosted payment past
+    its grace period, ask Paymob, and settle it - with no charge sent.
+    """
+    tenant, owner = await _workspace(db_session)
+    paymob = Paymob()
+    provider = paymob.provider(api_key="an-inquiry-api-key")
+    started = await CheckoutService(db_session, tenant_id=tenant.id, provider=provider).start(
+        plan_code="pro", actor=owner, now=T0
+    )
+    payment = await db_session.get(Payment, started.payment_id)
+    assert payment is not None
+    # Committed, as the checkout request's own transaction would be: the sweep
+    # works in its own transactions and rolls back when a phase finds nothing.
+    await db_session.commit()
+    await db_session.refresh(payment)
+    paymob.inquiry = json.loads(_callback(payment, transaction=700_900_101)[0])["obj"]
+    paymob.requests.clear()
+
+    worker = _worker(db_session, monkeypatch, provider)
+    await worker._reconcile(now=payment.created_at + timedelta(hours=1))
+
+    await db_session.refresh(payment)
+    await db_session.refresh(tenant)
+    assert payment.status is PaymentStatus.SUCCEEDED
+    assert await _agents(db_session, tenant) == 5
+    assert paymob.pays() == [], "the sweep asked; it never charged"
+
+
 # ----------------------------------------------------------------- B29
 
 
