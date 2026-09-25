@@ -487,6 +487,60 @@ async def test_a_cheaper_page_buys_only_the_cheaper_plan(db_session: AsyncSessio
     assert await _agents(db_session, tenant) == 20
 
 
+async def test_a_checkout_settles_on_the_terms_it_was_opened_at(db_session: AsyncSession) -> None:
+    """BILL-06, mutation B17. A new version published while the page is open changes nothing.
+
+    The customer opened Pro at 99 EGP / 5 agents. Before they paid, an operator
+    published Pro v2 at 149 / 3 agents. The 99 they pay buys what the page
+    showed them: v1, five agents - never the terms that happened to be current
+    when the callback arrived.
+    """
+    tenant, owner = await _workspace(db_session)
+    paymob = Paymob()
+    provider = paymob.provider()
+    started = await CheckoutService(db_session, tenant_id=tenant.id, provider=provider).start(
+        plan_code="pro", actor=owner, now=T0
+    )
+    invoice = await db_session.get(Invoice, started.invoice_id)
+    assert invoice is not None and invoice.plan_version_id is not None
+    opened_at = invoice.plan_version_id
+
+    pro = await own_plan(db_session, code="pro", price=Decimal("99.00"), limits={"agents": 5})
+    admin = PlanCatalogAdmin(db_session)
+    latest = (await admin.versions(pro.id))[0].version
+    await admin.create_version(
+        pro.id,
+        PlanVersionCreate(
+            price=Decimal("149.00"),
+            currency="EGP",
+            interval="monthly",
+            limits={"agents": 3},
+            expected_version=latest,
+            reason="Repriced while a customer's page was open.",
+        ),
+        actor=await add_owner(db_session, tenant),
+        now=T0 + timedelta(minutes=1),
+    )
+
+    payment = await db_session.get(Payment, started.payment_id)
+    assert payment is not None
+    assert (
+        await _apply(
+            db_session,
+            tenant.id,
+            provider,
+            _callback(payment, transaction=700_600_101),
+            now=T0 + timedelta(minutes=2),
+        )
+        == APPLIED
+    )
+
+    subscription = await _subscription(db_session, tenant)
+    assert subscription.plan_version_id == opened_at
+    assert await _agents(db_session, tenant) == 5
+    assert invoice.amount_paid == Decimal("99.00")
+
+
 # --------------------------------------------------------------- BILL-11
 
 
