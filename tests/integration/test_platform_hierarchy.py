@@ -485,6 +485,22 @@ PLATFORM_ROUTE_POLICY = {
     ("POST", "/platform/billing/reconciliation/{payment_id}/run"): "staff",
     ("GET", "/platform/billing/incidents"): "staff",
     ("POST", "/platform/billing/incidents/{incident_id}/resolve"): "staff",
+    # Custom plans and top-ups (ADR-113): the same staff guard; deleting a
+    # product is owner-only by role, proved in test_commercial_api.py.
+    ("POST", "/platform/billing/tenants/{tenant_id}/custom-plan/preview"): "staff",
+    ("POST", "/platform/billing/tenants/{tenant_id}/custom-plan"): "staff",
+    ("GET", "/platform/billing/tenants/{tenant_id}/summary"): "staff",
+    ("POST", "/platform/billing/tenants/{tenant_id}/topups/grant"): "staff",
+    ("GET", "/platform/billing/topups"): "staff",
+    ("POST", "/platform/billing/topups"): "staff",
+    ("GET", "/platform/billing/topups/{topup_id}"): "staff",
+    ("PATCH", "/platform/billing/topups/{topup_id}"): "staff",
+    ("POST", "/platform/billing/topups/{topup_id}/activate"): "staff",
+    ("POST", "/platform/billing/topups/{topup_id}/deactivate"): "staff",
+    ("DELETE", "/platform/billing/topups/{topup_id}"): "staff",
+    ("GET", "/platform/billing/topup-purchases"): "staff",
+    ("GET", "/platform/billing/topup-purchases/{purchase_id}"): "staff",
+    ("POST", "/platform/billing/topup-purchases/{purchase_id}/refund-review"): "staff",
 }
 
 

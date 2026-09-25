@@ -27,7 +27,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.db.models.billing import (
     MAX_LIMIT_VALUE,
@@ -36,6 +36,7 @@ from app.db.models.billing import (
     BillingInterval,
     LimitKey,
     Plan,
+    PlanScope,
     PlanVersion,
     PlanVersionMigration,
     ScheduledChangeSource,
@@ -127,7 +128,26 @@ class PlanCreate(_Terms):
     description: StorableText | None = Field(default=None, max_length=2000)
     is_public: bool = True
     sort_order: int = Field(default=0, ge=0, le=10_000)
+    # Who may hold the plan (ADR-113). Omitted, it follows `is_public` exactly
+    # as before; `tenant` names the one workspace in `tenant_id`.
+    scope: PlanScope | None = None
+    tenant_id: uuid.UUID | None = None
     reason: StorableText = Reason
+
+    @model_validator(mode="after")
+    def _scope(self) -> Self:
+        scope = self.resolved_scope
+        if (scope is PlanScope.TENANT) != (self.tenant_id is not None):
+            raise ValueError("A tenant plan names its workspace; any other plan names none.")
+        if "is_public" in self.model_fields_set and self.is_public != (scope is PlanScope.PUBLIC):
+            raise ValueError("is_public must agree with scope: only a public plan is public.")
+        return self
+
+    @property
+    def resolved_scope(self) -> PlanScope:
+        if self.scope is not None:
+            return self.scope
+        return PlanScope.PUBLIC if self.is_public else PlanScope.PRIVATE
 
 
 class PlanUpdate(BaseModel):
@@ -220,6 +240,9 @@ class PlatformPlanRead(BaseModel):
     code: str
     name: str
     description: str | None
+    scope: PlanScope
+    tenant_id: uuid.UUID | None
+    is_custom: bool
     is_public: bool
     is_active: bool
     sort_order: int
@@ -242,6 +265,9 @@ class PlatformPlanRead(BaseModel):
             code=plan.code,
             name=plan.name,
             description=plan.description,
+            scope=plan.scope,
+            tenant_id=plan.tenant_id,
+            is_custom=plan.is_custom,
             is_public=plan.is_public,
             is_active=plan.is_active,
             sort_order=plan.sort_order,

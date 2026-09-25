@@ -79,6 +79,7 @@ from app.schemas.platform_billing import (
 from app.services import billing_calendar
 from app.services.invoice_service import InvoiceService
 from app.services.payment_reconciliation_service import PaymentReconciler
+from app.services.plan_catalog import PlanCatalog
 from app.services.refund_service import RefundService
 from app.services.subscription_service import SubscriptionService
 
@@ -263,6 +264,11 @@ class PlatformBillingOperations:
         version = await self._session.get(PlanVersion, payload.plan_version_id)
         if version is None:
             raise NotFoundError("No such plan version.")
+        # Another workspace's custom plan is refused before anything else is
+        # considered (ADR-113): 422 `custom_plan_not_available_for_workspace`.
+        await PlanCatalog(self._session).require_available(
+            version, tenant_id=subscription.tenant_id
+        )
         before = _subscription_state(subscription)
         service = SubscriptionService(self._session, tenant_id=subscription.tenant_id)
 

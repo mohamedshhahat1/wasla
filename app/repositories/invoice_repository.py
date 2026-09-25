@@ -196,6 +196,8 @@ class InvoiceRepository(TenantScopedRepository[Invoice]):
             self._select()
             .where(Invoice.id != invoice_id)
             .where(Invoice.plan_code == plan_code)
+            # A top-up is extra allowance, never cover for a plan (ADR-113).
+            .where(Invoice.purpose != InvoicePurpose.TOPUP)
             .where(Invoice.status != InvoiceStatus.VOID)
             .where(Invoice.amount_paid > 0)
             .where(Invoice.period_start <= at)

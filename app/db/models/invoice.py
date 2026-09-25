@@ -31,6 +31,7 @@ from enum import StrEnum
 from typing import Any, Final
 
 from sqlalchemy import (
+    DDL,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -41,13 +42,19 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, RevisionedMixin, TimestampMixin, UUIDPrimaryKeyMixin
-from app.db.models.billing import CURRENCY_CHECK_SQL, CURRENCY_LENGTH, DEFAULT_CURRENCY
+from app.db.models.billing import (
+    CURRENCY_CHECK_SQL,
+    CURRENCY_LENGTH,
+    CUSTOM_PLAN_SCOPE_FUNCTION_SQL,
+    DEFAULT_CURRENCY,
+)
 from app.db.models.enums import _enum_type
 
 MAX_REFERENCE_LENGTH: Final = 200
@@ -80,12 +87,20 @@ class InvoicePurpose(StrEnum):
         Reserved for a future credit or correction document. Nothing creates
         one today; it is in the vocabulary so the day something does, it cannot
         be mistaken for any of the three above.
+    ``TOPUP``
+        A one-time purchase of extra allowance (ADR-113). Customer-initiated,
+        paid at a hosted page, **never** recurring and never collected from a
+        saved card - a trigger on `payments` refuses an automatic attempt
+        against one. It buys no plan: settlement grants its `TopupPurchase`
+        and leaves the subscription exactly as it was, and no reversal of it
+        ever withdraws a plan.
     """
 
     CHECKOUT = "checkout"
     RENEWAL = "renewal"
     MANUAL = "manual"
     ADJUSTMENT = "adjustment"
+    TOPUP = "topup"
 
 
 class InvoiceStatus(StrEnum):
@@ -600,3 +615,41 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
         return f"Payment(invoice_id={self.invoice_id!r}, status={self.status!r})"
+
+
+# An invoice may only name a version of a plan its workspace may hold - see
+# `CUSTOM_PLAN_SCOPE_FUNCTION_SQL` in `billing.py` (ADR-113).
+INVOICES_CUSTOM_PLAN_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER invoices_custom_plan_scope BEFORE INSERT OR UPDATE OF "
+    "tenant_id, plan_version_id ON invoices "
+    "FOR EACH ROW EXECUTE FUNCTION billing_refuse_foreign_custom_plan()"
+)
+
+# **A top-up is never a merchant-initiated charge** (ADR-113). The collection
+# sweep only claims renewals, and `RecurringService` checks the purpose again;
+# this makes the property the ledger's own, so no future collection path can
+# debit a saved card for an add-on the customer did not just choose to buy.
+PAYMENTS_NO_AUTOMATIC_TOPUP_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION payments_refuse_automatic_topup() RETURNS trigger AS $$
+    BEGIN
+        IF NEW.is_automatic AND EXISTS (
+            SELECT 1 FROM invoices i
+             WHERE i.id = NEW.invoice_id AND i.purpose::text = 'topup'
+        ) THEN
+            RAISE EXCEPTION 'topup invoices are never collected automatically'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+    """
+PAYMENTS_NO_AUTOMATIC_TOPUP_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER payments_no_automatic_topup BEFORE INSERT OR UPDATE OF "
+    "is_automatic, invoice_id ON payments "
+    "FOR EACH ROW EXECUTE FUNCTION payments_refuse_automatic_topup()"
+)
+
+event.listen(Invoice.__table__, "after_create", DDL(CUSTOM_PLAN_SCOPE_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Invoice.__table__, "after_create", DDL(INVOICES_CUSTOM_PLAN_TRIGGER_SQL))  # type: ignore[no-untyped-call]
+event.listen(Payment.__table__, "after_create", DDL(PAYMENTS_NO_AUTOMATIC_TOPUP_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Payment.__table__, "after_create", DDL(PAYMENTS_NO_AUTOMATIC_TOPUP_TRIGGER_SQL))  # type: ignore[no-untyped-call]

@@ -108,6 +108,8 @@ async def renewal_invoice(
 
 
 LEDGER_TEARDOWN = (
+    # First: a top-up purchase holds its invoice and payment by RESTRICT.
+    "DELETE FROM topup_purchases WHERE tenant_id = ANY(:ids)",
     "DELETE FROM billing_incidents WHERE tenant_id = ANY(:ids)",
     "DELETE FROM billing_adjustments WHERE tenant_id = ANY(:ids)",
     "DELETE FROM payment_events WHERE payment_id IN "

@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.core.telemetry import record_payment_reconciliation
+from app.core.telemetry import record_payment_reconciliation, record_topup_purchase
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import (
     PlanVersion,
@@ -38,6 +38,7 @@ from app.db.models.billing import (
     Subscription,
     SubscriptionStatus,
 )
+from app.db.models.topup import TopupStatus
 from app.db.session import Database
 from app.integrations.billing import build_checkout_provider
 from app.integrations.billing.checkout import RecurringProvider
@@ -47,6 +48,7 @@ from app.repositories.billing_repository import (
 )
 from app.repositories.invoice_repository import PlatformInvoiceRepository
 from app.repositories.tenant_repository import TenantRepository
+from app.repositories.topup_repository import PlatformTopupPurchaseRepository
 from app.services.audit_service import AuditTrail
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
@@ -57,8 +59,13 @@ from app.services.plan_catalog import PlanCatalog
 from app.services.recurring_service import MAX_COLLECTION_ATTEMPTS, RecurringService
 from app.services.settlement_service import InvoiceSettlement
 from app.services.subscription_service import roll_over
+from app.services.topup_ledger import move as move_topup
 
 logger = get_logger(__name__)
+
+# A top-up paid for and not granted this long is worth an alert: it is always
+# an open incident, and one sitting for an hour means nobody has picked it up.
+TOPUP_STUCK_AFTER: Final = timedelta(hours=1)
 
 # Ten minutes. A period boundary is a date, not an instant, and sweeping harder
 # would be querying constantly to learn nothing.
@@ -165,6 +172,10 @@ class BillingWorker:
         moment = now or datetime.now(UTC)
 
         handled = await self._advance_due(now=moment)
+        # Record the top-ups whose period has ended (ADR-113). Bookkeeping, not
+        # enforcement: the limit arithmetic already ignores an expired top-up
+        # by its clock, so this phase running late never extends an allowance.
+        handled += await self._drain(self._expire_topups, now=moment)
         # Reconcile before collecting, and the order is the point. An attempt
         # whose answer never arrived makes its invoice uncollectible, so
         # resolving it first is what lets the same pass go on to charge - and
@@ -305,6 +316,49 @@ class BillingWorker:
                 },
             )
             return 1
+
+    async def _expire_topups(self, *, now: datetime) -> int:
+        """Mark one batch of granted top-ups past `expires_at` as expired.
+
+        `SKIP LOCKED`, one transaction for the batch: a row another worker holds
+        is that worker's to record. Deletes nothing - a capacity the workspace
+        still uses beyond its plan simply leaves it over its limit. Also counts
+        paid-but-ungranted purchases older than an hour, for the stuck alert.
+        """
+        async with self._database.session() as session:
+            purchases = PlatformTopupPurchaseRepository(session)
+            expired = await purchases.claim_expired(now=now, limit=self._claim_limit)
+            for purchase in expired:
+                move_topup(purchase, TopupStatus.EXPIRED)
+                purchase.ended_at = purchase.expires_at
+                AuditTrail(session, tenant_id=purchase.tenant_id).record(
+                    AuditAction.BILLING_TOPUP_EXPIRED,
+                    actor=None,
+                    actor_kind=AuditActorKind.SYSTEM,
+                    target_type="topup_purchase",
+                    target_id=purchase.id,
+                    target_label=purchase.product_code,
+                    meta={
+                        "entitlement_key": purchase.entitlement_key.value,
+                        "quantity": purchase.quantity,
+                        "source": purchase.source.value,
+                        "expires_at": purchase.expires_at.isoformat(),
+                    },
+                )
+            keys = [purchase.entitlement_key.value for purchase in expired]
+            stuck = (
+                await purchases.stuck(paid_before=now - TOPUP_STUCK_AFTER) if not expired else {}
+            )
+        for key in keys:
+            await record_topup_purchase(key, "expired")
+        for entitlement, count in stuck.items():
+            await record_topup_purchase(entitlement.value, "stuck", amount=count)
+        if keys:
+            logger.info(
+                "billing.topups_expired",
+                extra={"event": "billing.topups_expired", "count": len(keys)},
+            )
+        return len(keys)
 
     async def _reconcile(self, *, now: datetime) -> int:
         """Ask the provider about attempts whose answer never came back.

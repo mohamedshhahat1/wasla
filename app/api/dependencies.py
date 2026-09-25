@@ -62,6 +62,7 @@ from app.services.refund_service import RefundService
 from app.services.sentiment_service import SentimentService
 from app.services.subscription_service import SubscriptionService
 from app.services.template_service import TemplateService
+from app.services.topup_service import TopupService
 from app.services.usage_service import UsageService
 from app.services.whatsapp_account_service import WhatsAppAccountService
 from app.services.workspace_service import WorkspaceService
@@ -666,6 +667,18 @@ def get_checkout_service(
 
 
 CheckoutServiceDep = Annotated[CheckoutService, Depends(get_checkout_service)]
+
+
+def get_topup_service(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+    checkout: CheckoutServiceDep,
+) -> TopupService:
+    """Workspace-scoped top-ups (ADR-113), buying through the one checkout path."""
+    return TopupService(session, tenant_id=workspace.tenant.id, checkout=checkout)
+
+
+TopupServiceDep = Annotated[TopupService, Depends(get_topup_service)]
 
 
 def get_refund_service(

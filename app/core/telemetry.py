@@ -343,10 +343,30 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
     ),
     # Every durable billing incident as it is raised: duplicate payments,
     # mismatched and unknown callbacks, permanent provider refusals. `kind` is
-    # `BillingIncidentKind`, seven values.
+    # `BillingIncidentKind`, thirteen values.
     "wasla_billing_incidents_total": (
         "Billing incidents raised, by kind.",
         ("kind",),
+    ),
+    # Top-ups and custom plans (ADR-113). `entitlement` is one of the seven
+    # top-up keys, `source` purchase or platform_grant, and the other labels
+    # closed words from `BILLING_LABEL_DOMAINS` - never a workspace, a product,
+    # an invoice, a payment or an amount.
+    "wasla_billing_topup_checkout_total": (
+        "Top-up checkouts by entitlement and outcome: created, refused, failed.",
+        ("entitlement", "outcome"),
+    ),
+    "wasla_billing_topup_grant_total": (
+        "Top-up grants by entitlement, source and outcome: granted, not_granted.",
+        ("entitlement", "source", "outcome"),
+    ),
+    "wasla_billing_topup_purchase_total": (
+        "Top-up purchase lifecycle steps by entitlement and outcome.",
+        ("entitlement", "outcome"),
+    ),
+    "wasla_billing_custom_plan_total": (
+        "Custom-plan operations by operation and outcome.",
+        ("operation", "outcome"),
     ),
     # How ingestion jobs ended (RAG-05). `outcome` is one of `IndexingOutcome`'s
     # seven fixed values - published, retry scheduled, failed, exhausted, stale,
@@ -1012,14 +1032,73 @@ BILLING_OUTCOMES: Final[dict[str, frozenset[str]]] = {
             "permanent_provider_error",
             "recovered_by_reconciliation",
             "refund_requested",
+            "topup_paid_but_not_granted",
+            "topup_duplicate_payment",
+            "topup_refund_after_consumption",
+            "topup_entitlement_reversal_blocked",
+            "topup_unknown_callback",
+            "custom_plan_scope_mismatch",
         }
     ),
+}
+
+
+_TOPUP_ENTITLEMENTS: Final[frozenset[str]] = frozenset(
+    {
+        "period_messages",
+        "period_ai_turns",
+        "period_campaign_messages",
+        "storage_bytes",
+        "whatsapp_numbers",
+        "team_members",
+        "knowledge_documents",
+    }
+)
+
+# The closed domains of the multi-label billing counters (ADR-113), per label.
+# A value outside its domain is counted as `other`, exactly like
+# `BILLING_OUTCOMES`: nothing a caller or a provider sends can widen a series.
+BILLING_LABEL_DOMAINS: Final[dict[str, dict[str, frozenset[str]]]] = {
+    "wasla_billing_topup_checkout_total": {
+        "entitlement": _TOPUP_ENTITLEMENTS,
+        "outcome": frozenset({"created", "refused", "failed"}),
+    },
+    "wasla_billing_topup_grant_total": {
+        "entitlement": _TOPUP_ENTITLEMENTS,
+        "source": frozenset({"purchase", "platform_grant"}),
+        "outcome": frozenset({"granted", "not_granted"}),
+    },
+    "wasla_billing_topup_purchase_total": {
+        "entitlement": _TOPUP_ENTITLEMENTS,
+        "outcome": frozenset(
+            {
+                "settled",
+                "expired",
+                "cancelled",
+                "refund_review",
+                "kept",
+                "withdrawn",
+                "callback_mismatched",
+                "stuck",
+            }
+        ),
+    },
+    "wasla_billing_custom_plan_total": {
+        "operation": frozenset({"create", "preview", "assign", "schedule", "version"}),
+        "outcome": frozenset({"succeeded", "refused", "failed"}),
+    },
 }
 
 
 def _closed(metric: str, value: str) -> str:
     """`value` if it is in the metric's closed domain, else `other`."""
     return value if value in BILLING_OUTCOMES[metric] else "other"
+
+
+def _closed_labels(metric: str, labels: Mapping[str, str]) -> dict[str, str]:
+    """Every label of a multi-label billing counter, each clamped to its domain."""
+    domains = BILLING_LABEL_DOMAINS[metric]
+    return {name: (value if value in domains[name] else "other") for name, value in labels.items()}
 
 
 async def _tolerate(recording: Awaitable[None]) -> None:
@@ -1064,6 +1143,37 @@ async def record_billing_incident(kind: str) -> None:
     """A durable billing incident was raised (BILL-15)."""
     metric = "wasla_billing_incidents_total"
     await _tolerate(_increment(metric, {"kind": _closed(metric, kind)}))
+
+
+async def record_topup_checkout(entitlement: str, outcome: str) -> None:
+    """A top-up checkout was opened, refused or could not be created (ADR-113)."""
+    metric = "wasla_billing_topup_checkout_total"
+    labels = _closed_labels(metric, {"entitlement": entitlement, "outcome": outcome})
+    await _tolerate(_increment(metric, labels))
+
+
+async def record_topup_grant(entitlement: str, source: str, outcome: str) -> None:
+    """A top-up was granted, or paid and not granted (ADR-113)."""
+    metric = "wasla_billing_topup_grant_total"
+    labels = _closed_labels(
+        metric, {"entitlement": entitlement, "source": source, "outcome": outcome}
+    )
+    await _tolerate(_increment(metric, labels))
+
+
+async def record_topup_purchase(entitlement: str, outcome: str, *, amount: int = 1) -> None:
+    """A top-up purchase moved through its lifecycle (ADR-113)."""
+    metric = "wasla_billing_topup_purchase_total"
+    labels = _closed_labels(metric, {"entitlement": entitlement, "outcome": outcome})
+    if amount > 0:
+        await _tolerate(_increment_by(metric, labels, amount))
+
+
+async def record_custom_plan(operation: str, outcome: str) -> None:
+    """A platform custom-plan operation succeeded, was refused or failed (ADR-113)."""
+    metric = "wasla_billing_custom_plan_total"
+    labels = _closed_labels(metric, {"operation": operation, "outcome": outcome})
+    await _tolerate(_increment(metric, labels))
 
 
 async def record_hosted_reconciliation(

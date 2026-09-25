@@ -42,7 +42,7 @@ from typing import Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, ValidationError
+from app.core.exceptions import ConflictError, CustomPlanNotAvailableError, ValidationError
 from app.core.logging import get_logger
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import (
@@ -72,6 +72,7 @@ from app.services.audit_service import AuditTrail
 from app.services.billing_incident_service import raise_incident
 from app.services.plan_catalog import PlanCatalog
 from app.services.subscription_service import SubscriptionService
+from app.services.topup_ledger import TopupLedger
 
 logger = get_logger(__name__)
 
@@ -173,6 +174,13 @@ class InvoiceSettlement:
                 await self._grant(
                     invoice, version=version, keep_cancellation=keep_cancellation, now=now
                 )
+            elif invoice.purpose is InvoicePurpose.TOPUP:
+                # Extra allowance, never a plan: the subscription is left
+                # exactly as it is, whatever the invoice's other fields say
+                # (ADR-113).
+                await TopupLedger(self._session, tenant_id=self._tenant_id).invoice_paid(
+                    invoice, payment=payment, now=now
+                )
             elif invoice.purpose not in PURCHASE_PURPOSES:
                 await self.renewal_paid(invoice, subscription=subscription, now=now)
 
@@ -257,9 +265,15 @@ class InvoiceSettlement:
         now: datetime,
     ) -> tuple[str, str | None]:
         """Keep the money on the payment, leave the invoice, and tell somebody."""
+        kind = refusal.kind
+        if (
+            invoice.purpose is InvoicePurpose.TOPUP
+            and kind is BillingIncidentKind.DUPLICATE_PAYMENT
+        ):
+            kind = BillingIncidentKind.TOPUP_DUPLICATE_PAYMENT
         await raise_incident(
             self._session,
-            kind=refusal.kind,
+            kind=kind,
             dedupe_key=f"{payment.id}:{payment.provider_reference or ''}",
             tenant_id=self._tenant_id,
             payment_id=payment.id,
@@ -278,7 +292,7 @@ class InvoiceSettlement:
                 "invoice_id": str(invoice.id),
                 "payment_id": str(payment.id),
                 "status": invoice.status.value,
-                "kind": refusal.kind.value,
+                "kind": kind.value,
             },
         )
         return REFUSED, refusal.detail
@@ -308,6 +322,16 @@ class InvoiceSettlement:
         now: datetime,
     ) -> _Refusal | None:
         """Why granting this purchase would be wrong, or None to grant it."""
+        try:
+            await self._catalog.require_available(version, tenant_id=self._tenant_id)
+        except CustomPlanNotAvailableError:
+            # Another workspace's custom plan. The trigger on `invoices` makes
+            # such an invoice impossible to write; if one existed anyway, its
+            # money is held and an operator told, never the plan granted.
+            return _Refusal(
+                BillingIncidentKind.CUSTOM_PLAN_SCOPE_MISMATCH,
+                "The invoice buys a custom plan that belongs to another workspace.",
+            )
         if subscription is None:
             return None
         if subscription.status is SubscriptionStatus.CANCELLED:
@@ -547,6 +571,10 @@ class InvoiceSettlement:
         self._move(invoice, InvoiceStatus.VOID)
         invoice.voided_at = now
         invoice.notes = reason
+        if invoice.purpose is InvoicePurpose.TOPUP:
+            await TopupLedger(self._session, tenant_id=self._tenant_id).invoice_voided(
+                invoice, now=now
+            )
 
         if behind and subscription is not None:
             if subscription_policy == "cancel":

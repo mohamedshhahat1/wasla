@@ -10,11 +10,13 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.db.models.billing import (
+    METER_ONLY_LIMITS,
+    RESOURCE_LIMITS,
     BillingInterval,
     LimitKey,
     Plan,
@@ -55,6 +57,9 @@ class PlanRead(BaseModel):
     interval: BillingInterval
     trial_days: int
     limits: list[PlanLimitRead]
+    # Written for this workspace alone (ADR-113). Never true for a plan another
+    # workspace could see.
+    is_custom: bool = False
 
     @classmethod
     def from_model(cls, plan: Plan, version: PlanVersion | None = None) -> Self:
@@ -73,6 +78,7 @@ class PlanRead(BaseModel):
             # comparison table renders "unlimited" rather than a blank cell it
             # has to guess the meaning of.
             limits=[PlanLimitRead(key=key, limit=terms.limit_for(key)) for key in LimitKey],
+            is_custom=plan.is_custom,
         )
 
 
@@ -82,22 +88,52 @@ class EntitlementRead(BaseModel):
     `limit` and `remaining` are both null when unlimited. Null rather than a
     large number: a client that renders "999999 left" has been told something
     false.
+
+    `limit` is the effective limit and equals `effective_limit` (ADR-113):
+
+        effective_limit = base_limit + topup_limit + platform_grant_limit
+
+    `over_limit` is true when the workspace holds or has used more than it is
+    now allowed - after a capacity top-up expired, say. Nothing is deleted;
+    `remaining` reads zero, never a negative number, and adding more is refused
+    until usage fits. `enforced` is false for the one meter-only key,
+    `period_messages`, which no customer message is ever refused over.
+    `period_start`/`period_end` bound a usage key's count and are null for
+    capacities.
     """
 
     key: LimitKey
+    kind: Literal["usage", "capacity"]
+    enforced: bool
     limit: int | None
+    base_limit: int | None
+    topup_limit: int
+    platform_grant_limit: int
+    effective_limit: int | None
     used: int
     remaining: int | None
+    over_limit: bool
     allowed: bool
+    period_start: datetime | None
+    period_end: datetime | None
 
     @classmethod
     def from_entitlement(cls, entitlement: Entitlement) -> Self:
         return cls(
             key=entitlement.key,
+            kind="capacity" if entitlement.key in RESOURCE_LIMITS else "usage",
+            enforced=entitlement.key not in METER_ONLY_LIMITS,
             limit=entitlement.limit,
+            base_limit=entitlement.base_limit,
+            topup_limit=entitlement.topup_limit,
+            platform_grant_limit=entitlement.grant_limit,
+            effective_limit=entitlement.limit,
             used=entitlement.used,
             remaining=entitlement.remaining,
+            over_limit=entitlement.over_limit,
             allowed=entitlement.allowed,
+            period_start=entitlement.period_start,
+            period_end=entitlement.period_end,
         )
 
 

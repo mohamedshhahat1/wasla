@@ -32,7 +32,7 @@ from fastapi import APIRouter, Depends, Query, status
 from app.api.dependencies import PlatformAccessAuditDep, PlatformOwnerDep, PlatformStaffDep
 from app.api.route import CommittingRoute
 from app.core.dependencies import SessionDep, SettingsDep
-from app.db.models.billing import SubscriptionStatus
+from app.db.models.billing import PlanScope, SubscriptionStatus
 from app.db.models.billing_incident import BillingIncidentKind, BillingIncidentStatus
 from app.db.models.invoice import InvoicePurpose, InvoiceStatus, PaymentStatus
 from app.platform.billing_operations import PlatformBillingOperations
@@ -127,11 +127,21 @@ async def list_plans(
     currency: Annotated[
         str | None, Query(min_length=3, max_length=3, pattern="^[A-Za-z]{3}$")
     ] = None,
+    scope: PlanScope | None = None,
+    tenant_id: uuid.UUID | None = None,
     limit: LimitQuery = 50,
     offset: OffsetQuery = 0,
 ) -> Page[PlatformPlanRead]:
+    """The catalogue. `scope=tenant&tenant_id=...` lists one company's custom plans."""
     page = await plans.list_plans(
-        active=active, public=public, code=code, currency=currency, limit=limit, offset=offset
+        active=active,
+        public=public,
+        code=code,
+        currency=currency,
+        scope=scope,
+        tenant_id=tenant_id,
+        limit=limit,
+        offset=offset,
     )
     result: Page[PlatformPlanRead] = Page(
         items=page.items, total=page.total, limit=limit, offset=offset

@@ -59,6 +59,7 @@ from app.core.telemetry import (
     record_billing_callback,
     record_billing_checkout,
     record_billing_payment,
+    record_topup_purchase,
 )
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import Plan, PlanVersion, Subscription
@@ -83,6 +84,7 @@ from app.integrations.billing.checkout import (
 )
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
 from app.repositories.invoice_repository import InvoiceRepository, PaymentRepository
+from app.repositories.topup_repository import TopupPurchaseRepository
 from app.services import billing_calendar
 from app.services.audit_service import AuditTrail
 from app.services.billing_incident_service import raise_incident
@@ -99,6 +101,7 @@ from app.services.settlement_service import (
     record_provider_outcome,
 )
 from app.services.subscription_service import SubscriptionService
+from app.services.topup_ledger import TopupLedger
 
 logger = get_logger(__name__)
 
@@ -165,6 +168,11 @@ class CheckoutService:
             provider_name=provider.name if provider is not None else None,
         )
 
+    @property
+    def has_provider(self) -> bool:
+        """Whether a payment page can be opened at all in this deployment."""
+        return self._provider is not None
+
     # ------------------------------------------------------------- starting
 
     async def start(
@@ -207,6 +215,28 @@ class CheckoutService:
             )
             description = f"{version.name} plan"
 
+        return await self.open_page(
+            invoice, description=description, actor=actor, idempotency_key=idempotency_key
+        )
+
+    async def open_page(
+        self,
+        invoice: Invoice,
+        *,
+        description: str,
+        actor: User | None,
+        idempotency_key: str | None,
+    ) -> StartedCheckout:
+        """A hosted payment page for one open invoice this workspace owns.
+
+        The one way any customer purchase reaches the provider - a plan, a bill
+        already due, or a top-up (ADR-113) - so every page is created, bound
+        and settled by the same code. The pending payment is written before
+        the provider is called, so the reference handed over is a row that
+        already exists; the caller commits afterwards.
+        """
+        if self._provider is None:
+            raise ValidationError("No payment provider is configured.")
         await self._session.flush()
 
         payment = await self._new_attempt(
@@ -315,7 +345,14 @@ class CheckoutService:
         refusal confirms nothing about which private codes are real.
         """
         plan = await self._plans.get_by_code(plan_code)
-        if plan is None or not plan.is_active or not plan.is_public:
+        if plan is None or not plan.is_active:
+            raise ValidationError("No such plan.")
+        # The public catalogue, or this workspace's own custom plan - which is
+        # how a customer pays for one an operator created for them (ADR-113).
+        # Another workspace's custom plan is refused exactly like a private or
+        # a missing one.
+        own = plan.is_custom and plan.tenant_id == self._tenant_id
+        if not (plan.is_public or own):
             raise ValidationError("No such plan.")
         version = await self._catalog.current_version(plan, at=now)
         if version is None:
@@ -365,6 +402,11 @@ class CheckoutService:
         invoice = await self._invoices.get_by_id(invoice_id)
         if invoice is None:
             raise NotFoundError("No such invoice.")
+        if invoice.purpose is InvoicePurpose.TOPUP:
+            # A top-up is bought through its own checkout, one page per
+            # purchase (ADR-113). A second page on the same invoice would be
+            # a second chance to pay for one allowance twice.
+            raise ConflictError("Top-ups are bought with POST /billing/topups/{id}/checkout.")
         if invoice.status is InvoiceStatus.PAID:
             raise ConflictError("This invoice has already been paid.")
         if invoice.status is not InvoiceStatus.OPEN:
@@ -476,6 +518,7 @@ class CheckoutService:
                 detail=detail,
                 now=moment,
             )
+            await self._count_topup_mismatch(payment)
         record.outcome = outcome
         record.detail = detail[:MAX_DETAIL_LENGTH] if detail else None
         record.processed_at = moment
@@ -607,7 +650,11 @@ class CheckoutService:
                 # paid: the customer was charged twice for one page (BILL-15).
                 await raise_incident(
                     self._session,
-                    kind=BillingIncidentKind.DUPLICATE_PAYMENT,
+                    kind=(
+                        BillingIncidentKind.TOPUP_DUPLICATE_PAYMENT
+                        if invoice.purpose is InvoicePurpose.TOPUP
+                        else BillingIncidentKind.DUPLICATE_PAYMENT
+                    ),
                     dedupe_key=f"{payment.id}:{event.provider_transaction_id}",
                     tenant_id=self._tenant_id,
                     payment_id=payment.id,
@@ -647,7 +694,10 @@ class CheckoutService:
             return APPLIED, f"Payment {event.status.value}."
         await record_billing_payment("succeeded")
         outcome, detail = await self._settlement.settle(invoice, payment=payment, now=now)
-        if outcome == APPLIED and invoice.purpose is InvoicePurpose.CHECKOUT:
+        if outcome == APPLIED and invoice.purpose in (
+            InvoicePurpose.CHECKOUT,
+            InvoicePurpose.TOPUP,
+        ):
             await record_billing_checkout("settled")
         elif outcome == REFUSED:
             await record_billing_payment("refused")
@@ -711,6 +761,7 @@ class CheckoutService:
             invoice.status = InvoiceStatus.OPEN
             invoice.paid_at = None
 
+        topup = invoice.purpose is InvoicePurpose.TOPUP
         if invoice.status is InvoiceStatus.OPEN:
             if full:
                 await self._withdraw_purchased_plan(invoice, now=now)
@@ -718,11 +769,21 @@ class CheckoutService:
                     invoice.status = InvoiceStatus.VOID
                     invoice.voided_at = now
                     invoice.notes = "Refunded in full at the platform's decision."
-            elif invoice.issued_at is None:
+            elif invoice.issued_at is None and not topup:
                 # An unrequested part-reversal is the one shape in which a
                 # checkout row becomes a genuine debt, so the dunning clock
-                # starts here (ADR-096).
+                # starts here (ADR-096). Never for a top-up: dunning one could
+                # suspend a workspace over an add-on, and an operator decides
+                # instead (ADR-113).
                 invoice.issued_at = now
+        if topup:
+            await TopupLedger(self._session, tenant_id=self._tenant_id).invoice_reversed(
+                invoice,
+                payment=payment,
+                full=full,
+                operator_requested=operator_requested,
+                now=now,
+            )
 
         self._audit.record(
             AuditAction.PAYMENT_REFUNDED,
@@ -757,6 +818,17 @@ class CheckoutService:
 
     def _provider_name(self) -> str:
         return self._provider.name if self._provider is not None else "unknown"
+
+    async def _count_topup_mismatch(self, payment: Payment) -> None:
+        """Count a refused callback against a top-up's entitlement, for its alert."""
+        invoice = await self._invoices.get_by_id(payment.invoice_id)
+        if invoice is None or invoice.purpose is not InvoicePurpose.TOPUP:
+            return
+        purchase = await TopupPurchaseRepository(
+            self._session, tenant_id=self._tenant_id
+        ).lock_for_invoice(invoice.id)
+        if purchase is not None:
+            await record_topup_purchase(purchase.entitlement_key.value, "callback_mismatched")
 
     async def _matching_payment(self, event: CallbackEvent) -> tuple[Payment | None, bool]:
         """The payment this callback names, and whether it was re-aimed.
@@ -852,6 +924,11 @@ class CheckoutService:
         Failure is contained: the record that a customer was repaid is the
         part that must never be rolled back.
         """
+        if invoice.purpose is InvoicePurpose.TOPUP:
+            # A top-up bought no plan, so refunding one withdraws no plan
+            # (ADR-113); `TopupLedger.invoice_reversed` decides what happens to
+            # the allowance.
+            return
         subscription = await self._subscriptions.get()
         if subscription is None or subscription.is_terminal:
             return
