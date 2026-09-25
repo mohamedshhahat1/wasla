@@ -221,6 +221,17 @@ class InvoiceRepository(TenantScopedRepository[Invoice]):
             )
         return await self._all(statement.limit(limit))
 
+    async def open_renewals(self) -> list[Invoice]:
+        """Issued renewals still owed, oldest first - what "Pay Renewal" pays."""
+        return await self._all(
+            self._select()
+            .where(Invoice.purpose == InvoicePurpose.RENEWAL)
+            .where(Invoice.status == InvoiceStatus.OPEN)
+            .where(Invoice.issued_at.is_not(None))
+            .where(Invoice.amount_paid < Invoice.amount_due)
+            .order_by(Invoice.period_start)
+        )
+
     def create(
         self,
         *,

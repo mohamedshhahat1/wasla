@@ -314,6 +314,7 @@ async def test_every_platform_read_route_records_one_entry(
         f"{PATH}/billing/plans/{{plan_id}}/versions",
         f"{PATH}/billing/subscriptions/{{subscription_id}}",
         f"{PATH}/billing/subscriptions/{{subscription_id}}/timeline",
+        f"{PATH}/billing/tenants/{{tenant_id}}/custom-offers",
         f"{PATH}/billing/tenants/{{tenant_id}}/summary",
         f"{PATH}/billing/topup-purchases/{{purchase_id}}",
         f"{PATH}/billing/topups/{{topup_id}}",

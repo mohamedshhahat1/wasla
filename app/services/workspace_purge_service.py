@@ -167,6 +167,9 @@ RETAINED_TABLES: frozenset[str] = frozenset(
         # subscription and invoices were sold at; a top-up product and every
         # purchase or grant of it are part of the same financial record.
         "plans",
+        # A custom plan offer is the record of terms a customer was offered and
+        # paid for (ADR-114).
+        "custom_plan_offers",
         "topup_products",
         "topup_purchases",
         "audit_logs",

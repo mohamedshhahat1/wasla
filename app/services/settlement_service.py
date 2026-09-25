@@ -70,6 +70,7 @@ from app.repositories.billing_repository import (
 from app.repositories.invoice_repository import InvoiceRepository
 from app.services.audit_service import AuditTrail
 from app.services.billing_incident_service import raise_incident
+from app.services.custom_plan_offer_ledger import CustomPlanOfferLedger
 from app.services.plan_catalog import PlanCatalog
 from app.services.subscription_service import SubscriptionService
 from app.services.topup_ledger import TopupLedger
@@ -124,6 +125,7 @@ class InvoiceSettlement:
         self._catalog = PlanCatalog(session)
         self._adjustments = BillingAdjustmentRepository(session)
         self._audit = AuditTrail(session, tenant_id=tenant_id)
+        self._offers = CustomPlanOfferLedger(session, tenant_id=tenant_id)
 
     # ------------------------------------------------------------ settling
 
@@ -158,6 +160,10 @@ class InvoiceSettlement:
                 decision = await self._purchase_refusal(
                     invoice, version=version, subscription=subscription, now=now
                 )
+                if decision is None:
+                    offer_problem = await self._offers.refusal(invoice)
+                    if offer_problem is not None:
+                        decision = _Refusal(BillingIncidentKind.REFUSED_SETTLEMENT, offer_problem)
                 if decision is not None:
                     return await self._refuse(invoice, payment=payment, refusal=decision, now=now)
                 keep_cancellation = self._cancelled_after_opening(invoice, subscription)
@@ -174,6 +180,7 @@ class InvoiceSettlement:
                 await self._grant(
                     invoice, version=version, keep_cancellation=keep_cancellation, now=now
                 )
+                await self._offers.activated(invoice, now=now)
             elif invoice.purpose is InvoicePurpose.TOPUP:
                 # Extra allowance, never a plan: the subscription is left
                 # exactly as it is, whatever the invoice's other fields say

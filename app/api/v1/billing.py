@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import (
     ActiveWorkspaceDep,
     CheckoutServiceDep,
+    CustomPlanOfferServiceDep,
     EntitlementServiceDep,
     PaymentMethodServiceDep,
     PlanCatalogDep,
@@ -32,10 +33,13 @@ from app.api.dependencies import (
     TopupServiceDep,
 )
 from app.api.route import CommittingRoute
-from app.core.dependencies import SessionDep
+from app.core.dependencies import SessionDep, SettingsDep
 from app.db.models.billing import TOPUP_LIMITS, LimitKey
 from app.db.models.invoice import Payment
 from app.db.models.topup import TopupEntitlement, TopupPurchase
+from app.integrations.billing import build_checkout_provider
+from app.repositories.invoice_repository import InvoiceRepository
+from app.repositories.payment_method_repository import PaymentMethodRepository
 from app.schemas.billing import (
     CancellationRequest,
     CheckoutRequestPayload,
@@ -46,6 +50,12 @@ from app.schemas.billing import (
     SubscriptionRead,
     SubscriptionStateRead,
 )
+from app.schemas.custom_plan import (
+    CustomPlanOfferAccept,
+    CustomPlanOfferCheckoutStarted,
+    CustomPlanOfferDecline,
+    CustomPlanOfferRead,
+)
 from app.schemas.invoice import (
     PaymentMethodRead,
     PaymentRead,
@@ -53,6 +63,7 @@ from app.schemas.invoice import (
     RefundReviewRequested,
 )
 from app.schemas.topup import (
+    PaymentRequiredRead,
     TenantBillingSummary,
     TopupCheckoutRequest,
     TopupCheckoutStarted,
@@ -60,6 +71,7 @@ from app.schemas.topup import (
     TopupPurchasePage,
     TopupPurchaseRead,
 )
+from app.services.custom_plan_offer_service import offer_read
 from app.services.entitlement_service import EntitlementService
 from app.services.subscription_service import SubscriptionService
 
@@ -495,7 +507,9 @@ async def billing_summary(
     subscriptions: SubscriptionServiceDep,
     entitlements: EntitlementServiceDep,
     topups: TopupServiceDep,
+    offers: CustomPlanOfferServiceDep,
     session: SessionDep,
+    settings: SettingsDep,
 ) -> TenantBillingSummary:
     """Billing -> Usage & Top-ups in one request. Owners only.
 
@@ -511,7 +525,32 @@ async def billing_summary(
             subscription, plan=plan, version=await subscriptions.version_for(subscription)
         )
     recent, _ = await topups.history(limit=_SUMMARY_RECENT, offset=0)
+    open_offer = await offers.open_offer()
+    renewals = await InvoiceRepository(session, tenant_id=workspace.tenant.id).open_renewals()
+    provider = build_checkout_provider(settings)
+    saved = await PaymentMethodRepository(session, tenant_id=workspace.tenant.id).default_method()
     return TenantBillingSummary(
+        open_offer=(
+            await offer_read(session, open_offer, now=offers.now()) if open_offer else None
+        ),
+        payment_required=[
+            PaymentRequiredRead(
+                invoice_id=invoice.id,
+                plan_code=invoice.plan_code,
+                amount_due=f"{invoice.outstanding:.2f}",
+                currency=invoice.currency,
+                period_start=invoice.period_start,
+                period_end=invoice.period_end,
+                issued_at=invoice.issued_at,
+            )
+            for invoice in renewals
+        ],
+        automatic_renewal=bool(
+            saved is not None
+            and saved.is_chargeable
+            and provider is not None
+            and getattr(provider, "can_charge_saved_methods", False)
+        ),
         subscription=read,
         entitlements=[
             EntitlementRead.from_entitlement(item)
@@ -521,3 +560,71 @@ async def billing_summary(
         recent_purchases=[await _purchase_read(session, row) for row in recent],
         topups_available=len(await topups.catalogue()),
     )
+
+
+# -------------------------------------------------------- custom plan offers
+
+
+@router.get("/custom-offers", response_model=list[CustomPlanOfferRead])
+async def list_custom_offers(
+    workspace: TenantOwnerDep,
+    offers: CustomPlanOfferServiceDep,
+    session: SessionDep,
+) -> list[CustomPlanOfferRead]:
+    """Custom plans offered to this workspace, newest first. Owners only.
+
+    Each carries everything to decide on before paying: price, currency,
+    interval, all seven limits and the period the terms would cover.
+    """
+    now = offers.now()
+    return [await offer_read(session, offer, now=now) for offer in await offers.offers()]
+
+
+@router.post(
+    "/custom-offers/{offer_id}/accept",
+    response_model=CustomPlanOfferCheckoutStarted,
+    status_code=status.HTTP_201_CREATED,
+    summary="Accept a custom plan offer and pay for it",
+)
+async def accept_custom_offer(
+    offer_id: uuid.UUID,
+    payload: CustomPlanOfferAccept,
+    workspace: TenantOwnerDep,
+    offers: CustomPlanOfferServiceDep,
+) -> CustomPlanOfferCheckoutStarted:
+    """Accept & Pay. Owners only. **Changes no plan by itself.**
+
+    Opens a hosted payment page for exactly the offered version's price. The
+    plan applies when the provider's signed callback confirms the money
+    (ADR-044, ADR-114). The request carries nothing that could price it.
+    """
+    accepted = await offers.accept(
+        offer_id, actor=workspace.user, idempotency_key=payload.idempotency_key
+    )
+    started = accepted.checkout
+    return CustomPlanOfferCheckoutStarted(
+        offer_id=accepted.offer.id,
+        redirect_url=started.redirect_url,
+        invoice_id=started.invoice_id,
+        payment_id=started.payment_id,
+        amount=f"{started.amount:.2f}",
+        currency=started.currency,
+        plan_version_id=accepted.version.id,
+    )
+
+
+@router.post(
+    "/custom-offers/{offer_id}/decline",
+    response_model=CustomPlanOfferRead,
+    summary="Decline a custom plan offer",
+)
+async def decline_custom_offer(
+    offer_id: uuid.UUID,
+    payload: CustomPlanOfferDecline,
+    workspace: TenantOwnerDep,
+    offers: CustomPlanOfferServiceDep,
+    session: SessionDep,
+) -> CustomPlanOfferRead:
+    """Decline. Owners only. The workspace stays on the plan it holds."""
+    offer = await offers.decline(offer_id, actor=workspace.user, reason=payload.reason)
+    return await offer_read(session, offer, now=offers.now())

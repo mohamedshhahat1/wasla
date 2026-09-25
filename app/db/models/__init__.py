@@ -48,6 +48,7 @@ from .conversation import (
     MessageKind,
     MessageStatus,
 )
+from .custom_plan_offer import CustomPlanOffer, CustomPlanOfferStatus
 from .email import (
     TERMINAL_EMAIL_STATUSES,
     EmailStatus,
@@ -222,6 +223,8 @@ __all__ = [
     "ConversationMode",
     "ConversationPriority",
     "ConversationStatus",
+    "CustomPlanOffer",
+    "CustomPlanOfferStatus",
     "Document",
     "DocumentChunk",
     "DocumentIndexGeneration",

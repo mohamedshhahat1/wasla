@@ -36,6 +36,7 @@ from app.db.models.topup import (
     TopupValidity,
 )
 from app.schemas.billing import EntitlementRead, SubscriptionRead
+from app.schemas.custom_plan import CustomPlanOfferRead
 from app.schemas.text import StorableText
 
 ProductCode = Field(min_length=2, max_length=50, pattern=r"^[a-z0-9][a-z0-9_-]*$")
@@ -310,6 +311,24 @@ class TopupRefundReview(BaseModel):
 # ------------------------------------------------------------------ summary
 
 
+class PaymentRequiredRead(BaseModel):
+    """A renewal the customer must pay themselves ("Payment required").
+
+    Shown when no saved card collected it - none was saved, or the charge was
+    declined. Paid with `POST /billing/checkout {"invoice_id": ...}`; the
+    ordinary grace and dunning rules apply meanwhile.
+    """
+
+    invoice_id: uuid.UUID
+    plan_code: str
+    amount_due: str
+    currency: str
+    period_start: datetime
+    period_end: datetime
+    issued_at: datetime | None
+    pay_with: str = "POST /billing/checkout"
+
+
 class TenantBillingSummary(BaseModel):
     """Billing -> Usage & Top-ups, in one request, for a workspace owner."""
 
@@ -318,3 +337,9 @@ class TenantBillingSummary(BaseModel):
     active_topups: list[TopupPurchaseRead]
     recent_purchases: list[TopupPurchaseRead]
     topups_available: int
+    # ADR-114: the custom plan offer awaiting the owner, and renewals the
+    # owner must pay by hand. Defaulted so older clients keep parsing.
+    open_offer: CustomPlanOfferRead | None = None
+    payment_required: list[PaymentRequiredRead] = Field(default_factory=list)
+    # Whether renewals will be charged to a saved card automatically.
+    automatic_renewal: bool = False

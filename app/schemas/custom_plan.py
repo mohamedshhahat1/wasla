@@ -63,8 +63,9 @@ class CustomPlanBasis(StrEnum):
 
     ``complimentary`` and ``manual_payment`` are the operator bases the
     subscription change already knows. ``customer_checkout`` assigns nothing:
-    the plan is created for the workspace, and its owner buys it at checkout
-    like any other plan, after which settlement applies it.
+    it makes an **offer** (ADR-114) that the workspace's owner sees with its
+    full terms and accepts and pays at a hosted checkout, after which
+    settlement applies exactly the offered version.
     """
 
     COMPLIMENTARY = "complimentary"
@@ -119,12 +120,21 @@ class CustomPlanCreate(CustomPlanTerms):
     financial_basis: CustomPlanBasis | None = None
     manual_payment: ManualPaymentDetails | None = None
     complimentary_until: datetime | None = None
+    # With `financial_basis: customer_checkout`: when the offer stops being
+    # acceptable. Null leaves it open until accepted, declined or withdrawn.
+    offer_expires_at: datetime | None = None
     # Required when assigning: the subscription revision the operator saw.
     expected_subscription_revision: int | None = Field(default=None, ge=1)
     reason: StorableText = Field(min_length=3, max_length=500)
 
     @model_validator(mode="after")
     def _assignment(self) -> Self:
+        if self.financial_basis is CustomPlanBasis.CUSTOMER_CHECKOUT:
+            # An offer: nothing is assigned, so no subscription revision is
+            # needed and the assignment mode does not apply (ADR-114).
+            return self
+        if self.offer_expires_at is not None:
+            raise ValueError("offer_expires_at applies only to financial_basis customer_checkout.")
         if not self.assign_to_tenant:
             return self
         if self.expected_subscription_revision is None:
@@ -216,7 +226,9 @@ class CustomPlanPreview(BaseModel):
 
 class CustomPlanAssignment(BaseModel):
     mode: AssignmentMode | None
-    status: Literal["assigned", "scheduled", "awaiting_customer_checkout", "not_assigned"]
+    status: Literal[
+        "assigned", "scheduled", "awaiting_customer_checkout", "offered", "not_assigned"
+    ]
     subscription: PlatformSubscriptionRead | None
 
 
@@ -225,3 +237,111 @@ class CustomPlanResult(BaseModel):
     version: PlanVersionRead
     assignment: CustomPlanAssignment
     preview: CustomPlanPreview
+    # Set when the basis was customer checkout: the plan reaches the workspace
+    # only when its owner accepts and pays this offer (ADR-114).
+    offer: CustomPlanOfferRead | None = None
+
+
+# ------------------------------------------------------------ offers (ADR-114)
+
+
+class OfferLimitRead(BaseModel):
+    """One of the seven limits an offer carries. Null is unlimited."""
+
+    key: LimitKey
+    kind: Literal["usage", "capacity"]
+    limit: int | None
+
+
+class OfferPeriodRead(BaseModel):
+    """When the offered terms would be in force if paid now.
+
+    A paid period starts when the payment settles (BILL-03), so this is an
+    illustration computed at read time, not a promise about a fixed date.
+    """
+
+    starts: Literal["on_payment"] = "on_payment"
+    interval: BillingInterval
+    if_paid_now_start: datetime
+    if_paid_now_end: datetime
+
+
+class CustomPlanOfferRead(BaseModel):
+    """Everything a customer must see before paying: price, terms and period."""
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    status: str
+    plan_id: uuid.UUID
+    plan_code: str
+    plan_version_id: uuid.UUID
+    version: int
+    name: str
+    description: str | None
+    price: str
+    currency: str
+    interval: BillingInterval
+    limits: list[OfferLimitRead]
+    # Limits the custom plan does not set (agents, owned workspaces), as the
+    # version holds them.
+    other_limits: dict[str, int | None]
+    effective_period: OfferPeriodRead
+    expires_at: datetime | None
+    created_at: datetime
+    accepted_at: datetime | None
+    activated_at: datetime | None
+    declined_at: datetime | None
+    decline_reason: str | None
+    cancelled_at: datetime | None
+    expired_at: datetime | None
+    can_accept: bool
+    # Payment method guidance (spec: no forced card saving).
+    renewal_note: str
+    revision: int
+
+
+class CustomPlanOfferCreate(BaseModel):
+    """Offer one version of a workspace's own custom plan to that workspace."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan_version_id: uuid.UUID
+    expires_at: datetime | None = None
+    reason: StorableText = Field(min_length=3, max_length=500)
+
+
+class CustomPlanOfferCancel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: StorableText = Field(min_length=3, max_length=500)
+    expected_revision: int = Field(ge=1)
+
+
+class CustomPlanOfferAccept(BaseModel):
+    """Accept and pay. Names nothing that could price the purchase."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: StorableText | None = Field(default=None, min_length=1, max_length=100)
+
+
+class CustomPlanOfferDecline(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: StorableText | None = Field(default=None, max_length=500)
+
+
+class CustomPlanOfferCheckoutStarted(BaseModel):
+    """Where to pay. The client secret travels only inside `redirect_url`."""
+
+    offer_id: uuid.UUID
+    redirect_url: str
+    invoice_id: uuid.UUID
+    payment_id: uuid.UUID
+    amount: str
+    currency: str
+    plan_version_id: uuid.UUID
+
+
+# `CustomPlanResult.offer` names a model declared after it.
+CustomPlanResult.model_rebuild()

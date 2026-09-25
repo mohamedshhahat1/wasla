@@ -4,8 +4,8 @@ Driven through the real services and the real billing sweep against
 PostgreSQL. Paymob is faked at the socket only; the callback that pays for the
 custom plan is signed and verified by the real adapter.
 
-1. Tenant A's custom plan, all seven limits, is bought by A's owner at checkout
-   and A is held to its version 1.
+1. Tenant A's custom plan, all seven limits, is offered to A and bought by A's
+   owner accepting the offer at checkout; A is held to its version 1.
 2. Tenant B cannot see it, buy it or be put on it.
 3. Version 2 is published and A stays on version 1.
 4. A migration is scheduled; A's renewal is billed at version 2 and A moves to
@@ -35,7 +35,9 @@ from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Paymen
 from app.db.models.topup import TopupEntitlement, TopupPurchase, TopupStatus
 from app.db.models.user import User
 from app.platform.billing_operations import PlatformBillingOperations
+from app.platform.custom_plan_offers import PlatformCustomPlanOffers
 from app.platform.plan_admin import PlanCatalogAdmin
+from app.schemas.custom_plan import CustomPlanOfferCreate
 from app.schemas.platform_billing import (
     ChangeMode,
     PlanCreate,
@@ -43,6 +45,7 @@ from app.schemas.platform_billing import (
     SubscriptionChangePlan,
 )
 from app.services.checkout_service import APPLIED, CheckoutService
+from app.services.custom_plan_offer_service import CustomPlanOfferService
 from app.services.invoice_service import InvoiceService
 from app.services.subscription_service import SubscriptionService
 from app.workers import billing_worker as worker_module
@@ -127,9 +130,18 @@ async def test_a_custom_plan_is_bought_reversioned_and_migrated_once(
     )
     assert created.current_version is not None
     v1 = created.current_version.id
-    started = await CheckoutService(
-        db_session, tenant_id=alpha.id, provider=paymob.provider()
-    ).start(plan_code=code, actor=alpha_owner, now=now)
+    offer = await PlatformCustomPlanOffers(db_session).offer(
+        alpha.id,
+        CustomPlanOfferCreate(plan_version_id=v1, reason="Negotiated terms."),
+        actor=staff,
+        now=now,
+    )
+    accepted = await CustomPlanOfferService(
+        db_session,
+        tenant_id=alpha.id,
+        checkout=CheckoutService(db_session, tenant_id=alpha.id, provider=paymob.provider()),
+    ).accept(offer.id, actor=alpha_owner, idempotency_key=None, now=now)
+    started = accepted.checkout
     payment = await db_session.get(Payment, started.payment_id)
     assert payment is not None
     assert (

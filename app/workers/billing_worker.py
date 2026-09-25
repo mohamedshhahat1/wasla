@@ -42,6 +42,7 @@ from app.db.models.topup import TopupStatus
 from app.db.session import Database
 from app.integrations.billing import build_checkout_provider
 from app.integrations.billing.checkout import RecurringProvider
+from app.platform.custom_plan_offers import PlatformCustomPlanOffers
 from app.repositories.billing_repository import (
     PlanVersionMigrationRepository,
     PlatformSubscriptionRepository,
@@ -176,6 +177,10 @@ class BillingWorker:
         # enforcement: the limit arithmetic already ignores an expired top-up
         # by its clock, so this phase running late never extends an allowance.
         handled += await self._drain(self._expire_topups, now=moment)
+        # Close custom plan offers whose acceptance window has passed (ADR-114).
+        # Also bookkeeping: acceptance checks the clock itself, and a page
+        # opened in time is still honoured when its money arrives.
+        handled += await self._drain(self._expire_offers, now=moment)
         # Reconcile before collecting, and the order is the point. An attempt
         # whose answer never arrived makes its invoice uncollectible, so
         # resolving it first is what lets the same pass go on to charge - and
@@ -359,6 +364,17 @@ class BillingWorker:
                 extra={"event": "billing.topups_expired", "count": len(keys)},
             )
         return len(keys)
+
+    async def _expire_offers(self, *, now: datetime) -> int:
+        """Mark one batch of open custom plan offers past `expires_at` as expired."""
+        async with self._database.session() as session:
+            expired = await PlatformCustomPlanOffers(session).expire_due(now=now)
+        if expired:
+            logger.info(
+                "billing.custom_plan_offers_expired",
+                extra={"event": "billing.custom_plan_offers_expired", "count": expired},
+            )
+        return expired
 
     async def _reconcile(self, *, now: datetime) -> int:
         """Ask the provider about attempts whose answer never came back.

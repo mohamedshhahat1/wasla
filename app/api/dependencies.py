@@ -46,6 +46,7 @@ from app.services.auth_service import AuthService
 from app.services.campaign_service import CampaignService
 from app.services.checkout_service import CheckoutService
 from app.services.credential_service import CredentialService
+from app.services.custom_plan_offer_service import CustomPlanOfferService
 from app.services.entitlement_service import Entitlement, EntitlementService
 from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
@@ -679,6 +680,20 @@ def get_topup_service(
 
 
 TopupServiceDep = Annotated[TopupService, Depends(get_topup_service)]
+
+
+def get_custom_plan_offer_service(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+    checkout: CheckoutServiceDep,
+) -> CustomPlanOfferService:
+    """Workspace-scoped custom plan offers (ADR-114), paid through the one checkout path."""
+    return CustomPlanOfferService(session, tenant_id=workspace.tenant.id, checkout=checkout)
+
+
+CustomPlanOfferServiceDep = Annotated[
+    CustomPlanOfferService, Depends(get_custom_plan_offer_service)
+]
 
 
 def get_refund_service(

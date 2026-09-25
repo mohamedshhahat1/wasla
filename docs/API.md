@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **186 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **192 operations**, of which
 17 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -251,7 +251,10 @@ payment was recorded.
 | GET | `/api/v1/billing/topups` | Top-ups this workspace may buy (`?entitlement_key=`): active global ones and its own | Workspace member |
 | POST | `/api/v1/billing/topups/{topup_id}/checkout` | Buy one: a `TOPUP` invoice and a hosted page (`201`) | Workspace **owner** |
 | GET | `/api/v1/billing/topup-purchases` | Its top-ups, bought and granted, newest first (`limit`, `offset`) | Workspace **owner** |
-| GET | `/api/v1/billing/summary` | Billing -> Usage & Top-ups in one read: subscription, the seven keys, live top-ups, recent purchases | Workspace **owner** |
+| GET | `/api/v1/billing/summary` | Billing -> Usage & Top-ups in one read: subscription, the seven keys, live top-ups, recent purchases, the open custom plan offer, renewals awaiting payment (`payment_required`) and `automatic_renewal` | Workspace **owner** |
+| GET | `/api/v1/billing/custom-offers` | Custom plans offered to it: price, currency, interval, the seven limits, the period, `can_accept` (ADR-114) | Workspace **owner** |
+| POST | `/api/v1/billing/custom-offers/{offer_id}/accept` | Accept & Pay: a `checkout` invoice pinned to the offered version and a hosted page (`201`); body `{"idempotency_key"?}` only. Changes no plan until Paymob confirms the money | Workspace **owner** |
+| POST | `/api/v1/billing/custom-offers/{offer_id}/decline` | Decline; the workspace keeps its plan | Workspace **owner** |
 
 ```
 POST /api/v1/billing/topups/{topup_id}/checkout   {"idempotency_key": "..."}
@@ -818,7 +821,10 @@ token or a raw provider payload.
 | POST | `/incidents/{id}/resolve` | Close one with an audited note |
 | GET | `/tenants/{tenant_id}/summary` | One company's billing in one read: plan, version, custom flag, period, renewal, the seven keys broken down, live top-ups, recent invoices, payments, incidents and timeline |
 | POST | `/tenants/{tenant_id}/custom-plan/preview` | What a custom plan would mean for the company; writes nothing |
-| POST | `/tenants/{tenant_id}/custom-plan` | Create a `tenant`-scoped plan and version 1, optionally assign it now or at renewal (ADR-113) |
+| POST | `/tenants/{tenant_id}/custom-plan` | Create a `tenant`-scoped plan and version 1, optionally assign it now or at renewal (ADR-113); `financial_basis: customer_checkout` makes an offer instead (ADR-114) |
+| GET | `/tenants/{tenant_id}/custom-offers` | Every custom plan offer made to the company |
+| POST | `/tenants/{tenant_id}/custom-offers` | Offer one version of the company's own priced custom plan; grants nothing |
+| POST | `/custom-offers/{offer_id}/cancel` | Withdraw an open offer (`expected_revision`, `reason`) |
 | POST | `/tenants/{tenant_id}/topups/grant` | Complimentary allowance until the period ends; no invoice or payment |
 | GET | `/topups` | Top-up products, filtered by scope, workspace, key, activity |
 | POST | `/topups` | Create a product (global or for one company) |

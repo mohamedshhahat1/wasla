@@ -36,6 +36,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -55,6 +56,7 @@ from app.db.models.billing import (
     CUSTOM_PLAN_SCOPE_FUNCTION_SQL,
     DEFAULT_CURRENCY,
 )
+from app.db.models.custom_plan_offer import INVOICE_OFFER_FUNCTION_SQL, INVOICE_OFFER_TRIGGER_SQL
 from app.db.models.enums import _enum_type
 
 MAX_REFERENCE_LENGTH: Final = 200
@@ -291,6 +293,24 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         CheckConstraint("amount_paid >= 0", name="amount_paid_non_negative"),
         CheckConstraint("amount_paid <= amount_due", name="amount_paid_within_due"),
         CheckConstraint(CURRENCY_CHECK_SQL, name="currency_supported"),
+        # An invoice for a custom plan offer names an offer of its own
+        # workspace, and only a customer's checkout does (ADR-114).
+        ForeignKeyConstraint(
+            ["custom_plan_offer_id", "tenant_id"],
+            ["custom_plan_offers.id", "custom_plan_offers.tenant_id"],
+            name="fk_invoices_custom_plan_offer_tenant",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "custom_plan_offer_id IS NULL OR "
+            "(purpose = 'checkout' AND plan_version_id IS NOT NULL)",
+            name="offer_is_a_checkout",
+        ),
+        Index(
+            "ix_invoices_custom_plan_offer_id",
+            "custom_plan_offer_id",
+            postgresql_where=text("custom_plan_offer_id IS NOT NULL"),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -327,6 +347,12 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         UUID(as_uuid=True),
         ForeignKey("plan_versions.id", ondelete="RESTRICT"),
         nullable=True,
+    )
+    # The custom plan offer this checkout accepts (ADR-114). Settlement reads
+    # it to activate the offer, and refuses the money if the offer was
+    # declined or withdrawn meanwhile. Fixed at creation by a trigger.
+    custom_plan_offer_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
     )
     amount_due: Mapped[Decimal] = mapped_column(
         Numeric(12, 2),
@@ -653,3 +679,5 @@ event.listen(Invoice.__table__, "after_create", DDL(CUSTOM_PLAN_SCOPE_FUNCTION_S
 event.listen(Invoice.__table__, "after_create", DDL(INVOICES_CUSTOM_PLAN_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 event.listen(Payment.__table__, "after_create", DDL(PAYMENTS_NO_AUTOMATIC_TOPUP_FUNCTION_SQL))  # type: ignore[no-untyped-call]
 event.listen(Payment.__table__, "after_create", DDL(PAYMENTS_NO_AUTOMATIC_TOPUP_TRIGGER_SQL))  # type: ignore[no-untyped-call]
+event.listen(Invoice.__table__, "after_create", DDL(INVOICE_OFFER_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Invoice.__table__, "after_create", DDL(INVOICE_OFFER_TRIGGER_SQL))  # type: ignore[no-untyped-call]

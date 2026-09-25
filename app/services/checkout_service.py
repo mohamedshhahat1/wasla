@@ -219,6 +219,40 @@ class CheckoutService:
             invoice, description=description, actor=actor, idempotency_key=idempotency_key
         )
 
+    async def start_offer(
+        self,
+        *,
+        plan: Plan,
+        version: PlanVersion,
+        offer_id: uuid.UUID,
+        actor: User | None,
+        idempotency_key: str | None,
+        now: datetime,
+    ) -> StartedCheckout:
+        """Open a payment page for an accepted custom plan offer (ADR-114).
+
+        The caller has locked the offer and checked it may be accepted. The
+        invoice is an ordinary `CHECKOUT` pinned to the offered version and
+        naming the offer, so settlement grants exactly those terms at exactly
+        that price - whatever version the plan has reached by the time the
+        money arrives - and can refuse the money if the offer was declined or
+        withdrawn in the meantime.
+        """
+        if self._provider is None:
+            raise ValidationError("No payment provider is configured.")
+        await self._refuse_repeat(idempotency_key)
+        subscription = await self._subscriptions.get()
+        await self._refuse_purchase(plan, version=version, subscription=subscription)
+        invoice = await self._open_invoice(
+            plan=plan, version=version, subscription=subscription, now=now, offer_id=offer_id
+        )
+        return await self.open_page(
+            invoice,
+            description=f"{version.name} plan",
+            actor=actor,
+            idempotency_key=idempotency_key,
+        )
+
     async def open_page(
         self,
         invoice: Invoice,
@@ -347,12 +381,17 @@ class CheckoutService:
         plan = await self._plans.get_by_code(plan_code)
         if plan is None or not plan.is_active:
             raise ValidationError("No such plan.")
-        # The public catalogue, or this workspace's own custom plan - which is
-        # how a customer pays for one an operator created for them (ADR-113).
-        # Another workspace's custom plan is refused exactly like a private or
-        # a missing one.
-        own = plan.is_custom and plan.tenant_id == self._tenant_id
-        if not (plan.is_public or own):
+        if not plan.is_public:
+            # A custom plan is never bought by naming its code: its owner
+            # accepts the offer made for it, which is what freezes the terms
+            # they were shown (ADR-114). Another workspace's custom plan is
+            # refused exactly like a private or a missing one, so the refusal
+            # confirms nothing about which codes are real.
+            if plan.is_custom and plan.tenant_id == self._tenant_id:
+                raise ValidationError(
+                    "This plan is bought by accepting its offer: "
+                    "POST /billing/custom-offers/{id}/accept."
+                )
             raise ValidationError("No such plan.")
         version = await self._catalog.current_version(plan, at=now)
         if version is None:
@@ -422,6 +461,7 @@ class CheckoutService:
         version: PlanVersion,
         subscription: Subscription | None,
         now: datetime,
+        offer_id: uuid.UUID | None = None,
     ) -> Invoice:
         """A new, immutable `CHECKOUT` invoice for exactly this version.
 
@@ -445,6 +485,7 @@ class CheckoutService:
                         purpose=InvoicePurpose.CHECKOUT,
                         plan_version_id=version.id,
                     )
+                    created.custom_plan_offer_id = offer_id
                     # When the customer opened this page, in the same clock the
                     # cancellation is written with - settlement compares the two.
                     created.created_at = now

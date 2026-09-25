@@ -255,8 +255,11 @@ NEW_MUTATIONS: list[tuple[str, str]] = [
     ("post", f"/topups/{uuid.uuid4()}/deactivate"),
     ("post", f"/topup-purchases/{uuid.uuid4()}/refund-review"),
     ("delete", f"/topups/{uuid.uuid4()}?reason=cleanup"),
+    ("post", f"/tenants/{uuid.uuid4()}/custom-offers"),
+    ("post", f"/custom-offers/{uuid.uuid4()}/cancel"),
 ]
 NEW_READS = [
+    f"/tenants/{uuid.uuid4()}/custom-offers",
     "/topups",
     f"/topups/{uuid.uuid4()}",
     "/topup-purchases",
@@ -423,10 +426,12 @@ async def test_a_custom_plan_is_one_workspaces_and_nobody_elses(
     assert refused.status_code == 422
     missing = await http.post(f"{BILLING}/checkout", json={"plan_code": "no-such-plan"})
     assert refused.json()["error"]["message"] == missing.json()["error"]["message"]
-    # Alpha's owner can.
+    # Alpha's owner cannot buy it by code either (ADR-114): a custom plan is
+    # bought by accepting the offer made for it, and the refusal says so.
     _as_member(app, alpha, alpha_owner, TenantRole.TENANT_OWNER)
-    bought = await http.post(f"{BILLING}/checkout", json={"plan_code": body["code"]})
-    assert bought.status_code == 201, bought.text
+    by_code = await http.post(f"{BILLING}/checkout", json={"plan_code": body["code"]})
+    assert by_code.status_code == 422, by_code.text
+    assert "custom-offers" in by_code.json()["error"]["message"]
 
     # The platform cannot assign it to Beta.
     version_id = result["version"]["id"]
@@ -567,7 +572,8 @@ async def test_assigning_a_priced_custom_plan_now_needs_money_or_a_named_basis(
         json=_custom_body(**common, financial_basis="customer_checkout"),
     )
     assert waiting.status_code == 201, waiting.text
-    assert waiting.json()["assignment"]["status"] == "awaiting_customer_checkout"
+    assert waiting.json()["assignment"]["status"] == "offered"
+    assert waiting.json()["offer"]["status"] == "offered"
     await db_session.refresh(subscription)
     assert subscription.plan_id != uuid.UUID(waiting.json()["plan"]["id"])
 
@@ -977,3 +983,218 @@ async def test_the_plan_list_filters_by_scope_and_workspace(
     assert [row["id"] for row in listed.json()["items"]] == [created["plan"]["id"]]
     public = await http.get(f"{PLATFORM}/plans", params={"scope": "public"})
     assert created["plan"]["id"] not in {row["id"] for row in public.json()["items"]}
+
+
+# ------------------------------------------------------ custom plan offers
+
+
+async def test_the_owner_sees_the_whole_offer_and_accepting_changes_nothing_until_paid(
+    db_session: AsyncSession, app: FastAPI, http: AsyncClient, intentions: Intentions
+) -> None:
+    """ADR-114, spec 5-9: the offer shows price, currency, interval, the seven
+    limits and the period; Accept & Pay opens one page priced from the version
+    and changes no plan; the request cannot carry a price.
+    """
+    now = base_now()
+    await catalogue(db_session)
+    tenant, owner, subscription = await workspace(db_session, now=now, name="ABC Company")
+    staff = await _staff(app, db_session, PlatformRole.PLATFORM_ADMIN)
+    body = _custom_body(financial_basis="customer_checkout")
+    created = await http.post(f"{PLATFORM}/tenants/{tenant.id}/custom-plan", json=body)
+    assert created.status_code == 201, created.text
+    assert created.json()["assignment"]["status"] == "offered"
+    offered = await db_session.scalar(
+        select(AuditLog)
+        .where(AuditLog.action == AuditAction.BILLING_CUSTOM_PLAN_OFFERED)
+        .where(AuditLog.tenant_id == tenant.id)
+    )
+    assert offered is not None and offered.actor_id == staff.id
+    assert offered.meta["reason"] == body["reason"]
+
+    _as_member(app, tenant, owner, TenantRole.MEMBER)
+    assert (await http.get(f"{BILLING}/custom-offers")).status_code == 403
+    _as_member(app, tenant, owner, TenantRole.TENANT_OWNER)
+    listed = await http.get(f"{BILLING}/custom-offers")
+    assert listed.status_code == 200, listed.text
+    _clean(listed.json())
+    (offer,) = listed.json()
+    assert (offer["name"], offer["price"], offer["currency"], offer["interval"]) == (
+        "ABC Enterprise",
+        "1500.00",
+        "EGP",
+        "monthly",
+    )
+    assert {row["key"]: row["limit"] for row in offer["limits"]} == {
+        key.value: body[key.value] for key in TopupEntitlement
+    }
+    assert offer["effective_period"]["starts"] == "on_payment"
+    assert offer["can_accept"] is True and offer["status"] == "offered"
+    assert "optional" in offer["renewal_note"]
+
+    forged = await http.post(
+        f"{BILLING}/custom-offers/{offer['id']}/accept", json={"price": "1.00"}
+    )
+    assert forged.status_code == 422
+    accepted = await http.post(f"{BILLING}/custom-offers/{offer['id']}/accept", json={})
+    assert accepted.status_code == 201, accepted.text
+    _clean(accepted.json())
+    assert (accepted.json()["amount"], accepted.json()["currency"]) == ("1500.00", "EGP")
+    assert intentions.count == 1
+    await db_session.refresh(subscription)
+    pro = await db_session.scalar(select(Plan).where(Plan.code == "pro"))
+    assert pro is not None and subscription.plan_id == pro.id, "accepting is not paying"
+
+    summary = await http.get(f"{BILLING}/summary")
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["open_offer"]["status"] == "pending_payment"
+    assert summary.json()["payment_required"] == []
+
+
+async def test_one_workspace_cannot_see_accept_decline_or_pay_anothers_offer(
+    db_session: AsyncSession, app: FastAPI, http: AsyncClient, intentions: Intentions
+) -> None:
+    """Spec 37: Tenant B cannot pay Tenant A's custom offer or A's private top-up,
+    even by supplying raw ids - every one is a 404 like a missing resource.
+    """
+    now = base_now()
+    await catalogue(db_session)
+    alpha, alpha_owner, _ = await workspace(db_session, now=now, name="Alpha")
+    beta, beta_owner, _ = await workspace(db_session, now=now, name="Beta")
+    await _staff(app, db_session, PlatformRole.PLATFORM_ADMIN)
+    await http.post(
+        f"{PLATFORM}/tenants/{alpha.id}/custom-plan",
+        json=_custom_body(financial_basis="customer_checkout"),
+    )
+    private = await product(
+        db_session, entitlement=TopupEntitlement.PERIOD_AI_TURNS, quantity=10_000, tenant=alpha
+    )
+    _as_member(app, alpha, alpha_owner, TenantRole.TENANT_OWNER)
+    (offer,) = (await http.get(f"{BILLING}/custom-offers")).json()
+    opened = await http.post(f"{BILLING}/custom-offers/{offer['id']}/accept", json={})
+    assert opened.status_code == 201
+    invoice_id = opened.json()["invoice_id"]
+
+    _as_member(app, beta, beta_owner, TenantRole.TENANT_OWNER)
+    assert (await http.get(f"{BILLING}/custom-offers")).json() == []
+    for path in (f"/custom-offers/{offer['id']}/accept", f"/custom-offers/{offer['id']}/decline"):
+        response = await http.post(f"{BILLING}{path}", json={})
+        assert response.status_code == 404, (path, response.text)
+    paid_by_beta = await http.post(f"{BILLING}/checkout", json={"invoice_id": invoice_id})
+    assert paid_by_beta.status_code == 404
+    topup = await http.post(f"{BILLING}/topups/{private.id}/checkout", json={})
+    assert topup.status_code == 404
+    assert intentions.count == 1, "nothing Beta did reached Paymob"
+
+
+async def test_offers_are_declined_withdrawn_and_refused_by_the_rules(
+    db_session: AsyncSession, app: FastAPI, http: AsyncClient
+) -> None:
+    now = base_now()
+    await catalogue(db_session)
+    tenant, owner, _ = await workspace(db_session, now=now)
+    other, _, _ = await workspace(db_session, now=now, name="Other")
+    await _staff(app, db_session, PlatformRole.PLATFORM_ADMIN)
+    created = (
+        await http.post(f"{PLATFORM}/tenants/{tenant.id}/custom-plan", json=_custom_body())
+    ).json()
+    version_id = created["version"]["id"]
+    reason = {"reason": "Enterprise deal."}
+
+    free = (
+        await http.post(
+            f"{PLATFORM}/tenants/{tenant.id}/custom-plan", json=_custom_body(price="0.00")
+        )
+    ).json()
+    refused_free = await http.post(
+        f"{PLATFORM}/tenants/{tenant.id}/custom-offers",
+        json={"plan_version_id": free["version"]["id"], **reason},
+    )
+    assert refused_free.status_code == 422
+    elsewhere = await http.post(
+        f"{PLATFORM}/tenants/{other.id}/custom-offers",
+        json={"plan_version_id": version_id, **reason},
+    )
+    assert elsewhere.status_code == 422
+    past = await http.post(
+        f"{PLATFORM}/tenants/{tenant.id}/custom-offers",
+        json={"plan_version_id": version_id, "expires_at": "2020-01-01T00:00:00Z", **reason},
+    )
+    assert past.status_code == 422
+
+    first = await http.post(
+        f"{PLATFORM}/tenants/{tenant.id}/custom-offers",
+        json={"plan_version_id": version_id, **reason},
+    )
+    assert first.status_code == 201, first.text
+    second = await http.post(
+        f"{PLATFORM}/tenants/{tenant.id}/custom-offers",
+        json={"plan_version_id": version_id, **reason},
+    )
+    assert second.status_code == 409
+
+    _as_member(app, tenant, owner, TenantRole.TENANT_OWNER)
+    declined = await http.post(
+        f"{BILLING}/custom-offers/{first.json()['id']}/decline", json={"reason": "Not now."}
+    )
+    assert declined.status_code == 200 and declined.json()["status"] == "declined"
+    again = await http.post(f"{BILLING}/custom-offers/{first.json()['id']}/accept", json={})
+    assert again.status_code == 409
+
+    third = await http.post(
+        f"{PLATFORM}/tenants/{tenant.id}/custom-offers",
+        json={"plan_version_id": version_id, **reason},
+    )
+    assert third.status_code == 201
+    stale = await http.post(
+        f"{PLATFORM}/custom-offers/{third.json()['id']}/cancel",
+        json={"expected_revision": 99, "reason": "Withdrawn."},
+    )
+    assert stale.status_code == 409
+    withdrawn = await http.post(
+        f"{PLATFORM}/custom-offers/{third.json()['id']}/cancel",
+        json={"expected_revision": third.json()["revision"], "reason": "Withdrawn."},
+    )
+    assert withdrawn.status_code == 200 and withdrawn.json()["status"] == "cancelled"
+    history = await http.get(f"{PLATFORM}/tenants/{tenant.id}/custom-offers")
+    assert [row["status"] for row in history.json()] == ["cancelled", "declined"]
+
+
+async def test_a_zero_price_custom_plan_is_a_recorded_assignment_not_a_payment(
+    db_session: AsyncSession, app: FastAPI, http: AsyncClient, intentions: Intentions
+) -> None:
+    """Spec 23: price 0 creates no Paymob transaction; the audit names the actor,
+    the reason, the workspace and the version.
+    """
+    now = base_now()
+    await catalogue(db_session)
+    tenant, _, subscription = await workspace(db_session, now=now)
+    staff = await _staff(app, db_session, PlatformRole.PLATFORM_ADMIN)
+    refused = await http.post(
+        f"{PLATFORM}/tenants/{tenant.id}/custom-plan",
+        json=_custom_body(price="0.00", financial_basis="customer_checkout"),
+    )
+    assert refused.status_code == 422
+    created = await http.post(
+        f"{PLATFORM}/tenants/{tenant.id}/custom-plan",
+        json=_custom_body(
+            price="0.00",
+            assign_to_tenant=True,
+            assignment_mode="now",
+            expected_subscription_revision=subscription.revision,
+            reason="Pilot partner, free for the pilot.",
+        ),
+    )
+    assert created.status_code == 201, created.text
+    version_id = created.json()["version"]["id"]
+    await db_session.refresh(subscription)
+    assert str(subscription.plan_version_id) == version_id
+    assert intentions.count == 0
+    audit = await db_session.scalar(
+        select(AuditLog)
+        .where(AuditLog.action == AuditAction.BILLING_CUSTOM_PLAN_ASSIGNED)
+        .where(AuditLog.tenant_id == tenant.id)
+    )
+    assert audit is not None
+    assert audit.actor_id == staff.id
+    assert audit.meta["reason"] == "Pilot partner, free for the pilot."
+    assert audit.meta["after"]["plan_version_id"] == version_id

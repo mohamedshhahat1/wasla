@@ -46,6 +46,7 @@ from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.platform.billing_audit import record_platform_billing
 from app.platform.billing_operations import PlatformBillingOperations
+from app.platform.custom_plan_offers import PlatformCustomPlanOffers
 from app.platform.plan_admin import PlanCatalogAdmin
 from app.repositories.billing_repository import (
     PlanRepository,
@@ -59,6 +60,7 @@ from app.schemas.custom_plan import (
     CustomPlanAssignment,
     CustomPlanBasis,
     CustomPlanCreate,
+    CustomPlanOfferCreate,
     CustomPlanPreview,
     CustomPlanPreviewRequest,
     CustomPlanResult,
@@ -74,6 +76,7 @@ from app.schemas.platform_billing import (
     SubscriptionChangePlan,
 )
 from app.services import billing_calendar
+from app.services.custom_plan_offer_service import offer_read
 from app.services.entitlement_service import EntitlementService
 from app.services.plan_catalog import PlanCatalog
 
@@ -280,7 +283,12 @@ class CustomPlanAdmin:
     ) -> CustomPlanResult:
         tenant = await self._tenant(tenant_id)
         subscription = await SubscriptionRepository(self._session, tenant_id=tenant.id).get()
-        if payload.assign_to_tenant and subscription is None:
+        offering = payload.financial_basis is CustomPlanBasis.CUSTOMER_CHECKOUT
+        if offering and payload.price <= 0:
+            raise ValidationError(
+                "A free custom plan is not sold. Assign it with a complimentary basis instead."
+            )
+        if payload.assign_to_tenant and subscription is None and not offering:
             raise ConflictError("The workspace has no subscription to put on this plan.")
         if (
             payload.effective_at is not None
@@ -341,7 +349,26 @@ class CustomPlanAdmin:
             raise NotFoundError("The custom plan has no version.")
 
         assignment = CustomPlanAssignment(mode=None, status="not_assigned", subscription=None)
-        if payload.assign_to_tenant and subscription is not None:
+        offer_read_model = None
+        if offering:
+            # Nothing is assigned. The owner sees the offer with its full terms
+            # and accepts and pays it; settlement applies the plan when the
+            # money is confirmed, and not before (ADR-114).
+            offer = await PlatformCustomPlanOffers(self._session).offer(
+                tenant.id,
+                CustomPlanOfferCreate(
+                    plan_version_id=version.id,
+                    expires_at=payload.offer_expires_at,
+                    reason=payload.reason,
+                ),
+                actor=actor,
+                now=now,
+            )
+            assignment = CustomPlanAssignment(
+                mode=payload.assignment_mode, status="offered", subscription=None
+            )
+            offer_read_model = await offer_read(self._session, offer, now=now)
+        elif payload.assign_to_tenant and subscription is not None:
             assignment = await self._assign(
                 payload, subscription=subscription, version=version, actor=actor, now=now
             )
@@ -352,6 +379,7 @@ class CustomPlanAdmin:
             version=PlanVersionRead.from_model(version),
             assignment=assignment,
             preview=preview,
+            offer=offer_read_model,
         )
 
     async def _assign(
@@ -363,28 +391,15 @@ class CustomPlanAdmin:
         actor: User,
         now: datetime,
     ) -> CustomPlanAssignment:
-        """Put the workspace on version 1 through the ordinary subscription change."""
-        if (
-            payload.assignment_mode is AssignmentMode.NOW
-            and payload.price > 0
-            and payload.financial_basis is CustomPlanBasis.CUSTOMER_CHECKOUT
-        ):
-            # Nothing is granted here. The owner buys it at checkout - it is on
-            # their catalogue and on nobody else's - and settlement applies it.
-            self._audit_assignment(
-                AuditAction.BILLING_CUSTOM_PLAN_ASSIGNMENT_SCHEDULED,
-                payload,
-                subscription=subscription,
-                version=version,
-                actor=actor,
-                extra={"awaiting": "customer_checkout"},
-            )
-            return CustomPlanAssignment(
-                mode=payload.assignment_mode,
-                status="awaiting_customer_checkout",
-                subscription=None,
-            )
+        """Put the workspace on version 1 through the ordinary subscription change.
 
+        A priced plan reaches the workspace only with its funding named: a
+        manual payment or a complimentary grant now, or an offer the customer
+        pays (handled before this is reached). Scheduling a priced custom plan
+        for the next renewal with no basis is refused by `change_plan`, because
+        a renewal can be taken from a saved card and the customer never agreed
+        to the price.
+        """
         operations = PlatformBillingOperations(self._session, settings=self._settings)
         changed = await operations.change_plan(
             subscription.id,

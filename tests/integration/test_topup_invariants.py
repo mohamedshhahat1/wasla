@@ -23,8 +23,10 @@ from app.db.models.enums import PlatformRole
 from app.db.models.topup import TopupEntitlement, TopupPurchase, TopupStatus
 from app.db.models.user import User
 from app.platform.billing_operations import PlatformBillingOperations
+from app.platform.custom_plan_offers import PlatformCustomPlanOffers
 from app.platform.plan_admin import PlanCatalogAdmin
 from app.platform.topup_admin import TopupAdmin
+from app.schemas.custom_plan import CustomPlanOfferCreate
 from app.schemas.platform_billing import ChangeMode, PlanCreate, SubscriptionChangePlan
 from app.schemas.topup import TopupGrantCreate
 from app.services.entitlement_service import EntitlementService
@@ -134,6 +136,41 @@ INVARIANTS: tuple[tuple[str, str], ...] = (
         "C05 a custom plan is never public",
         "SELECT count(*) FROM plans WHERE scope = 'tenant' AND is_public",
     ),
+    # Custom plan offers (ADR-114).
+    (
+        "O01 an active offer has a paid invoice for its version",
+        """SELECT count(*) FROM custom_plan_offers o
+            WHERE o.status = 'active' AND NOT EXISTS (
+              SELECT 1 FROM invoices i WHERE i.custom_plan_offer_id = o.id
+                 AND i.status = 'paid' AND i.plan_version_id = o.plan_version_id)""",
+    ),
+    (
+        "O02 no paid offer invoice for a declined or cancelled offer",
+        """SELECT count(*) FROM invoices i
+             JOIN custom_plan_offers o ON o.id = i.custom_plan_offer_id
+            WHERE i.status = 'paid' AND o.status IN ('declined', 'cancelled')""",
+    ),
+    (
+        "O03 an offer invoice sells the offered version at its price",
+        """SELECT count(*) FROM invoices i
+             JOIN custom_plan_offers o ON o.id = i.custom_plan_offer_id
+             JOIN plan_versions v ON v.id = o.plan_version_id
+            WHERE i.plan_version_id <> o.plan_version_id OR i.amount_due <> v.price""",
+    ),
+    (
+        "O04 no priced custom plan is held without a paid invoice for it",
+        """SELECT count(*) FROM subscriptions s JOIN plans p ON p.id = s.plan_id
+             JOIN plan_versions v ON v.id = s.plan_version_id
+            WHERE p.scope = 'tenant' AND v.price > 0 AND NOT EXISTS (
+              SELECT 1 FROM invoices i WHERE i.tenant_id = s.tenant_id AND i.status = 'paid'
+                 AND i.plan_version_id IN (SELECT id FROM plan_versions WHERE plan_id = p.id))""",
+    ),
+    (
+        "O05 at most one open offer per workspace",
+        """SELECT count(*) FROM (SELECT tenant_id FROM custom_plan_offers
+             WHERE status IN ('offered', 'pending_payment')
+             GROUP BY tenant_id HAVING count(*) > 1) x""",
+    ),
 )
 
 
@@ -158,7 +195,7 @@ async def test_every_invariant_holds_over_a_populated_ledger(db_session: AsyncSe
     admin = TopupAdmin(db_session, settings=_settings())
     transaction = iter(range(930_000_001, 930_001_000))
 
-    # Custom plans: Alpha's scheduled for Alpha, Beta's held by Beta.
+    # Custom plans: Alpha's offered to Alpha, Beta's (free) held by Beta.
     plans = PlanCatalogAdmin(db_session)
     for tenant, subscription in ((alpha, alpha_subscription), (beta, beta_subscription)):
         read = await plans.create(
@@ -187,6 +224,18 @@ async def test_every_invariant_holds_over_a_populated_ledger(db_session: AsyncSe
             now=now,
         )
         assert read.current_version is not None
+        if tenant is alpha:
+            # A priced custom plan reaches its workspace as an offer (ADR-114);
+            # the ledger holds it open, unpaid.
+            await PlatformCustomPlanOffers(db_session).offer(
+                alpha.id,
+                CustomPlanOfferCreate(
+                    plan_version_id=read.current_version.id, reason="Invariant sweep."
+                ),
+                actor=staff,
+                now=now,
+            )
+            continue
         await PlatformBillingOperations(db_session, settings=_settings()).change_plan(
             subscription.id,
             SubscriptionChangePlan(

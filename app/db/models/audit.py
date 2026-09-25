@@ -358,6 +358,15 @@ class AuditAction(StrEnum):
     BILLING_CUSTOM_PLAN_VERSION_CREATED = "billing_custom_plan_version_created"
     BILLING_CUSTOM_PLAN_ASSIGNED = "billing_custom_plan_assigned"
     BILLING_CUSTOM_PLAN_ASSIGNMENT_SCHEDULED = "billing_custom_plan_assignment_scheduled"
+    # Custom plan offers (ADR-114): offered by the platform, accepted (a
+    # checkout opened) or declined by the customer, activated only by a
+    # settled payment, withdrawn by staff, or expired by the sweep.
+    BILLING_CUSTOM_PLAN_OFFERED = "billing_custom_plan_offered"
+    BILLING_CUSTOM_PLAN_OFFER_ACCEPTED = "billing_custom_plan_offer_accepted"
+    BILLING_CUSTOM_PLAN_OFFER_DECLINED = "billing_custom_plan_offer_declined"
+    BILLING_CUSTOM_PLAN_OFFER_ACTIVATED = "billing_custom_plan_offer_activated"
+    BILLING_CUSTOM_PLAN_OFFER_CANCELLED = "billing_custom_plan_offer_cancelled"
+    BILLING_CUSTOM_PLAN_OFFER_EXPIRED = "billing_custom_plan_offer_expired"
     # Top-ups (ADR-113): the catalogue, a customer's purchase from checkout to
     # grant to expiry, an operator's complimentary grant, and the operator's
     # decision after a refund.

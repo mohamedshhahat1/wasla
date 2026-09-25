@@ -11,6 +11,7 @@ Every read records a `platform_billing_read` access entry. Lists are paged,
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, status
@@ -20,11 +21,15 @@ from app.api.route import CommittingRoute
 from app.core.dependencies import SessionDep, SettingsDep
 from app.db.models.topup import TopupEntitlement, TopupScope, TopupSource, TopupStatus
 from app.platform.custom_plan_admin import CustomPlanAdmin
+from app.platform.custom_plan_offers import PlatformCustomPlanOffers
 from app.platform.tenant_billing_summary import TenantBillingSummaryBuilder
 from app.platform.topup_admin import TopupAdmin
 from app.schemas.billing_summary import PlatformTenantBillingSummary
 from app.schemas.custom_plan import (
     CustomPlanCreate,
+    CustomPlanOfferCancel,
+    CustomPlanOfferCreate,
+    CustomPlanOfferRead,
     CustomPlanPreview,
     CustomPlanPreviewRequest,
     CustomPlanResult,
@@ -40,6 +45,7 @@ from app.schemas.topup import (
     TopupRefundReview,
     TopupStateChange,
 )
+from app.services.custom_plan_offer_service import offer_read
 
 router = APIRouter(route_class=CommittingRoute, prefix="/platform/billing", tags=["platform"])
 
@@ -59,7 +65,12 @@ def get_summaries(session: SessionDep, settings: SettingsDep) -> TenantBillingSu
     return TenantBillingSummaryBuilder(session, settings=settings)
 
 
+def get_offers(session: SessionDep) -> PlatformCustomPlanOffers:
+    return PlatformCustomPlanOffers(session)
+
+
 CustomPlansDep = Annotated[CustomPlanAdmin, Depends(get_custom_plans)]
+OffersDep = Annotated[PlatformCustomPlanOffers, Depends(get_offers)]
 TopupsDep = Annotated[TopupAdmin, Depends(get_topups)]
 SummariesDep = Annotated[TenantBillingSummaryBuilder, Depends(get_summaries)]
 
@@ -107,9 +118,61 @@ async def create_custom_plan(
     """A TENANT-scoped plan and its version 1, optionally assigned now or at renewal.
 
     A priced plan applied now needs a `financial_basis`; `customer_checkout`
-    assigns nothing and lets the company's owner buy it at checkout.
+    assigns nothing and makes an **offer** the company's owner accepts and
+    pays (ADR-114). The plan applies only when that payment is confirmed.
     """
     return await plans.create(tenant_id, payload, actor=staff.user)
+
+
+@router.get(
+    "/tenants/{tenant_id}/custom-offers",
+    response_model=list[CustomPlanOfferRead],
+)
+async def list_custom_offers(
+    tenant_id: uuid.UUID,
+    staff: PlatformStaffDep,
+    access: PlatformAccessAuditDep,
+    offers: OffersDep,
+    session: SessionDep,
+) -> list[CustomPlanOfferRead]:
+    """Every custom plan offer made to this company, newest first."""
+    rows = await offers.list_for_tenant(tenant_id)
+    now = datetime.now(UTC)
+    access.billing_read(actor=staff.user, resource="custom_plan_offers", tenant_id=tenant_id)
+    return [await offer_read(session, row, now=now) for row in rows]
+
+
+@router.post(
+    "/tenants/{tenant_id}/custom-offers",
+    response_model=CustomPlanOfferRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def offer_custom_plan(
+    tenant_id: uuid.UUID,
+    payload: CustomPlanOfferCreate,
+    staff: PlatformStaffDep,
+    offers: OffersDep,
+    session: SessionDep,
+) -> CustomPlanOfferRead:
+    """Offer one version of this company's own priced custom plan. Grants nothing."""
+    offer = await offers.offer(tenant_id, payload, actor=staff.user)
+    return await offer_read(session, offer, now=datetime.now(UTC))
+
+
+@router.post(
+    "/custom-offers/{offer_id}/cancel",
+    response_model=CustomPlanOfferRead,
+)
+async def cancel_custom_offer(
+    offer_id: uuid.UUID,
+    payload: CustomPlanOfferCancel,
+    staff: PlatformStaffDep,
+    offers: OffersDep,
+    session: SessionDep,
+) -> CustomPlanOfferRead:
+    """Withdraw an open offer. Money for it arriving afterwards is held, not granted."""
+    offer = await offers.cancel(offer_id, payload, actor=staff.user)
+    return await offer_read(session, offer, now=datetime.now(UTC))
 
 
 @router.get(

@@ -1084,7 +1084,21 @@ BILLING_LABEL_DOMAINS: Final[dict[str, dict[str, frozenset[str]]]] = {
         ),
     },
     "wasla_billing_custom_plan_total": {
-        "operation": frozenset({"create", "preview", "assign", "schedule", "version"}),
+        "operation": frozenset(
+            {
+                "create",
+                "preview",
+                "assign",
+                "schedule",
+                "version",
+                # Offers (ADR-114).
+                "offer",
+                "offer_accept",
+                "offer_decline",
+                "offer_cancel",
+                "offer_expire",
+            }
+        ),
         "outcome": frozenset({"succeeded", "refused", "failed"}),
     },
 }
