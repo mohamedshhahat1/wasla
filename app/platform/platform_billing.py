@@ -68,24 +68,19 @@ class PlatformBillingService:
         actor: User | None = None,
     ) -> Payment:
         invoice = await self._locate(invoice_id)
-        payment = await self._service(invoice).record_payment(
+        # Settled by the same engine a provider callback uses (BILL-10, BILL-20),
+        # which also writes the audit entry - against the *workspace's* trail
+        # and attributed to the staff member, because the customer is entitled
+        # to see who marked their invoice paid. The newer
+        # `/platform/billing/invoices/{id}/payments` adds currency, a reason and
+        # optimistic concurrency on top of exactly this path.
+        return await self._service(invoice).record_payment(
             invoice_id=invoice.id,
             amount=amount,
             provider=provider,
             reference=reference,
-        )
-        # Recorded against the *workspace's* trail, not the platform's, and
-        # attributed to the staff member. The customer is entitled to see who
-        # marked their invoice paid, which is the whole reason this is logged.
-        self._audit(invoice).record(
-            AuditAction.PAYMENT_RECORDED,
             actor=actor,
-            actor_kind=AuditActorKind.PLATFORM_STAFF,
-            target_type="invoice",
-            target_id=invoice.id,
-            meta={"amount": str(amount), "provider": provider},
         )
-        return payment
 
     async def void(
         self,

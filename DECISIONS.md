@@ -5731,3 +5731,186 @@ so a takeover in that window waits for the intent and then finds a committed
 send. Clients must send `expected_assigned_to_id` and handle 409s; that UI
 behaviour is a deployment verification item. The residual race between the
 AI's last read and Meta's socket (CRM-17) is unchanged and remains accepted.
+
+## ADR-112 — Billing Has One Commercial Model, One Settlement Engine And An Operator Control Plane
+
+**Context.** The billing audit (`billing-03bb13b1`) found the money path strict
+(signed callbacks, idempotent events, durable MIT attempts) and the commercial
+model around it undefined. The free Starter plan expired after a fourteen-day
+trial and a later payment granted nothing (BILL-01). A saved card could be
+charged for an abandoned checkout invoice (BILL-02). The sweep invoiced the
+period that had just ended, so a purchase's first month was billed twice
+(BILL-03). Real TOKEN callbacks never attached a card, because the stored
+reference was the intention id rather than the order id (BILL-04). Every real
+MOTO renewal was refused because the billing e-mail was a placeholder, and the
+refusal was retried for ever (BILL-05). Callbacks were bound only to an unsigned
+merchant reference, not to Paymob's order, integration or mode (BILL-11). A
+checkout whose callback was lost was never recovered (BILL-09). A checkout re-pointed an existing invoice at a new plan
+(BILL-06), a decline closed a checkout that could still succeed (BILL-07), and
+count limits could be exceeded by concurrent requests (BILL-08). Plans could be
+changed only by SQL, and a price edit silently repriced every subscriber
+(BILL-12). A manual payment, a callback and a reconciliation each settled money
+differently (BILL-10, BILL-20). Tenant owners could refund themselves and keep
+the plan (BILL-13). Anomalies were log lines (BILL-15), and periods drifted after
+the 31st (BILL-18).
+
+**Decision.**
+
+1. **Commercial rules.** Free plans are permanent: no trial, no expiry
+   (migration `0070`). Priced plans are billed in advance. An upgrade takes
+   effect on settlement and starts a full new period, with no credit. A
+   downgrade is scheduled for the period end. Cancellation is at period end by
+   default.
+2. **Versioned catalogue.** Commercial terms live in immutable `plan_versions`
+   (enforced by a trigger). Subscriptions and invoices are pinned to a version.
+   A new version applies to new checkouts only. Existing subscribers move by an
+   explicit migration, applied at each subscriber's renewal and adopted only
+   once that renewal is paid.
+3. **Invoices have a purpose** (`checkout`, `renewal`, `manual`, `adjustment`).
+   Only renewals are unique per period, and only a renewal that passes the
+   strict eligibility predicate can be charged to a saved card. Every checkout
+   is a new invoice that freezes the version, price, currency and interval.
+4. **One settlement engine.** `InvoiceSettlement` is the only code that applies
+   money to an invoice or voids one. It enforces the invoice state machine and
+   turns every refusal into a durable, deduplicated `billing_incidents` row.
+5. **Paymob binding.** The intention id and the order id are stored separately.
+   A transaction callback must match the stored order, an allowed integration
+   and the payment's test/live mode. A TOKEN callback is correlated by order
+   id, and a lost one is recovered by Card Token Inquiry. MOTO charges carry
+   the owner's e-mail address. Provider errors are classified as permanent,
+   retryable or ambiguous, and each class has one handling rule.
+6. **Concurrency.** Count-based entitlements are reserved under a per-workspace
+   advisory lock held to commit. Financial rows reference their tenant with
+   `ON DELETE RESTRICT`. The database checks money invariants.
+7. **Operator control plane.** `/api/v1/platform/billing/*` manages plans,
+   versions, migrations, subscriptions, invoices, payments, refunds,
+   reconciliation and incidents, under platform RBAC, with optimistic
+   concurrency and a full audit trail. A tenant's refund endpoint only files a
+   request.
+8. **Observability.** Closed-label billing counters and a pending-age histogram
+   feed eight alert rules, each with a promtool test.
+
+**Consequences.** A price change reaches existing subscribers only when somebody
+decides it should. A customer who pays twice is never granted twice; a person
+decides on the refund. Operators no longer need database access to run billing.
+Trials are no longer supported for any plan; reintroducing them is a new
+decision. Checkout invoices accumulate one per attempt; abandoned ones stay
+`open` and are never chased, because `issued_at` is not set.
+
+## ADR-113 — Custom Plans Are Tenant-Scoped Plan Versions; Top-Ups Are Expiring Additions To The Effective Limit
+
+**Context.** Sales needed two things the catalogue could not express: terms
+negotiated for one company, and extra allowance bought mid-period without
+changing plan. Both touch the money path ADR-112 had just made strict - pinned
+plan versions, one settlement engine, bound Paymob callbacks, strict MIT
+eligibility - and both could undo it: a "custom plan" held on the subscription
+would be a second answer to "what is this workspace allowed", a top-up stored as
+a plan edit would re-price or re-limit a pinned version, and a top-up charged
+like a renewal would be an unauthorised merchant-initiated charge.
+
+**Decision.**
+
+1. **A custom plan is a plan with `scope = tenant`.** `plans.scope` is `public`,
+   `private` or `tenant`; a `tenant` plan names its workspace in
+   `plans.tenant_id`, which never changes. It uses ordinary immutable plan
+   versions, ordinary migrations and ordinary settlement. There is no second
+   plan model.
+2. **The TENANT binding is enforced twice.** `PlanCatalog.require_available` on
+   every assignment path (platform error `custom_plan_not_available_for_workspace`;
+   a tenant naming another's plan gets "No such plan."), and triggers on
+   `subscriptions` and `invoices` so no writer - the sweep, a migration, SQL -
+   can point a workspace at another's custom plan.
+3. **Seven keys, and only seven,** are custom-plan terms and top-up targets:
+   `period_messages`, `period_ai_turns`, `period_campaign_messages`,
+   `storage_bytes`, `whatsapp_numbers`, `team_members`, `knowledge_documents`.
+   A custom plan inherits every other limit from the plan the workspace holds.
+4. **The effective limit is computed, never stored:** pinned version + active
+   paid top-ups + active platform grants, in `EntitlementService.check`, which
+   every enforcement path already reads - so existing advisory locks and
+   meters apply unchanged, and no plan version is ever modified. Unlimited
+   stays unlimited; zero is zero.
+5. **A top-up is a frozen purchase that expires with its period.**
+   `topup_products` is the catalogue; `topup_purchases` freezes key, quantity,
+   price, period and expiry at checkout (a trigger refuses changes). Usage and
+   capacity top-ups alike expire at the current period's end in v1, with no
+   carry-over. Expiry is decided by the clock; the sweep only records it.
+   Capacity expiry deletes nothing: the workspace is `over_limit` and new
+   creation is refused.
+6. **Buying one is an ordinary hosted checkout** through
+   `CheckoutService.open_page`, a `topup` invoice purpose and
+   `InvoiceSettlement`, granted exactly once under a row lock by `TopupLedger`.
+   A `topup` invoice is never MIT-collectible (the sweep's predicate,
+   `RecurringService`, and a trigger on `payments`), never issued and never
+   dunned.
+7. **A platform grant is not a sale.** It is a `topup_purchases` row with
+   `source = platform_grant` and, by CHECK constraint, no invoice, payment or
+   price.
+8. **Refunds never subtract on their own.** Before the grant, a full refund
+   cancels; after it, the purchase keeps counting in `refund_review` until an
+   operator keeps or withdraws it, with an incident either way.
+9. **`period_messages` stays metered, not enforced** (ADR-030). A top-up raises
+   the allowance it is reported against, and the API says `enforced: false`.
+
+**Consequences.** A company's negotiated terms cannot leak to another company
+through any code path. Top-ups can never raise a renewal price, change a plan,
+renew or be charged to a saved card. A refunded top-up that was used is an
+operator decision, not a silent limit drop. Top-ups do not carry over and
+cannot be bought for a key the plan leaves unlimited; both are v1 product
+rules, and relaxing either is a new decision.
+
+## ADR-114 — A Priced Custom Plan Is An Offer The Customer Accepts And Pays, Never An Assignment
+
+**Context.** ADR-113 let an operator create a workspace's custom plan and, with
+`financial_basis: customer_checkout`, leave the owner to buy it "at checkout" by
+its plan code. Nothing told the owner an offer existed, nothing let them decline
+it, and nothing tied the payment to the terms they had been shown. Worse, an
+operator could schedule a priced custom plan onto a subscriber for the next
+renewal with no basis at all: the renewal would then bill a price the customer
+never agreed to, and with a saved card the MIT sweep would charge it.
+
+**Decision.**
+
+1. **A priced custom plan reaches its workspace in one of three ways:** an
+   **offer** its owner accepts and pays; a manual payment an operator has seen;
+   or a complimentary grant recorded as one. Creating or offering a plan grants
+   nothing. Scheduling a priced custom plan the workspace does not already hold
+   onto the next renewal is refused (`change_plan`, 422). Migrating a subscriber
+   between versions of the custom plan it already holds stays an ordinary
+   ADR-112 migration.
+2. **`custom_plan_offers`** names one immutable version of the workspace's own
+   custom plan and moves `offered → pending_payment → active`, or ends
+   `declined`, `expired` or `cancelled`. There is no `draft`: an unoffered plan
+   is simply a plan with no offer. A partial unique index keeps one open offer
+   per workspace; a trigger fixes an offer's tenant, plan and version and
+   refuses an offer of another workspace's plan.
+3. **Accept & Pay is an ordinary hosted checkout** (`CheckoutService.start_offer`
+   → `open_page`): a `CHECKOUT` invoice pinned to the offered version, priced
+   from it, naming the offer through a composite foreign key onto
+   `(id, tenant_id)`, with a CHECK and a trigger that it sells exactly the
+   offered version. The request carries no price. Buying a custom plan by its
+   code is refused with a pointer to the offer.
+4. **Only settlement activates an offer.** `InvoiceSettlement` asks
+   `CustomPlanOfferLedger` before granting: money for an offer declined or
+   withdrawn after its page was opened is held with a `refused_settlement`
+   incident; a page opened before an offer expired is honoured. After the
+   grant, the offer becomes `active` once, under a row lock, audited. The
+   authoritative signal is the signed Paymob callback or the transaction
+   inquiry that recovers a lost one - never the browser redirect.
+5. **Renewal follows the saved-card choice, which is optional.** A workspace
+   that saved its card at the first checkout renews by the existing MOTO/MIT
+   path at the pinned custom version's price; one that did not gets a renewal
+   invoice under the ordinary grace and dunning rules, shown as
+   `payment_required` in `GET /billing/summary`, and pays it at a hosted
+   checkout. Top-ups remain customer-initiated hosted checkouts, never MIT.
+6. **A free custom plan is not sold.** Offering one is refused; it is assigned
+   with the audit naming actor, reason, workspace and version.
+7. **Wasla stays the subscription engine.** No Paymob Subscription Plans are
+   created for custom plans or top-ups (unchanged from ADR-046).
+
+**Consequences.** "A paid custom plan cannot become the tenant's entitlement
+until its authoritative payment succeeds" is a property of the schema and the
+settlement engine, not of operator discipline. The customer sees and agrees to
+exact terms before paying, can decline, and is never charged a renewal price
+they did not accept. A custom offer cheaper than a pricier paid period in
+progress is refused at acceptance like any downgrade (ADR-112), which is a
+product limitation recorded in CUSTOM_PLANS_TOPUPS_IMPLEMENTATION.md.

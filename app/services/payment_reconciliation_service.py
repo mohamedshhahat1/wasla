@@ -66,8 +66,11 @@ from enum import StrEnum
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.core.logging import get_logger
-from app.db.models.invoice import CollectionState, PaymentStatus
+from app.core.telemetry import record_hosted_reconciliation
+from app.db.models.billing_incident import BillingIncidentKind
+from app.db.models.invoice import CollectionState, Payment, PaymentStatus
 from app.integrations.billing.checkout import (
     CallbackEvent,
     ChargeInquiry,
@@ -76,7 +79,8 @@ from app.integrations.billing.checkout import (
     InquiryVerdict,
 )
 from app.repositories.invoice_repository import PlatformPaymentRepository
-from app.services.checkout_service import CheckoutService
+from app.services.billing_incident_service import raise_incident
+from app.services.checkout_service import APPLIED, DECLINED, CheckoutService
 
 logger = get_logger(__name__)
 
@@ -152,9 +156,13 @@ class PaymentReconciler:
         session: AsyncSession,
         provider: CheckoutProvider,
         default_plan_code: str | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self._session = session
         self._provider = provider
+        # Needed only to store a card recovered by Card Token Inquiry, which is
+        # sealed with the deployment's token keys.
+        self._settings = settings
         # Carried only to hand on. An inquiry answers with whatever the
         # transaction has become, and "refunded" is one of the answers - so
         # this path can reach `_apply_reversal` and needs to know where a
@@ -417,6 +425,185 @@ class PaymentReconciler:
             },
         )
         return Verdict.ABANDONED
+
+    # ------------------------------------------------ hosted checkouts (BILL-09)
+
+    async def run_hosted(
+        self,
+        *,
+        now: datetime | None = None,
+        grace_seconds: float,
+        lease_seconds: float,
+        max_age_seconds: float,
+        limit: int,
+    ) -> dict[str, int]:
+        """Ask about hosted-checkout payments whose callback never came.
+
+        A customer paid on the provider's page and Wasla never heard: before
+        this, the payment stayed `pending` for ever and the customer had paid
+        for nothing (BILL-09). The same lease protocol as the automatic path,
+        and the same settlement path as a callback - an inquiry's answer is
+        translated by the function that reads callbacks and applied by
+        `CheckoutService.apply`, so the two cannot settle one payment twice.
+
+        Nothing here can charge anybody. The worst it does is ask.
+        """
+        moment = now or datetime.now(UTC)
+        counts: dict[str, int] = {}
+        if not self.available:
+            return counts
+        older_than = moment - timedelta(seconds=grace_seconds)
+        for _ in range(limit):
+            claimed = await self._payments.claim_hosted_for_reconciliation(
+                provider=self._provider.name,
+                older_than=older_than,
+                newer_than=moment - timedelta(seconds=max_age_seconds),
+                lease_before=moment - timedelta(seconds=lease_seconds),
+                now=moment,
+            )
+            if claimed is None:
+                await self._session.rollback()
+                break
+            payment_id, tenant_id = claimed.id, claimed.tenant_id
+            await self._session.commit()
+            verdict = await self.reconcile_hosted(payment_id, tenant_id=tenant_id, now=moment)
+            counts[verdict] = counts.get(verdict, 0) + 1
+            if verdict == "unreachable":
+                break
+
+        oldest = await self._payments.oldest_pending_hosted_at(
+            provider=self._provider.name, older_than=older_than
+        )
+        age = max((moment - _aware(oldest)).total_seconds(), 0.0) if oldest else 0.0
+        await record_hosted_reconciliation(counts, oldest_pending_seconds=age)
+        return counts
+
+    async def reconcile_hosted(
+        self,
+        payment_id: uuid.UUID,
+        *,
+        tenant_id: uuid.UUID,
+        now: datetime,
+    ) -> str:
+        """One hosted payment: ask, and apply through the callback path."""
+        inquiry = await self._ask(payment_id)
+        if inquiry.verdict in (InquiryVerdict.UNREACHABLE, InquiryVerdict.UNSUPPORTED):
+            return "unreachable"
+        if inquiry.verdict is InquiryVerdict.PENDING:
+            return "still_pending"
+        if inquiry.verdict is InquiryVerdict.NOT_FOUND or inquiry.event is None:
+            return "not_found"
+
+        service = CheckoutService(
+            self._session,
+            tenant_id=tenant_id,
+            provider=self._provider,
+            default_plan_code=self._default_plan_code,
+        )
+        outcome = await service.apply(inquiry.event, now=now)
+        payment = await self._payments.get_by_id(payment_id)
+        recovered = (
+            outcome == APPLIED and payment is not None and payment.status is PaymentStatus.SUCCEEDED
+        )
+        if recovered and payment is not None:
+            # Visible, and closed: nothing is owed, but an operator reading the
+            # ledger must be able to see that this payment was found by asking
+            # rather than by being told.
+            await raise_incident(
+                self._session,
+                kind=BillingIncidentKind.RECOVERED_BY_RECONCILIATION,
+                dedupe_key=str(payment_id),
+                tenant_id=tenant_id,
+                payment_id=payment_id,
+                invoice_id=payment.invoice_id,
+                provider=self._provider.name,
+                provider_transaction_id=payment.provider_reference,
+                amount=payment.amount,
+                currency=payment.currency,
+                detail="A hosted payment whose callback never arrived, settled by inquiry.",
+                resolved=True,
+                now=now,
+            )
+            await self._recover_saved_card(payment, tenant_id=tenant_id)
+        await self._session.commit()
+        logger.info(
+            "billing.hosted_payment_reconciled",
+            extra={
+                "event": "billing.hosted_payment_reconciled",
+                "tenant_id": str(tenant_id),
+                "payment_id": str(payment_id),
+                "outcome": outcome,
+            },
+        )
+        if recovered:
+            return "settled"
+        if outcome == DECLINED:
+            return "declined"
+        return "still_pending"
+
+    async def _recover_saved_card(self, payment: Payment, *, tenant_id: uuid.UUID) -> None:
+        """Ask for the card saved under a recovered checkout's order, if any.
+
+        Card Token Inquiry is the documented recovery for a TOKEN callback that
+        never arrived. Best effort: storing a card is idempotent on its
+        fingerprint, so a TOKEN callback that did arrive changes nothing, and a
+        card that cannot be recovered is a customer invoiced by e-mail.
+        """
+        order = payment.provider_order_id
+        inquire = getattr(self._provider, "inquire_saved_method", None)
+        if not order or inquire is None or self._settings is None:
+            return
+        saved = await inquire(str(order))
+        if saved is None:
+            return
+        from app.services.payment_method_service import remember_saved_method
+
+        await remember_saved_method(
+            self._session,
+            settings=self._settings,
+            tenant_id=tenant_id,
+            provider=self._provider.name,
+            saved=saved,
+        )
+
+    async def reconcile_payment(self, payment_id: uuid.UUID, *, now: datetime) -> str:
+        """An operator asked about one payment (spec: reconciliation action).
+
+        Routes to the logic the sweeps use: an unresolved automatic attempt is
+        asked about and settled or closed exactly as the automatic pass would,
+        a pending hosted payment exactly as the hosted pass would. **Nothing
+        here can send a charge** - the most it does is ask.
+        """
+        if not self.available:
+            return "unsupported"
+        payment = await self._payments.get_by_id(payment_id)
+        if payment is None:
+            return "not_found"
+        tenant_id = payment.tenant_id
+        if payment.is_unresolved_collection:
+            inquiry = await self._ask(payment_id)
+            if inquiry.verdict in (InquiryVerdict.UNREACHABLE, InquiryVerdict.UNSUPPORTED):
+                return Verdict.UNREACHABLE.value
+            if inquiry.verdict is InquiryVerdict.PENDING:
+                return Verdict.STILL_PENDING.value
+            if inquiry.verdict is InquiryVerdict.NOT_FOUND or inquiry.event is None:
+                absent = await self._absent(
+                    payment_id,
+                    tenant_id=tenant_id,
+                    invoice_id=payment.invoice_id,
+                    created_at=payment.created_at,
+                    state=payment.collection_state,
+                    abandon_before=now - timedelta(days=1),
+                    now=now,
+                )
+                return absent.value
+            applied = await self._apply(
+                inquiry.event, payment_id=payment_id, tenant_id=tenant_id, now=now
+            )
+            return applied.value
+        if not payment.is_automatic and payment.status is PaymentStatus.PENDING:
+            return await self.reconcile_hosted(payment_id, tenant_id=tenant_id, now=now)
+        return "nothing_to_do"
 
     async def unresolved_count(self) -> int:
         """How many attempts are still waiting for an answer."""

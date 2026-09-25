@@ -38,9 +38,12 @@ from app.integrations.billing.paymob import (
     INTENTION_PATH,
     REFUND_PATH,
     REGIONS,
-    UNKNOWN_BILLING_FIELD,
+    UNKNOWN_FIRST_NAME,
+    UNKNOWN_LAST_NAME,
+    UNKNOWN_PHONE,
     PaymobProvider,
 )
+from tests.paymob_orders import order_from_request
 
 SECRET_KEY = "sk_test_notreal000000000000"
 PUBLIC_KEY = "pk_test_notreal000000000000"
@@ -69,7 +72,14 @@ def _intention_ok(
     def handler(request: httpx.Request) -> httpx.Response:
         if seen is not None:
             seen.append(request)
-        return httpx.Response(201, json={"id": "pi_test_1", "client_secret": CLIENT_SECRET})
+        return httpx.Response(
+            201,
+            json={
+                "id": "pi_test_1",
+                "client_secret": CLIENT_SECRET,
+                "intention_order_id": order_from_request(request),
+            },
+        )
 
     return handler
 
@@ -480,12 +490,14 @@ async def test_the_required_billing_keys_are_always_present() -> None:
     assert billing["last_name"] == "Lovelace"
 
 
-async def test_a_field_we_do_not_collect_is_sent_as_an_obvious_placeholder() -> None:
-    """Wasla holds no telephone number, and Paymob requires one.
+async def test_a_field_we_do_not_collect_is_sent_as_a_neutral_stand_in() -> None:
+    """Wasla holds no telephone number, and Paymob requires one (BILL-22).
 
-    A placeholder is the only option other than not taking card payments, and
-    it is spelled to be unmistakable in Paymob's dashboard so nobody reading a
-    transaction takes it for a customer's real number.
+    The stand-ins used to read `NOT_COLLECTED`, which the customer saw on the
+    hosted page as their own name. They are now neutral - `NA` for the phone,
+    the product's name for a missing name - and the e-mail is **never** a
+    placeholder: with none it is sent empty, so Paymob refuses the intention
+    rather than carrying an invented address (BILL-05).
     """
     seen: list[httpx.Request] = []
 
@@ -499,11 +511,11 @@ async def test_a_field_we_do_not_collect_is_sent_as_an_obvious_placeholder() -> 
     )
 
     billing = json.loads(seen[0].read())["billing_data"]
-    assert billing["phone_number"] == UNKNOWN_BILLING_FIELD
-    # No account details at all, so every field falls back rather than the
-    # block being omitted - an omitted block is a refused intention.
-    assert billing["email"] == UNKNOWN_BILLING_FIELD
-    assert billing["first_name"] == UNKNOWN_BILLING_FIELD
+    assert billing["phone_number"] == UNKNOWN_PHONE == "NA"
+    assert billing["email"] == ""
+    assert billing["first_name"] == UNKNOWN_FIRST_NAME
+    assert billing["last_name"] == UNKNOWN_LAST_NAME
+    assert "NOT_COLLECTED" not in json.dumps(billing)
 
 
 async def test_a_single_word_name_still_fills_both_name_fields() -> None:
@@ -522,7 +534,7 @@ async def test_a_single_word_name_still_fills_both_name_fields() -> None:
 
     billing = json.loads(seen[0].read())["billing_data"]
     assert billing["first_name"] == "Ada"
-    assert billing["last_name"] == UNKNOWN_BILLING_FIELD
+    assert billing["last_name"] == UNKNOWN_LAST_NAME
 
 
 async def test_no_address_is_ever_sent() -> None:

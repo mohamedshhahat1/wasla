@@ -31,23 +31,32 @@ from enum import StrEnum
 from typing import Any, Final
 
 from sqlalchemy import (
+    DDL,
     Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
+    event,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from app.db.models.billing import CURRENCY_LENGTH, DEFAULT_CURRENCY
+from app.db.base import Base, RevisionedMixin, TimestampMixin, UUIDPrimaryKeyMixin
+from app.db.models.billing import (
+    CURRENCY_CHECK_SQL,
+    CURRENCY_LENGTH,
+    CUSTOM_PLAN_SCOPE_FUNCTION_SQL,
+    DEFAULT_CURRENCY,
+)
+from app.db.models.custom_plan_offer import INVOICE_OFFER_FUNCTION_SQL, INVOICE_OFFER_TRIGGER_SQL
 from app.db.models.enums import _enum_type
 
 MAX_REFERENCE_LENGTH: Final = 200
@@ -59,6 +68,41 @@ MAX_FAILURE_LENGTH: Final = 500
 # UUID, a ULID or a request id, small enough that it is not a place to put a
 # payload.
 MAX_IDEMPOTENCY_KEY_LENGTH: Final = 100
+
+
+class InvoicePurpose(StrEnum):
+    """Why an invoice exists, which decides who may collect it and how (BILL-02).
+
+    ``CHECKOUT``
+        A customer chose to buy something and was sent to a payment page. Only
+        that customer, at that page, pays it. **Never collected automatically**:
+        a checkout somebody abandoned is not consent to be charged, and the
+        renewal sweep debiting one from a saved card was an unauthorised
+        merchant-initiated charge.
+    ``RENEWAL``
+        The billing sweep's bill for the next service period of a subscription,
+        issued in advance. The only purpose automatic collection may claim.
+    ``MANUAL``
+        Raised by platform staff for money that arrives outside the product -
+        a bank transfer against an operator plan change.
+    ``ADJUSTMENT``
+        Reserved for a future credit or correction document. Nothing creates
+        one today; it is in the vocabulary so the day something does, it cannot
+        be mistaken for any of the three above.
+    ``TOPUP``
+        A one-time purchase of extra allowance (ADR-113). Customer-initiated,
+        paid at a hosted page, **never** recurring and never collected from a
+        saved card - a trigger on `payments` refuses an automatic attempt
+        against one. It buys no plan: settlement grants its `TopupPurchase`
+        and leaves the subscription exactly as it was, and no reversal of it
+        ever withdraws a plan.
+    """
+
+    CHECKOUT = "checkout"
+    RENEWAL = "renewal"
+    MANUAL = "manual"
+    ADJUSTMENT = "adjustment"
+    TOPUP = "topup"
 
 
 class InvoiceStatus(StrEnum):
@@ -150,6 +194,7 @@ TERMINAL_INVOICE_STATUSES: Final[frozenset[InvoiceStatus]] = frozenset(
 )
 
 INVOICE_STATUS_TYPE = _enum_type(InvoiceStatus, name="invoice_status")
+INVOICE_PURPOSE_TYPE = _enum_type(InvoicePurpose, name="invoice_purpose")
 PAYMENT_STATUS_TYPE = _enum_type(PaymentStatus, name="payment_status")
 COLLECTION_STATE_TYPE = _enum_type(CollectionState, name="payment_collection_state")
 
@@ -216,28 +261,66 @@ def invoice_may_move(current: InvoiceStatus, target: InvoiceStatus) -> bool:
     return target in INVOICE_TRANSITIONS[current]
 
 
-class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     """What one workspace owed for one period."""
 
     __tablename__ = "invoices"
     __table_args__ = (
-        # One invoice per workspace per period. A sweep that runs twice, or two
-        # replicas sweeping at once, must not bill a customer twice for March -
-        # and that is a constraint's job rather than a check in a service.
-        UniqueConstraint(
+        # One *renewal* per workspace per period. A sweep that runs twice, or
+        # two replicas sweeping at once, must not bill a customer twice for
+        # March - and that is a constraint's job rather than a check in a
+        # service. Partial since 0071: a checkout is a purchase with its own
+        # period, fixed at settlement, and two purchases are two invoices; the
+        # constraint forcing them to share one is what let a second checkout
+        # re-price the first (BILL-06).
+        Index(
+            "uq_invoices_renewal_tenant_id_period_start",
             "tenant_id",
             "period_start",
-            name="uq_invoices_tenant_id_period_start",
+            unique=True,
+            postgresql_where=text("purpose = 'renewal'"),
         ),
         Index("ix_invoices_tenant_id", "tenant_id"),
         Index("ix_invoices_tenant_id_status", "tenant_id", "status"),
         Index("ix_invoices_status", "status"),
         Index("ix_invoices_subscription_id", "subscription_id"),
+        Index("ix_invoices_purpose_status", "purpose", "status"),
+        # Defence in depth beneath every settlement path (BILL-12, BILL-20):
+        # the database used to accept a negative amount and an overpaid
+        # invoice, and a paid invoice holding more than it was for is a refund
+        # nobody has noticed they owe.
+        CheckConstraint("amount_due >= 0", name="amount_due_non_negative"),
+        CheckConstraint("amount_paid >= 0", name="amount_paid_non_negative"),
+        CheckConstraint("amount_paid <= amount_due", name="amount_paid_within_due"),
+        CheckConstraint(CURRENCY_CHECK_SQL, name="currency_supported"),
+        # An invoice for a custom plan offer names an offer of its own
+        # workspace, and only a customer's checkout does (ADR-114).
+        ForeignKeyConstraint(
+            ["custom_plan_offer_id", "tenant_id"],
+            ["custom_plan_offers.id", "custom_plan_offers.tenant_id"],
+            name="fk_invoices_custom_plan_offer_tenant",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "custom_plan_offer_id IS NULL OR "
+            "(purpose = 'checkout' AND plan_version_id IS NOT NULL)",
+            name="offer_is_a_checkout",
+        ),
+        Index(
+            "ix_invoices_custom_plan_offer_id",
+            "custom_plan_offer_id",
+            postgresql_where=text("custom_plan_offer_id IS NOT NULL"),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
+        # RESTRICT, not CASCADE (BILL-19). An invoice is financial history, and
+        # deleting a tenant row - by a mistaken statement, a restore script, a
+        # future purge - must be refused rather than silently take the ledger
+        # with it. Retention already never deletes the tenant row; this makes
+        # that a property of the schema rather than of one code path.
+        ForeignKey("tenants.id", ondelete="RESTRICT"),
         nullable=False,
     )
     subscription_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -248,9 +331,29 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=True,
     )
     status: Mapped[InvoiceStatus] = mapped_column(INVOICE_STATUS_TYPE, nullable=False)
+    # Who may collect this and how - see `InvoicePurpose`. The automatic
+    # collection sweep claims `RENEWAL` and nothing else (BILL-02).
+    purpose: Mapped[InvoicePurpose] = mapped_column(INVOICE_PURPOSE_TYPE, nullable=False)
     # Copied from the plan at issue time, never joined for. A plan renamed or
     # repriced afterwards must not change what March says.
     plan_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    # The immutable terms this invoice charges for (BILL-06, BILL-12). Written
+    # when the invoice is created and never changed: a second checkout for
+    # another plan opens its own invoice rather than re-pricing this one, so a
+    # payment can only ever buy what its own invoice says. NULL on an invoice
+    # issued before 0071, whose meaning is carried by `plan_code`, `lines` and
+    # `amount_due` - no historical version is invented for it.
+    plan_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("plan_versions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    # The custom plan offer this checkout accepts (ADR-114). Settlement reads
+    # it to activate the offer, and refuses the money if the offer was
+    # declined or withdrawn meanwhile. Fixed at creation by a trigger.
+    custom_plan_offer_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
     amount_due: Mapped[Decimal] = mapped_column(
         Numeric(12, 2),
         nullable=False,
@@ -309,7 +412,7 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         return f"Invoice(tenant_id={self.tenant_id!r}, status={self.status!r})"
 
 
-class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     """One attempt at collecting an invoice.
 
     Attempts are rows rather than a status, because a failed one is not
@@ -373,16 +476,26 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Index("ix_payments_tenant_id", "tenant_id"),
         Index("ix_payments_invoice_id", "invoice_id"),
         Index("ix_payments_status", "status"),
+        # What a TOKEN callback and the Paymob order binding look payments up
+        # by (BILL-04, BILL-11).
+        Index("ix_payments_provider_provider_order_id", "provider", "provider_order_id"),
+        CheckConstraint("amount > 0", name="amount_positive"),
+        CheckConstraint("refunded_amount >= 0", name="refunded_amount_non_negative"),
+        CheckConstraint("refunded_amount <= amount", name="refunded_within_amount"),
+        CheckConstraint(CURRENCY_CHECK_SQL, name="currency_supported"),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
+        # RESTRICT (BILL-19): see `Invoice.tenant_id`.
+        ForeignKey("tenants.id", ondelete="RESTRICT"),
         nullable=False,
     )
     invoice_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("invoices.id", ondelete="CASCADE"),
+        # RESTRICT: a payment is money that moved, and it outlives any attempt
+        # to delete the invoice it was collected against.
+        ForeignKey("invoices.id", ondelete="RESTRICT"),
         nullable=False,
     )
     status: Mapped[PaymentStatus] = mapped_column(PAYMENT_STATUS_TYPE, nullable=False)
@@ -397,16 +510,34 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         String(MAX_REFERENCE_LENGTH),
         nullable=True,
     )
-    # The provider's id for the *intended* payment, written when a hosted
-    # checkout is created. Distinct from `provider_reference`, which is the id
-    # of the transaction that eventually settled it and does not exist yet at
-    # the moment a customer is sent to a payment page. Kept so support can find
-    # an abandoned checkout in the provider's dashboard - the commonest real
-    # question being "I started paying and nothing happened".
+    # The provider's id for the *intended* payment - Paymob's intention id
+    # (`pi_test_...`) - written when the intention is created, for a hosted
+    # checkout and for an automatic charge alike. One meaning and one only
+    # (BILL-04): it is not the order id and not a transaction id, and nothing
+    # correlates a callback on it. Kept so support can find an abandoned
+    # checkout in the provider's dashboard.
     provider_intent_reference: Mapped[str | None] = mapped_column(
         String(MAX_REFERENCE_LENGTH),
         nullable=True,
     )
+    # The provider's order under that intention - Paymob's
+    # `intention_order_id`. **The identifier every callback is bound to**
+    # (BILL-04, BILL-11): a transaction callback's `order.id` is inside the
+    # HMAC and must equal this before anything settles, and a TOKEN callback's
+    # `order_id` finds its workspace by it. NULL only on a payment created
+    # before 0071; no historical order id is invented for one.
+    provider_order_id: Mapped[str | None] = mapped_column(
+        String(MAX_REFERENCE_LENGTH),
+        nullable=True,
+    )
+    # `test` or `live`: which of the provider's environments this attempt was
+    # created in. Identifiers are not meaningful across the two, and a signed
+    # Test callback must never settle a Live payment (BILL-11).
+    provider_mode: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # The provider integration the settling transaction ran on, recorded from
+    # the verified callback - the card integration for a hosted checkout, the
+    # MOTO integration for an automatic charge.
+    provider_integration_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # What the provider said when it refused. Kept because "declined" alone
     # tells a customer nothing they can act on.
     failure_reason: Mapped[str | None] = mapped_column(String(MAX_FAILURE_LENGTH), nullable=True)
@@ -429,6 +560,14 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=True,
     )
     refunded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # How much the standing refund request asked for, recorded with the
+    # request (BILL-13). Compared with what the provider confirms, and what
+    # distinguishes a partial refund an operator approved as goodwill from a
+    # reversal nobody here asked for.
+    refund_requested_amount: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 2),
+        nullable=True,
+    )
     # The provider's id for the *reversal*, which is a different transaction
     # from the one being reversed. Kept so the callback reporting the reversal
     # can be tied back to the request that caused it.
@@ -502,3 +641,43 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
         return f"Payment(invoice_id={self.invoice_id!r}, status={self.status!r})"
+
+
+# An invoice may only name a version of a plan its workspace may hold - see
+# `CUSTOM_PLAN_SCOPE_FUNCTION_SQL` in `billing.py` (ADR-113).
+INVOICES_CUSTOM_PLAN_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER invoices_custom_plan_scope BEFORE INSERT OR UPDATE OF "
+    "tenant_id, plan_version_id ON invoices "
+    "FOR EACH ROW EXECUTE FUNCTION billing_refuse_foreign_custom_plan()"
+)
+
+# **A top-up is never a merchant-initiated charge** (ADR-113). The collection
+# sweep only claims renewals, and `RecurringService` checks the purpose again;
+# this makes the property the ledger's own, so no future collection path can
+# debit a saved card for an add-on the customer did not just choose to buy.
+PAYMENTS_NO_AUTOMATIC_TOPUP_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION payments_refuse_automatic_topup() RETURNS trigger AS $$
+    BEGIN
+        IF NEW.is_automatic AND EXISTS (
+            SELECT 1 FROM invoices i
+             WHERE i.id = NEW.invoice_id AND i.purpose::text = 'topup'
+        ) THEN
+            RAISE EXCEPTION 'topup invoices are never collected automatically'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+    """
+PAYMENTS_NO_AUTOMATIC_TOPUP_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER payments_no_automatic_topup BEFORE INSERT OR UPDATE OF "
+    "is_automatic, invoice_id ON payments "
+    "FOR EACH ROW EXECUTE FUNCTION payments_refuse_automatic_topup()"
+)
+
+event.listen(Invoice.__table__, "after_create", DDL(CUSTOM_PLAN_SCOPE_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Invoice.__table__, "after_create", DDL(INVOICES_CUSTOM_PLAN_TRIGGER_SQL))  # type: ignore[no-untyped-call]
+event.listen(Payment.__table__, "after_create", DDL(PAYMENTS_NO_AUTOMATIC_TOPUP_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Payment.__table__, "after_create", DDL(PAYMENTS_NO_AUTOMATIC_TOPUP_TRIGGER_SQL))  # type: ignore[no-untyped-call]
+event.listen(Invoice.__table__, "after_create", DDL(INVOICE_OFFER_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Invoice.__table__, "after_create", DDL(INVOICE_OFFER_TRIGGER_SQL))  # type: ignore[no-untyped-call]

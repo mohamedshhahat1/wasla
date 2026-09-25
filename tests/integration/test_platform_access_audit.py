@@ -130,6 +130,7 @@ async def _access_entries(session: AsyncSession) -> list[AuditLog]:
                     AuditAction.PLATFORM_OVERVIEW_READ,
                     AuditAction.PLATFORM_WORKSPACES_READ,
                     AuditAction.PLATFORM_AUDIT_LOG_READ,
+                    AuditAction.PLATFORM_BILLING_READ,
                 ]
             )
         )
@@ -292,11 +293,36 @@ async def test_every_platform_read_route_records_one_entry(
         for path, operations in app.openapi()["paths"].items()
         if path.startswith(f"{PATH}/") and "get" in operations
     )
-    assert read_routes == [
-        f"{PATH}/audit-logs",
-        f"{PATH}/overview",
-        f"{PATH}/tenants",
+    billing_lists = [
+        f"{PATH}/billing/features",
+        f"{PATH}/billing/incidents",
+        f"{PATH}/billing/invoices",
+        f"{PATH}/billing/payments",
+        f"{PATH}/billing/plans",
+        f"{PATH}/billing/reconciliation",
+        f"{PATH}/billing/subscriptions",
+        f"{PATH}/billing/topup-purchases",
+        f"{PATH}/billing/topups",
     ]
+    # The billing reads of one row need a row to name; each is audited by the
+    # same `billing_read` call as the lists, proved in
+    # test_platform_billing_api.py. Listed here so a new one still fails.
+    billing_rows = [
+        f"{PATH}/billing/invoices/{{invoice_id}}",
+        f"{PATH}/billing/payments/{{payment_id}}",
+        f"{PATH}/billing/plans/{{plan_id}}",
+        f"{PATH}/billing/plans/{{plan_id}}/versions",
+        f"{PATH}/billing/subscriptions/{{subscription_id}}",
+        f"{PATH}/billing/subscriptions/{{subscription_id}}/timeline",
+        f"{PATH}/billing/tenants/{{tenant_id}}/custom-offers",
+        f"{PATH}/billing/tenants/{{tenant_id}}/summary",
+        f"{PATH}/billing/topup-purchases/{{purchase_id}}",
+        f"{PATH}/billing/topups/{{topup_id}}",
+    ]
+    assert read_routes == sorted(
+        [f"{PATH}/audit-logs", f"{PATH}/overview", f"{PATH}/tenants", *billing_lists, *billing_rows]
+    )
+    read_routes = [path for path in read_routes if path not in billing_rows]
 
     for path in read_routes:
         response = await http.get(path)

@@ -44,6 +44,9 @@ from app.services.audit_service import AuditTrail
 RESOURCE_WORKSPACES = "workspaces"
 RESOURCE_PLATFORM_USAGE = "platform_usage"
 RESOURCE_AUDIT_LOG = "audit_log"
+# The billing control plane, by what was read: `billing.plans`,
+# `billing.invoices`, ... A fixed word per route, never an identifier.
+RESOURCE_BILLING = "billing"
 
 
 class PlatformAccessAudit:
@@ -145,9 +148,36 @@ class PlatformAccessAudit:
             detail={"returned": returned},
         )
 
+    def billing_read(
+        self,
+        *,
+        actor: User,
+        resource: str,
+        tenant_id: uuid.UUID | None = None,
+        returned: int | None = None,
+    ) -> AuditLog:
+        """A read of the billing control plane (BILL-12).
+
+        `resource` is the route's fixed noun - `plans`, `invoices`, `payment` -
+        and `tenant_id` the workspace the rows belong to when the read was one
+        workspace's, or the filter the operator narrowed to. Never an amount,
+        a provider reference or a search value.
+        """
+        detail: dict[str, object] = {}
+        if returned is not None:
+            detail["returned"] = returned
+        return self._record(
+            AuditAction.PLATFORM_BILLING_READ,
+            actor=actor,
+            resource=f"{RESOURCE_BILLING}.{resource}",
+            tenant_id=tenant_id,
+            detail=detail or None,
+        )
+
 
 __all__ = [
     "RESOURCE_AUDIT_LOG",
+    "RESOURCE_BILLING",
     "RESOURCE_PLATFORM_USAGE",
     "RESOURCE_WORKSPACES",
     "PlatformAccessAudit",

@@ -45,6 +45,8 @@ from app.api.v1 import (
     members,
     payment_webhooks,
     platform,
+    platform_billing,
+    platform_commercial,
     templates,
     usage,
     webhooks,
@@ -122,6 +124,10 @@ UNLIMITED_ROUTERS = (
     email_verification.router,
     google_oauth.router,
     platform.router,
+    # Platform authority, like `platform.router` above (BILL-12).
+    platform_billing.router,
+    # Custom plans and top-ups: the same prefix and authority (ADR-113).
+    platform_commercial.router,
     webhooks.router,
     email_webhooks.router,
     # A payment provider cannot hold a credential of ours and retries anything

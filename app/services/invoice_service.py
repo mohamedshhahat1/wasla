@@ -1,4 +1,4 @@
-"""Turning a finished period into an invoice, and recording what was paid.
+"""Billing a service period in advance, and recording what was paid.
 
 The shape of an invoice here is deliberately simple: one line for the plan's
 subscription fee, plus a record of what the workspace consumed during the period.
@@ -11,6 +11,12 @@ this is what you used. When overage pricing exists, the usage lines gain amounts
 and nothing else about this file changes.
 
 Three rules hold the whole thing together:
+
+**Periods are billed in advance** (BILL-03). A renewal is the bill for the
+period that is *starting*, at the terms of the plan version that governs it; the
+usage lines report the period that just ended, for information. A purchase
+covers the period it opens, so the first renewal is always for the period after
+it and no period is billed twice.
 
 **An issued invoice never changes.** Amounts are copied at issue time, not
 joined for. A plan repriced in April cannot alter March.
@@ -28,18 +34,28 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, ValidationError
 from app.core.logging import get_logger
-from app.db.models.billing import Plan, Subscription
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.billing import Plan, PlanVersion, Subscription
+from app.db.models.invoice import (
+    Invoice,
+    InvoicePurpose,
+    InvoiceStatus,
+    Payment,
+    PaymentStatus,
+)
 from app.db.models.usage import UsageEventType
+from app.db.models.user import User
 from app.integrations.billing.base import PaymentProvider
 from app.repositories.invoice_repository import InvoiceRepository, PaymentRepository
 from app.repositories.usage_repository import UsageEventRepository
+
+if TYPE_CHECKING:
+    from app.services.settlement_service import InvoiceSettlement
 
 logger = get_logger(__name__)
 
@@ -81,37 +97,49 @@ class InvoiceService:
         self,
         *,
         subscription: Subscription,
-        plan: Plan,
+        plan: Plan | PlanVersion,
         period_start: datetime,
         period_end: datetime,
         now: datetime | None = None,
+        plan_code: str | None = None,
+        usage_since: datetime | None = None,
     ) -> tuple[Invoice, bool]:
-        """Bill a finished period. Returns the invoice and whether it is new.
+        """Issue the renewal for a period. Returns the invoice and whether it is new.
 
-        Idempotent by period: a sweep that runs twice finds the invoice it
-        already issued and returns it unchanged. That is what makes the sweep
-        safe to retry, and it is checked here so a second run is a no-op rather
-        than an integrity error.
+        `plan` is the version whose terms the period is billed at (a bare
+        `Plan` is accepted for callers that predate versioning). `usage_since`
+        is the start of the period that just ended, whose consumption the
+        usage lines report; without it they report `period_start` onwards.
+
+        Idempotent by period: a sweep that runs twice finds the renewal it
+        already issued and returns it unchanged.
         """
         moment = now if now is not None else datetime.now(UTC)
         existing = await self._invoices.get_for_period(period_start=period_start)
         if existing is not None:
             return existing, False
 
+        version = plan if isinstance(plan, PlanVersion) else None
         lines = await self._lines(
             plan=plan,
-            period_start=period_start,
-            period_end=period_end,
+            period_start=usage_since if usage_since is not None else period_start,
+            period_end=period_start if usage_since is not None else period_end,
         )
+        if version is not None:
+            lines[0]["plan_version"] = version.version
+            lines[0]["interval"] = version.interval.value
+        code = plan_code if plan_code is not None else getattr(plan, "code", None)
         invoice = self._invoices.create(
             subscription_id=subscription.id,
-            plan_code=plan.code,
+            plan_code=str(code),
             amount_due=plan.price,
             currency=plan.currency,
             period_start=period_start,
             period_end=period_end,
             lines=lines,
             status=InvoiceStatus.OPEN if plan.price > 0 else InvoiceStatus.PAID,
+            purpose=InvoicePurpose.RENEWAL,
+            plan_version_id=version.id if version is not None else None,
         )
         invoice.issued_at = moment
         if invoice.status is InvoiceStatus.PAID:
@@ -126,7 +154,7 @@ class InvoiceService:
             extra={
                 "event": "billing.invoice_issued",
                 "tenant_id": str(self._tenant_id),
-                "plan": plan.code,
+                "plan": invoice.plan_code,
                 "amount_due": str(invoice.amount_due),
             },
         )
@@ -135,7 +163,7 @@ class InvoiceService:
     async def _lines(
         self,
         *,
-        plan: Plan,
+        plan: Plan | PlanVersion,
         period_start: datetime,
         period_end: datetime,
     ) -> list[dict[str, Any]]:
@@ -154,6 +182,8 @@ class InvoiceService:
             }
         ]
 
+        if period_end <= period_start:
+            return lines
         totals = await self._usage.totals(
             since=period_start,
             until=period_end,
@@ -165,6 +195,8 @@ class InvoiceService:
                 "description": total.event_type.value,
                 "quantity": total.quantity,
                 "unit": total.unit.value,
+                "usage_from": period_start.isoformat(),
+                "usage_until": period_end.isoformat(),
                 # Included at zero rather than omitted, so the shape of a line
                 # never depends on whether overage pricing exists yet.
                 "amount": "0.00",
@@ -217,8 +249,9 @@ class InvoiceService:
         invoice.provider = self._provider.name
         invoice.provider_reference = outcome.reference
 
+        await self._session.flush()
         if outcome.succeeded:
-            self._settle(invoice, amount=outcome.amount, now=moment)
+            await self._settlement().settle(invoice, payment=payment, now=moment)
         await self._session.flush()
         return payment
 
@@ -230,20 +263,52 @@ class InvoiceService:
         provider: str,
         reference: str | None = None,
         now: datetime | None = None,
+        currency: str | None = None,
+        expected_revision: int | None = None,
+        recover_uncollectible: bool = False,
+        actor: User | None = None,
     ) -> Payment:
-        """Record money that arrived outside the system.
+        """Record money that arrived outside the system (BILL-10, BILL-20).
 
-        A bank transfer, a card taken over the phone. This is how the manual
-        provider is actually settled, and it exists as its own operation because
-        somebody has to have *seen* the money — a provider that marked its own
-        pending invoices paid would be inventing collections.
+        A bank transfer, a card taken over the phone - asserted by platform
+        staff who have *seen* the money. It is settled by exactly the engine a
+        provider callback uses, so a full payment of a renewal restores a
+        suspended workspace and a full payment of a purchase grants its plan.
+
+        Refused, before anything is written:
+
+        - an invoice that is not open - paying a paid invoice again, or a void
+          one, is a 409; one written off as uncollectible needs the explicit
+          `recover_uncollectible` flag;
+        - a non-positive amount, a currency that is not the invoice's, or more
+          than is outstanding - overpayment is not a feature of this system;
+        - an `expected_revision` that is not the invoice's current one.
         """
         moment = now if now is not None else datetime.now(UTC)
         invoice = await self._invoices.require_by_id(invoice_id)
+        if expected_revision is not None and invoice.revision != expected_revision:
+            raise ConflictError(
+                f"The invoice has changed (revision {invoice.revision}); reload it and retry."
+            )
         if invoice.status is InvoiceStatus.VOID:
             raise ConflictError("A voided invoice cannot be paid.")
+        if invoice.status is InvoiceStatus.PAID:
+            raise ConflictError("This invoice has already been paid.")
+        if invoice.status is InvoiceStatus.UNCOLLECTIBLE and not recover_uncollectible:
+            raise ConflictError(
+                "This invoice was written off as uncollectible. Recover it deliberately "
+                "with recover_uncollectible to record a payment against it."
+            )
+        if invoice.status is InvoiceStatus.DRAFT:
+            raise ConflictError("A draft invoice has not been issued and cannot be paid.")
         if amount <= 0:
             raise ValidationError("A payment must be for a positive amount.")
+        if currency is not None and currency.upper() != invoice.currency.upper():
+            raise ValidationError(f"This invoice is in {invoice.currency}.")
+        if amount > invoice.outstanding:
+            raise ValidationError(
+                f"{amount} is more than the {invoice.outstanding} outstanding on this invoice."
+            )
 
         payment = self._payments.record(
             invoice_id=invoice.id,
@@ -254,7 +319,16 @@ class InvoiceService:
             provider_reference=reference,
             processed_at=moment,
         )
-        self._settle(invoice, amount=amount, now=moment)
+        await self._session.flush()
+        outcome, detail = await self._settlement().settle(
+            invoice,
+            payment=payment,
+            now=moment,
+            actor=actor,
+            recover_uncollectible=recover_uncollectible,
+        )
+        if outcome != "applied":
+            raise ConflictError(detail or "The payment could not be applied to this invoice.")
         await self._session.flush()
         logger.info(
             "billing.payment_recorded",
@@ -267,37 +341,41 @@ class InvoiceService:
         )
         return payment
 
-    def _settle(self, invoice: Invoice, *, amount: Decimal, now: datetime) -> None:
-        """Apply money to an invoice, marking it paid once it is covered.
+    def _settlement(self) -> InvoiceSettlement:
+        # Imported here: the settlement engine imports the subscription service,
+        # which is heavier than anything a read of invoices needs.
+        from app.services.settlement_service import InvoiceSettlement
 
-        Part payments are kept as part payments: the invoice stays open with a
-        smaller outstanding balance, because a customer who paid half has paid
-        half.
-        """
-        invoice.amount_paid = invoice.amount_paid + amount
-        if invoice.amount_paid >= invoice.amount_due:
-            invoice.status = InvoiceStatus.PAID
-            invoice.paid_at = now
+        return InvoiceSettlement(self._session, tenant_id=self._tenant_id)
 
-    async def void(self, invoice_id: uuid.UUID, *, reason: str | None = None) -> Invoice:
-        """Withdraw an invoice that should not have been issued.
+    async def void(
+        self,
+        invoice_id: uuid.UUID,
+        *,
+        reason: str | None = None,
+        subscription_policy: str | None = None,
+        expected_revision: int | None = None,
+        actor: User | None = None,
+        now: datetime | None = None,
+    ) -> Invoice:
+        """Withdraw an invoice that should not have been issued (BILL-10, BILL-20).
 
-        Voided rather than deleted or edited: the customer has seen it, and a
-        bill that silently changes is worse than one that is visibly withdrawn.
-        A paid invoice cannot be voided - that is a refund, which is a different
-        operation and a different conversation.
+        Voided rather than deleted or edited: the customer has seen it. Through
+        the transition table and the settlement engine, which decides what the
+        void means for the subscription - see `InvoiceSettlement.void`.
         """
         invoice = await self._invoices.require_by_id(invoice_id)
-        if invoice.status is InvoiceStatus.PAID:
-            raise ConflictError("A paid invoice cannot be voided. Refund it instead.")
-        if invoice.status is InvoiceStatus.VOID:
-            return invoice
-
-        invoice.status = InvoiceStatus.VOID
-        invoice.voided_at = datetime.now(UTC)
-        if reason:
-            invoice.notes = reason
-        return invoice
+        if expected_revision is not None and invoice.revision != expected_revision:
+            raise ConflictError(
+                f"The invoice has changed (revision {invoice.revision}); reload it and retry."
+            )
+        return await self._settlement().void(
+            invoice,
+            reason=reason or "Voided.",
+            subscription_policy=subscription_policy,
+            now=now if now is not None else datetime.now(UTC),
+            actor=actor,
+        )
 
     async def list_invoices(self, *, limit: int = 50) -> list[Invoice]:
         return await self._invoices.list_invoices(limit=limit)

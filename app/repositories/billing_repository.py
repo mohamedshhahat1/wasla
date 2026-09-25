@@ -17,9 +17,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
 
-from app.db.models.billing import Plan, Subscription, SubscriptionStatus
+from app.db.models.billing import (
+    BillingAdjustment,
+    BillingAdjustmentKind,
+    Plan,
+    PlanScope,
+    PlanVersion,
+    PlanVersionMigration,
+    Subscription,
+    SubscriptionStatus,
+)
 from app.db.models.tenant import Tenant
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
@@ -47,17 +56,33 @@ class PlanRepository(BaseRepository[Plan]):
     async def get_by_code(self, code: str) -> Plan | None:
         return await self._first(self._select().where(Plan.code == code.strip().lower()))
 
-    async def list_plans(self, *, public_only: bool = True, active_only: bool = True) -> list[Plan]:
+    async def list_plans(
+        self,
+        *,
+        public_only: bool = True,
+        active_only: bool = True,
+        for_tenant: uuid.UUID | None = None,
+    ) -> list[Plan]:
         """The catalogue, in the order a pricing page shows it.
 
         `public_only` excludes plans written for one customer. `active_only`
         excludes retired ones - which are kept rather than deleted, because
         subscriptions still point at them and their history has to keep meaning
         what it meant.
+
+        `for_tenant` adds that one workspace's own custom plans to a public
+        listing (ADR-113). Another workspace's custom plan is never included:
+        the filter is on the plan's owner, not on anything the caller sends.
         """
         statement = self._select()
         if public_only:
-            statement = statement.where(Plan.is_public.is_(True))
+            visible: ColumnElement[bool] = Plan.is_public.is_(True)
+            if for_tenant is not None:
+                visible = or_(
+                    visible,
+                    and_(Plan.scope == PlanScope.TENANT, Plan.tenant_id == for_tenant),
+                )
+            statement = statement.where(visible)
         if active_only:
             statement = statement.where(Plan.is_active.is_(True))
         return await self._all(statement.order_by(Plan.sort_order, Plan.price, Plan.name))
@@ -220,3 +245,94 @@ class PlatformSubscriptionRepository(BaseRepository[Subscription]):
             .with_for_update(skip_locked=True, of=Subscription)
         )
         return await self._all(statement)
+
+
+class PlanVersionRepository(BaseRepository[PlanVersion]):
+    """The immutable commercial terms of every plan (BILL-12).
+
+    Platform-owned like `PlanRepository`: a version belongs to a plan, not to a
+    workspace. Rows are inserted and read; nothing here updates one, and the
+    table's trigger would refuse it if anything tried.
+    """
+
+    model = PlanVersion
+
+    async def get_by_id(self, version_id: uuid.UUID) -> PlanVersion | None:
+        return await self._first(self._select().where(PlanVersion.id == version_id))
+
+    async def list_for_plan(self, plan_id: uuid.UUID) -> list[PlanVersion]:
+        """Every version of one plan, newest first."""
+        return await self._all(
+            self._select()
+            .where(PlanVersion.plan_id == plan_id)
+            .order_by(PlanVersion.version.desc())
+        )
+
+    async def latest(self, plan_id: uuid.UUID) -> PlanVersion | None:
+        """The highest-numbered version, whether or not it is in effect yet."""
+        return await self._first(
+            self._select()
+            .where(PlanVersion.plan_id == plan_id)
+            .order_by(PlanVersion.version.desc())
+        )
+
+    async def effective(self, plan_id: uuid.UUID, *, at: datetime) -> PlanVersion | None:
+        """The version a *new* customer gets at `at`: the newest already in effect."""
+        return await self._first(
+            self._select()
+            .where(PlanVersion.plan_id == plan_id)
+            .where(PlanVersion.effective_at <= at)
+            .order_by(PlanVersion.version.desc())
+        )
+
+    async def count_subscribers(self) -> dict[uuid.UUID, int]:
+        """How many subscriptions each version governs, for the catalogue view."""
+        result = await self.session.execute(
+            select(Subscription.plan_version_id, func.count())
+            .where(Subscription.plan_version_id.is_not(None))
+            .group_by(Subscription.plan_version_id)
+        )
+        return {row[0]: int(row[1]) for row in result.all()}
+
+
+class PlanVersionMigrationRepository(BaseRepository[PlanVersionMigration]):
+    """Cohort migrations between plan versions, applied at each renewal."""
+
+    model = PlanVersionMigration
+
+    async def live_from(self, version_id: uuid.UUID) -> PlanVersionMigration | None:
+        """The migration still waiting to move subscribers off this version."""
+        return await self._first(
+            self._select()
+            .where(PlanVersionMigration.from_version_id == version_id)
+            .where(PlanVersionMigration.cancelled_at.is_(None))
+        )
+
+    async def list_for_plan(self, plan_id: uuid.UUID) -> list[PlanVersionMigration]:
+        return await self._all(
+            self._select()
+            .where(PlanVersionMigration.plan_id == plan_id)
+            .order_by(PlanVersionMigration.created_at.desc())
+        )
+
+
+class BillingAdjustmentRepository(BaseRepository[BillingAdjustment]):
+    """Operator grants and waivers - service given without money, on record."""
+
+    model = BillingAdjustment
+
+    async def covering(
+        self,
+        *,
+        subscription_id: uuid.UUID,
+        at: datetime,
+    ) -> BillingAdjustment | None:
+        """A complimentary grant whose window contains `at`, if there is one."""
+        return await self._first(
+            self._select()
+            .where(BillingAdjustment.subscription_id == subscription_id)
+            .where(BillingAdjustment.kind == BillingAdjustmentKind.COMPLIMENTARY_GRANT)
+            .where(BillingAdjustment.starts_at <= at)
+            .where((BillingAdjustment.ends_at.is_(None)) | (BillingAdjustment.ends_at > at))
+            .order_by(BillingAdjustment.starts_at.desc())
+        )

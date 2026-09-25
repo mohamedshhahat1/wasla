@@ -42,6 +42,7 @@ from app.core.crypto import generate_key
 from app.integrations.billing import build_checkout_provider
 from app.integrations.billing.checkout import CheckoutRequest
 from app.integrations.billing.paymob import PaymobProvider
+from tests.paymob_orders import order_from_request
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -193,7 +194,14 @@ def _captured_intention(
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(json.loads(request.content))
-        return httpx.Response(201, json={"id": "pi_1", "client_secret": "csk_1"})
+        return httpx.Response(
+            201,
+            json={
+                "id": "pi_1",
+                "client_secret": "csk_1",
+                "intention_order_id": order_from_request(request),
+            },
+        )
 
     provider = PaymobProvider(
         secret_key="sk_test_notreal",

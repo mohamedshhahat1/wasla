@@ -26,7 +26,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Protocol, runtime_checkable
+from enum import StrEnum
+from typing import Any, Final, Protocol, runtime_checkable
 
 from app.core.exceptions import ExternalServiceError
 from app.db.models.invoice import PaymentStatus
@@ -58,10 +59,56 @@ class ProviderError(ExternalServiceError):
         message: str | None = None,
         *,
         retryable: bool = False,
+        provider_status: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(message, **kwargs)
         self.retryable = retryable
+        # The provider's HTTP status when it answered, None when it did not.
+        # What separates a *permanent* refusal - a 4xx describing the request
+        # itself - from everything else (BILL-05). Not `status_code`: that is
+        # the HTTP status *this* API answers with for the exception.
+        self.provider_status = provider_status
+
+    @property
+    def failure_class(self) -> ProviderFailureClass:
+        """Which of the kinds of failure this is. See `ProviderFailureClass`."""
+        if self.provider_status is not None and 400 <= self.provider_status < 500:
+            if self.provider_status == RATE_LIMITED_STATUS:
+                return ProviderFailureClass.RETRYABLE
+            return ProviderFailureClass.PERMANENT
+        if self.retryable:
+            return ProviderFailureClass.RETRYABLE
+        return ProviderFailureClass.PERMANENT
+
+
+# A provider's explicit "later".
+RATE_LIMITED_STATUS: Final = 429
+
+
+class ProviderFailureClass(StrEnum):
+    """What a provider failure means for trying again (BILL-05).
+
+    ``PERMANENT``
+        The provider read the request and refused it as invalid - a 4xx other
+        than 429: a billing field it will not accept, an integration it does
+        not know. Sending it again produces the same refusal, so automatic
+        retries stop and an operator is told. Retrying this daily for ever was
+        how every real MIT attempt failed silently.
+    ``RETRYABLE``
+        No usable answer - a 5xx, a 429, a connection that failed - on a
+        request that moves no money. Worth trying again later.
+    ``AMBIGUOUS``
+        Not decided by this exception. A timeout on a request that *can* move
+        money leaves the outcome unknown, and that is judged by the caller that
+        knows which request it sent: the collection protocol leaves such an
+        attempt unresolved for reconciliation and never sends another charge
+        blindly (ADR-088). Named here so the three classes have one vocabulary.
+    """
+
+    PERMANENT = "permanent"
+    RETRYABLE = "retryable"
+    AMBIGUOUS = "ambiguous"
 
 
 @dataclass(frozen=True, slots=True)

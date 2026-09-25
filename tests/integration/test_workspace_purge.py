@@ -39,7 +39,7 @@ from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
 from app.db.models.billing import BillingInterval, Plan, Subscription, SubscriptionStatus
 from app.db.models.conversation import Contact, Conversation
 from app.db.models.enums import TenantStatus
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.whatsapp import WhatsAppAccount
 from app.services.workspace_purge_service import (
     PURGED_TABLES,
@@ -122,6 +122,7 @@ async def _money(session: AsyncSession, tenant: Tenant) -> tuple[Invoice, Paymen
     invoice = Invoice(
         tenant_id=tenant.id,
         status=InvoiceStatus.PAID,
+        purpose=InvoicePurpose.CHECKOUT,
         plan_code=plan.code,
         amount_due=Decimal("50.00"),
         amount_paid=Decimal("50.00"),

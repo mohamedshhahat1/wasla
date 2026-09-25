@@ -157,6 +157,21 @@ RETAINED_TABLES: frozenset[str] = frozenset(
         "invoices",
         "payments",
         "subscriptions",
+        # Financial records beside the invoices (BILL-15): a complimentary
+        # grant or a waiver explains an invoice that was never paid, and an
+        # incident is the record of a duplicate charge or a refused callback -
+        # both are what a later dispute needs.
+        "billing_adjustments",
+        "billing_incidents",
+        # Custom plans and top-ups (ADR-113). A custom plan is the terms its
+        # subscription and invoices were sold at; a top-up product and every
+        # purchase or grant of it are part of the same financial record.
+        "plans",
+        # A custom plan offer is the record of terms a customer was offered and
+        # paid for (ADR-114).
+        "custom_plan_offers",
+        "topup_products",
+        "topup_purchases",
         "audit_logs",
         "memberships",
         # Not erased by the purge because it *is* the purge's record of what it

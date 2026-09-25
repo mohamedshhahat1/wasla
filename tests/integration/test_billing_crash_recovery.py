@@ -75,12 +75,24 @@ from app.db.models.billing import (
     Subscription,
     SubscriptionStatus,
 )
-from app.db.models.invoice import CollectionState, Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.enums import TenantRole
+from app.db.models.invoice import (
+    CollectionState,
+    Invoice,
+    InvoicePurpose,
+    InvoiceStatus,
+    Payment,
+    PaymentStatus,
+)
+from app.db.models.membership import Membership
 from app.db.models.payment_method import PaymentMethodStatus
 from app.db.models.tenant import Tenant
+from app.db.models.user import User
 from app.integrations.billing.checkout import SavedMethodCharge
+from app.services.plan_catalog import PlanCatalog
 from app.workers import billing_worker as worker_module
 from app.workers.billing_worker import BillingWorker
+from tests.billing_fixtures import erase_ledger
 from tests.fakes import as_database
 from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, saved_card
 
@@ -234,12 +246,26 @@ async def workspace(
         )
         session.add(subscription)
         await session.flush()
+        version = await PlanCatalog(session).pinned_version(subscription)
+        assert version is not None
+        # The workspace's billing contact, sent with every automatic charge
+        # (BILL-05).
+        owner = User(
+            email=f"crash-owner-{uuid.uuid4().hex[:10]}@example.com",
+            hashed_password="x",
+            is_active=True,
+        )
+        session.add(owner)
+        await session.flush()
+        session.add(Membership(tenant_id=tenant.id, user_id=owner.id, role=TenantRole.TENANT_OWNER))
 
         session.add(
             Invoice(
                 tenant_id=tenant.id,
                 subscription_id=subscription.id,
                 status=InvoiceStatus.OPEN,
+                purpose=InvoicePurpose.RENEWAL,
+                plan_version_id=version.id,
                 plan_code=plan.code,
                 amount_due=AMOUNT,
                 amount_paid=Decimal("0.00"),
@@ -266,6 +292,7 @@ async def workspace(
         )
         await session.commit()
         identifiers = (tenant.id, plan.id)
+        owner_id = owner.id
 
     try:
         yield identifiers
@@ -279,8 +306,10 @@ async def workspace(
             # audit rows by action, and this file sweeps forty days into the
             # future, which produces exactly the ones they are looking for.
             await session.execute(delete(AuditLog).where(AuditLog.tenant_id == identifiers[0]))
+            await erase_ledger(session, [identifiers[0]])
             await session.execute(delete(Tenant).where(Tenant.id == identifiers[0]))
             await session.execute(delete(Plan).where(Plan.id == identifiers[1]))
+            await session.execute(delete(User).where(User.id == owner_id))
             await session.commit()
 
 

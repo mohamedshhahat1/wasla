@@ -22,8 +22,12 @@ reporting outage. And a response that distinguished them would confirm which
 payment references exist, to a caller who by then has proven only that they
 hold the HMAC secret for *some* payload.
 
-Only an unverified request is refused, and it is refused with 401 rather than
-200: that one is not a retry worth accepting.
+Only an unverified request is refused, and it is refused with 403 rather than
+200: that one is not a retry worth accepting. 403 rather than the 401 this
+docstring once promised (BILL-22): every webhook in the application answers an
+unauthenticated signature with the same refusal, pinned by
+`tests/integration/test_malformed_authenticity_values.py`, and Paymob treats
+any non-2xx alike.
 """
 
 from __future__ import annotations
@@ -41,7 +45,8 @@ from app.core.config import Settings
 from app.core.dependencies import SessionDep, SettingsDep
 from app.core.exceptions import DependencyUnavailableError, PermissionDeniedError
 from app.core.logging import get_logger
-from app.core.telemetry import observe_auth_event
+from app.core.telemetry import observe_auth_event, record_billing_callback
+from app.db.models.billing_incident import BillingIncidentKind
 from app.db.models.invoice import Payment
 from app.integrations.billing import build_checkout_provider
 from app.integrations.billing.checkout import (
@@ -50,6 +55,7 @@ from app.integrations.billing.checkout import (
     RecurringProvider,
 )
 from app.integrations.billing.paymob import callback_type
+from app.services.billing_incident_service import raise_incident
 from app.services.checkout_service import CheckoutService
 from app.services.payment_method_service import remember_saved_method
 
@@ -118,13 +124,18 @@ async def receive_payment_callback(
             "billing.callback_rejected",
             extra={"event": "billing.callback_rejected", "reason": str(error)},
         )
-        _count_refusal()
+        await _count_refusal()
         raise PermissionDeniedError("The callback could not be verified.") from error
 
-    tenant_id = await _tenant_for(session, event.reference)
+    tenant_id = await _tenant_for(
+        session, provider=provider.name, order_id=event.order_id, reference=event.reference
+    )
     if tenant_id is None:
-        # Verified, but naming nothing we issued. Recorded by the log and
-        # answered exactly like a success - see the module docstring.
+        # Verified, but naming nothing we issued. Answered exactly like a
+        # success - see the module docstring - and recorded as a durable
+        # incident rather than only a log line (BILL-14, BILL-15): a signed
+        # transaction for money we cannot attribute is exactly what an
+        # operator needs to be able to list.
         logger.warning(
             "billing.callback_unknown_payment",
             extra={
@@ -132,6 +143,18 @@ async def receive_payment_callback(
                 "provider_event_id": event.event_id,
             },
         )
+        await raise_incident(
+            session,
+            kind=BillingIncidentKind.UNKNOWN_CALLBACK,
+            dedupe_key=event.event_id,
+            tenant_id=None,
+            provider=provider.name,
+            provider_transaction_id=event.provider_transaction_id,
+            amount=event.amount,
+            currency=event.currency or None,
+            detail=f"A verified {event.event_type} named no payment of ours.",
+        )
+        await record_billing_callback("unmatched")
         return {"status": "received"}
 
     service = CheckoutService(
@@ -152,7 +175,7 @@ async def receive_payment_callback(
     return {"status": "received"}
 
 
-def _count_refusal() -> None:
+async def _count_refusal() -> None:
     """A callback that failed authentication, counted like the other two.
 
     The same series the Meta and Resend webhooks use, so one alert covers a
@@ -161,6 +184,9 @@ def _count_refusal() -> None:
     if at all, as an unhandled error.
     """
     observe_auth_event(event="paymob_webhook", outcome="blocked", reason="invalid_signature")
+    # Counted on the billing series too, so the billing alert on a spike of
+    # unauthenticated callbacks reads one family of metrics (BILL-14).
+    await record_billing_callback("rejected_signature")
 
 
 def _signature_from_body(body: bytes) -> str | None:
@@ -181,8 +207,20 @@ def _signature_from_body(body: bytes) -> str | None:
     return value if isinstance(value, str) else None
 
 
-async def _tenant_for(session: AsyncSession, reference: str | None) -> uuid.UUID | None:
-    """Which workspace a callback belongs to, decided by our own reference.
+async def _tenant_for(
+    session: AsyncSession,
+    *,
+    provider: str,
+    order_id: str | None,
+    reference: str | None,
+) -> uuid.UUID | None:
+    """Which workspace a callback belongs to, decided by identifiers we recorded.
+
+    By the provider **order** first - it is inside the signature, and this
+    system recorded it when it created the intention (BILL-11). Then by our own
+    payment reference, for a payment created before orders were recorded; the
+    settlement path refuses a collection on such a payment, so this fallback
+    only ever reaches reversals and reconciliation.
 
     This lookup is deliberately **not** tenant-scoped, and it is the one place
     in the application that reads a payment without a tenant filter - a
@@ -193,6 +231,16 @@ async def _tenant_for(session: AsyncSession, reference: str | None) -> uuid.UUID
     tenant-scoped service built from that value, so an event can only ever
     affect the workspace that owns the payment it names.
     """
+    if order_id:
+        by_order = await session.execute(
+            select(Payment.tenant_id)
+            .where(Payment.provider == provider)
+            .where(Payment.provider_order_id == order_id)
+            .limit(1)
+        )
+        found = by_order.scalar_one_or_none()
+        if found is not None:
+            return found
     if not reference:
         return None
     try:
@@ -234,10 +282,12 @@ async def _receive_saved_method(
             "billing.card_token_rejected",
             extra={"event": "billing.card_token_rejected", "reason": str(error)},
         )
-        _count_refusal()
+        await _count_refusal()
         raise PermissionDeniedError("The callback could not be verified.") from error
 
-    tenant_id = await _tenant_for_order(session, saved.order_reference)
+    tenant_id = await _tenant_for_order(
+        session, provider=provider.name, order=saved.order_reference
+    )
     if tenant_id is None:
         # Verified, but naming no checkout of ours. Answered like a success for
         # the same reason an unmatched payment is - see the module docstring.
@@ -268,24 +318,33 @@ async def _receive_saved_method(
     return {"status": "received"}
 
 
-async def _tenant_for_order(session: AsyncSession, order_reference: str | None) -> uuid.UUID | None:
-    """Which workspace saved this card, decided by our own intention reference.
+async def _tenant_for_order(
+    session: AsyncSession,
+    *,
+    provider: str,
+    order: str | None,
+) -> uuid.UUID | None:
+    """Which workspace saved this card, decided by the Paymob order we recorded.
 
-    Paymob quotes the order back on the token callback. That order was created
-    from an intention whose id we stored on the payment as
-    `provider_intent_reference`, so the lookup is against something this system
-    wrote down - never against a value the caller invented.
+    Paymob's TOKEN callback carries `order_id` - the *order* under the checkout
+    intention, which this system records as `provider_order_id` when it creates
+    the intention (BILL-04). It used to be matched against
+    `provider_intent_reference`, which holds the intention id (`pi_test_...`),
+    so no real saved card ever matched. The lookup is still against something
+    this system wrote down, and only a customer-facing checkout can save a card.
 
     Deliberately not tenant-scoped, for the same reason `_tenant_for` is not: a
     callback arrives with no session, so there is no workspace to scope by yet.
     The tenant is read off the row that the reference resolves to.
     """
-    if not order_reference:
+    if not order:
         return None
 
     result = await session.execute(
         select(Payment.tenant_id)
-        .where(Payment.provider_intent_reference == str(order_reference))
+        .where(Payment.provider == provider)
+        .where(Payment.provider_order_id == str(order))
+        .where(Payment.is_automatic.is_(False))
         .limit(1)
     )
     return result.scalar_one_or_none()

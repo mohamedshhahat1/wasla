@@ -207,6 +207,27 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
         )
         return set(result.scalars().all())
 
+    async def pending_in_other_live_campaigns(self, campaign_id: uuid.UUID) -> int:
+        """Recipients other scheduled or running campaigns have yet to reach.
+
+        The campaign allowance's reservation (BILL-08): these sends are already
+        promised, and are metered only as each one goes out.
+        """
+        from app.db.models.campaign import Campaign, CampaignStatus
+
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(CampaignRecipient)
+            .join(Campaign, Campaign.id == CampaignRecipient.campaign_id)
+            .where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id != campaign_id,
+                CampaignRecipient.status == RecipientStatus.PENDING,
+                Campaign.status.in_([CampaignStatus.SCHEDULED, CampaignStatus.RUNNING]),
+            )
+        )
+        return int(result.scalar_one())
+
     async def pending_count(self, campaign_id: uuid.UUID) -> int:
         result = await self.session.execute(
             select(func.count())

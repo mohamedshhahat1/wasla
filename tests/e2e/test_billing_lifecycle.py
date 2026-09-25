@@ -49,6 +49,8 @@ from app.db.session import Database
 from app.integrations.billing import paymob
 from app.integrations.billing.paymob import hmac_signature
 from app.main import create_app
+from tests.billing_fixtures import erase_ledger
+from tests.paymob_orders import order_for, order_from_request
 
 pytestmark = [pytest.mark.e2e, pytest.mark.integration]
 
@@ -80,7 +82,11 @@ def _fake_provider_socket(monkeypatch: pytest.MonkeyPatch) -> None:
         if "intention" in str(request.url):
             return httpx.Response(
                 201,
-                json={"id": INTENTION_ID, "client_secret": CLIENT_SECRET},
+                json={
+                    "id": INTENTION_ID,
+                    "client_secret": CLIENT_SECRET,
+                    "intention_order_id": order_from_request(request),
+                },
             )
         return httpx.Response(200, json={"id": 900000001, "success": True, "pending": False})
 
@@ -210,6 +216,17 @@ async def _forget(engine: AsyncEngine, *, slug: str, email: str, plan_code: str)
     """
     by_tenant = "DELETE FROM {table} WHERE tenant_id IN (SELECT id FROM tenants WHERE slug = :slug)"
     async with engine.begin() as connection:
+        doomed = (
+            (
+                await connection.execute(
+                    text("SELECT id FROM tenants WHERE slug = :slug"), {"slug": slug}
+                )
+            )
+            .scalars()
+            .all()
+        )
+        # The ledger no longer cascades from its tenant (BILL-19); erased first.
+        await erase_ledger(connection, list(doomed))
         await connection.execute(
             text(
                 "DELETE FROM payment_events WHERE payment_id IN ("
@@ -252,7 +269,8 @@ def _transaction(
         "is_3d_secure": True,
         "integration_id": INTEGRATION_ID,
         "has_parent_transaction": False,
-        "order": {"id": 1, "merchant_order_id": reference},
+        "order": {"id": order_for(reference), "merchant_order_id": reference},
+        "is_live": False,
         "created_at": "2026-08-29T11:33:44.592345",
         "currency": "EGP",
         "source_data": {"pan": "2346", "type": "card", "sub_type": "MasterCard"},
@@ -442,7 +460,9 @@ async def test_a_declined_payment_leaves_the_workspace_exactly_as_it_was(
                     headers=auth,
                 )
             ).json()
-            assert payment["status"] == "failed"
+            # A declined transaction on the hosted page, which the customer may
+            # still pay with another card (BILL-07): pending, with the reason.
+            assert payment["status"] == "pending"
             assert payment["failure_reason"] == "Insufficient funds"
 
             invoice = (

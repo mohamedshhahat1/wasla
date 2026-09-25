@@ -11,9 +11,9 @@ import uuid
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import DateTime, ForeignKey, Index, MetaData, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, MetaData, event, func
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, declared_attr, mapped_column
 from sqlalchemy.schema import SchemaItem
 
 NAMING_CONVENTION: Final[dict[str, str]] = {
@@ -55,6 +55,34 @@ class TimestampMixin:
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class RevisionedMixin:
+    """A row whose every change bumps a counter, for optimistic concurrency.
+
+    What an operator's `expected_revision` is compared with before a platform
+    billing mutation (BILL-12): Admin A reads revision 4, Admin B changes the
+    row to revision 5, and A's edit based on 4 is refused with 409 instead of
+    silently overwriting B's. The comparison is made under a row lock, so the
+    check and the write cannot interleave.
+
+    Bumped by `_bump_revisions` below on every flush that changes the row,
+    rather than by each service remembering to: a counter that one code path
+    forgets to increment is a counter that says "unchanged" about a changed
+    row. Bulk `UPDATE` statements bypass the ORM and must bump it themselves.
+    """
+
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+
+
+@event.listens_for(Session, "before_flush")
+def _bump_revisions(session: Session, flush_context: object, instances: object) -> None:
+    """Advance `revision` on every revisioned row this flush changes."""
+    for instance in session.dirty:
+        if isinstance(instance, RevisionedMixin) and session.is_modified(
+            instance, include_collections=False
+        ):
+            instance.revision = (instance.revision or 0) + 1
 
 
 class SoftDeleteMixin:

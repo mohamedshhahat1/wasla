@@ -772,6 +772,12 @@ class Settings(BaseSettings):
     # so this bounds how long a pass can run - and on a healthy deployment
     # there is nothing here to find at all.
     billing_reconciliation_batch_size: int = Field(default=50, gt=0, le=1_000)
+    # How long a *hosted* checkout's pending payment stays eligible for a
+    # provider inquiry (BILL-09). A customer who paid on a Paymob page whose
+    # callback was lost is found by the next pass after the grace period; a
+    # page abandoned for a week is not asked about for ever. Older pending
+    # payments remain visible under /platform/billing/reconciliation.
+    billing_hosted_reconciliation_max_age_seconds: float = Field(default=7 * 86_400.0, gt=0)
 
     # Which processor collects money, if any (ADR-044). `manual` is the
     # existing behaviour and stays the default: it records what is owed and
@@ -816,6 +822,13 @@ class Settings(BaseSettings):
     # which is how this product billed before saved cards existed. With it,
     # `RecurringService` can debit a saved card when a renewal falls due.
     paymob_moto_integration_id: int | None = None
+    # Integration ids a *customer* checkout's callback may legitimately carry,
+    # beyond the numeric entries of `PAYMOB_INTEGRATION_IDS` (BILL-11). Needed
+    # only when that list names methods ("card") rather than ids: a settled
+    # transaction is bound to the integration it ran on, and a name has no id
+    # to compare with. Left empty with only names configured, every checkout
+    # callback is refused - which is the fail-closed direction.
+    paymob_callback_integration_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
     # The legacy API key, and a fourth Paymob credential rather than a spelling
     # of one of the other three. Paymob's transaction-inquiry API authenticates
     # with a bearer token minted from *this* key, not with the secret key that
@@ -914,6 +927,14 @@ class Settings(BaseSettings):
     # is what makes open redirection structurally impossible here rather than
     # something a validator has to keep catching.
     google_redirect_uri: str | None = None
+
+    @field_validator("paymob_callback_integration_ids", mode="before")
+    @classmethod
+    def _split_callback_integration_ids(cls, value: object) -> object:
+        """A comma-separated list of integer ids, as the other list is written."""
+        if isinstance(value, str):
+            return [int(item.strip()) for item in value.split(",") if item.strip()]
+        return value
 
     @field_validator("paymob_integration_ids", mode="before")
     @classmethod

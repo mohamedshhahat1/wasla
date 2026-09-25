@@ -25,11 +25,11 @@ JANUARY_31 = datetime(2026, 1, 31, 9, 0, tzinfo=UTC)
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
 
-def _plan(interval: BillingInterval = BillingInterval.MONTHLY) -> Plan:
+def _plan(interval: BillingInterval = BillingInterval.MONTHLY, *, price: str = "99.00") -> Plan:
     return Plan(
-        code="pro",
-        name="Pro",
-        price=Decimal("99.00"),
+        code="pro" if Decimal(price) > 0 else "starter",
+        name="Pro" if Decimal(price) > 0 else "Starter",
+        price=Decimal(price),
         currency="EGP",
         interval=interval,
         limits={},
@@ -107,6 +107,27 @@ async def test_a_trial_nobody_acted_on_expires_rather_than_cancels() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_legacy_free_trial_rolls_on_as_active_rather_than_expiring() -> None:
+    """BILL-01 (mutation R-BILL-01). A free plan's 'trial' grants nothing to end.
+
+    No new subscription trials a free plan, but one written before migration
+    0070 - or restored from an old backup - can still say `trialing`. At its
+    period end it becomes plain `active` on the same plan and rolls on; it
+    used to become `expired`, after which a paid checkout took the money and
+    granted nothing.
+    """
+    subscription = _subscription(SubscriptionStatus.TRIALING)
+    subscription.trial_ends_at = datetime(2026, 8, 23, tzinfo=UTC)
+
+    await roll_over(subscription, plan=_plan(price="0.00"), now=NOW)
+
+    assert subscription.status is SubscriptionStatus.ACTIVE
+    assert subscription.ended_at is None
+    assert subscription.current_period_start == datetime(2026, 8, 23, tzinfo=UTC)
+    assert subscription.trial_ends_at is None
+
+
+@pytest.mark.asyncio
 async def test_an_active_subscription_opens_the_next_period() -> None:
     subscription = _subscription(
         start=datetime(2026, 7, 23, tzinfo=UTC),
@@ -120,6 +141,26 @@ async def test_an_active_subscription_opens_the_next_period() -> None:
     # sweep that runs late silently shortens the customer's month.
     assert subscription.current_period_start == datetime(2026, 8, 23, tzinfo=UTC)
     assert subscription.current_period_end == datetime(2026, 9, 23, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_a_month_end_anchor_survives_february_through_roll_over() -> None:
+    """BILL-18 (mutation R-BILL-18): the sweep counts from the anchor, not the last end.
+
+    Bought on 31 January, renewed on 28 February: the next period must end on
+    31 March. Chaining from 28 February used to fix it on the 28th for ever.
+    """
+    subscription = _subscription(
+        start=datetime(2026, 1, 31, 9, tzinfo=UTC),
+        end=datetime(2026, 2, 28, 9, tzinfo=UTC),
+    )
+    subscription.billing_anchor_at = datetime(2026, 1, 31, 9, tzinfo=UTC)
+
+    await roll_over(subscription, plan=_plan(), now=datetime(2026, 2, 28, 9, 5, tzinfo=UTC))
+    assert subscription.current_period_end == datetime(2026, 3, 31, 9, tzinfo=UTC)
+
+    await roll_over(subscription, plan=_plan(), now=datetime(2026, 3, 31, 9, 5, tzinfo=UTC))
+    assert subscription.current_period_end == datetime(2026, 4, 30, 9, tzinfo=UTC)
 
 
 @pytest.mark.asyncio

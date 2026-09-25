@@ -91,6 +91,18 @@ class ConflictError(WaslaError):
     message = "The request conflicts with the current state."
 
 
+class CustomPlanNotAvailableError(ValidationError):
+    """A workspace was pointed at another workspace's custom plan (ADR-113).
+
+    Raised on the *platform* side, where staff already see every plan and a
+    precise refusal helps them. A workspace naming another's custom plan gets
+    the ordinary "No such plan." instead, so the refusal confirms nothing.
+    """
+
+    error_code = "custom_plan_not_available_for_workspace"
+    message = "That custom plan belongs to another workspace and cannot be assigned here."
+
+
 class PlanLimitExceededError(WaslaError):
     """The workspace's plan does not allow this, and no role change would.
 

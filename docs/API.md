@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **138 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **192 operations**, of which
 17 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -180,10 +180,11 @@ Accepting an invitation for an address that already has an account adds or reins
 | Method | Path | Purpose | Access |
 | --- | --- | --- | --- |
 | POST | `/api/v1/billing/subscription` | Choose a **free** plan for a workspace that has none (`201`); a priced plan answers `402` | Workspace **owner** |
-| POST | `/api/v1/billing/subscription/plan` | Move to another **free** plan; a priced plan answers `402` | Workspace **owner** |
+| POST | `/api/v1/billing/subscription/plan` | Move to another **free** plan; a cheaper plan while on a paid one is **scheduled for the period end**; a pricier one answers `402` | Workspace **owner** |
+| POST | `/api/v1/billing/subscription/scheduled-change/cancel` | Withdraw a scheduled downgrade | Workspace **owner** |
 | POST | `/api/v1/billing/checkout` | Open a hosted payment page for a plan or an outstanding invoice (`201`) | Workspace **owner** |
 | GET | `/api/v1/billing/payments/{id}` | Where one payment attempt has got to | Workspace **owner** |
-| POST | `/api/v1/billing/payments/{id}/refund` | Give back what is left of a payment (`202`) | Workspace **owner** |
+| POST | `/api/v1/billing/payments/{id}/refund` | **Ask** platform staff for a refund (`202`); no money moves (ADR-112) | Workspace **owner** |
 | POST | `/api/v1/webhooks/paymob` | Receive a payment provider callback | Public, HMAC-verified |
 
 ```
@@ -225,15 +226,14 @@ Keep polling; the callback is what resolves it.
 
 ```
 POST /api/v1/billing/payments/{payment_id}/refund   {"reason": "..."}
-  -> 202 {"status": "succeeded", "refund_pending": true,
-          "refunded_amount": "0.00", ...}
+  -> 202 {"payment_id": "...", "status": "review_requested"}
 ```
 
-**202, and the status still says `succeeded`.** This records that the provider
-accepted the reversal; the money moves later and is confirmed by a callback,
-exactly as a payment is. There is no amount in the request — it is the
-payment's own unreturned balance, so no client can ask for more back than was
-paid. Render `refund_pending`, never "refunded", until `refunded_at` is set.
+**A request, not a refund** (ADR-112, BILL-13). A workspace owner used to be able
+to refund their own payment and keep the plan it bought. Now this records the
+request, audits it and raises a `refund_requested` incident for platform staff.
+The payment does not change. Refunds are made through
+`POST /api/v1/platform/billing/payments/{id}/refund`.
 
 The webhook is unauthenticated by necessity and answers `200 {"status":
 "received"}` to everything it verified — applied, duplicate, unmatched or
@@ -241,6 +241,46 @@ mismatched alike, because a reply that distinguished them would confirm which
 payment references exist. An unverified request is `403`; a deployment with no
 provider configured is `503`, so the provider retries rather than believing a
 payment was recorded.
+
+## Billing: usage and top-ups (ADR-113)
+
+| Method | Path | Purpose | Access |
+| --- | --- | --- | --- |
+| GET | `/api/v1/billing/plans` | The catalogue: public plans, plus this workspace's own custom plan (`is_custom: true`) and never another's | Workspace member |
+| GET | `/api/v1/billing/entitlements` | Every limit, broken down: `base_limit`, `topup_limit`, `platform_grant_limit`, `effective_limit` (= `limit`), `used`, `remaining`, `over_limit`, `enforced`, and the period for usage keys | Workspace member |
+| GET | `/api/v1/billing/topups` | Top-ups this workspace may buy (`?entitlement_key=`): active global ones and its own | Workspace member |
+| POST | `/api/v1/billing/topups/{topup_id}/checkout` | Buy one: a `TOPUP` invoice and a hosted page (`201`) | Workspace **owner** |
+| GET | `/api/v1/billing/topup-purchases` | Its top-ups, bought and granted, newest first (`limit`, `offset`) | Workspace **owner** |
+| GET | `/api/v1/billing/summary` | Billing -> Usage & Top-ups in one read: subscription, the seven keys, live top-ups, recent purchases, the open custom plan offer, renewals awaiting payment (`payment_required`) and `automatic_renewal` | Workspace **owner** |
+| GET | `/api/v1/billing/custom-offers` | Custom plans offered to it: price, currency, interval, the seven limits, the period, `can_accept` (ADR-114) | Workspace **owner** |
+| POST | `/api/v1/billing/custom-offers/{offer_id}/accept` | Accept & Pay: a `checkout` invoice pinned to the offered version and a hosted page (`201`); body `{"idempotency_key"?}` only. Changes no plan until Paymob confirms the money | Workspace **owner** |
+| POST | `/api/v1/billing/custom-offers/{offer_id}/decline` | Decline; the workspace keeps its plan | Workspace **owner** |
+
+```
+POST /api/v1/billing/topups/{topup_id}/checkout   {"idempotency_key": "..."}
+  -> 201 {"redirect_url": "...", "purchase_id": "...", "invoice_id": "...",
+          "payment_id": "...", "amount": "200.00", "currency": "EGP",
+          "entitlement_key": "period_ai_turns", "quantity": 10000,
+          "expires_at": "2026-10-25T10:00:00Z"}
+```
+
+The body names nothing that could price the purchase (`422` if it tries). A
+product the workspace cannot see is `404`, exactly like one that does not
+exist. `409` for a free product, a workspace that is not active, a key the plan
+already leaves unlimited, or an `idempotency_key` already used - that `409`
+carries `details.purchase_id`, and no second page is opened. The allowance is
+granted when the signed Paymob callback settles the invoice, once, and lasts
+until `expires_at`, the end of the current billing period. A top-up is never
+charged to a saved card and never renews.
+
+```
+GET /api/v1/billing/entitlements
+  -> 200 [{"key": "period_ai_turns", "kind": "usage", "enforced": true,
+           "base_limit": 5000, "topup_limit": 10000, "platform_grant_limit": 0,
+           "effective_limit": 15000, "limit": 15000, "used": 6200,
+           "remaining": 8800, "over_limit": false, "allowed": true,
+           "period_start": "...", "period_end": "..."}, ...]
+```
 
 ## Webhook
 
@@ -737,6 +777,71 @@ Platform authority is a property of the user, not of a membership. Owning a work
 - **`/tenants` uses offset paging**, unlike the cursors elsewhere: the list is sorted by name and searched by hand, so an operator wants page three of forty results rather than a stable feed. `total` is the number matching the filter. `search` matches name or address and is escaped, so `%` finds a workspace called "100%" rather than everything.
 - **Each row carries the same counters that workspace sees on its own `/usage`**, so an operator and a customer quote the same number.
 
+## Platform billing
+
+`/api/v1/platform/billing`. The procedures are in
+[BILLING_OPERATIONS.md](BILLING_OPERATIONS.md). Every route requires
+`PLATFORM_OWNER` or `PLATFORM_ADMIN`; `DELETE /plans/{id}` and
+`DELETE /topups/{id}` require `PLATFORM_OWNER`. Every write takes a `reason` and the `expected_revision` (or
+`expected_version`) it was based on, answers `409` if that is stale, and is
+audited with actor, role, reason, before and after. Lists are offset-paged:
+`limit` (maximum 100), `offset`, `total`. No response carries a secret, a card
+token or a raw provider payload.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/features` | The entitlement keys, their units and how each is enforced |
+| GET | `/plans` | The catalogue, with the current and latest version and subscriber counts; `?scope=tenant&tenant_id=` lists one company's custom plans |
+| POST | `/plans` | Create a plan and its version 1 |
+| GET | `/plans/{plan_id}` | One plan |
+| PATCH | `/plans/{plan_id}` | Name, description, visibility, order |
+| POST | `/plans/{plan_id}/activate` | Offer it to new customers |
+| POST | `/plans/{plan_id}/deactivate` | Stop offering it; existing subscribers keep it |
+| DELETE | `/plans/{plan_id}` | Delete a plan nothing has referenced (owner only) |
+| GET | `/plans/{plan_id}/versions` | Every version, with subscribers per version |
+| POST | `/plans/{plan_id}/versions` | Publish new terms for new customers |
+| POST | `/plans/{plan_id}/versions/preview` | What publishing would mean; writes nothing |
+| POST | `/plans/{plan_id}/migrations` | Count (`confirm: false`) or schedule (`confirm: true`) a cohort move at next renewal |
+| GET | `/subscriptions` | Filter by workspace, plan, status, renewal window |
+| GET | `/subscriptions/{id}` | One subscription |
+| GET | `/subscriptions/{id}/timeline` | Its audit, invoices and payments in order |
+| POST | `/subscriptions/{id}/change-plan` | `next_renewal`, or `now` with a named financial basis |
+| POST | `/subscriptions/{id}/cancel` | At period end, or `immediately` |
+| POST | `/subscriptions/{id}/resume` | Undo a pending cancellation |
+| GET | `/invoices` | Filter by workspace, subscription, status, purpose, plan, dates |
+| GET | `/invoices/{id}` | One invoice |
+| POST | `/invoices/{id}/payments` | Record a manual payment, settled like any other |
+| POST | `/invoices/{id}/void` | Withdraw an invoice with an explicit subscription policy |
+| GET | `/payments` | Filter by workspace, status, provider |
+| GET | `/payments/{id}` | Provider facts: transaction, order, intention, integration, mode |
+| POST | `/payments/{id}/refund` | Full or partial refund; confirmed only by a signed callback |
+| GET | `/reconciliation` | What needs attention, counted by category |
+| POST | `/reconciliation/{payment_id}/run` | Ask the provider about one payment now; never charges |
+| GET | `/incidents` | Durable billing incidents |
+| POST | `/incidents/{id}/resolve` | Close one with an audited note |
+| GET | `/tenants/{tenant_id}/summary` | One company's billing in one read: plan, version, custom flag, period, renewal, the seven keys broken down, live top-ups, recent invoices, payments, incidents and timeline |
+| POST | `/tenants/{tenant_id}/custom-plan/preview` | What a custom plan would mean for the company; writes nothing |
+| POST | `/tenants/{tenant_id}/custom-plan` | Create a `tenant`-scoped plan and version 1, optionally assign it now or at renewal (ADR-113); `financial_basis: customer_checkout` makes an offer instead (ADR-114) |
+| GET | `/tenants/{tenant_id}/custom-offers` | Every custom plan offer made to the company |
+| POST | `/tenants/{tenant_id}/custom-offers` | Offer one version of the company's own priced custom plan; grants nothing |
+| POST | `/custom-offers/{offer_id}/cancel` | Withdraw an open offer (`expected_revision`, `reason`) |
+| POST | `/tenants/{tenant_id}/topups/grant` | Complimentary allowance until the period ends; no invoice or payment |
+| GET | `/topups` | Top-up products, filtered by scope, workspace, key, activity |
+| POST | `/topups` | Create a product (global or for one company) |
+| GET | `/topups/{topup_id}` | One product, with how many purchases name it |
+| PATCH | `/topups/{topup_id}` | Price, quantity, name, visibility for new purchases |
+| POST | `/topups/{topup_id}/activate` | Offer it again |
+| POST | `/topups/{topup_id}/deactivate` | Stop new purchases; nobody's purchase changes |
+| DELETE | `/topups/{topup_id}` | Delete a product nobody bought (owner only) |
+| GET | `/topup-purchases` | Purchases and grants, filtered by workspace, status, source, key |
+| GET | `/topup-purchases/{purchase_id}` | One purchase or grant |
+| POST | `/topup-purchases/{purchase_id}/refund-review` | Keep or withdraw a refunded top-up; withdrawal deletes nothing |
+
+A custom plan assigned to another company answers `422` with error code
+`custom_plan_not_available_for_workspace`. Creating one requires all seven
+limits (`null` is unlimited, `0` is none); a priced one assigned `now` needs a
+`financial_basis` of `customer_checkout`, `manual_payment` or `complimentary`.
+
 ## Planned platform endpoints
 
-`/api/v1/platform/tenants/{tenant_id}`, `/api/v1/platform/billing`, `/api/v1/platform/plans`, `/api/v1/platform/audit-logs`, `/api/v1/platform/system-health`.
+`/api/v1/platform/tenants/{tenant_id}`, `/api/v1/platform/plans`, `/api/v1/platform/audit-logs`, `/api/v1/platform/system-health`.

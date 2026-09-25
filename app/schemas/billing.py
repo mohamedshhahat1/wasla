@@ -10,14 +10,18 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.db.models.billing import (
+    METER_ONLY_LIMITS,
+    RESOURCE_LIMITS,
     BillingInterval,
     LimitKey,
     Plan,
+    PlanVersion,
+    ScheduledChangeSource,
     Subscription,
     SubscriptionStatus,
 )
@@ -35,33 +39,46 @@ class PlanLimitRead(BaseModel):
 
 
 class PlanRead(BaseModel):
-    """A plan as a pricing page shows it."""
+    """A plan as a pricing page shows it, at the terms of one version.
+
+    `version` names which immutable terms these are (BILL-12). On the
+    catalogue it is the version a new customer would buy; on a subscription it
+    is the version that subscriber is held to - which is not necessarily the
+    same thing, and that is the point.
+    """
 
     id: str
     code: str
     name: str
     description: str | None
+    version: int | None
     price: Decimal
     currency: str
     interval: BillingInterval
     trial_days: int
     limits: list[PlanLimitRead]
+    # Written for this workspace alone (ADR-113). Never true for a plan another
+    # workspace could see.
+    is_custom: bool = False
 
     @classmethod
-    def from_model(cls, plan: Plan) -> Self:
+    def from_model(cls, plan: Plan, version: PlanVersion | None = None) -> Self:
+        terms: Plan | PlanVersion = version if version is not None else plan
         return cls(
             id=str(plan.id),
             code=plan.code,
-            name=plan.name,
+            name=version.name if version is not None else plan.name,
             description=plan.description,
-            price=plan.price,
-            currency=plan.currency,
-            interval=plan.interval,
-            trial_days=plan.trial_days,
+            version=version.version if version is not None else None,
+            price=terms.price,
+            currency=terms.currency,
+            interval=terms.interval,
+            trial_days=terms.trial_days,
             # Every key, including the ones this plan does not limit, so a
             # comparison table renders "unlimited" rather than a blank cell it
             # has to guess the meaning of.
-            limits=[PlanLimitRead(key=key, limit=plan.limit_for(key)) for key in LimitKey],
+            limits=[PlanLimitRead(key=key, limit=terms.limit_for(key)) for key in LimitKey],
+            is_custom=plan.is_custom,
         )
 
 
@@ -71,50 +88,111 @@ class EntitlementRead(BaseModel):
     `limit` and `remaining` are both null when unlimited. Null rather than a
     large number: a client that renders "999999 left" has been told something
     false.
+
+    `limit` is the effective limit and equals `effective_limit` (ADR-113):
+
+        effective_limit = base_limit + topup_limit + platform_grant_limit
+
+    `over_limit` is true when the workspace holds or has used more than it is
+    now allowed - after a capacity top-up expired, say. Nothing is deleted;
+    `remaining` reads zero, never a negative number, and adding more is refused
+    until usage fits. `enforced` is false for the one meter-only key,
+    `period_messages`, which no customer message is ever refused over.
+    `period_start`/`period_end` bound a usage key's count and are null for
+    capacities.
     """
 
     key: LimitKey
+    kind: Literal["usage", "capacity"]
+    enforced: bool
     limit: int | None
+    base_limit: int | None
+    topup_limit: int
+    platform_grant_limit: int
+    effective_limit: int | None
     used: int
     remaining: int | None
+    over_limit: bool
     allowed: bool
+    period_start: datetime | None
+    period_end: datetime | None
 
     @classmethod
     def from_entitlement(cls, entitlement: Entitlement) -> Self:
         return cls(
             key=entitlement.key,
+            kind="capacity" if entitlement.key in RESOURCE_LIMITS else "usage",
+            enforced=entitlement.key not in METER_ONLY_LIMITS,
             limit=entitlement.limit,
+            base_limit=entitlement.base_limit,
+            topup_limit=entitlement.topup_limit,
+            platform_grant_limit=entitlement.grant_limit,
+            effective_limit=entitlement.limit,
             used=entitlement.used,
             remaining=entitlement.remaining,
+            over_limit=entitlement.over_limit,
             allowed=entitlement.allowed,
+            period_start=entitlement.period_start,
+            period_end=entitlement.period_end,
         )
 
 
+class ScheduledChangeRead(BaseModel):
+    """A plan change waiting for the current period to end."""
+
+    plan_version_id: str
+    source: ScheduledChangeSource
+    effective_at: datetime
+
+
 class SubscriptionRead(BaseModel):
-    """A workspace's subscription, with the plan it is on."""
+    """A workspace's subscription, with the terms it is held to."""
 
     id: str
     status: SubscriptionStatus
     plan: PlanRead
+    plan_version_id: str | None
     current_period_start: datetime
     current_period_end: datetime
+    billing_anchor_at: datetime | None
     trial_ends_at: datetime | None
     cancel_at_period_end: bool
     cancelled_at: datetime | None
     ended_at: datetime | None
+    scheduled_change: ScheduledChangeRead | None
+    revision: int
 
     @classmethod
-    def from_model(cls, subscription: Subscription, *, plan: Plan) -> Self:
+    def from_model(
+        cls,
+        subscription: Subscription,
+        *,
+        plan: Plan,
+        version: PlanVersion | None = None,
+    ) -> Self:
+        scheduled = None
+        if subscription.scheduled_plan_version_id is not None:
+            scheduled = ScheduledChangeRead(
+                plan_version_id=str(subscription.scheduled_plan_version_id),
+                source=subscription.scheduled_change_source or ScheduledChangeSource.OPERATOR,
+                effective_at=subscription.current_period_end,
+            )
         return cls(
             id=str(subscription.id),
             status=subscription.status,
-            plan=PlanRead.from_model(plan),
+            plan=PlanRead.from_model(plan, version),
+            plan_version_id=(
+                str(subscription.plan_version_id) if subscription.plan_version_id else None
+            ),
             current_period_start=subscription.current_period_start,
             current_period_end=subscription.current_period_end,
+            billing_anchor_at=subscription.billing_anchor_at,
             trial_ends_at=subscription.trial_ends_at,
             cancel_at_period_end=subscription.cancel_at_period_end,
             cancelled_at=subscription.cancelled_at,
             ended_at=subscription.ended_at,
+            scheduled_change=scheduled,
+            revision=subscription.revision or 1,
         )
 
 

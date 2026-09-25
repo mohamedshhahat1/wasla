@@ -8,13 +8,14 @@ client can parse it into whatever decimal type it has.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.payment_method import PaymentMethod
 from app.schemas.text import StorableText
 
@@ -94,7 +95,8 @@ class PaymentRead(BaseModel):
             # boolean rather than by exposing the provider's reference: which
             # transaction id a reversal has is nobody's business outside
             # support, and it is in the audit log for them.
-            refund_pending=bool(payment.refund_requested_at) and not payment.refunded_amount,
+            refund_pending=payment.refund_requested_amount is not None
+            or (bool(payment.refund_requested_at) and not payment.refunded_amount),
             refunded_at=payment.refunded_at,
             failure_reason=payment.failure_reason,
             processed_at=payment.processed_at,
@@ -145,7 +147,11 @@ class InvoiceRead(BaseModel):
 
     id: str
     status: InvoiceStatus
+    # Why the invoice exists: a `checkout` a customer opened, the sweep's
+    # `renewal` for a period, or a `manual` bill from platform staff.
+    purpose: InvoicePurpose
     plan_code: str
+    plan_version_id: str | None
     amount_due: str
     amount_paid: str
     outstanding: str
@@ -161,7 +167,9 @@ class InvoiceRead(BaseModel):
         return cls(
             id=str(invoice.id),
             status=invoice.status,
+            purpose=invoice.purpose,
             plan_code=invoice.plan_code,
+            plan_version_id=str(invoice.plan_version_id) if invoice.plan_version_id else None,
             amount_due=_money(invoice.amount_due),
             amount_paid=_money(invoice.amount_paid),
             outstanding=_money(invoice.outstanding),
@@ -214,6 +222,17 @@ class InvoiceVoidRequest(BaseModel):
     reason: StorableText | None = Field(default=None, max_length=300)
 
 
+class RefundReviewRequested(BaseModel):
+    """A workspace's refund request was filed for platform review (BILL-13).
+
+    Nothing moved. The payment keeps its status until an operator approves a
+    refund and the provider confirms it.
+    """
+
+    payment_id: uuid.UUID
+    status: Literal["review_requested"]
+
+
 __all__ = [
     "InvoiceLineRead",
     "InvoiceRead",
@@ -222,4 +241,5 @@ __all__ = [
     "PaymentRead",
     "PaymentRecordRequest",
     "RefundRequestPayload",
+    "RefundReviewRequested",
 ]

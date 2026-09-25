@@ -49,7 +49,7 @@ from app.db.models.billing import (
     SubscriptionStatus,
 )
 from app.db.models.enums import TenantRole
-from app.db.models.invoice import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.membership import Membership
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
@@ -57,7 +57,9 @@ from app.integrations.billing.paymob import hmac_signature
 from app.main import create_app
 from app.services.entitlement_service import EntitlementService
 from app.services.subscription_service import SubscriptionService
+from tests.billing_fixtures import renewal_invoice
 from tests.conftest import AllowingEntitlements
+from tests.paymob_orders import order_for
 
 pytestmark = pytest.mark.integration
 
@@ -178,6 +180,29 @@ async def _subscribed(session: AsyncSession, *, tenant: Tenant, plan: Plan) -> S
     return subscription
 
 
+async def _renewal_rows(
+    session: AsyncSession,
+    *,
+    subscription: Subscription,
+    plan: Plan,
+) -> tuple[Invoice, Payment]:
+    """The sweep's advance renewal and a hosted page opened to pay it."""
+    invoice = await renewal_invoice(session, subscription=subscription, plan=plan)
+    payment = Payment(
+        tenant_id=subscription.tenant_id,
+        invoice_id=invoice.id,
+        status=PaymentStatus.PENDING,
+        amount=invoice.amount_due,
+        currency=invoice.currency,
+        provider="paymob",
+    )
+    session.add(payment)
+    await session.flush()
+    payment.provider_order_id = str(order_for(payment.id))
+    await session.flush()
+    return invoice, payment
+
+
 async def _checkout_rows(
     session: AsyncSession,
     *,
@@ -190,6 +215,7 @@ async def _checkout_rows(
         tenant_id=tenant.id,
         subscription_id=subscription.id if subscription else None,
         status=InvoiceStatus.OPEN,
+        purpose=InvoicePurpose.CHECKOUT,
         plan_code=plan.code,
         amount_due=plan.price,
         amount_paid=Decimal("0.00"),
@@ -210,6 +236,8 @@ async def _checkout_rows(
     )
     session.add(payment)
     await session.flush()
+    payment.provider_order_id = str(order_for(payment.id))
+    await session.flush()
     return invoice, payment
 
 
@@ -227,7 +255,8 @@ def _transaction(*, reference: str | None, amount_cents: int, **overrides: Any) 
         "is_3d_secure": True,
         "integration_id": 4097558,
         "has_parent_transaction": False,
-        "order": {"id": 217503754, "merchant_order_id": reference},
+        "order": {"id": order_for(reference), "merchant_order_id": reference},
+        "is_live": False,
         "created_at": "2026-08-27T11:33:44.592345",
         "currency": "EGP",
         "source_data": {"pan": "2346", "type": "card", "sub_type": "MasterCard"},
@@ -513,9 +542,7 @@ async def test_paying_a_renewal_does_not_restart_the_period(
     plan = await _plan(db_session, price="99.00", agents=25)
     subscription = await _subscribed(db_session, tenant=tenant, plan=plan)
     started = subscription.current_period_start
-    _, payment = await _checkout_rows(
-        db_session, tenant=tenant, plan=plan, subscription=subscription
-    )
+    _, payment = await _renewal_rows(db_session, subscription=subscription, plan=plan)
 
     await _deliver(http, _transaction(reference=str(payment.id), amount_cents=9900))
 
@@ -528,22 +555,25 @@ async def test_paying_an_old_invoice_does_not_revive_a_cancelled_subscription(
     http: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
-    """Paying is not a request to resubscribe - the rule `_settle` already kept."""
+    """Paying an old *renewal* is not a request to resubscribe (ADR-059).
+
+    A renewal settles a debt; only a purchase the customer chose after the
+    subscription ended brings it back (BILL-01, tested in
+    `test_paymob_checkout.py`).
+    """
     tenant = await _tenant(db_session)
-    free = await _plan(db_session, price="0.00", agents=1)
     paid = await _plan(db_session, price="99.00", agents=25)
-    subscription = await _subscribed(db_session, tenant=tenant, plan=free)
+    subscription = await _subscribed(db_session, tenant=tenant, plan=paid)
+    invoice, payment = await _renewal_rows(db_session, subscription=subscription, plan=paid)
     subscription.status = SubscriptionStatus.CANCELLED
     await db_session.flush()
-    _, payment = await _checkout_rows(
-        db_session, tenant=tenant, plan=paid, subscription=subscription
-    )
 
     await _deliver(http, _transaction(reference=str(payment.id), amount_cents=9900))
 
     await db_session.refresh(subscription)
+    await db_session.refresh(invoice)
+    assert invoice.status is InvoiceStatus.PAID
     assert subscription.status is SubscriptionStatus.CANCELLED
-    assert subscription.plan_id == free.id
 
 
 async def test_a_settled_payment_still_clears_past_due(
@@ -570,12 +600,12 @@ async def test_a_paid_invoice_with_no_subscription_settles_and_grants_nothing(
     http: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
-    """The misconfigured deployment, recorded rather than guessed at.
+    """BILL-01: a settled purchase always yields the plan it paid for.
 
-    Every workspace gets a subscription at registration, so this is the state
-    where `DEFAULT_PLAN_CODE` names no plan - and where limits are already
-    unenforced. The money is still recorded; inventing trial and period rules
-    inside a settlement path is the parallel state machine this fix avoids.
+    A workspace with no subscription row - a deployment whose default plan was
+    missing at registration - used to have its money recorded and nothing
+    granted. It now gets a subscription on exactly the version it bought, for
+    the period that started when the payment settled.
     """
     tenant = await _tenant(db_session)
     paid = await _plan(db_session, price="99.00", agents=25)
@@ -586,6 +616,13 @@ async def test_a_paid_invoice_with_no_subscription_settles_and_grants_nothing(
     assert delivered.status_code == 200
     await db_session.refresh(invoice)
     assert invoice.status is InvoiceStatus.PAID
-    assert (
-        await db_session.scalar(select(Subscription).where(Subscription.tenant_id == tenant.id))
-    ) is None
+    subscription = await db_session.scalar(
+        select(Subscription).where(Subscription.tenant_id == tenant.id)
+    )
+    assert subscription is not None
+    assert subscription.plan_id == paid.id
+    assert subscription.status is SubscriptionStatus.ACTIVE
+    assert (invoice.period_start, invoice.period_end) == (
+        subscription.current_period_start,
+        subscription.current_period_end,
+    )

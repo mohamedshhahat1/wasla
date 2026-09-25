@@ -26,6 +26,7 @@ is added it changes which object is constructed and nothing else (ADR-031).
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
@@ -72,13 +73,24 @@ class CheckoutSession:
     """Where to send the customer, and what the provider called this attempt.
 
     `redirect_url` is the only part the API hands out. `provider_reference` is
-    the provider's own id for the intended payment, stored so support can find
-    it in their dashboard - and so a callback that names it can be tied back to
-    the row that started it.
+    the provider's own id for the intended payment (Paymob's intention id),
+    stored so support can find it in their dashboard.
+
+    `order_reference` is the provider's *order* under that intention, and it is
+    the identifier callbacks are bound to (BILL-04, BILL-11): the order id sits
+    inside the transaction signature, and it is what a saved-card notification
+    quotes. Two different identifiers with two different jobs, kept in two
+    fields so neither can be mistaken for the other again.
+
+    `mode` is the provider environment the session was created in - `test` or
+    `live` - recorded on the payment so identifiers are never compared across
+    the two.
     """
 
     redirect_url: str
     provider_reference: str
+    order_reference: str | None = None
+    mode: str | None = None
 
 
 class EventKind(StrEnum):
@@ -137,6 +149,14 @@ class CallbackEvent:
     They are carried so the caller can refuse an event that disagrees with the
     invoice rather than trusting it, which is the difference between a webhook
     that reports a payment and a webhook that decides one.
+
+    `order_id`, `integration_id` and `is_live` are what the event is *bound*
+    by (BILL-11). `reference` travels in a field the provider does not sign, so
+    a validly signed callback could be re-aimed at another payment by editing
+    it; the order id is signed, and settlement requires it to equal the order
+    this system recorded when it created the intention. The integration and the
+    mode must match the deployment's own configuration, so a Test transaction
+    cannot settle a Live payment.
     """
 
     event_id: str
@@ -149,6 +169,9 @@ class CallbackEvent:
     parent_transaction_id: str | None = None
     refunded_amount: Decimal | None = None
     failure_reason: str | None = None
+    order_id: str | None = None
+    integration_id: str | None = None
+    is_live: bool | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -276,12 +299,35 @@ class SavedPaymentMethod:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedCharge:
+    """The provider's identifiers for an automatic charge, before it is sent.
+
+    Produced by the non-monetary first half of a saved-card charge (creating an
+    intention) and handed to the caller *before* the half that moves money. The
+    collection protocol commits these, so a callback that arrives before the
+    charge request has even returned already finds the order it is bound to.
+    """
+
+    intention_reference: str | None
+    order_reference: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class SavedMethodCharge:
     """A renewal we want taken from a card already on file.
 
     `reference` is ours and is what the resulting callback quotes home, exactly
     as at checkout. `token` is the provider's, read from a stored payment
     method - never from a request.
+
+    `customer_email` and `customer_name` are the workspace's billing contact,
+    read from the account of its owner. A provider that validates its billing
+    block refuses a placeholder, and Paymob did: every real automatic renewal
+    was refused over `email = "NOT_COLLECTED"` (BILL-05).
+
+    `on_prepared` is awaited between the two halves of the charge - after the
+    intention exists and before the card is debited - with the identifiers the
+    callback will be bound to (BILL-11).
     """
 
     reference: str
@@ -289,6 +335,13 @@ class SavedMethodCharge:
     amount: Decimal
     currency: str
     description: str
+    customer_email: str | None = None
+    customer_name: str | None = None
+    on_prepared: Callable[[PreparedCharge], Awaitable[None]] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 class InquiryVerdict(StrEnum):
@@ -441,6 +494,30 @@ class RecurringProvider(Protocol):
 
         Raises `RecurringUnavailableError` when the account cannot do this at
         all, and `ProviderError` when it can and the attempt failed.
+        """
+        ...
+
+
+@runtime_checkable
+class CallbackBindingProvider(Protocol):
+    """A provider that can say whether a verified callback belongs to us.
+
+    Separate from `CheckoutProvider` because it is a statement about the
+    deployment's configuration - which integrations and which environment are
+    ours - rather than about signatures. Checked by settlement after the
+    signature and before anything changes (BILL-11).
+    """
+
+    @property
+    def mode(self) -> str | None:
+        """`test` or `live` - the environment this deployment's keys belong to."""
+        ...
+
+    def callback_binding_problem(self, event: CallbackEvent, *, automatic: bool) -> str | None:
+        """Why this event cannot be ours, or None when it can.
+
+        `automatic` says which integration the payment should have run on: the
+        merchant-initiated one for a renewal, a customer-facing one otherwise.
         """
         ...
 

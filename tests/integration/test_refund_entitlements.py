@@ -41,6 +41,7 @@ from app.db.models.billing import (
 )
 from app.db.models.invoice import (
     Invoice,
+    InvoicePurpose,
     InvoiceStatus,
     Payment,
     PaymentStatus,
@@ -49,7 +50,9 @@ from app.db.models.tenant import Tenant
 from app.integrations.billing.paymob import PaymobProvider, hmac_signature
 from app.services.checkout_service import APPLIED, DUPLICATE, CheckoutService
 from app.services.entitlement_service import EntitlementService
+from tests.billing_fixtures import pin
 from tests.integration.plan_catalogue import own_plan
+from tests.paymob_orders import order_for
 
 pytestmark = pytest.mark.integration
 
@@ -159,6 +162,7 @@ async def _bought(
         tenant_id=tenant.id,
         subscription_id=subscription.id,
         status=InvoiceStatus.OPEN,
+        purpose=InvoicePurpose.CHECKOUT,
         plan_code=plan_code,
         amount_due=Decimal(amount),
         amount_paid=Decimal("0.00"),
@@ -180,6 +184,8 @@ async def _bought(
         # automatic debits and nothing here is one.
     )
     session.add(payment)
+    await session.flush()
+    payment.provider_order_id = str(order_for(payment.id))
     await session.flush()
     return invoice, payment
 
@@ -208,7 +214,8 @@ def _transaction(
         "integration_id": 4097558,
         "has_parent_transaction": False,
         "parent_transaction": None,
-        "order": {"id": 217503754, "merchant_order_id": reference},
+        "order": {"id": order_for(reference), "merchant_order_id": reference},
+        "is_live": False,
         "created_at": "2026-08-29T11:33:44.592345",
         "currency": "EGP",
         "source_data": {"pan": "2346", "type": "card", "sub_type": "MasterCard"},
@@ -442,23 +449,35 @@ async def test_another_settled_invoice_for_the_same_plan_keeps_it(
 ) -> None:
     """ "Granted solely by this payment" is a query, not an assumption.
 
-    A workspace that paid for August and again for September, then refunded
-    August, has bought September. Downgrading on the strength of the reversed
-    invoice alone would take a plan the customer is paid up on.
+    A workspace that bought Pro and then paid the renewal for the period it is
+    in, and refunded the purchase, has still paid for now. Downgrading on the
+    strength of the reversed invoice alone would take a plan the customer is
+    paid up on. (A second *checkout* for a plan already paid this period is
+    refused as a duplicate payment now - BILL-15 - so the second cover is the
+    renewal, which is how a customer actually pays twice for one plan.)
     """
     tenant, subscription, _ = await _workspace(db_session)
     august, august_payment = await _bought(db_session, tenant, subscription)
     await _settle(db_session, tenant, august_payment)
 
-    september, september_payment = await _bought(
-        db_session,
-        tenant,
-        subscription,
-        transaction=SECOND_TRANSACTION,
-        period_start=NOW - timedelta(days=1),
-        period_end=NOW + timedelta(days=29),
+    db_session.add(
+        Invoice(
+            tenant_id=tenant.id,
+            subscription_id=subscription.id,
+            status=InvoiceStatus.PAID,
+            purpose=InvoicePurpose.RENEWAL,
+            plan_code=PAID_PLAN,
+            amount_due=Decimal("99.00"),
+            amount_paid=Decimal("99.00"),
+            currency="EGP",
+            period_start=NOW - timedelta(days=1),
+            period_end=NOW + timedelta(days=29),
+            issued_at=NOW - timedelta(days=1),
+            paid_at=NOW - timedelta(days=1),
+            lines=[],
+        )
     )
-    await _settle(db_session, tenant, september_payment, transaction=SECOND_TRANSACTION)
+    await db_session.flush()
     assert await _plan_code(db_session, subscription) == PAID_PLAN
 
     assert await _reverse(db_session, tenant, august_payment) == APPLIED
@@ -479,15 +498,23 @@ async def test_a_settled_invoice_for_a_period_that_has_ended_does_not_count(
     be free.
     """
     tenant, subscription, _ = await _workspace(db_session)
-    old, old_payment = await _bought(
-        db_session,
-        tenant,
-        subscription,
-        transaction=SECOND_TRANSACTION,
+    old = Invoice(
+        tenant_id=tenant.id,
+        subscription_id=subscription.id,
+        status=InvoiceStatus.PAID,
+        purpose=InvoicePurpose.RENEWAL,
+        plan_code=PAID_PLAN,
+        amount_due=Decimal("99.00"),
+        amount_paid=Decimal("99.00"),
+        currency="EGP",
         period_start=NOW - timedelta(days=60),
         period_end=NOW - timedelta(days=30),
+        issued_at=NOW - timedelta(days=60),
+        paid_at=NOW - timedelta(days=60),
+        lines=[],
     )
-    await _settle(db_session, tenant, old_payment, transaction=SECOND_TRANSACTION)
+    db_session.add(old)
+    await db_session.flush()
 
     current, current_payment = await _bought(db_session, tenant, subscription)
     await _settle(db_session, tenant, current_payment)
@@ -518,7 +545,7 @@ async def test_refunding_a_plan_the_workspace_has_since_left_changes_nothing(
     _, payment = await _bought(db_session, tenant, subscription)
     await _settle(db_session, tenant, payment)
     subscription.plan_id = plans[OTHER_PAID_PLAN].id
-    await db_session.flush()
+    await pin(db_session, subscription, plans[OTHER_PAID_PLAN])
 
     await _reverse(db_session, tenant, payment)
     await db_session.flush()

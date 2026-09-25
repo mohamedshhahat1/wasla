@@ -14,6 +14,341 @@ Scope: plans, subscriptions, entitlements, invoicing, and payment provider bound
 | Invoice | Implemented | Billable period summary |
 | Payment | Implemented | Recorded payment attempt and outcome |
 
+## The commercial rules (ADR-112)
+
+The billing audit `billing-03bb13b1` ([../BILLING_PAYMENTS_AUDIT.md](../BILLING_PAYMENTS_AUDIT.md))
+found the money path strict and the commercial model around it undefined. These
+rules came out of it and are what the code enforces; where an older section below
+says otherwise, this one wins and the older text has been corrected.
+[../BILLING_FINDINGS_REMEDIATION.md](../BILLING_FINDINGS_REMEDIATION.md) maps each
+rule to the finding it closes.
+
+| Rule | What it means in practice |
+| --- | --- |
+| **Starter is free for good** | No trial and no expiry on a free plan. Migration `0070` moved every trialing free workspace to `active` and revived every one that had expired off a free trial. Priced plans have no trials either: checkout goes straight to paid (BILL-01, BILL-23). |
+| **Billed in advance** | The sweep opens period *N+1* and invoices it at the boundary, priced at the version that will serve it. The old sweep billed the period that had just ended, so a purchase's first month was billed twice (BILL-03). |
+| **Upgrade: immediately, a full new period, no credit** | Paying for a pricier plan starts a fresh period at the moment of settlement. Nothing from the old period is credited. |
+| **Downgrade: at period end** | Asking for a cheaper plan while on a paid one schedules the change (`subscription.scheduled_change`); the paid period is kept. A downgrade can be withdrawn with `POST /billing/subscription/scheduled-change/cancel`. |
+| **Cancel at period end** | The default. A cancelled workspace keeps what it paid for until the boundary. |
+| **Plan versions are immutable** | Price, currency, interval and limits live in `plan_versions`; a database trigger refuses any `UPDATE`. A subscription is pinned to one version and its limits come from that version, not from `plans` (BILL-12). |
+| **A price change is for new customers** | Publishing a version changes new checkouts only. Existing subscribers move only when an operator schedules a migration, which is applied at each subscriber's own renewal and adopted only when that renewal is paid. |
+| **A checkout is a frozen snapshot** | Every checkout writes a new `CHECKOUT` invoice carrying the plan version, price, currency and interval. Settlement grants exactly that version. Invoices are never re-pointed at another plan (BILL-06). |
+| **Invoice purpose** | `checkout`, `renewal`, `manual`, `adjustment` or `topup` (ADR-113). Only `renewal` is unique per period, and only a `renewal` can be charged to a saved card (BILL-02, BILL-03); a trigger on `payments` refuses an automatic attempt against a `topup` invoice. |
+| **Strict MIT eligibility** | A saved card is charged only for an `OPEN`, issued renewal of the current period, priced at its version, for an `ACTIVE` workspace, with no refund and no unresolved attempt anywhere on the subscription (BILL-02). A platform-suspended workspace is never charged (BILL-17). |
+| **Callbacks are bound** | Wasla stores the Paymob intention id and the Paymob order id apart. A transaction callback settles only when its signed `order.id`, integration and test/live mode match what Wasla created (BILL-11). A TOKEN callback is matched on the order id (BILL-04). |
+| **A lost callback is recovered** | The hosted reconciler finds pending checkouts by transaction inquiry and settles them through the normal path, and recovers the saved card by Card Token Inquiry (BILL-04, BILL-09). |
+| **The MOTO billing e-mail is real** | The workspace owner's address. A workspace with no usable address is refused permanently before anything is sent (BILL-05). |
+| **Provider errors have three classes** | `permanent` stops the attempt and raises an incident, `retryable` is retried on the next pass, `ambiguous` is left to reconciliation and never charged again (BILL-05). |
+| **A decline does not end a checkout** | A declined attempt leaves the payment pending, so a later success on the same order settles it (BILL-07). |
+| **Count limits hold under concurrency** | Creating an agent, a number, an invitation or a document takes a per-workspace advisory lock until commit, so two requests cannot both take the last slot (BILL-08). |
+| **Every route to money settles the same way** | Callback, reconciliation, a manual payment and a void all go through `InvoiceSettlement` and the one invoice state machine (BILL-10, BILL-20). |
+| **Anomalies are durable** | Duplicate payments, refused settlements, mismatched and unknown callbacks and permanent provider errors are rows in `billing_incidents`, deduplicated, counted by metric and alerted on (BILL-15). |
+| **Refunds are operator actions** | A workspace owner can *ask* for a refund (`202`, an incident for platform staff). Only platform staff can refund, fully or partly (BILL-13). |
+| **Anchored periods** | Period ends are counted from `billing_anchor_at`, never chained: 31 Jan → 28 Feb → 31 Mar. A 29 February yearly anchor renews on 28 February in common years and on 29 February in leap years (BILL-18). |
+| **Financial rows are never cascaded** | `invoices`, `payments`, `payment_events`, `billing_incidents` and `billing_adjustments` reference their tenant with `ON DELETE RESTRICT` (BILL-19). |
+| **The database checks the money** | Non-negative prices and amounts, `amount_paid <= amount_due`, `0 <= refunded <= amount`, and EGP as the only currency (BILL-12). |
+
+### The platform billing control plane
+
+`/api/v1/platform/billing/*` is how platform staff run billing without SQL. All
+of it takes `PLATFORM_OWNER` or `PLATFORM_ADMIN`; deleting a plan takes
+`PLATFORM_OWNER`. Every change names the revision it was based on and gets a
+`409` if the row has moved since. Every change is audited with actor, role,
+reason, before and after. Lists are paged, 100 at most. No response carries a
+secret, a card token or a raw provider payload. The endpoints are listed in
+[API.md](API.md#platform-billing) and the procedures are in
+[BILLING_OPERATIONS.md](BILLING_OPERATIONS.md).
+
+### Metrics and alerts
+
+| Metric | Labels |
+| --- | --- |
+| `wasla_billing_checkouts_total` | `outcome`: created, settled, failed |
+| `wasla_billing_payments_total` | `outcome`: succeeded, declined, failed, refused, mismatched, duplicate |
+| `wasla_billing_renewals_total` | `outcome`: invoiced, charge_requested, not_sent, provider_refused, outcome_unknown, permanent_failure, skipped |
+| `wasla_billing_callbacks_total` | `outcome`: applied, duplicate, unmatched, mismatched, no_change, refused, declined, rejected_signature |
+| `wasla_billing_refunds_total` | `outcome`: requested, refused, confirmed, review_requested |
+| `wasla_billing_hosted_reconciliation_total` | `outcome`: settled, declined, still_pending, not_found, unreachable, expired |
+| `wasla_billing_incidents_total` | `kind`: the thirteen incident kinds |
+| `wasla_billing_topup_checkout_total` | `entitlement` (the seven top-up keys), `outcome`: created, refused, failed |
+| `wasla_billing_topup_grant_total` | `entitlement`, `source`: purchase, platform_grant; `outcome`: granted, not_granted |
+| `wasla_billing_topup_purchase_total` | `entitlement`, `outcome`: settled, expired, cancelled, refund_review, kept, withdrawn, callback_mismatched, stuck |
+| `wasla_billing_custom_plan_total` | `operation`: create, preview, assign, schedule, version; `outcome`: succeeded, refused, failed |
+| `wasla_oldest_pending_hosted_payment_age_seconds` | histogram, no labels |
+
+Every label value is a fixed word. None carries a workspace, an invoice, an
+amount or a provider reference. The alert rules are in the `wasla-billing` group
+of `deploy/monitoring/alerts.yml`: `BillingDuplicatePayment`,
+`BillingMismatchedCallback`, `BillingPermanentChargeFailure`,
+`BillingInvalidCallbackSpike`, `BillingRenewalFailureSpike`,
+`BillingCheckoutProviderFailing`, `BillingHostedReconciliationFailing` and
+`BillingHostedPaymentStuck`. The `wasla-billing-topups` group adds
+`BillingTopupPaidNotGranted`, `BillingTopupSettlementFailure`,
+`BillingTopupCallbackMismatchSpike`, `BillingTopupReconciliationStuck` and
+`BillingCustomPlanFailureSpike` (ADR-113). Each one has a promtool unit test.
+
+## Custom plans and top-ups (ADR-113)
+
+Two ways to sell a workspace more than the public catalogue does, built on the
+machinery above rather than beside it: a **custom plan** is an ordinary plan
+restricted to one workspace, and a **top-up** is a one-time purchase of extra
+allowance that expires with the period it was bought in.
+
+### The seven keys
+
+Custom plans are written in, and top-ups raise, exactly these seven keys. No
+other key can be sold as a top-up; `agents` and `owned_workspaces` are not
+among them. A custom plan copies every other limit from the plan the workspace
+holds, so it never makes one unlimited by leaving it out.
+
+| Key | Kind | Unit | Enforced by |
+| --- | --- | --- | --- |
+| `period_messages` | usage (per period) | messages sent and received | **Nothing.** Metered only (ADR-030): no customer message is refused over billing. A top-up raises the reported allowance and `remaining`; the API says `enforced: false`. |
+| `period_ai_turns` | usage | AI-answered customer turns | `EntitlementService.consume`, under the workspace's advisory lock; exhausted hands the conversation to a person. |
+| `period_campaign_messages` | usage | campaign messages | `reserve_period` when a campaign is scheduled, counting other live campaigns' unsent recipients, under the lock. |
+| `storage_bytes` | capacity | bytes held (integer; 1 GiB = 1024³) | `reserve` on upload, under the lock; inbound media over it is skipped. |
+| `whatsapp_numbers` | capacity | connected numbers (disabled and released ones do not count) | `reserve_or_refuse` on connect. |
+| `team_members` | capacity | active members plus open invitations | `reserve_or_refuse` on invite and reinstate. |
+| `knowledge_documents` | capacity | documents, whatever their indexing state | `reserve_or_refuse` on submit. |
+
+Each key uses the counter it always had. There is no second message counter,
+seat counter or document counter; a top-up changes the limit these are compared
+with, never how usage is counted.
+
+### The effective limit
+
+For every workspace and every one of the seven keys:
+
+    effective_limit = pinned plan version's limit
+                    + active paid top-ups for the key
+                    + active platform grants for the key
+
+"Active" means `status` is `granted` (or `refund_review`, see below) and
+`granted_at <= now < expires_at`. The clock decides, not the sweep that later
+records the expiry, so an allowance never outlives its period because a worker
+was down. An unlimited base (`null`) stays unlimited: a top-up cannot make
+unlimited more unlimited, so none can be bought for it. `0` is zero, never
+unlimited.
+
+`EntitlementService.check` computes this, and it is the only place every limit
+in the product is read, so every enforcement path above - advisory locks
+included - uses the effective limit with no change of its own. The plan version
+is never modified: a top-up is an addition beside it.
+
+`GET /billing/entitlements` (any member) and the summaries return, per key,
+`base_limit`, `topup_limit`, `platform_grant_limit`, `effective_limit` (also
+`limit`, for older clients), `used`, `remaining`, `over_limit`, `enforced`, and
+for usage keys `period_start`/`period_end`.
+
+### Period usage and capacity
+
+**Usage top-ups** (`period_messages`, `period_ai_turns`,
+`period_campaign_messages`) add to the allowance of the billing period they are
+bought in. They expire at that period's end, captured as `expires_at` when the
+checkout opens. The base meter resets at the boundary. There is **no
+carry-over**: bought on 10 October in a 25 September - 25 October period, a
+top-up counts from 10 to 25 October.
+
+**Capacity top-ups** (`storage_bytes`, `whatsapp_numbers`, `team_members`,
+`knowledge_documents`) also end with the current period in v1. When one expires
+the effective capacity returns to the plan's, and **nothing is deleted**: numbers
+stay connected, members stay members, documents stay searchable, stored media
+stays readable. The workspace reads `over_limit: true` with `remaining: 0`, and
+creating, connecting, inviting or uploading is refused until usage is back
+within the limit or more capacity is bought. A downgrade at renewal behaves the
+same way.
+
+A plan change during the period does not touch a live top-up: it keeps its own
+`expires_at`, and the effective limit is the *new* plan version's limit plus
+whatever top-ups are still live. Top-ups belong to the workspace, not to a plan
+version, and no plan change rewrites their history.
+
+### Custom plans
+
+`plans.scope` is `public` (on the catalogue), `private` (off it, assignable to
+anyone by staff - Enterprise, say) or `tenant`. A `tenant` plan names its one
+workspace in `plans.tenant_id`; two CHECK constraints tie `tenant` to a named
+workspace and `public` to `is_public`, and the owning workspace can never be
+changed afterwards. A plan inserted without a scope (a seed, raw SQL) takes the
+one its `is_public` implies.
+
+**It can never be held by another workspace.** `PlanCatalog.require_available`
+refuses it on every assignment path - start, change, schedule, purchase grant,
+renewal adoption - with `422 custom_plan_not_available_for_workspace` on the
+platform side. A workspace naming another's custom plan at checkout or in a plan
+request gets the ordinary "No such plan.", so nothing is confirmed to it. And
+triggers on `subscriptions` and `invoices` refuse any row that points a workspace
+at another's custom plan (its plan, pinned version, scheduled version or
+invoiced version), so the billing sweep, a migration or hand-written SQL cannot
+do it either. The owning workspace sees its custom plan in `GET /billing/plans`,
+marked `is_custom`, and nobody else does.
+
+A custom plan is an ordinary `Plan` with ordinary immutable `PlanVersion`s.
+Changing its price, interval or any limit publishes a new version; the
+subscriber stays on the version they hold until an operator migrates them,
+exactly like any plan. Deactivating it stops new checkouts and assignments and
+changes nobody holding it.
+
+**Assigning one is never free by accident** (ADR-114). A priced custom plan
+reaches its workspace in one of three ways: `customer_checkout`, which makes an
+**offer** the owner accepts and pays (below); `manual_payment` (money the
+operator has seen); or `complimentary` (recorded as a `complimentary_grant`
+adjustment). Scheduling a priced custom plan the workspace does not already hold
+onto its next renewal is refused, because a renewal can be charged to a saved
+card at a price the customer never accepted. Moving a subscriber between
+versions of the custom plan it already holds is an ordinary migration. A free
+custom plan (`price = 0`) is assigned, never offered; the audit entry names the
+operator, the reason, the workspace and the version.
+
+### Custom plan offers (ADR-114)
+
+An offer names one immutable version of the workspace's own custom plan.
+
+| Status | Meaning |
+| --- | --- |
+| `offered` | Visible to the workspace's owners with its full terms. Nothing owed. |
+| `pending_payment` | An owner clicked Accept & Pay; a hosted checkout is open. The plan has **not** changed. |
+| `active` | A signed Paymob callback (or a transaction inquiry recovering a lost one) settled one of its invoices; the subscription is pinned to the offered version. |
+| `declined` | The owner said no. Money for a page opened earlier is held with a `refused_settlement` incident. |
+| `expired` | `expires_at` passed. No new page can be opened; a page opened in time is still honoured. |
+| `cancelled` | Withdrawn by platform staff. Money arriving afterwards is held, never granted. |
+
+One offer per workspace can be open at a time (a partial unique index). The
+offer's tenant, plan and version are fixed by a trigger.
+
+**What the customer sees** (`GET /billing/custom-offers`, owners): name,
+price, currency, interval, all seven limits, the other limits the version
+carries, the period the terms would cover if paid now (`starts: on_payment`),
+the expiry, whether it can be accepted, and a note that saving the card is
+optional.
+
+**Accept & Pay** (`POST /billing/custom-offers/{id}/accept`, body
+`{"idempotency_key"?}` only) opens a `checkout` invoice pinned to the offered
+version, priced from it, and naming the offer (a composite foreign key keeps the
+offer inside the invoice's workspace; a trigger requires the invoice to sell the
+offered version). Then the ordinary Paymob Create Intention on the normal card
+integration, never MOTO. The checkout snapshot is authoritative: if the platform
+publishes version 2 at 1,800 EGP while a 1,500 EGP page is open, paying that page
+buys version 1 at 1,500 EGP. Buying a custom plan by its code at
+`POST /billing/checkout` is refused with a pointer to the offer.
+
+**Decline** (`POST /billing/custom-offers/{id}/decline`) leaves the workspace on
+the plan it holds.
+
+**Renewal.** Saving the card at the first checkout is **optional**. If the card
+was saved, each renewal of the custom plan is charged by the existing MOTO/MIT
+path at the pinned version's price. If not, nothing is charged automatically:
+the renewal invoice is issued under the ordinary grace and dunning rules,
+`GET /billing/summary` lists it under `payment_required`, and the owner pays it
+with `POST /billing/checkout {"invoice_id": ...}`. `automatic_renewal` in the
+summary says which applies.
+
+**Platform side:** `POST /platform/billing/tenants/{id}/custom-plan` with
+`financial_basis: customer_checkout` (and optionally `offer_expires_at`)
+creates the plan and its offer in one step;
+`POST /platform/billing/tenants/{id}/custom-offers` offers an existing version
+(for example version 2); `GET` the same path lists the company's offers;
+`POST /platform/billing/custom-offers/{id}/cancel` withdraws one
+(`expected_revision`, `reason`). Every one is audited.
+
+### Top-up products and purchases
+
+A **product** (`topup_products`) says which key it raises, by how much, for what
+price, and for whom: `global` (every workspace) or `tenant` (one workspace, which
+alone can see, buy or be granted it). Prices live on the rows - nothing is
+hard-coded. Editing a product's price or quantity affects new purchases only;
+deactivating one stops new purchases only; a product anybody bought can be
+deactivated but never deleted.
+
+A **purchase** (`topup_purchases`) freezes, at checkout, the product's id, code
+and name, the key, the quantity, the price, the currency, the billing period and
+the expiry. A trigger refuses any later change to that snapshot, so the payment
+grants exactly what the customer was shown, whatever the product becomes.
+
+| Status | Meaning | Counts toward the limit |
+| --- | --- | --- |
+| `pending` | Checkout open, no money yet | No |
+| `paid` | Money settled, allowance **not** granted (period over, or subscription not serving); a `topup_paid_but_not_granted` incident asks for a refund | No |
+| `granted` | Live until `expires_at` | Yes |
+| `expired` | Past `expires_at`, recorded by the sweep | No |
+| `cancelled` | Abandoned, refunded before the grant, or withdrawn by an operator | No |
+| `refund_review` | Refunded after the grant; an operator decides | **Yes**, until decided |
+
+### Buying a top-up: the Paymob flow
+
+`POST /billing/topups/{id}/checkout` (workspace owners) names a product and,
+optionally, an `idempotency_key` - nothing that could price it. It refuses a
+product the workspace cannot see (`404`, like one that does not exist), a free
+product, a workspace that is not `active` (a `past_due` one settles its invoice
+first), and a key the plan leaves unlimited. Then, in one transaction:
+
+1. a `TOPUP` invoice for the price, `plan_version_id` null, never `issued_at`
+   (so never dunned), with the snapshot in its lines;
+2. the frozen `TopupPurchase`, `pending`;
+3. a hosted page from the same `CheckoutService.open_page` every plan checkout
+   uses - the same Paymob intention, order binding and test/live mode.
+
+The same idempotency key again answers `409` naming the purchase already opened;
+its unique constraint makes four simultaneous requests open one page and call
+Paymob once. The signed callback is applied by the same `CheckoutService.apply`
+and `InvoiceSettlement` as any payment: the invoice becomes paid, and
+`TopupLedger` locks the purchase and grants it exactly once. A replayed callback
+is a duplicate before it gets that far; a second successful transaction on the
+same page is a `topup_duplicate_payment` incident. A lost callback is recovered
+by hosted reconciliation like any checkout. A top-up invoice cannot be paid
+through `POST /billing/checkout {invoice_id}`: one page per purchase.
+
+**A top-up is never charged to a saved card.** The renewal sweep claims only
+`renewal` invoices, `RecurringService` checks the purpose again, and a trigger on
+`payments` refuses an automatic attempt against a `topup` invoice. Nothing
+renews a top-up; buying one is always the customer's own act.
+
+### Platform grants
+
+`POST /platform/billing/tenants/{id}/topups/grant` gives complimentary allowance
+until the current period ends. It is a `TopupPurchase` with `source =
+platform_grant` and no invoice, no payment and no price - a CHECK constraint
+refuses one that carries any of them - and it appears as `platform_grant_limit`,
+never as paid top-up. The audit entry records actor, platform role, workspace,
+key, quantity, expiry, reason, the effective limit before and after, and the
+request id.
+
+### Refunds
+
+Top-ups have **no automated self-refund**: a workspace owner asks through the
+existing refund request, and platform staff decide. When Paymob confirms a
+refund of a top-up payment:
+
+- **before the grant** (`pending` or `paid`), a full refund cancels the purchase;
+  nothing was ever added;
+- **after the grant**, nothing is subtracted automatically. The purchase moves to
+  `refund_review` and keeps counting, and an incident says whether the
+  allowance was already in use (`topup_refund_after_consumption`) or not
+  (`topup_entitlement_reversal_blocked`). An operator then keeps it or withdraws
+  it (`POST /platform/billing/topup-purchases/{id}/refund-review`). Withdrawing
+  removes the quantity from the limit from then on; usage already recorded is
+  never reduced, and capacity in use is never deleted - the workspace is simply
+  over its limit;
+- an operator's *partial* refund is goodwill and changes nothing;
+- no refund of a top-up ever withdraws a plan or starts dunning.
+
+### Summaries
+
+`GET /platform/billing/tenants/{id}/summary` is the platform company page in one
+read: subscription, plan and version, whether it is a custom plan, price,
+period, next renewal, scheduled change, the seven keys broken down, live top-ups
+and grants, and the ten most recent invoices, payments, open incidents and
+timeline entries. `GET /billing/summary` is the owner's "Usage & Top-ups" page:
+subscription, the seven keys, live top-ups and recent purchases - nothing only
+staff should see.
+
+### Not built in v1
+
+Carry-over of unused allowance; top-ups that outlive the period; buying several
+packs in one purchase; top-ups for `agents` or `owned_workspaces`; enforcement of
+`period_messages`; automatic self-refund.
+
+
 ## Plans
 
 A plan is a row in `plans`: a stable `code`, a name, a price in `Numeric` (never float — 19.99 is not representable in binary floating point, and that error reaches an invoice), an interval, trial days, and its limits.
@@ -53,15 +388,15 @@ Migration `0016` seeds starter, pro, business and enterprise from the table in [
 
 One per workspace, enforced by `UNIQUE(tenant_id)` rather than by a service — two subscriptions are two answers to "what am I allowed to do". States: `trialing`, `active`, `past_due`, `cancelled`, `expired`.
 
-`past_due` still serves the workspace. A failed card is a conversation to have with a customer, not a reason to cut them off mid-sentence with their own customers; when that grace runs out is a separate decision the platform makes. `expired` is what a trial becomes when nobody acts, kept apart from `cancelled` because nobody chose it.
+`past_due` still serves the workspace. A failed card is a conversation to have with a customer, not a reason to cut them off mid-sentence with their own customers; when that grace runs out is a separate decision the platform makes. `expired` is kept apart from `cancelled` because nobody chose it. No plan has a trial any more (ADR-112), so nothing new reaches it.
 
-Registering a workspace starts a subscription on `DEFAULT_PLAN_CODE`, on trial if that plan offers one. A signup whose catalogue has no such plan still succeeds, with a warning: a signup that 500s over billing configuration is the least forgivable failure in the product.
+Registering a workspace starts a subscription on `DEFAULT_PLAN_CODE`. A free plan never has a trial (ADR-112), so this is `active`. A signup whose catalogue has no such plan still succeeds, with a warning: a signup that 500s over billing configuration is the least forgivable failure in the product.
 
 A workspace with no subscription — every workspace that predates billing — is entitled to the plan named by `DEFAULT_PLAN_CODE` all the same, and its period limits are counted over the calendar month. If that plan is missing, limits are not enforced and a warning is logged: a missing catalogue row should not take a deployment offline.
 
 ## The sweep
 
-`WORKER_KINDS=billing` runs a loop that polls for subscriptions whose period has ended (ADR-022, like follow-ups and campaigns) and advances each one: a pending cancellation takes effect, a trial nobody acted on becomes `expired`, and anything else opens its next period starting where the last one ended — so a sweep that runs late does not shorten a customer's month.
+`WORKER_KINDS=billing` runs a loop that polls for subscriptions whose period has ended (ADR-022, like follow-ups and campaigns) and advances each one: a pending cancellation takes effect, a trial nobody acted on becomes `expired`, and anything else opens its next period starting where the last one ended — so a sweep that runs late does not shorten a customer's month. The next period's end is counted from `billing_anchor_at` (ADR-112), and the new period is invoiced as it opens, in advance, at the version that will serve it.
 
 It polls every ten minutes rather than every thirty seconds, because a period boundary is a date rather than an instant, and entitlements are computed from the row on each request anyway: a trial that ended at 09:00 and is noticed at 09:55 has cost nobody anything. A subscription that has already ended is never picked up again — its period ending is the past, not an event.
 
@@ -91,13 +426,13 @@ A refused action answers **402**, not 403. A permission error tells a caller to 
 
 ## Invoices
 
-An invoice is a **record of a past period**, not a live calculation (ADR-031). The plan code and the amounts are copied onto the row when it is issued, so a plan repriced in April cannot change what March says — which is the only question anybody ever asks about an invoice.
+An invoice is a **record**, not a live calculation (ADR-031). Since ADR-112 a renewal invoice is issued in advance for the period it pays for, and every invoice carries a `purpose` and the plan version it was priced at. The plan code and the amounts are copied onto the row when it is issued, so a plan repriced in April cannot change what March says — which is the only question anybody ever asks about an invoice.
 
 An issued invoice is never edited. A mistake is **voided**, because the customer has already seen it and a bill that silently changes is worse than one visibly withdrawn. A paid invoice cannot be voided at all: that is a refund, a different operation and a different conversation.
 
 Lines are the plan's fee plus what the workspace consumed. **The usage lines carry a quantity and no amount**, and that absence is deliberate: no per-unit overage price is stored anywhere, and inventing one would put a number on a bill that no pricing decision stands behind.
 
-`UNIQUE(tenant_id, period_start)` makes billing a period twice impossible rather than merely unlikely — the caller is a sweep that may run on two replicas.
+A partial unique index on `(tenant_id, period_start) WHERE purpose = 'renewal'` makes billing a period twice impossible rather than merely unlikely — the caller is a sweep that may run on two replicas. Checkout invoices are outside it: each checkout is its own snapshot (ADR-112).
 
 ## Payments
 
@@ -233,7 +568,7 @@ so every plan is currently unlimited and the only ceiling in force is
 product entitlement. Choosing what Starter, Pro and Business allow is a pricing
 decision; the mechanism is ready and the values are the product's to set.
 
-## Provider independence## Provider independence
+## Provider independence
 
 `PaymentProvider` is one method — charge this amount, with this idempotency key, and say what happened. Subscriptions, plans and periods stay Wasla's, because the moment a service knows what a "payment intent" is, the system belongs to that processor. A decline is an outcome, not an exception; only an unreachable provider raises.
 
@@ -277,7 +612,7 @@ recording what is owed and waiting for a person to confirm a transfer.
 POST /api/v1/billing/checkout   {"plan_code": "pro"}      owner only
         │
         ├─ plan read from the database, priced there
-        ├─ invoice opened (or the period's existing one reused)
+        ├─ a new CHECKOUT invoice: plan version, price, interval frozen
         ├─ payment row written, status pending          ← reference is its id
         │
         ↓
@@ -315,7 +650,7 @@ Four refusals stand between a verified callback and a paid invoice:
 | Check | Why |
 | --- | --- |
 | The event is new | `UNIQUE(provider, provider_event_id)`, and the insert *is* the claim — a preceding read is what a retry storm defeats |
-| It names a payment we issued | By our own reference, sent as `special_reference` and returned as `order.merchant_order_id` |
+| It names a payment we issued | By the Paymob order id stored when the intention was created, and by our own reference, sent as `special_reference` and returned as `order.merchant_order_id`. The signed integration id and test/live mode must match too (ADR-112) |
 | That payment is this workspace's | The repository's tenant filter, so a leaked reference still reaches nothing |
 | The amount and currency match | A provider reporting a different figure is not settling this invoice, whatever it says |
 
@@ -556,9 +891,16 @@ none of it is ours to keep.
 
 ## Refunds (ADR-045)
 
-`POST /billing/payments/{id}/refund`, owners only, **202 Accepted**.
+**Since ADR-112 a workspace owner cannot refund their own payment.** `POST
+/billing/payments/{id}/refund` now records a *refund request*: `202`, an
+audit row and a `refund_requested` incident for platform staff, and no money
+moves. Refunds are made by platform staff through `POST
+/api/v1/platform/billing/payments/{id}/refund`, which can take an `amount` for
+a partial refund. What follows describes that operator refund. A partial
+refund an operator asked for is goodwill and leaves the plan alone. A full
+one withdraws the plan and voids the invoice.
 
-There is no amount in the request. It is the payment's own unreturned balance,
+*(Before ADR-112:)* there was no amount in the request. It was the payment's own unreturned balance,
 computed on the server, so no client can ask for more back than was paid. That
 also settles the partial-refund question: Wasla has no credit notes and no way
 to render "half of March", so a refund returns what is left of one payment.
@@ -669,7 +1011,7 @@ is no card on file.
 ```
 period ends
     │
-    ├─ billing worker issues the invoice for the period that ended
+    ├─ billing worker opens the next period and invoices it in advance
     ├─ owners are emailed that it is due
     │
     ├─ customer pays it:  POST /billing/checkout {"invoice_id": …}
@@ -881,8 +1223,14 @@ before it decides what to collect:
 ```
 POST /api/auth/tokens                        { api_key }        → bearer token
 POST /api/ecommerce/orders/transaction_inquiry
-     Authorization: Bearer …                 { merchant_order_id }
+     { auth_token, merchant_order_id }      (and Authorization: Bearer …)
 ```
+
+`auth_token` in the body is the current documented contract (Transaction
+Inquiry by Order ID or Reference, last updated 2026-06-28). Wasla originally
+sent the token only as a Bearer header, following Paymob's Postman collection;
+it now sends both, and the real Test API recovered two lost payments with this
+request on 2026-09-25 (CUSTOM_PLANS_TOPUPS_IMPLEMENTATION.md).
 
 `merchant_order_id` is the `special_reference` sent when the intention was
 created, which is the payment id — an identifier committed before Paymob could
@@ -956,10 +1304,8 @@ Honest list.
   `PAYMOB_API_KEY` belongs with it: without that credential an attempt whose
   callback never arrives cannot be reconciled, and the backlog is a metric
   rather than a duplicate debit.
-- **Credit notes, and partial refunds *initiated here*.** `POST
-  /billing/payments/{id}/refund` always asks for the payment's whole remaining
-  balance: there is no field a caller can send to name a smaller figure, which
-  is also why there is no field to name a larger one. A partial reversal can
+- **Credit notes.** Partial refunds can now be made by platform staff
+  (ADR-112); a workspace owner can only ask for one. A partial reversal can
   still *arrive* — issued from Paymob's own dashboard — and is applied, because
   the ledger has to match the bank whoever moved the money. What that does to
   the plan is set out under *Reversals* below.

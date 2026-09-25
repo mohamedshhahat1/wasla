@@ -10,13 +10,17 @@ from the request:
 - it was collected by the provider this deployment is configured for
 - no reversal has been asked for already
 
-The amount is never accepted from a caller. It is the payment's own unreturned
-balance, computed here, so there is no field anybody can send to be given back
-more than they paid. That also decides the partial-refund question: Wasla has no
-credit notes and no way to represent "half of March", so a refund returns what
-is left of one payment and nothing else. Enforcing full-remainder semantics is
-the honest version of not supporting partial refunds - the alternative is
-inventing a concept the invoice model cannot render.
+**Only platform staff move money back** (BILL-13). A workspace owner used to
+be able to refund their own payment in full at any time - twenty-nine days of
+Pro, then the whole price back. The owner's endpoint now files a *request*
+(`request_review`) that moves nothing; `refund` is reached only from the
+platform's billing API, by an owner or admin, with a reason.
+
+The amount is the operator's decision within bounds the database already
+knows: positive, and no more than what is left of the payment. A partial
+refund is a goodwill credit - the customer keeps the period - and a full one
+withdraws what the payment bought once the provider confirms it (see
+`CheckoutService._apply_reversal`).
 
 **A refund is requested here and confirmed elsewhere.** This records that the
 provider accepted the reversal; it does not mark the money returned. That
@@ -31,19 +35,23 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
-from app.db.models.audit import AuditAction
+from app.core.telemetry import record_billing_refund
+from app.db.models.audit import AuditAction, AuditActorKind
+from app.db.models.billing_incident import BillingIncidentKind
 from app.db.models.invoice import Payment
 from app.db.models.user import User
 from app.integrations.billing.base import ProviderError
 from app.integrations.billing.checkout import CheckoutProvider, RefundRequest
 from app.repositories.invoice_repository import InvoiceRepository, PaymentRepository
 from app.services.audit_service import AuditTrail
+from app.services.billing_incident_service import raise_incident
 
 logger = get_logger(__name__)
 
@@ -67,7 +75,7 @@ class RefundService:
         self._invoices = InvoiceRepository(session, tenant_id=tenant_id)
         self._audit = AuditTrail(session, tenant_id=tenant_id)
 
-    async def refund(
+    async def request_review(
         self,
         payment_id: uuid.UUID,
         *,
@@ -75,19 +83,74 @@ class RefundService:
         reason: str | None = None,
         now: datetime | None = None,
     ) -> Payment:
-        """Ask the provider to return what is left of one payment.
+        """A workspace owner asks for money back. Nothing moves (BILL-13).
+
+        Recorded as an open billing incident a platform operator works through,
+        and on the workspace's trail. One open request per payment - asking
+        twice is the same request.
+        """
+        moment = now if now is not None else datetime.now(UTC)
+        payment = await self._refundable(payment_id)
+        await raise_incident(
+            self._session,
+            kind=BillingIncidentKind.REFUND_REQUESTED,
+            dedupe_key=f"{payment.id}:{payment.refunded_amount}",
+            tenant_id=self._tenant_id,
+            payment_id=payment.id,
+            invoice_id=payment.invoice_id,
+            provider=payment.provider,
+            provider_transaction_id=payment.provider_reference,
+            amount=payment.amount - payment.refunded_amount,
+            currency=payment.currency,
+            detail=(reason or "Refund requested by the workspace owner.")[:MAX_REASON_LENGTH],
+            now=moment,
+        )
+        self._audit.record(
+            AuditAction.PAYMENT_REFUND_REVIEW_REQUESTED,
+            actor=actor,
+            target_type="payment",
+            target_id=payment.id,
+            meta={"reason": reason[:MAX_REASON_LENGTH] if reason else None},
+        )
+        await record_billing_refund("review_requested")
+        return payment
+
+    async def refund(
+        self,
+        payment_id: uuid.UUID,
+        *,
+        actor: User | None = None,
+        reason: str | None = None,
+        now: datetime | None = None,
+        amount: Decimal | None = None,
+        currency: str | None = None,
+        expected_revision: int | None = None,
+    ) -> Payment:
+        """Ask the provider to return some or all of one payment. Platform only.
 
         Returns the payment with the request recorded on it. Its status is
         deliberately unchanged: it still says `succeeded`, because the money
-        has not come back yet and saying otherwise would be a lie the customer
-        could read.
+        has not come back yet. Entitlements move only when the provider's
+        signed callback confirms the reversal - never because a request was
+        made.
         """
         if self._provider is None:
             raise ValidationError("No payment provider is configured.")
 
         moment = now if now is not None else datetime.now(UTC)
         payment = await self._refundable(payment_id)
-        amount = payment.amount - payment.refunded_amount
+        if expected_revision is not None and payment.revision != expected_revision:
+            raise ConflictError(
+                f"The payment has changed (revision {payment.revision}); reload it and retry."
+            )
+        remaining = payment.amount - payment.refunded_amount
+        amount = remaining if amount is None else amount
+        if amount <= 0:
+            raise ValidationError("A refund must be for a positive amount.")
+        if amount > remaining:
+            raise ValidationError(f"Only {remaining} of this payment can still be refunded.")
+        if currency is not None and currency.upper() != payment.currency.upper():
+            raise ValidationError(f"This payment was collected in {payment.currency}.")
 
         # Written *and committed* before the provider is called, so a reversal
         # that is accepted and then lost to a crashed process still leaves a
@@ -97,14 +160,22 @@ class RefundService:
         # and the next one reversed the same money again - the refund-shaped
         # version of WSL-01 (ADR-088).
         payment.refund_requested_at = moment
+        # The refunded *total* this request brings the payment to. What the
+        # confirming callback is compared with, and what marks the request as
+        # outstanding until it arrives.
+        payment.refund_requested_amount = payment.refunded_amount + amount
         self._audit.record(
             AuditAction.PAYMENT_REFUND_REQUESTED,
             actor=actor,
+            actor_kind=AuditActorKind.PLATFORM_STAFF if actor is not None else None,
             target_type="payment",
             target_id=payment.id,
             meta={
                 "amount": str(amount),
                 "currency": payment.currency,
+                "partial": amount < remaining,
+                "original_payment_amount": str(payment.amount),
+                "provider_reference": payment.provider_reference,
                 "reason": reason[:MAX_REASON_LENGTH] if reason else None,
             },
         )
@@ -129,7 +200,9 @@ class RefundService:
                 # of having asked is withdrawn - which is what lets somebody
                 # fix the cause and ask again.
                 payment.refund_requested_at = None
+                payment.refund_requested_amount = None
                 await self._session.commit()
+                await record_billing_refund("refused")
             # Otherwise the request is left standing, because a provider that
             # did not answer may still be reversing the money. `_refundable`
             # refuses the next attempt until a callback says what happened,
@@ -148,6 +221,7 @@ class RefundService:
 
         payment.refund_reference = outcome.provider_reference
         await self._session.flush()
+        await record_billing_refund("requested")
 
         logger.info(
             "billing.refund_requested",
@@ -186,7 +260,9 @@ class RefundService:
             raise ConflictError("This payment was not collected through a payment provider.")
         if self._provider is not None and payment.provider != self._provider.name:
             raise ConflictError("This payment was collected by a different provider.")
-        if payment.refund_requested_at is not None and payment.refunded_at is None:
+        if payment.refund_requested_amount is not None or (
+            payment.refund_requested_at is not None and payment.refunded_at is None
+        ):
             # A reversal is outstanding: asked for, and not yet confirmed by a
             # callback. Asking again would reverse the same money twice.
             #

@@ -46,6 +46,7 @@ from app.services.auth_service import AuthService
 from app.services.campaign_service import CampaignService
 from app.services.checkout_service import CheckoutService
 from app.services.credential_service import CredentialService
+from app.services.custom_plan_offer_service import CustomPlanOfferService
 from app.services.entitlement_service import Entitlement, EntitlementService
 from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
@@ -57,10 +58,12 @@ from app.services.media_service import MediaService
 from app.services.membership_service import MembershipService
 from app.services.messaging_service import MessagingService
 from app.services.payment_method_service import PaymentMethodService
+from app.services.plan_catalog import PlanCatalog
 from app.services.refund_service import RefundService
 from app.services.sentiment_service import SentimentService
 from app.services.subscription_service import SubscriptionService
 from app.services.template_service import TemplateService
+from app.services.topup_service import TopupService
 from app.services.usage_service import UsageService
 from app.services.whatsapp_account_service import WhatsAppAccountService
 from app.services.workspace_service import WorkspaceService
@@ -584,6 +587,14 @@ def get_plan_repository(session: SessionDep) -> PlanRepository:
 PlanRepositoryDep = Annotated[PlanRepository, Depends(get_plan_repository)]
 
 
+def get_plan_catalog(session: SessionDep) -> PlanCatalog:
+    """The plan catalogue as customers see it: plans at their current versions."""
+    return PlanCatalog(session)
+
+
+PlanCatalogDep = Annotated[PlanCatalog, Depends(get_plan_catalog)]
+
+
 def get_subscription_service(
     session: SessionDep,
     workspace: ActiveWorkspaceDep,
@@ -657,6 +668,32 @@ def get_checkout_service(
 
 
 CheckoutServiceDep = Annotated[CheckoutService, Depends(get_checkout_service)]
+
+
+def get_topup_service(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+    checkout: CheckoutServiceDep,
+) -> TopupService:
+    """Workspace-scoped top-ups (ADR-113), buying through the one checkout path."""
+    return TopupService(session, tenant_id=workspace.tenant.id, checkout=checkout)
+
+
+TopupServiceDep = Annotated[TopupService, Depends(get_topup_service)]
+
+
+def get_custom_plan_offer_service(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+    checkout: CheckoutServiceDep,
+) -> CustomPlanOfferService:
+    """Workspace-scoped custom plan offers (ADR-114), paid through the one checkout path."""
+    return CustomPlanOfferService(session, tenant_id=workspace.tenant.id, checkout=checkout)
+
+
+CustomPlanOfferServiceDep = Annotated[
+    CustomPlanOfferService, Depends(get_custom_plan_offer_service)
+]
 
 
 def get_refund_service(
@@ -759,7 +796,11 @@ def require_entitlement(
     """
 
     async def guard(entitlements: EntitlementServiceDep) -> Entitlement:
-        return await entitlements.require(key)
+        # Under the workspace's advisory lock for this limit, held until the
+        # request commits - after the route has written the row it is
+        # creating (BILL-08). A plain count-then-create let two simultaneous
+        # requests both take the last slot.
+        return await entitlements.reserve_or_refuse(key)
 
     return guard
 

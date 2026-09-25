@@ -12,14 +12,17 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import ColumnElement, func, select, update
+from sqlalchemy import ColumnElement, Select, func, or_, select, update
+from sqlalchemy.orm import aliased
 
 from app.core.pagination import Cursor
-from app.db.models.billing import Subscription, SubscriptionStatus
+from app.db.models.billing import SERVING_STATUSES, PlanVersion, Subscription, SubscriptionStatus
+from app.db.models.enums import TenantStatus
 from app.db.models.invoice import (
     UNRESOLVED_COLLECTION_STATES,
     CollectionState,
     Invoice,
+    InvoicePurpose,
     InvoiceStatus,
     Payment,
     PaymentStatus,
@@ -47,6 +50,84 @@ def _has_unresolved_attempt() -> ColumnElement[bool]:
     )
 
 
+def _subscription_has_unresolved_attempt() -> ColumnElement[bool]:
+    """Whether any invoice of this invoice's subscription has an unknown charge.
+
+    Wider than `_has_unresolved_attempt` on purpose. Renewals are billed in
+    advance, so the sweep opens next period's invoice on time even while the
+    previous period's charge is still unanswered - and debiting the same card
+    again before anybody knows what the last request did is exactly the blind
+    retry the collection protocol exists to forbid (ADR-088). Reconcile first.
+    """
+    sibling = aliased(Invoice)
+    return (
+        select(Payment.id)
+        .join(sibling, sibling.id == Payment.invoice_id)
+        .where(sibling.subscription_id == Invoice.subscription_id)
+        .where(Payment.collection_state.in_(UNRESOLVED_COLLECTION_STATES))
+        .exists()
+    )
+
+
+def _has_refunded_payment() -> ColumnElement[bool]:
+    """Whether any money collected for this invoice has been given back.
+
+    An invoice somebody refunded or charged back is never collected again
+    automatically: re-debiting a card for money the customer just disputed is
+    the fastest route to a second chargeback.
+    """
+    return (
+        select(Payment.id)
+        .where(Payment.invoice_id == Invoice.id)
+        .where(Payment.refunded_amount > 0)
+        .exists()
+    )
+
+
+def _automatically_collectible(statement: Select[tuple[Invoice]]) -> Select[tuple[Invoice]]:
+    """The one contract for what a merchant-initiated charge may claim (BILL-02).
+
+    A saved card is debited without the customer present only for **the
+    renewal of the subscription's current period, at its own frozen price**:
+
+    - `purpose = renewal`, issued by the sweep. A checkout a customer opened
+      and abandoned is not consent to be charged, and before this predicate
+      the sweep debited one within ten minutes and granted its plan.
+    - its period is the subscription's *current* period, and the subscription
+      is still serving;
+    - its version belongs to the subscription's plan, or is the change the
+      subscription has scheduled;
+    - it is charged its whole snapshot, which still equals its version's price,
+      and nothing has been paid or refunded on it;
+    - the workspace is neither deleted nor **suspended by the platform**
+      (BILL-17): a workspace whose owner cannot sign in to cancel or remove a
+      card must not be charged while it is locked.
+    """
+    return (
+        statement.join(Tenant, Tenant.id == Invoice.tenant_id)
+        .join(Subscription, Subscription.id == Invoice.subscription_id)
+        .join(PlanVersion, PlanVersion.id == Invoice.plan_version_id)
+        .where(Tenant.deleted_at.is_(None))
+        .where(Tenant.status == TenantStatus.ACTIVE)
+        .where(Invoice.purpose == InvoicePurpose.RENEWAL)
+        .where(Invoice.status == InvoiceStatus.OPEN)
+        .where(Invoice.issued_at.is_not(None))
+        .where(Invoice.amount_paid == 0)
+        .where(Invoice.amount_due == PlanVersion.price)
+        .where(Invoice.currency == PlanVersion.currency)
+        .where(Invoice.period_start == Subscription.current_period_start)
+        .where(Subscription.status.in_(SERVING_STATUSES))
+        .where(
+            or_(
+                PlanVersion.plan_id == Subscription.plan_id,
+                PlanVersion.id == Subscription.scheduled_plan_version_id,
+            )
+        )
+        .where(~_has_refunded_payment())
+        .where(~_subscription_has_unresolved_attempt())
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RevenueTotal:
     """Money recognised in one currency, and how many invoices it came from."""
@@ -71,13 +152,18 @@ class InvoiceRepository(TenantScopedRepository[Invoice]):
         return await self._require(self._select().where(Invoice.id == invoice_id))
 
     async def get_for_period(self, *, period_start: datetime) -> Invoice | None:
-        """The invoice already issued for this period, if there is one.
+        """The renewal already issued for this period, if there is one.
 
-        The unique constraint is the real guard against billing a customer
-        twice for March; this lookup exists so a second sweep is a no-op rather
-        than an integrity error.
+        The partial unique index on renewals is the real guard against billing
+        a customer twice for March; this lookup exists so a second sweep is a
+        no-op rather than an integrity error. Renewals only: a checkout is a
+        purchase with its own period, not the sweep's bill for this one.
         """
-        return await self._first(self._select().where(Invoice.period_start == period_start))
+        return await self._first(
+            self._select()
+            .where(Invoice.period_start == period_start)
+            .where(Invoice.purpose == InvoicePurpose.RENEWAL)
+        )
 
     async def has_other_settled_cover(
         self,
@@ -110,6 +196,8 @@ class InvoiceRepository(TenantScopedRepository[Invoice]):
             self._select()
             .where(Invoice.id != invoice_id)
             .where(Invoice.plan_code == plan_code)
+            # A top-up is extra allowance, never cover for a plan (ADR-113).
+            .where(Invoice.purpose != InvoicePurpose.TOPUP)
             .where(Invoice.status != InvoiceStatus.VOID)
             .where(Invoice.amount_paid > 0)
             .where(Invoice.period_start <= at)
@@ -133,6 +221,17 @@ class InvoiceRepository(TenantScopedRepository[Invoice]):
             )
         return await self._all(statement.limit(limit))
 
+    async def open_renewals(self) -> list[Invoice]:
+        """Issued renewals still owed, oldest first - what "Pay Renewal" pays."""
+        return await self._all(
+            self._select()
+            .where(Invoice.purpose == InvoicePurpose.RENEWAL)
+            .where(Invoice.status == InvoiceStatus.OPEN)
+            .where(Invoice.issued_at.is_not(None))
+            .where(Invoice.amount_paid < Invoice.amount_due)
+            .order_by(Invoice.period_start)
+        )
+
     def create(
         self,
         *,
@@ -144,12 +243,16 @@ class InvoiceRepository(TenantScopedRepository[Invoice]):
         period_end: datetime,
         lines: list[dict[str, object]],
         status: InvoiceStatus = InvoiceStatus.DRAFT,
+        purpose: InvoicePurpose = InvoicePurpose.RENEWAL,
+        plan_version_id: uuid.UUID | None = None,
     ) -> Invoice:
         return self.add(
             Invoice(
                 tenant_id=self.tenant_id,
                 subscription_id=subscription_id,
                 status=status,
+                purpose=purpose,
+                plan_version_id=plan_version_id,
                 plan_code=plan_code,
                 amount_due=amount_due,
                 currency=currency,
@@ -217,6 +320,18 @@ class PaymentRepository(TenantScopedRepository[Payment]):
         never finds another's attempt.
         """
         return await self._first(self._select().where(Payment.idempotency_key == key))
+
+    async def get_by_order(self, *, provider: str, order_id: str) -> Payment | None:
+        """The attempt created under one provider order (BILL-04, BILL-11).
+
+        Tenant-scoped like everything here. Orders are unique per provider
+        environment, and a payment records the one it was created with.
+        """
+        return await self._first(
+            self._select()
+            .where(Payment.provider == provider)
+            .where(Payment.provider_order_id == order_id)
+        )
 
     async def get_by_transaction(self, *, provider: str, transaction_id: str) -> Payment | None:
         """The attempt a provider transaction settled, if we have it.
@@ -354,9 +469,8 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
         duplicate debit this whole protocol exists to prevent (ADR-088).
         """
         return await self._first(
-            self._select()
+            _automatically_collectible(self._select())
             .where(Invoice.id == invoice_id)
-            .where(Invoice.status == InvoiceStatus.OPEN)
             .where(Invoice.collection_attempts < max_attempts)
             .where(~_has_unresolved_attempt())
             .with_for_update(skip_locked=True, of=Invoice)
@@ -382,6 +496,10 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
         statement = (
             select(Invoice, Subscription)
             .join(Subscription, Subscription.id == Invoice.subscription_id)
+            .join(Tenant, Tenant.id == Invoice.tenant_id)
+            # Dunning pauses with collection while the platform holds the
+            # workspace (BILL-17): its owner cannot reach billing to pay.
+            .where(Tenant.status == TenantStatus.ACTIVE)
             .where(Invoice.id == invoice_id)
             .where(Subscription.id == subscription_id)
             .where(Invoice.status == InvoiceStatus.OPEN)
@@ -444,11 +562,7 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
         last place worth being certain.
         """
         return await self._all(
-            self._select()
-            .join(Tenant, Tenant.id == Invoice.tenant_id)
-            .where(Tenant.deleted_at.is_(None))
-            .where(Invoice.status == InvoiceStatus.OPEN)
-            .where(Invoice.subscription_id.is_not(None))
+            _automatically_collectible(self._select())
             .where(Invoice.collection_attempts < max_attempts)
             .where(~_has_unresolved_attempt())
             .where((Invoice.next_collection_at.is_(None)) | (Invoice.next_collection_at <= before))
@@ -496,6 +610,8 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
         statement = (
             select(Invoice, Subscription)
             .join(Subscription, Subscription.id == Invoice.subscription_id)
+            .join(Tenant, Tenant.id == Invoice.tenant_id)
+            .where(Tenant.status == TenantStatus.ACTIVE)
             .where(Invoice.status == InvoiceStatus.OPEN)
             .where(Invoice.issued_at.is_not(None))
             .where(Invoice.issued_at < before)
@@ -597,6 +713,63 @@ class PlatformPaymentRepository(BaseRepository[Payment]):
         await self.session.flush()
         return payment
 
+    async def claim_hosted_for_reconciliation(
+        self,
+        *,
+        provider: str,
+        older_than: datetime,
+        newer_than: datetime,
+        lease_before: datetime,
+        now: datetime,
+    ) -> Payment | None:
+        """Take the oldest hosted-checkout payment still pending, and lease it (BILL-09).
+
+        A customer at a payment page whose callback never arrived: the payment
+        stays `pending` for ever unless somebody asks the provider. Same lease
+        protocol as `claim_for_reconciliation` - `reconciled_at` is written and
+        committed before the lookup - and bounded in age both ways: younger
+        than `older_than` is somebody still paying, older than `newer_than` is
+        a page abandoned long ago.
+
+        Only payments with a recorded order. One created before orders were
+        recorded cannot be bound to a callback and is left for an operator.
+        """
+        statement = (
+            select(Payment)
+            .where(Payment.provider == provider)
+            .where(Payment.is_automatic.is_(False))
+            .where(Payment.status == PaymentStatus.PENDING)
+            .where(Payment.provider_order_id.is_not(None))
+            .where(Payment.created_at < older_than)
+            .where(Payment.created_at > newer_than)
+            .where((Payment.reconciled_at.is_(None)) | (Payment.reconciled_at < lease_before))
+            .order_by(Payment.created_at)
+            .limit(1)
+            .with_for_update(skip_locked=True, of=Payment)
+        )
+        payment = await self._first(statement)
+        if payment is None:
+            return None
+        payment.reconciled_at = now
+        await self.session.flush()
+        return payment
+
+    async def oldest_pending_hosted_at(
+        self,
+        *,
+        provider: str,
+        older_than: datetime,
+    ) -> datetime | None:
+        """When the oldest hosted payment still pending past the grace was created."""
+        oldest = await self.session.scalar(
+            select(func.min(Payment.created_at))
+            .where(Payment.provider == provider)
+            .where(Payment.is_automatic.is_(False))
+            .where(Payment.status == PaymentStatus.PENDING)
+            .where(Payment.created_at < older_than)
+        )
+        return oldest if isinstance(oldest, datetime) else None
+
     async def get_by_id(self, payment_id: uuid.UUID) -> Payment | None:
         """One attempt by id, across workspaces.
 
@@ -653,5 +826,9 @@ class PlatformPaymentRepository(BaseRepository[Payment]):
             update(Invoice)
             .where(Invoice.id == invoice_id)
             .where(Invoice.collection_attempts > 0)
-            .values(collection_attempts=Invoice.collection_attempts - 1, next_collection_at=None)
+            .values(
+                collection_attempts=Invoice.collection_attempts - 1,
+                next_collection_at=None,
+                revision=Invoice.revision + 1,
+            )
         )

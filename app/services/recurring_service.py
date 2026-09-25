@@ -63,28 +63,37 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DependencyUnavailableError
 from app.core.logging import get_logger
+from app.core.telemetry import record_billing_renewal
 from app.db.models.billing import Subscription
+from app.db.models.billing_incident import BillingIncidentKind
+from app.db.models.enums import MembershipStatus, TenantRole
 from app.db.models.invoice import (
     CollectionState,
     Invoice,
+    InvoicePurpose,
     InvoiceStatus,
     Payment,
     PaymentStatus,
 )
-from app.integrations.billing.base import ProviderError
+from app.db.models.membership import Membership
+from app.db.models.user import User
+from app.integrations.billing.base import ProviderError, ProviderFailureClass
 from app.integrations.billing.checkout import (
     ChargeNotSentError,
+    PreparedCharge,
     RecurringProvider,
     RecurringUnavailableError,
     SavedMethodCharge,
 )
 from app.repositories.invoice_repository import InvoiceRepository, PaymentRepository
 from app.repositories.payment_method_repository import PaymentMethodRepository
+from app.services.billing_incident_service import raise_incident
 from app.services.payment_token_service import PaymentTokenProtector
 
 logger = get_logger(__name__)
@@ -160,6 +169,9 @@ NOT_SENT: Final = "not_sent"
 # `PROVIDER_REFUSED` is the difference between an invoice that waits and a card
 # that is charged twice.
 OUTCOME_UNKNOWN: Final = "outcome_unknown"
+# The provider refused the charge *request* as invalid - a permanent 4xx - so
+# automatic collection of this invoice stops and an operator is told (BILL-05).
+PERMANENT_FAILURE: Final = "permanent_failure"
 
 
 class RecurringService:
@@ -228,6 +240,20 @@ class RecurringService:
         # point needs it.
         payment_id = payment.id
         attempt = invoice.collection_attempts
+        contact_email, contact_name = await self._billing_contact()
+
+        async def remember_order(prepared: PreparedCharge) -> None:
+            # Committed before the pay request is sent, so a callback that
+            # beats the pay response home already finds the order it is bound
+            # to (BILL-11). Nothing money-moving has happened yet.
+            stored = await self._payments.get_by_id(payment_id)
+            if stored is None:  # pragma: no cover - committed in TX1
+                return
+            stored.provider_intent_reference = prepared.intention_reference
+            stored.provider_order_id = prepared.order_reference
+            stored.provider_mode = getattr(provider, "mode", None)
+            await self._session.commit()
+
         charge = SavedMethodCharge(
             # Our id, quoted home by the callback, exactly as at checkout, and
             # committed before this object exists. The settlement path does not
@@ -239,6 +265,9 @@ class RecurringService:
             amount=payment.amount,
             currency=payment.currency,
             description=f"{invoice.plan_code} plan",
+            customer_email=contact_email,
+            customer_name=contact_name,
+            on_prepared=remember_order,
         )
 
         # TX2. "A charge may have been sent for this invoice" becomes a fact
@@ -274,6 +303,12 @@ class RecurringService:
             # request that moves money. Provably nothing was charged, so this
             # attempt closes and its budget returns rather than blocking the
             # invoice behind a lookup about a request that never left.
+            if error.failure_class is ProviderFailureClass.PERMANENT:
+                # ...unless the provider refused the request itself. That is a
+                # configuration or data problem retrying cannot fix, and it
+                # used to be retried once a day for ever with nobody told
+                # (BILL-05). Collection stops and an operator is alerted.
+                return await self._stop_permanently(payment_id, error=error, moment=moment)
             return await self._abandon(
                 payment_id,
                 reason=PROVIDER_REFUSED if not error.retryable else NOT_SENT,
@@ -301,9 +336,30 @@ class RecurringService:
         # TX3. The request was accepted; what it *did* is still the callback's
         # to say, so the attempt stays `requested` and `pending`.
         stored = await self._payments.get_by_id(payment_id)
-        if stored is not None:
-            stored.provider_intent_reference = reference
+        if stored is not None and stored.provider_reference is None:
+            # The pay request's own transaction id. The callback writes the
+            # same value when it arrives; this only fills it in if the callback
+            # has not beaten the response home. The intention id stays where
+            # `remember_order` put it - one column, one meaning (BILL-04).
+            #
+            # In a savepoint, because nothing after a charge that may have
+            # moved money is allowed to fail the attempt: a provider reusing a
+            # transaction id is the provider's inconsistency to reconcile, not
+            # a reason to lose the record that a request was made.
+            try:
+                async with self._session.begin_nested():
+                    stored.provider_reference = reference
+                    await self._session.flush()
+            except IntegrityError:
+                logger.warning(
+                    "billing.recurring_reference_conflict",
+                    extra={
+                        "event": "billing.recurring_reference_conflict",
+                        "payment_id": str(payment_id),
+                    },
+                )
             await self._session.commit()
+        await record_billing_renewal("charge_requested")
 
         logger.info(
             "billing.recurring_charge_requested",
@@ -360,6 +416,12 @@ class RecurringService:
         payment.status = PaymentStatus.FAILED
         payment.collection_state = CollectionState.ABANDONED
         payment.failure_reason = detail
+        # Flushed before the abandoned attempts are counted (BILL-16). The
+        # application's sessions do not autoflush, so without this the count
+        # missed the row just abandoned, read one fewer than the truth, and the
+        # first abandonment backed off by the table's *last* entry - a day -
+        # instead of its first. Tests autoflushed, which is why none noticed.
+        await self._session.flush()
         invoice = await self._invoices.get_by_id(payment.invoice_id)
         abandoned = 0
         next_at: datetime | None = None
@@ -392,7 +454,85 @@ class RecurringService:
                 "next_collection_at": next_at.isoformat() if next_at else None,
             },
         )
+        await record_billing_renewal("not_sent")
         return CollectionOutcome(charged=False, reason=reason, payment_id=payment_id)
+
+    async def _stop_permanently(
+        self,
+        payment_id: uuid.UUID,
+        *,
+        error: ProviderError,
+        moment: datetime,
+    ) -> CollectionOutcome:
+        """Close an attempt the provider refused as invalid, and stop collecting.
+
+        Nothing was charged - the refusal came before the pay request - so the
+        attempt is abandoned exactly as a transient failure is. What differs is
+        what happens next: the invoice's automatic budget is spent, so no sweep
+        tries again, and a durable incident tells an operator what the
+        provider objected to. The invoice itself stays open and is chased by
+        e-mail like any renewal nobody can debit.
+        """
+        payment = await self._payments.get_by_id(payment_id)
+        if payment is None:  # pragma: no cover - it was committed a moment ago
+            return CollectionOutcome(charged=False, reason=PERMANENT_FAILURE)
+        payment.status = PaymentStatus.FAILED
+        payment.collection_state = CollectionState.ABANDONED
+        payment.failure_reason = "The provider refused the charge request as invalid."
+        invoice = await self._invoices.get_by_id(payment.invoice_id)
+        if invoice is not None:
+            invoice.collection_attempts = MAX_COLLECTION_ATTEMPTS
+            invoice.next_collection_at = None
+        await raise_incident(
+            self._session,
+            kind=BillingIncidentKind.PERMANENT_PROVIDER_ERROR,
+            dedupe_key=str(payment_id),
+            tenant_id=self._tenant_id,
+            payment_id=payment_id,
+            invoice_id=payment.invoice_id,
+            provider=payment.provider,
+            amount=payment.amount,
+            currency=payment.currency,
+            # The status only: the provider's body can quote the request.
+            detail=f"Charge request refused with HTTP {error.provider_status}.",
+            now=moment,
+        )
+        await self._session.commit()
+        logger.error(
+            "billing.collection_permanently_refused",
+            extra={
+                "event": "billing.collection_permanently_refused",
+                "tenant_id": str(self._tenant_id),
+                "payment_id": str(payment_id),
+                "provider_status": error.provider_status,
+            },
+        )
+        await record_billing_renewal("permanent_failure")
+        return CollectionOutcome(charged=False, reason=PERMANENT_FAILURE, payment_id=payment_id)
+
+    async def _billing_contact(self) -> tuple[str | None, str | None]:
+        """The workspace's billing contact: its owner's e-mail and name (BILL-05).
+
+        The earliest active owner with an active account - the person the
+        subscription belongs to. A real address this product already holds,
+        never an invented one; with none, the charge refuses itself before
+        anything reaches the provider.
+        """
+        row = (
+            await self._session.execute(
+                select(User.email, User.full_name)
+                .join(Membership, Membership.user_id == User.id)
+                .where(Membership.tenant_id == self._tenant_id)
+                .where(Membership.role == TenantRole.TENANT_OWNER)
+                .where(Membership.status == MembershipStatus.ACTIVE)
+                .where(User.is_active.is_(True))
+                .order_by(Membership.created_at, Membership.id)
+                .limit(1)
+            )
+        ).first()
+        if row is None:
+            return None, None
+        return row[0], row[1]
 
     async def _leave_unknown(
         self,
@@ -420,6 +560,7 @@ class RecurringService:
                 "payment_id": str(payment_id),
             },
         )
+        await record_billing_renewal("outcome_unknown")
         return CollectionOutcome(charged=False, reason=OUTCOME_UNKNOWN, payment_id=payment_id)
 
     async def _record_refusal(
@@ -449,6 +590,7 @@ class RecurringService:
                 "payment_id": str(payment_id),
             },
         )
+        await record_billing_renewal("provider_refused")
         return CollectionOutcome(charged=False, reason=PROVIDER_REFUSED, payment_id=payment_id)
 
     def _refusal(
@@ -464,6 +606,11 @@ class RecurringService:
         if not self._provider.can_charge_saved_methods:
             return NOT_SUPPORTED
         if invoice.status is not InvoiceStatus.OPEN or invoice.outstanding <= 0:
+            return NOT_COLLECTIBLE
+        if invoice.purpose is not InvoicePurpose.RENEWAL or invoice.issued_at is None:
+            # Checked again here, beneath the claim query that already excludes
+            # it: a checkout is the customer's to pay at a page, and debiting an
+            # abandoned one was an unauthorised charge (BILL-02).
             return NOT_COLLECTIBLE
         if subscription is None or not subscription.is_serving:
             # The refusal that matters most. A cancelled or expired workspace
