@@ -52,8 +52,9 @@ flow for creating one.
 | See the company first | `GET /tenants/{tenant_id}/summary` | Plan, version, price, period, next renewal, the seven limits with usage, live top-ups and grants, recent invoices, payments, incidents and timeline. |
 | Preview the terms | `POST /tenants/{tenant_id}/custom-plan/preview` | Writes nothing. Shows current versus proposed for each of the seven keys, what is in use, which proposals are already below usage, the limits inherited from the current plan (`agents`, `owned_workspaces`), when it would take effect and the next charge. |
 | Create it | `POST /tenants/{tenant_id}/custom-plan` | `code`, `name`, `price`, `currency` (EGP), `billing_interval` and **all seven limits** are required. `null` is unlimited, `0` is none, and leaving a key out is refused. Storage is in bytes (GiB x 1024^3). |
-| Create and assign at renewal | the same, with `assign_to_tenant: true`, `assignment_mode: "next_renewal"` and `expected_subscription_revision` | A scheduled change: cheaper applies at the boundary; pricier is billed at the boundary and adopted once paid. |
-| Create and assign now | `assignment_mode: "now"` | A free custom plan applies at once. A priced one needs `financial_basis`: `customer_checkout` (nothing is assigned; the owner buys it at checkout), `manual_payment` (with the payment details you have seen) or `complimentary` (with `complimentary_until`). |
+| Offer it to the company (the normal way to sell it) | the same, with `financial_basis: "customer_checkout"` and optionally `offer_expires_at` | Creates the plan and an **offer** (ADR-114). Nothing is assigned; the owner sees the terms, clicks Accept & Pay, and the plan applies when Paymob confirms the payment. |
+| Create and assign at renewal | the same, with `assign_to_tenant: true`, `assignment_mode: "next_renewal"` and `expected_subscription_revision` | **Free custom plans only.** A priced custom plan the company does not already hold is refused here (422): it would be billed, possibly to a saved card, at a price the customer never accepted. Offer it instead. |
+| Create and assign now | `assignment_mode: "now"` | A free custom plan applies at once. A priced one needs `financial_basis`: `customer_checkout` (nothing is assigned: it makes an **offer** the owner accepts and pays; ADR-114), `manual_payment` (with the payment details you have seen) or `complimentary` (with `complimentary_until`). |
 | Change its terms | `POST /plans/{id}/versions` | A new immutable version. The company stays on its version until you migrate it (`POST /plans/{id}/migrations` or `change-plan` with `next_renewal`). |
 | Stop offering it | `POST /plans/{id}/deactivate` | The company keeps it and keeps renewing on it. |
 | List a company's custom plans | `GET /plans?scope=tenant&tenant_id=…` | |
@@ -62,6 +63,20 @@ A custom plan cannot be assigned to another company: `change-plan` answers
 `422 custom_plan_not_available_for_workspace`, and the database refuses it even
 by SQL. It cannot be made public (`PATCH` with `is_public: true` is `422`), and
 its owning company cannot be changed.
+
+### Offers (ADR-114)
+
+| Task | Call | Notes |
+| --- | --- | --- |
+| Offer a version (e.g. a new v2) | `POST /tenants/{tenant_id}/custom-offers` `{plan_version_id, expires_at?, reason}` | Only the company's own priced custom plan. One open offer per company (409 otherwise); free versions are assigned, not offered (422). |
+| See a company's offers | `GET /tenants/{tenant_id}/custom-offers` | Status, full terms, accepted/activated/declined/cancelled/expired times. |
+| Withdraw an offer | `POST /custom-offers/{offer_id}/cancel` `{expected_revision, reason}` | From `offered` or `pending_payment`. A page the customer already opened and pays anyway is **held** (`refused_settlement` incident) and must be refunded. |
+
+An offer is `active` only when Paymob's signed callback, or a transaction
+inquiry recovering a lost one, settles its invoice. A browser redirect never
+activates anything. If a customer says they paid and the offer still reads
+`pending_payment`, run reconciliation for its payment (`POST /reconciliation/{payment_id}/run`, or wait for
+the sweep): it asks Paymob and settles through the same path.
 
 ## Top-ups (ADR-113)
 

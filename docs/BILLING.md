@@ -189,13 +189,67 @@ subscriber stays on the version they hold until an operator migrates them,
 exactly like any plan. Deactivating it stops new checkouts and assignments and
 changes nobody holding it.
 
-**Assigning one is never free by accident.** `mode: now` for a priced custom
-plan needs a `financial_basis`: `manual_payment` (money the operator has seen),
-`complimentary` (recorded as a `complimentary_grant` adjustment) or
-`customer_checkout` - which assigns nothing and lets the owner buy the plan at
-the ordinary checkout, after which settlement applies it. `next_renewal` is a
-scheduled change: a cheaper custom plan applies at the boundary, a pricier one
-is billed at the boundary and adopted when that renewal is paid.
+**Assigning one is never free by accident** (ADR-114). A priced custom plan
+reaches its workspace in one of three ways: `customer_checkout`, which makes an
+**offer** the owner accepts and pays (below); `manual_payment` (money the
+operator has seen); or `complimentary` (recorded as a `complimentary_grant`
+adjustment). Scheduling a priced custom plan the workspace does not already hold
+onto its next renewal is refused, because a renewal can be charged to a saved
+card at a price the customer never accepted. Moving a subscriber between
+versions of the custom plan it already holds is an ordinary migration. A free
+custom plan (`price = 0`) is assigned, never offered; the audit entry names the
+operator, the reason, the workspace and the version.
+
+### Custom plan offers (ADR-114)
+
+An offer names one immutable version of the workspace's own custom plan.
+
+| Status | Meaning |
+| --- | --- |
+| `offered` | Visible to the workspace's owners with its full terms. Nothing owed. |
+| `pending_payment` | An owner clicked Accept & Pay; a hosted checkout is open. The plan has **not** changed. |
+| `active` | A signed Paymob callback (or a transaction inquiry recovering a lost one) settled one of its invoices; the subscription is pinned to the offered version. |
+| `declined` | The owner said no. Money for a page opened earlier is held with a `refused_settlement` incident. |
+| `expired` | `expires_at` passed. No new page can be opened; a page opened in time is still honoured. |
+| `cancelled` | Withdrawn by platform staff. Money arriving afterwards is held, never granted. |
+
+One offer per workspace can be open at a time (a partial unique index). The
+offer's tenant, plan and version are fixed by a trigger.
+
+**What the customer sees** (`GET /billing/custom-offers`, owners): name,
+price, currency, interval, all seven limits, the other limits the version
+carries, the period the terms would cover if paid now (`starts: on_payment`),
+the expiry, whether it can be accepted, and a note that saving the card is
+optional.
+
+**Accept & Pay** (`POST /billing/custom-offers/{id}/accept`, body
+`{"idempotency_key"?}` only) opens a `checkout` invoice pinned to the offered
+version, priced from it, and naming the offer (a composite foreign key keeps the
+offer inside the invoice's workspace; a trigger requires the invoice to sell the
+offered version). Then the ordinary Paymob Create Intention on the normal card
+integration, never MOTO. The checkout snapshot is authoritative: if the platform
+publishes version 2 at 1,800 EGP while a 1,500 EGP page is open, paying that page
+buys version 1 at 1,500 EGP. Buying a custom plan by its code at
+`POST /billing/checkout` is refused with a pointer to the offer.
+
+**Decline** (`POST /billing/custom-offers/{id}/decline`) leaves the workspace on
+the plan it holds.
+
+**Renewal.** Saving the card at the first checkout is **optional**. If the card
+was saved, each renewal of the custom plan is charged by the existing MOTO/MIT
+path at the pinned version's price. If not, nothing is charged automatically:
+the renewal invoice is issued under the ordinary grace and dunning rules,
+`GET /billing/summary` lists it under `payment_required`, and the owner pays it
+with `POST /billing/checkout {"invoice_id": ...}`. `automatic_renewal` in the
+summary says which applies.
+
+**Platform side:** `POST /platform/billing/tenants/{id}/custom-plan` with
+`financial_basis: customer_checkout` (and optionally `offer_expires_at`)
+creates the plan and its offer in one step;
+`POST /platform/billing/tenants/{id}/custom-offers` offers an existing version
+(for example version 2); `GET` the same path lists the company's offers;
+`POST /platform/billing/custom-offers/{id}/cancel` withdraws one
+(`expected_revision`, `reason`). Every one is audited.
 
 ### Top-up products and purchases
 
@@ -1169,8 +1223,14 @@ before it decides what to collect:
 ```
 POST /api/auth/tokens                        { api_key }        → bearer token
 POST /api/ecommerce/orders/transaction_inquiry
-     Authorization: Bearer …                 { merchant_order_id }
+     { auth_token, merchant_order_id }      (and Authorization: Bearer …)
 ```
+
+`auth_token` in the body is the current documented contract (Transaction
+Inquiry by Order ID or Reference, last updated 2026-06-28). Wasla originally
+sent the token only as a Bearer header, following Paymob's Postman collection;
+it now sends both, and the real Test API recovered two lost payments with this
+request on 2026-09-25 (CUSTOM_PLANS_TOPUPS_IMPLEMENTATION.md).
 
 `merchant_order_id` is the `special_reference` sent when the intention was
 created, which is the payment id — an identifier committed before Paymob could

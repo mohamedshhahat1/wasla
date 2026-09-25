@@ -5857,3 +5857,60 @@ renew or be charged to a saved card. A refunded top-up that was used is an
 operator decision, not a silent limit drop. Top-ups do not carry over and
 cannot be bought for a key the plan leaves unlimited; both are v1 product
 rules, and relaxing either is a new decision.
+
+## ADR-114 — A Priced Custom Plan Is An Offer The Customer Accepts And Pays, Never An Assignment
+
+**Context.** ADR-113 let an operator create a workspace's custom plan and, with
+`financial_basis: customer_checkout`, leave the owner to buy it "at checkout" by
+its plan code. Nothing told the owner an offer existed, nothing let them decline
+it, and nothing tied the payment to the terms they had been shown. Worse, an
+operator could schedule a priced custom plan onto a subscriber for the next
+renewal with no basis at all: the renewal would then bill a price the customer
+never agreed to, and with a saved card the MIT sweep would charge it.
+
+**Decision.**
+
+1. **A priced custom plan reaches its workspace in one of three ways:** an
+   **offer** its owner accepts and pays; a manual payment an operator has seen;
+   or a complimentary grant recorded as one. Creating or offering a plan grants
+   nothing. Scheduling a priced custom plan the workspace does not already hold
+   onto the next renewal is refused (`change_plan`, 422). Migrating a subscriber
+   between versions of the custom plan it already holds stays an ordinary
+   ADR-112 migration.
+2. **`custom_plan_offers`** names one immutable version of the workspace's own
+   custom plan and moves `offered → pending_payment → active`, or ends
+   `declined`, `expired` or `cancelled`. There is no `draft`: an unoffered plan
+   is simply a plan with no offer. A partial unique index keeps one open offer
+   per workspace; a trigger fixes an offer's tenant, plan and version and
+   refuses an offer of another workspace's plan.
+3. **Accept & Pay is an ordinary hosted checkout** (`CheckoutService.start_offer`
+   → `open_page`): a `CHECKOUT` invoice pinned to the offered version, priced
+   from it, naming the offer through a composite foreign key onto
+   `(id, tenant_id)`, with a CHECK and a trigger that it sells exactly the
+   offered version. The request carries no price. Buying a custom plan by its
+   code is refused with a pointer to the offer.
+4. **Only settlement activates an offer.** `InvoiceSettlement` asks
+   `CustomPlanOfferLedger` before granting: money for an offer declined or
+   withdrawn after its page was opened is held with a `refused_settlement`
+   incident; a page opened before an offer expired is honoured. After the
+   grant, the offer becomes `active` once, under a row lock, audited. The
+   authoritative signal is the signed Paymob callback or the transaction
+   inquiry that recovers a lost one - never the browser redirect.
+5. **Renewal follows the saved-card choice, which is optional.** A workspace
+   that saved its card at the first checkout renews by the existing MOTO/MIT
+   path at the pinned custom version's price; one that did not gets a renewal
+   invoice under the ordinary grace and dunning rules, shown as
+   `payment_required` in `GET /billing/summary`, and pays it at a hosted
+   checkout. Top-ups remain customer-initiated hosted checkouts, never MIT.
+6. **A free custom plan is not sold.** Offering one is refused; it is assigned
+   with the audit naming actor, reason, workspace and version.
+7. **Wasla stays the subscription engine.** No Paymob Subscription Plans are
+   created for custom plans or top-ups (unchanged from ADR-046).
+
+**Consequences.** "A paid custom plan cannot become the tenant's entitlement
+until its authoritative payment succeeds" is a property of the schema and the
+settlement engine, not of operator discipline. The customer sees and agrees to
+exact terms before paying, can decline, and is never charged a renewal price
+they did not accept. A custom offer cheaper than a pricier paid period in
+progress is refused at acceptance like any downgrade (ADR-112), which is a
+product limitation recorded in CUSTOM_PLANS_TOPUPS_IMPLEMENTATION.md.
