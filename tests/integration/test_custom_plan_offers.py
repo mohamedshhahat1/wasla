@@ -216,6 +216,12 @@ def _signed(payment: Payment, *, transaction: int, **changes: Any) -> tuple[byte
     )
 
 
+def _status(offer: CustomPlanOffer) -> CustomPlanOfferStatus:
+    """The offer's status as read now. A call, so a type checker does not carry
+    an earlier assertion's narrowing past a `refresh()` that changed it."""
+    return offer.status
+
+
 async def _activations(session: AsyncSession, tenant: Tenant | uuid.UUID) -> int:
     tenant_id = tenant if isinstance(tenant, uuid.UUID) else tenant.id
     return int(
@@ -259,7 +265,7 @@ async def test_an_offer_activates_exactly_its_version_once_and_only_when_paid(
     assert intention["payment_methods"] == [CARD_INTEGRATION_ID], "hosted card, never MOTO"
     assert intention["special_reference"] == str(payment.id)
     await db_session.refresh(offer)
-    assert offer.status is CustomPlanOfferStatus.PENDING_PAYMENT
+    assert _status(offer) is CustomPlanOfferStatus.PENDING_PAYMENT
     # Accepting is not paying.
     held = await _subscription(db_session, tenant)
     assert held.plan_version_id == pro_version
@@ -273,7 +279,7 @@ async def test_an_offer_activates_exactly_its_version_once_and_only_when_paid(
     subscription = await _subscription(db_session, tenant)
     assert invoice.status is InvoiceStatus.PAID
     assert payment.status is PaymentStatus.SUCCEEDED
-    assert offer.status is CustomPlanOfferStatus.ACTIVE and offer.activated_at == paid_at
+    assert _status(offer) is CustomPlanOfferStatus.ACTIVE and offer.activated_at == paid_at
     assert (subscription.plan_id, subscription.plan_version_id) == (plan_id, v1)
     assert subscription.status is SubscriptionStatus.ACTIVE
     assert subscription.current_period_start == paid_at, "a paid period starts at payment"
@@ -315,14 +321,14 @@ async def test_a_declined_transaction_activates_nothing_and_the_page_stays_payab
     assert await _apply(db_session, tenant.id, provider, declined, now=now) == DECLINED
     await db_session.refresh(offer)
     await db_session.refresh(invoice)
-    assert offer.status is CustomPlanOfferStatus.PENDING_PAYMENT
+    assert _status(offer) is CustomPlanOfferStatus.PENDING_PAYMENT
     assert invoice.status is InvoiceStatus.OPEN
     assert (await _subscription(db_session, tenant)).plan_version_id == before
 
     retried = _callback(payment, transaction=810_100_002)
     assert await _apply(db_session, tenant.id, provider, retried, now=now) == APPLIED
     await db_session.refresh(offer)
-    assert offer.status is CustomPlanOfferStatus.ACTIVE
+    assert _status(offer) is CustomPlanOfferStatus.ACTIVE
     assert (await _subscription(db_session, tenant)).plan_version_id == v1
 
 
@@ -486,7 +492,7 @@ async def test_an_expired_offer_cannot_be_accepted_but_a_page_opened_in_time_is_
     worker = _worker(db_session, monkeypatch, provider)
     await worker._expire_offers(now=later(now, hours=2))
     await db_session.refresh(offer)
-    assert offer.status is CustomPlanOfferStatus.EXPIRED
+    assert _status(offer) is CustomPlanOfferStatus.EXPIRED
     with pytest.raises(ConflictError):
         await _accept(db_session, tenant, owner, provider, offer, now=later(now, hours=2))
 
@@ -501,7 +507,7 @@ async def test_an_expired_offer_cannot_be_accepted_but_a_page_opened_in_time_is_
         == APPLIED
     )
     await db_session.refresh(offer)
-    assert offer.status is CustomPlanOfferStatus.ACTIVE
+    assert _status(offer) is CustomPlanOfferStatus.ACTIVE
     assert (await _subscription(db_session, tenant)).plan_version_id == v1
 
 
@@ -543,7 +549,7 @@ async def test_a_callback_that_disagrees_with_the_snapshot_is_refused(
     await db_session.refresh(offer)
     await db_session.refresh(invoice)
     await db_session.refresh(payment)
-    assert offer.status is CustomPlanOfferStatus.PENDING_PAYMENT
+    assert _status(offer) is CustomPlanOfferStatus.PENDING_PAYMENT
     assert invoice.status is InvoiceStatus.OPEN and invoice.amount_paid == 0
     assert payment.status is PaymentStatus.PENDING
     assert (await _subscription(db_session, tenant)).plan_version_id == before
@@ -730,7 +736,7 @@ async def test_a_lost_offer_callback_is_recovered_by_inquiry_through_the_sweep(
     await db_session.refresh(invoice)
     assert payment.status is PaymentStatus.SUCCEEDED
     assert invoice.status is InvoiceStatus.PAID
-    assert offer.status is CustomPlanOfferStatus.ACTIVE
+    assert _status(offer) is CustomPlanOfferStatus.ACTIVE
     assert (await _subscription(db_session, tenant_id)).plan_version_id == v1
     assert paymob.pays() == [], "recovery asks; it never charges"
     inquiry = next(item for item in paymob.requests if item["url"].endswith("/transaction_inquiry"))

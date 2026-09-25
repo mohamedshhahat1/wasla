@@ -1009,7 +1009,7 @@ async def test_the_owner_sees_the_whole_offer_and_accepting_changes_nothing_unti
         .where(AuditLog.tenant_id == tenant.id)
     )
     assert offered is not None and offered.actor_id == staff.id
-    assert offered.meta["reason"] == body["reason"]
+    assert offered.meta is not None and offered.meta["reason"] == body["reason"]
 
     _as_member(app, tenant, owner, TenantRole.MEMBER)
     assert (await http.get(f"{BILLING}/custom-offers")).status_code == 403
@@ -1196,5 +1196,6 @@ async def test_a_zero_price_custom_plan_is_a_recorded_assignment_not_a_payment(
     )
     assert audit is not None
     assert audit.actor_id == staff.id
+    assert audit.meta is not None
     assert audit.meta["reason"] == "Pilot partner, free for the pilot."
     assert audit.meta["after"]["plan_version_id"] == version_id
