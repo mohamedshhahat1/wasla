@@ -352,7 +352,9 @@ async def test_the_page_opened_at_1500_buys_version_1_after_version_2_at_1800(
             reason="New pricing.",
         ),
         actor=staff,
-        now=later(now, minutes=1),
+        # Effective at once, so version 2 *is* the plan's current version
+        # when the old page is paid - the case a grant must not follow.
+        now=now,
     )
     assert v2.id != v1
 
@@ -374,6 +376,47 @@ async def test_the_page_opened_at_1500_buys_version_1_after_version_2_at_1800(
     assert (
         await standing(db_session, tenant, LimitKey.PERIOD_AI_TURNS, at=paid_at)
     ).limit == 40_000
+
+
+async def test_accepting_after_a_new_version_still_buys_the_offered_version(
+    db_session: AsyncSession,
+) -> None:
+    """The offer names version 1; version 2 is published before the customer
+    accepts. The page, its price and the grant are version 1's (ADR-114): an
+    offer is a snapshot of terms, not a pointer to "the latest".
+    """
+    now = base_now()
+    await catalogue(db_session)
+    tenant, owner, _ = await workspace(db_session, now=now)
+    staff = await _staff(db_session)
+    paymob = Paymob()
+    provider = paymob.provider()
+    plan_id, v1 = await _custom_plan(db_session, tenant, staff, now=now)
+    offer = await _offer(db_session, tenant, staff, v1, now=now)
+    await PlanCatalogAdmin(db_session).create_version(
+        plan_id,
+        PlanVersionCreate(
+            price=Decimal("1800.00"),
+            currency="EGP",
+            interval=BillingInterval.MONTHLY,
+            limits={"agents": 5, **SEVEN, "period_ai_turns": 60_000},
+            expected_version=1,
+            reason="New pricing.",
+        ),
+        actor=staff,
+        now=now,
+    )
+
+    _, payment, invoice = await _accept(db_session, tenant, owner, provider, offer, now=now)
+    assert (invoice.plan_version_id, invoice.amount_due, payment.amount) == (v1, PRICE, PRICE)
+    assert paymob.intentions()[-1]["body"]["amount"] == 150_000
+    assert (
+        await _apply(
+            db_session, tenant.id, provider, _callback(payment, transaction=810_250_001), now=now
+        )
+        == APPLIED
+    )
+    assert (await _subscription(db_session, tenant)).plan_version_id == v1
 
 
 # ---------------------------------------------------- 4. declined / withdrawn
