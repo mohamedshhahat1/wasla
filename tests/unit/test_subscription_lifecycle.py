@@ -25,11 +25,11 @@ JANUARY_31 = datetime(2026, 1, 31, 9, 0, tzinfo=UTC)
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
 
-def _plan(interval: BillingInterval = BillingInterval.MONTHLY) -> Plan:
+def _plan(interval: BillingInterval = BillingInterval.MONTHLY, *, price: str = "99.00") -> Plan:
     return Plan(
-        code="pro",
-        name="Pro",
-        price=Decimal("99.00"),
+        code="pro" if Decimal(price) > 0 else "starter",
+        name="Pro" if Decimal(price) > 0 else "Starter",
+        price=Decimal(price),
         currency="EGP",
         interval=interval,
         limits={},
@@ -104,6 +104,27 @@ async def test_a_trial_nobody_acted_on_expires_rather_than_cancels() -> None:
     await roll_over(subscription, plan=_plan(), now=NOW)
 
     assert subscription.status is SubscriptionStatus.EXPIRED
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_free_trial_rolls_on_as_active_rather_than_expiring() -> None:
+    """BILL-01 (mutation R-BILL-01). A free plan's 'trial' grants nothing to end.
+
+    No new subscription trials a free plan, but one written before migration
+    0070 - or restored from an old backup - can still say `trialing`. At its
+    period end it becomes plain `active` on the same plan and rolls on; it
+    used to become `expired`, after which a paid checkout took the money and
+    granted nothing.
+    """
+    subscription = _subscription(SubscriptionStatus.TRIALING)
+    subscription.trial_ends_at = datetime(2026, 8, 23, tzinfo=UTC)
+
+    await roll_over(subscription, plan=_plan(price="0.00"), now=NOW)
+
+    assert subscription.status is SubscriptionStatus.ACTIVE
+    assert subscription.ended_at is None
+    assert subscription.current_period_start == datetime(2026, 8, 23, tzinfo=UTC)
+    assert subscription.trial_ends_at is None
 
 
 @pytest.mark.asyncio
