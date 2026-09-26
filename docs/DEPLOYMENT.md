@@ -46,6 +46,15 @@ the migration owner inherit the same grants. The API and worker never receive
 the migration URL. The backup reads through the application role; it does not
 need the migration owner or superuser.
 
+The application role cannot rewrite the evidence it writes (DB-006):
+`audit_logs` is `SELECT` and `INSERT` only, and `billing_incidents` has no
+`DELETE` and `UPDATE` only on `status`, `resolved_at`, `resolved_by`,
+`resolution_note` and `updated_at`. The provisioning step re-applies these
+after its blanket grant on every run, so a repeat release never widens them.
+An incident's evidence columns are also immutable for every role, the owner
+included, by a trigger (migration 0076). Correcting an audit row is an owner
+action, taken deliberately with the migration identity.
+
 On an **existing database**, choose a new runtime username and password, set
 `DATABASE_URL` to it, and retain the current owner in
 `MIGRATION_DATABASE_URL`. Run `docker compose -f docker-compose.prod.yml run

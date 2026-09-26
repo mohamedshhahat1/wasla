@@ -452,6 +452,19 @@ class Settings(BaseSettings):
     database_pool_timeout: float = Field(default=30.0, gt=0)
     database_pool_recycle_seconds: int = Field(default=1800, gt=0)
     database_connect_timeout_seconds: float = Field(default=5.0, gt=0)
+    # Bounds on what one session may hold, applied to every connection the
+    # application's pool opens (DB-007). Before, all three were 0 - unbounded -
+    # so one stuck lock wait or one transaction left open across a slow call
+    # held a pooled connection for ever, and fifteen of them emptied a replica.
+    # The values are an order of magnitude beyond anything measured: the
+    # slowest hot query is ~40 ms at 200k-row scale, settlement holds its rows
+    # for tens of milliseconds, and no transaction waits on a provider since
+    # DB-008. Migrations and backups build their own connections and are not
+    # bounded by these; a workspace purge raises its own (see
+    # `WorkspacePurgeService`). 0 switches one off.
+    database_statement_timeout_ms: int = Field(default=30_000, ge=0)
+    database_lock_timeout_ms: int = Field(default=5_000, ge=0)
+    database_idle_in_transaction_timeout_ms: int = Field(default=60_000, ge=0)
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"

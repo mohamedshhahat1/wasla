@@ -27,7 +27,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Final
 
-from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint
+from sqlalchemy import DDL, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint, event
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -167,3 +167,46 @@ class BillingIncident(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
         return f"BillingIncident(kind={self.kind!r}, status={self.status!r})"
+
+
+# **An incident is evidence, and evidence is not edited** (DB-006, ADR-112).
+# Resolving one changes its status and records who resolved it and why; what
+# was raised - which money, which workspace, which transaction, and when -
+# stays as it was, for every role. A resolved incident stays resolved: the
+# resolution is part of the record. The runtime role is further limited by
+# privilege to exactly the resolution columns (`provision_runtime_db_role.py`).
+INCIDENT_EVIDENCE_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION billing_incidents_refuse_evidence_change() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = public, pg_catalog
+    AS $$
+    BEGIN
+        IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+           OR NEW.kind IS DISTINCT FROM OLD.kind
+           OR NEW.dedupe_key IS DISTINCT FROM OLD.dedupe_key
+           OR NEW.payment_id IS DISTINCT FROM OLD.payment_id
+           OR NEW.invoice_id IS DISTINCT FROM OLD.invoice_id
+           OR NEW.provider IS DISTINCT FROM OLD.provider
+           OR NEW.provider_transaction_id IS DISTINCT FROM OLD.provider_transaction_id
+           OR NEW.amount IS DISTINCT FROM OLD.amount
+           OR NEW.currency IS DISTINCT FROM OLD.currency
+           OR NEW.detail IS DISTINCT FROM OLD.detail
+           OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+            RAISE EXCEPTION 'a billing incident keeps the evidence it was raised with'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        IF OLD.status::text = 'resolved' AND NEW.status::text <> 'resolved' THEN
+            RAISE EXCEPTION 'a resolved billing incident stays resolved'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NEW;
+    END;
+    $$
+    """
+INCIDENT_EVIDENCE_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER billing_incidents_evidence_immutable BEFORE UPDATE ON billing_incidents "
+    "FOR EACH ROW EXECUTE FUNCTION billing_incidents_refuse_evidence_change()"
+)
+
+event.listen(BillingIncident.__table__, "after_create", DDL(INCIDENT_EVIDENCE_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(BillingIncident.__table__, "after_create", DDL(INCIDENT_EVIDENCE_TRIGGER_SQL))  # type: ignore[no-untyped-call]
