@@ -99,6 +99,12 @@ class FollowUp(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         Index("ix_follow_ups_tenant_id_status", "tenant_id", "status"),
         Index("ix_follow_ups_conversation_id", "conversation_id"),
         Index("ix_follow_ups_lead_id", "lead_id"),
+        # The SET NULL a deleted message fires (DB-002).
+        Index(
+            "ix_follow_ups_message_id",
+            "message_id",
+            postgresql_where=text("message_id IS NOT NULL"),
+        ),
         Index("ix_follow_ups_tenant_id_created_at", "tenant_id", "created_at"),
         # The worker's only query: pending rows whose time has come, oldest
         # first. Partial, because everything else in the table is finished work

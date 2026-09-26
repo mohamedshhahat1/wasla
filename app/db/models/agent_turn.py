@@ -137,6 +137,9 @@ class AgentTurn(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         ),
         # Restated, not inherited: see TenantScopedMixin.
         Index("ix_agent_turns_tenant_id", "tenant_id"),
+        # The cascade a deleted conversation fires; the tenant index alone
+        # made each one scan a workspace's whole turn history (DB-002).
+        Index("ix_agent_turns_conversation_id", "conversation_id"),
         # What an operator view or a later sweep reads: turns still holding a
         # claim. Partial, because on a healthy deployment this is a handful of
         # rows out of every turn the platform has ever run, and a full index

@@ -120,11 +120,15 @@ PURGED_TABLES: tuple[str, ...] = (
     "agent_turns",
     "message_sentiments",
     "message_media",
+    # Before `messages` and `conversations`, which they name with SET NULL
+    # keys: deleted first, the actions the parents' deletes fire find nothing
+    # to update (DB-002). Their lookups are indexed as well (migration 0075),
+    # so the order is a saving, not the fix.
+    "campaign_recipients",
+    "follow_ups",
     "messages",
     "conversations",
-    "campaign_recipients",
     "campaigns",
-    "follow_ups",
     "lead_activities",
     "lead_notes",
     "leads",

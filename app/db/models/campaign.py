@@ -237,6 +237,19 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
         # Analytics: broadcast outcomes in a window, across every campaign.
         # The per-campaign indexes serve the worker; this serves the report.
         Index("ix_campaign_recipients_tenant_id_created_at", "tenant_id", "created_at"),
+        # What deleting a message or a conversation looks up: every deleted
+        # row fires a SET NULL here, and without these each one scanned every
+        # workspace's recipients (DB-002). Partial - only rows that name one.
+        Index(
+            "ix_campaign_recipients_message_id",
+            "message_id",
+            postgresql_where=text("message_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_campaign_recipients_conversation_id",
+            "conversation_id",
+            postgresql_where=text("conversation_id IS NOT NULL"),
+        ),
         # What the worker claims from, and the only query that runs ten thousand
         # times. Partial: everything else in the table is finished work.
         Index(
