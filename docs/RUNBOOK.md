@@ -1331,6 +1331,62 @@ last three need a person to read the row's activity or message and decide what
 really happened. The same queries, scoped to a test's own workspaces, are the
 permanent sweep in `tests/integration/crm_invariants.py`.
 
+### Settlement backstop (before and after deploying 0074)
+
+Migration 0074 (DB-001) records which payments an invoice counts
+(`payments.applied_at`) and installs two commit-time checks: an invoice's
+`amount_paid` is the net of its applied payments, and collected money that is
+not applied is held with a billing incident. It backfills `applied_at` for every
+collected payment that no refusal incident holds, then **refuses to install**
+if the existing ledger still does not balance, naming the counts. It never
+repairs: an unbalanced invoice is most likely a customer charged twice by the
+concurrent settlement DB-001 describes, and which payment was the duplicate is a
+person's decision.
+
+```sql
+-- collected payments no incident holds, beyond the first, on an invoice whose
+-- amount_paid they do not add up to: the candidates for "the duplicate"
+CREATE TEMP TABLE extra AS
+SELECT p.id, p.invoice_id FROM (
+  SELECT p.*, row_number() OVER (PARTITION BY p.invoice_id ORDER BY p.processed_at, p.id) n
+  FROM payments p
+  WHERE p.status IN ('succeeded', 'refunded')
+    AND NOT EXISTS (SELECT 1 FROM billing_incidents b WHERE b.payment_id = p.id)) p
+JOIN invoices i ON i.id = p.invoice_id
+WHERE p.n > 1
+  AND i.amount_paid <> (SELECT sum(q.amount - q.refunded_amount) FROM payments q
+        WHERE q.invoice_id = i.id AND q.status IN ('succeeded', 'refunded')
+          AND NOT EXISTS (SELECT 1 FROM billing_incidents b WHERE b.payment_id = q.id));
+SELECT e.invoice_id, p.id, p.amount, p.provider, p.provider_reference, p.processed_at
+FROM extra e JOIN payments p ON p.id = e.id ORDER BY e.invoice_id, p.processed_at;
+```
+
+For each row: check the provider's dashboard for the transactions. The earliest
+payment paid the invoice and stays; each listed one is the extra. Raise the
+incident settlement would have raised - so the money is held, visible in the
+`BillingDuplicatePayment` alert and the operator queue, and refunded through the
+platform API:
+
+```sql
+INSERT INTO billing_incidents (id, tenant_id, kind, status, dedupe_key, payment_id,
+  invoice_id, provider, provider_transaction_id, amount, currency, detail,
+  created_at, updated_at)
+SELECT gen_random_uuid(), p.tenant_id, 'duplicate_payment', 'open',
+       'duplicate_payment:' || p.id || ':' || coalesce(p.provider_reference, ''),
+       p.id, p.invoice_id, p.provider, p.provider_reference, p.amount, p.currency,
+       'Held by the 0074 reconciliation: a second payment for one invoice.', now(), now()
+FROM payments p WHERE p.id IN (SELECT id FROM extra);
+```
+
+This procedure was rehearsed on a copy of a 0073 database holding the ten double
+settlements the DB-001 reproduction left: 0074 refused naming 10 invoices, the
+query listed 10 extra payments, and after the insert 0074 installed.
+
+Then rerun the migration: the extra payment is left unapplied and held. After
+0074 the same state cannot be written - a commit that would leave it fails with
+SQLSTATE 23000 - and the settlement lock order means an ordinary race never
+reaches that check: it is refused and raised as an incident first.
+
 ## What to watch
 
 **Start with the metrics.** `/metrics` publishes request rates and latency,

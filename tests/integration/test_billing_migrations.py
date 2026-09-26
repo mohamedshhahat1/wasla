@@ -29,6 +29,7 @@ from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY
 pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[2]
 
+DEC_31 = datetime(2025, 12, 31, 10, tzinfo=UTC)
 JAN_31 = datetime(2026, 1, 31, 10, tzinfo=UTC)
 FEB_28 = datetime(2026, 2, 28, 10, tzinfo=UTC)
 MAR_31 = datetime(2026, 3, 31, 10, tzinfo=UTC)
@@ -77,6 +78,7 @@ class Seed:
         self.trialing, self.expired, self.cancelled = (uuid.uuid4() for _ in range(3))
         self.month_end, self.legacy, self.leap = (uuid.uuid4() for _ in range(3))
         self.renewal, self.checkout, self.payment = (uuid.uuid4() for _ in range(3))
+        self.settled = uuid.uuid4()
         self.tag = uuid.uuid4().hex[:8]
 
     def statements(self) -> list[tuple[str, dict[str, Any]]]:
@@ -187,6 +189,27 @@ class Seed:
                     "invoice": self.renewal,
                     "at": FEB_28,
                 },
+            ),
+            # A succeeded payment against an invoice still holding nothing,
+            # with no incident explaining it, is a ledger that does not balance
+            # - and migration 0074 rightly refuses to install on one (DB-001).
+            # The payment is legacy money on a *settled* earlier bill instead.
+            (
+                "INSERT INTO invoices (id, tenant_id, subscription_id, status, plan_code,"
+                " amount_due, amount_paid, currency, period_start, period_end, lines,"
+                " collection_attempts, issued_at, paid_at) VALUES (:id, :tenant, :tenant,"
+                " 'paid', :code, 99, 99, 'EGP', :start, :end, '[]', 0, :start, :start)",
+                {
+                    "id": self.settled,
+                    "tenant": self.month_end,
+                    "code": f"paid-{self.tag}",
+                    "start": DEC_31,
+                    "end": JAN_31,
+                },
+            ),
+            (
+                "UPDATE payments SET invoice_id = :invoice WHERE id = :id",
+                {"invoice": self.settled, "id": self.payment},
             ),
         ]
         return out

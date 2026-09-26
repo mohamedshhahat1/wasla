@@ -532,6 +532,13 @@ class CheckoutService:
         """
         moment = now if now is not None else datetime.now(UTC)
         payment, retargeted = await self._matching_payment(event)
+        if payment is not None and not retargeted:
+            # Before the claim and before anything is written: the payment,
+            # its invoice and the subscription, in the one settlement order
+            # (DB-001, DB-003). A second callback for the same payment - or a
+            # callback racing a manual payment or a reconciliation on the same
+            # invoice - waits here, then decides on what the first committed.
+            await self._settlement.lock(invoice_id=payment.invoice_id, payment_id=payment.id)
 
         record = await self._claim(event, payment=payment, now=moment)
         if record is None:
@@ -789,6 +796,34 @@ class CheckoutService:
             payment.refund_requested_amount = None
         if refunded >= payment.amount and payment_may_move(payment.status, PaymentStatus.REFUNDED):
             payment.status = PaymentStatus.REFUNDED
+
+        if payment.applied_at is None:
+            # Money that was held, never applied: a duplicate payment or one
+            # refused at settlement, sitting with its incident for an operator
+            # (DB-001). Giving it back returns it to the customer and nothing
+            # else - the invoice never counted it, so it must not lose it, and
+            # nothing it bought is withdrawn.
+            self._audit.record(
+                AuditAction.PAYMENT_REFUNDED,
+                actor=None,
+                actor_kind=AuditActorKind.SYSTEM,
+                tenant_id=self._tenant_id,
+                target_type="payment",
+                target_id=payment.id,
+                meta={
+                    "amount": str(returned),
+                    "refunded_total": str(refunded),
+                    "currency": invoice.currency,
+                    "kind": event.kind.value,
+                    "operator_requested": operator_requested,
+                    "provider_reference": event.provider_transaction_id,
+                    "held": True,
+                },
+            )
+            from app.core.telemetry import record_billing_refund
+
+            await record_billing_refund("confirmed")
+            return APPLIED, f"Refunded {returned} of held money; the invoice is unaffected."
 
         invoice.amount_paid = max(invoice.amount_paid - returned, Decimal("0.00"))
         full = invoice.amount_paid <= 0

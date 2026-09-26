@@ -566,6 +566,11 @@ class PlatformPaymentRead(BaseModel):
     provider_order_id: str | None
     provider_intention_id: str | None
     provider_integration_id: str | None
+    # An operator's own reference for money that arrived outside a processor.
+    manual_reference: str | None
+    # Whether this payment's money counts towards its invoice; a collected
+    # payment that does not is held with an incident (DB-001).
+    applied: bool
     is_automatic: bool
     collection_state: str | None
     failure_reason: str | None
@@ -592,6 +597,8 @@ class PlatformPaymentRead(BaseModel):
             provider_order_id=payment.provider_order_id,
             provider_intention_id=payment.provider_intent_reference,
             provider_integration_id=payment.provider_integration_id,
+            manual_reference=payment.manual_reference,
+            applied=payment.applied_at is not None,
             is_automatic=payment.is_automatic,
             collection_state=payment.collection_state.value if payment.collection_state else None,
             failure_reason=payment.failure_reason,

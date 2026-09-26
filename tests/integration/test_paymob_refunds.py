@@ -148,6 +148,8 @@ async def _paid(
         provider_reference=transaction if status is PaymentStatus.SUCCEEDED else None,
         refunded_amount=Decimal("0.00"),
         processed_at=moment,
+        # A settled payment is one whose money the invoice counts (DB-001).
+        applied_at=moment if status is PaymentStatus.SUCCEEDED else None,
     )
     session.add(payment)
     await session.flush()

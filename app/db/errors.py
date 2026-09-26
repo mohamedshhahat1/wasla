@@ -51,4 +51,39 @@ def is_data_exception(error: BaseException) -> bool:
     return state is not None and state.startswith(DATA_EXCEPTION_CLASS)
 
 
-__all__ = ["DATA_EXCEPTION_CLASS", "is_data_exception", "sqlstate"]
+# Refusals that say "not now", not "not ever": another transaction held what
+# this one needed (DB-017). The same request, retried, will usually succeed,
+# so they answer 503 with a retry hint rather than a 500 that reads as a bug.
+# A deadlock here is operational defence only - settlement takes its locks in
+# one order and does not deadlock by design (DB-003).
+RETRYABLE_STATES: Final = frozenset(
+    {
+        "40P01",  # deadlock_detected
+        "40001",  # serialization_failure
+        "55P03",  # lock_not_available (lock_timeout)
+        "57014",  # query_canceled (statement_timeout)
+    }
+)
+# Another request already wrote what this one tried to write.
+UNIQUE_VIOLATION: Final = "23505"
+
+
+def is_retryable(error: BaseException) -> bool:
+    """Whether PostgreSQL refused this for contention rather than content."""
+    return isinstance(error, DBAPIError) and sqlstate(error) in RETRYABLE_STATES
+
+
+def is_unique_violation(error: BaseException) -> bool:
+    """Whether a unique constraint refused a duplicate of an existing row."""
+    return isinstance(error, DBAPIError) and sqlstate(error) == UNIQUE_VIOLATION
+
+
+__all__ = [
+    "DATA_EXCEPTION_CLASS",
+    "RETRYABLE_STATES",
+    "UNIQUE_VIOLATION",
+    "is_data_exception",
+    "is_retryable",
+    "is_unique_violation",
+    "sqlstate",
+]

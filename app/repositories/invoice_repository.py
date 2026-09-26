@@ -151,6 +151,24 @@ class InvoiceRepository(TenantScopedRepository[Invoice]):
     async def require_by_id(self, invoice_id: uuid.UUID) -> Invoice:
         return await self._require(self._select().where(Invoice.id == invoice_id))
 
+    async def lock(self, invoice_id: uuid.UUID) -> Invoice | None:
+        """This workspace's invoice, row-locked and re-read from the database.
+
+        `FOR NO KEY UPDATE`, the lock an `UPDATE` of a non-key column takes
+        anyway, so it never blocks the key-share lock a child row's foreign
+        key takes - a payment, an incident or a top-up naming this invoice.
+        `populate_existing` because a copy already in the session was read
+        before the lock and may describe a state another transaction has
+        since committed (DB-001). Part of the settlement lock order; see
+        `InvoiceSettlement.lock`.
+        """
+        return await self._first(
+            self._select()
+            .where(Invoice.id == invoice_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+
     async def get_for_period(self, *, period_start: datetime) -> Invoice | None:
         """The renewal already issued for this period, if there is one.
 
@@ -270,6 +288,15 @@ class PaymentRepository(TenantScopedRepository[Payment]):
 
     def _tenant_filter(self) -> ColumnElement[bool]:
         return Payment.tenant_id == self.tenant_id
+
+    async def lock(self, payment_id: uuid.UUID) -> Payment | None:
+        """This workspace's payment, row-locked and re-read. See `InvoiceRepository.lock`."""
+        return await self._first(
+            self._select()
+            .where(Payment.id == payment_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
 
     async def get_by_id(self, payment_id: uuid.UUID) -> Payment | None:
         """One payment of this workspace's.

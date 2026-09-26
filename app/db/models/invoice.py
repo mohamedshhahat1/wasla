@@ -483,6 +483,23 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         CheckConstraint("refunded_amount >= 0", name="refunded_amount_non_negative"),
         CheckConstraint("refunded_amount <= amount", name="refunded_within_amount"),
         CheckConstraint(CURRENCY_CHECK_SQL, name="currency_supported"),
+        # Only money that was collected can have been applied to an invoice.
+        CheckConstraint(
+            "applied_at IS NULL OR status IN ('succeeded', 'refunded')",
+            name="applied_only_when_collected",
+        ),
+        # An operator's reference for money that arrived outside a processor
+        # is unique within one workspace and method, not across the platform:
+        # two workspaces' bank transfers may well share "BT-1" (DB-017). The
+        # processor's own transaction ids keep their global uniqueness above.
+        Index(
+            "uq_payments_tenant_id_provider_manual_reference",
+            "tenant_id",
+            "provider",
+            "manual_reference",
+            unique=True,
+            postgresql_where=text("manual_reference IS NOT NULL"),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -615,6 +632,25 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         DateTime(timezone=True),
         nullable=True,
     )
+    # When this payment's money was applied to its invoice - counted in its
+    # `amount_paid` - by settlement (DB-001). NULL for an attempt that
+    # collected nothing, and for collected money that was *held*: a second
+    # payment for an invoice already paid, a page paid after its offer was
+    # declined. Held money always has a billing incident beside it, and
+    # `amount_paid` always equals the net of the applied payments; the
+    # database checks both at commit (migration 0074).
+    applied_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    # What an operator wrote down for money that arrived outside a processor -
+    # a bank transfer's reference. Display and duplicate detection within the
+    # workspace only; the ledger identifies the payment by
+    # `provider_reference`, which for such a payment is ours (DB-017).
+    manual_reference: Mapped[str | None] = mapped_column(
+        String(MAX_REFERENCE_LENGTH),
+        nullable=True,
+    )
 
     @property
     def is_refundable(self) -> bool:
@@ -675,9 +711,86 @@ PAYMENTS_NO_AUTOMATIC_TOPUP_TRIGGER_SQL: Final = (
     "FOR EACH ROW EXECUTE FUNCTION payments_refuse_automatic_topup()"
 )
 
+# **The books balance, and held money is explained** (DB-001). Checked at
+# commit rather than per statement: a settlement writes the invoice and the
+# payment in whichever order its flushes happen, and only the transaction's
+# end state has to agree. Two things, for every invoice or payment a
+# transaction touched:
+#
+# - `invoices.amount_paid` equals the net (amount - refunded) of the payments
+#   *applied* to it. A second settlement that read the invoice before another
+#   committed - the concurrent double settlement the audit reproduced - leaves
+#   two applied payments against one invoice's worth of `amount_paid`, and is
+#   refused here at commit however it got there.
+# - collected money that was not applied is held with a billing incident.
+#   Nothing may keep a customer's money silently.
+#
+# The invoice is locked (`FOR NO KEY UPDATE`) before it is summed, so two
+# transactions cannot each check before the other commits. Every settlement
+# path already holds that lock; this only makes the check honest when one
+# does not. The rows are re-read: a deferred trigger's NEW is the row as the
+# queued statement left it, not as the transaction ends.
+COLLECTION_RECONCILES_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION billing_refuse_unreconciled_collection() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = public, pg_catalog
+    AS $$
+    DECLARE
+        target uuid;
+        payment_status text;
+        payment_applied timestamptz;
+        held numeric;
+        applied numeric;
+    BEGIN
+        IF TG_TABLE_NAME = 'payments' THEN
+            SELECT p.invoice_id, p.status::text, p.applied_at
+              INTO target, payment_status, payment_applied
+              FROM payments p WHERE p.id = NEW.id;
+            IF NOT FOUND THEN
+                RETURN NULL;
+            END IF;
+            IF payment_status IN ('succeeded', 'refunded') AND payment_applied IS NULL
+               AND NOT EXISTS (SELECT 1 FROM billing_incidents b WHERE b.payment_id = NEW.id) THEN
+                RAISE EXCEPTION 'collected money not applied to its invoice is held by an incident'
+                    USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+        ELSE
+            target := NEW.id;
+        END IF;
+        SELECT i.amount_paid INTO held FROM invoices i WHERE i.id = target FOR NO KEY UPDATE;
+        IF NOT FOUND THEN
+            RETURN NULL;
+        END IF;
+        SELECT coalesce(sum(p.amount - p.refunded_amount), 0) INTO applied
+          FROM payments p WHERE p.invoice_id = target AND p.applied_at IS NOT NULL;
+        IF applied <> held THEN
+            RAISE EXCEPTION 'an invoice holds exactly the money applied to it'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NULL;
+    END;
+    $$
+    """
+INVOICES_COLLECTION_TRIGGER_SQL: Final = (
+    "CREATE CONSTRAINT TRIGGER invoices_collection_reconciles "
+    "AFTER INSERT OR UPDATE OF amount_paid ON invoices "
+    "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+    "EXECUTE FUNCTION billing_refuse_unreconciled_collection()"
+)
+PAYMENTS_COLLECTION_TRIGGER_SQL: Final = (
+    "CREATE CONSTRAINT TRIGGER payments_collection_reconciles "
+    "AFTER INSERT OR UPDATE OF status, amount, refunded_amount, applied_at, invoice_id "
+    "ON payments DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+    "WHEN (NEW.status::text IN ('succeeded', 'refunded') OR NEW.applied_at IS NOT NULL) "
+    "EXECUTE FUNCTION billing_refuse_unreconciled_collection()"
+)
+
 event.listen(Invoice.__table__, "after_create", DDL(CUSTOM_PLAN_SCOPE_FUNCTION_SQL))  # type: ignore[no-untyped-call]
 event.listen(Invoice.__table__, "after_create", DDL(INVOICES_CUSTOM_PLAN_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 event.listen(Payment.__table__, "after_create", DDL(PAYMENTS_NO_AUTOMATIC_TOPUP_FUNCTION_SQL))  # type: ignore[no-untyped-call]
 event.listen(Payment.__table__, "after_create", DDL(PAYMENTS_NO_AUTOMATIC_TOPUP_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 event.listen(Invoice.__table__, "after_create", DDL(INVOICE_OFFER_FUNCTION_SQL))  # type: ignore[no-untyped-call]
 event.listen(Invoice.__table__, "after_create", DDL(INVOICE_OFFER_TRIGGER_SQL))  # type: ignore[no-untyped-call]
+event.listen(Invoice.__table__, "after_create", DDL(COLLECTION_RECONCILES_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Invoice.__table__, "after_create", DDL(INVOICES_COLLECTION_TRIGGER_SQL))  # type: ignore[no-untyped-call]
+event.listen(Payment.__table__, "after_create", DDL(PAYMENTS_COLLECTION_TRIGGER_SQL))  # type: ignore[no-untyped-call]

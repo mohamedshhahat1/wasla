@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, ValidationError
@@ -51,6 +52,7 @@ from app.db.models.invoice import (
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
 from app.integrations.billing.base import PaymentProvider
+from app.integrations.billing.paymob import PAYMOB_PROVIDER
 from app.repositories.invoice_repository import InvoiceRepository, PaymentRepository
 from app.repositories.usage_repository import UsageEventRepository
 
@@ -58,6 +60,11 @@ if TYPE_CHECKING:
     from app.services.settlement_service import InvoiceSettlement
 
 logger = get_logger(__name__)
+
+# Processors whose transaction ids are globally unique facts. A manual record
+# naming one keeps the processor's id as the ledger's reference; anything else
+# is money that arrived outside a processor (DB-017).
+REAL_PAYMENT_PROVIDERS: frozenset[str] = frozenset({PAYMOB_PROVIDER})
 
 # The meters an invoice reports. Not every meter: a customer reading a bill
 # wants the figures they recognise from their own dashboard, not thirteen rows
@@ -285,7 +292,13 @@ class InvoiceService:
         - an `expected_revision` that is not the invoice's current one.
         """
         moment = now if now is not None else datetime.now(UTC)
-        invoice = await self._invoices.require_by_id(invoice_id)
+        # Locked and re-read before anything is judged: a second operator, a
+        # callback or a reconciliation settling the same invoice waits here
+        # and then sees what the first committed (DB-001). The one manual
+        # money primitive - the legacy platform route and the newer one both
+        # arrive here.
+        await self._invoices.require_by_id(invoice_id)
+        invoice = (await self._settlement().lock(invoice_id=invoice_id)).invoice
         if expected_revision is not None and invoice.revision != expected_revision:
             raise ConflictError(
                 f"The invoice has changed (revision {invoice.revision}); reload it and retry."
@@ -310,16 +323,38 @@ class InvoiceService:
                 f"{amount} is more than the {invoice.outstanding} outstanding on this invoice."
             )
 
-        payment = self._payments.record(
-            invoice_id=invoice.id,
-            status=PaymentStatus.SUCCEEDED,
-            amount=amount,
-            currency=invoice.currency,
-            provider=provider,
-            provider_reference=reference,
-            processed_at=moment,
-        )
-        await self._session.flush()
+        payment_id = uuid.uuid4()
+        if provider in REAL_PAYMENT_PROVIDERS:
+            # A transaction of a real processor, recorded by hand: its id is
+            # the processor's own and stays globally unique, so the same
+            # transaction cannot also be counted by its callback.
+            provider_reference, manual_reference = reference, None
+        else:
+            # Money that arrived outside any processor. The operator's
+            # reference is free text two workspaces may both use (DB-017), so
+            # it is kept apart - unique per workspace and method - and the
+            # ledger's own identifier is ours.
+            provider_reference, manual_reference = f"manual:{payment_id}", reference
+        try:
+            # Added inside the savepoint, so a refused duplicate leaves the
+            # session exactly as it was rather than holding a doomed insert.
+            async with self._session.begin_nested():
+                payment = self._payments.record(
+                    invoice_id=invoice.id,
+                    status=PaymentStatus.SUCCEEDED,
+                    amount=amount,
+                    currency=invoice.currency,
+                    provider=provider,
+                    provider_reference=provider_reference,
+                    processed_at=moment,
+                )
+                payment.id = payment_id
+                payment.manual_reference = manual_reference
+                await self._session.flush()
+        except IntegrityError:
+            raise ConflictError(
+                "A payment with this reference has already been recorded."
+            ) from None
         outcome, detail = await self._settlement().settle(
             invoice,
             payment=payment,
@@ -364,7 +399,8 @@ class InvoiceService:
         the transition table and the settlement engine, which decides what the
         void means for the subscription - see `InvoiceSettlement.void`.
         """
-        invoice = await self._invoices.require_by_id(invoice_id)
+        await self._invoices.require_by_id(invoice_id)
+        invoice = (await self._settlement().lock(invoice_id=invoice_id)).invoice
         if expected_revision is not None and invoice.revision != expected_revision:
             raise ConflictError(
                 f"The invoice has changed (revision {invoice.revision}); reload it and retry."

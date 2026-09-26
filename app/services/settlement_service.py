@@ -28,6 +28,28 @@ one place:
    customer chose to buy back is reactivated (BILL-01); a paid renewal lifts
    `PAST_DUE` or `SUSPENDED` and adopts the version it was issued for.
 
+**One lock order** (DB-001, DB-003). Two settlements of one invoice used to
+read it unlocked, each compute `0 + 99`, and both apply: two succeeded
+payments, an invoice saying 99 was paid, and no incident. And two settlements
+touching the same payment took the payment, invoice and subscription rows in
+whatever order their flushes happened to write them, and deadlocked. Every
+settlement now takes its rows up front, in one order, before deciding
+anything:
+
+    payment -> invoice -> subscription -> offer / top-up
+
+`lock` takes the first three; the offer and top-up ledgers lock their own
+rows afterwards. The refusal decision is made on the invoice as it is
+*after* the lock, so a second payment for an invoice another transaction has
+just paid is refused and raised as a `duplicate_payment` incident - exactly
+what happens when the two arrive one after the other.
+
+Beneath that, the database keeps the books honest on its own (migration
+0074): an invoice's `amount_paid` must equal the net of the payments applied
+to it (`payments.applied_at`), and a collected payment that was *not* applied
+must be explained by an incident. A settlement path that forgot the lock
+would fail at commit rather than record money twice.
+
 Nothing here talks to a provider, and nothing here can move money.
 """
 
@@ -42,7 +64,12 @@ from typing import Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, CustomPlanNotAvailableError, ValidationError
+from app.core.exceptions import (
+    ConflictError,
+    CustomPlanNotAvailableError,
+    NotFoundError,
+    ValidationError,
+)
 from app.core.logging import get_logger
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import (
@@ -67,7 +94,7 @@ from app.repositories.billing_repository import (
     PlanRepository,
     SubscriptionRepository,
 )
-from app.repositories.invoice_repository import InvoiceRepository
+from app.repositories.invoice_repository import InvoiceRepository, PaymentRepository
 from app.services.audit_service import AuditTrail
 from app.services.billing_incident_service import raise_incident
 from app.services.custom_plan_offer_ledger import CustomPlanOfferLedger
@@ -106,6 +133,15 @@ class _Refusal:
     detail: str
 
 
+@dataclass(frozen=True, slots=True)
+class SettlementRows:
+    """The rows one settlement holds locked, re-read after locking."""
+
+    payment: Payment | None
+    invoice: Invoice
+    subscription: Subscription | None
+
+
 class InvoiceSettlement:
     """Applies money to one workspace's invoices, and what paying them grants."""
 
@@ -127,6 +163,39 @@ class InvoiceSettlement:
         self._audit = AuditTrail(session, tenant_id=tenant_id)
         self._offers = CustomPlanOfferLedger(session, tenant_id=tenant_id)
 
+    # ------------------------------------------------------------ locking
+
+    async def lock(
+        self,
+        *,
+        invoice_id: uuid.UUID,
+        payment_id: uuid.UUID | None = None,
+    ) -> SettlementRows:
+        """Take the settlement locks in the one global order, and re-read.
+
+        Payment, then invoice, then the workspace's subscription - the same
+        order for a callback, a reconciliation, a manual payment and a
+        refund, so two of them can wait for each other but never deadlock
+        (DB-003). Each row is re-read under its lock, so what is decided
+        next is decided on committed state rather than on a copy read
+        before another settlement finished (DB-001).
+
+        Call it before changing any of the three rows: re-reading discards
+        unflushed changes. Taking a lock this transaction already holds is a
+        no-op, so a caller that locked early and `settle` locking again is
+        the intended shape, not a double lock.
+        """
+        payment: Payment | None = None
+        if payment_id is not None:
+            payment = await PaymentRepository(self._session, tenant_id=self._tenant_id).lock(
+                payment_id
+            )
+        invoice = await self._invoices.lock(invoice_id)
+        if invoice is None:
+            raise NotFoundError("No such invoice.")
+        subscription = await self._subscriptions.lock()
+        return SettlementRows(payment=payment, invoice=invoice, subscription=subscription)
+
     # ------------------------------------------------------------ settling
 
     async def settle(
@@ -144,13 +213,19 @@ class InvoiceSettlement:
         may pay an invoice written off as uncollectible (spec: invoice state
         machine). A provider callback never passes it.
         """
+        # Whatever the caller already holds, the decision below is made under
+        # the locks and on the rows as they are now. The flush first: the
+        # payment may be new or carry the provider's outcome, and re-reading
+        # it must not discard that.
+        await self._session.flush()
+        rows = await self.lock(invoice_id=invoice.id, payment_id=payment.id)
+        subscription = rows.subscription
         refusal = self._invoice_refusal(
             invoice, payment=payment, recover_uncollectible=recover_uncollectible
         )
         if refusal is not None:
             return await self._refuse(invoice, payment=payment, refusal=refusal, now=now)
 
-        subscription = await self._subscriptions.get()
         version: PlanVersion | None = None
         keep_cancellation = False
         completes = invoice.amount_paid + payment.amount >= invoice.amount_due
@@ -169,17 +244,24 @@ class InvoiceSettlement:
                 keep_cancellation = self._cancelled_after_opening(invoice, subscription)
 
         invoice.amount_paid = invoice.amount_paid + payment.amount
+        # The money is now on the invoice: the ledger's record that this
+        # payment, and not a held duplicate, is what `amount_paid` counts.
+        payment.applied_at = now
         if payment.provider_reference:
             invoice.provider_reference = payment.provider_reference
         if invoice.amount_paid >= invoice.amount_due:
+            if version is not None:
+                # Before the invoice is marked paid: the grant writes the
+                # period the payment opened onto the invoice, and a paid
+                # invoice's terms are frozen by the database (DB-005).
+                await self._grant(
+                    invoice, version=version, keep_cancellation=keep_cancellation, now=now
+                )
             self._move(invoice, InvoiceStatus.PAID)
             invoice.paid_at = now
 
         if invoice.status is InvoiceStatus.PAID:
             if version is not None:
-                await self._grant(
-                    invoice, version=version, keep_cancellation=keep_cancellation, now=now
-                )
                 await self._offers.activated(invoice, now=now)
             elif invoice.purpose is InvoicePurpose.TOPUP:
                 # Extra allowance, never a plan: the subscription is left
@@ -562,7 +644,7 @@ class InvoiceSettlement:
                 "Reconcile it before voiding."
             )
 
-        subscription = await self._subscriptions.get()
+        subscription = await self._subscriptions.lock()
         behind = (
             subscription is not None
             and subscription.id == invoice.subscription_id
@@ -670,4 +752,5 @@ __all__ = [
     "REFUSED",
     "UNMATCHED",
     "InvoiceSettlement",
+    "SettlementRows",
 ]

@@ -698,7 +698,10 @@ async def test_a_settled_attempt_is_never_examined_again(
     async with committing() as session:
         row = await session.get(Payment, payment_id, populate_existing=True)
         assert row is not None
-        row.status = PaymentStatus.SUCCEEDED
+        # Terminal without money: a declined attempt whose outcome is known. A
+        # *succeeded* one written here, with no settlement behind it, is a
+        # ledger the database refuses at commit (DB-001).
+        row.status = PaymentStatus.FAILED
         row.collection_state = CollectionState.SETTLED
         await session.commit()
 

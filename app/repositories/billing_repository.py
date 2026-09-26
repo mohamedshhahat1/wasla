@@ -104,6 +104,18 @@ class SubscriptionRepository(TenantScopedRepository[Subscription]):
     async def get(self) -> Subscription | None:
         return await self._first(self._select())
 
+    async def lock(self) -> Subscription | None:
+        """This workspace's subscription, row-locked and re-read.
+
+        The last lock settlement takes before the offer or top-up it may
+        grant (see `InvoiceSettlement.lock`). `FOR NO KEY UPDATE`, so an
+        invoice being opened for this subscription elsewhere - whose foreign
+        key takes a key-share lock on this row - is never blocked by it.
+        """
+        return await self._first(
+            self._select().with_for_update(key_share=True).execution_options(populate_existing=True)
+        )
+
     def create(
         self,
         *,
