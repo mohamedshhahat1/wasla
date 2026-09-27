@@ -27,14 +27,15 @@ otherwise strand every row that sweep had claimed.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final
 
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.storage import MediaStorage, build_media_storage
-from app.core.telemetry import record_retention_pass
+from app.core.telemetry import record_retention_pass, record_webhook_payload_retention
 from app.db.session import Database
+from app.repositories.whatsapp_repository import WebhookPayloadRetention
 from app.services.media_retention_service import MediaRetentionService, RetentionOutcome
 
 logger = get_logger(__name__)
@@ -84,6 +85,12 @@ class RetentionWorker:
                 # unavailable for a day is not a reason to stop trying, and the
                 # claimed rows are still claimed when it comes back.
                 logger.exception("retention.sweep_failed")
+            try:
+                # Independent of the media store: raw payloads age out even
+                # while a store is refusing deletions (DB-011).
+                await self.redact_webhook_payloads()
+            except Exception:
+                logger.exception("retention.webhook_redaction_failed")
             try:
                 await asyncio.wait_for(self._stopping.wait(), timeout=self._poll_seconds)
             except TimeoutError:
@@ -136,3 +143,36 @@ class RetentionWorker:
                 },
             )
         return outcome
+
+    async def redact_webhook_payloads(self, *, now: datetime | None = None) -> int:
+        """Clear processed webhook payloads past their window (DB-011).
+
+        One short transaction per batch, until a batch comes back short, so a
+        large first run never becomes one long transaction.
+        """
+        moment = now or datetime.now(UTC)
+        days = self._settings.whatsapp_event_payload_retention_days
+        cutoff = moment - timedelta(days=days)
+        batch = self._settings.whatsapp_event_redaction_batch_size
+        redacted = 0
+        while True:
+            async with self._database.session() as session:
+                cleared = await WebhookPayloadRetention(session).redact(
+                    older_than=cutoff, now=moment, limit=batch
+                )
+            redacted += cleared
+            if cleared < batch:
+                break
+        async with self._database.session() as session:
+            pending = await WebhookPayloadRetention(session).pending(older_than=cutoff)
+        await record_webhook_payload_retention(redacted=redacted, pending=pending)
+        if redacted:
+            logger.info(
+                "retention.webhook_payloads_redacted",
+                extra={
+                    "event": "retention.webhook_payloads_redacted",
+                    "redacted": redacted,
+                    "pending": pending,
+                },
+            )
+        return redacted

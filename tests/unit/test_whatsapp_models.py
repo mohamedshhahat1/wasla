@@ -100,6 +100,9 @@ def test_whatsapp_tables_declare_the_indexes_the_migrations_create() -> None:
         "ix_whatsapp_events_tenant_id",
         "ix_whatsapp_events_account_id",
         "ix_whatsapp_events_tenant_id_state",
+        # Migration 0079 (DB-011). Partial: the retention sweep's backlog -
+        # processed events still holding a raw payload.
+        "ix_whatsapp_events_redactable",
     }
 
 

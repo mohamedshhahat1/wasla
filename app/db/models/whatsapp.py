@@ -21,6 +21,7 @@ from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -247,6 +248,19 @@ class WhatsAppEvent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
         Index("ix_whatsapp_events_tenant_id", "tenant_id"),
         Index("ix_whatsapp_events_account_id", "account_id"),
         Index("ix_whatsapp_events_tenant_id_state", "tenant_id", "state"),
+        # What the retention sweep reads (DB-011): processed events whose raw
+        # payload is still held, oldest first. Partial, so it holds only the
+        # backlog, not every event the platform ever received.
+        Index(
+            "ix_whatsapp_events_redactable",
+            "processed_at",
+            postgresql_where=text("state = 'processed' AND payload IS NOT NULL"),
+        ),
+        # A payload is gone only because retention removed it, and says when.
+        CheckConstraint(
+            "payload IS NOT NULL OR payload_redacted_at IS NOT NULL",
+            name="payload_present_or_redacted",
+        ),
     )
 
     account_id: Mapped[uuid.UUID] = mapped_column(
@@ -261,7 +275,12 @@ class WhatsAppEvent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
         nullable=False,
         default=WhatsAppEventState.RECEIVED,
     )
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # The webhook exactly as Meta sent it, until retention clears it (DB-011).
+    # NULL only with `payload_redacted_at` set.
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    payload_redacted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)

@@ -557,6 +557,16 @@ class Settings(BaseSettings):
     # How often the retention sweep runs. Daily by default: retention is a date,
     # and sweeping harder would be querying constantly to learn nothing.
     media_retention_poll_seconds: float = Field(default=86_400.0, gt=0)
+    # How long a processed WhatsApp webhook keeps its raw payload (DB-011).
+    # Every inbound message and every delivery status is stored as Meta sent
+    # it - customer text and phone numbers included - and nothing read it
+    # afterwards, so it grew for the workspace's lifetime. After this many
+    # days the retention sweep clears the payload of a *processed* event and
+    # keeps its identity (event id, state, timestamps, workspace), which is
+    # all webhook deduplication and recovery need. A received or failed event
+    # keeps its payload until it is processed or looked at.
+    whatsapp_event_payload_retention_days: int = Field(default=30, ge=1)
+    whatsapp_event_redaction_batch_size: int = Field(default=1_000, gt=0, le=10_000)
     # How long an upload intent must sit untouched before reconciliation treats
     # it as abandoned rather than in progress (ADR-087).
     #
