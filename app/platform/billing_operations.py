@@ -81,7 +81,12 @@ from app.services.invoice_service import InvoiceService
 from app.services.payment_reconciliation_service import PaymentReconciler
 from app.services.plan_catalog import PlanCatalog
 from app.services.refund_service import RefundService
-from app.services.subscription_service import SubscriptionService
+from app.services.subscription_service import (
+    COMPLIMENTARY_GRANT,
+    PLATFORM_GRANT,
+    PlanGrant,
+    SubscriptionService,
+)
 
 # A hosted payment still pending after this is worth an operator's attention.
 STUCK_HOSTED_AFTER: Final = timedelta(minutes=15)
@@ -295,7 +300,13 @@ class PlatformBillingOperations:
             )
             action = AuditAction.SUBSCRIPTION_PLAN_CHANGE_SCHEDULED
         elif version.price <= 0:
-            await service.apply_purchase(version=version, now=moment)
+            # Nothing to pay, so nothing was purchased: the trail names the
+            # operator who assigned it (PAY-E2E-02).
+            await service.apply_purchase(
+                version=version,
+                now=moment,
+                grant=PlanGrant(actor=actor, basis=PLATFORM_GRANT, reason=payload.reason),
+            )
             action = AuditAction.SUBSCRIPTION_PLAN_CHANGED
         elif payload.financial_basis is FinancialBasis.COMPLIMENTARY:
             ends = payload.complimentary_until or billing_calendar.add_interval(
@@ -315,7 +326,11 @@ class PlatformBillingOperations:
                     ends_at=ends,
                 )
             )
-            await service.apply_purchase(version=version, now=moment)
+            await service.apply_purchase(
+                version=version,
+                now=moment,
+                grant=PlanGrant(actor=actor, basis=COMPLIMENTARY_GRANT, reason=payload.reason),
+            )
             action = AuditAction.SUBSCRIPTION_COMPLIMENTARY_GRANT
         elif payload.financial_basis is FinancialBasis.MANUAL_PAYMENT:
             details = payload.manual_payment

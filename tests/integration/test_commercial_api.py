@@ -43,9 +43,10 @@ from app.api.dependencies import (
 from app.core.config import Settings
 from app.core.dependencies import get_session
 from app.core.security import TokenClaims, TokenType
-from app.db.models.audit import AuditAction, AuditLog
+from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
 from app.db.models.billing import Plan, PlanScope, PlanVersion
 from app.db.models.enums import MembershipStatus, PlatformRole, TenantRole
+from app.db.models.invoice import Invoice, Payment
 from app.db.models.membership import Membership
 from app.db.models.tenant import Tenant
 from app.db.models.topup import TopupEntitlement
@@ -603,6 +604,95 @@ async def test_assigning_a_priced_custom_plan_now_needs_money_or_a_named_basis(
         ),
     )
     assert stale.status_code == 409
+
+
+async def _plan_change_rows(
+    session: AsyncSession, tenant: Tenant, version_id: uuid.UUID
+) -> list[AuditLog]:
+    """Every audit row that moved `tenant`'s subscription onto `version_id`."""
+    rows = (
+        await session.scalars(
+            select(AuditLog)
+            .where(AuditLog.tenant_id == tenant.id)
+            .where(AuditLog.action == AuditAction.SUBSCRIPTION_PLAN_CHANGED)
+        )
+    ).all()
+    return [row for row in rows if (row.meta or {}).get("plan_version_id") == str(version_id)]
+
+
+@pytest.mark.parametrize(
+    ("price", "basis", "reason"),
+    [("0.00", None, "platform_grant"), ("1500.00", "complimentary", "complimentary_grant")],
+)
+async def test_an_assignment_without_payment_is_never_audited_as_a_purchase(
+    db_session: AsyncSession,
+    app: FastAPI,
+    http: AsyncClient,
+    intentions: Intentions,
+    price: str,
+    basis: str | None,
+    reason: str,
+) -> None:
+    """PAY-E2E-02. A zero-price custom plan (P13) and a complimentary grant of a
+    priced one move a workspace with no checkout, no Paymob call, no invoice and
+    no payment - and the trail used to add a `system` row saying
+    `purchase_settled` beside the operator's own. Every row about the change now
+    names the operator, the basis and the version, and none claims a purchase.
+    """
+    now = base_now()
+    await catalogue(db_session)
+    tenant, _, subscription = await workspace(db_session, now=now)
+    staff = await _staff(app, db_session, PlatformRole.PLATFORM_OWNER)
+    invoices_before = await db_session.scalar(
+        select(func.count()).select_from(Invoice).where(Invoice.tenant_id == tenant.id)
+    )
+
+    body: dict[str, Any] = {
+        "price": price,
+        "assign_to_tenant": True,
+        "assignment_mode": "now",
+        "expected_subscription_revision": subscription.revision,
+        "reason": "Pilot customer, agreed in writing.",
+    }
+    if basis is not None:
+        body["financial_basis"] = basis
+    created = await http.post(
+        f"{PLATFORM}/tenants/{tenant.id}/custom-plan", json=_custom_body(**body)
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["assignment"]["status"] == "assigned"
+    version_id = uuid.UUID(created.json()["version"]["id"])
+    await db_session.refresh(subscription)
+    assert subscription.plan_version_id == version_id
+
+    assert intentions.count == 0, "0 Paymob transactions"
+    assert (
+        await db_session.scalar(
+            select(func.count()).select_from(Invoice).where(Invoice.tenant_id == tenant.id)
+        )
+    ) == invoices_before, "0 invoices"
+    assert (
+        await db_session.scalar(
+            select(func.count()).select_from(Payment).where(Payment.tenant_id == tenant.id)
+        )
+    ) == 0, "0 payments"
+
+    rows = await _plan_change_rows(db_session, tenant, version_id)
+    assert rows, "the change is audited"
+    assert all((row.meta or {}).get("reason") != "purchase_settled" for row in rows)
+    assert all(row.actor_kind is AuditActorKind.PLATFORM_STAFF for row in rows)
+    assert all(row.actor_id == staff.id for row in rows)
+    grant = next(row for row in rows if (row.meta or {}).get("reason") == reason)
+    assert grant.meta is not None
+    assert grant.meta["operator_reason"] == "Pilot customer, agreed in writing."
+    assert grant.meta["payment"] is None
+    assigned = await db_session.scalar(
+        select(AuditLog)
+        .where(AuditLog.action == AuditAction.BILLING_CUSTOM_PLAN_ASSIGNED)
+        .where(AuditLog.tenant_id == tenant.id)
+    )
+    assert assigned is not None and assigned.actor_id == staff.id
+    assert assigned.actor_kind is AuditActorKind.PLATFORM_STAFF
 
 
 async def test_a_new_custom_version_changes_nobody_until_they_are_moved(
