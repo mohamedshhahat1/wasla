@@ -243,7 +243,7 @@ OFFER_INTEGRITY_FUNCTION_SQL: Final = """
         END IF;
         RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """
 OFFER_INTEGRITY_TRIGGER_SQL: Final = (
     "CREATE TRIGGER custom_plan_offers_integrity BEFORE INSERT OR UPDATE ON custom_plan_offers "
@@ -269,7 +269,7 @@ INVOICE_OFFER_FUNCTION_SQL: Final = """
         END IF;
         RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """
 INVOICE_OFFER_TRIGGER_SQL: Final = (
     "CREATE TRIGGER invoices_custom_plan_offer BEFORE INSERT OR UPDATE OF "

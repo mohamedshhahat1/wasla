@@ -1459,6 +1459,57 @@ After 0078, each is refused as written (23514 for a period, 23505 for a second
 default or a case-variant address), and a concurrent first-card save keeps
 the second card as an ordinary one instead of a second default.
 
+### Downgrading past the billing migrations
+
+0071, 0072 and 0073 hold commercial records their downgrades would drop with
+their tables. Each downgrade counts them first and refuses, changing nothing,
+naming what it found (DB-019):
+
+| Downgrade | Refused while any exist |
+| --- | --- |
+| 0073 → 0072 | custom plan offers (open, declined, expired, cancelled or active), invoices naming an offer |
+| 0072 → 0071 | top-up invoices, top-up purchases and platform grants, top-up products, custom plans |
+| 0071 → 0070 | billing incidents, billing adjustments, plan version migrations, plan versions after the first, scheduled plan changes |
+
+There is no flag to override this. A release that must be rolled back past one
+of these is rolled back by redeploying the previous image against the current
+schema where that image can run on it (each migration's docstring says what it
+changes for older code), and otherwise fixed forward - never by dropping the
+ledger. If a
+downgrade really is intended (a scratch or staging database), export the
+records first, delete them deliberately, and then downgrade.
+`tests/integration/test_migration_recovery.py` walks each refusal.
+
+### A migration stopped half-way
+
+Migrations that add enum labels (0059, 0063, 0064, 0067, 0068, 0071, 0072,
+0073) or build indexes concurrently (0039, 0040, 0075, 0077, 0078, 0079) end
+with an `autocommit_block()`. **Alembic commits the migration's DDL before that
+block and records the version after it**, because `ALTER TYPE ... ADD VALUE`
+and `CREATE INDEX CONCURRENTLY` cannot run inside a transaction. A failure
+inside the block - a lost connection, a lock timeout, a killed container -
+therefore leaves the DDL committed and `alembic_version` still naming the
+previous revision. Rerunning fails on "already exists". Alembic does not make
+enum additions transactional, and nothing here pretends it does.
+
+1. Read the failure: which revision, and which statement in its block.
+2. Confirm the revision's objects are present - its tables, columns,
+   constraints and triggers (`\d table` in psql), and each enum label it adds
+   (`SELECT enumlabel FROM pg_enum JOIN pg_type t ON t.oid = enumtypid WHERE
+   typname = '...'`). Enum additions use `ADD VALUE IF NOT EXISTS` and index
+   builds drop an `INVALID` leftover before rebuilding, so the block itself is
+   safe to repeat.
+3. If everything before the block is present, record it:
+   `alembic stamp <revision>`, then `alembic upgrade head`, which reruns the
+   rest.
+4. `python -m scripts.db_preflight verify` must then report no unvalidated
+   constraint, invalid index or disabled trigger.
+
+If step 2 finds the DDL only partly present, the failure was before the block,
+the transaction rolled back, and nothing was committed: rerun normally.
+`tests/integration/test_migration_recovery.py` reproduces the half-applied
+state for 0073 and takes it through this path.
+
 ## What to watch
 
 **Start with the metrics.** `/metrics` publishes request rates and latency,

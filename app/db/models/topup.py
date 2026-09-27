@@ -419,7 +419,7 @@ TOPUP_SNAPSHOT_FUNCTION_SQL: Final = """
         END IF;
         RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """
 TOPUP_SNAPSHOT_TRIGGER_SQL: Final = (
     "CREATE TRIGGER topup_purchases_snapshot_immutable BEFORE UPDATE ON topup_purchases "
@@ -440,7 +440,7 @@ TOPUP_SCOPE_FUNCTION_SQL: Final = """
         END IF;
         RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """
 TOPUP_SCOPE_TRIGGER_SQL: Final = (
     "CREATE TRIGGER topup_purchases_product_scope BEFORE INSERT OR UPDATE OF "

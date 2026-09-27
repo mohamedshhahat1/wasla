@@ -456,22 +456,47 @@ def upgrade() -> None:
             op.execute(f"ALTER TYPE audit_action ADD VALUE IF NOT EXISTS '{value}'")
 
 
+# What 0072's downgrade would drop (DB-019). Its guard used to cover top-up
+# invoices only, so a platform grant - which has no invoice - and the catalogue
+# would have gone silently, and a custom plan would have lost its workspace.
+DOWNGRADE_REFUSES = (
+    ("top-up invoices", "SELECT count(*) FROM invoices WHERE purpose::text = 'topup'"),
+    ("top-up purchases and platform grants", "SELECT count(*) FROM topup_purchases"),
+    ("top-up products", "SELECT count(*) FROM topup_products"),
+    ("custom plans", "SELECT count(*) FROM plans WHERE scope::text = 'tenant'"),
+)
+
+
+def _refuse_to_destroy(checks: tuple[tuple[str, str], ...], revision: str) -> None:
+    """Refuse the downgrade while it would drop durable commercial records (DB-019).
+
+    Counted first, and nothing is changed when any is found: a downgrade that
+    silently dropped these would lose money's evidence, not a schema detail.
+    """
+    connection = op.get_bind()
+    found = [
+        f"{label}: {count}"
+        for label, query in checks
+        if (count := connection.exec_driver_sql(query).scalar_one())
+    ]
+    if found:
+        raise RuntimeError(
+            f"Refusing to downgrade {revision}: it would drop commercial records "
+            "(docs/RUNBOOK.md, 'Downgrading past the billing migrations'). "
+            "Nothing has been changed: " + "; ".join(found)
+        )
+
+
 def downgrade() -> None:
     """Return to the 0071 schema.
 
-    Refused while any top-up invoice exists: `invoice_purpose` keeps its
-    `topup` label (PostgreSQL cannot drop one), and a 0071 application reading
-    such an invoice would not know what it is. Custom plans become private
+    Refused while any top-up invoice, purchase, grant or product, or any
+    custom plan, exists (DB-019): `invoice_purpose` keeps its `topup` label
+    (PostgreSQL cannot drop one), a 0071 application reading such an invoice
+    would not know what it is, and the rest would simply be dropped. Custom plans become private
     plans - their subscribers keep them - and the top-up ledger is dropped.
     """
-    op.execute("""
-        DO $$
-        BEGIN
-            IF EXISTS (SELECT 1 FROM invoices WHERE purpose::text = 'topup') THEN
-                RAISE EXCEPTION 'top-up invoices exist; 0072 cannot be downgraded safely';
-            END IF;
-        END $$;
-        """)
+    _refuse_to_destroy(DOWNGRADE_REFUSES, "0072")
     for name, table, _timing, _function in reversed(TRIGGERS):
         op.execute(f"DROP TRIGGER IF EXISTS {name} ON {table}")
     for function in FUNCTIONS:

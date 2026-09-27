@@ -59,7 +59,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.db.base import Base, RevisionedMixin, TimestampMixin, UUIDPrimaryKeyMixin
-from app.db.models.enums import _enum_type
+from app.db.models.enums import _enum_type, ordered_type_ddl
 
 MAX_PLAN_NAME_LENGTH: Final = 100
 MAX_PLAN_CODE_LENGTH: Final = 50
@@ -304,7 +304,12 @@ class BillingAdjustmentKind(StrEnum):
 
 BILLING_INTERVAL_TYPE = _enum_type(BillingInterval, name="billing_interval")
 PLAN_SCOPE_TYPE = _enum_type(PlanScope, name="plan_scope")
-SUBSCRIPTION_STATUS_TYPE = _enum_type(SubscriptionStatus, name="subscription_status")
+SUBSCRIPTION_STATUS_TYPE = _enum_type(
+    SubscriptionStatus,
+    name="subscription_status",
+    # `suspended` was added by a later migration (0037), after `expired`.
+    database_order=("trialing", "active", "past_due", "cancelled", "expired", "suspended"),
+)
 SCHEDULED_CHANGE_SOURCE_TYPE = _enum_type(ScheduledChangeSource, name="scheduled_change_source")
 BILLING_ADJUSTMENT_KIND_TYPE = _enum_type(BillingAdjustmentKind, name="billing_adjustment_kind")
 
@@ -515,7 +520,7 @@ _PLAN_VERSION_IMMUTABLE_FUNCTION = DDL("""
         RAISE EXCEPTION 'plan_versions rows are immutable; publish a new version'
             USING ERRCODE = 'integrity_constraint_violation';
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """)  # type: ignore[no-untyped-call]
 _PLAN_VERSION_IMMUTABLE_TRIGGER = DDL(  # type: ignore[no-untyped-call]
     "CREATE TRIGGER plan_versions_immutable BEFORE UPDATE ON plan_versions "
@@ -560,7 +565,7 @@ CUSTOM_PLAN_SCOPE_FUNCTION_SQL: Final = """
         END IF;
         RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """
 SUBSCRIPTIONS_CUSTOM_PLAN_TRIGGER_SQL: Final = (
     "CREATE TRIGGER subscriptions_custom_plan_scope BEFORE INSERT OR UPDATE OF "
@@ -578,7 +583,7 @@ PLAN_TENANT_IMMUTABLE_FUNCTION_SQL: Final = """
         END IF;
         RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """
 PLAN_TENANT_IMMUTABLE_TRIGGER_SQL: Final = (
     "CREATE TRIGGER plans_tenant_immutable BEFORE UPDATE OF tenant_id, scope ON plans "
@@ -596,7 +601,7 @@ PLAN_DERIVE_SCOPE_FUNCTION_SQL: Final = """
         END IF;
         RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """
 PLAN_DERIVE_SCOPE_TRIGGER_SQL: Final = (
     "CREATE TRIGGER plans_derive_scope BEFORE INSERT ON plans "
@@ -775,6 +780,9 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         return f"Subscription(tenant_id={self.tenant_id!r}, status={self.status!r})"
 
 
+_CREATE_SUBSCRIPTION_STATUS, _DROP_SUBSCRIPTION_STATUS = ordered_type_ddl("subscription_status")
+event.listen(Subscription.__table__, "before_create", _CREATE_SUBSCRIPTION_STATUS)
+event.listen(Subscription.__table__, "after_drop", _DROP_SUBSCRIPTION_STATUS)
 event.listen(Subscription.__table__, "after_create", DDL(CUSTOM_PLAN_SCOPE_FUNCTION_SQL))  # type: ignore[no-untyped-call]
 event.listen(Subscription.__table__, "after_create", DDL(SUBSCRIPTIONS_CUSTOM_PLAN_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 

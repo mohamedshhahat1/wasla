@@ -240,18 +240,41 @@ def upgrade() -> None:
             op.execute(f"ALTER TYPE audit_action ADD VALUE IF NOT EXISTS '{value}'")
 
 
+# What 0073's downgrade would drop (DB-019). Its guard used to cover offer
+# invoices only, so an offer that was never paid - open, declined, expired or
+# withdrawn, each a record of what the platform proposed - went with the table.
+DOWNGRADE_REFUSES = (
+    (
+        "invoices naming an offer",
+        "SELECT count(*) FROM invoices WHERE custom_plan_offer_id IS NOT NULL",
+    ),
+    ("custom plan offers", "SELECT count(*) FROM custom_plan_offers"),
+)
+
+
+def _refuse_to_destroy(checks: tuple[tuple[str, str], ...], revision: str) -> None:
+    """Refuse the downgrade while it would drop durable commercial records (DB-019).
+
+    Counted first, and nothing is changed when any is found: a downgrade that
+    silently dropped these would lose money's evidence, not a schema detail.
+    """
+    connection = op.get_bind()
+    found = [
+        f"{label}: {count}"
+        for label, query in checks
+        if (count := connection.exec_driver_sql(query).scalar_one())
+    ]
+    if found:
+        raise RuntimeError(
+            f"Refusing to downgrade {revision}: it would drop commercial records "
+            "(docs/RUNBOOK.md, 'Downgrading past the billing migrations'). "
+            "Nothing has been changed: " + "; ".join(found)
+        )
+
+
 def downgrade() -> None:
-    # Refused while any invoice names an offer: dropping the column would
-    # erase which checkout bought which negotiated terms.
-    op.execute("""
-        DO $$
-        BEGIN
-            IF EXISTS (SELECT 1 FROM invoices WHERE custom_plan_offer_id IS NOT NULL) THEN
-                RAISE EXCEPTION 'invoices name custom plan offers; refusing to downgrade';
-            END IF;
-        END
-        $$
-    """)
+    # Refused while any offer, or any invoice naming one, exists (DB-019).
+    _refuse_to_destroy(DOWNGRADE_REFUSES, "0073")
     op.execute("DROP TRIGGER IF EXISTS invoices_custom_plan_offer ON invoices")
     op.execute("DROP FUNCTION IF EXISTS invoices_refuse_offer_mismatch()")
     op.drop_index("ix_invoices_custom_plan_offer_id", table_name="invoices")

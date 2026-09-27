@@ -544,13 +544,52 @@ def upgrade() -> None:
             op.execute(f"ALTER TYPE audit_action ADD VALUE IF NOT EXISTS '{value}'")
 
 
+# What 0071's downgrade would drop that cannot be derived again (DB-019). A
+# version 1 pinned by a subscription or an invoice is re-derived from its plan
+# by the upgrade - with no later version, the plan still holds its terms - so
+# rows carried forward from 0070 still round-trip. Anything below cannot be.
+DOWNGRADE_REFUSES = (
+    ("billing incidents", "SELECT count(*) FROM billing_incidents"),
+    ("billing adjustments", "SELECT count(*) FROM billing_adjustments"),
+    ("plan version migrations", "SELECT count(*) FROM plan_version_migrations"),
+    ("edited plan versions", "SELECT count(*) FROM plan_versions WHERE version > 1"),
+    (
+        "scheduled plan changes",
+        "SELECT count(*) FROM subscriptions WHERE scheduled_change_at IS NOT NULL",
+    ),
+)
+
+
+def _refuse_to_destroy(checks: tuple[tuple[str, str], ...], revision: str) -> None:
+    """Refuse the downgrade while it would drop durable commercial records (DB-019).
+
+    Counted first, and nothing is changed when any is found: a downgrade that
+    silently dropped these would lose money's evidence, not a schema detail.
+    """
+    connection = op.get_bind()
+    found = [
+        f"{label}: {count}"
+        for label, query in checks
+        if (count := connection.exec_driver_sql(query).scalar_one())
+    ]
+    if found:
+        raise RuntimeError(
+            f"Refusing to downgrade {revision}: it would drop commercial records "
+            "(docs/RUNBOOK.md, 'Downgrading past the billing migrations'). "
+            "Nothing has been changed: " + "; ".join(found)
+        )
+
+
 def downgrade() -> None:
     """Return to the 0070 schema.
 
     Versions, adjustments and incidents are dropped with their tables; the
     ledger's cascade semantics and the all-invoices period uniqueness return.
     The audit labels stay: PostgreSQL cannot drop an enum label.
+
+    Refused while it would drop a record `DOWNGRADE_REFUSES` names (DB-019).
     """
+    _refuse_to_destroy(DOWNGRADE_REFUSES, "0071")
     for table, name, _expression in reversed(CHECKS):
         op.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}")
     for table, name, column, target, old, _new in FOREIGN_KEYS:

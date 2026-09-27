@@ -147,12 +147,18 @@ class PlatformSubscriptionRepository(BaseRepository[Subscription]):
     model = Subscription
 
     async def counts(self) -> list[SubscriptionCount]:
+        """How many subscriptions are in each status, in `SubscriptionStatus` order.
+
+        Sorted here rather than by `ORDER BY status`: a PostgreSQL enum sorts
+        by the order its labels were added, which is history, not
+        presentation (DB-015).
+        """
         result = await self.session.execute(
-            select(Subscription.status, func.count())
-            .group_by(Subscription.status)
-            .order_by(Subscription.status)
+            select(Subscription.status, func.count()).group_by(Subscription.status)
         )
-        return [SubscriptionCount(status=row[0], count=int(row[1])) for row in result.all()]
+        order = list(SubscriptionStatus)
+        rows = sorted(result.all(), key=lambda row: order.index(row[0]))
+        return [SubscriptionCount(status=row[0], count=int(row[1])) for row in rows]
 
     async def get_by_id(self, subscription_id: uuid.UUID | None) -> Subscription | None:
         """One subscription by its own id, across every workspace.

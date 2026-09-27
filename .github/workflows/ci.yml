@@ -221,6 +221,12 @@ jobs:
           alembic downgrade base
           alembic upgrade head
 
+      - name: Every rule the migrations declare is enforced
+        # `alembic upgrade` exiting 0 does not mean every constraint was
+        # validated, every concurrent index finished and every trigger is on
+        # (DB-027). The same check the `migrate` command runs after upgrading.
+        run: python -m scripts.db_preflight verify
+
       - name: No model drift against migrations
         run: alembic check
 

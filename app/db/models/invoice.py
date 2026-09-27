@@ -736,7 +736,7 @@ PAYMENTS_NO_AUTOMATIC_TOPUP_FUNCTION_SQL: Final = """
         END IF;
         RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """
 PAYMENTS_NO_AUTOMATIC_TOPUP_TRIGGER_SQL: Final = (
     "CREATE TRIGGER payments_no_automatic_topup BEFORE INSERT OR UPDATE OF "
