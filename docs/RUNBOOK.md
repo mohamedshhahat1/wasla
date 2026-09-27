@@ -1510,6 +1510,40 @@ the transaction rolled back, and nothing was committed: rerun normally.
 `tests/integration/test_migration_recovery.py` reproduces the half-applied
 state for 0073 and takes it through this path.
 
+### The database is struggling
+
+The API publishes the server's own view at each scrape (DB-023):
+`wasla_db_connections{state}`, `wasla_db_max_connections`,
+`wasla_db_lock_waiting_sessions`, `wasla_db_oldest_transaction_age_seconds`,
+`wasla_db_deadlocks_total`, `wasla_db_size_bytes` and
+`wasla_db_dead_tuples{table}`. The server log carries the detail: statements
+over a second, lock waits over `deadlock_timeout` with the blocking process,
+and long autovacuums.
+
+- **`DatabaseDeadlocks`** - the settlement lock order (payment, then invoice,
+  then subscription, then offer or top-up) is designed not to deadlock, so
+  one is a code path taking locks in another order. The server log names both
+  statements; find their call sites.
+- **`DatabaseConnectionsNearLimit`** - compare each process's
+  `wasla_db_pool_checked_out` with the budget in docs/DEPLOYMENT.md. Scaling
+  replicas without resizing pools is the usual cause.
+- **`DatabaseLockWaits` / `DatabaseLongTransaction`** -
+
+  ```sql
+  SELECT pid, usename, state, now() - xact_start AS open_for, wait_event_type,
+         pg_blocking_pids(pid) AS blocked_by, left(query, 120)
+    FROM pg_stat_activity WHERE datname = current_database() ORDER BY xact_start;
+  ```
+
+  Runtime sessions are bounded by `DATABASE_STATEMENT_TIMEOUT_MS`,
+  `DATABASE_LOCK_TIMEOUT_MS` and the idle-in-transaction timeout (DB-007), so
+  an old transaction is almost always a purge, a migration or somebody's psql.
+  `pg_cancel_backend(pid)` first; `pg_terminate_backend(pid)` only if it will
+  not stop.
+- **`DatabaseDeadTuplesHigh`** - check `last_autovacuum` in
+  `pg_stat_user_tables` and whether a long transaction is holding vacuum back;
+  a manual `VACUUM (ANALYZE) <table>` is safe at any time.
+
 ## What to watch
 
 **Start with the metrics.** `/metrics` publishes request rates and latency,

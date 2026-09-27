@@ -115,8 +115,38 @@ if [ -z "${exists}" ]; then
     admin "CREATE DATABASE \"${target}\"" >/dev/null || fail "could not create ${target}"
 fi
 
+verify() {
+    psql --no-password --quiet --tuples-only --no-align --dbname="${target}" -c "$1"
+}
+
+# ---------------------------------------------------- prerequisites (DB-010)
+#
+# pgvector is not a trusted extension: only a superuser can create it, and the
+# dump's first statement does. A restore run as a database owner that is not a
+# superuser - a managed server, or a hardened self-hosted one - used to fail
+# there, with the target half-made. Now the extensions are made present first,
+# or the restore stops with what to do about it; once they are present the
+# dump's own extension entries are skipped, because re-commenting an extension
+# needs its owner, which this identity may not be.
+for extension in vector pgcrypto; do
+    present="$(verify "SELECT 1 FROM pg_extension WHERE extname = '${extension}'")"
+    if [ -z "${present}" ]; then
+        verify "CREATE EXTENSION IF NOT EXISTS \"${extension}\"" >/dev/null 2>&1 \
+            || fail "extension ${extension} is not installed in ${target} and ${PGUSER} cannot \
+create it. A superuser must run CREATE EXTENSION IF NOT EXISTS ${extension}; in ${target} \
+(self-hosted), or enable it through the provider's extension allow-list (managed). \
+See docs/BACKUP.md, \"Restore prerequisites\"."
+    fi
+done
+log "extensions present: vector, pgcrypto"
+
 # ------------------------------------------------------------------ restore
 log "restoring ${dump} into ${target}"
+contents="$(mktemp)"
+trap 'rm -f "${contents}"' EXIT
+pg_restore --list "${dump}" \
+    | grep -v -E ' (EXTENSION|COMMENT) - (EXTENSION )?(vector|pgcrypto)( |$)' >"${contents}" \
+    || fail "could not read the contents of ${dump}"
 # --exit-on-error, so a partially restored database is never reported as a
 # success. Without it pg_restore reports errors and carries on, and the shape
 # of that failure is a database that looks restored and is missing a table.
@@ -126,14 +156,12 @@ if ! pg_restore \
     --no-owner \
     --no-privileges \
     --exit-on-error \
+    --use-list="${contents}" \
     "${dump}"; then
     fail "pg_restore exited non-zero; ${target} is not a usable restore"
 fi
 
 # ----------------------------------------------------------------- verify
-verify() {
-    psql --no-password --quiet --tuples-only --no-align --dbname="${target}" -c "$1"
-}
 
 tables="$(verify "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'")"
 [ "${tables:-0}" -gt 0 ] || fail "the restored database has no tables"
@@ -161,5 +189,29 @@ fi
 tenants="$(verify "SELECT count(*) FROM tenants")"
 users="$(verify "SELECT count(*) FROM users")"
 log "rows: ${tenants} tenants, ${users} users"
+
+# Every rule the schema declares is being enforced (DB-027): no constraint left
+# NOT VALID, no index left INVALID, no trigger disabled. The same three checks
+# `python -m scripts.db_preflight verify` makes after a migration; restated in
+# SQL because this image carries psql, not the application.
+unenforced="$(verify "
+    SELECT string_agg(item, ', ') FROM (
+        SELECT 'constraint ' || c.relname || '.' || k.conname AS item
+          FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND NOT k.convalidated
+        UNION ALL
+        SELECT 'index ' || i.relname
+          FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid
+          JOIN pg_namespace n ON n.oid = i.relnamespace
+         WHERE n.nspname = 'public' AND NOT (x.indisvalid AND x.indisready)
+        UNION ALL
+        SELECT 'trigger ' || c.relname || '.' || g.tgname
+          FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND NOT g.tgisinternal AND g.tgenabled = 'D'
+    ) problems")"
+[ -z "${unenforced}" ] || fail "restored schema is not enforcing: ${unenforced}"
+log "constraints validated, indexes valid, triggers enabled"
 
 log "done: ${target} is restored and verified"

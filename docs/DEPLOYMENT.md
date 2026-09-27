@@ -82,6 +82,28 @@ Keep the fingerprint key stable: changing it requires an explicit rehash of
 every payment method under the new key. A downgrade with saved cards is refused
 because returning to the old schema would restore plaintext token storage.
 
+### Connection budget
+
+PostgreSQL refuses connections past `max_connections`, which the production
+compose file leaves at the default of **100** (3 of them reserved for
+superusers). Every process's pool is `DATABASE_POOL_SIZE` (5) plus
+`DATABASE_MAX_OVERFLOW` (10):
+
+| Consumer | Connections at most |
+| --- | --- |
+| API, 2 replicas × (5 + 10) | 30 |
+| Worker, 2 replicas × (5 + 10) | 30 |
+| `migrate` — Alembic, then `db_preflight`, then provisioning, one after another | 1 |
+| `backup` — a single `pg_dump` | 1 |
+| Operator sessions (`psql`, `queues`, `platform-role`) | ~3 |
+| Database health gauges (DB-023) — read through the API's own pool at scrape time | 0 extra |
+| **Total** | **~65 of 97 usable, about a third spare** |
+
+No exporter or second monitoring identity was added: the `wasla_db_*` series
+are queries the API already had the connection for. Adding a replica of either
+process adds fifteen; past five of each, raise `max_connections` or lower the
+pools before scaling. `DatabaseConnectionsNearLimit` fires at 80%.
+
 `docker-compose.yml` targets local development with reload and mounted source. `docker-compose.prod.yml` targets production with pinned images, no source mounts, and stricter resource and restart policies.
 
 Every secret in the production file is required and interpolated from the deployment environment — compose fails to start rather than falling back to an insecure default. The settings added in phases 13 and 14 are wired through it explicitly, with defaults chosen so that omitting them is a *specific* outcome rather than a vague one:
