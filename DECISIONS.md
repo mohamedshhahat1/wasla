@@ -5914,3 +5914,71 @@ exact terms before paying, can decline, and is never charged a renewal price
 they did not accept. A custom offer cheaper than a pricier paid period in
 progress is refused at acceptance like any downgrade (ADR-112), which is a
 product limitation recorded in CUSTOM_PLANS_TOPUPS_IMPLEMENTATION.md.
+
+## ADR-115 — The Database Enforces The Ledger; Tenancy Stays Application-Scoped Without RLS
+
+**Context.** The PostgreSQL audit (DATABASE_AUDIT.md, score 62/100, NOT READY)
+found the ledger's promises held in Python and contradicted by what PostgreSQL
+would accept: two concurrent settlements of one invoice both applied (DB-001),
+settlement paths took their row locks in different orders and deadlocked
+(DB-003), direct SQL could bind one workspace's money to another's invoice
+(DB-004) and rewrite a paid invoice (DB-005), and the runtime role could
+rewrite the audit trail (DB-006). It also recorded that row-level security is
+not used (DB-022) and that account deletion keeps email and name (DB-021).
+
+**Decision.**
+
+1. **One settlement lock order**, everywhere money is applied: payment, then
+   invoice, then subscription, then the offer or top-up that depends on them,
+   each `FOR NO KEY UPDATE` and re-read after locking. Callbacks,
+   reconciliation, MOTO and hosted renewals, offer and top-up checkouts,
+   operator and legacy manual payments and voids all take it through
+   `InvoiceSettlement.lock`; the refusal of a second payment is decided on the
+   locked state, and the loser is held with a `duplicate_payment` incident,
+   never discarded.
+2. **The database is the backstop, not the first line.** Commit-time triggers
+   require an invoice's `amount_paid` to equal the net of its applied payments
+   and every unapplied collected payment to be held by an incident (0074);
+   composite `(tenant_id, id)` foreign keys bind every financial row to its own
+   workspace, and a subscription's version to its own plan (0077); triggers
+   freeze settled invoices and collected payments while allowing the documented
+   refund, void and reversal transitions (0077); CHECKs and a partial unique
+   index enforce period order, one active default card and one account per
+   address ignoring case (0078). Every trigger function pins
+   `search_path = public, pg_catalog` and runs as its caller (0080). Each rule
+   was proved against direct SQL, and each migration refuses to install over
+   existing rows that break it rather than repairing them.
+3. **The runtime role cannot rewrite evidence.** `audit_logs` is SELECT and
+   INSERT only; `billing_incidents` has no DELETE and UPDATE only on its
+   resolution columns, and a trigger freezes its evidence for every role.
+   Runtime sessions carry statement, lock and idle-in-transaction timeouts;
+   the purge and the migration identity set their own.
+4. **No transaction is held across a provider call.** Checkout commits its
+   pending attempt, calls Paymob with no connection or row lock held, and binds
+   the answer in a second short transaction under the settlement locks.
+5. **Row-level security is not adopted (DB-022).** A single application role
+   serves every workspace; RLS would add defence only with a per-request
+   `SET app.tenant` that every session path, worker and sweep would have to
+   carry, and a missed one fails open or closed at runtime rather than at
+   review. The defence model is: tenant-scoped repositories, composite
+   tenant foreign keys on every tenant-owned relation (ADR-100, ADR-111 and
+   point 2), billing triggers, and the runtime role's restricted privileges.
+   The cross-tenant gap the audit found was DB-004, and it is closed by keys,
+   not by RLS.
+6. **Account deletion stays a tombstone (DB-021).** The row, address and name
+   are kept; the address stays reserved, ignoring case; re-registration is not
+   supported. This records the existing policy in docs/AUTH.md; erasure is a
+   product and legal decision not taken here.
+7. **Recovery is held to RPO ≤ 5 minutes and RTO ≤ 2 hours** by WAL archiving or
+   managed PITR (docs/BACKUP.md), with the mechanism drilled locally by
+   `scripts/pitr_drill.sh`. A deployment has not verified it yet, and until
+   one does its RPO is the daily dump's.
+
+**Consequences.** Concurrent double settlement, cross-workspace financial
+bindings and settled-history rewrites are refused by PostgreSQL however they are
+attempted, and the application's own paths refuse them first with a proper
+error and an incident. Migrations after 0073 validate constraints online
+(`NOT VALID` then `VALIDATE`, concurrent indexes) and `scripts/db_preflight.py
+verify` fails a deploy or restore that leaves a rule unenforced. Tenant
+isolation remains a property of the repositories plus keys; a future
+multi-role or externally-queried architecture would revisit RLS.

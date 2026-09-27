@@ -124,6 +124,16 @@ Unchanged by this work and written down so it is not changed by accident:
   clean refusal belongs.
 - **There is no undelete.** Not by the person, not by platform staff. Reversing
   one is a database operation, in [RUNBOOK.md](RUNBOOK.md).
+- **Deletion is tombstoning, not erasure** (DB-021). The `users` row stays, with
+  its email address and name, so every foreign key that names the person keeps
+  resolving; `user_deleted` in the audit trail records the address as its
+  label. Nothing anonymises either later. This is intentional and it is the
+  current policy, not a gap: a right-to-erasure process, if one is required,
+  is a product and legal decision that would change this list, add a
+  migration for the rows involved, and has not been made.
+- **Re-registering the same address is not supported**, in any letter case:
+  the address is unique ignoring case at the database (DB-025), tombstones
+  included. `test_deletion_is_a_tombstone_not_an_erasure` holds all of this.
 
 Platform staff close somebody else's account with
 `DELETE /platform/users/{user_id}`, which follows the same policy. Both write
