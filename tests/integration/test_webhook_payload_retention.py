@@ -8,6 +8,7 @@ row stays: its event id still deduplicates Meta's retries.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
@@ -287,3 +288,44 @@ async def test_the_worker_drains_a_backlog_in_short_batches(
     retention = counters.hashes[f"{COUNTER_PREFIX}:wasla_webhook_payload_retention_total"]
     assert retention["outcome=redacted"] == 8
     assert "outcome=pending" not in retention
+
+
+async def test_the_running_worker_redacts_on_every_pass(
+    committed: tuple[Database, list[uuid.UUID]],
+    small_batches: Settings,
+    counters: FakeQueueRedis,
+    tmp_path: Path,
+) -> None:
+    """The loop, not only the method: a pass of `run_forever` clears old payloads.
+
+    The sweep above is called directly; this is what makes it happen in a
+    deployment. A worker whose loop stopped calling it would leave every
+    payload in place for ever while the method's own test stayed green.
+    """
+    database, tenants = committed
+    async with database.session() as session:
+        tenant, account = await _workspace(session)
+        tenants.append(tenant.id)
+        old = await _event(session, tenant, account)
+
+    worker = RetentionWorker(
+        database=database,
+        settings=small_batches,
+        storage=LocalMediaStorage(tmp_path),
+        poll_seconds=0.05,
+    )
+    running = asyncio.create_task(worker.run_forever())
+    payload: object = PAYLOAD
+    try:
+        for _ in range(200):
+            async with database.session() as session:
+                payload = await session.scalar(
+                    select(WhatsAppEvent.payload).where(WhatsAppEvent.id == old.id)
+                )
+            if payload is None:
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        worker.stop()
+        await asyncio.wait_for(running, timeout=30)
+    assert payload is None

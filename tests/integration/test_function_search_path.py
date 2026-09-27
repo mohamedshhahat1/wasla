@@ -51,7 +51,13 @@ async def test_no_function_runs_with_its_owners_rights(db_connection: AsyncConne
 
 
 async def test_conversations_leave_room_for_hot_updates(db_connection: AsyncConnection) -> None:
+    """Ninety, the value migration 0080 sets and the measurement was taken at.
+
+    A literal rather than the model's constant: compared with the constant, a
+    change to it would change the expectation too and prove nothing.
+    """
+    assert CONVERSATIONS_FILLFACTOR == 90
     options = await db_connection.scalar(
         text("SELECT reloptions FROM pg_class WHERE relname = 'conversations'")
     )
-    assert f"fillfactor={CONVERSATIONS_FILLFACTOR}" in (options or [])
+    assert "fillfactor=90" in (options or [])
