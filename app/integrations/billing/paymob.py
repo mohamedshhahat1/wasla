@@ -937,9 +937,8 @@ class PaymobProvider:
         happen.
 
         The event id pairs the transaction with the state - see
-        `CallbackEvent.event_id`. That pairing is the whole reason a refund
-        notification about the original transaction is not swallowed as a
-        duplicate of the payment.
+        `CallbackEvent.event_id` - and, for a reversal of the collecting
+        transaction, with the cumulative total returned (PAY-E2E-01).
         """
         success = bool(transaction.get("success"))
         pending = bool(transaction.get("pending"))
@@ -967,6 +966,11 @@ class PaymobProvider:
         transaction_id = str(transaction.get("id"))
         parent = transaction.get("parent_transaction")
         refunded_cents = transaction.get("refunded_amount_cents")
+        cumulative_cents = (
+            refunded_cents
+            if isinstance(refunded_cents, int) and not isinstance(refunded_cents, bool)
+            else None
+        )
 
         failure_reason: str | None = None
         if kind is EventKind.FAILED:
@@ -976,8 +980,17 @@ class PaymobProvider:
                 if isinstance(message, str):
                     failure_reason = message[:MAX_FAILURE_REASON_LENGTH]
 
+        event_id = f"{transaction_id}:{kind.value}"
+        if kind in (EventKind.REFUNDED, EventKind.VOIDED):
+            # One event per cumulative state of the parent (PAY-E2E-01). A
+            # void carries no refunded total and reverses everything, so its
+            # state is the whole amount.
+            amount_cents = transaction.get("amount_cents")
+            state = cumulative_cents if cumulative_cents else amount_cents
+            event_id = f"{event_id}:{state}"
+
         return CallbackEvent(
-            event_id=f"{transaction_id}:{kind.value}",
+            event_id=event_id,
             reference=str(reference) if reference else None,
             kind=kind,
             status=_STATUS_FOR_KIND[kind],
@@ -990,9 +1003,7 @@ class PaymobProvider:
             # given back". The documented sample carries null on a fresh
             # payment.
             refunded_amount=(
-                _from_cents(refunded_cents)
-                if isinstance(refunded_cents, int) and not isinstance(refunded_cents, bool)
-                else None
+                _from_cents(cumulative_cents) if cumulative_cents is not None else None
             ),
             failure_reason=failure_reason,
             order_id=str(order_id) if order_id not in (None, "") else None,

@@ -141,6 +141,16 @@ class CallbackEvent:
     `provider_transaction_id` is the raw id, kept because it is the number a
     support conversation and the provider's dashboard both use.
 
+    A reversal reported on the *collecting* transaction carries the provider's
+    **cumulative** refunded total in `refunded_amount`, and its `event_id`
+    includes that total (PAY-E2E-01). Paymob allows several partial refunds of
+    one transaction and reports each on the same parent id - 30.00, then 99.00
+    - so an id of the parent and the state alone made every refund after the
+    first a "duplicate" of it. With the total in the id, a replay of one
+    cumulative state is still a duplicate of itself and a larger total is a
+    new event; `CheckoutService` applies only the difference from what it
+    already recorded, so a late, smaller total changes nothing.
+
     `parent_transaction_id` is documented as present on a refund or a void: it
     names the transaction being reversed. It is a second way to find the
     payment when the reversal does not carry our own reference home.

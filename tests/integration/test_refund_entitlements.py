@@ -60,7 +60,6 @@ HMAC_SECRET = "a-test-hmac-secret"
 FREE_PLAN = "starter"
 PAID_PLAN = "pro"
 PAID_TRANSACTION = "192036465"
-SECOND_TRANSACTION = "192036999"
 OTHER_PAID_PLAN = "business"
 FREE_AGENTS = 1
 PAID_AGENTS = 20
@@ -675,13 +674,10 @@ async def test_a_second_partial_reversal_that_empties_the_invoice_withdraws(
     await _reverse(db_session, tenant, payment, returned="50.00")
     assert await _plan_code(db_session, subscription) == PAID_PLAN
 
-    await _reverse(
-        db_session,
-        tenant,
-        payment,
-        returned="99.00",
-        transaction=SECOND_TRANSACTION,
-    )
+    # The same parent transaction with the new running total: how Paymob
+    # reports a second partial refund (PAY-E2E-01). This used to be sent on a
+    # second transaction id, which is why the dropped refund went unseen.
+    await _reverse(db_session, tenant, payment, returned="99.00")
 
     await db_session.refresh(invoice)
     assert invoice.amount_paid == Decimal("0.00")

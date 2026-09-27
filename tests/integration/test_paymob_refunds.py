@@ -568,6 +568,10 @@ async def test_a_partial_reversal_then_the_rest_adds_up_once(db_session: AsyncSe
     """The running total is cumulative, so the *difference* is what came back.
 
     Adding the reported figure each time would return 150 of a 99 payment.
+    Both notifications are about the **same** parent transaction, as real
+    Paymob sends them (PAY-E2E-01: 542754263 reported 3000, then 9900). An
+    earlier version gave each its own transaction id, which is how the second
+    refund being dropped as a duplicate went unnoticed.
     """
     tenant = await _tenant(db_session)
     invoice, payment = await _paid(db_session, tenant)
@@ -575,12 +579,12 @@ async def test_a_partial_reversal_then_the_rest_adds_up_once(db_session: AsyncSe
     first = await _apply(
         db_session,
         tenant,
-        _reversal(reference=str(payment.id), transaction="1001", refunded_cents=4000),
+        _reversal(reference=str(payment.id), refunded_cents=4000),
     )
     second = await _apply(
         db_session,
         tenant,
-        _reversal(reference=str(payment.id), transaction="1002", refunded_cents=9900),
+        _reversal(reference=str(payment.id), refunded_cents=9900),
     )
 
     assert (first, second) == (APPLIED, APPLIED)
@@ -657,26 +661,22 @@ async def test_a_reversal_naming_nothing_of_ours_is_recorded_and_ignored(
     assert outcome == UNMATCHED
 
 
-async def test_a_reversal_repeated_at_the_same_total_reports_no_change(
+async def test_a_smaller_running_total_arriving_late_reports_no_change(
     db_session: AsyncSession,
 ) -> None:
-    """A second, distinct notification saying the same thing as the first.
+    """Two states of one parent transaction, delivered out of order.
 
-    Not a duplicate - it is a different event id - and not a change either.
-    Recording it as `applied` would say money moved when none did.
+    Not a duplicate - a different running total is a different event - and
+    not a change either: the provider has already said more went back.
+    Recording it as `applied`, or lowering the total, would say money came
+    back *into* the account.
     """
     tenant = await _tenant(db_session)
     _, payment = await _paid(db_session, tenant)
 
-    await _apply(
-        db_session,
-        tenant,
-        _reversal(reference=str(payment.id), transaction="1001", refunded_cents=9900),
-    )
+    await _apply(db_session, tenant, _reversal(reference=str(payment.id), refunded_cents=9900))
     outcome = await _apply(
-        db_session,
-        tenant,
-        _reversal(reference=str(payment.id), transaction="1002", refunded_cents=9900),
+        db_session, tenant, _reversal(reference=str(payment.id), refunded_cents=3000)
     )
 
     assert outcome == NO_CHANGE

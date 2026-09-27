@@ -820,14 +820,41 @@ class CheckoutService:
           ever tries to collect money that was deliberately given back.
         - **An unrequested partial reversal** - a chargeback, a dashboard
           refund - leaves a genuine debt: the invoice reopens and is dunned.
+
+        **The provider's figure is a running total** (PAY-E2E-01). Paymob
+        reports every refund of a transaction on that transaction, with
+        `refunded_amount_cents` the cumulative amount returned so far, and
+        allows several partial refunds. So the money this event moves is the
+        *difference* from what is already recorded: 30 then 99 returns 30 and
+        then 69. The same total again is a replay; a smaller total arriving
+        late is stale provider state and the higher total stands - the
+        database refuses `refunded_amount` going down in any case.
         """
         refunded = event.refunded_amount if event.refunded_amount else event.amount
         if refunded <= 0 or refunded > payment.amount:
             return MISMATCHED, f"Refund of {refunded} against a payment of {payment.amount}."
+        reversed_transaction = self._reversed_transaction(event, payment=payment)
+        if reversed_transaction is not None:
+            return MISMATCHED, reversed_transaction
         if payment.status not in (PaymentStatus.SUCCEEDED, PaymentStatus.REFUNDED):
             return REFUSED, f"{payment.status.value} was never collected."
-        if refunded <= payment.refunded_amount:
+        if refunded == payment.refunded_amount:
             return NO_CHANGE, f"Already refunded {payment.refunded_amount}."
+        if refunded < payment.refunded_amount:
+            logger.info(
+                "billing.refund_state_stale",
+                extra={
+                    "event": "billing.refund_state_stale",
+                    "tenant_id": str(self._tenant_id),
+                    "payment_id": str(payment.id),
+                    "reported_total": str(refunded),
+                    "recorded_total": str(payment.refunded_amount),
+                },
+            )
+            return NO_CHANGE, (
+                f"Stale provider callback: a refunded total of {refunded} arrived after "
+                f"{payment.refunded_amount} was recorded; the higher total stands."
+            )
 
         requested = payment.refund_requested_amount
         operator_requested = requested is not None and refunded <= requested
@@ -935,6 +962,27 @@ class CheckoutService:
 
         await record_billing_refund("confirmed")
         return APPLIED, f"Refunded {returned}."
+
+    @staticmethod
+    def _reversed_transaction(event: CallbackEvent, *, payment: Payment) -> str | None:
+        """Why this reversal is of some other transaction than this payment's, or None.
+
+        A reversal is found by its order, and one order can carry more than one
+        collection - a page paid twice (BILL-15). Returning the second one must
+        not take money off the invoice the first one funded, so the reversed
+        transaction has to be the one this payment recorded: the event's own
+        id for a reversal reported on the parent, or the parent it names. A
+        payment that never recorded one has nothing to compare with.
+        """
+        recorded = payment.provider_reference
+        if not recorded:
+            return None
+        if recorded in (event.provider_transaction_id, event.parent_transaction_id):
+            return None
+        return (
+            f"The reversal is of transaction {event.provider_transaction_id}, "
+            f"this payment collected {recorded}."
+        )
 
     def _provider_name(self) -> str:
         return self._provider.name if self._provider is not None else "unknown"
