@@ -87,6 +87,51 @@ of `deploy/monitoring/alerts.yml`: `BillingDuplicatePayment`,
 `BillingTopupCallbackMismatchSpike`, `BillingTopupReconciliationStuck` and
 `BillingCustomPlanFailureSpike` (ADR-113). Each one has a promtool unit test.
 
+## Monthly and yearly prices (ADR-116)
+
+**One plan, one set of limits, several prices.** `Business v4` is a
+`plan_versions` row: its limits. `299 EGP a month` and `2,990 EGP a year` are two
+`plan_prices` rows of it. Choosing between them decides how often the customer
+is billed and nothing about what they may do - the limits are the version's.
+
+| Concept | Where | Meaning |
+| --- | --- | --- |
+| Plan | `plans` | The product's identity: code, name, scope |
+| Plan version | `plan_versions` | Immutable entitlements. `price = 0` marks a free version (no prices, never checked out) |
+| Plan price | `plan_prices` | Immutable amount per billing term (`monthly`/`yearly` x `interval_count`, only 1 sold); retired, never edited or deleted; one active per version, term and currency |
+| Billing term | `subscriptions.current_period_*` | What the last payment covers: a month or a year |
+| Usage cycle | `subscriptions.usage_period_*` | The calendar month the `period_*` allowances count over, inside the term |
+
+- **Subscriptions, scheduled changes, invoices and offers pin a price.** A
+  deferred trigger refuses a live subscription on a priced version without
+  one; composite keys make every pinned price a price of the version beside
+  it; a trigger makes a priced invoice charge exactly its price's amount,
+  currency and term and never change it.
+- **A priced version is published with its price.** Inserting a version with
+  `price > 0` inserts its first `plan_prices` row in the same statement;
+  further terms are added by the catalogue API.
+- **Usage resets monthly on a yearly price.** `period_messages: 100000` is
+  100,000 a month, never 1.2 million at once. The entitlement engine counts the
+  cycle the clock is in; the sweep records it (`_advance_usage`) with no
+  invoice, no charge and no change to the billing term, catching up any number
+  of missed months in one step.
+- **Capacities** (`storage_bytes`, `whatsapp_numbers`, `team_members`,
+  `knowledge_documents`) are continuous and do not reset.
+- **Top-ups:** a usage top-up expires with its monthly usage cycle; a capacity
+  top-up with the billing term (a year on a yearly price). Expiry deletes
+  nothing.
+- **Changes** (`commercial_policy.change_timing`): monthly -> yearly and any
+  higher tier is a purchase now - full price, new term from settlement, no
+  credit; yearly -> monthly, any lower tier and any change to free wait for the
+  end of the paid term at a pinned price. Tiers across terms are compared on the
+  current term's price, else annualised by calendar months.
+- **Renewal** of a yearly price is one invoice for the year: one MOTO charge on
+  a saved card, or a hosted checkout without one. Cancelling ends at the end of
+  the paid year; usage cycles roll monthly until then.
+- **Migrations** keep each subscriber on their term: monthly to the target's
+  monthly price, yearly to its yearly price; a target not sold on a term in use
+  is refused.
+
 ## Custom plans and top-ups (ADR-113)
 
 Two ways to sell a workspace more than the public catalogue does, built on the

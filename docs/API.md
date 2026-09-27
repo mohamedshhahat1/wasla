@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **192 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **198 operations**, of which
 17 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -180,22 +180,30 @@ Accepting an invitation for an address that already has an account adds or reins
 | Method | Path | Purpose | Access |
 | --- | --- | --- | --- |
 | POST | `/api/v1/billing/subscription` | Choose a **free** plan for a workspace that has none (`201`); a priced plan answers `402` | Workspace **owner** |
-| POST | `/api/v1/billing/subscription/plan` | Move to another **free** plan; a cheaper plan while on a paid one is **scheduled for the period end**; a pricier one answers `402` | Workspace **owner** |
+| POST | `/api/v1/billing/subscription/plan` | Ask for another plan or billing term: `{"plan_price_id"}` (or `{"plan_code"}` for its monthly price). Free to free applies now; a lower tier or a **shorter term** (yearly -> monthly) is **scheduled for the end of the paid term**, pinned to that price; a higher tier or a **longer term** (monthly -> yearly) answers `402` - buy it at checkout | Workspace **owner** |
 | POST | `/api/v1/billing/subscription/scheduled-change/cancel` | Withdraw a scheduled downgrade | Workspace **owner** |
-| POST | `/api/v1/billing/checkout` | Open a hosted payment page for a plan or an outstanding invoice (`201`) | Workspace **owner** |
+| POST | `/api/v1/billing/checkout` | Open a hosted payment page for a price (`plan_price_id`), a plan's monthly price (`plan_code`, earlier clients) or an outstanding invoice (`201`) | Workspace **owner** |
 | GET | `/api/v1/billing/payments/{id}` | Where one payment attempt has got to | Workspace **owner** |
 | POST | `/api/v1/billing/payments/{id}/refund` | **Ask** platform staff for a refund (`202`); no money moves (ADR-112) | Workspace **owner** |
 | POST | `/api/v1/webhooks/paymob` | Receive a payment provider callback | Public, HMAC-verified |
 
 ```
-POST /api/v1/billing/checkout   {"plan_code": "pro"}
+POST /api/v1/billing/checkout   {"plan_price_id": "<Business yearly price id>"}
   -> 201 {"redirect_url": "https://eg.checkout.paymob.com/?publicKey=...&clientSecret=...",
-          "payment_id": "...", "invoice_id": "...", "amount": "99.00", "currency": "EGP"}
+          "payment_id": "...", "invoice_id": "...", "amount": "2990.00", "currency": "EGP"}
 ```
 
-The request names **either a `plan_code` or an `invoice_id`**, and exactly one
-of them — naming a plan is choosing what to buy, naming an invoice is paying a
-renewal the sweep already issued. Amount, currency and workspace come from the
+The request names **exactly one of `plan_price_id`, `plan_code` or
+`invoice_id`** — naming a price is choosing what to buy and how often to pay
+for it (ADR-116); `plan_code` alone buys that plan's **monthly** price, as it
+always did, and is refused for a plan sold only yearly; naming an invoice is
+paying a renewal the sweep already issued. A yearly price is one invoice and
+one hosted payment for the **full annual amount**; on settlement a twelve-month
+billing term and a one-month usage cycle begin. A retired price, a price of a
+superseded version, another workspace's custom price and an unknown id are
+`422`; a lower tier or shorter term while a paid term runs is `409` (schedule
+it with `POST /billing/subscription/plan`); the same plan and term already held
+is `409`. Amount, currency and workspace come from the
 database and the access token; the schema forbids extra fields, so sending
 `amount` is a `422` rather than a value quietly ignored. Redirect the customer
 to `redirect_url`.
@@ -246,13 +254,13 @@ payment was recorded.
 
 | Method | Path | Purpose | Access |
 | --- | --- | --- | --- |
-| GET | `/api/v1/billing/plans` | The catalogue: public plans, plus this workspace's own custom plan (`is_custom: true`) and never another's | Workspace member |
+| GET | `/api/v1/billing/plans` | The catalogue: public plans, plus this workspace's own custom plan (`is_custom: true`) and never another's. Each carries `prices` - its active monthly and yearly options - and `billing_required` (false for Starter, which has none); `price`/`interval` stay the monthly price for earlier clients | Workspace member |
 | GET | `/api/v1/billing/entitlements` | Every limit, broken down: `base_limit`, `topup_limit`, `platform_grant_limit`, `effective_limit` (= `limit`), `used`, `remaining`, `over_limit`, `enforced`, and the period for usage keys | Workspace member |
 | GET | `/api/v1/billing/topups` | Top-ups this workspace may buy (`?entitlement_key=`): active global ones and its own | Workspace member |
 | POST | `/api/v1/billing/topups/{topup_id}/checkout` | Buy one: a `TOPUP` invoice and a hosted page (`201`) | Workspace **owner** |
 | GET | `/api/v1/billing/topup-purchases` | Its top-ups, bought and granted, newest first (`limit`, `offset`) | Workspace **owner** |
-| GET | `/api/v1/billing/summary` | Billing -> Usage & Top-ups in one read: subscription, the seven keys, live top-ups, recent purchases, the open custom plan offer, renewals awaiting payment (`payment_required`) and `automatic_renewal` | Workspace **owner** |
-| GET | `/api/v1/billing/custom-offers` | Custom plans offered to it: price, currency, interval, the seven limits, the period, `can_accept` (ADR-114) | Workspace **owner** |
+| GET | `/api/v1/billing/summary` | Billing -> Usage & Top-ups in one read: subscription (plan, version, `plan_price`, `billing_interval`, `billing_period_*` and `paid_through`, `usage_period_*`, `next_renewal_at`/`next_renewal_amount`, the scheduled version **and price**), the seven keys, live top-ups, recent purchases, the open custom plan offer, renewals awaiting payment (`payment_required`) and `automatic_renewal` | Workspace **owner** |
+| GET | `/api/v1/billing/custom-offers` | Custom plans offered to it: the one offered price (`plan_price_id`, `billing_interval`, `price`, `currency`), the seven limits, the period, `can_accept` (ADR-114, ADR-116) | Workspace **owner** |
 | POST | `/api/v1/billing/custom-offers/{offer_id}/accept` | Accept & Pay: a `checkout` invoice pinned to the offered version and a hosted page (`201`); body `{"idempotency_key"?}` only. Changes no plan until Paymob confirms the money | Workspace **owner** |
 | POST | `/api/v1/billing/custom-offers/{offer_id}/decline` | Decline; the workspace keeps its plan | Workspace **owner** |
 
@@ -801,11 +809,17 @@ token or a raw provider payload.
 | GET | `/plans/{plan_id}/versions` | Every version, with subscribers per version |
 | POST | `/plans/{plan_id}/versions` | Publish new terms for new customers |
 | POST | `/plans/{plan_id}/versions/preview` | What publishing would mean; writes nothing |
-| POST | `/plans/{plan_id}/migrations` | Count (`confirm: false`) or schedule (`confirm: true`) a cohort move at next renewal |
-| GET | `/subscriptions` | Filter by workspace, plan, status, renewal window |
+| POST | `/plans/{plan_id}/migrations` | Count (`confirm: false`) or schedule (`confirm: true`) a cohort move at next renewal; each subscriber keeps their billing term, and a target not sold on a term in use is `422` |
+| GET | `/plan-versions/{version_id}` | One version: its limits and every price it has had, retired ones marked |
+| GET | `/plan-versions/{version_id}/prices` | Its price history with what still names each price; `?active=true` is what new customers can choose |
+| POST | `/plan-versions/{version_id}/prices` | Publish a monthly or yearly price for the version - one code path for both, standard or custom plan (`201`) |
+| GET | `/prices/{price_id}` | One price, with subscriber, scheduled-change, invoice and offer counts |
+| POST | `/prices/{price_id}/retire` | Stop selling it to new customers; its subscribers keep renewing at it. Never deletes |
+| PATCH | `/prices/{price_id}` | Always `409`: a price is immutable - retire it and create another |
+| GET | `/subscriptions` | Filter by workspace, plan, status, renewal window, `billing_interval`, `plan_price_id`; each row shows the billing term and the usage cycle apart |
 | GET | `/subscriptions/{id}` | One subscription |
 | GET | `/subscriptions/{id}/timeline` | Its audit, invoices and payments in order |
-| POST | `/subscriptions/{id}/change-plan` | `next_renewal`, or `now` with a named financial basis |
+| POST | `/subscriptions/{id}/change-plan` | `next_renewal`, or `now` with a named financial basis, at `plan_price_id` (default: the version's monthly price) |
 | POST | `/subscriptions/{id}/cancel` | At period end, or `immediately` |
 | POST | `/subscriptions/{id}/resume` | Undo a pending cancellation |
 | GET | `/invoices` | Filter by workspace, subscription, status, purpose, plan, dates |
@@ -823,7 +837,7 @@ token or a raw provider payload.
 | POST | `/tenants/{tenant_id}/custom-plan/preview` | What a custom plan would mean for the company; writes nothing |
 | POST | `/tenants/{tenant_id}/custom-plan` | Create a `tenant`-scoped plan and version 1, optionally assign it now or at renewal (ADR-113); `financial_basis: customer_checkout` makes an offer instead (ADR-114) |
 | GET | `/tenants/{tenant_id}/custom-offers` | Every custom plan offer made to the company |
-| POST | `/tenants/{tenant_id}/custom-offers` | Offer one version of the company's own priced custom plan; grants nothing |
+| POST | `/tenants/{tenant_id}/custom-offers` | Offer one **price** (`plan_price_id`, monthly or yearly) of the company's own custom plan; grants nothing. `plan_version_id` alone is accepted only for a version with one active price |
 | POST | `/custom-offers/{offer_id}/cancel` | Withdraw an open offer (`expected_revision`, `reason`) |
 | POST | `/tenants/{tenant_id}/topups/grant` | Complimentary allowance until the period ends; no invoice or payment |
 | GET | `/topups` | Top-up products, filtered by scope, workspace, key, activity |
@@ -836,6 +850,55 @@ token or a raw provider payload.
 | GET | `/topup-purchases` | Purchases and grants, filtered by workspace, status, source, key |
 | GET | `/topup-purchases/{purchase_id}` | One purchase or grant |
 | POST | `/topup-purchases/{purchase_id}/refund-review` | Keep or withdraw a refunded top-up; withdrawal deletes nothing |
+
+### Plan prices (ADR-116)
+
+A plan version is one set of entitlements; its prices are how often and how
+much a customer pays for them. Publishing a yearly price for Business v4 does
+not copy v4:
+
+```
+POST /api/v1/platform/billing/plan-versions/{version_id}/prices
+  {"billing_interval": "yearly", "interval_count": 1, "amount": "2990.00",
+   "currency": "EGP", "reason": "Annual pricing."}
+  -> 201 {"id": "...", "plan_version_id": "...", "billing_interval": "yearly",
+          "interval_count": 1, "amount": "2990.00", "currency": "EGP", "active": true,
+          "created_at": "...", "retired_at": null, "references": {...}}
+
+POST /api/v1/platform/billing/prices/{price_id}/retire   {"reason": "Annual price rises."}
+  -> 200 {..., "active": false, "retired_at": "...", "references": {"subscriptions": 12, ...}}
+```
+
+`billing_interval` is `monthly` or `yearly` (`month` and `year` are accepted);
+`interval_count` must be `1` - a quarterly or two-year term is modelled but not
+sold. Refused: an amount of zero or less, an unsupported currency or term
+(`422`); a free version, a retired plan or a version a newer one has replaced
+(`422`); a second active price for the same term (`409`). Changing a price is
+**retire, then create**: existing subscribers stay on the retired price until
+an operator migrates them, and an open checkout settles at the price it was
+opened at.
+
+`POST /plans` and `POST /plans/{id}/versions` take either the earlier
+`price` + `interval`, or `prices: [{"billing_interval": "monthly", "amount":
+"299.00"}, {"billing_interval": "yearly", "amount": "2990.00"}]` - monthly
+only, yearly only, both, or `[]` for a free version. The custom-plan form takes
+the same `prices` and a `selected_billing_interval` naming the one the offer or
+assignment uses:
+
+```
+POST /api/v1/platform/billing/tenants/{tenant_id}/custom-plan
+  {"code": "abc-enterprise", "name": "Enterprise Custom",
+   "prices": [{"billing_interval": "monthly", "amount": "2500.00"},
+              {"billing_interval": "yearly", "amount": "25000.00"}],
+   "selected_billing_interval": "yearly", "financial_basis": "customer_checkout",
+   "period_messages": 100000, ..., "reason": "Negotiated terms."}
+
+POST /api/v1/platform/billing/tenants/{tenant_id}/custom-offers
+  {"plan_price_id": "<yearly custom price>", "expires_at": "...", "reason": "Enterprise deal."}
+```
+
+The customer accepts with `{"idempotency_key"?}` and nothing else: the amount,
+currency and yearly term are the offer's price's own.
 
 A custom plan assigned to another company answers `422` with error code
 `custom_plan_not_available_for_workspace`. Creating one requires all seven

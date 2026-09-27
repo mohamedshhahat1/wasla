@@ -5982,3 +5982,47 @@ error and an incident. Migrations after 0073 validate constraints online
 verify` fails a deploy or restore that leaves a rule unenforced. Tenant
 isolation remains a property of the repositories plus keys; a future
 multi-role or externally-queried architecture would revisit RLS.
+
+## ADR-116 — A Plan Version Is Sold At Immutable Prices; The Billing Term And The Usage Cycle Are Two Clocks
+
+**Context.** A plan version carried one price and one interval, so selling
+Business monthly and yearly meant two plans with duplicated limits, and the
+subscription's one period was both what a payment covered and what usage was
+counted over. A yearly price would have granted a year's allowance at once, or
+counted a monthly allowance over a year.
+
+**Decision.**
+
+1. **`plan_prices`**: a version is sold at one or more immutable prices - an
+   amount per term (`monthly`/`yearly` x `interval_count`; only `1` is sold).
+   One active price per version, term and currency; a price is retired, never
+   edited or deleted. A priced version publishes its own terms as its first
+   price (trigger); a free version has none. `plan_versions.price` keeps two
+   meanings only: `0` is free, otherwise the terms it was published with.
+2. **Everything that sells names a price**: subscriptions (and scheduled
+   changes), invoices (with an interval snapshot) and custom plan offers, by
+   composite keys onto the version beside them. A deferred trigger refuses a
+   live priced subscription without a price; a trigger makes a priced
+   purchase or renewal charge exactly its price and never change it. Checkout
+   takes a `plan_price_id` (a `plan_code` alone means its monthly price, for
+   earlier clients) and never an amount.
+3. **Two clocks on one anchor**: the billing term (`current_period_*`) is one
+   price's term; the usage cycle (`usage_period_*`) is always one calendar
+   month inside it, anchored on `billing_anchor_at`. Usage limits and usage
+   top-ups follow the cycle; capacity top-ups and cancellation follow the term.
+   Entitlements use the cycle the clock is in; the sweep records it with no
+   invoice, charge or term change, in one step however late.
+4. **When changes happen**: a higher tier or a longer term is a purchase now
+   (full price, new term from settlement, no credit - ADR-112); a lower tier, a
+   shorter term or free waits for the paid term's end at a pinned price, and a
+   pinned price retired meanwhile is honoured. Migrations keep each subscriber
+   on their term.
+5. **Migration 0081 invents no price**: each priced version's published terms
+   become its one price, everything is pinned to it, usage cycles equal billing
+   periods; inconsistent history stops the migration unchanged.
+
+**Consequences.** Annual pricing is a platform operation on an existing
+version, with no plan duplicated. A published price change reaches existing
+subscribers only through an explicit migration. Monthly behaviour is exactly
+as before. Paymob still only collects: one hosted payment or one MOTO charge
+per term, for the term's full amount.

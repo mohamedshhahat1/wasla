@@ -1459,6 +1459,34 @@ After 0078, each is refused as written (23514 for a period, 23505 for a second
 default or a case-variant address), and a concurrent first-card save keeps
 the second card as an ordinary one instead of a second default.
 
+### Plan prices (before and after deploying 0081)
+
+Migration 0081 (ADR-116) gives every priced plan version one `plan_prices` row -
+its own published price, currency and interval, nothing invented - and pins
+every paid subscription, scheduled change, priced invoice and custom plan offer
+to it. It refuses to run, changing nothing, while any of these return rows:
+
+```sql
+SELECT i.id FROM invoices i JOIN plan_versions v ON v.id = i.plan_version_id
+ WHERE i.purpose::text IN ('checkout','renewal','manual') AND v.price > 0
+   AND (i.amount_due <> v.price OR i.currency <> v.currency);
+SELECT i.id FROM invoices i JOIN plan_versions v ON v.id = i.plan_version_id
+ WHERE i.purpose::text IN ('checkout','renewal','manual') AND v.price <= 0 AND i.amount_due > 0;
+SELECT o.id FROM custom_plan_offers o JOIN plan_versions v ON v.id = o.plan_version_id
+ WHERE v.price <= 0;
+```
+
+Each is an invoice or offer whose price cannot be known without guessing. Find
+the true terms from the invoice's `lines`, its payments and the audit trail,
+and correct the record through the platform (void and reissue), never by
+editing a settled invoice. After 0081 a yearly price is added only by the
+platform API.
+
+**Downgrading 0081 -> 0080** is refused while any subscription, scheduled
+change, invoice or offer names a price other than its version's published terms
+(a yearly price added to a monthly version), or any live subscription's usage
+cycle differs from its billing term: dropping the columns would re-price them.
+
 ### Downgrading past the billing migrations
 
 0071, 0072 and 0073 hold commercial records their downgrades would drop with
