@@ -155,6 +155,14 @@ class CallbackEvent:
     names the transaction being reversed. It is a second way to find the
     payment when the reversal does not carry our own reference home.
 
+    `reversal_child` marks the refund or void transaction *itself* - Paymob's
+    `is_refund` child, which says `success: true` because the refund
+    succeeded, and whose `amount` is that one refund rather than a running
+    total (PAY-E2E-03). It is never a collection. It does not say how much has
+    been returned in all, so on its own it moves no money; the parent's
+    cumulative state does, whether it arrives by callback or is read back from
+    the provider.
+
     `amount` and `currency` are what the provider says was actually collected.
     They are carried so the caller can refuse an event that disagrees with the
     invoice rather than trusting it, which is the difference between a webhook
@@ -182,10 +190,16 @@ class CallbackEvent:
     order_id: str | None = None
     integration_id: str | None = None
     is_live: bool | None = None
+    reversal_child: bool = False
 
     @property
     def succeeded(self) -> bool:
         return self.status is PaymentStatus.SUCCEEDED
+
+    @property
+    def is_reversal(self) -> bool:
+        """Whether this reports money going back rather than being collected."""
+        return self.kind in (EventKind.REFUNDED, EventKind.VOIDED)
 
     @property
     def event_type(self) -> str:
@@ -367,8 +381,9 @@ class InquiryVerdict(StrEnum):
         the same code that reads a callback, because it is the same object.
 
     ``PENDING``
-        The provider knows about it and has not finished. Nothing to do but
-        ask again.
+        The provider knows about it and has not finished - or has told us two
+        things that do not yet agree, such as a refund whose parent does not
+        show it. Nothing to do but ask again.
 
     ``NOT_FOUND``
         The provider has no record of this reference. That is evidence the
@@ -445,6 +460,28 @@ class ChargeInquiryProvider(Protocol):
         both are answers a caller has to act on differently, and an exception
         would flatten them into the same thing at the first `except`.
         """
+        ...
+
+
+@runtime_checkable
+class TransactionInquiryProvider(Protocol):
+    """A provider that can describe one of its transactions by the id it gave it.
+
+    The complement of `ChargeInquiryProvider`, which asks by *our* reference
+    and gets back whatever happened last on the order - after a refund, the
+    refund. Asking by transaction id is how a reversal is read on the
+    transaction it reverses, with the cumulative total returned so far, and it
+    is only ever asked about an id this system recorded when money arrived or
+    that the provider named as a parent.
+    """
+
+    @property
+    def can_inquire(self) -> bool:
+        """Whether this deployment holds what the lookup needs."""
+        ...
+
+    async def inquire_transaction(self, transaction_id: str) -> ChargeInquiry:
+        """Describe one provider transaction. Never raises for an outage."""
         ...
 
 

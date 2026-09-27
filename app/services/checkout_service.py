@@ -828,14 +828,29 @@ class CheckoutService:
         *difference* from what is already recorded: 30 then 99 returns 30 and
         then 69. The same total again is a replay; a smaller total arriving
         late is stale provider state and the higher total stands - the
-        database refuses `refunded_amount` going down in any case.
+        database refuses `refunded_amount` going down in any case. A refund
+        callback, an inquiry that found a refund and a transaction read all
+        arrive here, so there is one place that turns provider reversal
+        evidence into accounting.
         """
+        if event.reversal_child:
+            # The refund transaction itself (PAY-E2E-03): its amount is one
+            # refund, not a total, and the parent's cumulative notification is
+            # what moves the ledger. Recorded, never applied.
+            return NO_CHANGE, (
+                f"Refund transaction {event.provider_transaction_id} of "
+                f"{event.parent_transaction_id}; the parent's running total is applied."
+            )
         refunded = event.refunded_amount if event.refunded_amount else event.amount
         if refunded <= 0 or refunded > payment.amount:
             return MISMATCHED, f"Refund of {refunded} against a payment of {payment.amount}."
         reversed_transaction = self._reversed_transaction(event, payment=payment)
         if reversed_transaction is not None:
             return MISMATCHED, reversed_transaction
+        if payment.status is PaymentStatus.PENDING:
+            return await self._reversed_before_settlement(
+                event, payment=payment, invoice=invoice, refunded=refunded, now=now
+            )
         if payment.status not in (PaymentStatus.SUCCEEDED, PaymentStatus.REFUNDED):
             return REFUSED, f"{payment.status.value} was never collected."
         if refunded == payment.refunded_amount:
@@ -982,6 +997,103 @@ class CheckoutService:
         return (
             f"The reversal is of transaction {event.provider_transaction_id}, "
             f"this payment collected {recorded}."
+        )
+
+    async def _reversed_before_settlement(
+        self,
+        event: CallbackEvent,
+        *,
+        payment: Payment,
+        invoice: Invoice,
+        refunded: Decimal,
+        now: datetime,
+    ) -> tuple[str, str | None]:
+        """Money collected and given back before this system heard it was collected.
+
+        The collection callback was lost and the payment refunded at the
+        provider before reconciliation asked (PAY-E2E-03) - or the refund
+        notification simply overtook it. The provider's reversal evidence
+        proves both halves: the transaction collected `event.amount`, and
+        `refunded` of it has gone back.
+
+        Recorded as exactly that and **nothing is settled**: no invoice paid,
+        no plan, offer or top-up granted from money that is already on its way
+        back. The collection is kept as held money, the same shape as a
+        refused settlement (DB-001) - `applied_at` stays NULL - with the
+        reversal on it and an incident beside it, open while any of it is
+        still held and an operator has to decide, resolved when all of it went
+        back. The attempt stops being pending, so reconciliation does not ask
+        about it again, and a delayed success callback finds a payment that
+        cannot become collected a second time.
+        """
+        if event.amount != payment.amount:
+            return MISMATCHED, (
+                f"Expected {payment.amount}, the reversed transaction collected {event.amount}."
+            )
+        # The provider facts of the collection, written by the one helper that
+        # records them; the status is then set from the reversal below.
+        record_provider_outcome(payment, event, now=now)
+        payment.status = PaymentStatus.SUCCEEDED
+        if payment.is_unresolved_collection:
+            payment.collection_state = CollectionState.SETTLED
+        payment.refunded_amount = refunded
+        payment.refunded_at = now
+        full = refunded >= payment.amount
+        if full:
+            payment.status = PaymentStatus.REFUNDED
+        requested = payment.refund_requested_amount
+        if requested is not None and refunded >= requested:
+            payment.refund_requested_amount = None
+
+        await raise_incident(
+            self._session,
+            kind=BillingIncidentKind.REFUSED_SETTLEMENT,
+            dedupe_key=f"{payment.id}:reversed_before_settlement",
+            tenant_id=self._tenant_id,
+            payment_id=payment.id,
+            invoice_id=invoice.id,
+            provider=self._provider_name(),
+            provider_transaction_id=event.provider_transaction_id,
+            amount=payment.amount - refunded,
+            currency=invoice.currency,
+            detail=(
+                f"Collected {payment.amount} and reversed {refunded} at the provider before "
+                "the collection was recorded; nothing was settled."
+            ),
+            resolved=full,
+            now=now,
+        )
+        self._audit.record(
+            AuditAction.PAYMENT_REFUNDED,
+            actor=None,
+            actor_kind=AuditActorKind.SYSTEM,
+            tenant_id=self._tenant_id,
+            target_type="payment",
+            target_id=payment.id,
+            meta={
+                "amount": str(refunded),
+                "refunded_total": str(refunded),
+                "currency": invoice.currency,
+                "kind": event.kind.value,
+                "provider_reference": event.provider_transaction_id,
+                "held": True,
+                "reversed_before_settlement": True,
+            },
+        )
+        logger.warning(
+            "billing.reversed_before_settlement",
+            extra={
+                "event": "billing.reversed_before_settlement",
+                "tenant_id": str(self._tenant_id),
+                "payment_id": str(payment.id),
+                "invoice_id": str(invoice.id),
+                "refunded_total": str(refunded),
+            },
+        )
+        await record_billing_payment("refused")
+        return REFUSED, (
+            f"Collected and reversed ({refunded}) at the provider before the collection "
+            "was recorded; nothing was settled."
         )
 
     def _provider_name(self) -> str:

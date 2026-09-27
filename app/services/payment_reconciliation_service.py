@@ -350,7 +350,10 @@ class PaymentReconciler:
             payment.collection_state = CollectionState.SETTLED
         await self._session.commit()
 
-        settled = payment is not None and payment.status is PaymentStatus.SUCCEEDED
+        # Settled means the invoice counted the money. A collection the
+        # provider had already reversed when it was found is recorded as held
+        # (PAY-E2E-03) and is not a settlement.
+        settled = payment is not None and payment.applied_at is not None
         logger.info(
             "billing.collection_reconciled",
             extra={
@@ -539,6 +542,11 @@ class PaymentReconciler:
             return "settled"
         if outcome == DECLINED:
             return "declined"
+        if payment is not None and payment.applied_at is None and payment.refunded_amount > 0:
+            # Paid and refunded at the provider before anybody here heard it
+            # was paid (PAY-E2E-03): recorded as held and reversed, nothing
+            # settled, an incident beside it.
+            return "reversed"
         return "still_pending"
 
     async def _recover_saved_card(self, payment: Payment, *, tenant_id: uuid.UUID) -> None:

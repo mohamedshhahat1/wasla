@@ -1041,7 +1041,7 @@ BILLING_OUTCOMES: Final[dict[str, frozenset[str]]] = {
         {"requested", "refused", "confirmed", "review_requested"}
     ),
     "wasla_billing_hosted_reconciliation_total": frozenset(
-        {"settled", "declined", "still_pending", "not_found", "unreachable", "expired"}
+        {"settled", "declined", "still_pending", "not_found", "unreachable", "expired", "reversed"}
     ),
     "wasla_billing_incidents_total": frozenset(
         {

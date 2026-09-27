@@ -166,6 +166,10 @@ INQUIRY_AUTH_PATH: Final = "/api/auth/tokens"
 INQUIRY_PATH: Final = "/api/ecommerce/orders/transaction_inquiry"
 INQUIRY: Final = "transaction_inquiry"
 INQUIRY_AUTH: Final = "inquiry_auth"
+# One transaction by its own id - how a refund is read on the payment it
+# reverses, with the running total. Same bearer token as the inquiry above.
+TRANSACTION_PATH: Final = "/api/acceptance/transactions/"
+TRANSACTION_INQUIRY: Final = "transaction_read"
 # Card Token Inquiry - the saved card created under one order, documented at
 # developers.paymob.com/paymob-docs/developers/transaction-inquiry-apis/
 # card-token-inquiry (last updated 2026-08-04, read 2026-09-24):
@@ -763,7 +767,22 @@ class PaymobProvider:
         operation: str,
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """One JSON POST, with the credential in exactly one place.
+        """One JSON POST - see `_request`."""
+        return await self._request("POST", path, body, operation=operation, headers=headers)
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None,
+        *,
+        operation: str,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """One JSON request, with the credential in exactly one place.
+
+        POST for everything but the transaction read, which is a GET with no
+        body (`inquire_transaction`).
 
         `headers` replaces the default `Token <secret_key>` authorization
         rather than adding to it, and only the inquiry path passes it: that
@@ -800,7 +819,8 @@ class PaymobProvider:
         call = ProviderCall(provider=Provider.PAYMOB, operation=operation)
         try:
             async with self._client() as client:
-                response = await client.post(
+                response = await client.request(
+                    method,
                     url,
                     json=body,
                     headers={
@@ -936,6 +956,17 @@ class PaymobProvider:
         progress is a failure, because a payment that is neither did not
         happen.
 
+        **A refund transaction is never a collection** (PAY-E2E-03). Paymob
+        records each refund as a transaction of its own - `is_refund: true`,
+        `success: true`, `parent_transaction` naming the payment - and
+        Transaction Inquiry answers with the *latest* transaction of an order,
+        so after a refund it answers with that child. Its `success` is the
+        refund's success. It is read first, before any success flag, and
+        comes out as a reversal child that moves no money on its own. A
+        transaction with a parent that is not flagged as a reversal of itself
+        is treated the same way: this integration never authorises and
+        captures separately, so no payment of ours is ever a child of another.
+
         The event id pairs the transaction with the state - see
         `CallbackEvent.event_id` - and, for a reversal of the collecting
         transaction, with the cumulative total returned (PAY-E2E-01).
@@ -943,11 +974,20 @@ class PaymobProvider:
         success = bool(transaction.get("success"))
         pending = bool(transaction.get("pending"))
         error_occured = bool(transaction.get("error_occured"))
+        parent = transaction.get("parent_transaction")
+        has_parent = bool(transaction.get("has_parent_transaction")) or parent not in (None, "")
 
-        if transaction.get("is_voided"):
+        child = False
+        if transaction.get("is_void"):
+            kind, child = EventKind.VOIDED, True
+        elif transaction.get("is_refund"):
+            kind, child = EventKind.REFUNDED, True
+        elif transaction.get("is_voided"):
             kind = EventKind.VOIDED
         elif transaction.get("is_refunded"):
             kind = EventKind.REFUNDED
+        elif has_parent:
+            kind, child = EventKind.REFUNDED, True
         elif success and not pending and not error_occured:
             kind = EventKind.SUCCEEDED
         elif pending and not error_occured:
@@ -964,7 +1004,6 @@ class PaymobProvider:
         is_live = transaction.get("is_live")
 
         transaction_id = str(transaction.get("id"))
-        parent = transaction.get("parent_transaction")
         refunded_cents = transaction.get("refunded_amount_cents")
         cumulative_cents = (
             refunded_cents
@@ -981,7 +1020,7 @@ class PaymobProvider:
                     failure_reason = message[:MAX_FAILURE_REASON_LENGTH]
 
         event_id = f"{transaction_id}:{kind.value}"
-        if kind in (EventKind.REFUNDED, EventKind.VOIDED):
+        if kind in (EventKind.REFUNDED, EventKind.VOIDED) and not child:
             # One event per cumulative state of the parent (PAY-E2E-01). A
             # void carries no refunded total and reverses everything, so its
             # state is the whole amount.
@@ -1001,9 +1040,12 @@ class PaymobProvider:
             # None rather than zero when absent, so a caller can tell "the
             # provider did not say" from "the provider says nothing has been
             # given back". The documented sample carries null on a fresh
-            # payment.
+            # payment. A refund child's own figure is always 0 - the running
+            # total lives on the parent - so it is never read as one.
             refunded_amount=(
-                _from_cents(cumulative_cents) if cumulative_cents is not None else None
+                _from_cents(cumulative_cents)
+                if cumulative_cents is not None and not child
+                else None
             ),
             failure_reason=failure_reason,
             order_id=str(order_id) if order_id not in (None, "") else None,
@@ -1013,6 +1055,7 @@ class PaymobProvider:
                 else None
             ),
             is_live=is_live if isinstance(is_live, bool) else None,
+            reversal_child=child,
         )
 
     @property
@@ -1260,6 +1303,96 @@ class PaymobProvider:
             # and either way nothing has been charged under it yet.
             return ChargeInquiry(verdict=InquiryVerdict.NOT_FOUND)
 
+        event = self._event(transaction)
+        if event.reversal_child:
+            # The latest transaction on the order is a refund (PAY-E2E-03).
+            # What matters is the payment it reverses and how much of it has
+            # gone back, so the answer is the parent, read by its own id.
+            return await self._parent_of(event)
+        if event.kind is EventKind.PENDING:
+            return ChargeInquiry(verdict=InquiryVerdict.PENDING, event=event)
+        return ChargeInquiry(verdict=InquiryVerdict.ANSWERED, event=event)
+
+    async def _parent_of(self, child: CallbackEvent) -> ChargeInquiry:
+        """The collecting transaction a refund child reverses, as an inquiry answer.
+
+        The parent is named by the child, which Paymob signed into nothing we
+        can check here - so it is bound: it must be on the same order, and it
+        must itself say it was reversed. Anything else is two provider
+        statements that do not agree yet, and the honest answer is "ask
+        again" (`PENDING`), never the parent's `success` read as a collection
+        of money that is on its way back.
+        """
+        parent_id = child.parent_transaction_id
+        if not parent_id:
+            return ChargeInquiry(verdict=InquiryVerdict.UNREACHABLE)
+        answer = await self.inquire_transaction(parent_id)
+        if not answer.answered or answer.event is None:
+            return ChargeInquiry(
+                verdict=(
+                    InquiryVerdict.UNREACHABLE
+                    if answer.verdict is InquiryVerdict.NOT_FOUND
+                    else answer.verdict
+                )
+            )
+        parent = answer.event
+        if parent.reversal_child or parent.order_id != child.order_id:
+            logger.warning(
+                "billing.paymob_refund_parent_unbound",
+                extra={
+                    "event": "billing.paymob_refund_parent_unbound",
+                    "transaction_id": child.provider_transaction_id,
+                    "parent_transaction_id": parent_id,
+                },
+            )
+            return ChargeInquiry(verdict=InquiryVerdict.UNREACHABLE)
+        if not parent.is_reversal:
+            return ChargeInquiry(verdict=InquiryVerdict.PENDING)
+        return ChargeInquiry(verdict=InquiryVerdict.ANSWERED, event=parent)
+
+    async def inquire_transaction(self, transaction_id: str) -> ChargeInquiry:
+        """Describe one Paymob transaction by its id.
+
+        `GET /api/acceptance/transactions/{id}` with the inquiry bearer token -
+        the read Paymob's Transaction Inquiry section documents by transaction
+        id, verified against the real Test API on 2026-09-27: for a payment
+        refunded twice it answered with the payment itself, `is_refunded:
+        true` and `refunded_amount_cents` the running total. That object is
+        exactly what a refund callback carries, so it is translated by `_event`
+        and applied by the same reversal path.
+
+        Same verdicts as `inquire_charge`, and the same refusal to raise for an
+        outage. Only ever asked about an id this system recorded or that the
+        provider named as a parent; never a list.
+        """
+        if self._api_key is None:
+            return ChargeInquiry(verdict=InquiryVerdict.UNSUPPORTED)
+        if not transaction_id.isdigit():
+            return ChargeInquiry(verdict=InquiryVerdict.NOT_FOUND)
+        try:
+            token = await self._auth_token()
+            payload = await self._request(
+                "GET",
+                f"{TRANSACTION_PATH}{transaction_id}",
+                None,
+                operation=TRANSACTION_INQUIRY,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        except ProviderError as error:
+            if error.retryable:
+                return ChargeInquiry(verdict=InquiryVerdict.UNREACHABLE)
+            if self._is_absent(error):
+                return ChargeInquiry(verdict=InquiryVerdict.NOT_FOUND)
+            logger.warning(
+                "billing.paymob_transaction_inquiry_refused",
+                extra={"event": "billing.paymob_transaction_inquiry_refused"},
+            )
+            return ChargeInquiry(verdict=InquiryVerdict.UNREACHABLE)
+
+        transaction = self._inquiry_transaction(payload)
+        if transaction is None or str(transaction.get("id")) != transaction_id:
+            # An answer about some other transaction is not an answer.
+            return ChargeInquiry(verdict=InquiryVerdict.NOT_FOUND)
         event = self._event(transaction)
         if event.kind is EventKind.PENDING:
             return ChargeInquiry(verdict=InquiryVerdict.PENDING, event=event)
