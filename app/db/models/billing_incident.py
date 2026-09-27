@@ -27,7 +27,18 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Final
 
-from sqlalchemy import DDL, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint, event
+from sqlalchemy import (
+    DDL,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Numeric,
+    String,
+    UniqueConstraint,
+    event,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -124,6 +135,25 @@ class BillingIncident(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         # identifiers of the thing that happened - a provider transaction, a
         # payment - so a callback delivered three times raises one incident.
         UniqueConstraint("dedupe_key", name="uq_billing_incidents_dedupe_key"),
+        # An incident is about its own workspace's payment and invoice
+        # (DB-004). Only an unknown callback has no workspace, and it names
+        # neither, so a missing tenant cannot slip a foreign row past the keys.
+        ForeignKeyConstraint(
+            ["tenant_id", "payment_id"],
+            ["payments.tenant_id", "payments.id"],
+            name="fk_billing_incidents_tenant_payment",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "invoice_id"],
+            ["invoices.tenant_id", "invoices.id"],
+            name="fk_billing_incidents_tenant_invoice",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "tenant_id IS NOT NULL OR (payment_id IS NULL AND invoice_id IS NULL)",
+            name="money_has_a_workspace",
+        ),
     )
 
     # Nullable: an unknown callback has, by definition, no workspace. RESTRICT
@@ -139,16 +169,8 @@ class BillingIncident(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=False,
     )
     dedupe_key: Mapped[str] = mapped_column(String(MAX_INCIDENT_KEY_LENGTH), nullable=False)
-    payment_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("payments.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
-    invoice_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("invoices.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
+    payment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    invoice_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
     provider_transaction_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)

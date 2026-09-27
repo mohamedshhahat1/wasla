@@ -180,9 +180,13 @@ class Seed:
                 },
             ),
             (
+                # `processed_at` as every version of the manual-payment path
+                # has written it; migration 0077 refuses a collected payment
+                # without one (DB-005).
                 "INSERT INTO payments (id, tenant_id, invoice_id, status, amount, currency,"
-                " provider, refunded_amount, is_automatic, refund_requested_at) VALUES (:id,"
-                " :tenant, :invoice, 'succeeded', 99, 'EGP', 'manual', 0, false, :at)",
+                " provider, refunded_amount, is_automatic, refund_requested_at, processed_at)"
+                " VALUES (:id, :tenant, :invoice, 'succeeded', 99, 'EGP', 'manual', 0, false,"
+                " :at, :at)",
                 {
                     "id": self.payment,
                     "tenant": self.month_end,

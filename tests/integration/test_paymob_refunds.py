@@ -21,6 +21,7 @@ is built, the real response parsed, the real HMAC checked on the callbacks.
 from __future__ import annotations
 
 import json
+import uuid
 from decimal import Decimal
 from typing import Any
 
@@ -107,7 +108,8 @@ async def _paid(
     *,
     amount: str = "99.00",
     currency: str = "EGP",
-    transaction: str = PAID_TRANSACTION,
+    transaction: str | None = PAID_TRANSACTION,
+    provider: str = "paymob",
     status: PaymentStatus = PaymentStatus.SUCCEEDED,
 ) -> tuple[Invoice, Payment]:
     """An invoice that has been collected, as a settled checkout leaves it."""
@@ -138,13 +140,19 @@ async def _paid(
     )
     session.add(invoice)
     await session.flush()
+    payment_id = uuid.uuid4()
     payment = Payment(
+        id=payment_id,
         tenant_id=tenant.id,
         invoice_id=invoice.id,
+        # The Paymob order its checkout was created under, bound - as
+        # `open_page` binds it - before any money is collected on it. A
+        # collected payment's order can no longer be written (DB-005).
+        provider_order_id=str(order_for(payment_id)),
         status=status,
         amount=Decimal(amount),
         currency=currency,
-        provider="paymob",
+        provider=provider,
         provider_reference=transaction if status is PaymentStatus.SUCCEEDED else None,
         refunded_amount=Decimal("0.00"),
         processed_at=moment,
@@ -152,9 +160,6 @@ async def _paid(
         applied_at=moment if status is PaymentStatus.SUCCEEDED else None,
     )
     session.add(payment)
-    await session.flush()
-    # The Paymob order its checkout was created under, as `start` records it.
-    payment.provider_order_id = str(order_for(payment.id))
     await session.flush()
     return invoice, payment
 
@@ -342,9 +347,8 @@ async def test_a_payment_taken_by_hand_cannot_be_reversed_by_a_processor(
     otherwise would send Paymob a null transaction id.
     """
     tenant = await _tenant(db_session)
-    _, payment = await _paid(db_session, tenant)
-    payment.provider_reference = None
-    await db_session.flush()
+    # Collected money keeps its identity (DB-005), so it is born this way.
+    _, payment = await _paid(db_session, tenant, transaction=None)
 
     with pytest.raises(ConflictError):
         await RefundService(db_session, tenant_id=tenant.id, provider=_provider()).refund(
@@ -360,9 +364,7 @@ async def test_a_payment_from_another_provider_is_not_reversed_through_this_one(
     Or, on a bad day, refunds a transaction that happens to share the number.
     """
     tenant = await _tenant(db_session)
-    _, payment = await _paid(db_session, tenant)
-    payment.provider = "manual"
-    await db_session.flush()
+    _, payment = await _paid(db_session, tenant, provider="manual")
 
     with pytest.raises(ConflictError):
         await RefundService(db_session, tenant_id=tenant.id, provider=_provider()).refund(

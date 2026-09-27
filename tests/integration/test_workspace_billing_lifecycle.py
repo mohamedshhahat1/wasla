@@ -434,6 +434,7 @@ async def test_invoices_and_payments_survive_deletion(
         amount_due=Decimal("75.00"),
         amount_paid=Decimal("75.00"),
         currency="EGP",
+        paid_at=NOW,
         period_start=NOW - timedelta(days=30),
         period_end=NOW,
         lines=[],
@@ -448,6 +449,9 @@ async def test_invoices_and_payments_survive_deletion(
         status=PaymentStatus.SUCCEEDED,
         provider="paymob",
         provider_reference="txn-history-1",
+        # As settlement leaves collected money: processed, and counted.
+        processed_at=NOW,
+        applied_at=NOW,
     )
     db_session.add(payment)
     await db_session.flush()

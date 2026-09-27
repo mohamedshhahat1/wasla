@@ -1387,6 +1387,50 @@ Then rerun the migration: the extra payment is left unapplied and held. After
 SQLSTATE 23000 - and the settlement lock order means an ordinary race never
 reaches that check: it is refused and raised as an incident first.
 
+### Financial integrity (before and after deploying 0077)
+
+Migration 0077 (DB-004, DB-005) makes every financial binding name its own
+workspace, pins a subscription's version to its own plan, and freezes settled
+invoices and collected payments. It counts existing rows each new rule would
+refuse and fails, changing nothing, if any exist. Every query below must return
+no rows before it can run:
+
+```sql
+-- money bound across workspaces (DB-004)
+SELECT p.id FROM payments p JOIN invoices i ON i.id = p.invoice_id WHERE i.tenant_id <> p.tenant_id;
+SELECT p.id FROM payments p JOIN payment_methods m ON m.id = p.payment_method_id WHERE m.tenant_id <> p.tenant_id;
+SELECT i.id FROM invoices i JOIN subscriptions s ON s.id = i.subscription_id WHERE s.tenant_id <> i.tenant_id;
+SELECT t.id FROM topup_purchases t JOIN invoices i ON i.id = t.invoice_id WHERE i.tenant_id <> t.tenant_id;
+SELECT t.id FROM topup_purchases t JOIN payments p ON p.id = t.payment_id WHERE p.tenant_id <> t.tenant_id;
+SELECT b.id FROM billing_incidents b JOIN invoices i ON i.id = b.invoice_id WHERE i.tenant_id IS DISTINCT FROM b.tenant_id;
+SELECT b.id FROM billing_incidents b JOIN payments p ON p.id = b.payment_id WHERE p.tenant_id IS DISTINCT FROM b.tenant_id;
+SELECT a.id FROM billing_adjustments a JOIN invoices i ON i.id = a.invoice_id WHERE i.tenant_id <> a.tenant_id;
+SELECT a.id FROM billing_adjustments a JOIN subscriptions s ON s.id = a.subscription_id WHERE s.tenant_id <> a.tenant_id;
+SELECT s.id FROM subscriptions s JOIN plan_versions v ON v.id = s.plan_version_id WHERE v.plan_id <> s.plan_id;
+-- undated settled states, and grants without payment (DB-005)
+SELECT id FROM invoices WHERE status = 'paid' AND paid_at IS NULL;
+SELECT id FROM payments WHERE status IN ('succeeded', 'refunded') AND processed_at IS NULL;
+SELECT t.id FROM topup_purchases t LEFT JOIN invoices i ON i.id = t.invoice_id
+ WHERE t.source = 'purchase' AND t.status = 'granted' AND (i.id IS NULL OR i.status <> 'paid');
+SELECT o.id FROM custom_plan_offers o WHERE o.status = 'active' AND NOT EXISTS
+ (SELECT 1 FROM invoices i WHERE i.custom_plan_offer_id = o.id AND i.status = 'paid');
+```
+
+A crossed binding is evidence of a defect or of manual repair SQL: find it in
+the audit trail and the provider's dashboard, decide with the workspace owner
+which workspace the money belongs to, and correct it deliberately. A missing
+`paid_at` or `processed_at` is taken from the settling `payment_recorded` audit
+entry or the provider's transaction time, never from `now()`. A grant or an
+activation without a paid invoice is reversed through the platform API, which
+records why. Then run the migration.
+
+After 0077, the same states are refused as they are written: a crossed binding
+with SQLSTATE 23503, a rewrite of settled terms with 23000 (a settled invoice
+keeps its terms; collected money keeps what it was), and an unpaid grant or
+activation at commit with 23000. The documented reversals still work: a refund
+lowers `amount_paid` and may reopen or, for an operator's full refund, void
+the invoice, and a refunded payment's `refunded_amount` only rises.
+
 ## What to watch
 
 **Start with the metrics.** `/metrics` publishes request rates and latency,

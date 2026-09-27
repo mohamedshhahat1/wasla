@@ -277,7 +277,46 @@ INVOICE_OFFER_TRIGGER_SQL: Final = (
     "FOR EACH ROW EXECUTE FUNCTION invoices_refuse_offer_mismatch()"
 )
 
-for _statement in (OFFER_INTEGRITY_FUNCTION_SQL, OFFER_INTEGRITY_TRIGGER_SQL):
+# **An active offer was paid for** (ADR-114, DB-005). An offer becomes active
+# only when one of its own checkout invoices is paid: a declined or withdrawn
+# offer cannot be made active by writing its status. Deferred to commit -
+# settlement marks the invoice paid and activates the offer in one transaction,
+# and the flush writes the offer (the invoice's parent) first - and checked when
+# an offer *becomes* active, re-reading both as the transaction leaves them.
+OFFER_ACTIVE_PAID_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION custom_plan_offers_refuse_unpaid_activation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = public, pg_catalog
+    AS $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM custom_plan_offers o
+             WHERE o.id = NEW.id AND o.status::text = 'active'
+               AND NOT EXISTS (
+                   SELECT 1 FROM invoices i
+                    WHERE i.custom_plan_offer_id = o.id AND i.status::text = 'paid')
+        ) THEN
+            RAISE EXCEPTION 'a custom plan offer is active only once its invoice is paid'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NULL;
+    END;
+    $$
+    """
+OFFER_ACTIVE_PAID_TRIGGER_SQL: Final = (
+    "CREATE CONSTRAINT TRIGGER custom_plan_offers_active_paid "
+    "AFTER INSERT OR UPDATE OF status ON custom_plan_offers "
+    "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+    "WHEN (NEW.status::text = 'active') "
+    "EXECUTE FUNCTION custom_plan_offers_refuse_unpaid_activation()"
+)
+
+for _statement in (
+    OFFER_INTEGRITY_FUNCTION_SQL,
+    OFFER_INTEGRITY_TRIGGER_SQL,
+    OFFER_ACTIVE_PAID_FUNCTION_SQL,
+    OFFER_ACTIVE_PAID_TRIGGER_SQL,
+):
     event.listen(CustomPlanOffer.__table__, "after_create", DDL(_statement))  # type: ignore[no-untyped-call]
 
 

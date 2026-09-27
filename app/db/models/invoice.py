@@ -293,6 +293,18 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         CheckConstraint("amount_paid >= 0", name="amount_paid_non_negative"),
         CheckConstraint("amount_paid <= amount_due", name="amount_paid_within_due"),
         CheckConstraint(CURRENCY_CHECK_SQL, name="currency_supported"),
+        # A paid invoice says when (DB-005).
+        CheckConstraint("status <> 'paid' OR paid_at IS NOT NULL", name="paid_is_dated"),
+        # What a payment, a top-up, an incident or an adjustment names, so
+        # each can name only its own workspace's invoice (DB-004, ADR-100).
+        UniqueConstraint("tenant_id", "id", name="uq_invoices_tenant_id_id"),
+        # An invoice's subscription is its own workspace's (DB-004).
+        ForeignKeyConstraint(
+            ["tenant_id", "subscription_id"],
+            ["subscriptions.tenant_id", "subscriptions.id"],
+            name="fk_invoices_tenant_subscription",
+            ondelete="SET NULL (subscription_id)",
+        ),
         # An invoice for a custom plan offer names an offer of its own
         # workspace, and only a customer's checkout does (ADR-114).
         ForeignKeyConstraint(
@@ -323,11 +335,11 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         ForeignKey("tenants.id", ondelete="RESTRICT"),
         nullable=False,
     )
+    # SET NULL (the column only): an invoice outlives the subscription it came
+    # from. A customer who left last year can still be shown what they paid.
+    # The key is composite with `tenant_id` - see `__table_args__`.
     subscription_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        # SET NULL: an invoice outlives the subscription it came from. A
-        # customer who left last year can still be shown what they paid.
-        ForeignKey("subscriptions.id", ondelete="SET NULL"),
         nullable=True,
     )
     status: Mapped[InvoiceStatus] = mapped_column(INVOICE_STATUS_TYPE, nullable=False)
@@ -488,6 +500,28 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
             "applied_at IS NULL OR status IN ('succeeded', 'refunded')",
             name="applied_only_when_collected",
         ),
+        # Collected money says when it was processed (DB-005).
+        CheckConstraint(
+            "status NOT IN ('succeeded', 'refunded') OR processed_at IS NOT NULL",
+            name="collected_is_processed",
+        ),
+        # A payment collects its own workspace's invoice, on its own
+        # workspace's card (DB-004): the audit wrote one against another
+        # workspace's invoice, and an automatic one on another workspace's
+        # saved card, and PostgreSQL accepted both.
+        UniqueConstraint("tenant_id", "id", name="uq_payments_tenant_id_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "invoice_id"],
+            ["invoices.tenant_id", "invoices.id"],
+            name="fk_payments_tenant_invoice",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "payment_method_id"],
+            ["payment_methods.tenant_id", "payment_methods.id"],
+            name="fk_payments_tenant_payment_method",
+            ondelete="SET NULL (payment_method_id)",
+        ),
         # An operator's reference for money that arrived outside a processor
         # is unique within one workspace and method, not across the platform:
         # two workspaces' bank transfers may well share "BT-1" (DB-017). The
@@ -508,13 +542,10 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         ForeignKey("tenants.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    invoice_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        # RESTRICT: a payment is money that moved, and it outlives any attempt
-        # to delete the invoice it was collected against.
-        ForeignKey("invoices.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # RESTRICT: a payment is money that moved, and it outlives any attempt to
+    # delete the invoice it was collected against. Composite with `tenant_id`
+    # - see `__table_args__`.
+    invoice_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     status: Mapped[PaymentStatus] = mapped_column(PAYMENT_STATUS_TYPE, nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     currency: Mapped[str] = mapped_column(
@@ -612,7 +643,6 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     # card from their account.
     payment_method_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("payment_methods.id", ondelete="SET NULL"),
         nullable=True,
     )
     # How far the automatic collection protocol got, which is a different
@@ -785,6 +815,115 @@ PAYMENTS_COLLECTION_TRIGGER_SQL: Final = (
     "EXECUTE FUNCTION billing_refuse_unreconciled_collection()"
 )
 
+# **Settled history is not rewritten** (DB-005, ADR-113 §5). Once an invoice is
+# paid or void, what it charged for - workspace, purpose, plan and version,
+# offer, amount due, currency, lines, period - is fixed; the only moves out of
+# `paid` are the documented reversals, which always give money back
+# (`amount_paid` falls): a refund reopening it, or an operator's full refund
+# voiding it. A void invoice stays void. `subscription_id` may only become NULL
+# (its foreign key's SET NULL); notes, provider fields and collection
+# bookkeeping stay writable.
+INVOICE_HISTORY_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION invoices_refuse_history_rewrite() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = public, pg_catalog
+    AS $$
+    BEGIN
+        IF OLD.status::text NOT IN ('paid', 'void') THEN
+            RETURN NEW;
+        END IF;
+        IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+           OR NEW.purpose IS DISTINCT FROM OLD.purpose
+           OR NEW.plan_code IS DISTINCT FROM OLD.plan_code
+           OR NEW.plan_version_id IS DISTINCT FROM OLD.plan_version_id
+           OR NEW.custom_plan_offer_id IS DISTINCT FROM OLD.custom_plan_offer_id
+           OR NEW.amount_due IS DISTINCT FROM OLD.amount_due
+           OR NEW.currency IS DISTINCT FROM OLD.currency
+           OR NEW.lines IS DISTINCT FROM OLD.lines
+           OR NEW.period_start IS DISTINCT FROM OLD.period_start
+           OR NEW.period_end IS DISTINCT FROM OLD.period_end
+           OR (NEW.subscription_id IS DISTINCT FROM OLD.subscription_id
+               AND NEW.subscription_id IS NOT NULL) THEN
+            RAISE EXCEPTION 'a settled invoice keeps the terms it was settled on'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        IF OLD.status::text = 'void'
+           AND (NEW.status IS DISTINCT FROM OLD.status
+                OR NEW.amount_paid IS DISTINCT FROM OLD.amount_paid) THEN
+            RAISE EXCEPTION 'a void invoice stays void'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        IF OLD.status::text = 'paid' THEN
+            IF NEW.amount_paid > OLD.amount_paid THEN
+                RAISE EXCEPTION 'a paid invoice takes no more money'
+                    USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+            IF NEW.status::text <> 'paid' AND NEW.amount_paid >= OLD.amount_paid THEN
+                RAISE EXCEPTION 'a paid invoice reopens only when money goes back'
+                    USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+            IF NEW.status::text = 'paid' AND NEW.paid_at IS DISTINCT FROM OLD.paid_at THEN
+                RAISE EXCEPTION 'a paid invoice keeps when it was paid'
+                    USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+        END IF;
+        RETURN NEW;
+    END;
+    $$
+    """
+INVOICE_HISTORY_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER invoices_history_immutable BEFORE UPDATE ON invoices "
+    "FOR EACH ROW EXECUTE FUNCTION invoices_refuse_history_rewrite()"
+)
+
+# The same for money collected. A succeeded or refunded payment keeps what it
+# was - workspace, invoice, amount, currency, provider and its identifiers,
+# when it was processed, how it was taken, the operator's reference - and
+# whether it was applied, once it was. It only ever goes back: `succeeded ->
+# refunded`, with `refunded_amount` never falling. The card may be detached
+# (its foreign key's SET NULL); refund bookkeeping, reconciliation and the
+# failure note stay writable.
+PAYMENT_HISTORY_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION payments_refuse_history_rewrite() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = public, pg_catalog
+    AS $$
+    BEGIN
+        IF OLD.status::text NOT IN ('succeeded', 'refunded') THEN
+            RETURN NEW;
+        END IF;
+        IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+           OR NEW.invoice_id IS DISTINCT FROM OLD.invoice_id
+           OR NEW.amount IS DISTINCT FROM OLD.amount
+           OR NEW.currency IS DISTINCT FROM OLD.currency
+           OR NEW.provider IS DISTINCT FROM OLD.provider
+           OR NEW.provider_reference IS DISTINCT FROM OLD.provider_reference
+           OR NEW.provider_order_id IS DISTINCT FROM OLD.provider_order_id
+           OR NEW.provider_integration_id IS DISTINCT FROM OLD.provider_integration_id
+           OR NEW.processed_at IS DISTINCT FROM OLD.processed_at
+           OR NEW.is_automatic IS DISTINCT FROM OLD.is_automatic
+           OR NEW.manual_reference IS DISTINCT FROM OLD.manual_reference
+           OR (OLD.applied_at IS NOT NULL AND NEW.applied_at IS DISTINCT FROM OLD.applied_at)
+           OR (NEW.payment_method_id IS DISTINCT FROM OLD.payment_method_id
+               AND NEW.payment_method_id IS NOT NULL) THEN
+            RAISE EXCEPTION 'collected money keeps what it was'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        IF NEW.status::text NOT IN ('succeeded', 'refunded')
+           OR (OLD.status::text = 'refunded' AND NEW.status::text <> 'refunded')
+           OR NEW.refunded_amount < OLD.refunded_amount THEN
+            RAISE EXCEPTION 'collected money only ever goes back'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NEW;
+    END;
+    $$
+    """
+PAYMENT_HISTORY_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER payments_history_immutable BEFORE UPDATE ON payments "
+    "FOR EACH ROW EXECUTE FUNCTION payments_refuse_history_rewrite()"
+)
+
 event.listen(Invoice.__table__, "after_create", DDL(CUSTOM_PLAN_SCOPE_FUNCTION_SQL))  # type: ignore[no-untyped-call]
 event.listen(Invoice.__table__, "after_create", DDL(INVOICES_CUSTOM_PLAN_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 event.listen(Payment.__table__, "after_create", DDL(PAYMENTS_NO_AUTOMATIC_TOPUP_FUNCTION_SQL))  # type: ignore[no-untyped-call]
@@ -794,3 +933,7 @@ event.listen(Invoice.__table__, "after_create", DDL(INVOICE_OFFER_TRIGGER_SQL)) 
 event.listen(Invoice.__table__, "after_create", DDL(COLLECTION_RECONCILES_FUNCTION_SQL))  # type: ignore[no-untyped-call]
 event.listen(Invoice.__table__, "after_create", DDL(INVOICES_COLLECTION_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 event.listen(Payment.__table__, "after_create", DDL(PAYMENTS_COLLECTION_TRIGGER_SQL))  # type: ignore[no-untyped-call]
+event.listen(Invoice.__table__, "after_create", DDL(INVOICE_HISTORY_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Invoice.__table__, "after_create", DDL(INVOICE_HISTORY_TRIGGER_SQL))  # type: ignore[no-untyped-call]
+event.listen(Payment.__table__, "after_create", DDL(PAYMENT_HISTORY_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Payment.__table__, "after_create", DDL(PAYMENT_HISTORY_TRIGGER_SQL))  # type: ignore[no-untyped-call]

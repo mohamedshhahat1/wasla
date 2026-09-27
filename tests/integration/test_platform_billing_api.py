@@ -629,6 +629,8 @@ async def test_a_platform_refund_is_bounded_and_confirmed_later(
         provider="paymob",
         provider_reference="541130792",
         refunded_amount=Decimal("0.00"),
+        # Collected money says when it was processed (DB-005).
+        processed_at=datetime.now(UTC),
     )
     failed = Payment(
         tenant_id=tenant.id,

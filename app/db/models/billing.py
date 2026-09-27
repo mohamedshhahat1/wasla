@@ -45,6 +45,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -460,6 +461,9 @@ class PlanVersion(Base, UUIDPrimaryKeyMixin):
     __tablename__ = "plan_versions"
     __table_args__ = (
         UniqueConstraint("plan_id", "version", name="uq_plan_versions_plan_id_version"),
+        # What a subscription names, so its pinned version is always one of its
+        # own plan's (DB-004).
+        UniqueConstraint("plan_id", "id", name="uq_plan_versions_plan_id_id"),
         Index("ix_plan_versions_plan_id_effective_at", "plan_id", "effective_at"),
         CheckConstraint("version >= 1", name="version_positive"),
         CheckConstraint("price >= 0", name="price_non_negative"),
@@ -618,6 +622,18 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         # One per workspace. A workspace with two has two answers to "what am I
         # allowed to do", and no correct way to choose between them.
         UniqueConstraint("tenant_id", name="uq_subscriptions_tenant_id"),
+        # What an invoice or an adjustment names, so each can name only its
+        # own workspace's subscription (DB-004).
+        UniqueConstraint("tenant_id", "id", name="uq_subscriptions_tenant_id_id"),
+        # The pinned version is a version *of the subscription's plan*: the
+        # audit pinned one plan's subscription to another plan's version with
+        # plain SQL, and nothing refused it (DB-004).
+        ForeignKeyConstraint(
+            ["plan_id", "plan_version_id"],
+            ["plan_versions.plan_id", "plan_versions.id"],
+            name="fk_subscriptions_plan_version_of_plan",
+            ondelete="RESTRICT",
+        ),
         Index("ix_subscriptions_tenant_id", "tenant_id"),
         Index("ix_subscriptions_status", "status"),
         Index("ix_subscriptions_plan_id", "plan_id"),
@@ -644,7 +660,6 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     # then pins it to the plan's current version on first read.
     plan_version_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("plan_versions.id", ondelete="RESTRICT"),
         nullable=True,
     )
     status: Mapped[SubscriptionStatus] = mapped_column(SUBSCRIPTION_STATUS_TYPE, nullable=False)
@@ -821,6 +836,20 @@ class BillingAdjustment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Index("ix_billing_adjustments_tenant_id", "tenant_id"),
         Index("ix_billing_adjustments_subscription_id", "subscription_id"),
         CheckConstraint("ends_at IS NULL OR ends_at > starts_at", name="window_ordered"),
+        # An adjustment explains its own workspace's invoice and subscription
+        # (DB-004).
+        ForeignKeyConstraint(
+            ["tenant_id", "invoice_id"],
+            ["invoices.tenant_id", "invoices.id"],
+            name="fk_billing_adjustments_tenant_invoice",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "subscription_id"],
+            ["subscriptions.tenant_id", "subscriptions.id"],
+            name="fk_billing_adjustments_tenant_subscription",
+            ondelete="SET NULL (subscription_id)",
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -830,11 +859,7 @@ class BillingAdjustment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         ForeignKey("tenants.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    subscription_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("subscriptions.id", ondelete="SET NULL"),
-        nullable=True,
-    )
+    subscription_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     kind: Mapped[BillingAdjustmentKind] = mapped_column(
         BILLING_ADJUSTMENT_KIND_TYPE, nullable=False
     )
@@ -843,11 +868,7 @@ class BillingAdjustment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         ForeignKey("plan_versions.id", ondelete="RESTRICT"),
         nullable=True,
     )
-    invoice_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("invoices.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
+    invoice_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     reason: Mapped[str] = mapped_column(String(MAX_BILLING_REASON_LENGTH), nullable=False)
     actor_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

@@ -47,7 +47,7 @@ from app.db.models.conversation import (
     ConversationStatus,
 )
 from app.db.models.enums import MembershipStatus, PlatformRole, TenantRole
-from app.db.models.invoice import Invoice, InvoicePurpose, Payment
+from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.membership import Membership
 from app.db.models.payment_event import PaymentEvent
 from app.db.models.tenant import Tenant
@@ -315,6 +315,22 @@ async def test_two_workers_granting_one_paid_topup_grant_it_once(
     """
     paymob = Paymob()
     purchase_id, payment_id = await _checkout(maker, world, paymob)
+    # The invoice is paid first, as the settlement engine leaves it before it
+    # asks the ledger to grant: a purchase is never granted on an unpaid
+    # invoice, and the database refuses one at commit (DB-005).
+    async with maker() as session:
+        payment = await session.get(Payment, payment_id)
+        assert payment is not None
+        invoice = await session.get(Invoice, payment.invoice_id)
+        assert invoice is not None
+        payment.status = PaymentStatus.SUCCEEDED
+        payment.provider_reference = f"txn-{uuid.uuid4().hex[:12]}"
+        payment.processed_at = world.now
+        payment.applied_at = world.now
+        invoice.status = InvoiceStatus.PAID
+        invoice.amount_paid = invoice.amount_due
+        invoice.paid_at = world.now
+        await session.commit()
 
     async def settle() -> None:
         async with maker() as session:

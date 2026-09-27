@@ -381,6 +381,7 @@ async def test_a_paid_invoice_is_not_charged_again(db_session: AsyncSession) -> 
     tenant, subscription, invoice = await _workspace(db_session)
     invoice.status = InvoiceStatus.PAID
     invoice.amount_paid = Decimal("25.00")
+    invoice.paid_at = NOW
     await db_session.flush()
 
     outcome = await _service(db_session, tenant).collect(

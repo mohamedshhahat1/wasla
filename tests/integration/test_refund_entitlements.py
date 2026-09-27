@@ -544,7 +544,7 @@ async def test_refunding_a_plan_the_workspace_has_since_left_changes_nothing(
     tenant, subscription, plans = await _workspace(db_session)
     _, payment = await _bought(db_session, tenant, subscription)
     await _settle(db_session, tenant, payment)
-    subscription.plan_id = plans[OTHER_PAID_PLAN].id
+    # `pin` moves the plan and its version together (DB-004).
     await pin(db_session, subscription, plans[OTHER_PAID_PLAN])
 
     await _reverse(db_session, tenant, payment)
