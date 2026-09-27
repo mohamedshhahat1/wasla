@@ -156,10 +156,12 @@ async def world(maker: async_sessionmaker[AsyncSession]) -> AsyncIterator[World]
         )
         version = await PlanCatalog(session).current_version(plan)
         assert version is not None
+        price = await PlanCatalog(session).publication_price(version)
         subscription = Subscription(
             tenant_id=tenant.id,
             plan_id=plan.id,
             plan_version_id=version.id,
+            plan_price_id=price.id if price is not None else None,
             status=SubscriptionStatus.ACTIVE,
             current_period_start=now,
             current_period_end=now + timedelta(days=30),
@@ -809,6 +811,7 @@ async def test_two_assignments_on_one_subscription_revision_one_wins(
                 .where(Subscription.id == world.subscription_id)
                 .values(
                     scheduled_plan_version_id=None,
+                    scheduled_plan_price_id=None,
                     scheduled_change_source=None,
                     scheduled_change_reason=None,
                     scheduled_change_actor_id=None,

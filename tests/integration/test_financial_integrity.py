@@ -47,6 +47,7 @@ from app.platform.plan_admin import PlanCatalogAdmin
 from app.schemas.custom_plan import CustomPlanOfferCreate
 from app.schemas.platform_billing import PlanCreate
 from app.services.plan_catalog import PlanCatalog
+from tests.billing_fixtures import price_terms
 from tests.integration.topup_harness import product
 
 pytestmark = pytest.mark.integration
@@ -101,6 +102,7 @@ async def _workspace(session: AsyncSession) -> Workspace:
         tenant_id=built.tenant.id,
         plan_id=built.plan.id,
         plan_version_id=version.id,
+        plan_price_id=(await price_terms(session, version.id)).get("plan_price_id"),
         status=SubscriptionStatus.ACTIVE,
         current_period_start=NOW,
         current_period_end=NOW + timedelta(days=30),
@@ -125,6 +127,7 @@ async def _workspace(session: AsyncSession) -> Workspace:
         purpose=InvoicePurpose.RENEWAL,
         plan_code=built.plan.code,
         plan_version_id=version.id,
+        **(await price_terms(session, version.id)),
         amount_due=PRICE,
         amount_paid=PRICE,
         currency="EGP",

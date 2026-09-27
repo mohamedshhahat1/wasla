@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.exceptions import NotFoundError
 from app.db.models.audit import AuditLog
-from app.db.models.billing import TOPUP_LIMITS, LimitKey, Plan, PlanVersion
+from app.db.models.billing import TOPUP_LIMITS, LimitKey, Plan, PlanPrice, PlanVersion
 from app.db.models.billing_incident import BillingIncident, BillingIncidentStatus
 from app.db.models.invoice import Invoice, Payment
 from app.db.models.tenant import Tenant
@@ -40,6 +40,7 @@ from app.schemas.platform_billing import (
     PlatformSubscriptionRead,
     TimelineEntry,
 )
+from app.services.billing_calendar import current_usage_period
 from app.services.entitlement_service import EntitlementService
 from app.services.plan_catalog import PlanCatalog
 
@@ -69,26 +70,45 @@ class TenantBillingSummaryBuilder:
 
         plan: Plan | None = None
         version: PlanVersion | None = None
+        price: PlanPrice | None = None
         subscription_read: PlatformSubscriptionRead | None = None
         scheduled: SummaryScheduledChange | None = None
         if subscription is not None:
             plan = await self._session.get(Plan, subscription.plan_id)
             version = await catalog.pinned_version(subscription)
+            price = (
+                await catalog.pinned_price(subscription, version=version)
+                if version is not None
+                else None
+            )
             subscription_read = PlatformSubscriptionRead.build(
                 subscription,
                 plan_code=plan.code if plan is not None else None,
                 version=version.version if version is not None else None,
+                price=price,
             )
+            # The cycle in force now, which the sweep may not have recorded.
+            usage = current_usage_period(subscription, moment)
+            subscription_read.usage_period_start, subscription_read.usage_period_end = usage
             if subscription.scheduled_plan_version_id is not None:
                 target = await catalog.get_version(subscription.scheduled_plan_version_id)
+                target_price = await catalog.get_price(subscription.scheduled_plan_price_id)
                 target_plan = (
                     await self._session.get(Plan, target.plan_id) if target is not None else None
                 )
                 scheduled = SummaryScheduledChange(
                     plan_version_id=subscription.scheduled_plan_version_id,
+                    plan_price_id=subscription.scheduled_plan_price_id,
                     plan_code=target_plan.code if target_plan is not None else None,
                     version=target.version if target is not None else None,
-                    price=f"{target.price:.2f}" if target is not None else None,
+                    price=(
+                        f"{target_price.amount:.2f}"
+                        if target_price is not None
+                        else ("0.00" if target is not None else None)
+                    ),
+                    billing_interval=(
+                        target_price.billing_interval if target_price is not None else None
+                    ),
                     source=subscription.scheduled_change_source,
                     effective_at=subscription.current_period_end,
                 )
@@ -128,12 +148,30 @@ class TenantBillingSummaryBuilder:
                 if plan is not None
                 else None
             ),
-            plan_version=PlanVersionRead.from_model(version) if version is not None else None,
+            plan_version=(
+                PlanVersionRead.from_model(
+                    version, prices=await catalog.prices(version, active_only=False)
+                )
+                if version is not None
+                else None
+            ),
             custom_plan=plan is not None and plan.is_custom,
-            price=f"{version.price:.2f}" if version is not None else None,
+            plan_price_id=price.id if price is not None else None,
+            billing_interval=price.billing_interval if price is not None else None,
+            price=(
+                f"{price.amount:.2f}"
+                if price is not None
+                else ("0.00" if version is not None else None)
+            ),
             currency=version.currency if version is not None else None,
             current_period_start=subscription.current_period_start if subscription else None,
             current_period_end=subscription.current_period_end if subscription else None,
+            usage_period_start=(
+                subscription_read.usage_period_start if subscription_read is not None else None
+            ),
+            usage_period_end=(
+                subscription_read.usage_period_end if subscription_read is not None else None
+            ),
             next_renewal_at=(
                 subscription.current_period_end if renews and subscription is not None else None
             ),

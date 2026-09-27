@@ -13,8 +13,9 @@ and nothing else about this file changes.
 Three rules hold the whole thing together:
 
 **Periods are billed in advance** (BILL-03). A renewal is the bill for the
-period that is *starting*, at the terms of the plan version that governs it; the
-usage lines report the period that just ended, for information. A purchase
+billing term that is *starting*, at the price that governs it - one invoice for
+a whole year on a yearly price, never twelve (ADR-116); the usage lines report
+the term that just ended, for information. A purchase
 covers the period it opens, so the first renewal is always for the period after
 it and no period is billed twice.
 
@@ -41,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, ValidationError
 from app.core.logging import get_logger
-from app.db.models.billing import Plan, PlanVersion, Subscription
+from app.db.models.billing import Plan, PlanPrice, PlanVersion, Subscription
 from app.db.models.invoice import (
     Invoice,
     InvoicePurpose,
@@ -110,13 +111,18 @@ class InvoiceService:
         now: datetime | None = None,
         plan_code: str | None = None,
         usage_since: datetime | None = None,
+        price: PlanPrice | None = None,
     ) -> tuple[Invoice, bool]:
-        """Issue the renewal for a period. Returns the invoice and whether it is new.
+        """Issue the renewal for a term. Returns the invoice and whether it is new.
 
-        `plan` is the version whose terms the period is billed at (a bare
-        `Plan` is accepted for callers that predate versioning). `usage_since`
-        is the start of the period that just ended, whose consumption the
-        usage lines report; without it they report `period_start` onwards.
+        `plan` is the version whose entitlements the term grants (a bare
+        `Plan` is accepted for callers that predate versioning) and `price`
+        the price it is billed at - its amount, currency and billing term are
+        copied onto the invoice, and the database refuses anything else. A
+        priced version must be billed at one of its prices; a free one has
+        none and is issued already paid. `usage_since` is the start of the term
+        that just ended, whose consumption the usage lines report; without it
+        they report `period_start` onwards.
 
         Idempotent by period: a sweep that runs twice finds the renewal it
         already issued and returns it unchanged.
@@ -127,27 +133,40 @@ class InvoiceService:
             return existing, False
 
         version = plan if isinstance(plan, PlanVersion) else None
+        if version is not None and (price is None) != version.is_free:
+            raise ValidationError("A renewal of a priced version is billed at one of its prices.")
+        amount = price.amount if price is not None else plan.price
         lines = await self._lines(
             plan=plan,
+            amount=amount,
             period_start=usage_since if usage_since is not None else period_start,
             period_end=period_start if usage_since is not None else period_end,
         )
         if version is not None:
             lines[0]["plan_version"] = version.version
-            lines[0]["interval"] = version.interval.value
+            lines[0]["interval"] = (
+                price.billing_interval.value if price is not None else version.interval.value
+            )
+        if price is not None:
+            lines[0]["plan_price_id"] = str(price.id)
+            lines[0]["interval_count"] = price.interval_count
         code = plan_code if plan_code is not None else getattr(plan, "code", None)
         invoice = self._invoices.create(
             subscription_id=subscription.id,
             plan_code=str(code),
-            amount_due=plan.price,
-            currency=plan.currency,
+            amount_due=amount,
+            currency=price.currency if price is not None else plan.currency,
             period_start=period_start,
             period_end=period_end,
             lines=lines,
-            status=InvoiceStatus.OPEN if plan.price > 0 else InvoiceStatus.PAID,
+            status=InvoiceStatus.OPEN if amount > 0 else InvoiceStatus.PAID,
             purpose=InvoicePurpose.RENEWAL,
             plan_version_id=version.id if version is not None else None,
         )
+        if price is not None:
+            invoice.plan_price_id = price.id
+            invoice.billing_interval = price.billing_interval
+            invoice.interval_count = price.interval_count
         invoice.issued_at = moment
         if invoice.status is InvoiceStatus.PAID:
             # A free plan produces an invoice that is settled on arrival. It is
@@ -171,6 +190,7 @@ class InvoiceService:
         self,
         *,
         plan: Plan | PlanVersion,
+        amount: Decimal,
         period_start: datetime,
         period_end: datetime,
     ) -> list[dict[str, Any]]:
@@ -185,7 +205,7 @@ class InvoiceService:
                 "kind": "subscription",
                 "description": f"{plan.name} plan",
                 "quantity": 1,
-                "amount": str(plan.price),
+                "amount": str(amount),
             }
         ]
 

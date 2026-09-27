@@ -8,6 +8,10 @@ An orchestration over what already exists, and nothing more:
       -> audit
       -> the full commercial picture, previewed before anything was written
 
+A custom plan may be sold monthly, yearly or both (ADR-116): its prices are
+ordinary `plan_prices` of its version, owned by the workspace through the plan,
+and the offer or assignment names exactly one of them.
+
 No second plan model, no second assignment path. A *priced* custom plan applied
 now is never granted for free: it needs a manual payment the operator has seen,
 a complimentary grant recorded as one, or the customer's own checkout - in which
@@ -37,7 +41,9 @@ from app.core.telemetry import record_custom_plan
 from app.db.models.audit import AuditAction
 from app.db.models.billing import (
     RESOURCE_LIMITS,
+    BillingInterval,
     LimitKey,
+    PlanPrice,
     PlanScope,
     PlanVersion,
     Subscription,
@@ -68,6 +74,7 @@ from app.schemas.custom_plan import (
     CustomPlanTerms,
     EstimatedCharge,
     LimitComparison,
+    ProposedPriceRead,
 )
 from app.schemas.platform_billing import (
     ChangeMode,
@@ -183,16 +190,35 @@ class CustomPlanAdmin:
                 "The workspace has no subscription, so there is no renewal to wait for."
             )
 
+        selected = payload.selected
+        if len(payload.resolved_prices) > 1 and selected is None:
+            warnings.append(
+                "The plan has more than one price; name selected_billing_interval to offer "
+                "or assign it."
+            )
         return CustomPlanPreview(
             tenant=CustomPlanTenantRead(
                 id=tenant.id, name=tenant.name, slug=tenant.slug, status=tenant.status
             ),
-            current_plan=await self._current_read(current),
+            current_plan=await self._current_read(subscription, current),
             proposed_code=payload.code.strip().lower(),
             proposed_name=payload.name,
-            proposed_price=_money(payload.price),
+            proposed_price=_money(selected.amount if selected is not None else Decimal("0")),
             currency=payload.currency,
-            interval=payload.billing_interval,
+            interval=(
+                selected.billing_interval
+                if selected is not None
+                else payload.billing_interval or BillingInterval.MONTHLY
+            ),
+            proposed_prices=[
+                ProposedPriceRead(
+                    billing_interval=price.billing_interval,
+                    interval_count=price.interval_count,
+                    amount=_money(price.amount),
+                    currency=price.currency,
+                )
+                for price in payload.resolved_prices
+            ],
             limits=comparisons,
             inherited_limits=self._inherited(current),
             effective_mode=payload.assignment_mode,
@@ -221,11 +247,12 @@ class CustomPlanAdmin:
         """The next money this plan would ask the customer for, and when."""
         if not assigning:
             return None
-        price = _money(payload.price)
-        if payload.price <= 0:
+        selected = payload.selected
+        if selected is None:
             return EstimatedCharge(
                 amount="0.00", currency=payload.currency, due_at=None, basis="none"
             )
+        price = _money(selected.amount)
         if payload.assignment_mode is AssignmentMode.NEXT_RENEWAL:
             due = subscription.current_period_end if subscription is not None else None
             return EstimatedCharge(
@@ -233,7 +260,7 @@ class CustomPlanAdmin:
             )
         if basis is CustomPlanBasis.COMPLIMENTARY:
             until = complimentary_until or billing_calendar.add_interval(
-                now, payload.billing_interval
+                now, selected.billing_interval, selected.interval_count
             )
             return EstimatedCharge(
                 amount=price, currency=payload.currency, due_at=until, basis="complimentary"
@@ -284,9 +311,14 @@ class CustomPlanAdmin:
         tenant = await self._tenant(tenant_id)
         subscription = await SubscriptionRepository(self._session, tenant_id=tenant.id).get()
         offering = payload.financial_basis is CustomPlanBasis.CUSTOMER_CHECKOUT
-        if offering and payload.price <= 0:
+        if offering and payload.is_free:
             raise ValidationError(
                 "A free custom plan is not sold. Assign it with a complimentary basis instead."
+            )
+        if (offering or payload.assign_to_tenant) and not payload.is_free and not payload.selected:
+            raise ValidationError(
+                "The plan has more than one price. Name the one to offer or assign with "
+                "selected_billing_interval."
             )
         if payload.assign_to_tenant and subscription is None and not offering:
             raise ConflictError("The workspace has no subscription to put on this plan.")
@@ -331,9 +363,8 @@ class CustomPlanAdmin:
                 code=payload.code,
                 name=payload.name,
                 description=payload.description,
-                price=payload.price,
                 currency=payload.currency,
-                interval=payload.billing_interval,
+                prices=payload.resolved_prices,
                 limits=limits,
                 effective_at=payload.effective_at,
                 scope=PlanScope.TENANT,
@@ -347,6 +378,7 @@ class CustomPlanAdmin:
         version = await PlanVersionRepository(self._session).latest(plan_read.id)
         if version is None:  # pragma: no cover - create() has just written v1
             raise NotFoundError("The custom plan has no version.")
+        chosen = await self._selected_price(payload, version)
 
         assignment = CustomPlanAssignment(mode=None, status="not_assigned", subscription=None)
         offer_read_model = None
@@ -357,6 +389,7 @@ class CustomPlanAdmin:
             offer = await PlatformCustomPlanOffers(self._session).offer(
                 tenant.id,
                 CustomPlanOfferCreate(
+                    plan_price_id=chosen.id if chosen is not None else None,
                     plan_version_id=version.id,
                     expires_at=payload.offer_expires_at,
                     reason=payload.reason,
@@ -370,13 +403,20 @@ class CustomPlanAdmin:
             offer_read_model = await offer_read(self._session, offer, now=now)
         elif payload.assign_to_tenant and subscription is not None:
             assignment = await self._assign(
-                payload, subscription=subscription, version=version, actor=actor, now=now
+                payload,
+                subscription=subscription,
+                version=version,
+                price=chosen,
+                actor=actor,
+                now=now,
             )
 
         plan_read = await plans.get(plan_read.id)
         return CustomPlanResult(
             plan=plan_read,
-            version=PlanVersionRead.from_model(version),
+            version=PlanVersionRead.from_model(
+                version, prices=await self._catalog.prices(version, active_only=False)
+            ),
             assignment=assignment,
             preview=preview,
             offer=offer_read_model,
@@ -388,10 +428,11 @@ class CustomPlanAdmin:
         *,
         subscription: Subscription,
         version: PlanVersion,
+        price: PlanPrice | None,
         actor: User,
         now: datetime,
     ) -> CustomPlanAssignment:
-        """Put the workspace on version 1 through the ordinary subscription change.
+        """Put the workspace on version 1, at the selected price, by the ordinary change.
 
         A priced plan reaches the workspace only with its funding named: a
         manual payment or a complimentary grant now, or an offer the customer
@@ -405,6 +446,7 @@ class CustomPlanAdmin:
             subscription.id,
             SubscriptionChangePlan(
                 plan_version_id=version.id,
+                plan_price_id=price.id if price is not None else None,
                 mode=(
                     ChangeMode.NOW
                     if payload.assignment_mode is AssignmentMode.NOW
@@ -429,6 +471,7 @@ class CustomPlanAdmin:
             payload,
             subscription=subscription,
             version=version,
+            price=price,
             actor=actor,
             extra={"subscription_revision": changed.revision},
         )
@@ -445,6 +488,7 @@ class CustomPlanAdmin:
         *,
         subscription: Subscription,
         version: PlanVersion,
+        price: PlanPrice | None,
         actor: User,
         extra: dict[str, Any],
     ) -> None:
@@ -460,8 +504,11 @@ class CustomPlanAdmin:
             after={
                 "plan_version_id": str(version.id),
                 "version": version.version,
-                "price": str(version.price),
-                "interval": version.interval.value,
+                "plan_price_id": str(price.id) if price is not None else None,
+                "price": str(price.amount) if price is not None else "0.00",
+                "interval": (
+                    price.billing_interval.value if price is not None else version.interval.value
+                ),
                 "mode": payload.assignment_mode.value,
                 "financial_basis": (
                     payload.financial_basis.value if payload.financial_basis else None
@@ -486,21 +533,40 @@ class CustomPlanAdmin:
         plan = await self._plans.get_by_code(code) if code else None
         return await self._catalog.current_version(plan) if plan is not None else None
 
-    async def _current_read(self, version: PlanVersion | None) -> CurrentPlanRead | None:
+    async def _selected_price(
+        self, payload: CustomPlanCreate, version: PlanVersion
+    ) -> PlanPrice | None:
+        """The row of the price an offer or assignment uses, as just published."""
+        selected = payload.selected
+        if selected is None or version.is_free:
+            return None
+        return await self._catalog.price_for_term(
+            version, interval=selected.billing_interval, interval_count=selected.interval_count
+        )
+
+    async def _current_read(
+        self, subscription: Subscription | None, version: PlanVersion | None
+    ) -> CurrentPlanRead | None:
         if version is None:
             return None
         plan = await self._plans.get_by_id(version.plan_id)
         if plan is None:  # pragma: no cover - RESTRICT makes this unreachable
             return None
+        price = (
+            await self._catalog.pinned_price(subscription, version=version)
+            if subscription is not None
+            else await self._catalog.default_price(version)
+        )
         return CurrentPlanRead(
             plan_id=plan.id,
             code=plan.code,
             name=version.name,
             scope=plan.scope,
             version=version.version,
-            price=_money(version.price),
+            price=_money(price.amount if price is not None else version.price),
             currency=version.currency,
-            interval=version.interval,
+            interval=price.billing_interval if price is not None else version.interval,
+            plan_price_id=price.id if price is not None else None,
         )
 
     @staticmethod

@@ -35,7 +35,9 @@ from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
 from app.db.models.billing import (
     BillingAdjustment,
     BillingAdjustmentKind,
+    BillingInterval,
     Plan,
+    PlanPrice,
     PlanVersion,
     ScheduledChangeSource,
     Subscription,
@@ -77,6 +79,7 @@ from app.schemas.platform_billing import (
     TimelineEntry,
 )
 from app.services import billing_calendar
+from app.services.checkout_service import invoice_lines
 from app.services.invoice_service import InvoiceService
 from app.services.payment_reconciliation_service import PaymentReconciler
 from app.services.plan_catalog import PlanCatalog
@@ -107,12 +110,20 @@ def _subscription_state(subscription: Subscription) -> dict[str, Any]:
         "plan_version_id": (
             str(subscription.plan_version_id) if subscription.plan_version_id else None
         ),
+        "plan_price_id": str(subscription.plan_price_id) if subscription.plan_price_id else None,
         "current_period_start": subscription.current_period_start.isoformat(),
         "current_period_end": subscription.current_period_end.isoformat(),
+        "usage_period_start": subscription.usage_period_start.isoformat(),
+        "usage_period_end": subscription.usage_period_end.isoformat(),
         "cancel_at_period_end": subscription.cancel_at_period_end,
         "scheduled_plan_version_id": (
             str(subscription.scheduled_plan_version_id)
             if subscription.scheduled_plan_version_id
+            else None
+        ),
+        "scheduled_plan_price_id": (
+            str(subscription.scheduled_plan_price_id)
+            if subscription.scheduled_plan_price_id
             else None
         ),
         "revision": subscription.revision,
@@ -168,8 +179,18 @@ class PlatformBillingOperations:
         renews_after: datetime | None,
         limit: int,
         offset: int,
+        billing_interval: BillingInterval | None = None,
+        plan_price_id: uuid.UUID | None = None,
     ) -> Page[PlatformSubscriptionRead]:
         statement = select(Subscription)
+        if plan_price_id is not None:
+            statement = statement.where(Subscription.plan_price_id == plan_price_id)
+        if billing_interval is not None:
+            # By the price each subscriber renews at (ADR-116); a free
+            # subscription has no billing term and matches neither.
+            statement = statement.join(PlanPrice, PlanPrice.id == Subscription.plan_price_id).where(
+                PlanPrice.billing_interval == billing_interval
+            )
         if tenant_id is not None:
             statement = statement.where(Subscription.tenant_id == tenant_id)
         if plan_code:
@@ -271,9 +292,9 @@ class PlatformBillingOperations:
             raise NotFoundError("No such plan version.")
         # Another workspace's custom plan is refused before anything else is
         # considered (ADR-113): 422 `custom_plan_not_available_for_workspace`.
-        await PlanCatalog(self._session).require_available(
-            version, tenant_id=subscription.tenant_id
-        )
+        catalog = PlanCatalog(self._session)
+        await catalog.require_available(version, tenant_id=subscription.tenant_id)
+        price = await self._chosen_price(catalog, version, payload.plan_price_id)
         before = _subscription_state(subscription)
         service = SubscriptionService(self._session, tenant_id=subscription.tenant_id)
 
@@ -292,6 +313,7 @@ class PlatformBillingOperations:
         if payload.mode is ChangeMode.NEXT_RENEWAL:
             await service.schedule_change(
                 version=version,
+                price=price,
                 source=ScheduledChangeSource.OPERATOR,
                 reason=payload.reason,
                 now=moment,
@@ -299,18 +321,22 @@ class PlatformBillingOperations:
                 actor_kind=AuditActorKind.PLATFORM_STAFF,
             )
             action = AuditAction.SUBSCRIPTION_PLAN_CHANGE_SCHEDULED
-        elif version.price <= 0:
+        elif price is None:
             # Nothing to pay, so nothing was purchased: the trail names the
             # operator who assigned it (PAY-E2E-02).
             await service.apply_purchase(
                 version=version,
+                price=None,
                 now=moment,
                 grant=PlanGrant(actor=actor, basis=PLATFORM_GRANT, reason=payload.reason),
             )
             action = AuditAction.SUBSCRIPTION_PLAN_CHANGED
         elif payload.financial_basis is FinancialBasis.COMPLIMENTARY:
+            # Complimentary for one term of the chosen price - a year on a
+            # yearly price - unless the operator says otherwise; the renewal
+            # after it bills that price. No invoice, no payment, no provider.
             ends = payload.complimentary_until or billing_calendar.add_interval(
-                moment, version.interval
+                moment, price.billing_interval, price.interval_count
             )
             if ends <= moment:
                 raise ValidationError("complimentary_until must be in the future.")
@@ -328,6 +354,7 @@ class PlatformBillingOperations:
             )
             await service.apply_purchase(
                 version=version,
+                price=price,
                 now=moment,
                 grant=PlanGrant(actor=actor, basis=COMPLIMENTARY_GRANT, reason=payload.reason),
             )
@@ -336,33 +363,29 @@ class PlatformBillingOperations:
             details = payload.manual_payment
             if details is None:
                 raise ValidationError("A manual payment needs its details.")
-            if details.amount != version.price or details.currency.upper() != version.currency:
+            if details.amount != price.amount or details.currency.upper() != price.currency:
                 raise ValidationError(
-                    f"A manual payment for this version must be {version.price} {version.currency}."
+                    f"A manual payment for this price must be {price.amount} {price.currency}."
                 )
             plan = await self._session.get(Plan, version.plan_id)
             invoices = InvoiceRepository(self._session, tenant_id=subscription.tenant_id)
             invoice = invoices.create(
                 subscription_id=subscription.id,
                 plan_code=plan.code if plan is not None else "unknown",
-                amount_due=version.price,
-                currency=version.currency,
+                amount_due=price.amount,
+                currency=price.currency,
                 period_start=moment,
-                period_end=billing_calendar.add_interval(moment, version.interval),
-                lines=[
-                    {
-                        "kind": "subscription",
-                        "description": f"{version.name} plan",
-                        "amount": str(version.price),
-                        "quantity": 1,
-                        "plan_version": version.version,
-                        "interval": version.interval.value,
-                    }
-                ],
+                period_end=billing_calendar.add_interval(
+                    moment, price.billing_interval, price.interval_count
+                ),
+                lines=invoice_lines(version, price),
                 status=InvoiceStatus.OPEN,
                 purpose=InvoicePurpose.MANUAL,
                 plan_version_id=version.id,
             )
+            invoice.plan_price_id = price.id
+            invoice.billing_interval = price.billing_interval
+            invoice.interval_count = price.interval_count
             invoice.issued_at = moment
             invoice.created_at = moment
             await self._session.flush()
@@ -399,9 +422,35 @@ class PlatformBillingOperations:
                     payload.financial_basis.value if payload.financial_basis else None
                 ),
                 "plan_version_id": str(version.id),
+                "plan_price_id": str(price.id) if price is not None else None,
+                "billing_interval": price.billing_interval.value if price is not None else None,
+                "amount": str(price.amount) if price is not None else "0.00",
             },
         )
         return await self._read_subscription(subscription)
+
+    @staticmethod
+    async def _chosen_price(
+        catalog: PlanCatalog, version: PlanVersion, price_id: uuid.UUID | None
+    ) -> PlanPrice | None:
+        """The price an operator put a subscriber on - explicit, or the default.
+
+        Explicit prices may be retired: an operator may honour old terms
+        deliberately. They must belong to the version. Omitted, the version's
+        default (monthly) price is used; a version sold only on other terms
+        needs one named.
+        """
+        if version.is_free:
+            return None
+        if price_id is not None:
+            price = await catalog.get_price(price_id)
+            if price is None or price.plan_version_id != version.id:
+                raise ValidationError("plan_price_id must be a price of plan_version_id.")
+            return price
+        price = await catalog.default_price(version)
+        if price is None:
+            raise ValidationError("This version is not sold monthly; name its price.")
+        return price
 
     async def _is_unaccepted_custom_plan(
         self, version: PlanVersion, *, subscription: Subscription
@@ -886,10 +935,16 @@ class PlatformBillingOperations:
             if subscription.plan_version_id
             else None
         )
+        price = (
+            await self._session.get(PlanPrice, subscription.plan_price_id)
+            if subscription.plan_price_id
+            else None
+        )
         return PlatformSubscriptionRead.build(
             subscription,
             plan_code=plan.code if plan is not None else None,
             version=version.version if version is not None else None,
+            price=price,
         )
 
     async def _require_subscription(self, subscription_id: uuid.UUID) -> Subscription:

@@ -92,7 +92,7 @@ from app.integrations.billing.checkout import SavedMethodCharge
 from app.services.plan_catalog import PlanCatalog
 from app.workers import billing_worker as worker_module
 from app.workers.billing_worker import BillingWorker
-from tests.billing_fixtures import erase_ledger
+from tests.billing_fixtures import erase_ledger, price_terms
 from tests.fakes import as_database
 from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, saved_card
 
@@ -266,6 +266,7 @@ async def workspace(
                 status=InvoiceStatus.OPEN,
                 purpose=InvoicePurpose.RENEWAL,
                 plan_version_id=version.id,
+                **(await price_terms(session, version.id)),
                 plan_code=plan.code,
                 amount_due=AMOUNT,
                 amount_paid=Decimal("0.00"),

@@ -58,7 +58,7 @@ from app.services.plan_catalog import PlanCatalog
 from app.services.recurring_service import MAX_COLLECTION_ATTEMPTS
 from app.workers import billing_worker as worker_module
 from app.workers.billing_worker import BillingWorker
-from tests.billing_fixtures import erase_ledger
+from tests.billing_fixtures import erase_ledger, price_terms
 from tests.fakes import as_database
 from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, saved_card
 
@@ -295,6 +295,7 @@ async def _open_invoice(
             tenant_id=tenant_id,
             subscription_id=subscription_id,
             plan_version_id=version.id,
+            **(await price_terms(session, version.id)),
             status=InvoiceStatus.OPEN,
             purpose=InvoicePurpose.RENEWAL,
             plan_code="sweep",

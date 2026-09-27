@@ -15,7 +15,7 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
-from app.db.models.billing import PlanScope, ScheduledChangeSource
+from app.db.models.billing import BillingInterval, PlanScope, ScheduledChangeSource
 from app.db.models.enums import TenantStatus
 from app.schemas.billing import EntitlementRead
 from app.schemas.platform_billing import (
@@ -50,10 +50,14 @@ class SummaryPlan(BaseModel):
 
 
 class SummaryScheduledChange(BaseModel):
+    """A change waiting for the end of the billing term, pinned to its price."""
+
     plan_version_id: uuid.UUID
+    plan_price_id: uuid.UUID | None = None
     plan_code: str | None
     version: int | None
     price: str | None
+    billing_interval: BillingInterval | None = None
     source: ScheduledChangeSource | None
     effective_at: datetime
 
@@ -64,10 +68,17 @@ class PlatformTenantBillingSummary(BaseModel):
     plan: SummaryPlan | None
     plan_version: PlanVersionRead | None
     custom_plan: bool
+    # The price the subscription renews at, and so its billing term (ADR-116).
+    plan_price_id: uuid.UUID | None = None
+    billing_interval: BillingInterval | None = None
     price: str | None
     currency: str | None
+    # The paid billing term - a year on a yearly price.
     current_period_start: datetime | None
     current_period_end: datetime | None
+    # The monthly usage cycle inside it, in force now.
+    usage_period_start: datetime | None = None
+    usage_period_end: datetime | None = None
     # Null when nothing will renew: a cancellation takes effect at period end,
     # or the subscription has stopped.
     next_renewal_at: datetime | None

@@ -16,7 +16,13 @@ from sqlalchemy import ColumnElement, Select, func, or_, select, update
 from sqlalchemy.orm import aliased
 
 from app.core.pagination import Cursor
-from app.db.models.billing import SERVING_STATUSES, PlanVersion, Subscription, SubscriptionStatus
+from app.db.models.billing import (
+    SERVING_STATUSES,
+    PlanPrice,
+    PlanVersion,
+    Subscription,
+    SubscriptionStatus,
+)
 from app.db.models.enums import TenantStatus
 from app.db.models.invoice import (
     UNRESOLVED_COLLECTION_STATES,
@@ -97,8 +103,10 @@ def _automatically_collectible(statement: Select[tuple[Invoice]]) -> Select[tupl
       is still serving;
     - its version belongs to the subscription's plan, or is the change the
       subscription has scheduled;
-    - it is charged its whole snapshot, which still equals its version's price,
-      and nothing has been paid or refunded on it;
+    - it is charged its whole snapshot, which still equals the price it names
+      - a yearly price's full year on a yearly renewal (ADR-116) - and nothing
+      has been paid or refunded on it. A renewal naming no price is never
+      charged automatically;
     - the workspace is neither deleted nor **suspended by the platform**
       (BILL-17): a workspace whose owner cannot sign in to cancel or remove a
       card must not be charged while it is locked.
@@ -107,14 +115,15 @@ def _automatically_collectible(statement: Select[tuple[Invoice]]) -> Select[tupl
         statement.join(Tenant, Tenant.id == Invoice.tenant_id)
         .join(Subscription, Subscription.id == Invoice.subscription_id)
         .join(PlanVersion, PlanVersion.id == Invoice.plan_version_id)
+        .join(PlanPrice, PlanPrice.id == Invoice.plan_price_id)
         .where(Tenant.deleted_at.is_(None))
         .where(Tenant.status == TenantStatus.ACTIVE)
         .where(Invoice.purpose == InvoicePurpose.RENEWAL)
         .where(Invoice.status == InvoiceStatus.OPEN)
         .where(Invoice.issued_at.is_not(None))
         .where(Invoice.amount_paid == 0)
-        .where(Invoice.amount_due == PlanVersion.price)
-        .where(Invoice.currency == PlanVersion.currency)
+        .where(Invoice.amount_due == PlanPrice.amount)
+        .where(Invoice.currency == PlanPrice.currency)
         .where(Invoice.period_start == Subscription.current_period_start)
         .where(Subscription.status.in_(SERVING_STATUSES))
         .where(

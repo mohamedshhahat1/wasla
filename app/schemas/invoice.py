@@ -15,6 +15,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.db.models.billing import BillingInterval
 from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.payment_method import PaymentMethod
 from app.schemas.text import StorableText
@@ -143,7 +144,14 @@ class RefundRequestPayload(BaseModel):
 
 
 class InvoiceRead(BaseModel):
-    """What a workspace owed for one period, and what is still outstanding."""
+    """What a workspace owed for one billing term, and what is still outstanding.
+
+    `billing_interval` and `interval_count` are the term this invoice pays for
+    (ADR-116), copied from its price when it was issued: a yearly invoice is
+    one invoice covering `period_start`..`period_end`, a whole year - never
+    twelve monthly ones. Null on a top-up, a free renewal and an invoice issued
+    before prices existed.
+    """
 
     id: str
     status: InvoiceStatus
@@ -152,6 +160,9 @@ class InvoiceRead(BaseModel):
     purpose: InvoicePurpose
     plan_code: str
     plan_version_id: str | None
+    plan_price_id: str | None = None
+    billing_interval: BillingInterval | None = None
+    interval_count: int | None = None
     amount_due: str
     amount_paid: str
     outstanding: str
@@ -170,6 +181,9 @@ class InvoiceRead(BaseModel):
             purpose=invoice.purpose,
             plan_code=invoice.plan_code,
             plan_version_id=str(invoice.plan_version_id) if invoice.plan_version_id else None,
+            plan_price_id=str(invoice.plan_price_id) if invoice.plan_price_id else None,
+            billing_interval=invoice.billing_interval,
+            interval_count=invoice.interval_count,
             amount_due=_money(invoice.amount_due),
             amount_paid=_money(invoice.amount_paid),
             outstanding=_money(invoice.outstanding),

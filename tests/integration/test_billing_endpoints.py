@@ -389,13 +389,24 @@ class StubSubscriptions:
     async def version_for(self, subscription: Subscription) -> None:
         return None
 
+    async def price_for(self, subscription: Subscription, version: object) -> None:
+        return None
+
+    async def scheduled_price_for(self, subscription: Subscription) -> None:
+        return None
+
+    async def prices_for(self, version: object) -> list[Any]:
+        return []
+
     async def request_plan(
         self,
         *,
-        plan_code: str,
+        plan_code: str | None = None,
+        plan_price_id: uuid.UUID | None = None,
         now: datetime | None = None,
         actor: User | None = None,
     ) -> Subscription:
+        assert plan_code is not None
         return await self.change_plan(plan_code=plan_code, now=now, actor=actor)
 
     async def start(
@@ -463,6 +474,9 @@ class StubPlans:
         )
 
         self.asked_for: list[uuid.UUID | None] = []
+
+    async def prices(self, version: object) -> list[Any]:
+        return []
 
     async def offered(self, *, tenant_id: uuid.UUID | None = None) -> list[Any]:
         # The route must ask for *its own* workspace's catalogue: that is what

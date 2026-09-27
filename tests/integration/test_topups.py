@@ -941,7 +941,9 @@ async def test_a_topup_purchase_stays_after_a_mid_period_plan_change(
     version = next(v for p, v in business if p.code == "business")
     upgrade = later(now, days=3)
     await SubscriptionService(db_session, tenant_id=tenant.id).apply_purchase(
-        version=version, now=upgrade
+        version=version,
+        price=await PlanCatalog(db_session).default_price(version),
+        now=upgrade,
     )
     purchase = await _purchase(db_session, started.purchase_id)
     assert purchase.expires_at == first_end

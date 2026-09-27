@@ -20,6 +20,7 @@ from app.db.models.billing import (
     BillingInterval,
     LimitKey,
     Plan,
+    PlanPrice,
     PlanVersion,
     ScheduledChangeSource,
     Subscription,
@@ -38,13 +39,44 @@ class PlanLimitRead(BaseModel):
     limit: int | None
 
 
-class PlanRead(BaseModel):
-    """A plan as a pricing page shows it, at the terms of one version.
+class PlanPriceOptionRead(BaseModel):
+    """One way to pay for a plan: an amount per billing term (ADR-116).
 
-    `version` names which immutable terms these are (BILL-12). On the
+    What a customer chooses at checkout, by its `id`. `interval` is the
+    billing term - `monthly` or `yearly` - and never how often allowances
+    reset: those reset every calendar month on either.
+    """
+
+    id: str
+    interval: BillingInterval
+    interval_count: int
+    amount: str
+    currency: str
+
+    @classmethod
+    def from_model(cls, price: PlanPrice) -> Self:
+        return cls(
+            id=str(price.id),
+            interval=price.billing_interval,
+            interval_count=price.interval_count,
+            amount=f"{price.amount:.2f}",
+            currency=price.currency,
+        )
+
+
+class PlanRead(BaseModel):
+    """A plan as a pricing page shows it: one version, and every price of it.
+
+    `version` names which immutable entitlements these are (BILL-12). On the
     catalogue it is the version a new customer would buy; on a subscription it
     is the version that subscriber is held to - which is not necessarily the
     same thing, and that is the point.
+
+    `prices` are the price options a customer may choose - monthly, yearly or
+    both - each granting exactly these limits (ADR-116). `billing_required` is
+    false for a free plan, which has no prices and is never checked out.
+    `price`, `currency` and `interval` are kept for earlier clients: the
+    default (monthly) price where there is one. A checkout names a price id.
     """
 
     id: str
@@ -55,6 +87,8 @@ class PlanRead(BaseModel):
     price: Decimal
     currency: str
     interval: BillingInterval
+    billing_required: bool = True
+    prices: list[PlanPriceOptionRead] = Field(default_factory=list)
     trial_days: int
     limits: list[PlanLimitRead]
     # Written for this workspace alone (ADR-113). Never true for a plan another
@@ -62,17 +96,34 @@ class PlanRead(BaseModel):
     is_custom: bool = False
 
     @classmethod
-    def from_model(cls, plan: Plan, version: PlanVersion | None = None) -> Self:
+    def from_model(
+        cls,
+        plan: Plan,
+        version: PlanVersion | None = None,
+        *,
+        prices: list[PlanPrice] | None = None,
+    ) -> Self:
         terms: Plan | PlanVersion = version if version is not None else plan
+        options = list(prices or [])
+        default = next(
+            (
+                price
+                for price in options
+                if price.billing_interval is BillingInterval.MONTHLY and price.interval_count == 1
+            ),
+            options[0] if options else None,
+        )
         return cls(
             id=str(plan.id),
             code=plan.code,
             name=version.name if version is not None else plan.name,
             description=plan.description,
             version=version.version if version is not None else None,
-            price=terms.price,
-            currency=terms.currency,
-            interval=terms.interval,
+            price=default.amount if default is not None else terms.price,
+            currency=default.currency if default is not None else terms.currency,
+            interval=default.billing_interval if default is not None else terms.interval,
+            billing_required=terms.price > 0,
+            prices=[PlanPriceOptionRead.from_model(price) for price in options],
             trial_days=terms.trial_days,
             # Every key, including the ones this plan does not limit, so a
             # comparison table renders "unlimited" rather than a blank cell it
@@ -138,22 +189,57 @@ class EntitlementRead(BaseModel):
 
 
 class ScheduledChangeRead(BaseModel):
-    """A plan change waiting for the current period to end."""
+    """A plan or price change waiting for the current billing term to end.
+
+    Pinned to its exact price (ADR-116): yearly to monthly shows the monthly
+    price the next invoice will charge, at `effective_at`, the end of the
+    paid year.
+    """
 
     plan_version_id: str
+    plan_price_id: str | None = None
+    billing_interval: BillingInterval | None = None
+    interval_count: int | None = None
+    amount: str | None = None
+    currency: str | None = None
     source: ScheduledChangeSource
     effective_at: datetime
 
 
 class SubscriptionRead(BaseModel):
-    """A workspace's subscription, with the terms it is held to."""
+    """A workspace's subscription, with the terms it is held to.
+
+    Two periods, never one (ADR-116):
+
+    - **billing term** - `billing_period_start`/`billing_period_end` (also
+      `current_period_start`/`current_period_end`, their earlier names): what
+      the last payment covers. A year on a yearly price; `paid_through` is its
+      end.
+    - **usage cycle** - `usage_period_start`/`usage_period_end`: the calendar
+      month the usage allowances are counted over. Inside a yearly term it is
+      one of twelve.
+
+    `plan_price` is the price the subscription renews at; `next_renewal_at` and
+    `next_renewal_amount` say when and what the next invoice will be - null
+    when nothing will renew (a cancellation at the term's end).
+    """
 
     id: str
     status: SubscriptionStatus
     plan: PlanRead
     plan_version_id: str | None
+    plan_price: PlanPriceOptionRead | None = None
+    billing_interval: BillingInterval | None = None
     current_period_start: datetime
     current_period_end: datetime
+    billing_period_start: datetime | None = None
+    billing_period_end: datetime | None = None
+    paid_through: datetime | None = None
+    usage_period_start: datetime | None = None
+    usage_period_end: datetime | None = None
+    next_renewal_at: datetime | None = None
+    next_renewal_amount: str | None = None
+    next_renewal_currency: str | None = None
     billing_anchor_at: datetime | None
     trial_ends_at: datetime | None
     cancel_at_period_end: bool
@@ -169,23 +255,59 @@ class SubscriptionRead(BaseModel):
         *,
         plan: Plan,
         version: PlanVersion | None = None,
+        price: PlanPrice | None = None,
+        scheduled_price: PlanPrice | None = None,
+        prices: list[PlanPrice] | None = None,
+        usage_period: tuple[datetime, datetime] | None = None,
     ) -> Self:
         scheduled = None
         if subscription.scheduled_plan_version_id is not None:
             scheduled = ScheduledChangeRead(
                 plan_version_id=str(subscription.scheduled_plan_version_id),
+                plan_price_id=str(scheduled_price.id) if scheduled_price is not None else None,
+                billing_interval=(
+                    scheduled_price.billing_interval if scheduled_price is not None else None
+                ),
+                interval_count=(
+                    scheduled_price.interval_count if scheduled_price is not None else None
+                ),
+                amount=f"{scheduled_price.amount:.2f}" if scheduled_price is not None else None,
+                currency=scheduled_price.currency if scheduled_price is not None else None,
                 source=subscription.scheduled_change_source or ScheduledChangeSource.OPERATOR,
                 effective_at=subscription.current_period_end,
             )
+        renews = not subscription.is_terminal and not subscription.cancel_at_period_end
+        renewing_at = scheduled_price if scheduled is not None else price
+        usage_start, usage_end = (
+            usage_period
+            if usage_period is not None
+            else (subscription.usage_period_start, subscription.usage_period_end)
+        )
         return cls(
             id=str(subscription.id),
             status=subscription.status,
-            plan=PlanRead.from_model(plan, version),
+            plan=PlanRead.from_model(plan, version, prices=prices),
             plan_version_id=(
                 str(subscription.plan_version_id) if subscription.plan_version_id else None
             ),
+            plan_price=PlanPriceOptionRead.from_model(price) if price is not None else None,
+            billing_interval=price.billing_interval if price is not None else None,
             current_period_start=subscription.current_period_start,
             current_period_end=subscription.current_period_end,
+            billing_period_start=subscription.current_period_start,
+            billing_period_end=subscription.current_period_end,
+            paid_through=subscription.current_period_end if price is not None else None,
+            usage_period_start=usage_start,
+            usage_period_end=usage_end,
+            next_renewal_at=subscription.current_period_end if renews else None,
+            next_renewal_amount=(
+                f"{renewing_at.amount:.2f}"
+                if renews and renewing_at is not None
+                else ("0.00" if renews else None)
+            ),
+            next_renewal_currency=(
+                renewing_at.currency if renews and renewing_at is not None else None
+            ),
             billing_anchor_at=subscription.billing_anchor_at,
             trial_ends_at=subscription.trial_ends_at,
             cancel_at_period_end=subscription.cancel_at_period_end,
@@ -209,11 +331,26 @@ class SubscriptionStateRead(BaseModel):
 
 
 class PlanSelectionRequest(BaseModel):
-    """Choosing a plan, by its stable code."""
+    """Choosing a plan or a price.
+
+    `plan_price_id` names the exact price - and billing term - wanted, as
+    `GET /billing/plans` lists them (ADR-116). `plan_code` alone means that
+    plan's default (monthly) price, as it always did. Never an amount, a
+    currency or an interval: those are the price's own.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    plan_code: StorableText = Field(min_length=1, max_length=MAX_PLAN_CODE_INPUT)
+    plan_code: StorableText | None = Field(
+        default=None, min_length=1, max_length=MAX_PLAN_CODE_INPUT
+    )
+    plan_price_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def _names_something(self) -> Self:
+        if self.plan_code is None and self.plan_price_id is None:
+            raise ValueError("Name plan_price_id or plan_code.")
+        return self
 
 
 class CheckoutRequestPayload(BaseModel):
@@ -238,6 +375,10 @@ class CheckoutRequestPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # The price to buy (ADR-116): monthly or yearly, as `GET /billing/plans`
+    # lists them. The amount, currency and billing term are the price's own.
+    plan_price_id: uuid.UUID | None = None
+    # Earlier clients: a plan code alone buys that plan's monthly price.
     plan_code: StorableText | None = Field(
         default=None, min_length=1, max_length=MAX_PLAN_CODE_INPUT
     )
@@ -246,14 +387,15 @@ class CheckoutRequestPayload(BaseModel):
 
     @model_validator(mode="after")
     def _exactly_one_subject(self) -> Self:
-        """One or the other. Both, or neither, is a caller that has not decided.
+        """Exactly one subject. Two, or none, is a caller that has not decided.
 
         Refused here rather than in the service so the answer is a 422 naming
         the field, which is what a client can act on - and so the service's own
         check stays as the guarantee rather than as the error message.
         """
-        if (self.plan_code is None) == (self.invoice_id is None):
-            raise ValueError("Name either plan_code or invoice_id, not both.")
+        named = [self.plan_price_id, self.plan_code, self.invoice_id]
+        if sum(value is not None for value in named) != 1:
+            raise ValueError("Name exactly one of plan_price_id, plan_code or invoice_id.")
         return self
 
 
@@ -293,6 +435,7 @@ __all__ = [
     "CancellationRequest",
     "EntitlementRead",
     "PlanLimitRead",
+    "PlanPriceOptionRead",
     "PlanRead",
     "PlanSelectionRequest",
     "SubscriptionRead",

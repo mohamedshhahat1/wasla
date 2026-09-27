@@ -22,7 +22,7 @@ from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.core.telemetry import record_custom_plan
 from app.db.models.audit import AuditAction, AuditActorKind
-from app.db.models.billing import Plan, PlanScope, PlanVersion
+from app.db.models.billing import Plan, PlanPrice, PlanScope, PlanVersion
 from app.db.models.custom_plan_offer import (
     CustomPlanOffer,
     CustomPlanOfferStatus,
@@ -34,6 +34,7 @@ from app.platform.billing_audit import record_platform_billing
 from app.repositories.custom_plan_offer_repository import PlatformCustomPlanOfferRepository
 from app.schemas.custom_plan import CustomPlanOfferCancel, CustomPlanOfferCreate
 from app.services.audit_service import AuditTrail
+from app.services.plan_catalog import PlanCatalog
 
 logger = get_logger(__name__)
 
@@ -105,9 +106,9 @@ class PlatformCustomPlanOffers:
         now: datetime,
     ) -> CustomPlanOffer:
         tenant = await self._tenant(tenant_id)
-        version = await self._session.get(PlanVersion, payload.plan_version_id)
-        plan = await self._session.get(Plan, version.plan_id) if version is not None else None
-        if version is None or plan is None:
+        version, price = await self._offered_terms(payload)
+        plan = await self._session.get(Plan, version.plan_id)
+        if plan is None:  # pragma: no cover - RESTRICT foreign keys
             raise NotFoundError("No such plan version.")
         if plan.scope is not PlanScope.TENANT or plan.tenant_id != tenant.id:
             raise ValidationError(
@@ -115,10 +116,12 @@ class PlatformCustomPlanOffers:
             )
         if not plan.is_active:
             raise ValidationError("A retired custom plan cannot be offered.")
-        if version.price <= 0:
+        if price is None:
             raise ValidationError(
                 "A free custom plan is not sold. Assign it with a complimentary basis instead."
             )
+        if not price.is_active:
+            raise ValidationError("A retired price cannot be offered; publish a new one.")
         expires_at = _aware(payload.expires_at) if payload.expires_at is not None else None
         if expires_at is not None and expires_at <= now:
             raise ValidationError("expires_at must be in the future.")
@@ -127,6 +130,7 @@ class PlatformCustomPlanOffers:
             tenant_id=tenant.id,
             plan_id=plan.id,
             plan_version_id=version.id,
+            plan_price_id=price.id,
             status=CustomPlanOfferStatus.OFFERED,
             expires_at=expires_at,
             reason=payload.reason,
@@ -154,9 +158,11 @@ class PlatformCustomPlanOffers:
             after={
                 **_state(offer),
                 "version": version.version,
-                "price": str(version.price),
-                "currency": version.currency,
-                "interval": version.interval.value,
+                "plan_price_id": str(price.id),
+                "price": str(price.amount),
+                "currency": price.currency,
+                "interval": price.billing_interval.value,
+                "interval_count": price.interval_count,
                 "limits": dict(version.limits),
             },
         )
@@ -170,6 +176,38 @@ class PlatformCustomPlanOffers:
             },
         )
         return offer
+
+    async def _offered_terms(
+        self, payload: CustomPlanOfferCreate
+    ) -> tuple[PlanVersion, PlanPrice | None]:
+        """The version and the one price an offer names (ADR-116).
+
+        `plan_price_id` is the answer. A version alone - an earlier client's
+        request - is accepted only when it has exactly one active price;
+        offering a version sold monthly and yearly without saying which would
+        leave the customer's billing term to chance.
+        """
+        catalog = PlanCatalog(self._session)
+        if payload.plan_price_id is not None:
+            price = await catalog.get_price(payload.plan_price_id)
+            version = await catalog.get_version(price.plan_version_id) if price else None
+            if price is None or version is None:
+                raise NotFoundError("No such price.")
+            if payload.plan_version_id is not None and payload.plan_version_id != version.id:
+                raise ValidationError("plan_price_id is not a price of plan_version_id.")
+            return version, price
+        version = await catalog.get_version(payload.plan_version_id)
+        if version is None:
+            raise NotFoundError("No such plan version.")
+        if version.is_free:
+            return version, None
+        prices = await catalog.prices(version)
+        if len(prices) != 1:
+            raise ValidationError(
+                f"This version has {len(prices)} active prices. Name the one to offer with "
+                "plan_price_id."
+            )
+        return version, prices[0]
 
     async def cancel(
         self,

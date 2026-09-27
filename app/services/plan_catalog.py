@@ -1,13 +1,17 @@
-"""Which immutable terms apply: the one place plan versions are resolved.
+"""Which immutable terms apply: the one place versions and prices are resolved.
 
-Every question with money or a limit behind it is answered from a
-`PlanVersion`, never from the `plans` row (BILL-12). This module is how the rest
-of billing finds the right one:
+Every question with money or a limit behind it is answered from a `PlanVersion`
+(what is allowed) and a `PlanPrice` (what is paid, and how often), never from
+the `plans` row (BILL-12, ADR-116). This module is how the rest of billing finds
+the right ones:
 
 - **What does a new customer get today?** `current_version` - the newest
-  version whose `effective_at` has arrived.
-- **What is this subscriber held to?** `pinned_version` - the version the
-  subscription points at, which a catalogue edit does not move.
+  version whose `effective_at` has arrived - at one of its *active* prices.
+- **What is this subscriber held to?** `pinned_version` and `pinned_price` -
+  the terms the subscription points at, which a catalogue edit, a new price
+  or a retired one does not move.
+- **May a customer buy this price now?** `selectable_price` - the single
+  check every checkout, plan change and offer runs.
 
 A plan with no versions at all is one that predates versioning or was written
 by hand (a test fixture, an operator's SQL). Its first version is *materialised*
@@ -15,21 +19,28 @@ from the plan row the first time anything asks - exactly the snapshot migration
 0071 took of every plan that existed when it ran - so there is one code path
 for "the terms of a plan" whatever the row's origin. Materialising is
 concurrency-safe: two callers racing both insert version 1, the unique
-constraint keeps one, and the loser re-reads it.
+constraint keeps one, and the loser re-reads it. The database publishes a priced
+version's first price as it is inserted, so a materialised version is sellable
+the moment it exists.
 """
 
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import CustomPlanNotAvailableError, NotFoundError
+from app.core.exceptions import CustomPlanNotAvailableError, NotFoundError, ValidationError
 from app.core.logging import get_logger
-from app.db.models.billing import Plan, PlanVersion, Subscription
-from app.repositories.billing_repository import PlanRepository, PlanVersionRepository
+from app.db.models.billing import BillingInterval, Plan, PlanPrice, PlanVersion, Subscription
+from app.repositories.billing_repository import (
+    PlanPriceRepository,
+    PlanRepository,
+    PlanVersionRepository,
+)
 
 logger = get_logger(__name__)
 
@@ -41,14 +52,33 @@ MATERIALISED_REASON = "Initial version, snapshotted from the plan catalogue."
 # same instant for the versions it backfills.
 ORIGINAL_TERMS_EFFECTIVE_AT = datetime(1970, 1, 1, tzinfo=UTC)
 
+# What a customer is told about a price they may not buy. One message for a
+# price that does not exist and for another workspace's, so a probe learns
+# nothing about which ids are real.
+NO_SUCH_PRICE = "No such price."
+PRICE_NOT_OFFERED = "That price is no longer offered. Choose one from GET /billing/plans."
+
+
+@dataclass(frozen=True, slots=True)
+class PricedTerms:
+    """One plan, the version it grants and the price it is paid at.
+
+    `price` is None exactly when the version is free.
+    """
+
+    plan: Plan
+    version: PlanVersion
+    price: PlanPrice | None
+
 
 class PlanCatalog:
-    """Resolves plan versions for customers and subscribers."""
+    """Resolves plan versions and prices for customers and subscribers."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._plans = PlanRepository(session)
         self._versions = PlanVersionRepository(session)
+        self._prices = PlanPriceRepository(session)
 
     async def offered(
         self, *, tenant_id: uuid.UUID | None = None
@@ -69,6 +99,111 @@ class PlanCatalog:
         if version_id is None:
             return None
         return await self._versions.get_by_id(version_id)  # type: ignore[arg-type]
+
+    # ---------------------------------------------------------------- prices
+
+    async def get_price(self, price_id: object) -> PlanPrice | None:
+        if price_id is None:
+            return None
+        return await self._prices.get_by_id(price_id)  # type: ignore[arg-type]
+
+    async def prices(self, version: PlanVersion, *, active_only: bool = True) -> list[PlanPrice]:
+        """A version's prices, shortest term first. Free versions have none."""
+        if version.is_free:
+            return []
+        await self._session.flush()
+        return await self._prices.for_version(version.id, active_only=active_only)
+
+    async def price_for_term(
+        self,
+        version: PlanVersion,
+        *,
+        interval: BillingInterval,
+        interval_count: int = 1,
+    ) -> PlanPrice | None:
+        """The version's active price for one billing term, if it sells one."""
+        if version.is_free:
+            return None
+        await self._session.flush()
+        return await self._prices.active_for_slot(
+            version.id,
+            interval=interval,
+            interval_count=interval_count,
+            currency=version.currency,
+        )
+
+    async def default_price(self, version: PlanVersion) -> PlanPrice | None:
+        """The price a request naming only a plan code buys (ADR-116, compatibility).
+
+        The active monthly price, which is what every plan code meant before
+        yearly prices existed; failing that, the active price on the term the
+        version was published with; failing that, none - and a caller must
+        then name a price explicitly. Never a guess between two terms.
+        """
+        monthly = await self.price_for_term(version, interval=BillingInterval.MONTHLY)
+        if monthly is not None:
+            return monthly
+        if version.interval is not BillingInterval.MONTHLY:
+            return await self.price_for_term(version, interval=version.interval)
+        return None
+
+    async def publication_price(self, version: PlanVersion) -> PlanPrice | None:
+        """The price a version was published with, retired or not.
+
+        Only for pinning a row written before prices existed: its terms were
+        the version's own, and this is the row the database made of them.
+        """
+        if version.is_free:
+            return None
+        await self._session.flush()
+        for price in await self._prices.for_version(version.id):
+            if (
+                price.billing_interval is version.interval
+                and price.interval_count == 1
+                and price.amount == version.price
+                and price.currency == version.currency
+            ):
+                return price
+        return None
+
+    async def selectable_price(
+        self,
+        price_id: uuid.UUID,
+        *,
+        tenant_id: uuid.UUID,
+        at: datetime,
+    ) -> PricedTerms:
+        """A price a workspace's customer may choose right now, with its terms.
+
+        The single gate on what a new purchase may be priced at. Refused
+        (`ValidationError`, 422) when the price:
+
+        - does not exist, or belongs to another workspace's custom plan - one
+          message for both, so a probe learns nothing;
+        - is retired, or belongs to a version a newer one has replaced - it is
+          no longer offered to anybody new;
+        - belongs to a plan that is retired, or not yet in effect.
+
+        Scope beyond ownership - whether a public plan may be bought at a
+        checkout, or a custom one only through its offer - is the caller's.
+        """
+        price = await self._prices.get_by_id(price_id)
+        if price is None:
+            raise ValidationError(NO_SUCH_PRICE)
+        version = await self._versions.get_by_id(price.plan_version_id)
+        if version is None:  # pragma: no cover - the foreign key forbids it
+            raise ValidationError(NO_SUCH_PRICE)
+        plan = await self._plans.get_by_id(version.plan_id)
+        if plan is None or not plan.available_to(tenant_id):
+            raise ValidationError(NO_SUCH_PRICE)
+        if not plan.is_active:
+            raise ValidationError("No such plan.")
+        current = await self.current_version(plan, at=at)
+        if not price.is_active or current is None or current.id != version.id:
+            raise ValidationError(PRICE_NOT_OFFERED)
+        return PricedTerms(plan=plan, version=version, price=price)
+
+    # -------------------------------------------------------------- versions
 
     async def require_available(
         self,
@@ -128,9 +263,9 @@ class PlanCatalog:
         """The terms this subscription is held to.
 
         A subscription written before versioning, or inserted without one, is
-        pinned to its plan's current version the first time it is read - and
-        from then on it stays there, which is the property that protects a
-        subscriber from the next catalogue edit.
+        pinned to its plan's current version - and that version's published
+        price - the first time it is read. From then on it stays there, which
+        is the property that protects a subscriber from the next catalogue edit.
         """
         if subscription.plan_version_id is not None:
             pinned = await self._versions.get_by_id(subscription.plan_version_id)
@@ -147,7 +282,34 @@ class PlanCatalog:
             version = versions[-1] if versions else None
         if version is not None and version.plan_id == subscription.plan_id:
             subscription.plan_version_id = version.id
+            if subscription.plan_price_id is None and not version.is_free:
+                price = await self.publication_price(version) or await self.default_price(version)
+                subscription.plan_price_id = price.id if price is not None else None
         return version
+
+    async def pinned_price(
+        self,
+        subscription: Subscription,
+        *,
+        version: PlanVersion | None = None,
+    ) -> PlanPrice | None:
+        """The price this subscription renews at, or None on a free version.
+
+        Pinned like the version, and lazily for the same kind of legacy row:
+        a priced subscription that names no price takes its version's
+        published one, which is what it was always billed at.
+        """
+        terms = version if version is not None else await self.pinned_version(subscription)
+        if terms is None or terms.is_free:
+            return None
+        if subscription.plan_price_id is not None:
+            pinned = await self._prices.get_by_id(subscription.plan_price_id)
+            if pinned is not None and pinned.plan_version_id == terms.id:
+                return pinned
+        price = await self.publication_price(terms) or await self.default_price(terms)
+        if price is not None and subscription.plan_version_id == terms.id:
+            subscription.plan_price_id = price.id
+        return price
 
     async def _materialise(self, plan: Plan) -> PlanVersion:
         """Version 1 of a plan that has none, snapshotted from the plan row."""
@@ -186,4 +348,11 @@ class PlanCatalog:
         return version
 
 
-__all__ = ["MATERIALISED_REASON", "ORIGINAL_TERMS_EFFECTIVE_AT", "PlanCatalog"]
+__all__ = [
+    "MATERIALISED_REASON",
+    "NO_SUCH_PRICE",
+    "ORIGINAL_TERMS_EFFECTIVE_AT",
+    "PRICE_NOT_OFFERED",
+    "PlanCatalog",
+    "PricedTerms",
+]

@@ -17,6 +17,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,6 +65,26 @@ async def version_of(session: AsyncSession, plan: Plan) -> PlanVersion:
     return version
 
 
+async def price_terms(session: AsyncSession, version_id: uuid.UUID | None) -> dict[str, Any]:
+    """The price columns an invoice for `version_id` carries (ADR-116).
+
+    A priced version's published price - the one every invoice for it charged
+    before prices existed - as `plan_price_id`, `billing_interval` and
+    `interval_count`; nothing for a free version or none. Spread into a
+    hand-built `Invoice(...)` whose amount is that price.
+    """
+    catalog = PlanCatalog(session)
+    version = await catalog.get_version(version_id)
+    price = await catalog.publication_price(version) if version is not None else None
+    if price is None:
+        return {}
+    return {
+        "plan_price_id": price.id,
+        "billing_interval": price.billing_interval,
+        "interval_count": price.interval_count,
+    }
+
+
 async def pin(session: AsyncSession, subscription: Subscription, plan: Plan) -> PlanVersion:
     """Pin a hand-built subscription to `plan` and that plan's current version.
 
@@ -73,8 +94,13 @@ async def pin(session: AsyncSession, subscription: Subscription, plan: Plan) -> 
     alone and be refused.
     """
     version = await version_of(session, plan)
+    # A priced version renews at a price of its own (ADR-116): the one it was
+    # published with, as every subscription before prices existed did. Looked
+    # up before the row changes, because the lookup flushes.
+    price = await PlanCatalog(session).publication_price(version)
     subscription.plan_id = plan.id
     subscription.plan_version_id = version.id
+    subscription.plan_price_id = price.id if price is not None else None
     if subscription.billing_anchor_at is None:
         subscription.billing_anchor_at = subscription.current_period_start
     await session.flush()
@@ -93,6 +119,7 @@ async def renewal_invoice(
 ) -> Invoice:
     """The sweep's advance bill for the subscription's current period."""
     version = await pin(session, subscription, plan)
+    price = await PlanCatalog(session).get_price(subscription.plan_price_id)
     invoice = Invoice(
         tenant_id=subscription.tenant_id,
         subscription_id=subscription.id,
@@ -108,6 +135,9 @@ async def renewal_invoice(
         issued_at=issued_at if issued_at is not None else subscription.current_period_start,
         lines=[],
         collection_attempts=collection_attempts,
+        plan_price_id=price.id if price is not None else None,
+        billing_interval=price.billing_interval if price is not None else None,
+        interval_count=price.interval_count if price is not None else None,
     )
     session.add(invoice)
     await session.flush()

@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import ColumnElement, and_, func, or_, select
 
@@ -23,6 +24,7 @@ from app.db.models.billing import (
     BillingAdjustment,
     BillingAdjustmentKind,
     Plan,
+    PlanPrice,
     PlanScope,
     PlanVersion,
     PlanVersionMigration,
@@ -124,7 +126,14 @@ class SubscriptionRepository(TenantScopedRepository[Subscription]):
         current_period_start: datetime,
         current_period_end: datetime,
         trial_ends_at: datetime | None = None,
+        usage_period_end: datetime | None = None,
     ) -> Subscription:
+        """A new subscription whose first usage cycle opens with its term.
+
+        `usage_period_end` is the end of that first cycle - one month into a
+        yearly term. Omitted, the cycle is the whole term, which is what a
+        monthly term and a free plan's month are (ADR-116).
+        """
         return self.add(
             Subscription(
                 tenant_id=self.tenant_id,
@@ -132,6 +141,10 @@ class SubscriptionRepository(TenantScopedRepository[Subscription]):
                 status=status,
                 current_period_start=current_period_start,
                 current_period_end=current_period_end,
+                usage_period_start=current_period_start,
+                usage_period_end=(
+                    usage_period_end if usage_period_end is not None else current_period_end
+                ),
                 trial_ends_at=trial_ends_at,
             )
         )
@@ -264,6 +277,59 @@ class PlatformSubscriptionRepository(BaseRepository[Subscription]):
         )
         return await self._all(statement)
 
+    @staticmethod
+    def _usage_due(statement: Any, *, now: datetime) -> Any:
+        """A usage cycle has ended inside a billing term that has not (ADR-116).
+
+        Only inside the term: at the term's end the roll-over opens the next
+        term *and* its first cycle, and a usage sweep acting there would open
+        a cycle nobody has paid for. Serving statuses only - a suspended or
+        ended workspace has no allowance to reset.
+        """
+        return (
+            statement.where(Subscription.usage_period_end <= now)
+            .where(Subscription.current_period_end > now)
+            .where(Subscription.ended_at.is_(None))
+            .where(
+                Subscription.status.in_(
+                    [
+                        SubscriptionStatus.TRIALING,
+                        SubscriptionStatus.ACTIVE,
+                        SubscriptionStatus.PAST_DUE,
+                    ]
+                )
+            )
+        )
+
+    async def claim_usage_due(self, *, now: datetime, limit: int = 100) -> Sequence[Subscription]:
+        """Claim subscriptions whose monthly usage cycle has run out mid-term.
+
+        The same `SKIP LOCKED` contract as `claim_due`, and the same subscription
+        row, so a usage roll and a billing roll of one workspace serialise on it
+        and each re-decides under the lock (ADR-082).
+        """
+        statement = self._usage_due(
+            self._select()
+            .join(Tenant, Tenant.id == Subscription.tenant_id)
+            .where(Tenant.deleted_at.is_(None)),
+            now=now,
+        )
+        return await self._all(
+            statement.order_by(Subscription.usage_period_end, Subscription.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True, of=Subscription)
+        )
+
+    async def claim_usage_by_id(
+        self, subscription_id: uuid.UUID, *, now: datetime
+    ) -> Subscription | None:
+        """Re-claim one subscription whose usage cycle is still due, or nothing."""
+        return await self._first(
+            self._usage_due(
+                self._select().where(Subscription.id == subscription_id), now=now
+            ).with_for_update(skip_locked=True)
+        )
+
 
 class PlanVersionRepository(BaseRepository[PlanVersion]):
     """The immutable commercial terms of every plan (BILL-12).
@@ -311,6 +377,106 @@ class PlanVersionRepository(BaseRepository[PlanVersion]):
             .group_by(Subscription.plan_version_id)
         )
         return {row[0]: int(row[1]) for row in result.all()}
+
+
+class PlanPriceRepository(BaseRepository[PlanPrice]):
+    """The prices of every plan version (ADR-116).
+
+    Platform-owned like the versions they belong to. Rows are inserted and
+    retired; their terms are never updated, and the table's trigger refuses it.
+    """
+
+    model = PlanPrice
+
+    async def get_by_id(self, price_id: uuid.UUID) -> PlanPrice | None:
+        return await self._first(self._select().where(PlanPrice.id == price_id))
+
+    async def lock(self, price_id: uuid.UUID) -> PlanPrice | None:
+        """One price, row-locked and re-read, for retiring it."""
+        return await self._first(
+            self._select()
+            .where(PlanPrice.id == price_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+    async def for_version(
+        self, version_id: uuid.UUID, *, active_only: bool = False
+    ) -> list[PlanPrice]:
+        """A version's prices: shortest term first, then oldest first."""
+        statement = self._select().where(PlanPrice.plan_version_id == version_id)
+        if active_only:
+            statement = statement.where(PlanPrice.retired_at.is_(None))
+        return await self._all(
+            statement.order_by(
+                PlanPrice.billing_interval,
+                PlanPrice.interval_count,
+                PlanPrice.created_at,
+                PlanPrice.id,
+            )
+        )
+
+    async def for_versions(self, version_ids: Sequence[uuid.UUID]) -> list[PlanPrice]:
+        """Every price of several versions at once, for a catalogue page."""
+        if not version_ids:
+            return []
+        return await self._all(
+            self._select()
+            .where(PlanPrice.plan_version_id.in_(list(version_ids)))
+            .order_by(
+                PlanPrice.billing_interval,
+                PlanPrice.interval_count,
+                PlanPrice.created_at,
+                PlanPrice.id,
+            )
+        )
+
+    async def active_for_slot(
+        self,
+        version_id: uuid.UUID,
+        *,
+        interval: object,
+        interval_count: int,
+        currency: str,
+    ) -> PlanPrice | None:
+        """The one active price in a commercial slot, if there is one."""
+        return await self._first(
+            self._select()
+            .where(PlanPrice.plan_version_id == version_id)
+            .where(PlanPrice.billing_interval == interval)
+            .where(PlanPrice.interval_count == interval_count)
+            .where(PlanPrice.currency == currency)
+            .where(PlanPrice.retired_at.is_(None))
+        )
+
+    async def references(self, price_id: uuid.UUID) -> dict[str, int]:
+        """What still names a price: subscribers, scheduled changes, invoices, offers."""
+        from app.db.models.custom_plan_offer import CustomPlanOffer
+        from app.db.models.invoice import Invoice
+
+        async def count(statement: object) -> int:
+            return int(await self.session.scalar(statement) or 0)  # type: ignore[call-overload]
+
+        return {
+            "subscriptions": await count(
+                select(func.count())
+                .select_from(Subscription)
+                .where(Subscription.plan_price_id == price_id)
+            ),
+            "scheduled_changes": await count(
+                select(func.count())
+                .select_from(Subscription)
+                .where(Subscription.scheduled_plan_price_id == price_id)
+            ),
+            "invoices": await count(
+                select(func.count()).select_from(Invoice).where(Invoice.plan_price_id == price_id)
+            ),
+            "offers": await count(
+                select(func.count())
+                .select_from(CustomPlanOffer)
+                .where(CustomPlanOffer.plan_price_id == price_id)
+            ),
+        }
 
 
 class PlanVersionMigrationRepository(BaseRepository[PlanVersionMigration]):

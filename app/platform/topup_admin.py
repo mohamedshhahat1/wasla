@@ -64,7 +64,7 @@ from app.schemas.topup import (
 )
 from app.services.entitlement_service import EntitlementService
 from app.services.plan_catalog import PlanCatalog
-from app.services.topup_ledger import TopupLedger, move, purchase_state
+from app.services.topup_ledger import TopupLedger, move, purchase_state, validity_window
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +350,9 @@ class TopupAdmin:
             clock=lambda: moment,
         )
         before = await entitlements.check(key, additional=0)
+        # The same window a purchase would cover (ADR-116): a usage grant lasts
+        # the current monthly cycle, a capacity grant the billing term.
+        valid_from, valid_until = validity_window(subscription, payload.entitlement_key, now=moment)
         purchase = TopupPurchase(
             tenant_id=tenant_id,
             topup_product_id=None,
@@ -362,9 +365,9 @@ class TopupAdmin:
             unit_price=Decimal("0.00"),
             total_amount=Decimal("0.00"),
             currency=DEFAULT_CURRENCY,
-            billing_period_start=subscription.current_period_start,
-            billing_period_end=subscription.current_period_end,
-            expires_at=subscription.current_period_end,
+            billing_period_start=valid_from,
+            billing_period_end=valid_until,
+            expires_at=valid_until,
             status=TopupStatus.PENDING,
             reason=payload.reason,
             actor_id=actor.id,

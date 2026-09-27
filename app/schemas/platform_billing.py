@@ -25,17 +25,28 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from app.db.models.billing import (
+    DEFAULT_CURRENCY,
     MAX_LIMIT_VALUE,
     MAX_PLAN_PRICE,
     SUPPORTED_CURRENCIES,
+    SUPPORTED_INTERVAL_COUNTS,
     BillingInterval,
     LimitKey,
     Plan,
+    PlanPrice,
     PlanScope,
     PlanVersion,
     PlanVersionMigration,
@@ -93,14 +104,85 @@ def validate_limits(value: dict[str, int | None]) -> dict[str, int | None]:
     return value
 
 
+def _interval(value: object) -> object:
+    """`month` and `year` are accepted as the stored `monthly` and `yearly`."""
+    return (
+        {"month": "monthly", "year": "yearly"}.get(value, value)
+        if isinstance(value, str)
+        else value
+    )
+
+
+#: A billing term's unit, in either spelling an operator is likely to write.
+IntervalField = Annotated[BillingInterval, BeforeValidator(_interval)]
+
+
+def _supported_currency(value: str) -> str:
+    upper = value.upper()
+    if upper not in SUPPORTED_CURRENCIES:
+        raise ValueError(f"Only {', '.join(sorted(SUPPORTED_CURRENCIES))} is supported.")
+    return upper
+
+
+class PriceSpec(BaseModel):
+    """One price of a plan version: an amount per billing term (ADR-116).
+
+    Validated identically wherever a price is written - on its own, with a new
+    version, with a custom plan. The amount is the operator's, never a
+    customer's: no customer-facing request carries one.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    billing_interval: IntervalField = Field(
+        validation_alias=AliasChoices("billing_interval", "interval")
+    )
+    # Only 1 is sold. The column exists so a quarterly or two-year price needs
+    # no new model; selling one is a product decision not yet taken.
+    interval_count: int = Field(default=1)
+    amount: Decimal = Field(gt=0, le=MAX_PLAN_PRICE, max_digits=12, decimal_places=2)
+    currency: StorableText = Field(default=DEFAULT_CURRENCY, min_length=3, max_length=3)
+
+    @field_validator("interval_count")
+    @classmethod
+    def _count(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("interval_count must be at least 1.")
+        if value not in SUPPORTED_INTERVAL_COUNTS:
+            raise ValueError("Only a one-month or one-year term is sold; interval_count must be 1.")
+        return value
+
+    @field_validator("currency")
+    @classmethod
+    def _supported(cls, value: str) -> str:
+        return _supported_currency(value)
+
+    @property
+    def slot(self) -> tuple[BillingInterval, int, str]:
+        return self.billing_interval, self.interval_count, self.currency
+
+
 class _Terms(BaseModel):
-    """Commercial terms, validated identically wherever they are written."""
+    """Commercial terms, validated identically wherever they are written.
+
+    Prices are given one of two ways, never both:
+
+    - `prices`: every term the version is sold on (ADR-116) - monthly, yearly
+      or both. An empty list is a free version.
+    - `price` and `interval`: one price, the shape every earlier client sends.
+      A price of 0 is a free version.
+
+    The limits are the version's and are the same whichever price is paid.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    price: Decimal = Field(ge=0, le=MAX_PLAN_PRICE, max_digits=12, decimal_places=2)
-    currency: StorableText = Field(min_length=3, max_length=3)
-    interval: BillingInterval
+    price: Decimal | None = Field(
+        default=None, ge=0, le=MAX_PLAN_PRICE, max_digits=12, decimal_places=2
+    )
+    currency: StorableText = Field(default=DEFAULT_CURRENCY, min_length=3, max_length=3)
+    interval: IntervalField | None = None
+    prices: list[PriceSpec] | None = Field(default=None, max_length=4)
     # Keyed by entitlement key. `null` (or an absent key) is unlimited.
     limits: dict[str, int | None] = Field(default_factory=dict, json_schema_extra=LIMITS_SCHEMA)
     # Trials are not implemented: a free plan never needs one and a priced
@@ -111,15 +193,55 @@ class _Terms(BaseModel):
     @field_validator("currency")
     @classmethod
     def _supported(cls, value: str) -> str:
-        upper = value.upper()
-        if upper not in SUPPORTED_CURRENCIES:
-            raise ValueError(f"Only {', '.join(sorted(SUPPORTED_CURRENCIES))} is supported.")
-        return upper
+        return _supported_currency(value)
 
     @field_validator("limits")
     @classmethod
     def _limits(cls, value: dict[str, int | None]) -> dict[str, int | None]:
         return validate_limits(value)
+
+    @model_validator(mode="after")
+    def _one_way_of_pricing(self) -> Self:
+        if self.prices is None:
+            if self.price is None or self.interval is None:
+                raise ValueError("Give prices, or price and interval.")
+            return self
+        if self.price is not None or self.interval is not None:
+            raise ValueError("Give prices, or price and interval - not both.")
+        slots = [price.slot for price in self.prices]
+        if len(slots) != len(set(slots)):
+            raise ValueError("Each billing term may be priced once.")
+        if any(price.currency != self.currency for price in self.prices):
+            raise ValueError("Every price is in the version's currency.")
+        return self
+
+    @property
+    def resolved_prices(self) -> list[PriceSpec]:
+        """Every price the version is published with. Empty for a free version."""
+        if self.prices is not None:
+            return list(self.prices)
+        if self.price is None or self.price <= 0 or self.interval is None:
+            return []
+        return [
+            PriceSpec(
+                billing_interval=self.interval,
+                amount=self.price,
+                currency=self.currency,
+            )
+        ]
+
+    @property
+    def headline(self) -> PriceSpec | None:
+        """The price the version row records as published: monthly if sold monthly.
+
+        The database makes this the version's first `plan_prices` row; the
+        others are added beside it. None for a free version.
+        """
+        prices = self.resolved_prices
+        for price in prices:
+            if price.billing_interval is BillingInterval.MONTHLY and price.interval_count == 1:
+                return price
+        return prices[0] if prices else None
 
 
 class PlanCreate(_Terms):
@@ -196,18 +318,106 @@ class PlanMigrationCreate(BaseModel):
     confirm: bool = False
 
 
+class PlanPriceCreate(PriceSpec):
+    """A new price for an existing plan version. Platform staff only (ADR-116)."""
+
+    reason: StorableText = Reason
+
+
+class PlanPriceRetire(BaseModel):
+    """Stop offering a price to new customers. Its subscribers keep it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: StorableText = Reason
+
+
+class PlanPriceUpdate(BaseModel):
+    """What an operator might send to change a price - always refused with 409.
+
+    Every field a price has is accepted, so the refusal is the domain's 409
+    naming the correct workflow (retire, then create) rather than a 422 about a
+    field name. Nothing here is ever written.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount: Decimal | None = Field(default=None, max_digits=12, decimal_places=2)
+    billing_interval: IntervalField | None = None
+    interval_count: int | None = Field(default=None, ge=1, le=120)
+    currency: StorableText | None = Field(default=None, min_length=3, max_length=3)
+    reason: StorableText | None = Field(default=None, max_length=500)
+
+
+class PriceReferences(BaseModel):
+    """What still names a price. Counts only, never whose."""
+
+    subscriptions: int
+    scheduled_changes: int
+    invoices: int
+    offers: int
+
+
+class PlanPriceRead(BaseModel):
+    """One price of a plan version, active or retired (ADR-116)."""
+
+    id: uuid.UUID
+    plan_version_id: uuid.UUID
+    billing_interval: BillingInterval
+    interval_count: int
+    amount: str
+    currency: str
+    active: bool
+    created_at: datetime
+    created_by: uuid.UUID | None
+    reason: str | None
+    retired_at: datetime | None
+    retired_by: uuid.UUID | None
+    retirement_reason: str | None
+    references: PriceReferences | None = None
+
+    @classmethod
+    def from_model(cls, price: PlanPrice, *, references: dict[str, int] | None = None) -> Self:
+        return cls(
+            id=price.id,
+            plan_version_id=price.plan_version_id,
+            billing_interval=price.billing_interval,
+            interval_count=price.interval_count,
+            amount=f"{price.amount:.2f}",
+            currency=price.currency,
+            active=price.is_active,
+            created_at=price.created_at,
+            created_by=price.created_by,
+            reason=price.reason,
+            retired_at=price.retired_at,
+            retired_by=price.retired_by,
+            retirement_reason=price.retirement_reason,
+            references=PriceReferences(**references) if references is not None else None,
+        )
+
+
 class LimitRead(BaseModel):
     key: LimitKey
     limit: int | None
 
 
 class PlanVersionRead(BaseModel):
+    """A version's entitlements and every price it has ever been sold at.
+
+    `price`, `currency` and `interval` are the terms the version was published
+    with - its first price - kept for earlier clients; `billing_required` and
+    `prices` are the full answer (ADR-116). `prices` includes retired rows, each
+    marked, so the platform sees the whole price history.
+    """
+
     id: uuid.UUID
     version: int
     name: str
     price: str
     currency: str
     interval: BillingInterval
+    billing_required: bool = True
+    prices: list[PlanPriceRead] = Field(default_factory=list)
     trial_days: int
     limits: list[LimitRead]
     effective_at: datetime
@@ -217,7 +427,13 @@ class PlanVersionRead(BaseModel):
     subscribers: int = 0
 
     @classmethod
-    def from_model(cls, version: PlanVersion, *, subscribers: int = 0) -> Self:
+    def from_model(
+        cls,
+        version: PlanVersion,
+        *,
+        subscribers: int = 0,
+        prices: list[PlanPrice] | None = None,
+    ) -> Self:
         return cls(
             id=version.id,
             version=version.version,
@@ -225,6 +441,8 @@ class PlanVersionRead(BaseModel):
             price=f"{version.price:.2f}",
             currency=version.currency,
             interval=version.interval,
+            billing_required=not version.is_free,
+            prices=[PlanPriceRead.from_model(price) for price in prices or []],
             trial_days=version.trial_days,
             limits=[LimitRead(key=key, limit=version.limit_for(key)) for key in LimitKey],
             effective_at=version.effective_at,
@@ -259,7 +477,9 @@ class PlatformPlanRead(BaseModel):
         current: PlanVersion | None,
         latest: PlanVersion | None,
         counts: dict[uuid.UUID, int],
+        prices: dict[uuid.UUID, list[PlanPrice]] | None = None,
     ) -> Self:
+        priced = prices or {}
         return cls(
             id=plan.id,
             code=plan.code,
@@ -273,12 +493,20 @@ class PlatformPlanRead(BaseModel):
             sort_order=plan.sort_order,
             revision=plan.revision,
             current_version=(
-                PlanVersionRead.from_model(current, subscribers=counts.get(current.id, 0))
+                PlanVersionRead.from_model(
+                    current,
+                    subscribers=counts.get(current.id, 0),
+                    prices=priced.get(current.id, []),
+                )
                 if current is not None
                 else None
             ),
             latest_version=(
-                PlanVersionRead.from_model(latest, subscribers=counts.get(latest.id, 0))
+                PlanVersionRead.from_model(
+                    latest,
+                    subscribers=counts.get(latest.id, 0),
+                    prices=priced.get(latest.id, []),
+                )
                 if latest is not None
                 else None
             ),
@@ -389,9 +617,18 @@ class ManualPaymentDetails(BaseModel):
 
 
 class SubscriptionChangePlan(BaseModel):
+    """Move a subscriber to a version at one exact price (ADR-116).
+
+    `plan_price_id` names the price - and so the billing term - the subscriber
+    renews at; it must be a price of `plan_version_id`. Omitted, the version's
+    default (monthly) price is used when it has one; a version sold only
+    yearly must be named explicitly. Ignored for a free version.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     plan_version_id: uuid.UUID
+    plan_price_id: uuid.UUID | None = None
     mode: ChangeMode
     financial_basis: FinancialBasis | None = None
     manual_payment: ManualPaymentDetails | None = None
@@ -416,20 +653,36 @@ class SubscriptionResume(BaseModel):
 
 
 class PlatformSubscriptionRead(BaseModel):
+    """A subscription as support sees it: the paid term and the usage cycle apart.
+
+    `current_period_*` is the **billing term** the customer has paid for - a
+    year on a yearly price - and `usage_period_*` the **monthly usage cycle**
+    their allowances are counted over (ADR-116). `billing_interval` and
+    `amount` are the price the subscription renews at.
+    """
+
     id: uuid.UUID
     tenant_id: uuid.UUID
     plan_id: uuid.UUID
     plan_code: str | None
     plan_version_id: uuid.UUID | None
     plan_version: int | None
+    plan_price_id: uuid.UUID | None = None
+    billing_interval: BillingInterval | None = None
+    interval_count: int | None = None
+    amount: str | None = None
+    currency: str | None = None
     status: SubscriptionStatus
     current_period_start: datetime
     current_period_end: datetime
+    usage_period_start: datetime | None = None
+    usage_period_end: datetime | None = None
     billing_anchor_at: datetime | None
     cancel_at_period_end: bool
     cancelled_at: datetime | None
     ended_at: datetime | None
     scheduled_plan_version_id: uuid.UUID | None
+    scheduled_plan_price_id: uuid.UUID | None = None
     scheduled_change_source: ScheduledChangeSource | None
     revision: int
 
@@ -440,6 +693,7 @@ class PlatformSubscriptionRead(BaseModel):
         *,
         plan_code: str | None,
         version: int | None,
+        price: PlanPrice | None = None,
     ) -> Self:
         return cls(
             id=subscription.id,
@@ -448,14 +702,22 @@ class PlatformSubscriptionRead(BaseModel):
             plan_code=plan_code,
             plan_version_id=subscription.plan_version_id,
             plan_version=version,
+            plan_price_id=subscription.plan_price_id,
+            billing_interval=price.billing_interval if price is not None else None,
+            interval_count=price.interval_count if price is not None else None,
+            amount=f"{price.amount:.2f}" if price is not None else None,
+            currency=price.currency if price is not None else None,
             status=subscription.status,
             current_period_start=subscription.current_period_start,
             current_period_end=subscription.current_period_end,
+            usage_period_start=subscription.usage_period_start,
+            usage_period_end=subscription.usage_period_end,
             billing_anchor_at=subscription.billing_anchor_at,
             cancel_at_period_end=subscription.cancel_at_period_end,
             cancelled_at=subscription.cancelled_at,
             ended_at=subscription.ended_at,
             scheduled_plan_version_id=subscription.scheduled_plan_version_id,
+            scheduled_plan_price_id=subscription.scheduled_plan_price_id,
             scheduled_change_source=subscription.scheduled_change_source,
             revision=subscription.revision,
         )
@@ -481,6 +743,10 @@ class PlatformInvoiceRead(BaseModel):
     status: InvoiceStatus
     plan_code: str
     plan_version_id: uuid.UUID | None
+    # The price and billing term this invoice covers, copied at issue (ADR-116).
+    plan_price_id: uuid.UUID | None = None
+    billing_interval: BillingInterval | None = None
+    interval_count: int | None = None
     amount_due: str
     amount_paid: str
     outstanding: str
@@ -506,6 +772,9 @@ class PlatformInvoiceRead(BaseModel):
             status=invoice.status,
             plan_code=invoice.plan_code,
             plan_version_id=invoice.plan_version_id,
+            plan_price_id=invoice.plan_price_id,
+            billing_interval=invoice.billing_interval,
+            interval_count=invoice.interval_count,
             amount_due=f"{invoice.amount_due:.2f}",
             amount_paid=f"{invoice.amount_paid:.2f}",
             outstanding=f"{invoice.outstanding:.2f}",

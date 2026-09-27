@@ -47,6 +47,7 @@ from app.schemas.platform_billing import (
 from app.services.checkout_service import APPLIED, CheckoutService
 from app.services.custom_plan_offer_service import CustomPlanOfferService
 from app.services.invoice_service import InvoiceService
+from app.services.plan_catalog import PlanCatalog
 from app.services.subscription_service import SubscriptionService
 from app.workers import billing_worker as worker_module
 from app.workers.billing_worker import BillingWorker
@@ -162,7 +163,7 @@ async def test_a_custom_plan_is_bought_reversioned_and_migrated_once(
     assert version is not None
     with pytest.raises(CustomPlanNotAvailableError):
         await SubscriptionService(db_session, tenant_id=beta.id).apply_purchase(
-            version=version, now=now
+            version=version, price=await PlanCatalog(db_session).default_price(version), now=now
         )
     await db_session.refresh(beta_subscription)
     assert beta_subscription.plan_version_id != v1

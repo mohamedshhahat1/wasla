@@ -32,7 +32,7 @@ from fastapi import APIRouter, Depends, Query, status
 from app.api.dependencies import PlatformAccessAuditDep, PlatformOwnerDep, PlatformStaffDep
 from app.api.route import CommittingRoute
 from app.core.dependencies import SessionDep, SettingsDep
-from app.db.models.billing import PlanScope, SubscriptionStatus
+from app.db.models.billing import BillingInterval, PlanScope, SubscriptionStatus
 from app.db.models.billing_incident import BillingIncidentKind, BillingIncidentStatus
 from app.db.models.invoice import InvoicePurpose, InvoiceStatus, PaymentStatus
 from app.platform.billing_operations import PlatformBillingOperations
@@ -48,6 +48,10 @@ from app.schemas.platform_billing import (
     Page,
     PlanCreate,
     PlanMigrationCreate,
+    PlanPriceCreate,
+    PlanPriceRead,
+    PlanPriceRetire,
+    PlanPriceUpdate,
     PlanStateChange,
     PlanUpdate,
     PlanVersionCreate,
@@ -257,6 +261,99 @@ async def schedule_migration(
     return await plans.schedule_migration(plan_id, payload, actor=staff.user)
 
 
+# ----------------------------------------------------------------- prices
+#
+# ADR-116. One version, several prices: an amount per billing term, monthly or
+# yearly, for a standard or a custom plan alike - one code path. A price is
+# published, retired and read; it is never edited and never deleted.
+
+
+@router.get("/plan-versions/{version_id}", response_model=PlanVersionRead)
+async def get_plan_version(
+    version_id: uuid.UUID,
+    staff: PlatformStaffDep,
+    access: PlatformAccessAuditDep,
+    plans: PlanAdminDep,
+) -> PlanVersionRead:
+    """One version's entitlements and every price it has had, retired ones marked."""
+    result = await plans.version(version_id)
+    access.billing_read(actor=staff.user, resource="plan_version")
+    return result
+
+
+@router.get("/plan-versions/{version_id}/prices", response_model=list[PlanPriceRead])
+async def list_plan_prices(
+    version_id: uuid.UUID,
+    staff: PlatformStaffDep,
+    access: PlatformAccessAuditDep,
+    plans: PlanAdminDep,
+    active: bool | None = None,
+) -> list[PlanPriceRead]:
+    """A version's price history, with what still names each price.
+
+    `active=true` is what new customers can choose; `active=false` the retired
+    prices existing subscribers may still hold.
+    """
+    result = await plans.prices(version_id, active=active)
+    access.billing_read(actor=staff.user, resource="plan_prices", **_read_scope(result))
+    return result
+
+
+@router.post(
+    "/plan-versions/{version_id}/prices",
+    response_model=PlanPriceRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_plan_price(
+    version_id: uuid.UUID,
+    payload: PlanPriceCreate,
+    staff: PlatformStaffDep,
+    plans: PlanAdminDep,
+) -> PlanPriceRead:
+    """Publish a monthly or yearly price for a version, without copying the version.
+
+    409 when that term already has an active price (retire it first); 422 for a
+    free version, a retired plan, a superseded version, an unsupported term or
+    currency, or a non-positive amount. Existing subscribers are not moved.
+    """
+    return await plans.create_price(version_id, payload, actor=staff.user)
+
+
+@router.get("/prices/{price_id}", response_model=PlanPriceRead)
+async def get_plan_price(
+    price_id: uuid.UUID,
+    staff: PlatformStaffDep,
+    access: PlatformAccessAuditDep,
+    plans: PlanAdminDep,
+) -> PlanPriceRead:
+    result = await plans.price(price_id)
+    access.billing_read(actor=staff.user, resource="plan_price")
+    return result
+
+
+@router.post("/prices/{price_id}/retire", response_model=PlanPriceRead)
+async def retire_plan_price(
+    price_id: uuid.UUID,
+    payload: PlanPriceRetire,
+    staff: PlatformStaffDep,
+    plans: PlanAdminDep,
+) -> PlanPriceRead:
+    """Stop offering a price to new customers. Its subscribers keep renewing at it."""
+    return await plans.retire_price(price_id, payload, actor=staff.user)
+
+
+@router.patch("/prices/{price_id}", response_model=PlanPriceRead)
+async def update_plan_price(
+    price_id: uuid.UUID,
+    payload: PlanPriceUpdate,
+    staff: PlatformStaffDep,
+    plans: PlanAdminDep,
+) -> PlanPriceRead:
+    """Always 409: a published price is immutable. Retire it and create another."""
+    await plans.price(price_id)
+    plans.refuse_price_change()
+
+
 # ---------------------------------------------------------- subscriptions
 
 
@@ -271,9 +368,12 @@ async def list_subscriptions(
     cancel_at_period_end: bool | None = None,
     renews_before: datetime | None = None,
     renews_after: datetime | None = None,
+    billing_interval: BillingInterval | None = None,
+    plan_price_id: uuid.UUID | None = None,
     limit: LimitQuery = 50,
     offset: OffsetQuery = 0,
 ) -> Page[PlatformSubscriptionRead]:
+    """Subscriptions, filterable by the billing term and exact price they renew at."""
     page = await operations.list_subscriptions(
         tenant_id=tenant_id,
         plan_code=plan,
@@ -281,6 +381,8 @@ async def list_subscriptions(
         cancel_at_period_end=cancel_at_period_end,
         renews_before=renews_before,
         renews_after=renews_after,
+        billing_interval=billing_interval,
+        plan_price_id=plan_price_id,
         limit=limit,
         offset=offset,
     )

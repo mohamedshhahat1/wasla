@@ -8,8 +8,10 @@ when the owner clicks "Accept & Pay"; it changes when the provider confirms the
 money, and only then.
 
 The request names an offer id and, optionally, an idempotency key. The price,
-the currency, the interval and the limits are read from the offer's immutable
-version; another workspace's offer id is a 404 like one that does not exist.
+the currency, the billing term and the limits are read from the offer's
+immutable price and version (ADR-116) - a yearly offer is paid yearly whatever
+the request says; another workspace's offer id is a 404 like one that does not
+exist.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.core.telemetry import record_custom_plan
 from app.db.models.audit import AuditAction, AuditActorKind
-from app.db.models.billing import RESOURCE_LIMITS, LimitKey, Plan, PlanVersion
+from app.db.models.billing import RESOURCE_LIMITS, LimitKey, Plan, PlanPrice, PlanVersion
 from app.db.models.custom_plan_offer import (
     CustomPlanOffer,
     CustomPlanOfferStatus,
@@ -60,16 +62,18 @@ RENEWAL_NOTE: Final = (
 class AcceptedOffer:
     offer: CustomPlanOffer
     version: PlanVersion
+    price: PlanPrice
     checkout: StartedCheckout
 
 
 async def offer_read(
     session: AsyncSession, offer: CustomPlanOffer, *, now: datetime
 ) -> CustomPlanOfferRead:
-    """An offer with the full terms of the version it names."""
+    """An offer with the full terms of the version and the price it names."""
     version = await session.get(PlanVersion, offer.plan_version_id)
     plan = await session.get(Plan, offer.plan_id)
-    if version is None or plan is None:  # pragma: no cover - RESTRICT foreign keys
+    price = await session.get(PlanPrice, offer.plan_price_id)
+    if version is None or plan is None or price is None:  # pragma: no cover - RESTRICT
         raise NotFoundError("No such offer.")
     return CustomPlanOfferRead(
         id=offer.id,
@@ -79,11 +83,14 @@ async def offer_read(
         plan_code=plan.code,
         plan_version_id=version.id,
         version=version.version,
+        plan_price_id=price.id,
+        billing_interval=price.billing_interval,
+        interval_count=price.interval_count,
         name=version.name,
         description=plan.description,
-        price=f"{version.price:.2f}",
-        currency=version.currency,
-        interval=version.interval,
+        price=f"{price.amount:.2f}",
+        currency=price.currency,
+        interval=price.billing_interval,
         limits=[
             OfferLimitRead(
                 key=key,
@@ -96,9 +103,12 @@ async def offer_read(
             key.value: version.limit_for(key) for key in LimitKey if key not in CUSTOM_PLAN_KEYS
         },
         effective_period=OfferPeriodRead(
-            interval=version.interval,
+            interval=price.billing_interval,
+            interval_count=price.interval_count,
             if_paid_now_start=now,
-            if_paid_now_end=billing_calendar.add_interval(now, version.interval),
+            if_paid_now_end=billing_calendar.add_interval(
+                now, price.billing_interval, price.interval_count
+            ),
         ),
         expires_at=offer.expires_at,
         created_at=offer.created_at,
@@ -178,15 +188,20 @@ class CustomPlanOfferService:
             )
         version = await self._session.get(PlanVersion, offer.plan_version_id)
         plan = await self._session.get(Plan, offer.plan_id)
+        price = await self._session.get(PlanPrice, offer.plan_price_id)
         if version is None or plan is None:  # pragma: no cover - RESTRICT foreign keys
             raise NotFoundError("No such offer.")
-        if version.price <= Decimal("0"):
+        if price is None or version.price <= Decimal("0"):
             raise ConflictError("This offer has no price; the platform assigns it directly.")
 
         try:
+            # The offer's own price, whatever the plan's catalogue says now: a
+            # price retired or replaced after the offer was made does not
+            # change the terms the customer is accepting (ADR-116).
             started = await self._checkout.start_offer(
                 plan=plan,
                 version=version,
+                price=price,
                 offer_id=offer.id,
                 actor=actor,
                 idempotency_key=idempotency_key,
@@ -226,9 +241,11 @@ class CustomPlanOfferService:
                 "invoice_id": str(started.invoice_id),
                 "payment_id": str(started.payment_id),
                 "plan_version_id": str(version.id),
+                "plan_price_id": str(price.id),
                 "amount": str(started.amount),
                 "currency": started.currency,
-                "interval": version.interval.value,
+                "interval": price.billing_interval.value,
+                "interval_count": price.interval_count,
                 "first_acceptance": first,
             },
         )
@@ -242,7 +259,7 @@ class CustomPlanOfferService:
                 "invoice_id": str(started.invoice_id),
             },
         )
-        return AcceptedOffer(offer=offer, version=version, checkout=started)
+        return AcceptedOffer(offer=offer, version=version, price=price, checkout=started)
 
     async def decline(
         self,
