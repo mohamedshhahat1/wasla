@@ -22,7 +22,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Final
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -68,6 +68,15 @@ class PaymentMethod(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         # What a payment names, so an automatic charge can use only its own
         # workspace's card (DB-004).
         UniqueConstraint("tenant_id", "id", name="uq_payment_methods_tenant_id_id"),
+        # At most one card renewals would charge, per workspace (DB-018).
+        # Revoked cards drop out, so revoking the default and choosing another
+        # never collide.
+        Index(
+            "uq_payment_methods_one_active_default",
+            "tenant_id",
+            unique=True,
+            postgresql_where=text("is_default AND status = 'active'"),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(

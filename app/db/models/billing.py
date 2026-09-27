@@ -625,6 +625,16 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         # What an invoice or an adjustment names, so each can name only its
         # own workspace's subscription (DB-004).
         UniqueConstraint("tenant_id", "id", name="uq_subscriptions_tenant_id_id"),
+        # A live period ends after it starts (DB-012). The calendar never
+        # produces anything else; this keeps repair SQL from producing it
+        # either. An *ended* subscription is exempt: ending one - an immediate
+        # cancellation, a void under the cancel policy - sets the period's end
+        # to the moment service stopped, and with renewals billed in advance
+        # that moment can precede a period that has already begun, or equal it.
+        CheckConstraint(
+            "ended_at IS NOT NULL OR current_period_end > current_period_start",
+            name="period_ordered",
+        ),
         # The pinned version is a version *of the subscription's plan*: the
         # audit pinned one plan's subscription to another plan's version with
         # plain SQL, and nothing refused it (DB-004).

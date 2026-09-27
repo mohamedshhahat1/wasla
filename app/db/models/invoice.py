@@ -295,6 +295,9 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         CheckConstraint(CURRENCY_CHECK_SQL, name="currency_supported"),
         # A paid invoice says when (DB-005).
         CheckConstraint("status <> 'paid' OR paid_at IS NOT NULL", name="paid_is_dated"),
+        # An invoice's period does not run backwards (DB-012). Equal is
+        # allowed: a zero-length period is a real, if degenerate, record.
+        CheckConstraint("period_end >= period_start", name="period_ordered"),
         # What a payment, a top-up, an incident or an adjustment names, so
         # each can name only its own workspace's invoice (DB-004, ADR-100).
         UniqueConstraint("tenant_id", "id", name="uq_invoices_tenant_id_id"),

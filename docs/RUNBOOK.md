@@ -1431,6 +1431,34 @@ activation at commit with 23000. The documented reversals still work: a refund
 lowers `amount_paid` and may reopen or, for an operator's full refund, void
 the invoice, and a refunded payment's `refunded_amount` only rises.
 
+### Periods, default cards and addresses (before and after deploying 0078)
+
+Migration 0078 (DB-012, DB-018, DB-025) refuses to run while any of these
+return rows, and changes nothing when it refuses:
+
+```sql
+SELECT id FROM subscriptions WHERE ended_at IS NULL AND current_period_end <= current_period_start;
+SELECT id FROM invoices WHERE period_end < period_start;
+SELECT tenant_id, array_agg(id ORDER BY created_at DESC, id DESC) FROM payment_methods
+ WHERE is_default AND status = 'active' GROUP BY tenant_id HAVING count(*) > 1;
+SELECT lower(email), array_agg(id) FROM users GROUP BY lower(email) HAVING count(*) > 1;
+```
+
+- A reversed period: take the true period from the subscription's latest paid
+  invoice or its audit trail (`subscription_*` entries) - never guess.
+- Two active defaults: nothing about a card is lost by demoting one. Keep the
+  default the workspace owner chose last (the newest, first in the list above)
+  and demote the rest - `UPDATE payment_methods SET is_default = false WHERE id
+  IN (...)` - telling the owner which card renewals will use.
+- Two accounts for one address: this is an identity question, not a data one.
+  Establish with the owners which account is theirs; the other is closed
+  through the account API, never deleted, and its address changed only with
+  its owner's agreement.
+
+After 0078, each is refused as written (23514 for a period, 23505 for a second
+default or a case-variant address), and a concurrent first-card save keeps
+the second card as an ordinary one instead of a second default.
+
 ## What to watch
 
 **Start with the metrics.** `/metrics` publishes request rates and latency,

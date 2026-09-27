@@ -29,9 +29,23 @@ class PaymentMethodRepository(TenantScopedRepository[PaymentMethod]):
         and stops being offered.
         """
         return await self._all(
+            self._select().where(PaymentMethod.status == PaymentMethodStatus.ACTIVE)
+            # `id` breaks a tie: two cards saved in one transaction share
+            # `created_at`, and a list must not reorder between reads (DB-013).
+            .order_by(PaymentMethod.created_at.desc(), PaymentMethod.id.desc())
+        )
+
+    async def lock_active(self) -> list[PaymentMethod]:
+        """The chargeable cards, locked and re-read, for changing the default.
+
+        Serialises two changes of one workspace's default card (DB-018).
+        """
+        return await self._all(
             self._select()
             .where(PaymentMethod.status == PaymentMethodStatus.ACTIVE)
-            .order_by(PaymentMethod.created_at.desc())
+            .order_by(PaymentMethod.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
 
     async def default_method(self) -> PaymentMethod | None:
@@ -39,12 +53,16 @@ class PaymentMethodRepository(TenantScopedRepository[PaymentMethod]):
 
         Both conditions matter. A card marked default but since revoked must
         not be charged, and returning it would mean a renewal attempt against a
-        card the customer removed.
+        card the customer removed. At most one row can match - the partial
+        unique index `uq_payment_methods_one_active_default` (DB-018) - and
+        the ordering makes the answer deterministic even against a database
+        that predates it.
         """
         return await self._first(
             self._select()
             .where(PaymentMethod.is_default.is_(True))
             .where(PaymentMethod.status == PaymentMethodStatus.ACTIVE)
+            .order_by(PaymentMethod.created_at, PaymentMethod.id)
         )
 
     def create(

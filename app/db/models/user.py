@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import Boolean, DateTime, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -38,7 +38,14 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     """
 
     __tablename__ = "users"
-    __table_args__ = (UniqueConstraint("email", name="uq_users_email"),)
+    __table_args__ = (
+        UniqueConstraint("email", name="uq_users_email"),
+        # The application stores addresses lower-cased; this makes that a
+        # database fact, so `Ada@x` and `ada@x` can never be two accounts
+        # however a row is written (DB-025). Tombstoned rows count too: a
+        # deleted account's address stays reserved (docs/AUTH.md).
+        Index("uq_users_email_lower", func.lower(text("email")), unique=True),
+    )
 
     email: Mapped[str] = mapped_column(String(MAX_EMAIL_LENGTH), nullable=False)
     # Set when a password is chosen: at registration, or when an invitation is
