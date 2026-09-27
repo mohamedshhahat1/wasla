@@ -781,6 +781,44 @@ class PlatformPaymentRepository(BaseRepository[Payment]):
         await self.session.flush()
         return payment
 
+    async def claim_refund_for_reconciliation(
+        self,
+        *,
+        provider: str,
+        older_than: datetime,
+        lease_before: datetime,
+        now: datetime,
+    ) -> Payment | None:
+        """Take the oldest payment whose requested refund was never confirmed, and lease it.
+
+        A refund the provider accepted is confirmed only by its callback; one
+        that never arrives leaves `refund_requested_amount` outstanding for
+        ever and the books claiming money the customer has had back
+        (PAY-E2E-01). Bounded to exactly those rows - collected, a request
+        standing longer than the grace period - so the provider is asked about
+        a handful of transactions this system recorded, never polled. Same
+        lease as the other claims: `reconciled_at` is written and committed
+        before the lookup.
+        """
+        statement = (
+            select(Payment)
+            .where(Payment.provider == provider)
+            .where(Payment.status == PaymentStatus.SUCCEEDED)
+            .where(Payment.refund_requested_amount.is_not(None))
+            .where(Payment.refund_requested_at < older_than)
+            .where(Payment.provider_reference.is_not(None))
+            .where((Payment.reconciled_at.is_(None)) | (Payment.reconciled_at < lease_before))
+            .order_by(Payment.refund_requested_at, Payment.id)
+            .limit(1)
+            .with_for_update(skip_locked=True, of=Payment)
+        )
+        payment = await self._first(statement)
+        if payment is None:
+            return None
+        payment.reconciled_at = now
+        await self.session.flush()
+        return payment
+
     async def oldest_pending_hosted_at(
         self,
         *,

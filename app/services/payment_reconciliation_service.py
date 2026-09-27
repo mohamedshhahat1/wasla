@@ -62,6 +62,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from enum import StrEnum
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,6 +78,7 @@ from app.integrations.billing.checkout import (
     ChargeInquiryProvider,
     CheckoutProvider,
     InquiryVerdict,
+    TransactionInquiryProvider,
 )
 from app.repositories.invoice_repository import PlatformPaymentRepository
 from app.services.billing_incident_service import raise_incident
@@ -110,6 +112,30 @@ class Verdict(StrEnum):
     STILL_PENDING = "still_pending"
     NOT_FOUND = "not_found"
     UNREACHABLE = "unreachable"
+
+
+@dataclass(frozen=True, slots=True)
+class RefundLedgerCheck:
+    """The provider's refunded total for one payment beside Wasla's.
+
+    The comparison the internal invariant ledger cannot make, because both
+    sides of that ledger are Wasla's own books (PAY-E2E-01: every internal
+    invariant held while Paymob had refunded 99.00 and Wasla recorded 30.00).
+    `provider_refunded` is None when the provider could not be asked or did
+    not answer; `matches` is then None too - unknown, never assumed.
+    """
+
+    payment_id: uuid.UUID
+    transaction_id: str | None
+    provider_refunded: Decimal | None
+    ledger_refunded: Decimal
+    verdict: str
+
+    @property
+    def matches(self) -> bool | None:
+        if self.provider_refunded is None:
+            return None
+        return self.provider_refunded == self.ledger_refunded
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +200,7 @@ class PaymentReconciler:
         # vanishes under -O; this way the type is settled where the object
         # arrives, which is also where the answer is interesting.
         self._inquirer = provider if isinstance(provider, ChargeInquiryProvider) else None
+        self._reader = provider if isinstance(provider, TransactionInquiryProvider) else None
 
     @property
     def available(self) -> bool:
@@ -611,7 +638,125 @@ class PaymentReconciler:
             return applied.value
         if not payment.is_automatic and payment.status is PaymentStatus.PENDING:
             return await self.reconcile_hosted(payment_id, tenant_id=tenant_id, now=now)
+        if payment.status is PaymentStatus.SUCCEEDED and payment.provider_reference:
+            # Collected money: the only thing left to learn is whether any of
+            # it went back without the callback saying so.
+            return await self.reconcile_refund(payment_id, tenant_id=tenant_id, now=now)
         return "nothing_to_do"
+
+    # ------------------------------------------------ refunds (PAY-E2E-01/03)
+
+    async def run_refunds(
+        self,
+        *,
+        now: datetime | None = None,
+        grace_seconds: float,
+        lease_seconds: float,
+        limit: int,
+    ) -> dict[str, int]:
+        """Confirm refunds whose callback never arrived, from the provider's own record.
+
+        Only payments with a refund request still standing past the grace
+        period - the one state in which a lost refund callback leaves the
+        books wrong and the request stuck. Each is read by the transaction id
+        recorded when its money arrived, and whatever reversal the provider
+        reports is applied through the same path a refund callback takes.
+        Nothing here can move money.
+        """
+        moment = now or datetime.now(UTC)
+        counts: dict[str, int] = {}
+        if self._reader is None or not self._reader.can_inquire:
+            return counts
+        for _ in range(limit):
+            claimed = await self._payments.claim_refund_for_reconciliation(
+                provider=self._provider.name,
+                older_than=moment - timedelta(seconds=grace_seconds),
+                lease_before=moment - timedelta(seconds=lease_seconds),
+                now=moment,
+            )
+            if claimed is None:
+                await self._session.rollback()
+                break
+            payment_id, tenant_id = claimed.id, claimed.tenant_id
+            await self._session.commit()
+            verdict = await self.reconcile_refund(payment_id, tenant_id=tenant_id, now=moment)
+            counts[verdict] = counts.get(verdict, 0) + 1
+            if verdict == "unreachable":
+                break
+        return counts
+
+    async def reconcile_refund(
+        self,
+        payment_id: uuid.UUID,
+        *,
+        tenant_id: uuid.UUID,
+        now: datetime,
+    ) -> str:
+        """Read one collected payment's transaction and apply any reversal it shows.
+
+        `refund_applied` when the provider's running total moved the books,
+        `no_change` when it agreed with them already (or was a replay), and
+        `not_refunded` when the provider shows nothing returned yet - the
+        request then stays outstanding and is asked about again after the
+        lease.
+        """
+        payment = await self._payments.get_by_id(payment_id)
+        if payment is None or not payment.provider_reference or self._reader is None:
+            await self._session.rollback()
+            return "not_found"
+        transaction_id = payment.provider_reference
+        await self._session.commit()
+
+        answer = await self._reader.inquire_transaction(transaction_id)
+        if answer.verdict in (InquiryVerdict.UNREACHABLE, InquiryVerdict.UNSUPPORTED):
+            return "unreachable"
+        if answer.verdict is InquiryVerdict.NOT_FOUND or answer.event is None:
+            return "not_found"
+        if not answer.event.is_reversal or answer.event.reversal_child:
+            return "not_refunded"
+
+        service = CheckoutService(
+            self._session,
+            tenant_id=tenant_id,
+            provider=self._provider,
+            default_plan_code=self._default_plan_code,
+        )
+        outcome = await service.apply(answer.event, now=now)
+        await self._session.commit()
+        logger.info(
+            "billing.refund_reconciled",
+            extra={
+                "event": "billing.refund_reconciled",
+                "tenant_id": str(tenant_id),
+                "payment_id": str(payment_id),
+                "outcome": outcome,
+            },
+        )
+        return "refund_applied" if outcome == APPLIED else "no_change"
+
+    async def compare_refund_state(self, payment_id: uuid.UUID) -> RefundLedgerCheck:
+        """The provider's refunded total for one payment against Wasla's (§ PAY-E2E-01).
+
+        A verification helper for an operator or a verification run, never a
+        sweep: it reads one transaction this system recorded and changes
+        nothing.
+        """
+        payment = await self._payments.get_by_id(payment_id)
+        if payment is None:
+            raise ValueError("No such payment.")
+        ledger = payment.refunded_amount
+        transaction_id = payment.provider_reference
+        if not transaction_id or self._reader is None or not self._reader.can_inquire:
+            return RefundLedgerCheck(payment_id, transaction_id, None, ledger, "unsupported")
+        answer = await self._reader.inquire_transaction(transaction_id)
+        event = answer.event
+        if not answer.answered or event is None or event.reversal_child:
+            return RefundLedgerCheck(payment_id, transaction_id, None, ledger, answer.verdict.value)
+        if event.is_reversal:
+            provider = event.refunded_amount if event.refunded_amount else event.amount
+        else:
+            provider = Decimal("0.00")
+        return RefundLedgerCheck(payment_id, transaction_id, provider, ledger, "answered")
 
     async def unresolved_count(self) -> int:
         """How many attempts are still waiting for an answer."""
@@ -633,5 +778,6 @@ class PaymentReconciler:
 __all__ = [
     "PaymentReconciler",
     "ReconciliationOutcome",
+    "RefundLedgerCheck",
     "Verdict",
 ]
