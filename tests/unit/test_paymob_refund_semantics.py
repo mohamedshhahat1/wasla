@@ -242,6 +242,17 @@ def test_a_success_with_a_parent_but_no_refund_flag_is_still_not_a_collection() 
     assert event.kind is not EventKind.SUCCEEDED and event.reversal_child
 
 
+def test_the_refund_flag_alone_is_enough_to_refuse_a_collection() -> None:
+    """Each guard stands on its own: a refund child that did not name its parent
+    is still a refund, not a collection (closes mutant PM-E2E-M05)."""
+    orphan = child()
+    orphan["has_parent_transaction"] = False
+    orphan["parent_transaction"] = None
+    event = verified(orphan)
+    assert event.kind is EventKind.REFUNDED and event.reversal_child
+    assert not event.succeeded
+
+
 def test_a_void_child_is_a_reversal_child() -> None:
     void = child()
     void["is_refund"] = False
