@@ -31,6 +31,15 @@ class UserRepository(BaseRepository[User]):
             self._select().where(User.id == user_id, User.deleted_at.is_(None))
         )
 
+    async def get_many(self, user_ids: list[uuid.UUID]) -> dict[uuid.UUID, User]:
+        """Live users by id, in one statement - what a roster reads (DB-014)."""
+        if not user_ids:
+            return {}
+        rows = await self._all(
+            self._select().where(User.id.in_(user_ids), User.deleted_at.is_(None))
+        )
+        return {row.id: row for row in rows}
+
     async def get_by_email(self, email: str) -> User | None:
         return await self._first(
             self._select().where(

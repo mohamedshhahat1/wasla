@@ -383,7 +383,9 @@ async def failed_documents(database: Database, *, limit: int) -> int:
         rows = await session.scalars(
             select(DocumentIndexGeneration)
             .where(DocumentIndexGeneration.state == GenerationState.FAILED)
-            .order_by(DocumentIndexGeneration.last_error_at.desc())
+            .order_by(
+                DocumentIndexGeneration.last_error_at.desc(), DocumentIndexGeneration.id.desc()
+            )
             .limit(limit)
         )
         generations = list(rows)

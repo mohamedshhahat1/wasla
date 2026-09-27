@@ -125,7 +125,7 @@ class ToolExecutionRepository(TenantScopedRepository[ToolExecution]):
         return await self._all(
             self._select()
             .where(ToolExecution.conversation_id == conversation_id)
-            .order_by(ToolExecution.requested_at)
+            .order_by(ToolExecution.requested_at, ToolExecution.id)
             .limit(limit)
         )
 

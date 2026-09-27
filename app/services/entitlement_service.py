@@ -159,11 +159,11 @@ def _refusal(entitlement: Entitlement) -> str:
     )
 
 
-# PostgreSQL advisory locks take two 32-bit integers. The first is a namespace
-# constant so this application's locks cannot collide with anything else using
-# the same mechanism on the same database; the second identifies the workspace
-# and the limit being consumed.
-_ADVISORY_NAMESPACE: Final = 0x5741_534C  # "WASL"
+# The single-key form of PostgreSQL's advisory lock, whose key space is
+# separate from the two-key form every other lock here uses
+# (`app.db.advisory_locks`), so these cannot collide with those. The key is a
+# hash of the workspace and the limit being consumed. (A two-key namespace was
+# declared here once and never used; it was removed - DB-016.)
 
 
 def _lock_id(tenant_id: uuid.UUID, key: LimitKey) -> int:

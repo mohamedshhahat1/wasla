@@ -201,7 +201,7 @@ class PlatformBillingOperations:
                 select(AuditLog)
                 .where(AuditLog.tenant_id == subscription.tenant_id)
                 .where(AuditLog.target_type.in_(["subscription", "invoice", "payment"]))
-                .order_by(AuditLog.occurred_at.desc())
+                .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
                 .limit(200)
             )
         ).all()
@@ -220,7 +220,7 @@ class PlatformBillingOperations:
             await self._session.scalars(
                 select(Invoice)
                 .where(Invoice.subscription_id == subscription.id)
-                .order_by(Invoice.created_at.desc())
+                .order_by(Invoice.created_at.desc(), Invoice.id.desc())
                 .limit(100)
             )
         ).all()
@@ -727,20 +727,26 @@ class PlatformBillingOperations:
             pending_hosted_payments=[
                 PlatformPaymentRead.from_model(row)
                 for row in (
-                    await self._session.scalars(hosted.order_by(Payment.created_at).limit(20))
+                    await self._session.scalars(
+                        hosted.order_by(Payment.created_at, Payment.id).limit(20)
+                    )
                 ).all()
             ],
             unresolved_automatic_attempts=[
                 PlatformPaymentRead.from_model(row)
                 for row in (
-                    await self._session.scalars(automatic.order_by(Payment.created_at).limit(20))
+                    await self._session.scalars(
+                        automatic.order_by(Payment.created_at, Payment.id).limit(20)
+                    )
                 ).all()
             ],
             open_incidents=[
                 IncidentRead.from_model(row)
                 for row in (
                     await self._session.scalars(
-                        incidents.order_by(BillingIncident.created_at.desc()).limit(50)
+                        incidents.order_by(
+                            BillingIncident.created_at.desc(), BillingIncident.id.desc()
+                        ).limit(50)
                     )
                 ).all()
             ],
@@ -818,7 +824,7 @@ class PlatformBillingOperations:
             statement = statement.where(BillingIncident.tenant_id == tenant_id)
         page = await _page(
             self._session,
-            statement.order_by(BillingIncident.created_at.desc()),
+            statement.order_by(BillingIncident.created_at.desc(), BillingIncident.id.desc()),
             limit=limit,
             offset=offset,
         )

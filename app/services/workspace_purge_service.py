@@ -267,7 +267,7 @@ class WorkspacePurgeService:
             .where(Tenant.purged_at.is_(None))
             .where(Tenant.purge_due_at.is_not(None))
             .where(Tenant.purge_due_at <= now)
-            .order_by(Tenant.purge_due_at)
+            .order_by(Tenant.purge_due_at, Tenant.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )

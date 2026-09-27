@@ -27,6 +27,13 @@ class TenantRepository(BaseRepository[Tenant]):
     async def get_by_id(self, tenant_id: uuid.UUID) -> Tenant | None:
         return await self._first(self._select().where(Tenant.id == tenant_id))
 
+    async def get_many(self, tenant_ids: list[uuid.UUID]) -> dict[uuid.UUID, Tenant]:
+        """Tenants by id, in one statement - what the workspace switcher reads."""
+        if not tenant_ids:
+            return {}
+        rows = await self._all(self._select().where(Tenant.id.in_(tenant_ids)))
+        return {row.id: row for row in rows}
+
     async def get_by_slug(self, slug: str) -> Tenant | None:
         """Including tombstoned workspaces, and that is deliberate.
 

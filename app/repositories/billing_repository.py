@@ -258,7 +258,7 @@ class PlatformSubscriptionRepository(BaseRepository[Subscription]):
                     ]
                 )
             )
-            .order_by(Subscription.current_period_end)
+            .order_by(Subscription.current_period_end, Subscription.id)
             .limit(limit)
             .with_for_update(skip_locked=True, of=Subscription)
         )
@@ -330,7 +330,7 @@ class PlanVersionMigrationRepository(BaseRepository[PlanVersionMigration]):
         return await self._all(
             self._select()
             .where(PlanVersionMigration.plan_id == plan_id)
-            .order_by(PlanVersionMigration.created_at.desc())
+            .order_by(PlanVersionMigration.created_at.desc(), PlanVersionMigration.id.desc())
         )
 
 
@@ -352,5 +352,5 @@ class BillingAdjustmentRepository(BaseRepository[BillingAdjustment]):
             .where(BillingAdjustment.kind == BillingAdjustmentKind.COMPLIMENTARY_GRANT)
             .where(BillingAdjustment.starts_at <= at)
             .where((BillingAdjustment.ends_at.is_(None)) | (BillingAdjustment.ends_at > at))
-            .order_by(BillingAdjustment.starts_at.desc())
+            .order_by(BillingAdjustment.starts_at.desc(), BillingAdjustment.id.desc())
         )

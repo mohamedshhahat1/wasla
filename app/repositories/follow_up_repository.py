@@ -301,7 +301,7 @@ class DueFollowUpClaim(BaseRepository[FollowUp]):
                 FollowUp.scheduled_at <= now,
                 or_(FollowUp.claimed_until.is_(None), FollowUp.claimed_until <= now),
             )
-            .order_by(FollowUp.scheduled_at)
+            .order_by(FollowUp.scheduled_at, FollowUp.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )

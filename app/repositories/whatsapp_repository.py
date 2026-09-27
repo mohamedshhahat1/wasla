@@ -170,7 +170,7 @@ class WhatsAppAccountDirectory(BaseRepository[WhatsAppAccount]):
         return await self._all(
             self._select()
             .where(WhatsAppAccount.phone_number_id == phone_number_id)
-            .order_by(WhatsAppAccount.ownership_started_at.desc())
+            .order_by(WhatsAppAccount.ownership_started_at.desc(), WhatsAppAccount.id.desc())
             .limit(MAX_OWNERSHIP_HISTORY)
         )
 
@@ -274,7 +274,7 @@ class InboundEventSweep(BaseRepository[WhatsAppEvent]):
                 WhatsAppEvent.state == WhatsAppEventState.RECEIVED,
                 WhatsAppEvent.created_at < older_than,
             )
-            .order_by(WhatsAppEvent.created_at)
+            .order_by(WhatsAppEvent.created_at, WhatsAppEvent.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
@@ -334,7 +334,7 @@ class WhatsAppAccountRepository(TenantScopedRepository[WhatsAppAccount]):
         return await self._all(
             self._select()
             .where(WhatsAppAccount.released_at.is_(None))
-            .order_by(WhatsAppAccount.created_at.desc())
+            .order_by(WhatsAppAccount.created_at.desc(), WhatsAppAccount.id.desc())
             .limit(limit)
         )
 
@@ -423,7 +423,9 @@ class WhatsAppEventRepository(TenantScopedRepository[WhatsAppEvent]):
 
     async def list_recent(self, *, limit: int = 50) -> list[WhatsAppEvent]:
         return await self._all(
-            self._select().order_by(WhatsAppEvent.received_at.desc()).limit(limit)
+            self._select()
+            .order_by(WhatsAppEvent.received_at.desc(), WhatsAppEvent.id.desc())
+            .limit(limit)
         )
 
     async def record(

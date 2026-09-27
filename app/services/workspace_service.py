@@ -59,6 +59,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.telemetry import observe_lifecycle_event
+from app.db import advisory_locks
 from app.db.models import Membership, MembershipStatus, Tenant, TenantRole, User
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.enums import TenantStatus
@@ -84,10 +85,9 @@ logger = get_logger(__name__)
 
 TENANT_SLUG_CONSTRAINT = "uq_tenants_slug"
 
-# Namespace for the advisory lock that serialises workspace creation per
-# account. Arbitrary but fixed: what matters is that nothing else in the
-# system uses it, so two unrelated operations cannot block each other.
-_WORKSPACE_CREATION_LOCK_NAMESPACE = 0x5741_5301
+# The advisory lock that serialises workspace creation per account, in its own
+# namespace (`app.db.advisory_locks`).
+_WORKSPACE_CREATION_LOCK_NAMESPACE = advisory_locks.WORKSPACE_CREATION
 
 # Stable machine-readable codes for the lifecycle conflicts a client has to be
 # able to act on. Every one of them is a 409: the request was well-formed and

@@ -435,12 +435,18 @@ class Plan(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         return self.scope is not PlanScope.TENANT or self.tenant_id == tenant_id
 
     def limit_for(self, key: LimitKey) -> int | None:
-        """The ceiling for one key, or None for unlimited.
+        """The ceiling for one key, or None for unlimited. See `validated_limit`.
 
-        A stored value that is not a positive integer is treated as unlimited
-        rather than as zero. Zero would mean "this workspace may do nothing",
-        which is never what a malformed row was meant to say, and a plan edited
-        badly should not lock a paying customer out of their own product.
+        - a non-negative integer is the ceiling - **including 0**, which means
+          "none of this" (ADR-113: a plan may deliberately exclude a feature);
+        - a missing key or JSON `null` is unlimited;
+        - anything malformed - a negative number, a string such as `"5"`, a
+          float such as `5.5`, a boolean - is read as unlimited, never as zero:
+          a plan edited badly by hand should not lock a paying customer out of
+          their own product. The plan API refuses such values on the way in.
+
+        (This used to say non-positive values were unlimited, which the code
+        has not done since ADR-113 made 0 mean zero - DB-026.)
         """
         return validated_limit(self.limits.get(key.value))
 
