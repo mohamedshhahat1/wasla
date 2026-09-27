@@ -76,6 +76,7 @@ from app.db.models.invoice import (
 )
 from app.db.models.payment_event import MAX_DETAIL_LENGTH, PaymentEvent
 from app.db.models.user import User
+from app.db.session import released
 from app.integrations.billing.checkout import (
     CallbackEvent,
     CheckoutProvider,
@@ -265,9 +266,21 @@ class CheckoutService:
 
         The one way any customer purchase reaches the provider - a plan, a bill
         already due, or a top-up (ADR-113) - so every page is created, bound
-        and settled by the same code. The pending payment is written before
-        the provider is called, so the reference handed over is a row that
-        already exists; the caller commits afterwards.
+        and settled by the same code.
+
+        **No transaction is open while the provider is asked** (DB-008). The
+        invoice and the pending payment are committed first, so the reference
+        handed over is a durable row; the provider is called with the
+        connection back in the pool and no row locked - an offer being
+        accepted included; and the order it answers with is bound in a second,
+        short transaction under the settlement locks. Whatever the caller
+        staged before calling this is committed with the first transaction,
+        and anything it writes afterwards it must re-read under a lock.
+
+        A provider call that fails leaves the committed attempt pending - the
+        outcome may be ambiguous, and hosted reconciliation asks the provider
+        about its reference - and releases its idempotency key, so the
+        customer's retry opens a page instead of being told one exists.
         """
         if self._provider is None:
             raise ValidationError("No payment provider is configured.")
@@ -279,20 +292,34 @@ class CheckoutService:
             idempotency_key=idempotency_key,
         )
 
-        session = await self._provider.create_checkout(
-            CheckoutRequest(
-                # Our id, quoted back by the provider as `merchant_order_id`.
-                # Fresh for every attempt, which is why a retried request cannot
-                # reuse an earlier page and is refused instead.
-                reference=str(payment.id),
-                amount=payment.amount,
-                currency=payment.currency,
-                description=description,
-                customer_email=actor.email if actor else None,
-                customer_name=actor.full_name if actor else None,
-                metadata={"invoice_id": str(invoice.id)},
-            )
+        request = CheckoutRequest(
+            # Our id, quoted back by the provider as `merchant_order_id`.
+            # Fresh for every attempt, which is why a retried request cannot
+            # reuse an earlier page and is refused instead.
+            reference=str(payment.id),
+            amount=payment.amount,
+            currency=payment.currency,
+            description=description,
+            customer_email=actor.email if actor else None,
+            customer_name=actor.full_name if actor else None,
+            metadata={"invoice_id": str(invoice.id)},
         )
+        payment_id, invoice_id = payment.id, invoice.id
+
+        try:
+            # TX1 ends here: invoice and pending attempt are durable, and
+            # nothing - no connection, no row lock - is held across the call.
+            async with released(self._session):
+                session = await self._provider.create_checkout(request)
+        except Exception:
+            await self._release_unopened(payment_id)
+            raise
+
+        # TX2: bind what the provider answered, under the settlement locks.
+        rows = await self._settlement.lock(invoice_id=invoice_id, payment_id=payment_id)
+        if rows.payment is None:  # pragma: no cover - committed in TX1
+            raise NotFoundError("No such payment.")
+        payment, invoice = rows.payment, rows.invoice
         payment.provider_intent_reference = session.provider_reference
         payment.provider_order_id = session.order_reference
         payment.provider_mode = session.mode
@@ -320,6 +347,23 @@ class CheckoutService:
             amount=payment.amount,
             currency=payment.currency,
         )
+
+    async def _release_unopened(self, payment_id: uuid.UUID) -> None:
+        """After a failed provider call: free the retry, keep the evidence.
+
+        Committed on its own, because the exception about to propagate rolls
+        the request's transaction back. The attempt stays `PENDING` - a timeout
+        does not say whether the provider created the page - with a reason a
+        support person can read, and hosted reconciliation asks the provider
+        about its reference like any other unanswered page. Its idempotency
+        key is cleared so the customer's retry is a new attempt rather than a
+        409 about a page they never received.
+        """
+        payment = await self._payments.lock(payment_id)
+        if payment is not None and payment.provider_order_id is None:
+            payment.idempotency_key = None
+            payment.failure_reason = "The payment page could not be opened."
+        await self._session.commit()
 
     async def _new_attempt(
         self,

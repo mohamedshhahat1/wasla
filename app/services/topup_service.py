@@ -24,7 +24,7 @@ from typing import Final
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, NotFoundError, ValidationError, WaslaError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.core.telemetry import record_topup_checkout
 from app.db.models.audit import AuditAction, AuditActorKind
@@ -221,9 +221,22 @@ class TopupService:
                 actor=actor,
                 idempotency_key=idempotency_key,
             )
-        except WaslaError:
+        except Exception:
+            # The purchase and its invoice were committed before the provider
+            # was asked (DB-008). The page may or may not exist, so the
+            # purchase stays pending for reconciliation to answer; its key is
+            # released so the customer's retry is a new purchase, not a 409.
             await record_topup_checkout(product.entitlement_key.value, "failed")
+            unopened = await self._purchases.lock_for_invoice(invoice.id)
+            if unopened is not None and unopened.payment_id is None:
+                unopened.idempotency_key = None
+            await self._session.commit()
             raise
+        # Re-read under its lock: the transaction that wrote it has committed.
+        locked = await self._purchases.lock_for_invoice(invoice.id)
+        if locked is None:  # pragma: no cover - committed with the invoice
+            raise NotFoundError("No such top-up.")
+        purchase = locked
         purchase.payment_id = started.payment_id
         await self._session.flush()
 
