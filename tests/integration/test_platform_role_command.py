@@ -167,13 +167,18 @@ async def test_an_owner_can_be_revoked_once_somebody_else_holds_it(
     await service.grant(account.email, PlatformRole.PLATFORM_OWNER)
     await service.grant(successor.email, PlatformRole.PLATFORM_OWNER)
     await db_session.flush()
+    # Every entry of one test shares the transaction's `now()`, so the
+    # revocation is identified as what the revoke added, not by its time.
+    before = {entry.id for entry in await _entries(db_session, account.id)}
 
     change = await service.revoke(account.email)
     await db_session.flush()
 
     assert change.current is None
     assert account.platform_role is None
-    _, revocation = await _entries(db_session, account.id)
+    (revocation,) = [
+        entry for entry in await _entries(db_session, account.id) if entry.id not in before
+    ]
     assert revocation.action is AuditAction.PLATFORM_ROLE_REVOKED
     assert revocation.meta == {
         "previous_role": "platform_owner",

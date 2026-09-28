@@ -368,20 +368,29 @@ async def test_knowledge_administration_is_audited_without_its_content(
     tenant = await _tenant(db_session)
     admin = await _actor(db_session)
     knowledge = KnowledgeService(session=db_session, tenant_id=tenant.id)
+    # Every row of one test shares the transaction's `now()`, so ordering by
+    # `occurred_at` cannot tell these apart. Each step is read as the one row
+    # it added, which is the order they happened in.
+    rows: list[AuditLog] = []
+
+    async def _step() -> None:
+        await db_session.flush()
+        seen = {row.id for row in rows}
+        trail = await db_session.scalars(select(AuditLog).where(AuditLog.tenant_id == tenant.id))
+        (added,) = [row for row in trail if row.id not in seen]
+        rows.append(added)
 
     base = await knowledge.create_knowledge_base(name="Pricing", actor=admin)
+    await _step()
     view, _ = await knowledge.submit(
         knowledge_base_id=base.id, title=SECRET_TITLE, raw=SECRET_TEXT, actor=admin
     )
+    await _step()
     await knowledge.reindex(view.document.id, actor=admin)
+    await _step()
     await knowledge.delete_document(view.document.id, actor=admin)
-    await db_session.flush()
+    await _step()
 
-    rows = list(
-        await db_session.scalars(
-            select(AuditLog).where(AuditLog.tenant_id == tenant.id).order_by(AuditLog.occurred_at)
-        )
-    )
     actions = [row.action for row in rows]
     assert actions == [
         AuditAction.KNOWLEDGE_BASE_CREATED,

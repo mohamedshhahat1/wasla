@@ -578,16 +578,22 @@ async def test_assignment_needs_the_expected_owner_and_a_stale_one_is_409(
 async def test_close_and_reopen_are_audited_once_each(
     http: AsyncClient, desk: Desk, db_session: AsyncSession
 ) -> None:
-    await http.post(f"{API}/conversations/{desk.conversation.id}/close", headers=desk.headers)
-    await http.post(f"{API}/conversations/{desk.conversation.id}/reopen", headers=desk.headers)
-    actions = (
-        await db_session.scalars(
-            select(AuditLog.action)
-            .where(AuditLog.tenant_id == desk.tenant.id)
-            .order_by(AuditLog.occurred_at)
+    async def _trail() -> list[AuditAction]:
+        return list(
+            await db_session.scalars(
+                select(AuditLog.action).where(AuditLog.tenant_id == desk.tenant.id)
+            )
         )
-    ).all()
-    assert actions == [AuditAction.CONVERSATION_CLOSED, AuditAction.CONVERSATION_REOPENED]
+
+    # Both requests run in the test's one transaction, so the two rows share
+    # its `now()`; the order is proven by reading the trail after each step.
+    await http.post(f"{API}/conversations/{desk.conversation.id}/close", headers=desk.headers)
+    assert await _trail() == [AuditAction.CONVERSATION_CLOSED]
+    await http.post(f"{API}/conversations/{desk.conversation.id}/reopen", headers=desk.headers)
+    actions = await _trail()
+    assert sorted(actions) == sorted(
+        [AuditAction.CONVERSATION_CLOSED, AuditAction.CONVERSATION_REOPENED]
+    )
 
 
 # ------------------------------------------------- member removal (PD-CRM-2/8)

@@ -88,16 +88,19 @@ async def test_revoking_a_tool_is_recorded_too(
 ) -> None:
     tenant, agent, admin, service = await _setup(db_session, settings)
     await service.grant_tool(agent.id, name=RECORD_LEAD_TOOL, actor=admin)
+    await db_session.flush()
+    granted = await _rows(db_session, tenant)
+    assert [row.action for row in granted] == [AuditAction.AGENT_TOOL_GRANTED]
 
     await service.revoke_tool(agent.id, name=RECORD_LEAD_TOOL, actor=admin)
     await db_session.flush()
 
-    rows = await _rows(db_session, tenant)
-    assert [row.action for row in rows] == [
-        AuditAction.AGENT_TOOL_GRANTED,
-        AuditAction.AGENT_TOOL_REVOKED,
-    ]
-    assert rows[1].meta == {"agent_id": str(agent.id), "tool": RECORD_LEAD_TOOL, "enabled": False}
+    # Both rows share the transaction's `now()`, so the revocation is the row
+    # the revoke added rather than the later of two equal timestamps.
+    seen = {row.id for row in granted}
+    (revoked,) = [row for row in await _rows(db_session, tenant) if row.id not in seen]
+    assert revoked.action is AuditAction.AGENT_TOOL_REVOKED
+    assert revoked.meta == {"agent_id": str(agent.id), "tool": RECORD_LEAD_TOOL, "enabled": False}
 
 
 async def test_granting_a_tool_switched_off_is_recorded_as_a_withdrawal(
