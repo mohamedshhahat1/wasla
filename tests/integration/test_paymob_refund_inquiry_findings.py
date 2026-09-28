@@ -220,15 +220,24 @@ async def _plan_code(session: AsyncSession, tenant_id: uuid.UUID) -> str:
 
 
 async def _refunded_audits(session: AsyncSession, payment: Payment) -> list[str]:
+    """Each refund's amount, in the order the refunds were applied.
+
+    `occurred_at` is the transaction's `now()`, so refunds applied inside one
+    test transaction share it; the running total each row records breaks the
+    tie, since it only ever grows.
+    """
     rows = (
         await session.scalars(
             select(AuditLog)
             .where(AuditLog.action == AuditAction.PAYMENT_REFUNDED)
             .where(AuditLog.target_id == payment.id)
-            .order_by(AuditLog.occurred_at)
         )
     ).all()
-    return [str((row.meta or {}).get("amount")) for row in rows]
+    ordered = sorted(
+        rows,
+        key=lambda row: (row.occurred_at, Decimal(str((row.meta or {})["refunded_total"]))),
+    )
+    return [str((row.meta or {}).get("amount")) for row in ordered]
 
 
 async def _fresh(session: AsyncSession, *rows: Any) -> None:
