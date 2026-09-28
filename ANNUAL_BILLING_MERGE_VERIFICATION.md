@@ -388,6 +388,9 @@ pushed to its upstream `origin/worktree-billing-google-auth` without force.
 `main`, feature branches and verification branches are not pushed. The
 post-push SHA, origin equality and CI result are recorded in §29.
 
+Pushed as `96e194f`; **MERGED, PUSHED, CI GREEN - READY FOR DEPLOYMENT
+VERIFICATION** (§27 lists what that verification must still do).
+
 ## 27. Remaining deployment verification
 
 Not authorized by this merge, and not done:
@@ -414,4 +417,32 @@ leaks.
 
 ## 29. Push and CI
 
-Recorded after the push in a follow-up commit.
+| | |
+|---|---|
+| Pre-push `git fetch origin --prune` | `origin/worktree-billing-google-auth` still `11cf44b` (no drift) |
+| Canonical update | `E:\wasla`: `git merge --ff-only final-merge-annual` (fast-forward, no new commit; the nine untracked documents untouched, none collides with a tracked path) |
+| Push | `git push origin worktree-billing-google-auth`: `11cf44b..96e194f`, **not forced** |
+| Pushed SHA | `96e194f92a28626ad5d0dd23b023190b3d776b53` |
+| Local == origin after `git fetch` | **YES** |
+| Other branches pushed | none (`main`, feature and verification branches stay local) |
+
+GitHub Actions, workflow **CI**, run **36392850230**, event `push`, head
+`96e194f92a28626ad5d0dd23b023190b3d776b53`:
+
+| Job | Conclusion | Duration |
+|---|---|---|
+| Lint, format, types | success | 1 m 13 s |
+| Tests and migrations | success (`6092 passed, 15 skipped, 2 deselected`; skip gate passed) | 27 m 11 s |
+| Migration-built schema (parity, integration + e2e, kept-data sweep) | success | 21 m 59 s |
+| Alert rules and receivers | success | 1 m 6 s |
+| Docker build (runtime image, `/health/live`) | success | 1 m 30 s |
+
+5 jobs, 5 succeeded, 0 failed, 0 skipped, 0 cancelled. CI's model-built lane
+has one more pass and one fewer skip than the local run because it mounts the
+tmpfs the storage-cleanup test needs. `security.yml` and `deploy.yml` are not
+triggered by a push to this branch (see §24).
+
+**CI verdict: GREEN.**
+
+The docs-only commit recording this section triggers `CI` again (the workflow
+has no path filter); its run is monitored in the same way.
