@@ -10,8 +10,11 @@ The contract this service enforces:
 * **A plan's identity is stable.** Its `code` is written once and never
   renamed; name, description, visibility and order are presentation and may
   change (`update`).
-* **Commercial terms change only by publishing a version** (`create_version`).
-  Versions are immutable. A new version applies to *new* checkouts from its
+* **Entitlements change only by publishing a version** (`create_version`), and
+  **prices only by publishing a price** (`create_price`) and retiring the old
+  one (`retire_price`) - never by editing a row (ADR-116). A version may be
+  sold monthly and yearly at once, with the same limits on both.
+  Versions and prices are immutable. A new version applies to *new* checkouts from its
   `effective_at`; existing subscribers stay on the version they hold until an
   operator schedules a migration (`schedule_migration`), which is applied at
   each subscriber's own next renewal and only adopted once that renewal is
@@ -30,7 +33,8 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Final
+from decimal import Decimal
+from typing import Any, Final, NoReturn
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -41,8 +45,10 @@ from app.db.models.audit import AuditAction
 from app.db.models.billing import (
     RESOURCE_LIMITS,
     SERVING_STATUSES,
+    BillingInterval,
     LimitKey,
     Plan,
+    PlanPrice,
     PlanScope,
     PlanVersion,
     PlanVersionMigration,
@@ -53,6 +59,7 @@ from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.platform.billing_audit import record_platform_billing
 from app.repositories.billing_repository import (
+    PlanPriceRepository,
     PlanVersionMigrationRepository,
     PlanVersionRepository,
 )
@@ -62,12 +69,16 @@ from app.schemas.platform_billing import (
     MigrationRead,
     PlanCreate,
     PlanMigrationCreate,
+    PlanPriceCreate,
+    PlanPriceRead,
+    PlanPriceRetire,
     PlanUpdate,
     PlanVersionCreate,
     PlanVersionPreview,
     PlanVersionPreviewRequest,
     PlanVersionRead,
     PlatformPlanRead,
+    _Terms,
 )
 from app.services.plan_catalog import PlanCatalog
 
@@ -177,7 +188,9 @@ _RESOURCE_COUNT_SQL: Final[dict[LimitKey, str]] = {
 }
 
 
-def _terms(version: PlanVersion | None) -> dict[str, Any] | None:
+def _terms(
+    version: PlanVersion | None, prices: list[PlanPrice] | None = None
+) -> dict[str, Any] | None:
     if version is None:
         return None
     return {
@@ -186,8 +199,21 @@ def _terms(version: PlanVersion | None) -> dict[str, Any] | None:
         "price": str(version.price),
         "currency": version.currency,
         "interval": version.interval.value,
+        "prices": [_price(price) for price in prices or []],
         "limits": dict(version.limits or {}),
         "effective_at": version.effective_at.isoformat(),
+    }
+
+
+def _price(price: PlanPrice) -> dict[str, Any]:
+    """A price as the audit trail records it."""
+    return {
+        "id": str(price.id),
+        "billing_interval": price.billing_interval.value,
+        "interval_count": price.interval_count,
+        "amount": str(price.amount),
+        "currency": price.currency,
+        "active": price.is_active,
     }
 
 
@@ -217,6 +243,7 @@ class PlanCatalogAdmin:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._versions = PlanVersionRepository(session)
+        self._prices = PlanPriceRepository(session)
         self._migrations = PlanVersionMigrationRepository(session)
         self._catalog = PlanCatalog(session)
 
@@ -271,19 +298,39 @@ class PlanCatalogAdmin:
         plan = await self._require(plan_id)
         await self._catalog.current_version(plan)  # materialise a legacy plan's first version
         counts = await self._versions.count_subscribers()
+        versions = await self._versions.list_for_plan(plan.id)
+        prices = await self._prices_by_version(versions)
         return [
-            PlanVersionRead.from_model(version, subscribers=counts.get(version.id, 0))
-            for version in await self._versions.list_for_plan(plan.id)
+            PlanVersionRead.from_model(
+                version,
+                subscribers=counts.get(version.id, 0),
+                prices=prices.get(version.id, []),
+            )
+            for version in versions
         ]
 
     async def _read(self, plan: Plan, *, counts: dict[uuid.UUID, int]) -> PlatformPlanRead:
         current = await self._catalog.current_version(plan)
         latest = await self._versions.latest(plan.id)
-        plan_counts = {
-            version.id: counts.get(version.id, 0)
-            for version in await self._versions.list_for_plan(plan.id)
-        }
-        return PlatformPlanRead.build(plan, current=current, latest=latest, counts=plan_counts)
+        versions = await self._versions.list_for_plan(plan.id)
+        plan_counts = {version.id: counts.get(version.id, 0) for version in versions}
+        return PlatformPlanRead.build(
+            plan,
+            current=current,
+            latest=latest,
+            counts=plan_counts,
+            prices=await self._prices_by_version(versions),
+        )
+
+    async def _prices_by_version(
+        self, versions: list[PlanVersion]
+    ) -> dict[uuid.UUID, list[PlanPrice]]:
+        """Every price of these versions, retired ones included, by version."""
+        await self._session.flush()
+        grouped: dict[uuid.UUID, list[PlanPrice]] = {}
+        for price in await self._prices.for_versions([version.id for version in versions]):
+            grouped.setdefault(price.plan_version_id, []).append(price)
+        return grouped
 
     # ------------------------------------------------------------- mutations
 
@@ -306,13 +353,14 @@ class PlanCatalogAdmin:
         ):
             raise NotFoundError("No such workspace.")
         effective = self._effective(payload.effective_at, moment)
+        headline = payload.headline
         plan = Plan(
             code=code,
             name=payload.name,
             description=payload.description,
-            price=payload.price,
+            price=headline.amount if headline is not None else Decimal("0.00"),
             currency=payload.currency,
-            interval=payload.interval,
+            interval=_published_interval(payload),
             trial_days=payload.trial_days,
             limits=dict(payload.limits),
             scope=scope,
@@ -327,22 +375,16 @@ class PlanCatalogAdmin:
                 await self._session.flush()
         except IntegrityError:
             raise ConflictError("A plan with that code already exists.") from None
-        version = PlanVersion(
-            plan_id=plan.id,
-            version=1,
+        version, prices = await self._publish(
+            plan,
+            number=1,
             name=payload.name,
-            price=payload.price,
-            currency=payload.currency,
-            interval=payload.interval,
-            trial_days=payload.trial_days,
-            limits=dict(payload.limits),
+            terms=payload,
             effective_at=effective,
-            created_at=moment,
-            created_by=actor.id,
+            now=moment,
+            actor=actor,
             reason=payload.reason,
         )
-        self._session.add(version)
-        await self._session.flush()
         record_platform_billing(
             self._session,
             (
@@ -356,7 +398,7 @@ class PlanCatalogAdmin:
             target_id=plan.id,
             tenant_id=plan.tenant_id,
             target_label=plan.code,
-            after={**_identity(plan), "terms": _terms(version)},
+            after={**_identity(plan), "terms": _terms(version, prices)},
         )
         return await self.get(plan.id)
 
@@ -499,27 +541,17 @@ class PlanCatalogAdmin:
                 f"The plan is at version {current_number}, not {payload.expected_version}. "
                 "Reload it and publish again."
             )
-        before = _terms(latest)
-        version = PlanVersion(
-            plan_id=plan.id,
-            version=current_number + 1,
+        before = _terms(latest, await self._catalog.prices(latest) if latest else None)
+        version, prices = await self._publish(
+            plan,
+            number=current_number + 1,
             name=payload.name or plan.name,
-            price=payload.price,
-            currency=payload.currency,
-            interval=payload.interval,
-            trial_days=payload.trial_days,
-            limits=dict(payload.limits),
+            terms=payload,
             effective_at=self._effective(payload.effective_at, moment),
-            created_at=moment,
-            created_by=actor.id,
+            now=moment,
+            actor=actor,
             reason=payload.reason,
         )
-        try:
-            async with self._session.begin_nested():
-                self._session.add(version)
-                await self._session.flush()
-        except IntegrityError:
-            raise ConflictError("Another version was published at the same moment.") from None
         # The plan row mirrors the most recently published terms for anybody
         # reading the table directly. Nothing that charges or enforces reads
         # them (see `Plan`).
@@ -543,9 +575,267 @@ class PlanCatalogAdmin:
             tenant_id=plan.tenant_id,
             target_label=plan.code,
             before=before,
-            after=_terms(version),
+            after=_terms(version, prices),
         )
-        return PlanVersionRead.from_model(version)
+        return PlanVersionRead.from_model(version, prices=prices)
+
+    async def _publish(
+        self,
+        plan: Plan,
+        *,
+        number: int,
+        name: str,
+        terms: _Terms,
+        effective_at: datetime,
+        now: datetime,
+        actor: User,
+        reason: str,
+    ) -> tuple[PlanVersion, list[PlanPrice]]:
+        """Write one version and every price it is sold at (ADR-116).
+
+        The version row carries the headline price - monthly where there is
+        one - and the database publishes it as the version's first price in
+        the same statement. Every other price is inserted beside it. One
+        version, one set of limits, however many terms it is sold on.
+        """
+        headline = terms.headline
+        version = PlanVersion(
+            plan_id=plan.id,
+            version=number,
+            name=name,
+            price=headline.amount if headline is not None else Decimal("0.00"),
+            currency=terms.currency,
+            interval=_published_interval(terms),
+            trial_days=terms.trial_days,
+            limits=dict(terms.limits),
+            effective_at=effective_at,
+            created_at=now,
+            created_by=actor.id,
+            reason=reason,
+        )
+        try:
+            async with self._session.begin_nested():
+                self._session.add(version)
+                await self._session.flush()
+        except IntegrityError:
+            raise ConflictError("Another version was published at the same moment.") from None
+        for spec in terms.resolved_prices:
+            if headline is not None and spec.slot == headline.slot:
+                continue
+            self._session.add(
+                PlanPrice(
+                    plan_version_id=version.id,
+                    billing_interval=spec.billing_interval,
+                    interval_count=spec.interval_count,
+                    amount=spec.amount,
+                    currency=spec.currency,
+                    created_at=now,
+                    created_by=actor.id,
+                    reason=reason,
+                )
+            )
+        await self._session.flush()
+        return version, await self._catalog.prices(version, active_only=False)
+
+    # ------------------------------------------------------------------ prices
+
+    async def version(self, version_id: uuid.UUID) -> PlanVersionRead:
+        """One version with every price it has had, retired ones marked."""
+        version = await self._require_version(version_id)
+        counts = await self._versions.count_subscribers()
+        return PlanVersionRead.from_model(
+            version,
+            subscribers=counts.get(version.id, 0),
+            prices=await self._catalog.prices(version, active_only=False),
+        )
+
+    async def prices(
+        self, version_id: uuid.UUID, *, active: bool | None = None
+    ) -> list[PlanPriceRead]:
+        """A version's price history: active and retired, oldest term first."""
+        version = await self._require_version(version_id)
+        rows = await self._catalog.prices(version, active_only=active is True)
+        if active is False:
+            rows = [row for row in rows if not row.is_active]
+        return [
+            PlanPriceRead.from_model(row, references=await self._prices.references(row.id))
+            for row in rows
+        ]
+
+    async def price(self, price_id: uuid.UUID) -> PlanPriceRead:
+        row = await self._prices.get_by_id(price_id)
+        if row is None:
+            raise NotFoundError("No such price.")
+        return PlanPriceRead.from_model(row, references=await self._prices.references(row.id))
+
+    async def create_price(
+        self,
+        version_id: uuid.UUID,
+        payload: PlanPriceCreate,
+        *,
+        actor: User,
+        now: datetime | None = None,
+    ) -> PlanPriceRead:
+        """Publish a new price for a version - monthly or yearly, one code path.
+
+        The way to add a yearly price to Business v4 without copying v4, and
+        the second half of changing a price: retire the old one, create this.
+        Refused (422) for a free version, a retired plan, a version a newer
+        one has already replaced, and a currency other than the version's;
+        refused (409) when the slot - version, term, currency - already has
+        an active price. Nobody already subscribed is moved onto it.
+        """
+        moment = now if now is not None else datetime.now(UTC)
+        version = await self._require_version(version_id)
+        plan = await self._lock(version.plan_id)
+        await self._require_sellable(plan, version, now=moment)
+        if payload.currency != version.currency:
+            raise ValidationError(f"This version is priced in {version.currency}.")
+        existing = await self._prices.active_for_slot(
+            version.id,
+            interval=payload.billing_interval,
+            interval_count=payload.interval_count,
+            currency=payload.currency,
+        )
+        if existing is not None:
+            raise ConflictError(
+                "This version already has an active price for that term. Retire it first; "
+                "a price is never edited.",
+                details={"price_id": str(existing.id)},
+            )
+        created = PlanPrice(
+            plan_version_id=version.id,
+            billing_interval=payload.billing_interval,
+            interval_count=payload.interval_count,
+            amount=payload.amount,
+            currency=payload.currency,
+            created_at=moment,
+            created_by=actor.id,
+            reason=payload.reason,
+        )
+        try:
+            async with self._session.begin_nested():
+                self._session.add(created)
+                await self._session.flush()
+        except IntegrityError:
+            raise ConflictError(
+                "Another price for that term was published at the same moment."
+            ) from None
+        self._audit_price(
+            AuditAction.BILLING_PLAN_PRICE_CREATED,
+            plan=plan,
+            version=version,
+            price=created,
+            actor=actor,
+            reason=payload.reason,
+            after=_price(created),
+        )
+        return PlanPriceRead.from_model(
+            created, references=await self._prices.references(created.id)
+        )
+
+    async def retire_price(
+        self,
+        price_id: uuid.UUID,
+        payload: PlanPriceRetire,
+        *,
+        actor: User,
+        now: datetime | None = None,
+    ) -> PlanPriceRead:
+        """Stop selling a price to new customers. Never deletes it (ADR-116).
+
+        Every subscription, scheduled change, invoice and offer that names it
+        keeps it: a subscriber on 2,990 a year still renews at 2,990 after
+        3,290 is published, until an operator migrates them deliberately.
+        """
+        moment = now if now is not None else datetime.now(UTC)
+        row = await self._prices.lock(price_id)
+        if row is None:
+            raise NotFoundError("No such price.")
+        if not row.is_active:
+            raise ConflictError("This price is already retired.")
+        version = await self._require_version(row.plan_version_id)
+        plan = await self._lock(version.plan_id)
+        before = _price(row)
+        row.retired_at = moment
+        row.retired_by = actor.id
+        row.retirement_reason = payload.reason
+        await self._session.flush()
+        references = await self._prices.references(row.id)
+        self._audit_price(
+            AuditAction.BILLING_PLAN_PRICE_RETIRED,
+            plan=plan,
+            version=version,
+            price=row,
+            actor=actor,
+            reason=payload.reason,
+            before=before,
+            after=_price(row),
+            extra={"still_referenced": references},
+        )
+        return PlanPriceRead.from_model(row, references=references)
+
+    @staticmethod
+    def refuse_price_change() -> NoReturn:
+        """A published price is never edited: retire it and publish another."""
+        raise ConflictError(
+            "A price is immutable. Retire it with POST /platform/billing/prices/{id}/retire "
+            "and create the new one with POST /platform/billing/plan-versions/{id}/prices; "
+            "existing subscribers keep the price they hold."
+        )
+
+    async def _require_sellable(self, plan: Plan, version: PlanVersion, *, now: datetime) -> None:
+        """Whether a new price may be published on `version` at all."""
+        if version.is_free:
+            raise ValidationError(
+                "A free plan version is not sold and has no prices. Publish a priced version."
+            )
+        if not plan.is_active:
+            raise ValidationError("A retired plan cannot be given a new price.")
+        current = await self._catalog.current_version(plan, at=now)
+        superseded = version.effective_at <= now and (current is None or current.id != version.id)
+        if superseded:
+            raise ValidationError(
+                "A newer version of this plan has replaced this one; price the current version."
+            )
+
+    def _audit_price(
+        self,
+        action: AuditAction,
+        *,
+        plan: Plan,
+        version: PlanVersion,
+        price: PlanPrice,
+        actor: User,
+        reason: str,
+        before: dict[str, Any] | None = None,
+        after: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        record_platform_billing(
+            self._session,
+            action,
+            actor=actor,
+            reason=reason,
+            target_type="plan_price",
+            target_id=price.id,
+            tenant_id=plan.tenant_id,
+            target_label=plan.code,
+            before=before,
+            after=after,
+            extra={
+                "plan_id": str(plan.id),
+                "plan_code": plan.code,
+                "custom_plan": plan.is_custom,
+                "plan_version_id": str(version.id),
+                "version": version.version,
+                "billing_interval": price.billing_interval.value,
+                "interval_count": price.interval_count,
+                "amount": str(price.amount),
+                "currency": price.currency,
+                **(extra or {}),
+            },
+        )
 
     async def preview(
         self,
@@ -588,13 +878,14 @@ class PlanCatalogAdmin:
             if key in RESOURCE_LIMITS and new is not None and key in _RESOURCE_COUNT_SQL:
                 above = await self._above(plan, key, new)
             changes.append(LimitChange(key=key, old=old, new=new, workspaces_above_new_limit=above))
+        headline = payload.headline
         return PlanVersionPreview(
             plan_id=plan.id,
             current_version=current.version if current is not None else None,
-            proposed_price=f"{payload.price:.2f}",
+            proposed_price=f"{headline.amount if headline is not None else 0:.2f}",
             current_price=f"{current.price:.2f}" if current is not None else None,
             currency=payload.currency,
-            interval=payload.interval,
+            interval=_published_interval(payload),
             active_subscriptions=active,
             subscriptions_on_current_version=on_current,
             subscriptions_staying_on_old_versions=active,
@@ -629,6 +920,7 @@ class PlanCatalogAdmin:
             raise NotFoundError("No such version of this plan.")
         if source.id == target.id:
             raise ValidationError("A migration must move to a different version.")
+        await self._refuse_unsold_terms(source, target)
         affected = int(
             await self._session.scalar(
                 select(func.count())
@@ -694,6 +986,43 @@ class PlanCatalogAdmin:
             raise ValidationError("effective_at cannot be in the past.")
         return moment
 
+    async def _refuse_unsold_terms(self, source: PlanVersion, target: PlanVersion) -> None:
+        """A migration keeps each subscriber on their billing term (ADR-116).
+
+        A monthly subscriber migrates to the target's monthly price and a
+        yearly one to its yearly price. A target that does not sell a term the
+        source's subscribers hold is refused, rather than silently moving
+        somebody to a term they never chose.
+        """
+        if target.is_free:
+            return
+        held = await self._session.execute(
+            select(PlanPrice.billing_interval, PlanPrice.interval_count)
+            .join(Subscription, Subscription.plan_price_id == PlanPrice.id)
+            .where(Subscription.plan_version_id == source.id)
+            .where(Subscription.status.in_([status.value for status in SERVING_STATUSES]))
+            .distinct()
+        )
+        missing = []
+        for interval, count in held.all():
+            if (
+                await self._catalog.price_for_term(target, interval=interval, interval_count=count)
+                is None
+            ):
+                missing.append(f"{count} {interval.value}")
+        if missing:
+            raise ValidationError(
+                "The target version is not sold on every billing term its subscribers hold: "
+                + ", ".join(sorted(missing))
+                + ". Publish those prices on it first."
+            )
+
+    async def _require_version(self, version_id: uuid.UUID) -> PlanVersion:
+        version = await self._versions.get_by_id(version_id)
+        if version is None:
+            raise NotFoundError("No such plan version.")
+        return version
+
     async def _require(self, plan_id: uuid.UUID) -> Plan:
         plan = await self._session.get(Plan, plan_id)
         if plan is None:
@@ -751,6 +1080,14 @@ class PlanCatalogAdmin:
             "AND usage.used > :limit"
         )
         return int(await self._session.scalar(statement, {"plan": plan.id, "limit": limit}) or 0)
+
+
+def _published_interval(terms: _Terms) -> BillingInterval:
+    """The interval a version row records: its headline price's, else monthly."""
+    headline = terms.headline
+    if headline is not None:
+        return headline.billing_interval
+    return terms.interval if terms.interval is not None else BillingInterval.MONTHLY
 
 
 __all__ = ["FEATURES", "PlanCatalogAdmin", "PlanPage"]

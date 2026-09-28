@@ -81,7 +81,7 @@ from app.services.payment_reconciliation_service import PaymentReconciler
 from app.services.plan_catalog import PlanCatalog
 from app.services.settlement_service import InvoiceSettlement
 from app.services.topup_service import TopupService
-from tests.billing_fixtures import add_owner, erase_ledger
+from tests.billing_fixtures import add_owner, erase_ledger, price_terms
 from tests.paymob_orders import CARD_INTEGRATION_ID, order_for, order_from_request
 
 pytestmark = pytest.mark.integration
@@ -223,6 +223,7 @@ async def _base(session: AsyncSession, *, status: SubscriptionStatus) -> World:
             tenant_id=tenant.id,
             plan_id=plan.id,
             plan_version_id=version.id,
+            plan_price_id=(await price_terms(session, version.id)).get("plan_price_id"),
             status=status,
             current_period_start=now,
             current_period_end=now + timedelta(days=30),
@@ -251,6 +252,7 @@ async def _renewal(session: AsyncSession, world: World) -> Invoice:
         purpose=InvoicePurpose.RENEWAL,
         plan_code="pro",
         plan_version_id=version.id,
+        **(await price_terms(session, version.id)),
         amount_due=PRICE,
         amount_paid=Decimal("0.00"),
         currency="EGP",

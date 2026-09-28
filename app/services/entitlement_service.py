@@ -11,9 +11,12 @@ Two kinds of question, answered by two different queries:
   colleagues, documents. A workspace over one stays over it until something is
   deleted, which is the correct behaviour: downgrading a plan does not delete
   anybody's work, it stops them adding more.
-- **Period limits** count what was consumed since `current_period_start`, read
-  from `usage_events`. They reset when the period rolls over, which is what
-  makes "1,000 messages a month" mean anything at all.
+- **Period limits** count what was consumed in the current *usage cycle*, read
+  from `usage_events`. The cycle is always one calendar month - on a yearly
+  price as on a monthly one (ADR-116) - so "100,000 messages" on an annual plan
+  means 100,000 each month, never twelve months' worth up front and never one
+  allowance for the year. The billing term decides what is paid for and when;
+  it never decides how much may be used.
 
 **Limits come from the subscription's pinned plan version** (BILL-12), never
 from the live `plans` row. A catalogue edit reaches an existing subscriber only
@@ -69,6 +72,7 @@ from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
 from app.repositories.topup_repository import TopupPurchaseRepository
 from app.repositories.usage_repository import UsageEventRepository
+from app.services.billing_calendar import current_usage_period
 from app.services.plan_catalog import PlanCatalog
 from app.services.usage_service import UsageRecorder
 
@@ -148,13 +152,13 @@ def _refusal(entitlement: Entitlement) -> str:
     if entitlement.topup_limit or entitlement.grant_limit:
         return (
             f"This workspace's plan and top-ups allow {entitlement.limit} {noun}"
-            + (" per billing period" if entitlement.key not in RESOURCE_LIMITS else "")
+            + (" per monthly usage cycle" if entitlement.key not in RESOURCE_LIMITS else "")
             + f", and {entitlement.used} have been used. Upgrade the plan or buy a "
             "top-up to continue."
         )
     return (
         f"This workspace's plan allows {entitlement.limit} {noun}"
-        + (" per billing period" if entitlement.key not in RESOURCE_LIMITS else "")
+        + (" per monthly usage cycle" if entitlement.key not in RESOURCE_LIMITS else "")
         + f", and {entitlement.used} have been used. Upgrade the plan to continue."
     )
 
@@ -298,7 +302,7 @@ class EntitlementService:
         limit = None if base is None else base + purchased + granted
         used = await self._used(key, subscription=subscription)
         allowed = limit is None or used + max(additional, 0) <= limit
-        since, until = _period(subscription)
+        since, until = _period(subscription, self._clock())
         return Entitlement(
             key=key,
             limit=limit,
@@ -655,9 +659,9 @@ class EntitlementService:
         return int(await self._session.scalar(statement) or 0)
 
     async def _period_usage(self, key: LimitKey, *, subscription: Subscription | None) -> int:
-        """How much was consumed in the current billing period.
+        """How much was consumed in the current usage cycle.
 
-        Without a subscription there is no period, so the window falls back to
+        Without a subscription there is no cycle, so the window falls back to
         the calendar month. That keeps a limit meaningful for a workspace on the
         default plan instead of summing since the beginning of time, which would
         refuse everybody eventually.
@@ -666,17 +670,21 @@ class EntitlementService:
         if not meters:
             return 0
 
-        since, until = _period(subscription)
+        since, until = _period(subscription, self._clock())
         totals = await self._usage.totals(since=since, until=until, event_types=meters)
         return sum(total.quantity for total in totals)
 
 
-def _period(subscription: Subscription | None) -> tuple[datetime, datetime]:
-    """The window a period limit is counted over."""
-    if subscription is not None:
-        return subscription.current_period_start, subscription.current_period_end
+def _period(subscription: Subscription | None, now: datetime) -> tuple[datetime, datetime]:
+    """The window a period limit is counted over: the usage cycle in force now.
 
-    now = datetime.now(UTC)
+    The subscription's *usage* cycle, never its billing term (ADR-116), and
+    the one the clock is in even if the sweep has not recorded it yet - so an
+    annual customer's allowance resets on the first second of each month.
+    """
+    if subscription is not None:
+        return current_usage_period(subscription, now)
+
     start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     # The first instant of next month, so the window stays half-open like every
     # other window in this system.

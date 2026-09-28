@@ -367,6 +367,10 @@ class AuditAction(StrEnum):
     BILLING_CUSTOM_PLAN_OFFER_ACTIVATED = "billing_custom_plan_offer_activated"
     BILLING_CUSTOM_PLAN_OFFER_CANCELLED = "billing_custom_plan_offer_cancelled"
     BILLING_CUSTOM_PLAN_OFFER_EXPIRED = "billing_custom_plan_offer_expired"
+    # Plan prices (ADR-116): a price published for a version - monthly or
+    # yearly, standard or custom - and a price retired from new sales.
+    BILLING_PLAN_PRICE_CREATED = "billing_plan_price_created"
+    BILLING_PLAN_PRICE_RETIRED = "billing_plan_price_retired"
     # Top-ups (ADR-113): the catalogue, a customer's purchase from checkout to
     # grant to expiry, an operator's complimentary grant, and the operator's
     # decision after a refund.
@@ -603,6 +607,9 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     "billing_custom_plan_offer_activated",
     "billing_custom_plan_offer_cancelled",
     "billing_custom_plan_offer_expired",
+    # 0081
+    "billing_plan_price_created",
+    "billing_plan_price_retired",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER

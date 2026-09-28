@@ -414,9 +414,11 @@ def test_the_paymob_adapter_is_the_only_module_that_names_payment_methods() -> N
 
     signature = inspect.signature(service.CheckoutService.start)
 
+    # `plan_price_id` names what is bought (ADR-116), never how it is paid.
     assert set(signature.parameters) == {
         "self",
         "plan_code",
+        "plan_price_id",
         "invoice_id",
         "actor",
         "idempotency_key",

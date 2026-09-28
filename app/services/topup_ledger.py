@@ -35,20 +35,54 @@ from app.core.exceptions import ConflictError
 from app.core.logging import get_logger
 from app.core.telemetry import record_topup_grant, record_topup_purchase
 from app.db.models.audit import AuditAction, AuditActorKind
+from app.db.models.billing import Subscription
 from app.db.models.billing_incident import BillingIncidentKind
 from app.db.models.invoice import Invoice, Payment
-from app.db.models.topup import TopupPurchase, TopupSource, TopupStatus, topup_may_move
+from app.db.models.topup import (
+    TopupEntitlement,
+    TopupPurchase,
+    TopupSource,
+    TopupStatus,
+    topup_may_move,
+)
 from app.repositories.billing_repository import SubscriptionRepository
 from app.repositories.topup_repository import TopupPurchaseRepository
 from app.services.audit_service import AuditTrail
+from app.services.billing_calendar import current_usage_period
 from app.services.billing_incident_service import raise_incident
 from app.services.entitlement_service import EntitlementService, hold_limit_lock
 
 logger = get_logger(__name__)
 
 # Why a paid top-up was not granted, in the words the incident carries.
-PERIOD_ENDED: Final = "The billing period this top-up was bought for had already ended."
+PERIOD_ENDED: Final = "The period this top-up was bought for had already ended."
 NOT_SERVING: Final = "The workspace's subscription is no longer active."
+
+
+def validity_window(
+    subscription: Subscription, entitlement: TopupEntitlement, *, now: datetime
+) -> tuple[datetime, datetime]:
+    """The window a top-up bought now covers, and so when it expires (ADR-116).
+
+    Two kinds, never confused:
+
+    - **Usage** (`period_messages`, `period_ai_turns`,
+      `period_campaign_messages`): the current monthly *usage cycle*. An
+      annual customer who buys AI turns on 15 October has them until the
+      cycle ends on 1 November, not until the year ends - usage allowances
+      reset monthly, and a top-up adds to one month's allowance. No carry-over.
+    - **Capacity** (`storage_bytes`, `whatsapp_numbers`, `team_members`,
+      `knowledge_documents`): the current *billing term*, unchanged from
+      ADR-113 - a month on a monthly price, the whole paid year on a yearly
+      one. Expiry deletes nothing; the workspace is over its limit and new
+      creation is refused until it fits.
+
+    On a monthly price the two windows are the same one, so nothing a monthly
+    customer buys behaves differently from before.
+    """
+    if entitlement.is_capacity:
+        return subscription.current_period_start, subscription.current_period_end
+    return current_usage_period(subscription, now)
 
 
 def purchase_state(purchase: TopupPurchase) -> dict[str, Any]:

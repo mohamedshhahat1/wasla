@@ -73,8 +73,9 @@ async def test_a_subscription_period_cannot_run_backwards(db_session: AsyncSessi
         )
     statement = (
         "INSERT INTO subscriptions (id, tenant_id, plan_id, status, current_period_start,"
-        " current_period_end, cancel_at_period_end, ended_at, revision) VALUES (:id, :tenant,"
-        " :plan, :status, :start, :end, false, :ended, 1)"
+        " current_period_end, usage_period_start, usage_period_end, cancel_at_period_end,"
+        " ended_at, revision) VALUES (:id, :tenant, :plan, :status, :start, :end, :start, :end,"
+        " false, :ended, 1)"
     )
 
     async def row(end: datetime, *, ended: datetime | None = None) -> dict[str, Any]:

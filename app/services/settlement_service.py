@@ -17,16 +17,19 @@ one place:
    and refused by the invoice, and becomes a durable **billing incident** rather
    than a log line (BILL-15). An operator decides whether to refund it.
 2. **Does the purchase still make sense?** A checkout is a customer's choice,
-   frozen when they made it: plan version, price, currency, interval
-   (BILL-06). Its settlement grants exactly that version, never whatever the
-   invoice might have been re-pointed at - invoices are never re-pointed any
-   more. It is refused (money held, incident raised) only where granting would
-   be wrong: the customer cancelled *after* opening the page, or already holds
-   the same plan paid for this period.
-3. **What does it grant?** A purchase starts a new paid period *at settlement*
-   and re-anchors the subscription there (BILL-03); a terminal subscription the
-   customer chose to buy back is reactivated (BILL-01); a paid renewal lifts
-   `PAST_DUE` or `SUSPENDED` and adopts the version it was issued for.
+   frozen when they made it: plan version and the exact price of it - amount,
+   currency, billing term (BILL-06, ADR-116). Its settlement grants exactly
+   that version, never whatever the invoice might have been re-pointed at -
+   invoices are never re-pointed any more. It is refused (money held,
+   incident raised) only where granting would be wrong: the customer
+   cancelled *after* opening the page, or already holds the same plan on the
+   same billing term, paid for this period.
+3. **What does it grant?** A purchase starts a new paid term *at settlement*
+   - a month or a year, as its price says - and re-anchors the subscription
+   there, with its first monthly usage cycle (BILL-03, ADR-116); a terminal
+   subscription the customer chose to buy back is reactivated (BILL-01); a
+   paid renewal lifts `PAST_DUE` or `SUSPENDED` and adopts the version and
+   price it was issued for.
 
 **One lock order** (DB-001, DB-003). Two settlements of one invoice used to
 read it unlocked, each compute `0 + 99`, and both apply: two succeeded
@@ -73,6 +76,7 @@ from app.core.exceptions import (
 from app.core.logging import get_logger
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import (
+    PlanPrice,
     PlanVersion,
     ScheduledChangeSource,
     Subscription,
@@ -227,10 +231,11 @@ class InvoiceSettlement:
             return await self._refuse(invoice, payment=payment, refusal=refusal, now=now)
 
         version: PlanVersion | None = None
+        price: PlanPrice | None = None
         keep_cancellation = False
         completes = invoice.amount_paid + payment.amount >= invoice.amount_due
         if invoice.purpose in PURCHASE_PURPOSES and completes:
-            version = await self._purchased_version(invoice)
+            version, price = await self._purchased_terms(invoice)
             if version is not None:
                 decision = await self._purchase_refusal(
                     invoice, version=version, subscription=subscription, now=now
@@ -255,7 +260,11 @@ class InvoiceSettlement:
                 # period the payment opened onto the invoice, and a paid
                 # invoice's terms are frozen by the database (DB-005).
                 await self._grant(
-                    invoice, version=version, keep_cancellation=keep_cancellation, now=now
+                    invoice,
+                    version=version,
+                    price=price,
+                    keep_cancellation=keep_cancellation,
+                    now=now,
                 )
             self._move(invoice, InvoiceStatus.PAID)
             invoice.paid_at = now
@@ -388,19 +397,31 @@ class InvoiceSettlement:
 
     # ------------------------------------------------------------ purchases
 
-    async def _purchased_version(self, invoice: Invoice) -> PlanVersion | None:
-        """The frozen terms this invoice sells.
+    async def _purchased_terms(
+        self, invoice: Invoice
+    ) -> tuple[PlanVersion | None, PlanPrice | None]:
+        """The frozen terms this invoice sells: its version and its price.
 
-        An invoice written before versioning names only a plan code; it is
-        treated as buying that plan's current version, which is what it would
-        have granted before. None when the plan no longer exists.
+        Always the invoice's own - never the plan's current price, which may
+        have been retired or replaced since the page was opened (ADR-116). An
+        invoice written before versioning names only a plan code; it is
+        treated as buying that plan's current version at the price matching
+        what it charged, which is what it would have granted before. None when
+        the plan no longer exists.
         """
         if invoice.plan_version_id is not None:
-            return await self._catalog.get_version(invoice.plan_version_id)
-        plan = await self._plans.get_by_code(invoice.plan_code)
-        if plan is None:
-            return None
-        return await self._catalog.current_version(plan)
+            version = await self._catalog.get_version(invoice.plan_version_id)
+        else:
+            plan = await self._plans.get_by_code(invoice.plan_code)
+            version = await self._catalog.current_version(plan) if plan is not None else None
+        if version is None or version.is_free:
+            return version, None
+        if invoice.plan_price_id is not None:
+            return version, await self._catalog.get_price(invoice.plan_price_id)
+        for candidate in await self._catalog.prices(version, active_only=False):
+            if candidate.amount == invoice.amount_due and candidate.currency == invoice.currency:
+                return version, candidate
+        return version, await self._catalog.default_price(version)
 
     async def _purchase_refusal(
         self,
@@ -437,6 +458,7 @@ class InvoiceSettlement:
         if (
             subscription.is_serving
             and subscription.plan_id == version.plan_id
+            and not await self._lengthens_term(invoice, subscription)
             and (
                 await self._invoices.has_other_settled_cover(
                     invoice_id=invoice.id, plan_code=invoice.plan_code, at=now
@@ -449,6 +471,23 @@ class InvoiceSettlement:
                 "The workspace already holds this plan, paid for this period.",
             )
         return None
+
+    async def _lengthens_term(self, invoice: Invoice, subscription: Subscription) -> bool:
+        """Whether this purchase moves the plan the workspace holds to a longer term.
+
+        Monthly to yearly on the same plan is a purchase in its own right
+        (ADR-116): the paid month does not make the year a duplicate, and the
+        new annual term replaces it at settlement with no credit. The same
+        term again is still refused as a duplicate.
+        """
+        if invoice.billing_interval is None or invoice.interval_count is None:
+            return False
+        held = await self._catalog.get_price(subscription.plan_price_id)
+        if held is None:
+            return False
+        from app.services.billing_calendar import term_months
+
+        return term_months(invoice.billing_interval, invoice.interval_count) > held.months
 
     @staticmethod
     def _cancelled_after_opening(invoice: Invoice, subscription: Subscription | None) -> bool:
@@ -467,13 +506,14 @@ class InvoiceSettlement:
         invoice: Invoice,
         *,
         version: PlanVersion,
+        price: PlanPrice | None,
         keep_cancellation: bool,
         now: datetime,
     ) -> None:
-        """Put the workspace on what it bought, for a period starting now."""
+        """Put the workspace on what it bought, for a term starting now."""
         subscription, previous = await SubscriptionService(
             self._session, tenant_id=self._tenant_id
-        ).apply_purchase(version=version, now=now, keep_cancellation=keep_cancellation)
+        ).apply_purchase(version=version, price=price, now=now, keep_cancellation=keep_cancellation)
         # The invoice and the subscription describe the same period: the one
         # this payment opened. Written once, here, at the moment it became
         # true - the checkout knew the interval but not when it would be paid.
@@ -571,10 +611,20 @@ class InvoiceSettlement:
         await self.adopt_renewal_version(invoice, subscription=subscription)
 
     async def adopt_renewal_version(self, invoice: Invoice, *, subscription: Subscription) -> None:
-        """Move the subscription onto the version its current renewal paid for."""
+        """Move the subscription onto the version and price its current renewal paid for.
+
+        A renewal billed at other terms than the subscription holds - a cohort
+        migration, an operator's change to a pricier version or a longer term -
+        is adopted only now that it is paid (spec: scheduled version migration).
+        The term the renewal paid for is already the subscription's current
+        one: the sweep billed it for exactly that window.
+        """
         if (
             invoice.plan_version_id is None
-            or invoice.plan_version_id == subscription.plan_version_id
+            or (
+                invoice.plan_version_id == subscription.plan_version_id
+                and invoice.plan_price_id == subscription.plan_price_id
+            )
             or invoice.period_start != subscription.current_period_start
             or subscription.is_terminal
         ):
@@ -583,9 +633,13 @@ class InvoiceSettlement:
         if version is None:
             return
         previous = subscription.plan_version_id
+        previous_price = subscription.plan_price_id
         subscription.plan_id = version.plan_id
         subscription.plan_version_id = version.id
-        if subscription.scheduled_plan_version_id == version.id:
+        subscription.plan_price_id = invoice.plan_price_id
+        if subscription.scheduled_plan_version_id == version.id and (
+            subscription.scheduled_plan_price_id == invoice.plan_price_id
+        ):
             subscription.clear_scheduled_change()
         self._audit.record(
             AuditAction.SUBSCRIPTION_PLAN_CHANGED,
@@ -596,6 +650,8 @@ class InvoiceSettlement:
             meta={
                 "from_version_id": str(previous) if previous else None,
                 "to_version_id": str(version.id),
+                "from_price_id": str(previous_price) if previous_price else None,
+                "to_price_id": str(invoice.plan_price_id) if invoice.plan_price_id else None,
                 "reason": "renewal_settled",
                 "invoice_id": str(invoice.id),
                 "source": ScheduledChangeSource.MIGRATION.value,
@@ -669,9 +725,8 @@ class InvoiceSettlement:
             if subscription_policy == "cancel":
                 subscription.status = SubscriptionStatus.CANCELLED
                 subscription.cancelled_at = now
-                subscription.ended_at = now
                 subscription.cancel_at_period_end = False
-                subscription.current_period_end = now
+                subscription.end_service_at(now)
                 subscription.clear_scheduled_change()
                 self._audit.record(
                     AuditAction.SUBSCRIPTION_CANCELLED,

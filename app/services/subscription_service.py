@@ -10,16 +10,25 @@ of validation afterwards makes that a good API.
   and starts `ACTIVE`; it never expires because a timer ran out (BILL-01).
 - **change_plan** — a move the *platform* makes at once: a purchase being
   granted, a reversal withdrawing one, a free-to-free move.
-- **request_plan** — what a customer asks for. A cheaper plan while a paid
-  period is running is *scheduled* for the end of that period, so nothing
-  already paid for is forfeited; a pricier one is a checkout (402 here).
-- **apply_purchase** — a settled purchase: the paid version, a new period that
-  starts at settlement, and a new billing anchor (BILL-03).
+- **request_plan** — what a customer asks for. A cheaper plan, or a shorter
+  billing term, while a paid term is running is *scheduled* for the end of
+  that term, so nothing already paid for is forfeited; a pricier one, or a
+  longer term, is a checkout (402 here). See `commercial_policy`.
+- **apply_purchase** — a settled purchase: the paid version at the paid price,
+  a new billing term that starts at settlement, its first monthly usage cycle,
+  and a new billing anchor (BILL-03, ADR-116).
 - **cancel** — at the end of the period the customer has paid for, or at once
   if they insist.
 - **resume** — undo a cancellation that has not taken effect yet.
-- **roll_over** — what the sweep does when a period ends: take a cancellation,
-  apply a scheduled change, open the next period from the anchor.
+- **roll_over** — what the sweep does when a term ends: take a cancellation,
+  apply a scheduled change, open the next term from the anchor and its first
+  usage cycle.
+
+**Two periods, never conflated** (ADR-116). `current_period_*` is the billing
+term a price paid for - a month or a year. `usage_period_*` is the calendar
+month the usage allowances count over. On a monthly price they are the same
+window; on a yearly price the term holds twelve cycles, and the sweep advances
+the cycle monthly without billing anything.
 
 Payment is deliberately absent. A subscription is a complete, usable record
 without a provider, which is what lets the whole of this work in local
@@ -48,6 +57,7 @@ from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import (
     BillingInterval,
     Plan,
+    PlanPrice,
     PlanVersion,
     ScheduledChangeSource,
     Subscription,
@@ -58,9 +68,10 @@ from app.repositories.billing_repository import PlanRepository, SubscriptionRepo
 from app.repositories.tenant_repository import TenantRepository
 from app.services import billing_calendar
 from app.services.audit_service import AuditTrail
+from app.services.commercial_policy import ChangeTiming, Terms, change_timing
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
-from app.services.plan_catalog import PlanCatalog
+from app.services.plan_catalog import NO_SUCH_PRICE, PlanCatalog
 
 logger = get_logger(__name__)
 
@@ -94,6 +105,31 @@ def add_interval(start: datetime, interval: BillingInterval) -> datetime:
     under its old name for the callers that import it from this module.
     """
     return billing_calendar.add_interval(start, interval)
+
+
+def term_end(start: datetime, *, version: PlanVersion, price: PlanPrice | None) -> datetime:
+    """Where a billing term that begins at `start` ends (ADR-116).
+
+    The price decides: one month on a monthly price, twelve calendar months on
+    a yearly one. A free version has no price and bills nothing; its term is
+    the calendar month its version was published with, as it always was.
+    """
+    if price is not None:
+        return billing_calendar.add_interval(start, price.billing_interval, price.interval_count)
+    return billing_calendar.add_interval(start, version.interval)
+
+
+def open_term(subscription: Subscription, *, start: datetime, end: datetime) -> None:
+    """Make `[start, end)` the billing term and open its first usage cycle.
+
+    The one place both periods move together, so no path can start a term
+    and leave the previous term's usage cycle behind it.
+    """
+    subscription.current_period_start = start
+    subscription.current_period_end = end
+    subscription.usage_period_start, subscription.usage_period_end = (
+        billing_calendar.first_usage_period(subscription)
+    )
 
 
 def _unusable_reason(subscription: Subscription) -> str:
@@ -160,6 +196,22 @@ class SubscriptionService:
         """The immutable terms this subscription is held to."""
         return await self._catalog.pinned_version(subscription)
 
+    async def price_for(
+        self, subscription: Subscription, version: PlanVersion | None
+    ) -> PlanPrice | None:
+        """The price this subscription renews at; None on a free version."""
+        if version is None:
+            return None
+        return await self._catalog.pinned_price(subscription, version=version)
+
+    async def scheduled_price_for(self, subscription: Subscription) -> PlanPrice | None:
+        """The exact price a scheduled change will renew at, if one is scheduled."""
+        return await self._catalog.get_price(subscription.scheduled_plan_price_id)
+
+    async def prices_for(self, version: PlanVersion | None) -> list[PlanPrice]:
+        """The price options a version is currently sold at."""
+        return await self._catalog.prices(version) if version is not None else []
+
     async def start(
         self,
         *,
@@ -184,10 +236,14 @@ class SubscriptionService:
         # than two weeks paid for plans it was then refused. A free plan
         # therefore never trials, whatever its row says.
         trialing = version.trial_days > 0 and version.price > 0
+        # Only the platform starts a workspace on a priced plan here (a
+        # customer is sent to a checkout by `_require_plan`), and it does so
+        # at the plan's default price - the monthly one where there is one.
+        price = None if version.is_free else await self._catalog.default_price(version)
         period_end = (
             moment + timedelta(days=version.trial_days)
             if trialing
-            else billing_calendar.add_interval(moment, version.interval)
+            else term_end(moment, version=version, price=price)
         )
         subscription = self._subscriptions.create(
             plan_id=plan.id,
@@ -197,7 +253,9 @@ class SubscriptionService:
             trial_ends_at=period_end if trialing else None,
         )
         subscription.plan_version_id = version.id
+        subscription.plan_price_id = price.id if price is not None else None
         subscription.billing_anchor_at = moment
+        open_term(subscription, start=moment, end=period_end)
         # Flushed so the caller can read the row it just created - primary keys
         # and server defaults are not populated until the insert reaches the
         # database, and a route that returns this would otherwise answer 500.
@@ -250,13 +308,14 @@ class SubscriptionService:
             raise ConflictError(_unusable_reason(subscription))
 
         version = await self._require_version(plan, at=moment)
+        price = None if version.is_free else await self._catalog.default_price(version)
         previous = subscription.plan_id
         subscription.plan_id = plan.id
         subscription.plan_version_id = version.id
+        subscription.plan_price_id = price.id if price is not None else None
         subscription.status = SubscriptionStatus.ACTIVE
-        subscription.current_period_start = moment
-        subscription.current_period_end = billing_calendar.add_interval(moment, version.interval)
         subscription.billing_anchor_at = moment
+        open_term(subscription, start=moment, end=term_end(moment, version=version, price=price))
         # A trial does not survive a deliberate choice of plan: the customer has
         # decided, which is what the trial was for.
         subscription.trial_ends_at = None
@@ -286,63 +345,122 @@ class SubscriptionService:
     async def request_plan(
         self,
         *,
-        plan_code: str,
+        plan_code: str | None = None,
+        plan_price_id: uuid.UUID | None = None,
         now: datetime | None = None,
         actor: User | None = None,
     ) -> Subscription:
-        """What a workspace owner asking for another plan gets (spec: downgrades).
+        """What a workspace owner asking for another plan or term gets.
 
-        - **A free move from a free plan** takes effect at once, as it always did.
-        - **A cheaper plan while a paid period runs** is *scheduled* for the end
-          of that period. The customer keeps what they paid for; the change and
-          the lower renewal price arrive together at the boundary. Moving them
-          down at once used to forfeit the rest of a period they had bought.
-        - **A pricier plan** is a purchase, and a purchase is a checkout: 402.
+        The customer names a price (`plan_price_id`) - or, for compatibility,
+        only a plan code, which means that plan's default (monthly) price.
+        `commercial_policy.change_timing` then decides (ADR-112, ADR-116):
+
+        - **Free to free** takes effect at once, as it always did.
+        - **A lower tier, or a shorter term, while a paid term runs** is
+          *scheduled* for the end of that term, pinned to the exact price
+          chosen. The customer keeps what they paid for - a yearly customer
+          moving to monthly keeps the rest of their year - and the change and
+          its price arrive together at the boundary.
+        - **A higher tier, or a longer term** is a purchase, and a purchase is
+          a checkout: 402.
 
         Resources above the new plan's limits are never deleted by any of
         these. They stay; creating more is refused until usage fits again.
         """
         moment = now if now is not None else datetime.now(UTC)
         subscription = await self._require_subscription()
-        plan = await self._plans.get_by_code(plan_code)
-        if plan is None or not self._on_offer(plan):
-            raise ValidationError("No such plan.")
-        if subscription.plan_id == plan.id:
-            raise ConflictError("This workspace is already on that plan.")
         if subscription.is_terminal:
             raise ConflictError(_unusable_reason(subscription))
-
-        target = await self._require_version(plan, at=moment)
+        plan, target, target_price = await self._requested_terms(
+            plan_code=plan_code, plan_price_id=plan_price_id, at=moment
+        )
         current = await self._catalog.pinned_version(subscription, at=moment)
-        current_price = current.price if current is not None else target.price
-
-        if target.price > 0 and target.price >= current_price:
+        current_price = (
+            await self._catalog.pinned_price(subscription, version=current)
+            if current is not None
+            else None
+        )
+        timing = await self.timing(
+            current=Terms(current, current_price) if current is not None else None,
+            target=Terms(target, target_price),
+        )
+        if timing is ChangeTiming.UNCHANGED:
+            raise ConflictError("This workspace is already on that plan and billing term.")
+        if timing is ChangeTiming.PURCHASE_NOW:
             raise PaymentRequiredError(
-                f"The {plan.name} plan is not free. Start a checkout for it and "
-                "the plan applies once the payment is confirmed."
+                f"The {plan.name} plan at that price is a purchase. Start a checkout for "
+                "it and it applies once the payment is confirmed."
             )
-        if current_price <= 0:
+        if timing is ChangeTiming.FREE_NOW:
             # Free to free: nothing is paid for, so nothing is forfeited.
             return await self.change_plan(plan_code=plan.code, now=moment, actor=actor)
         return await self.schedule_change(
             version=target,
+            price=target_price,
             source=ScheduledChangeSource.DOWNGRADE,
-            reason="Downgrade requested by the workspace owner.",
+            reason="Change requested by the workspace owner for the end of the paid term.",
             now=moment,
             actor=actor,
         )
+
+    async def timing(self, *, current: Terms | None, target: Terms) -> ChangeTiming:
+        """`change_timing`, with the target priced on the current term if it can be."""
+        like_for_like = None
+        if current is not None and current.price is not None and target.price is not None:
+            like_for_like = await self._catalog.price_for_term(
+                target.version,
+                interval=current.price.billing_interval,
+                interval_count=current.price.interval_count,
+            )
+        return change_timing(current, target, target_on_current_term=like_for_like)
+
+    async def _requested_terms(
+        self,
+        *,
+        plan_code: str | None,
+        plan_price_id: uuid.UUID | None,
+        at: datetime,
+    ) -> tuple[Plan, PlanVersion, PlanPrice | None]:
+        """The plan, version and price a customer asked for, if they may have it."""
+        if plan_price_id is not None:
+            terms = await self._catalog.selectable_price(
+                plan_price_id, tenant_id=self._tenant_id, at=at
+            )
+            if not self._on_offer(terms.plan):
+                raise ValidationError(NO_SUCH_PRICE)
+            if plan_code is not None and plan_code.strip().lower() != terms.plan.code:
+                raise ValidationError("That price is not a price of that plan.")
+            return terms.plan, terms.version, terms.price
+        plan = await self._plans.get_by_code(plan_code or "")
+        if plan is None or not self._on_offer(plan):
+            raise ValidationError("No such plan.")
+        version = await self._require_version(plan, at=at)
+        if version.is_free:
+            return plan, version, None
+        price = await self._catalog.default_price(version)
+        if price is None:
+            raise ValidationError(
+                "That plan is not sold monthly. Name the price you want with plan_price_id."
+            )
+        return plan, version, price
 
     async def schedule_change(
         self,
         *,
         version: PlanVersion,
+        price: PlanPrice | None,
         source: ScheduledChangeSource,
         reason: str,
         now: datetime | None = None,
         actor: User | None = None,
         actor_kind: AuditActorKind | None = None,
     ) -> Subscription:
-        """Arrange for the subscription to move to `version` when its period ends.
+        """Arrange for the subscription to move to `version` at `price` when its term ends.
+
+        The price is pinned now (ADR-116): a price published or retired before
+        the boundary does not change what was agreed, and the renewal at the
+        boundary bills exactly this one - a yearly term if it is yearly.
 
         One pending change at a time: scheduling again replaces the previous
         one, and the trail records both. Applied once, by the billing sweep, at
@@ -352,12 +470,19 @@ class SubscriptionService:
         subscription = await self._require_subscription()
         if subscription.is_terminal:
             raise ConflictError(_unusable_reason(subscription))
-        if subscription.plan_version_id == version.id:
-            raise ConflictError("This subscription is already on that version.")
+        if (price is None) != version.is_free or (
+            price is not None and price.plan_version_id != version.id
+        ):
+            raise ValidationError("A scheduled change names a price of its own version.")
+        if subscription.plan_version_id == version.id and (
+            price is None or subscription.plan_price_id == price.id
+        ):
+            raise ConflictError("This subscription is already on that version and price.")
         await self._catalog.require_available(version, tenant_id=self._tenant_id)
 
         before = str(subscription.scheduled_plan_version_id or "")
         subscription.scheduled_plan_version_id = version.id
+        subscription.scheduled_plan_price_id = price.id if price is not None else None
         subscription.scheduled_change_source = source
         subscription.scheduled_change_reason = reason
         subscription.scheduled_change_actor_id = actor.id if actor is not None else None
@@ -371,6 +496,11 @@ class SubscriptionService:
             meta={
                 "source": source.value,
                 "to_version_id": str(version.id),
+                "to_price_id": str(price.id) if price is not None else None,
+                "billing_interval": price.billing_interval.value if price is not None else None,
+                "interval_count": price.interval_count if price is not None else None,
+                "amount": str(price.amount) if price is not None else "0.00",
+                "currency": price.currency if price is not None else version.currency,
                 "effective_at": subscription.current_period_end.isoformat(),
                 "replaced_version_id": before or None,
                 "reason": reason,
@@ -412,18 +542,25 @@ class SubscriptionService:
         self,
         *,
         version: PlanVersion,
+        price: PlanPrice | None,
         now: datetime,
         keep_cancellation: bool = False,
         grant: PlanGrant | None = None,
     ) -> tuple[Subscription, SubscriptionStatus | None]:
-        """Put the workspace on the version a settled payment bought (BILL-01, BILL-03).
+        """Put the workspace on the version and price a settled payment bought.
 
-        The single place a paid purchase changes a subscription. The paid
-        period starts **now** - at settlement - and ends one interval later,
-        and the billing anchor moves to now with it. That is the whole of the
+        The single place a paid purchase changes a subscription (BILL-01,
+        BILL-03, ADR-116). The paid term starts **now** - at settlement - and
+        ends one term of `price` later: a month, or twelve calendar months for
+        a yearly price. The billing anchor moves to now with it, and the first
+        monthly usage cycle opens now too. That is the whole of the
         advance-billing contract: the invoice that was just paid covers exactly
-        `[now, anchor + 1 interval)`, and the first renewal the sweep raises is
-        for the period *after* it, so no period is ever billed twice.
+        `[now, anchor + 1 term)`, and the first renewal the sweep raises is for
+        the term *after* it, so no term is ever billed twice. A yearly purchase
+        changes nothing about usage allowances except that they now reset
+        monthly inside a year that is already paid.
+
+        `price` is None exactly when `version` is free.
 
         A workspace with no subscription gets one, and a terminal one is
         brought back: the caller has already decided that this purchase is one
@@ -441,9 +578,13 @@ class SubscriptionService:
         the change is a settled purchase, recorded by the system.
         """
         await self._catalog.require_available(version, tenant_id=self._tenant_id)
+        if (price is None) != version.is_free or (
+            price is not None and price.plan_version_id != version.id
+        ):
+            raise ValidationError("A purchase grants a version at one of its own prices.")
         subscription = await self._subscriptions.get()
         previous: SubscriptionStatus | None = None
-        period_end = billing_calendar.add_interval(now, version.interval)
+        period_end = term_end(now, version=version, price=price)
         if subscription is None:
             subscription = self._subscriptions.create(
                 plan_id=version.plan_id,
@@ -455,15 +596,15 @@ class SubscriptionService:
             previous = subscription.status
             subscription.plan_id = version.plan_id
             subscription.status = SubscriptionStatus.ACTIVE
-            subscription.current_period_start = now
-            subscription.current_period_end = period_end
             subscription.trial_ends_at = None
             subscription.ended_at = None
             if not keep_cancellation:
                 subscription.cancel_at_period_end = False
                 subscription.cancelled_at = None
         subscription.plan_version_id = version.id
+        subscription.plan_price_id = price.id if price is not None else None
         subscription.billing_anchor_at = now
+        open_term(subscription, start=now, end=period_end)
         subscription.clear_scheduled_change()
         await self._session.flush()
 
@@ -490,8 +631,12 @@ class SubscriptionService:
             meta={
                 "plan_version_id": str(version.id),
                 "version": version.version,
+                "plan_price_id": str(price.id) if price is not None else None,
+                "billing_interval": price.billing_interval.value if price is not None else None,
+                "amount": str(price.amount) if price is not None else "0.00",
                 "period_start": now.isoformat(),
                 "period_end": period_end.isoformat(),
+                "usage_period_end": subscription.usage_period_end.isoformat(),
                 "from_status": previous.value if previous is not None else None,
                 "reason": grant.basis if grant is not None else PURCHASE_SETTLED,
                 **({"operator_reason": grant.reason, "payment": None} if grant is not None else {}),
@@ -520,12 +665,14 @@ class SubscriptionService:
         subscription.cancelled_at = moment
         if immediately:
             subscription.status = SubscriptionStatus.CANCELLED
-            subscription.ended_at = moment
             subscription.cancel_at_period_end = False
-            # The period ends now, so nothing counts against an allowance the
-            # workspace no longer has.
-            subscription.current_period_end = moment
+            # The term and its usage cycle end now, so nothing counts against
+            # an allowance the workspace no longer has.
+            subscription.end_service_at(moment)
         else:
+            # At the end of the paid *billing term* - a year on a yearly price,
+            # not the end of the current monthly usage cycle (ADR-116). Usage
+            # cycles keep rolling monthly until then.
             subscription.cancel_at_period_end = True
 
         self._audit.record(
@@ -709,49 +856,73 @@ async def bootstrap_default_subscription(
         )
 
 
-def legacy_anchor(subscription: Subscription, interval: BillingInterval) -> datetime:
+def legacy_anchor(
+    subscription: Subscription, interval: BillingInterval, interval_count: int = 1
+) -> datetime:
     """The anchor of a subscription written before anchors were stored.
 
-    Its period start, when the period is exactly one interval from it - which
-    is every period this application ever opened, so the original day survives
+    Its period start, when the period is exactly one term from it - which is
+    every period this application ever opened, so the original day survives
     (31 January stays the 31st). Otherwise its period end: a row somebody wrote
-    by hand with an irregular period keeps renewing one interval at a time from
+    by hand with an irregular period keeps renewing one term at a time from
     where it actually is, rather than being snapped to a short first period.
     """
     start = subscription.current_period_start
-    if billing_calendar.add_interval(start, interval) == subscription.current_period_end:
+    if (
+        billing_calendar.add_interval(start, interval, interval_count)
+        == subscription.current_period_end
+    ):
         return start
     return subscription.current_period_end
+
+
+def _term_shape(terms: Plan | PlanVersion, price: PlanPrice | None) -> tuple[BillingInterval, int]:
+    """The billing term a price - or, for a free version, its version - renews on."""
+    if price is not None:
+        return price.billing_interval, price.interval_count
+    return terms.interval, 1
 
 
 async def roll_over(
     subscription: Subscription,
     *,
     plan: Plan | PlanVersion,
+    price: PlanPrice | None = None,
     now: datetime | None = None,
     next_version: PlanVersion | None = None,
+    next_price: PlanPrice | None = None,
+    term_price: PlanPrice | None = None,
 ) -> Subscription:
-    """Advance a subscription whose period has ended.
+    """Advance a subscription whose billing term has ended.
 
     Pure state, no I/O, so the rules are testable without a database and the
     sweep that calls this is left with nothing but the query and the commit.
 
-    `plan` is the terms of the period that is ending; `next_version` the terms
-    of the one that opens, when they differ - a scheduled downgrade the sweep
-    has already decided to apply. Four outcomes, decided entirely by the row:
+    `plan` and `price` are the terms of the term that is ending; `next_version`
+    and `next_price` the terms of the one that opens, when they differ - a
+    scheduled change the sweep has already decided to apply. Four outcomes,
+    decided entirely by the row:
 
-    - A cancellation was pending: it takes effect now.
+    - A cancellation was pending: it takes effect now - at the end of the paid
+      billing term, which on a yearly price is the end of the year.
     - A trial of a *priced* plan ended: `EXPIRED`, because nobody decided it. A
       free plan's "trial" is not a trial at all (BILL-01) - it simply rolls on.
-    - A scheduled change applies: the next period opens on the new version.
-    - Otherwise the next period opens on the same one. The subscription stays
-      whatever it was - including `PAST_DUE`, since a new period does not
+    - A scheduled change applies: the next term opens on the new version and
+      price - yearly to monthly takes effect here, and not a month earlier.
+    - Otherwise the next term opens on the same terms. The subscription stays
+      whatever it was - including `PAST_DUE`, since a new term does not
       settle an old debt.
 
-    The new period ends at the next anniversary of the billing anchor, not one
-    interval after the old end (BILL-18). An interval change - monthly to
-    yearly - re-anchors at the boundary, because an anchor only means anything
-    against one interval.
+    The new term ends at the next anniversary of the billing anchor, one term
+    of the price on - a month or twelve calendar months - not one interval
+    after the old end (BILL-18). A change of term length re-anchors at the
+    boundary, because an anchor only means anything against one term. The new
+    term's first monthly usage cycle opens with it (ADR-116).
+
+    `term_price` is the price the opening term is *billed* at when that is not
+    the subscription's own - a migration or a pricier operator change adopted
+    only once paid. The term is as long as that price's, so a yearly renewal
+    invoice always covers a year, even before its version is adopted.
     """
     moment = now if now is not None else datetime.now(UTC)
 
@@ -769,15 +940,23 @@ async def roll_over(
         subscription.status = SubscriptionStatus.ACTIVE
         subscription.trial_ends_at = None
 
-    terms = next_version if next_version is not None else plan
+    ending = _term_shape(plan, price)
+    opening = ending
     start = subscription.current_period_end
-    anchor = subscription.billing_anchor_at or legacy_anchor(subscription, plan.interval)
+    anchor = subscription.billing_anchor_at or legacy_anchor(subscription, *ending)
     if next_version is not None:
         subscription.plan_id = next_version.plan_id
         subscription.plan_version_id = next_version.id
-        if next_version.interval is not plan.interval:
-            anchor = start
+        subscription.plan_price_id = next_price.id if next_price is not None else None
+        opening = _term_shape(next_version, next_price)
+    elif term_price is not None:
+        opening = _term_shape(plan, term_price)
+    if billing_calendar.term_months(*opening) != billing_calendar.term_months(*ending):
+        anchor = start
     subscription.billing_anchor_at = anchor
-    subscription.current_period_start = start
-    subscription.current_period_end = billing_calendar.next_boundary(anchor, start, terms.interval)
+    open_term(
+        subscription,
+        start=start,
+        end=billing_calendar.next_boundary(anchor, start, *opening),
+    )
     return subscription

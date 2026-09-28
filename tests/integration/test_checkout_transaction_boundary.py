@@ -49,7 +49,7 @@ from app.schemas.platform_billing import PlanCreate
 from app.services.checkout_service import CheckoutService
 from app.services.custom_plan_offer_service import CustomPlanOfferService
 from app.services.plan_catalog import PlanCatalog
-from tests.billing_fixtures import add_owner, erase_ledger
+from tests.billing_fixtures import add_owner, erase_ledger, price_terms
 from tests.paymob_orders import CARD_INTEGRATION_ID, order_from_request
 
 pytestmark = pytest.mark.integration
@@ -144,6 +144,7 @@ async def world(engine: AsyncEngine) -> AsyncIterator[World]:
             tenant_id=tenant.id,
             plan_id=plan.id,
             plan_version_id=version.id,
+            plan_price_id=(await price_terms(session, version.id)).get("plan_price_id"),
             status=SubscriptionStatus.PAST_DUE,
             current_period_start=now,
             current_period_end=now + timedelta(days=30),
@@ -161,6 +162,7 @@ async def world(engine: AsyncEngine) -> AsyncIterator[World]:
                 purpose=InvoicePurpose.RENEWAL,
                 plan_code=plan.code,
                 plan_version_id=version.id,
+                **(await price_terms(session, version.id)),
                 amount_due=PRICE,
                 amount_paid=Decimal("0.00"),
                 currency="EGP",

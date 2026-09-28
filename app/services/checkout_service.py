@@ -4,19 +4,22 @@ Two halves of one flow, kept in one module because they are the two ends of the
 same state machine and reading either without the other is misleading.
 
 The rule that shapes everything here: **the browser is never believed.** The
-customer chooses a plan code or names one of their own invoices, and nothing
-else. The amount, the currency and the workspace are read from the database and
-the authenticated session, the reference the provider quotes back is one we
+customer chooses a price (`plan_price_id`), a plan code (its default, monthly
+price), or one of their own invoices, and nothing else. The amount, the
+currency, the billing term and the workspace are read from the database and the
+authenticated session, the reference the provider quotes back is one we
 generated, and the payment is only settled by a callback whose signature
 checked out. A customer returning to the site with `?success=true` changes
 nothing; there is deliberately no endpoint that would let it.
 
-**A checkout is a frozen purchase** (BILL-06). Each one opens its own `CHECKOUT`
-invoice naming an immutable plan version, its price, currency and interval, and
-that invoice is never re-pointed at another plan. Opening a Business page after
-a Pro page therefore leaves the Pro page buying Pro, whichever is paid first;
-before, the second checkout re-priced the shared invoice and paying the cheaper
-page bought the pricier plan.
+**A checkout is a frozen purchase** (BILL-06, ADR-116). Each one opens its own
+`CHECKOUT` invoice naming an immutable plan version and one immutable price of
+it - amount, currency and billing term - and that invoice is never re-pointed.
+A price the platform retires, or replaces with a dearer one, after the page was
+opened changes nothing about what the page charges or what paying it grants.
+Opening a Business page after a Pro page therefore leaves the Pro page buying
+Pro, whichever is paid first; before, the second checkout re-priced the shared
+invoice and paying the cheaper page bought the pricier plan.
 
 **A callback is bound, not merely signed** (BILL-11). The event must name the
 Paymob order this system recorded when it created the intention - `order.id`,
@@ -62,7 +65,7 @@ from app.core.telemetry import (
     record_topup_purchase,
 )
 from app.db.models.audit import AuditAction, AuditActorKind
-from app.db.models.billing import Plan, PlanVersion, Subscription
+from app.db.models.billing import Plan, PlanPrice, PlanVersion, Subscription
 from app.db.models.billing_incident import BillingIncidentKind
 from app.db.models.invoice import (
     CollectionState,
@@ -89,7 +92,8 @@ from app.repositories.topup_repository import TopupPurchaseRepository
 from app.services import billing_calendar
 from app.services.audit_service import AuditTrail
 from app.services.billing_incident_service import raise_incident
-from app.services.plan_catalog import PlanCatalog
+from app.services.commercial_policy import ChangeTiming, Terms, change_timing
+from app.services.plan_catalog import NO_SUCH_PRICE, PlanCatalog
 from app.services.settlement_service import (
     APPLIED,
     DECLINED,
@@ -106,6 +110,34 @@ from app.services.topup_ledger import TopupLedger
 
 logger = get_logger(__name__)
 
+
+def _description(version: PlanVersion, price: PlanPrice) -> str:
+    """What the payment page says the customer is buying."""
+    term = {1: "monthly", 12: "yearly"}.get(price.months, f"{price.months} months")
+    return f"{version.name} plan ({term})"
+
+
+def invoice_lines(version: PlanVersion, price: PlanPrice) -> list[dict[str, object]]:
+    """An invoice's subscription line, with the terms copied in (ADR-116).
+
+    Enough to answer "why was I charged this" without joining anything: the
+    plan, its version, the price and the one billing term it pays for - one
+    line for a year on a yearly price, never twelve.
+    """
+    return [
+        {
+            "kind": "subscription",
+            "description": f"{version.name} plan",
+            "amount": str(price.amount),
+            "quantity": 1,
+            "plan_version": version.version,
+            "plan_price_id": str(price.id),
+            "interval": price.billing_interval.value,
+            "interval_count": price.interval_count,
+        }
+    ]
+
+
 __all__ = [
     "APPLIED",
     "DECLINED",
@@ -116,6 +148,7 @@ __all__ = [
     "UNMATCHED",
     "CheckoutService",
     "StartedCheckout",
+    "invoice_lines",
 ]
 
 # How many microseconds a new checkout invoice's provisional period start may
@@ -180,16 +213,19 @@ class CheckoutService:
         self,
         *,
         plan_code: str | None = None,
+        plan_price_id: uuid.UUID | None = None,
         invoice_id: uuid.UUID | None = None,
         actor: User | None = None,
         idempotency_key: str | None = None,
         now: datetime | None = None,
     ) -> StartedCheckout:
-        """Open a payment page, either for a plan or for an invoice already due.
+        """Open a payment page, either for a price or for an invoice already due.
 
-        Exactly one of `plan_code` and `invoice_id`. Naming a plan is somebody
-        choosing what to buy; naming an invoice is somebody paying a bill this
-        system issued them.
+        Exactly one of `plan_price_id`, `plan_code` and `invoice_id`. Naming a
+        price is somebody choosing what to buy and how often to pay for it; a
+        plan code alone is the same choice at that plan's default (monthly)
+        price, kept for clients written before yearly prices (ADR-116); naming
+        an invoice is somebody paying a bill this system issued them.
 
         The invoice and the pending payment are written *before* the provider
         is called, so the reference handed to the provider is a row that
@@ -198,8 +234,8 @@ class CheckoutService:
         """
         if self._provider is None:
             raise ValidationError("No payment provider is configured.")
-        if (plan_code is None) == (invoice_id is None):
-            raise ValidationError("Name either a plan or an invoice, not both.")
+        if sum(value is not None for value in (plan_code, plan_price_id, invoice_id)) != 1:
+            raise ValidationError("Name exactly one of a price, a plan or an invoice.")
 
         moment = now if now is not None else datetime.now(UTC)
         await self._refuse_repeat(idempotency_key)
@@ -208,13 +244,18 @@ class CheckoutService:
             invoice = await self._collectible_invoice(invoice_id)
             description = f"{invoice.plan_code} plan"
         else:
-            plan, version = await self._priced_plan(str(plan_code), now=moment)
+            if plan_price_id is not None:
+                plan, version, price = await self._selected_price(plan_price_id, now=moment)
+            else:
+                plan, version, price = await self._priced_plan(str(plan_code), now=moment)
             subscription = await self._subscriptions.get()
-            await self._refuse_purchase(plan, version=version, subscription=subscription)
-            invoice = await self._open_invoice(
-                plan=plan, version=version, subscription=subscription, now=moment
+            await self._refuse_purchase(
+                plan, version=version, price=price, subscription=subscription
             )
-            description = f"{version.name} plan"
+            invoice = await self._open_invoice(
+                plan=plan, version=version, price=price, subscription=subscription, now=moment
+            )
+            description = _description(version, price)
 
         return await self.open_page(
             invoice, description=description, actor=actor, idempotency_key=idempotency_key
@@ -225,6 +266,7 @@ class CheckoutService:
         *,
         plan: Plan,
         version: PlanVersion,
+        price: PlanPrice,
         offer_id: uuid.UUID,
         actor: User | None,
         idempotency_key: str | None,
@@ -233,23 +275,29 @@ class CheckoutService:
         """Open a payment page for an accepted custom plan offer (ADR-114).
 
         The caller has locked the offer and checked it may be accepted. The
-        invoice is an ordinary `CHECKOUT` pinned to the offered version and
-        naming the offer, so settlement grants exactly those terms at exactly
-        that price - whatever version the plan has reached by the time the
-        money arrives - and can refuse the money if the offer was declined or
-        withdrawn in the meantime.
+        invoice is an ordinary `CHECKOUT` pinned to the offered version and the
+        offered price, and naming the offer, so settlement grants exactly those
+        terms at exactly that price on exactly that billing term - whatever
+        version or price the plan has reached by the time the money arrives -
+        and can refuse the money if the offer was declined or withdrawn in the
+        meantime.
         """
         if self._provider is None:
             raise ValidationError("No payment provider is configured.")
         await self._refuse_repeat(idempotency_key)
         subscription = await self._subscriptions.get()
-        await self._refuse_purchase(plan, version=version, subscription=subscription)
+        await self._refuse_purchase(plan, version=version, price=price, subscription=subscription)
         invoice = await self._open_invoice(
-            plan=plan, version=version, subscription=subscription, now=now, offer_id=offer_id
+            plan=plan,
+            version=version,
+            price=price,
+            subscription=subscription,
+            now=now,
+            offer_id=offer_id,
         )
         return await self.open_page(
             invoice,
-            description=f"{version.name} plan",
+            description=_description(version, price),
             actor=actor,
             idempotency_key=idempotency_key,
         )
@@ -416,11 +464,38 @@ class CheckoutService:
                 "Read its status rather than starting another."
             )
 
-    async def _priced_plan(self, plan_code: str, *, now: datetime) -> tuple[Plan, PlanVersion]:
-        """The plan a customer may pay for, and the version they would buy.
+    async def _selected_price(
+        self, price_id: uuid.UUID, *, now: datetime
+    ) -> tuple[Plan, PlanVersion, PlanPrice]:
+        """The price a customer named, if a checkout may sell it (ADR-116).
+
+        `PlanCatalog.selectable_price` refuses a retired price, a price of a
+        superseded version or a retired plan, and another workspace's custom
+        price (as if it did not exist). A public plan's price is sold here; the
+        workspace's own custom plan is sold only through its offer, whose
+        terms the customer was shown.
+        """
+        terms = await self._catalog.selectable_price(price_id, tenant_id=self._tenant_id, at=now)
+        if terms.price is None:  # pragma: no cover - a price row is never free
+            raise ValidationError("That plan does not require payment.")
+        if not terms.plan.is_public:
+            if terms.plan.is_custom and terms.plan.tenant_id == self._tenant_id:
+                raise ValidationError(
+                    "This plan is bought by accepting its offer: "
+                    "POST /billing/custom-offers/{id}/accept."
+                )
+            raise ValidationError(NO_SUCH_PRICE)
+        return terms.plan, terms.version, terms.price
+
+    async def _priced_plan(
+        self, plan_code: str, *, now: datetime
+    ) -> tuple[Plan, PlanVersion, PlanPrice]:
+        """The plan a customer may pay for, the version and its default price.
 
         Inactive, private and not-yet-effective plans are refused alike, so the
-        refusal confirms nothing about which private codes are real.
+        refusal confirms nothing about which private codes are real. A plan
+        code alone buys the plan's monthly price - what it always meant; a plan
+        sold only yearly must be bought by naming that price.
         """
         plan = await self._plans.get_by_code(plan_code)
         if plan is None or not plan.is_active:
@@ -440,39 +515,62 @@ class CheckoutService:
         version = await self._catalog.current_version(plan, at=now)
         if version is None:
             raise ValidationError("No such plan.")
-        if version.price <= 0:
+        if version.is_free:
             raise ValidationError("That plan does not require payment.")
-        return plan, version
+        price = await self._catalog.default_price(version)
+        if price is None:
+            raise ValidationError(
+                "That plan is not sold monthly. Choose its price with plan_price_id."
+            )
+        return plan, version, price
 
     async def _refuse_purchase(
         self,
         plan: Plan,
         *,
         version: PlanVersion,
+        price: PlanPrice,
         subscription: Subscription | None,
     ) -> None:
         """Refuse, before any money moves, a purchase that cannot be granted.
 
-        Two, and both answer 409 with the way forward:
+        `commercial_policy.change_timing` decides, and two outcomes answer 409
+        with the way forward:
 
-        - **The plan the workspace is already serving on.** There is nothing to
-          buy; a workspace behind on that plan pays the open renewal instead.
-        - **A cheaper plan while a pricier paid period runs.** Downgrades take
-          effect at the period end so nothing paid for is forfeited, and they
-          are scheduled, not bought (spec: downgrades).
+        - **The plan and billing term the workspace is already serving on.**
+          There is nothing to buy; a workspace behind on it pays the open
+          renewal instead. Moving the *same* plan from monthly to yearly is a
+          purchase, not this.
+        - **A lower tier, or a shorter term, while a paid term runs.** It takes
+          effect at the end of the paid term, so nothing paid for is forfeited
+          - a yearly customer is never moved to monthly mid-year - and it is
+          scheduled, not bought (spec: downgrades).
         """
         if subscription is None or not subscription.is_serving:
             return
-        if subscription.plan_id == plan.id:
-            raise ConflictError(
-                "This workspace is already on that plan. To settle what it owes, "
-                "pay its open invoice instead."
-            )
         current = await self._catalog.pinned_version(subscription)
-        if current is not None and current.price > 0 and version.price < current.price:
+        if current is None:  # pragma: no cover - RESTRICT keeps a pinned version
+            return
+        held = await self._catalog.pinned_price(subscription, version=current)
+        like_for_like = (
+            await self._catalog.price_for_term(
+                version, interval=held.billing_interval, interval_count=held.interval_count
+            )
+            if held is not None
+            else None
+        )
+        timing = change_timing(
+            Terms(current, held), Terms(version, price), target_on_current_term=like_for_like
+        )
+        if timing is ChangeTiming.UNCHANGED:
             raise ConflictError(
-                "A cheaper plan starts when the current paid period ends. "
-                "Schedule it with POST /billing/subscription/plan."
+                "This workspace is already on that plan and billing term. To settle what it "
+                "owes, pay its open invoice instead."
+            )
+        if timing is ChangeTiming.AT_TERM_END:
+            raise ConflictError(
+                "A lower plan or a shorter billing term starts when the current paid term "
+                "ends. Schedule it with POST /billing/subscription/plan."
             )
 
     async def _collectible_invoice(self, invoice_id: uuid.UUID) -> Invoice:
@@ -503,15 +601,19 @@ class CheckoutService:
         *,
         plan: Plan,
         version: PlanVersion,
+        price: PlanPrice,
         subscription: Subscription | None,
         now: datetime,
         offer_id: uuid.UUID | None = None,
     ) -> Invoice:
-        """A new, immutable `CHECKOUT` invoice for exactly this version.
+        """A new, immutable `CHECKOUT` invoice for exactly this version and price.
 
-        Always new: two checkouts are two independent purchases. The period is
-        provisional - one interval from now - and is fixed at settlement, when
-        it is known when the paid period actually starts (BILL-03).
+        Always new: two checkouts are two independent purchases. The amount,
+        currency and billing term are the price's own - never the request's -
+        and the database refuses anything else. The period is provisional -
+        one term from now, a year for a yearly price - and is fixed at
+        settlement, when it is known when the paid term actually starts
+        (BILL-03).
         """
         period_start = now
         for _ in range(_PERIOD_NUDGE_ATTEMPTS):
@@ -521,14 +623,19 @@ class CheckoutService:
                         subscription_id=subscription.id if subscription else None,
                         status=InvoiceStatus.OPEN,
                         plan_code=plan.code,
-                        amount_due=version.price,
-                        currency=version.currency,
+                        amount_due=price.amount,
+                        currency=price.currency,
                         period_start=period_start,
-                        period_end=billing_calendar.add_interval(period_start, version.interval),
-                        lines=self._lines(version),
+                        period_end=billing_calendar.add_interval(
+                            period_start, price.billing_interval, price.interval_count
+                        ),
+                        lines=invoice_lines(version, price),
                         purpose=InvoicePurpose.CHECKOUT,
                         plan_version_id=version.id,
                     )
+                    created.plan_price_id = price.id
+                    created.billing_interval = price.billing_interval
+                    created.interval_count = price.interval_count
                     created.custom_plan_offer_id = offer_id
                     # When the customer opened this page, in the same clock the
                     # cancellation is written with - settlement compares the two.
@@ -540,24 +647,6 @@ class CheckoutService:
                     microsecond=(period_start.microsecond + 1) % 10**6
                 )
         raise ConflictError("Another checkout was opened at the same instant. Try again.")
-
-    @staticmethod
-    def _lines(version: PlanVersion) -> list[dict[str, object]]:
-        """The invoice as it will be read back, with the terms copied in.
-
-        Enough to answer "why was I charged this" without joining anything:
-        the plan, its version, the price and what it buys a period of.
-        """
-        return [
-            {
-                "kind": "subscription",
-                "description": f"{version.name} plan",
-                "amount": str(version.price),
-                "quantity": 1,
-                "plan_version": version.version,
-                "interval": version.interval.value,
-            }
-        ]
 
     # ------------------------------------------------------------- applying
 

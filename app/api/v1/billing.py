@@ -15,6 +15,7 @@ that a good API.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Query, status
@@ -34,7 +35,8 @@ from app.api.dependencies import (
 )
 from app.api.route import CommittingRoute
 from app.core.dependencies import SessionDep, SettingsDep
-from app.db.models.billing import TOPUP_LIMITS, LimitKey
+from app.core.exceptions import PaymentRequiredError
+from app.db.models.billing import TOPUP_LIMITS, LimitKey, Plan, Subscription
 from app.db.models.invoice import Payment
 from app.db.models.topup import TopupEntitlement, TopupPurchase
 from app.integrations.billing import build_checkout_provider
@@ -71,11 +73,36 @@ from app.schemas.topup import (
     TopupPurchasePage,
     TopupPurchaseRead,
 )
+from app.services.billing_calendar import current_usage_period
 from app.services.custom_plan_offer_service import offer_read
 from app.services.entitlement_service import EntitlementService
 from app.services.subscription_service import SubscriptionService
 
 router = APIRouter(route_class=CommittingRoute, prefix="/billing", tags=["billing"])
+
+
+async def _subscription_read(
+    subscriptions: SubscriptionService,
+    subscription: Subscription,
+    *,
+    plan: Plan,
+) -> SubscriptionRead:
+    """A subscription with its version, the price it renews at, and both periods.
+
+    The usage cycle is the one in force now - the clock's, like the limits it
+    bounds (ADR-116) - so a page never shows a month the sweep has not yet
+    recorded as over.
+    """
+    version = await subscriptions.version_for(subscription)
+    return SubscriptionRead.from_model(
+        subscription,
+        plan=plan,
+        version=version,
+        price=await subscriptions.price_for(subscription, version),
+        scheduled_price=await subscriptions.scheduled_price_for(subscription),
+        prices=await subscriptions.prices_for(version),
+        usage_period=current_usage_period(subscription, datetime.now(UTC)),
+    )
 
 
 async def _state(
@@ -92,9 +119,7 @@ async def _state(
     read = None
     if subscription is not None:
         plan = await subscriptions.plan_for(subscription)
-        read = SubscriptionRead.from_model(
-            subscription, plan=plan, version=await subscriptions.version_for(subscription)
-        )
+        read = await _subscription_read(subscriptions, subscription, plan=plan)
 
     snapshot = await entitlements.snapshot()
     return SubscriptionStateRead(
@@ -116,7 +141,7 @@ async def list_plans(
     that customer.
     """
     return [
-        PlanRead.from_model(plan, version)
+        PlanRead.from_model(plan, version, prices=await catalog.prices(version))
         for plan, version in await catalog.offered(tenant_id=workspace.tenant.id)
     ]
 
@@ -149,14 +174,17 @@ async def start_subscription(
     comes from the plan - a caller that could ask for a trial length is a
     caller that can ask for a thousand days.
     """
+    if payload.plan_code is None:
+        # Starting is for free plans; a price is bought at `POST /billing/checkout`.
+        raise PaymentRequiredError(
+            "A priced plan is bought at POST /billing/checkout with its plan_price_id."
+        )
     subscription = await subscriptions.start(
         plan_code=payload.plan_code,
         actor=workspace.user,
     )
     plan = await subscriptions.plan_for(subscription)
-    return SubscriptionRead.from_model(
-        subscription, plan=plan, version=await subscriptions.version_for(subscription)
-    )
+    return await _subscription_read(subscriptions, subscription, plan=plan)
 
 
 @router.post("/subscription/plan", response_model=SubscriptionRead)
@@ -180,12 +208,11 @@ async def change_plan(
     """
     subscription = await subscriptions.request_plan(
         plan_code=payload.plan_code,
+        plan_price_id=payload.plan_price_id,
         actor=workspace.user,
     )
     plan = await subscriptions.plan_for(subscription)
-    return SubscriptionRead.from_model(
-        subscription, plan=plan, version=await subscriptions.version_for(subscription)
-    )
+    return await _subscription_read(subscriptions, subscription, plan=plan)
 
 
 @router.post("/subscription/cancel", response_model=SubscriptionRead)
@@ -204,9 +231,7 @@ async def cancel_subscription(
         actor=workspace.user,
     )
     plan = await subscriptions.plan_for(subscription)
-    return SubscriptionRead.from_model(
-        subscription, plan=plan, version=await subscriptions.version_for(subscription)
-    )
+    return await _subscription_read(subscriptions, subscription, plan=plan)
 
 
 @router.post("/subscription/scheduled-change/cancel", response_model=SubscriptionRead)
@@ -217,9 +242,7 @@ async def cancel_scheduled_change(
     """Withdraw a plan change that has not taken effect yet. Owners only."""
     subscription = await subscriptions.cancel_scheduled_change(actor=workspace.user)
     plan = await subscriptions.plan_for(subscription)
-    return SubscriptionRead.from_model(
-        subscription, plan=plan, version=await subscriptions.version_for(subscription)
-    )
+    return await _subscription_read(subscriptions, subscription, plan=plan)
 
 
 @router.post("/subscription/resume", response_model=SubscriptionRead)
@@ -230,9 +253,7 @@ async def resume_subscription(
     """Undo a cancellation that has not taken effect yet. Owners only."""
     subscription = await subscriptions.resume(actor=workspace.user)
     plan = await subscriptions.plan_for(subscription)
-    return SubscriptionRead.from_model(
-        subscription, plan=plan, version=await subscriptions.version_for(subscription)
-    )
+    return await _subscription_read(subscriptions, subscription, plan=plan)
 
 
 @router.post(
@@ -264,6 +285,7 @@ async def start_checkout(
     """
     started = await checkout.start(
         plan_code=payload.plan_code,
+        plan_price_id=payload.plan_price_id,
         invoice_id=payload.invoice_id,
         actor=workspace.user,
         idempotency_key=payload.idempotency_key,
@@ -521,9 +543,7 @@ async def billing_summary(
     read = None
     if subscription is not None:
         plan = await subscriptions.plan_for(subscription)
-        read = SubscriptionRead.from_model(
-            subscription, plan=plan, version=await subscriptions.version_for(subscription)
-        )
+        read = await _subscription_read(subscriptions, subscription, plan=plan)
     recent, _ = await topups.history(limit=_SUMMARY_RECENT, offset=0)
     open_offer = await offers.open_offer()
     renewals = await InvoiceRepository(session, tenant_id=workspace.tenant.id).open_renewals()
@@ -610,6 +630,8 @@ async def accept_custom_offer(
         amount=f"{started.amount:.2f}",
         currency=started.currency,
         plan_version_id=accepted.version.id,
+        plan_price_id=accepted.price.id,
+        billing_interval=accepted.price.billing_interval,
     )
 
 

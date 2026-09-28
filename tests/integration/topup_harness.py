@@ -206,7 +206,11 @@ async def workspace(
         assert plan is not None
         version = await PlanCatalog(session).current_version(plan, at=now)
         assert version is not None
-        await service.apply_purchase(version=version, now=now)
+        await service.apply_purchase(
+            version=version,
+            price=await PlanCatalog(session).default_price(version),
+            now=now,
+        )
     subscription = await session.scalar(
         select(Subscription).where(Subscription.tenant_id == tenant.id)
     )

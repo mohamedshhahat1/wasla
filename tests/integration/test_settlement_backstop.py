@@ -35,6 +35,7 @@ from app.integrations.billing.paymob import PaymobProvider, hmac_signature
 from app.services.checkout_service import APPLIED, CheckoutService
 from app.services.invoice_service import InvoiceService
 from app.services.plan_catalog import PlanCatalog
+from tests.billing_fixtures import price_terms
 from tests.paymob_orders import CARD_INTEGRATION_ID, order_for, order_from_request
 
 pytestmark = pytest.mark.integration
@@ -343,6 +344,7 @@ async def test_refunding_held_money_leaves_the_paid_invoice_alone(
         tenant_id=tenant.id,
         plan_id=plan.id,
         plan_version_id=version.id,
+        plan_price_id=(await price_terms(db_session, version.id)).get("plan_price_id"),
         status=SubscriptionStatus.PAST_DUE,
         current_period_start=now,
         current_period_end=now + timedelta(days=30),
@@ -356,6 +358,7 @@ async def test_refunding_held_money_leaves_the_paid_invoice_alone(
         purpose=InvoicePurpose.RENEWAL,
         plan_code=plan.code,
         plan_version_id=version.id,
+        **(await price_terms(db_session, version.id)),
         amount_due=PRICE,
         amount_paid=Decimal("0.00"),
         currency="EGP",

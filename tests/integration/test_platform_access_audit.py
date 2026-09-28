@@ -310,8 +310,11 @@ async def test_every_platform_read_route_records_one_entry(
     billing_rows = [
         f"{PATH}/billing/invoices/{{invoice_id}}",
         f"{PATH}/billing/payments/{{payment_id}}",
+        f"{PATH}/billing/plan-versions/{{version_id}}",
+        f"{PATH}/billing/plan-versions/{{version_id}}/prices",
         f"{PATH}/billing/plans/{{plan_id}}",
         f"{PATH}/billing/plans/{{plan_id}}/versions",
+        f"{PATH}/billing/prices/{{price_id}}",
         f"{PATH}/billing/subscriptions/{{subscription_id}}",
         f"{PATH}/billing/subscriptions/{{subscription_id}}/timeline",
         f"{PATH}/billing/tenants/{{tenant_id}}/custom-offers",

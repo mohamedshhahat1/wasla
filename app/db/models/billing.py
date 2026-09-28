@@ -96,9 +96,10 @@ class LimitKey(StrEnum):
     - **Resource limits** measure what exists *now* - numbers, agents, people,
       bytes held in the object store. Checked with a `COUNT` or a `SUM`, and a
       workspace over the limit stays over it until something is deleted.
-    - **Usage limits** count what was consumed *in the current billing period*,
-      read from `usage_events`. They reset when the period rolls over, which is
-      what makes "1,000 messages a month" mean anything.
+    - **Usage limits** count what was consumed *in the current usage cycle* -
+      one calendar month, whatever the billing term (ADR-116) - read from
+      `usage_events`. They reset when the cycle rolls over, which is what
+      makes "1,000 messages a month" mean anything, on a yearly price too.
 
     `PERIOD_` is in the name of the second kind so a reader never has to guess
     which sort of question a key is asking.
@@ -203,15 +204,30 @@ class PlanScope(StrEnum):
 
 
 class BillingInterval(StrEnum):
-    """How long a billing period lasts.
+    """The unit a price's billing term is counted in (ADR-116).
 
     Two, not an arbitrary number of days. Every price a customer compares is
     quoted per month or per year, and an interval nobody quotes is one nobody
-    can price.
+    can price. A term is `interval_count` of these units; only 1 is sold today.
+
+    This is the cadence of *billing*, never of usage: a yearly price bills once
+    a year and its usage allowances still reset every calendar month.
     """
 
     MONTHLY = "monthly"
     YEARLY = "yearly"
+
+
+# Calendar months in one unit of each interval. The only place the length of a
+# year is written down, so nothing anywhere computes 365 or 30 days.
+MONTHS_PER_INTERVAL: Final[dict[BillingInterval, int]] = {
+    BillingInterval.MONTHLY: 1,
+    BillingInterval.YEARLY: 12,
+}
+# The term lengths the product sells (ADR-116). `interval_count` exists so a
+# quarterly or two-year price needs no new model; selling one is a product
+# decision, and until it is made the API refuses anything but 1.
+SUPPORTED_INTERVAL_COUNTS: Final[frozenset[int]] = frozenset({1})
 
 
 class SubscriptionStatus(StrEnum):
@@ -455,13 +471,25 @@ class Plan(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
 
 
 class PlanVersion(Base, UUIDPrimaryKeyMixin):
-    """One immutable set of commercial terms for a plan (BILL-12).
+    """One immutable set of entitlements for a plan (BILL-12, ADR-116).
 
-    Everything a customer is charged and allowed: price, currency, interval and
-    limits, plus the name as it was shown. Written once and never changed - a
-    trigger refuses any UPDATE, so "what did version 3 of Pro cost" has one
-    answer for ever, and an invoice that names a version keeps meaning what it
-    meant.
+    What a customer is allowed - the limits - plus the name as it was shown.
+    Written once and never changed - a trigger refuses any UPDATE, so "what did
+    version 3 of Pro allow" has one answer for ever, and an invoice that names a
+    version keeps meaning what it meant.
+
+    **What a customer pays is a `PlanPrice` of the version, not the version**
+    (ADR-116). One version may be sold monthly and yearly; both prices grant
+    exactly these limits. `price`, `currency` and `interval` here are the terms
+    the version was *published* with, and they keep two meanings only:
+
+    - `price = 0` marks a free version: it has no prices, is never checked out
+      and never invoiced for money (Starter, a complimentary custom plan);
+    - on a priced version they are its first price, which the database
+      publishes as a `plan_prices` row when the version is inserted.
+
+    Nothing charges a customer from these columns: checkouts, renewals, offers
+    and invoices name a `PlanPrice`.
 
     `effective_at` is when a version becomes the one *new* customers get. It
     changes nobody already subscribed: a subscription keeps the version it
@@ -513,8 +541,109 @@ class PlanVersion(Base, UUIDPrimaryKeyMixin):
         """The ceiling this version sets for one key, or None for unlimited."""
         return validated_limit(self.limits.get(key.value))
 
+    @property
+    def is_free(self) -> bool:
+        """Whether holding this version costs nothing - it has no prices."""
+        return self.price <= 0
+
     def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
         return f"PlanVersion(plan_id={self.plan_id!r}, version={self.version!r})"
+
+
+class PlanPrice(Base, UUIDPrimaryKeyMixin):
+    """One way to pay for a plan version: an amount per billing term (ADR-116).
+
+    `Business v4` is one set of entitlements; `299 EGP a month` and `2,990 EGP a
+    year` are two prices of it. Choosing between them changes how often the
+    customer is billed and nothing about what they are allowed - usage
+    allowances reset every calendar month on either.
+
+    **Immutable terms.** Version, interval, count, amount and currency never
+    change (a trigger refuses it). A new price is a new row; the old one is
+    *retired*, which only stops new customers choosing it. Every subscription,
+    invoice, scheduled change and offer that names it keeps it, so a published
+    price change reaches an existing subscriber only through an explicit
+    migration.
+
+    **One active price per commercial slot** - version, interval, count and
+    currency - by a partial unique index. Retired rows are history and may
+    repeat a slot.
+
+    Tenant ownership is inherited, never stored: a price belongs to a version,
+    the version to a plan, and a custom plan to one workspace. Composite foreign
+    keys pin every reference to a price *of the version it names*, and the
+    custom-plan triggers already refuse another workspace's version - so a
+    workspace can never be bound to another's price by any writer.
+    """
+
+    __tablename__ = "plan_prices"
+    __table_args__ = (
+        # What a subscription, an invoice and an offer name together with
+        # their version, so a price is always one of that version's own.
+        UniqueConstraint("plan_version_id", "id", name="uq_plan_prices_plan_version_id_id"),
+        Index(
+            "uq_plan_prices_active_slot",
+            "plan_version_id",
+            "billing_interval",
+            "interval_count",
+            "currency",
+            unique=True,
+            postgresql_where=text("retired_at IS NULL"),
+        ),
+        # A free version has no prices; a price is always money.
+        CheckConstraint("amount > 0", name="amount_positive"),
+        CheckConstraint("interval_count > 0", name="interval_count_positive"),
+        CheckConstraint(CURRENCY_CHECK_SQL, name="currency_supported"),
+        CheckConstraint(
+            "retired_at IS NULL OR retired_at >= created_at", name="retired_after_created"
+        ),
+    )
+
+    plan_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        # CASCADE, for the reason `PlanVersion.plan_id` cascades: a price
+        # anybody used is held by a subscription, an invoice or an offer, all
+        # RESTRICT, so only a never-sold plan takes its prices with it.
+        ForeignKey("plan_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    billing_interval: Mapped[BillingInterval] = mapped_column(BILLING_INTERVAL_TYPE, nullable=False)
+    interval_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(CURRENCY_LENGTH), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    reason: Mapped[str | None] = mapped_column(String(MAX_BILLING_REASON_LENGTH), nullable=True)
+    # Retired: no longer selectable by a new customer. Never deleted, never
+    # un-retired - existing subscribers keep it.
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retired_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    retirement_reason: Mapped[str | None] = mapped_column(
+        String(MAX_BILLING_REASON_LENGTH), nullable=True
+    )
+
+    @property
+    def is_active(self) -> bool:
+        return self.retired_at is None
+
+    @property
+    def months(self) -> int:
+        """The billing term in calendar months: 1 for monthly, 12 for yearly."""
+        return MONTHS_PER_INTERVAL[self.billing_interval] * self.interval_count
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
+        return (
+            f"PlanPrice(version={self.plan_version_id!r}, {self.amount} {self.currency} "
+            f"per {self.interval_count} {self.billing_interval.value})"
+        )
 
 
 # The immutability of a version is a property of the table, not of the code
@@ -534,6 +663,81 @@ _PLAN_VERSION_IMMUTABLE_TRIGGER = DDL(  # type: ignore[no-untyped-call]
 )
 event.listen(PlanVersion.__table__, "after_create", _PLAN_VERSION_IMMUTABLE_FUNCTION)
 event.listen(PlanVersion.__table__, "after_create", _PLAN_VERSION_IMMUTABLE_TRIGGER)
+
+# **A priced version is published with its price** (ADR-116). The terms a
+# version is inserted with become its first `plan_prices` row in the same
+# statement, so no writer - the catalogue API, a migration, a fixture, SQL -
+# can create a priced version nobody can pay for. A version sold on more than
+# one term gets its further prices from the catalogue service afterwards.
+# Restated verbatim by migration 0081; `create_all` gets it from here.
+PLAN_VERSION_PUBLISH_PRICE_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION plan_versions_publish_price() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = public, pg_catalog
+    AS $$
+    BEGIN
+        INSERT INTO plan_prices (id, plan_version_id, billing_interval, interval_count,
+                                 amount, currency, created_at, created_by, reason)
+        VALUES (gen_random_uuid(), NEW.id, NEW.interval, 1, NEW.price, NEW.currency,
+                NEW.created_at, NEW.created_by, 'Published with the plan version.');
+        RETURN NULL;
+    END;
+    $$
+    """
+PLAN_VERSION_PUBLISH_PRICE_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER plan_versions_publish_price AFTER INSERT ON plan_versions "
+    "FOR EACH ROW WHEN (NEW.price > 0) EXECUTE FUNCTION plan_versions_publish_price()"
+)
+# **A price's terms never change, and a retired price stays retired.** Only
+# the retirement columns may move, once, from unset to set; `retired_by` may
+# also lose its user to that foreign key's SET NULL. And a free version is not
+# sold, so it carries no price at all.
+PLAN_PRICE_GUARD_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION plan_prices_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = public, pg_catalog
+    AS $$
+    BEGIN
+        IF TG_OP = 'INSERT' THEN
+            IF EXISTS (SELECT 1 FROM plan_versions v
+                        WHERE v.id = NEW.plan_version_id AND v.price <= 0) THEN
+                RAISE EXCEPTION 'a free plan version is not sold and has no prices'
+                    USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+            RETURN NEW;
+        END IF;
+        IF NEW.plan_version_id IS DISTINCT FROM OLD.plan_version_id
+           OR NEW.billing_interval IS DISTINCT FROM OLD.billing_interval
+           OR NEW.interval_count IS DISTINCT FROM OLD.interval_count
+           OR NEW.amount IS DISTINCT FROM OLD.amount
+           OR NEW.currency IS DISTINCT FROM OLD.currency
+           OR NEW.created_at IS DISTINCT FROM OLD.created_at
+           OR NEW.reason IS DISTINCT FROM OLD.reason THEN
+            RAISE EXCEPTION 'plan_prices terms are immutable; retire the price and create another'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        IF OLD.retired_at IS NOT NULL AND (
+               NEW.retired_at IS DISTINCT FROM OLD.retired_at
+            OR NEW.retirement_reason IS DISTINCT FROM OLD.retirement_reason
+            OR (NEW.retired_by IS DISTINCT FROM OLD.retired_by AND NEW.retired_by IS NOT NULL)
+        ) THEN
+            RAISE EXCEPTION 'a retired price stays retired'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NEW;
+    END;
+    $$
+    """
+PLAN_PRICE_GUARD_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER plan_prices_guard BEFORE INSERT OR UPDATE ON plan_prices "
+    "FOR EACH ROW EXECUTE FUNCTION plan_prices_guard()"
+)
+event.listen(PlanPrice.__table__, "after_create", DDL(PLAN_PRICE_GUARD_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(PlanPrice.__table__, "after_create", DDL(PLAN_PRICE_GUARD_TRIGGER_SQL))  # type: ignore[no-untyped-call]
+# On `plan_prices`, not `plan_versions`: the function inserts into the prices
+# table, which `create_all` builds after the versions table.
+event.listen(PlanPrice.__table__, "after_create", DDL(PLAN_VERSION_PUBLISH_PRICE_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(PlanPrice.__table__, "after_create", DDL(PLAN_VERSION_PUBLISH_PRICE_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 
 # The TENANT binding (ADR-113), as a property of the tables rather than of the
 # services that write them today. Every row that points a workspace at a plan -
@@ -619,6 +823,16 @@ event.listen(Plan.__table__, "after_create", DDL(PLAN_TENANT_IMMUTABLE_FUNCTION_
 event.listen(Plan.__table__, "after_create", DDL(PLAN_TENANT_IMMUTABLE_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 
 
+def _term_start(context: Any) -> Any:
+    """The billing term's start, as a default for a usage cycle nobody set."""
+    return context.get_current_parameters()["current_period_start"]
+
+
+def _term_end(context: Any) -> Any:
+    """The billing term's end, as a default for a usage cycle nobody set."""
+    return context.get_current_parameters()["current_period_end"]
+
+
 class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     """One workspace's standing arrangement.
 
@@ -655,11 +869,51 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
             name="fk_subscriptions_plan_version_of_plan",
             ondelete="RESTRICT",
         ),
+        # The pinned price, and the scheduled one, are prices *of the version
+        # beside them* (ADR-116). A price without its version would escape the
+        # composite key (MATCH SIMPLE), so the CHECKs require the pair.
+        ForeignKeyConstraint(
+            ["plan_version_id", "plan_price_id"],
+            ["plan_prices.plan_version_id", "plan_prices.id"],
+            name="fk_subscriptions_plan_price_of_version",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["scheduled_plan_version_id", "scheduled_plan_price_id"],
+            ["plan_prices.plan_version_id", "plan_prices.id"],
+            name="fk_subscriptions_scheduled_price_of_version",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "plan_price_id IS NULL OR plan_version_id IS NOT NULL", name="price_pinned"
+        ),
+        CheckConstraint(
+            "scheduled_plan_price_id IS NULL OR scheduled_plan_version_id IS NOT NULL",
+            name="scheduled_price_pinned",
+        ),
+        # The usage cycle lies inside the paid billing term (ADR-116): an
+        # annual term holds twelve monthly cycles, a monthly term exactly one.
+        # An ended subscription is exempt, for the reason `period_ordered` is.
+        CheckConstraint(
+            "ended_at IS NOT NULL OR (usage_period_end > usage_period_start"
+            " AND usage_period_start >= current_period_start"
+            " AND usage_period_end <= current_period_end)",
+            name="usage_period_within_term",
+        ),
         Index("ix_subscriptions_tenant_id", "tenant_id"),
         Index("ix_subscriptions_status", "status"),
         Index("ix_subscriptions_plan_id", "plan_id"),
         # The sweep that ends trials and rolls periods over reads this.
         Index("ix_subscriptions_current_period_end", "current_period_end"),
+        # The sweep that opens the next monthly usage cycle reads this.
+        Index("ix_subscriptions_usage_period_end", "usage_period_end"),
+        # What a RESTRICT on a price scans, like every other referencing key.
+        Index("ix_subscriptions_plan_price_id", "plan_price_id"),
+        Index(
+            "ix_subscriptions_scheduled_plan_price_id",
+            "scheduled_plan_price_id",
+            postgresql_where=text("scheduled_plan_price_id IS NOT NULL"),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -683,6 +937,11 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         UUID(as_uuid=True),
         nullable=True,
     )
+    # The price this subscription renews at, and so its billing term - monthly
+    # or yearly (ADR-116). NULL exactly when the version is free; a deferred
+    # trigger refuses a live subscription on a priced version without one, so
+    # nothing can hold paid terms with no price to renew at.
+    plan_price_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     status: Mapped[SubscriptionStatus] = mapped_column(SUBSCRIPTION_STATUS_TYPE, nullable=False)
     # The moment periods are counted from (BILL-18). Every period end is the
     # anchor plus a whole number of intervals, clamped to the month, so a
@@ -701,6 +960,12 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         ForeignKey("plan_versions.id", ondelete="RESTRICT"),
         nullable=True,
     )
+    # The exact price the scheduled change renews at (ADR-116). Pinned when
+    # the change is scheduled, never re-resolved at the boundary: a price
+    # published or retired in between does not change what was agreed.
+    scheduled_plan_price_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
     scheduled_change_source: Mapped[ScheduledChangeSource | None] = mapped_column(
         SCHEDULED_CHANGE_SOURCE_TYPE,
         nullable=True,
@@ -718,11 +983,28 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         DateTime(timezone=True),
         nullable=True,
     )
-    # The window usage limits are counted over. Stored rather than derived from
-    # `created_at` and the interval, because a plan change mid-period moves the
-    # boundary and the arithmetic afterwards has to agree with what was billed.
+    # The **billing term**: what the last paid invoice covers, and when the next
+    # one is due - one month on a monthly price, twelve on a yearly one
+    # (ADR-116). Stored rather than derived, because a plan change mid-term
+    # moves the boundary and the arithmetic afterwards has to agree with what
+    # was billed. Capacity top-ups last until its end.
     current_period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     current_period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # The **usage cycle**: the calendar month the `period_*` allowances are
+    # counted over and usage top-ups expire at. Equal to the billing term on a
+    # monthly price; one of its twelve months on a yearly one. Anchored on
+    # `billing_anchor_at`, so the twelfth cycle ends exactly where the term
+    # does. Advanced by the sweep without any invoice or charge.
+    # A row written without a cycle - a monthly term, a free plan - gets the
+    # term itself, which is exactly a monthly cycle. Applied by SQLAlchemy at
+    # INSERT, never by the database: every service path sets both explicitly
+    # (`open_term`), and a yearly term always does.
+    usage_period_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_term_start
+    )
+    usage_period_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_term_end
+    )
     trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # A cancellation a customer asked for but that has not taken effect yet.
     # They keep what they paid for until the period ends, which is both fair and
@@ -738,6 +1020,27 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     # nothing may read them as meaningful today.
     provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
     provider_reference: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    @validates("current_period_start", "current_period_end")
+    def _move_a_monthly_cycle_with_its_term(self, key: str, value: datetime) -> datetime:
+        """A usage cycle that *is* the term moves with it (ADR-116).
+
+        On a monthly price the usage cycle and the billing term are one window,
+        so a writer that moves the term directly - a repair, an immediate
+        cancellation, a test - moves the cycle with it. A cycle that differs
+        from its term (a month inside a year) is never touched here: only
+        `open_term` and the usage sweep move one of those. Reads the instance
+        dictionary only, so an unloaded attribute is never fetched.
+        """
+        state = self.__dict__
+        term = (state.get("current_period_start"), state.get("current_period_end"))
+        cycle = (state.get("usage_period_start"), state.get("usage_period_end"))
+        if None not in term and cycle == term:
+            if key == "current_period_start":
+                self.usage_period_start = value
+            else:
+                self.usage_period_end = value
+        return value
 
     @property
     def is_serving(self) -> bool:
@@ -777,20 +1080,72 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     def clear_scheduled_change(self) -> None:
         """Forget a pending change, in one place so no field is left behind."""
         self.scheduled_plan_version_id = None
+        self.scheduled_plan_price_id = None
         self.scheduled_change_source = None
         self.scheduled_change_reason = None
         self.scheduled_change_actor_id = None
         self.scheduled_change_at = None
 
+    def end_service_at(self, moment: datetime) -> None:
+        """Stop the billing term, and the usage cycle inside it, at `moment`.
+
+        What an immediate cancellation does: nothing counts against an
+        allowance the workspace no longer has, on either clock.
+        """
+        self.ended_at = moment
+        self.current_period_end = moment
+        self.usage_period_end = min(self.usage_period_end, moment)
+
     def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
         return f"Subscription(tenant_id={self.tenant_id!r}, status={self.status!r})"
 
+
+# **A live subscription to a priced version renews at a named price, and a
+# scheduled change to one names its price too** (ADR-116). Deferred to commit:
+# a purchase writes the version and the price in one flush, but a row may be
+# written in stages within a transaction, and only the end state has to agree.
+# Re-reads the row, because a deferred trigger's NEW is the row as the queued
+# statement left it. Restated verbatim by migration 0081.
+SUBSCRIPTION_PRICE_PIN_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION subscriptions_refuse_unpriced_terms() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = public, pg_catalog
+    AS $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM subscriptions s JOIN plan_versions v ON v.id = s.plan_version_id
+             WHERE s.id = NEW.id AND s.ended_at IS NULL
+               AND s.plan_price_id IS NULL AND v.price > 0
+        ) THEN
+            RAISE EXCEPTION 'a subscription to a priced plan version renews at one of its prices'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        IF EXISTS (
+            SELECT 1 FROM subscriptions s JOIN plan_versions v ON v.id = s.scheduled_plan_version_id
+             WHERE s.id = NEW.id AND s.scheduled_plan_price_id IS NULL AND v.price > 0
+        ) THEN
+            RAISE EXCEPTION 'a scheduled change to a priced plan version names its price'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NULL;
+    END;
+    $$
+    """
+SUBSCRIPTION_PRICE_PIN_TRIGGER_SQL: Final = (
+    "CREATE CONSTRAINT TRIGGER subscriptions_price_pinned "
+    "AFTER INSERT OR UPDATE OF plan_version_id, plan_price_id, scheduled_plan_version_id, "
+    "scheduled_plan_price_id, ended_at ON subscriptions "
+    "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+    "EXECUTE FUNCTION subscriptions_refuse_unpriced_terms()"
+)
 
 _CREATE_SUBSCRIPTION_STATUS, _DROP_SUBSCRIPTION_STATUS = ordered_type_ddl("subscription_status")
 event.listen(Subscription.__table__, "before_create", _CREATE_SUBSCRIPTION_STATUS)
 event.listen(Subscription.__table__, "after_drop", _DROP_SUBSCRIPTION_STATUS)
 event.listen(Subscription.__table__, "after_create", DDL(CUSTOM_PLAN_SCOPE_FUNCTION_SQL))  # type: ignore[no-untyped-call]
 event.listen(Subscription.__table__, "after_create", DDL(SUBSCRIPTIONS_CUSTOM_PLAN_TRIGGER_SQL))  # type: ignore[no-untyped-call]
+event.listen(Subscription.__table__, "after_create", DDL(SUBSCRIPTION_PRICE_PIN_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Subscription.__table__, "after_create", DDL(SUBSCRIPTION_PRICE_PIN_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 
 
 class PlanVersionMigration(Base, UUIDPrimaryKeyMixin, TimestampMixin):

@@ -9,10 +9,16 @@ urgent to the minute — a trial that ends at 09:00 and is noticed at 09:55 has
 cost nobody anything, because entitlements are computed from the row on every
 request and the *row* already says the period is over. What this loop does is
 make that state explicit and durable: a pending cancellation takes effect, a
-scheduled plan change is applied, an active subscription opens its next period
-- and **that next period is billed in advance**, at the terms of the version
-that governs it (BILL-03). The period that just ended was already paid for by
-the invoice that opened it.
+scheduled plan change is applied, an active subscription opens its next billing
+term - and **that next term is billed in advance**, at the price that governs
+it (BILL-03): one invoice for a year on a yearly price, for a month on a
+monthly one (ADR-116). The term that just ended was already paid for by the
+invoice that opened it.
+
+**Usage cycles roll without money** (ADR-116). A yearly term holds twelve
+monthly usage cycles; when one ends mid-term, `_advance_usage` opens the cycle
+the clock is in - catching up any number of missed months in one step - and
+issues no invoice, attempts no charge and leaves the billing term alone.
 
 The rules themselves are in `roll_over`, which is a pure function over a row.
 This module is the query, the loop and the commit, and nothing else.
@@ -24,6 +30,7 @@ import asyncio
 import uuid
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Final, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +40,7 @@ from app.core.logging import get_logger
 from app.core.telemetry import record_payment_reconciliation, record_topup_purchase
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import (
+    PlanPrice,
     PlanVersion,
     ScheduledChangeSource,
     Subscription,
@@ -51,6 +59,7 @@ from app.repositories.invoice_repository import PlatformInvoiceRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.repositories.topup_repository import PlatformTopupPurchaseRepository
 from app.services.audit_service import AuditTrail
+from app.services.billing_calendar import current_usage_period
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
 from app.services.invoice_service import InvoiceService
@@ -173,6 +182,11 @@ class BillingWorker:
         moment = now or datetime.now(UTC)
 
         handled = await self._advance_due(now=moment)
+        # After the billing roll, so a term that ended and a cycle inside the
+        # term that opened are never both acted on from stale state: the roll
+        # opens the new term's first cycle itself, and this phase only ever
+        # touches cycles strictly inside a term that is still running.
+        handled += await self._advance_usage(now=moment)
         # Record the top-ups whose period has ended (ADR-113). Bookkeeping, not
         # enforcement: the limit arithmetic already ignores an expired top-up
         # by its clock, so this phase running late never extends an allowance.
@@ -238,6 +252,62 @@ class BillingWorker:
         """Roll over or expire every subscription whose period has ended."""
         return await self._drain(self._advance_batch, now=now)
 
+    async def _advance_usage(self, *, now: datetime) -> int:
+        """Open the current monthly usage cycle of every term that is still running."""
+        return await self._drain(self._advance_usage_batch, now=now)
+
+    async def _advance_usage_batch(self, *, now: datetime) -> int:
+        """Claim a batch of subscriptions whose usage cycle ended mid-term."""
+        async with self._database.session() as session:
+            claimed = await PlatformSubscriptionRepository(session).claim_usage_due(
+                now=now, limit=self._claim_limit
+            )
+            identifiers = [subscription.id for subscription in claimed]
+        handled = 0
+        for subscription_id in identifiers:
+            handled += await self._advance_usage_one(subscription_id, now=now)
+        return handled
+
+    async def _advance_usage_one(self, subscription_id: uuid.UUID, *, now: datetime) -> int:
+        """Move one subscription's usage cycle to the one the clock is in.
+
+        Re-claimed by id under `SKIP LOCKED`, with the predicate re-asked: a
+        billing roll or another worker that got here first has already moved
+        the row, and acting on it again would be the duplicate this protocol
+        exists to prevent. The new cycle is computed directly from the anchor
+        (`current_usage_period`), so a worker that was down for three months
+        lands on the right one in a single write.
+
+        **Nothing about money happens here**: no invoice, no payment attempt,
+        no change to the billing term. The usage counters need no reset - they
+        are sums over `usage_events` inside the cycle - so moving the window is
+        the whole of it. Usage top-ups bought for the old cycle expire at its
+        end by their own clock.
+        """
+        async with self._database.session() as session:
+            subscription = await PlatformSubscriptionRepository(session).claim_usage_by_id(
+                subscription_id, now=now
+            )
+            if subscription is None:
+                return 0
+            before = subscription.usage_period_start, subscription.usage_period_end
+            opened = current_usage_period(subscription, now)
+            if opened == before:  # pragma: no cover - the claim says it is due
+                return 0
+            subscription.usage_period_start, subscription.usage_period_end = opened
+            logger.info(
+                "billing.usage_period_advanced",
+                extra={
+                    "event": "billing.usage_period_advanced",
+                    "tenant_id": str(subscription.tenant_id),
+                    "subscription_id": str(subscription.id),
+                    "usage_period_start": opened[0].isoformat(),
+                    "usage_period_end": opened[1].isoformat(),
+                    "billing_period_end": subscription.current_period_end.isoformat(),
+                },
+            )
+            return 1
+
     async def _advance_batch(self, *, now: datetime) -> int:
         """Claim a batch of due subscriptions, one transaction each."""
         async with self._database.session() as session:
@@ -273,6 +343,11 @@ class BillingWorker:
 
             catalog = PlanCatalog(session)
             current = await catalog.pinned_version(subscription, at=now)
+            current_price = (
+                await catalog.pinned_price(subscription, version=current)
+                if current is not None
+                else None
+            )
             if current is None:
                 # RESTRICT on the foreign keys makes this unreachable, and it is
                 # logged rather than crashed on: one impossible row must not
@@ -285,20 +360,37 @@ class BillingWorker:
 
             previous = subscription.status
             ended_start = subscription.current_period_start
-            switch_now, bill_at = await self._next_terms(session, subscription, current=current)
-            await roll_over(subscription, plan=current, now=now, next_version=switch_now)
+            switch_now, bill_at = await self._next_terms(
+                session, subscription, current=current, current_price=current_price
+            )
+            # The term that opens is as long as the price it is billed at: a
+            # yearly renewal opens a year even while its version is adopted
+            # only once paid.
+            billed = bill_at or switch_now or (current, current_price)
+            await roll_over(
+                subscription,
+                plan=current,
+                price=current_price,
+                now=now,
+                next_version=switch_now[0] if switch_now is not None else None,
+                next_price=switch_now[1] if switch_now is not None else None,
+                term_price=billed[1],
+            )
             if not subscription.is_terminal:
                 if switch_now is not None:
-                    self._record_applied_change(session, subscription, version=switch_now)
-                # Billed *after* the roll and for the period that has just
+                    self._record_applied_change(
+                        session, subscription, version=switch_now[0], price=switch_now[1]
+                    )
+                # Billed *after* the roll and for the term that has just
                 # opened: advance billing (BILL-03). The bounds now describe the
-                # new period, and the terms are the version it is billed at.
+                # new term, and the terms are the version and price it is
+                # billed at: a pending migration's target, else a change just
+                # applied, else unchanged.
                 await self._invoice(
                     session,
                     subscription=subscription,
-                    # The terms of the period that opened: a pending migration's
-                    # target, else a downgrade just applied, else unchanged.
-                    version=bill_at or switch_now or current,
+                    version=billed[0],
+                    price=billed[1],
                     now=now,
                     usage_since=ended_start,
                 )
@@ -807,41 +899,80 @@ class BillingWorker:
         subscription: Subscription,
         *,
         current: PlanVersion,
-    ) -> tuple[PlanVersion | None, PlanVersion | None]:
-        """What the opening period runs on, and what it is billed at.
+        current_price: PlanPrice | None,
+    ) -> tuple[
+        tuple[PlanVersion, PlanPrice | None] | None,
+        tuple[PlanVersion, PlanPrice | None] | None,
+    ]:
+        """What the opening term runs on, and what it is billed at.
 
-        Returns `(switch_now, bill_at)`: the version the subscription moves to
-        at the boundary, if any, and the version the renewal invoice charges,
-        if different from the current one. Three sources, one of them at most:
+        Returns `(switch_now, bill_at)`: the version and price the subscription
+        moves to at the boundary, if any, and the version and price the renewal
+        invoice charges, if different from the current ones. Three sources, one
+        of them at most:
 
-        - **A downgrade** the customer scheduled, or an operator change to a
-          plan that costs no more: applied at the boundary. The customer has
-          already chosen to have less, and the renewal is billed at the lower
-          price.
-        - **A migration**, or an operator change to a pricier plan: *billed* at
+        - **A change the customer scheduled** - a lower tier, or a shorter
+          term such as yearly to monthly - or an operator change that bills no
+          more: applied at the boundary, at the exact price pinned when it was
+          scheduled (ADR-116). A price retired since is still honoured; what
+          was agreed does not change under the customer.
+        - **A migration**, or an operator change that bills more: *billed* at
           the boundary and adopted only when that renewal is paid
           (`InvoiceSettlement.adopt_renewal_version`). Entitlements never move
           ahead of the money behind them (spec: scheduled version migration).
         - **A cohort migration** out of the current version that nobody has
-          scheduled on this row individually: treated exactly as the above.
+          scheduled on this row individually: treated exactly as the above,
+          at the target version's price on the *same term* the subscriber
+          holds. A target that does not sell that term leaves the subscriber
+          where they are and says so - a monthly subscriber is never silently
+          moved to a yearly bill.
         """
         catalog = PlanCatalog(session)
         target: PlanVersion | None = None
+        target_price: PlanPrice | None = None
         source = subscription.scheduled_change_source
         if subscription.scheduled_plan_version_id is not None:
             target = await catalog.get_version(subscription.scheduled_plan_version_id)
+            target_price = await catalog.get_price(subscription.scheduled_plan_price_id)
         if target is None:
             migration = await PlanVersionMigrationRepository(session).live_from(current.id)
             if migration is not None:
                 target = await catalog.get_version(migration.to_version_id)
                 source = ScheduledChangeSource.MIGRATION
-        if target is None or target.id == current.id:
-            return None, None
-        if source is ScheduledChangeSource.DOWNGRADE or (
-            source is ScheduledChangeSource.OPERATOR and target.price <= current.price
+                if target is not None and not target.is_free:
+                    target_price = (
+                        await catalog.price_for_term(
+                            target,
+                            interval=current_price.billing_interval,
+                            interval_count=current_price.interval_count,
+                        )
+                        if current_price is not None
+                        else await catalog.default_price(target)
+                    )
+                    if target_price is None:
+                        logger.warning(
+                            "billing.migration_term_unavailable",
+                            extra={
+                                "event": "billing.migration_term_unavailable",
+                                "tenant_id": str(subscription.tenant_id),
+                                "subscription_id": str(subscription.id),
+                                "to_version_id": str(target.id),
+                            },
+                        )
+                        return None, None
+        if target is None or (
+            target.id == current.id
+            and (target_price.id if target_price else None)
+            == (current_price.id if current_price else None)
         ):
-            return target, None
-        return None, target
+            return None, None
+        billed = target_price.amount if target_price is not None else Decimal("0.00")
+        held = current_price.amount if current_price is not None else Decimal("0.00")
+        if source is ScheduledChangeSource.DOWNGRADE or (
+            source is ScheduledChangeSource.OPERATOR and billed <= held
+        ):
+            return (target, target_price), None
+        return None, (target, target_price)
 
     @staticmethod
     def _record_applied_change(
@@ -849,6 +980,7 @@ class BillingWorker:
         subscription: Subscription,
         *,
         version: PlanVersion,
+        price: PlanPrice | None,
     ) -> None:
         """The audit row for a scheduled change taking effect at the boundary."""
         subscription.clear_scheduled_change()
@@ -860,6 +992,8 @@ class BillingWorker:
             target_id=subscription.id,
             meta={
                 "to_version_id": str(version.id),
+                "to_price_id": str(price.id) if price is not None else None,
+                "billing_interval": price.billing_interval.value if price is not None else None,
                 "reason": "scheduled_change_applied",
                 "effective_at": subscription.current_period_start.isoformat(),
             },
@@ -871,6 +1005,7 @@ class BillingWorker:
         *,
         subscription: Subscription,
         version: PlanVersion,
+        price: PlanPrice | None,
         now: datetime,
         usage_since: datetime | None = None,
     ) -> None:
@@ -896,6 +1031,7 @@ class BillingWorker:
                 invoice, created = await service.issue_for_period(
                     subscription=subscription,
                     plan=version,
+                    price=price,
                     plan_code=plan_code,
                     period_start=subscription.current_period_start,
                     period_end=subscription.current_period_end,

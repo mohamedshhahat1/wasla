@@ -6,9 +6,11 @@ workspace through an **offer** the workspace's owner accepts and pays for, a
 manual payment an operator has seen, or a complimentary grant said out loud -
 never merely because somebody on the platform assigned it (ADR-114).
 
-An offer names one immutable version, so what the customer is shown - price,
-currency, interval and the seven limits - is exactly what they pay for and
-exactly what they get. It moves through a small state machine:
+An offer names one immutable version and one of its prices (ADR-116), so what
+the customer is shown - price, currency, billing term and the seven limits - is
+exactly what they pay for and exactly what they get. A yearly offer is paid
+yearly; the customer cannot turn it into a monthly one by editing a request,
+because the request names nothing but the offer. It moves through a small state machine:
 
     offered --accept--> pending_payment --authenticated payment--> active
        |                      |
@@ -54,6 +56,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     String,
     UniqueConstraint,
@@ -137,6 +140,14 @@ class CustomPlanOffer(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin
         ),
         Index("ix_custom_plan_offers_tenant_id_created_at", "tenant_id", "created_at"),
         Index("ix_custom_plan_offers_plan_version_id", "plan_version_id"),
+        # The offered price is a price of the offered version (ADR-116).
+        ForeignKeyConstraint(
+            ["plan_version_id", "plan_price_id"],
+            ["plan_prices.plan_version_id", "plan_prices.id"],
+            name="fk_custom_plan_offers_plan_price_of_version",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_custom_plan_offers_plan_price_id", "plan_price_id"),
         # The expiry sweep.
         Index("ix_custom_plan_offers_status_expires_at", "status", "expires_at"),
         CheckConstraint(
@@ -168,6 +179,9 @@ class CustomPlanOffer(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin
         ForeignKey("plan_versions.id", ondelete="RESTRICT"),
         nullable=False,
     )
+    # The one price the customer accepts - and so the billing term they will
+    # be invoiced on (ADR-116). Fixed for ever, like the version.
+    plan_price_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     status: Mapped[CustomPlanOfferStatus] = mapped_column(
         CUSTOM_PLAN_OFFER_STATUS_TYPE, nullable=False, default=CustomPlanOfferStatus.OFFERED
     )
@@ -226,6 +240,7 @@ OFFER_INTEGRITY_FUNCTION_SQL: Final = """
                NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
             OR NEW.plan_id IS DISTINCT FROM OLD.plan_id
             OR NEW.plan_version_id IS DISTINCT FROM OLD.plan_version_id
+            OR NEW.plan_price_id IS DISTINCT FROM OLD.plan_price_id
         ) THEN
             RAISE EXCEPTION 'a custom plan offer keeps the terms it was made with'
                 USING ERRCODE = 'integrity_constraint_violation';
@@ -249,8 +264,9 @@ OFFER_INTEGRITY_TRIGGER_SQL: Final = (
     "CREATE TRIGGER custom_plan_offers_integrity BEFORE INSERT OR UPDATE ON custom_plan_offers "
     "FOR EACH ROW EXECUTE FUNCTION custom_plan_offers_refuse_foreign_or_changed()"
 )
-# An invoice that names an offer sells exactly the offered version. The
-# composite foreign key already keeps it inside its workspace.
+# An invoice that names an offer sells exactly the offered version at exactly
+# the offered price (ADR-116). The composite foreign key already keeps it
+# inside its workspace.
 INVOICE_OFFER_FUNCTION_SQL: Final = """
     CREATE OR REPLACE FUNCTION invoices_refuse_offer_mismatch() RETURNS trigger AS $$
     BEGIN
@@ -258,6 +274,7 @@ INVOICE_OFFER_FUNCTION_SQL: Final = """
             SELECT 1 FROM custom_plan_offers o
              WHERE o.id = NEW.custom_plan_offer_id
                AND o.plan_version_id = NEW.plan_version_id
+               AND o.plan_price_id = NEW.plan_price_id
         ) THEN
             RAISE EXCEPTION 'an invoice for a custom plan offer sells the offered version'
                 USING ERRCODE = 'integrity_constraint_violation';
@@ -273,7 +290,7 @@ INVOICE_OFFER_FUNCTION_SQL: Final = """
     """
 INVOICE_OFFER_TRIGGER_SQL: Final = (
     "CREATE TRIGGER invoices_custom_plan_offer BEFORE INSERT OR UPDATE OF "
-    "custom_plan_offer_id, plan_version_id ON invoices "
+    "custom_plan_offer_id, plan_version_id, plan_price_id ON invoices "
     "FOR EACH ROW EXECUTE FUNCTION invoices_refuse_offer_mismatch()"
 )
 

@@ -22,6 +22,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.db.models.billing import (
+    DEFAULT_CURRENCY,
     MAX_LIMIT_VALUE,
     MAX_PLAN_PRICE,
     SUPPORTED_CURRENCIES,
@@ -32,10 +33,12 @@ from app.db.models.billing import (
 from app.db.models.enums import TenantStatus
 from app.schemas.platform_billing import (
     FinancialBasis,
+    IntervalField,
     ManualPaymentDetails,
     PlanVersionRead,
     PlatformPlanRead,
     PlatformSubscriptionRead,
+    PriceSpec,
 )
 from app.schemas.text import StorableText
 
@@ -74,16 +77,28 @@ class CustomPlanBasis(StrEnum):
 
 
 class CustomPlanTerms(BaseModel):
-    """The commercial terms of a custom plan's version, as the form sends them."""
+    """The commercial terms of a custom plan's version, as the form sends them.
+
+    Priced one of two ways (ADR-116): `prices`, every term the plan is sold on
+    - `[{"billing_interval": "monthly", "amount": "2500.00"}, {"billing_interval":
+    "yearly", "amount": "25000.00"}]` - or, as before, one `price` with its
+    `billing_interval`. Both terms grant the same seven limits. When the plan
+    has more than one price, `selected_billing_interval` names the one an offer
+    or an assignment uses; the customer cannot change it afterwards.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     code: str = Field(min_length=2, max_length=50, pattern=r"^[a-z0-9][a-z0-9_-]*$")
     name: StorableText = Field(min_length=1, max_length=100)
     description: StorableText | None = Field(default=None, max_length=2000)
-    price: Decimal = Field(ge=0, le=MAX_PLAN_PRICE, max_digits=12, decimal_places=2)
-    currency: StorableText = Field(min_length=3, max_length=3)
-    billing_interval: BillingInterval
+    price: Decimal | None = Field(
+        default=None, ge=0, le=MAX_PLAN_PRICE, max_digits=12, decimal_places=2
+    )
+    currency: StorableText = Field(default=DEFAULT_CURRENCY, min_length=3, max_length=3)
+    billing_interval: IntervalField | None = None
+    prices: list[PriceSpec] | None = Field(default=None, max_length=4)
+    selected_billing_interval: IntervalField | None = None
 
     period_messages: int | None = Limit
     period_ai_turns: int | None = Limit
@@ -107,6 +122,60 @@ class CustomPlanTerms(BaseModel):
     def limits(self) -> dict[str, int | None]:
         """The seven limits, keyed as a plan version stores them."""
         return {key.value: getattr(self, key.value) for key in CUSTOM_PLAN_KEYS}
+
+    @model_validator(mode="after")
+    def _pricing(self) -> Self:
+        if self.prices is None:
+            if self.price is None or self.billing_interval is None:
+                raise ValueError("Give prices, or price and billing_interval.")
+        elif self.price is not None or self.billing_interval is not None:
+            raise ValueError("Give prices, or price and billing_interval - not both.")
+        else:
+            slots = [price.slot for price in self.prices]
+            if len(slots) != len(set(slots)):
+                raise ValueError("Each billing term may be priced once.")
+            if any(price.currency != self.currency for price in self.prices):
+                raise ValueError("Every price is in the plan's currency.")
+        chosen = self.selected_billing_interval
+        resolved = self.resolved_prices
+        if (
+            chosen is not None
+            and resolved
+            and not any(price.billing_interval is chosen for price in resolved)
+        ):
+            raise ValueError("selected_billing_interval must be one of the plan's prices.")
+        return self
+
+    @property
+    def resolved_prices(self) -> list[PriceSpec]:
+        """Every price the version is published with. Empty for a free plan."""
+        if self.prices is not None:
+            return list(self.prices)
+        if self.price is None or self.price <= 0 or self.billing_interval is None:
+            return []
+        return [
+            PriceSpec(
+                billing_interval=self.billing_interval, amount=self.price, currency=self.currency
+            )
+        ]
+
+    @property
+    def is_free(self) -> bool:
+        return not self.resolved_prices
+
+    @property
+    def selected(self) -> PriceSpec | None:
+        """The price an offer or assignment uses. None for a free plan.
+
+        The one named by `selected_billing_interval`; else the only one; else
+        None, and a caller that needs one refuses the request.
+        """
+        resolved = self.resolved_prices
+        if self.selected_billing_interval is not None:
+            for price in resolved:
+                if price.billing_interval is self.selected_billing_interval:
+                    return price
+        return resolved[0] if len(resolved) == 1 else None
 
 
 class CustomPlanPreviewRequest(CustomPlanTerms):
@@ -139,7 +208,7 @@ class CustomPlanCreate(CustomPlanTerms):
             return self
         if self.expected_subscription_revision is None:
             raise ValueError("Assigning needs expected_subscription_revision.")
-        if self.assignment_mode is AssignmentMode.NOW and self.price > 0:
+        if self.assignment_mode is AssignmentMode.NOW and not self.is_free:
             if self.financial_basis is None:
                 raise ValueError(
                     "A priced plan applied now needs a financial_basis: customer_checkout, "
@@ -169,6 +238,8 @@ class CustomPlanTenantRead(BaseModel):
 
 
 class CurrentPlanRead(BaseModel):
+    """What the workspace holds now: its version and the price it renews at."""
+
     plan_id: uuid.UUID
     code: str
     name: str
@@ -177,6 +248,7 @@ class CurrentPlanRead(BaseModel):
     price: str
     currency: str
     interval: BillingInterval
+    plan_price_id: uuid.UUID | None = None
 
 
 class LimitComparison(BaseModel):
@@ -205,7 +277,21 @@ class EstimatedCharge(BaseModel):
     basis: Literal["checkout", "manual_payment", "complimentary", "renewal", "none"]
 
 
+class ProposedPriceRead(BaseModel):
+    billing_interval: BillingInterval
+    interval_count: int
+    amount: str
+    currency: str
+
+
 class CustomPlanPreview(BaseModel):
+    """What creating a custom plan would mean.
+
+    `proposed_price` and `interval` are the selected price - the one an offer
+    or assignment would use; `proposed_prices` lists every price the plan is
+    published with (ADR-116).
+    """
+
     tenant: CustomPlanTenantRead
     current_plan: CurrentPlanRead | None
     proposed_code: str
@@ -213,6 +299,7 @@ class CustomPlanPreview(BaseModel):
     proposed_price: str
     currency: str
     interval: BillingInterval
+    proposed_prices: list[ProposedPriceRead] = Field(default_factory=list)
     limits: list[LimitComparison]
     # Limits a custom plan does not set (agents, owned workspaces), copied from
     # the plan the workspace holds so a custom plan never silently makes them
@@ -256,14 +343,18 @@ class OfferLimitRead(BaseModel):
 class OfferPeriodRead(BaseModel):
     """When the offered terms would be in force if paid now.
 
-    A paid period starts when the payment settles (BILL-03), so this is an
-    illustration computed at read time, not a promise about a fixed date.
+    A paid term starts when the payment settles (BILL-03), so this is an
+    illustration computed at read time, not a promise about a fixed date. On a
+    yearly offer the term is a year and the usage allowances still reset
+    monthly inside it (`usage_period_months` = 1).
     """
 
     starts: Literal["on_payment"] = "on_payment"
     interval: BillingInterval
+    interval_count: int = 1
     if_paid_now_start: datetime
     if_paid_now_end: datetime
+    usage_period_months: int = 1
 
 
 class CustomPlanOfferRead(BaseModel):
@@ -276,6 +367,12 @@ class CustomPlanOfferRead(BaseModel):
     plan_code: str
     plan_version_id: uuid.UUID
     version: int
+    # The one price this offer is for (ADR-116). `price` and `interval` are its
+    # amount and billing term: a yearly offer is paid yearly, and nothing the
+    # customer sends can turn it into a monthly one.
+    plan_price_id: uuid.UUID
+    billing_interval: BillingInterval
+    interval_count: int
     name: str
     description: str | None
     price: str
@@ -301,13 +398,26 @@ class CustomPlanOfferRead(BaseModel):
 
 
 class CustomPlanOfferCreate(BaseModel):
-    """Offer one version of a workspace's own custom plan to that workspace."""
+    """Offer one price of a workspace's own custom plan to that workspace.
+
+    `plan_price_id` names the exact price - and so the billing term - the
+    customer is offered (ADR-116). `plan_version_id` alone is accepted from
+    earlier clients when the version has exactly one active price; with a
+    monthly and a yearly price it is ambiguous and refused.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    plan_version_id: uuid.UUID
+    plan_price_id: uuid.UUID | None = None
+    plan_version_id: uuid.UUID | None = None
     expires_at: datetime | None = None
     reason: StorableText = Field(min_length=3, max_length=500)
+
+    @model_validator(mode="after")
+    def _names_the_terms(self) -> Self:
+        if self.plan_price_id is None and self.plan_version_id is None:
+            raise ValueError("Name the offered price with plan_price_id.")
+        return self
 
 
 class CustomPlanOfferCancel(BaseModel):
@@ -341,6 +451,8 @@ class CustomPlanOfferCheckoutStarted(BaseModel):
     amount: str
     currency: str
     plan_version_id: uuid.UUID
+    plan_price_id: uuid.UUID | None = None
+    billing_interval: BillingInterval | None = None
 
 
 # `CustomPlanResult.offer` names a model declared after it.

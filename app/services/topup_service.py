@@ -44,6 +44,7 @@ from app.repositories.topup_repository import TopupProductRepository, TopupPurch
 from app.services.audit_service import AuditTrail
 from app.services.checkout_service import CheckoutService
 from app.services.plan_catalog import PlanCatalog
+from app.services.topup_ledger import validity_window
 
 logger = get_logger(__name__)
 
@@ -159,6 +160,9 @@ class TopupService:
         subscription = await self._subscriptions.get()
         if subscription is None:  # pragma: no cover - `_refuse` has just checked
             raise ConflictError("Top-ups need an active subscription.")
+        # A usage top-up covers the current monthly usage cycle and a capacity
+        # top-up the current billing term (ADR-116), frozen here.
+        valid_from, valid_until = validity_window(subscription, product.entitlement_key, now=moment)
         try:
             async with self._session.begin_nested():
                 invoice = self._invoices.create(
@@ -166,8 +170,8 @@ class TopupService:
                     plan_code=(TOPUP_INVOICE_PREFIX + product.code)[:_PLAN_CODE_LENGTH],
                     amount_due=product.price,
                     currency=product.currency,
-                    period_start=subscription.current_period_start,
-                    period_end=subscription.current_period_end,
+                    period_start=valid_from,
+                    period_end=valid_until,
                     lines=[
                         {
                             "kind": "topup",
@@ -176,7 +180,7 @@ class TopupService:
                             "entitlement_key": product.entitlement_key.value,
                             "quantity": product.quantity,
                             "amount": str(product.price),
-                            "valid_until": subscription.current_period_end.isoformat(),
+                            "valid_until": valid_until.isoformat(),
                         }
                     ],
                     status=InvoiceStatus.OPEN,
@@ -196,9 +200,9 @@ class TopupService:
                     unit_price=product.price,
                     total_amount=product.price,
                     currency=product.currency,
-                    billing_period_start=subscription.current_period_start,
-                    billing_period_end=subscription.current_period_end,
-                    expires_at=subscription.current_period_end,
+                    billing_period_start=valid_from,
+                    billing_period_end=valid_until,
+                    expires_at=valid_until,
                     status=TopupStatus.PENDING,
                     invoice_id=invoice.id,
                     idempotency_key=idempotency_key,

@@ -41,6 +41,27 @@ and the endpoint list is in [API.md](API.md#platform-billing).
 A version cannot be edited once published, not even with SQL: a database
 trigger refuses any `UPDATE`. To correct a mistake, publish another version.
 
+## Prices (ADR-116)
+
+- **Add a yearly price to a standard plan** without copying its version:
+  `POST /plan-versions/{version_id}/prices` with `{"billing_interval":
+  "yearly", "amount": "...", "reason": "..."}`. The version's limits are the
+  same for monthly and yearly customers. Wasla invents no annual price: every
+  yearly price exists because an operator published it.
+- **Change a price:** `POST /prices/{id}/retire`, then create the new one.
+  Nobody already subscribed moves; `GET /prices/{id}` shows how many
+  subscriptions, scheduled changes, invoices and offers still name the old one.
+  Moving existing subscribers to the new price is a separate, explicit version
+  migration.
+- **Never** `UPDATE plan_prices` by hand: a trigger refuses any change to a
+  price's terms, and un-retiring one.
+- **Support questions** - "is this customer paid up?" - read
+  `current_period_end` (the paid-through date) and `billing_interval` on
+  `GET /subscriptions/{id}`; "why are they out of AI turns?" reads
+  `usage_period_*`, the current monthly cycle.
+- A price scheduled for a subscriber and later retired is still honoured at the
+  boundary: what the customer agreed to does not change under them.
+
 ## Custom plans (ADR-113)
 
 A custom plan is a normal plan with `scope: tenant`, restricted to one company

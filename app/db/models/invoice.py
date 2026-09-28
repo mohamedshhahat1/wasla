@@ -51,10 +51,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, RevisionedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.billing import (
+    BILLING_INTERVAL_TYPE,
     CURRENCY_CHECK_SQL,
     CURRENCY_LENGTH,
     CUSTOM_PLAN_SCOPE_FUNCTION_SQL,
     DEFAULT_CURRENCY,
+    BillingInterval,
 )
 from app.db.models.custom_plan_offer import INVOICE_OFFER_FUNCTION_SQL, INVOICE_OFFER_TRIGGER_SQL
 from app.db.models.enums import _enum_type
@@ -326,6 +328,28 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
             "custom_plan_offer_id",
             postgresql_where=text("custom_plan_offer_id IS NOT NULL"),
         ),
+        # The price an invoice charges is a price of the version it names
+        # (ADR-116), and its billing term is copied beside it - all three or
+        # none, so a historical invoice reads the same after the price retires.
+        ForeignKeyConstraint(
+            ["plan_version_id", "plan_price_id"],
+            ["plan_prices.plan_version_id", "plan_prices.id"],
+            name="fk_invoices_plan_price_of_version",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "plan_price_id IS NULL OR plan_version_id IS NOT NULL", name="price_pinned"
+        ),
+        CheckConstraint(
+            "(plan_price_id IS NULL) = (billing_interval IS NULL)"
+            " AND (plan_price_id IS NULL) = (interval_count IS NULL)",
+            name="price_snapshot_complete",
+        ),
+        Index(
+            "ix_invoices_plan_price_id",
+            "plan_price_id",
+            postgresql_where=text("plan_price_id IS NOT NULL"),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -363,6 +387,16 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         ForeignKey("plan_versions.id", ondelete="RESTRICT"),
         nullable=True,
     )
+    # The exact price this invoice charges, and the billing term it covers,
+    # copied at issue (ADR-116): `2,990 EGP per 1 yearly` is one invoice for a
+    # year, never twelve. NULL on a free renewal, a top-up and an invoice issued
+    # before 0071. A trigger requires every priced purchase and renewal to name
+    # one, and the amount and currency to be exactly that price's.
+    plan_price_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    billing_interval: Mapped[BillingInterval | None] = mapped_column(
+        BILLING_INTERVAL_TYPE, nullable=True
+    )
+    interval_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # The custom plan offer this checkout accepts (ADR-114). Settlement reads
     # it to activate the offer, and refuses the money if the offer was
     # declined or withdrawn meanwhile. Fixed at creation by a trigger.
@@ -720,6 +754,59 @@ INVOICES_CUSTOM_PLAN_TRIGGER_SQL: Final = (
     "FOR EACH ROW EXECUTE FUNCTION billing_refuse_foreign_custom_plan()"
 )
 
+# **An invoice charges exactly the price it names, and keeps it** (ADR-116).
+# On insert: a purchase or renewal of a priced version names one of its prices
+# (the composite key keeps it that version's), and the amount, currency,
+# interval and count are that price's own - so a client-supplied figure, a
+# renewal at the monthly price for a yearly term, or a checkout priced from a
+# newer price than it pinned cannot be written. On update: the price and its
+# snapshot never move, whatever the invoice's status. A top-up, a free renewal
+# and a pre-0071 invoice name no price. Restated verbatim by migration 0081.
+INVOICE_PRICE_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION invoices_refuse_price_mismatch() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = public, pg_catalog
+    AS $$
+    BEGIN
+        IF TG_OP = 'UPDATE' AND (
+               NEW.plan_price_id IS DISTINCT FROM OLD.plan_price_id
+            OR NEW.billing_interval IS DISTINCT FROM OLD.billing_interval
+            OR NEW.interval_count IS DISTINCT FROM OLD.interval_count
+            OR (NEW.plan_price_id IS NOT NULL AND (
+                   NEW.amount_due IS DISTINCT FROM OLD.amount_due
+                OR NEW.currency IS DISTINCT FROM OLD.currency))
+        ) THEN
+            RAISE EXCEPTION 'an invoice keeps the price it was issued at'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        IF TG_OP = 'INSERT' AND NEW.plan_price_id IS NULL
+           AND NEW.purpose::text IN ('checkout', 'renewal', 'manual')
+           AND EXISTS (SELECT 1 FROM plan_versions v
+                        WHERE v.id = NEW.plan_version_id AND v.price > 0) THEN
+            RAISE EXCEPTION 'an invoice for a priced plan version names the price it charges'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        IF NEW.plan_price_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM plan_prices p
+             WHERE p.id = NEW.plan_price_id
+               AND p.amount = NEW.amount_due
+               AND p.currency = NEW.currency
+               AND p.billing_interval = NEW.billing_interval
+               AND p.interval_count = NEW.interval_count
+        ) THEN
+            RAISE EXCEPTION 'an invoice charges exactly the price it names'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NEW;
+    END;
+    $$
+    """
+INVOICE_PRICE_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER invoices_price_snapshot BEFORE INSERT OR UPDATE OF "
+    "plan_price_id, billing_interval, interval_count, amount_due, currency ON invoices "
+    "FOR EACH ROW EXECUTE FUNCTION invoices_refuse_price_mismatch()"
+)
+
 # **A top-up is never a merchant-initiated charge** (ADR-113). The collection
 # sweep only claims renewals, and `RecurringService` checks the purpose again;
 # this makes the property the ledger's own, so no future collection path can
@@ -940,3 +1027,5 @@ event.listen(Invoice.__table__, "after_create", DDL(INVOICE_HISTORY_FUNCTION_SQL
 event.listen(Invoice.__table__, "after_create", DDL(INVOICE_HISTORY_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 event.listen(Payment.__table__, "after_create", DDL(PAYMENT_HISTORY_FUNCTION_SQL))  # type: ignore[no-untyped-call]
 event.listen(Payment.__table__, "after_create", DDL(PAYMENT_HISTORY_TRIGGER_SQL))  # type: ignore[no-untyped-call]
+event.listen(Invoice.__table__, "after_create", DDL(INVOICE_PRICE_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(Invoice.__table__, "after_create", DDL(INVOICE_PRICE_TRIGGER_SQL))  # type: ignore[no-untyped-call]

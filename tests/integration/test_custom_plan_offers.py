@@ -801,6 +801,10 @@ async def test_the_database_keeps_offers_and_their_invoices_inside_one_workspace
                 purpose=InvoicePurpose.CHECKOUT,
                 plan_version_id=v1,
             )
+            # The offer's own price, so the only thing wrong is the workspace.
+            forged.plan_price_id = offer.plan_price_id
+            forged.billing_interval = BillingInterval.MONTHLY
+            forged.interval_count = 1
             forged.custom_plan_offer_id = offer.id
             await db_session.flush()
     assert "fk_invoices_custom_plan_offer_tenant" in str(refused.value) or (
