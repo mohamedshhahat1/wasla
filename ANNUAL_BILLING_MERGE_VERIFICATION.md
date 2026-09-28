@@ -446,3 +446,41 @@ triggered by a push to this branch (see §24).
 
 The docs-only commit recording this section triggers `CI` again (the workflow
 has no path filter); its run is monitored in the same way.
+
+### 29a. The docs-only commit's CI run failed once - a test defect
+
+Run **36395644876** on `cfa3ef9c0b9708630838dc25bd39964a5d8401ba` (the
+commit above, documentation only): Lint, Migration-built schema, Alert rules
+and Docker build **success**; **Tests and migrations failure** -
+`1 failed, 6091 passed, 15 skipped, 2 deselected`:
+
+```
+tests/integration/test_paymob_refund_inquiry_findings.py (PAY-E2E-01, 30 + 69 on one parent)
+>       assert await _refunded_audits(db_session, payment) == ["30.00", "69.00"]
+E       AssertionError: assert ['69.00', '30.00'] == ['30.00', '69.00']
+```
+
+**Classification: test defect (non-deterministic ordering), not a code
+regression and not infrastructure.** The code under test is identical to
+`96e194f`, which passed in CI and in all four local lanes. Both refund audit
+rows existed with the right amounts; only the order they were read in
+differed. `audit_logs.occurred_at` defaults to PostgreSQL `now()`, the
+transaction's start, and the test applies both refunds inside one test
+transaction, so the two rows share a timestamp and `ORDER BY occurred_at`
+alone may return either. Every payment and invoice assertion before that line
+passed.
+
+**Fix:** `fae8660` `fix(tests): order refund audits by their running total
+when timestamps tie` - the helper orders by `(occurred_at, refunded_total)`;
+every `PAYMENT_REFUNDED` row records its cumulative `refunded_total`, which
+only grows, so the order proven is still the order the refunds were applied.
+Test-only; no application, billing, database or payment path changed, so the
+full lanes were not repeated. Verified: ruff, black, mypy (680 files) pass;
+the file 17/17 five times model-built and three times migration-built. Ten
+other test files order audit rows by `occurred_at` alone (one of them is the
+`test_rag_integrity` flake recorded in
+CUSTOM_PLANS_TOPUPS_MERGE_VERIFICATION.md); they are left for a separate
+change.
+
+The CI result of the commit carrying this fix is reported with the final
+verdict of this task.
