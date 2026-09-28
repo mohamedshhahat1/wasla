@@ -33,6 +33,23 @@ logger = get_logger(__name__)
 DB_SESSION_SPAN: Final = "db.session"
 
 
+def session_timeouts(settings: Settings) -> dict[str, str]:
+    """The per-session bounds every application connection starts with (DB-007).
+
+    Sent as connection-startup parameters, so they hold from the first
+    statement and cannot be forgotten by a code path; a unit of work that
+    legitimately needs longer - the workspace purge - raises its own with
+    `SET LOCAL`, which ends with its transaction.
+    """
+    return {
+        "statement_timeout": str(settings.database_statement_timeout_ms),
+        "lock_timeout": str(settings.database_lock_timeout_ms),
+        "idle_in_transaction_session_timeout": str(
+            settings.database_idle_in_transaction_timeout_ms
+        ),
+    }
+
+
 class Database:
     """Owns the async engine and hands out sessions."""
 
@@ -75,7 +92,10 @@ class Database:
             return {}
         return {
             "timeout": settings.database_connect_timeout_seconds,
-            "server_settings": {"application_name": settings.app_name.lower()},
+            "server_settings": {
+                "application_name": settings.app_name.lower(),
+                **session_timeouts(settings),
+            },
         }
 
     @property

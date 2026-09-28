@@ -927,6 +927,7 @@ async def test_a_paid_invoice_cannot_be_collected_again(db_session: AsyncSession
         period_end=datetime(2026, 8, 1, tzinfo=UTC),
         lines=[],
     )
+    invoice.paid_at = datetime(2026, 7, 1, tzinfo=UTC)
     await db_session.flush()
 
     with pytest.raises(ConflictError):

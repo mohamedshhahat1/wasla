@@ -76,6 +76,7 @@ from app.db.models.invoice import (
 )
 from app.db.models.payment_event import MAX_DETAIL_LENGTH, PaymentEvent
 from app.db.models.user import User
+from app.db.session import released
 from app.integrations.billing.checkout import (
     CallbackEvent,
     CheckoutProvider,
@@ -265,9 +266,21 @@ class CheckoutService:
 
         The one way any customer purchase reaches the provider - a plan, a bill
         already due, or a top-up (ADR-113) - so every page is created, bound
-        and settled by the same code. The pending payment is written before
-        the provider is called, so the reference handed over is a row that
-        already exists; the caller commits afterwards.
+        and settled by the same code.
+
+        **No transaction is open while the provider is asked** (DB-008). The
+        invoice and the pending payment are committed first, so the reference
+        handed over is a durable row; the provider is called with the
+        connection back in the pool and no row locked - an offer being
+        accepted included; and the order it answers with is bound in a second,
+        short transaction under the settlement locks. Whatever the caller
+        staged before calling this is committed with the first transaction,
+        and anything it writes afterwards it must re-read under a lock.
+
+        A provider call that fails leaves the committed attempt pending - the
+        outcome may be ambiguous, and hosted reconciliation asks the provider
+        about its reference - and releases its idempotency key, so the
+        customer's retry opens a page instead of being told one exists.
         """
         if self._provider is None:
             raise ValidationError("No payment provider is configured.")
@@ -279,20 +292,34 @@ class CheckoutService:
             idempotency_key=idempotency_key,
         )
 
-        session = await self._provider.create_checkout(
-            CheckoutRequest(
-                # Our id, quoted back by the provider as `merchant_order_id`.
-                # Fresh for every attempt, which is why a retried request cannot
-                # reuse an earlier page and is refused instead.
-                reference=str(payment.id),
-                amount=payment.amount,
-                currency=payment.currency,
-                description=description,
-                customer_email=actor.email if actor else None,
-                customer_name=actor.full_name if actor else None,
-                metadata={"invoice_id": str(invoice.id)},
-            )
+        request = CheckoutRequest(
+            # Our id, quoted back by the provider as `merchant_order_id`.
+            # Fresh for every attempt, which is why a retried request cannot
+            # reuse an earlier page and is refused instead.
+            reference=str(payment.id),
+            amount=payment.amount,
+            currency=payment.currency,
+            description=description,
+            customer_email=actor.email if actor else None,
+            customer_name=actor.full_name if actor else None,
+            metadata={"invoice_id": str(invoice.id)},
         )
+        payment_id, invoice_id = payment.id, invoice.id
+
+        try:
+            # TX1 ends here: invoice and pending attempt are durable, and
+            # nothing - no connection, no row lock - is held across the call.
+            async with released(self._session):
+                session = await self._provider.create_checkout(request)
+        except Exception:
+            await self._release_unopened(payment_id)
+            raise
+
+        # TX2: bind what the provider answered, under the settlement locks.
+        rows = await self._settlement.lock(invoice_id=invoice_id, payment_id=payment_id)
+        if rows.payment is None:  # pragma: no cover - committed in TX1
+            raise NotFoundError("No such payment.")
+        payment, invoice = rows.payment, rows.invoice
         payment.provider_intent_reference = session.provider_reference
         payment.provider_order_id = session.order_reference
         payment.provider_mode = session.mode
@@ -320,6 +347,23 @@ class CheckoutService:
             amount=payment.amount,
             currency=payment.currency,
         )
+
+    async def _release_unopened(self, payment_id: uuid.UUID) -> None:
+        """After a failed provider call: free the retry, keep the evidence.
+
+        Committed on its own, because the exception about to propagate rolls
+        the request's transaction back. The attempt stays `PENDING` - a timeout
+        does not say whether the provider created the page - with a reason a
+        support person can read, and hosted reconciliation asks the provider
+        about its reference like any other unanswered page. Its idempotency
+        key is cleared so the customer's retry is a new attempt rather than a
+        409 about a page they never received.
+        """
+        payment = await self._payments.lock(payment_id)
+        if payment is not None and payment.provider_order_id is None:
+            payment.idempotency_key = None
+            payment.failure_reason = "The payment page could not be opened."
+        await self._session.commit()
 
     async def _new_attempt(
         self,
@@ -532,6 +576,13 @@ class CheckoutService:
         """
         moment = now if now is not None else datetime.now(UTC)
         payment, retargeted = await self._matching_payment(event)
+        if payment is not None and not retargeted:
+            # Before the claim and before anything is written: the payment,
+            # its invoice and the subscription, in the one settlement order
+            # (DB-001, DB-003). A second callback for the same payment - or a
+            # callback racing a manual payment or a reconciliation on the same
+            # invoice - waits here, then decides on what the first committed.
+            await self._settlement.lock(invoice_id=payment.invoice_id, payment_id=payment.id)
 
         record = await self._claim(event, payment=payment, now=moment)
         if record is None:
@@ -769,14 +820,56 @@ class CheckoutService:
           ever tries to collect money that was deliberately given back.
         - **An unrequested partial reversal** - a chargeback, a dashboard
           refund - leaves a genuine debt: the invoice reopens and is dunned.
+
+        **The provider's figure is a running total** (PAY-E2E-01). Paymob
+        reports every refund of a transaction on that transaction, with
+        `refunded_amount_cents` the cumulative amount returned so far, and
+        allows several partial refunds. So the money this event moves is the
+        *difference* from what is already recorded: 30 then 99 returns 30 and
+        then 69. The same total again is a replay; a smaller total arriving
+        late is stale provider state and the higher total stands - the
+        database refuses `refunded_amount` going down in any case. A refund
+        callback, an inquiry that found a refund and a transaction read all
+        arrive here, so there is one place that turns provider reversal
+        evidence into accounting.
         """
+        if event.reversal_child:
+            # The refund transaction itself (PAY-E2E-03): its amount is one
+            # refund, not a total, and the parent's cumulative notification is
+            # what moves the ledger. Recorded, never applied.
+            return NO_CHANGE, (
+                f"Refund transaction {event.provider_transaction_id} of "
+                f"{event.parent_transaction_id}; the parent's running total is applied."
+            )
         refunded = event.refunded_amount if event.refunded_amount else event.amount
         if refunded <= 0 or refunded > payment.amount:
             return MISMATCHED, f"Refund of {refunded} against a payment of {payment.amount}."
+        reversed_transaction = self._reversed_transaction(event, payment=payment)
+        if reversed_transaction is not None:
+            return MISMATCHED, reversed_transaction
+        if payment.status is PaymentStatus.PENDING:
+            return await self._reversed_before_settlement(
+                event, payment=payment, invoice=invoice, refunded=refunded, now=now
+            )
         if payment.status not in (PaymentStatus.SUCCEEDED, PaymentStatus.REFUNDED):
             return REFUSED, f"{payment.status.value} was never collected."
-        if refunded <= payment.refunded_amount:
+        if refunded == payment.refunded_amount:
             return NO_CHANGE, f"Already refunded {payment.refunded_amount}."
+        if refunded < payment.refunded_amount:
+            logger.info(
+                "billing.refund_state_stale",
+                extra={
+                    "event": "billing.refund_state_stale",
+                    "tenant_id": str(self._tenant_id),
+                    "payment_id": str(payment.id),
+                    "reported_total": str(refunded),
+                    "recorded_total": str(payment.refunded_amount),
+                },
+            )
+            return NO_CHANGE, (
+                f"Stale provider callback: a refunded total of {refunded} arrived after "
+                f"{payment.refunded_amount} was recorded; the higher total stands."
+            )
 
         requested = payment.refund_requested_amount
         operator_requested = requested is not None and refunded <= requested
@@ -789,6 +882,34 @@ class CheckoutService:
             payment.refund_requested_amount = None
         if refunded >= payment.amount and payment_may_move(payment.status, PaymentStatus.REFUNDED):
             payment.status = PaymentStatus.REFUNDED
+
+        if payment.applied_at is None:
+            # Money that was held, never applied: a duplicate payment or one
+            # refused at settlement, sitting with its incident for an operator
+            # (DB-001). Giving it back returns it to the customer and nothing
+            # else - the invoice never counted it, so it must not lose it, and
+            # nothing it bought is withdrawn.
+            self._audit.record(
+                AuditAction.PAYMENT_REFUNDED,
+                actor=None,
+                actor_kind=AuditActorKind.SYSTEM,
+                tenant_id=self._tenant_id,
+                target_type="payment",
+                target_id=payment.id,
+                meta={
+                    "amount": str(returned),
+                    "refunded_total": str(refunded),
+                    "currency": invoice.currency,
+                    "kind": event.kind.value,
+                    "operator_requested": operator_requested,
+                    "provider_reference": event.provider_transaction_id,
+                    "held": True,
+                },
+            )
+            from app.core.telemetry import record_billing_refund
+
+            await record_billing_refund("confirmed")
+            return APPLIED, f"Refunded {returned} of held money; the invoice is unaffected."
 
         invoice.amount_paid = max(invoice.amount_paid - returned, Decimal("0.00"))
         full = invoice.amount_paid <= 0
@@ -856,6 +977,124 @@ class CheckoutService:
 
         await record_billing_refund("confirmed")
         return APPLIED, f"Refunded {returned}."
+
+    @staticmethod
+    def _reversed_transaction(event: CallbackEvent, *, payment: Payment) -> str | None:
+        """Why this reversal is of some other transaction than this payment's, or None.
+
+        A reversal is found by its order, and one order can carry more than one
+        collection - a page paid twice (BILL-15). Returning the second one must
+        not take money off the invoice the first one funded, so the reversed
+        transaction has to be the one this payment recorded: the event's own
+        id for a reversal reported on the parent, or the parent it names. A
+        payment that never recorded one has nothing to compare with.
+        """
+        recorded = payment.provider_reference
+        if not recorded:
+            return None
+        if recorded in (event.provider_transaction_id, event.parent_transaction_id):
+            return None
+        return (
+            f"The reversal is of transaction {event.provider_transaction_id}, "
+            f"this payment collected {recorded}."
+        )
+
+    async def _reversed_before_settlement(
+        self,
+        event: CallbackEvent,
+        *,
+        payment: Payment,
+        invoice: Invoice,
+        refunded: Decimal,
+        now: datetime,
+    ) -> tuple[str, str | None]:
+        """Money collected and given back before this system heard it was collected.
+
+        The collection callback was lost and the payment refunded at the
+        provider before reconciliation asked (PAY-E2E-03) - or the refund
+        notification simply overtook it. The provider's reversal evidence
+        proves both halves: the transaction collected `event.amount`, and
+        `refunded` of it has gone back.
+
+        Recorded as exactly that and **nothing is settled**: no invoice paid,
+        no plan, offer or top-up granted from money that is already on its way
+        back. The collection is kept as held money, the same shape as a
+        refused settlement (DB-001) - `applied_at` stays NULL - with the
+        reversal on it and an incident beside it, open while any of it is
+        still held and an operator has to decide, resolved when all of it went
+        back. The attempt stops being pending, so reconciliation does not ask
+        about it again, and a delayed success callback finds a payment that
+        cannot become collected a second time.
+        """
+        if event.amount != payment.amount:
+            return MISMATCHED, (
+                f"Expected {payment.amount}, the reversed transaction collected {event.amount}."
+            )
+        # The provider facts of the collection, written by the one helper that
+        # records them; the status is then set from the reversal below.
+        record_provider_outcome(payment, event, now=now)
+        payment.status = PaymentStatus.SUCCEEDED
+        if payment.is_unresolved_collection:
+            payment.collection_state = CollectionState.SETTLED
+        payment.refunded_amount = refunded
+        payment.refunded_at = now
+        full = refunded >= payment.amount
+        if full:
+            payment.status = PaymentStatus.REFUNDED
+        requested = payment.refund_requested_amount
+        if requested is not None and refunded >= requested:
+            payment.refund_requested_amount = None
+
+        await raise_incident(
+            self._session,
+            kind=BillingIncidentKind.REFUSED_SETTLEMENT,
+            dedupe_key=f"{payment.id}:reversed_before_settlement",
+            tenant_id=self._tenant_id,
+            payment_id=payment.id,
+            invoice_id=invoice.id,
+            provider=self._provider_name(),
+            provider_transaction_id=event.provider_transaction_id,
+            amount=payment.amount - refunded,
+            currency=invoice.currency,
+            detail=(
+                f"Collected {payment.amount} and reversed {refunded} at the provider before "
+                "the collection was recorded; nothing was settled."
+            ),
+            resolved=full,
+            now=now,
+        )
+        self._audit.record(
+            AuditAction.PAYMENT_REFUNDED,
+            actor=None,
+            actor_kind=AuditActorKind.SYSTEM,
+            tenant_id=self._tenant_id,
+            target_type="payment",
+            target_id=payment.id,
+            meta={
+                "amount": str(refunded),
+                "refunded_total": str(refunded),
+                "currency": invoice.currency,
+                "kind": event.kind.value,
+                "provider_reference": event.provider_transaction_id,
+                "held": True,
+                "reversed_before_settlement": True,
+            },
+        )
+        logger.warning(
+            "billing.reversed_before_settlement",
+            extra={
+                "event": "billing.reversed_before_settlement",
+                "tenant_id": str(self._tenant_id),
+                "payment_id": str(payment.id),
+                "invoice_id": str(invoice.id),
+                "refunded_total": str(refunded),
+            },
+        )
+        await record_billing_payment("refused")
+        return REFUSED, (
+            f"Collected and reversed ({refunded}) at the provider before the collection "
+            "was recorded; nothing was settled."
+        )
 
     def _provider_name(self) -> str:
         return self._provider.name if self._provider is not None else "unknown"

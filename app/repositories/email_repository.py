@@ -116,7 +116,7 @@ class EmailOutboxRepository:
                 OutboundEmail.status == EmailStatus.PENDING,
                 OutboundEmail.available_at <= now,
             )
-            .order_by(OutboundEmail.available_at)
+            .order_by(OutboundEmail.available_at, OutboundEmail.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )

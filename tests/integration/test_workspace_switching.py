@@ -23,7 +23,8 @@ workspace the request was actually scoped to.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from itertools import count
 from typing import Any
 
 import pytest
@@ -148,6 +149,13 @@ async def _person(session: AsyncSession) -> User:
     return user
 
 
+# Each membership joins after the one before. Rows written in one transaction
+# share `now()`, and which of them the login lands on first is decided by when
+# the person joined - not by where a row happens to sit on disk (DB-013).
+_JOINED = count()
+_JOINED_FROM = datetime(2026, 1, 1, tzinfo=UTC)
+
+
 async def _workspace(
     session: AsyncSession,
     *,
@@ -159,7 +167,15 @@ async def _workspace(
     tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
     session.add(tenant)
     await session.flush()
-    session.add(Membership(tenant_id=tenant.id, user_id=user.id, role=role, status=status))
+    session.add(
+        Membership(
+            tenant_id=tenant.id,
+            user_id=user.id,
+            role=role,
+            status=status,
+            created_at=_JOINED_FROM + timedelta(seconds=next(_JOINED)),
+        )
+    )
     await session.flush()
     return tenant
 

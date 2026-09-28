@@ -12,7 +12,7 @@ import os
 
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 
 async def provision() -> None:
@@ -115,8 +115,52 @@ async def provision() -> None:
                 }
                 command = await connection.scalar(text(sql), values)
                 await connection.exec_driver_sql(command)
+
+            await _restrict_evidence(connection, runtime_url.username)
     finally:
         await engine.dispose()
+
+
+# Evidence the runtime role writes and may never rewrite (DB-006). The blanket
+# grant above is re-applied on every deploy, so these are re-applied after it:
+# the final state is the same however many times this runs. A table-level
+# REVOKE also removes column grants, which is why the column grant comes last.
+EVIDENCE_TABLES = ("audit_logs", "billing_incidents")
+# The columns resolving an incident writes - and nothing about what happened.
+INCIDENT_RESOLUTION_COLUMNS = (
+    "status",
+    "resolved_at",
+    "resolved_by",
+    "resolution_note",
+    "updated_at",
+)
+
+
+async def _restrict_evidence(connection: AsyncConnection, role: str) -> None:
+    """Append-only audit trail; incidents resolvable, never rewritten or deleted."""
+    for table in EVIDENCE_TABLES:
+        present = await connection.scalar(
+            text("SELECT to_regclass(:name) IS NOT NULL"), {"name": f"public.{table}"}
+        )
+        if not present:
+            continue
+        command = await connection.scalar(
+            text(
+                "SELECT format('REVOKE UPDATE, DELETE, TRUNCATE ON %I FROM %I',"
+                " CAST(:t AS text), CAST(:r AS text))"
+            ),
+            {"t": table, "r": role},
+        )
+        await connection.exec_driver_sql(command)
+        if table == "billing_incidents":
+            command = await connection.scalar(
+                text(
+                    "SELECT format('GRANT UPDATE (%s) ON %I TO %I', CAST(:columns AS text),"
+                    " CAST(:t AS text), CAST(:r AS text))"
+                ),
+                {"columns": ", ".join(INCIDENT_RESOLUTION_COLUMNS), "t": table, "r": role},
+            )
+            await connection.exec_driver_sql(command)
 
 
 if __name__ == "__main__":

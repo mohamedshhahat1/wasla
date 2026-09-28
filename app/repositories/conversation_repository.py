@@ -155,7 +155,7 @@ class UnresolvedOutboundDirectory(BaseRepository[Message]):
         return await self._all(
             self._select()
             .where(Message.delivery_state == MessageDeliveryState.REQUESTED)
-            .order_by(Message.created_at)
+            .order_by(Message.created_at, Message.id)
             .limit(limit)
         )
 

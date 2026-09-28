@@ -54,17 +54,23 @@ class PaymentMethodService:
     async def make_default(self, method_id: uuid.UUID) -> PaymentMethod:
         """Choose which card renewals use.
 
-        Clearing the old default and setting the new one happen in the same
-        transaction, which is why the database does not enforce "exactly one":
-        a constraint would make this a two-statement dance that can fail
-        halfway and leave a workspace with none.
+        The database allows at most one active default per workspace (DB-018),
+        so the old default is cleared and flushed *before* the new one is set:
+        one transaction, so a failure between the two leaves the old default,
+        never none. The workspace's cards are locked first, so two concurrent
+        choices serialise - the second waits, re-reads and wins cleanly rather
+        than colliding with the first.
         """
+        active = await self._methods.lock_active()
         method = await self._require(method_id)
-        if not method.is_chargeable:
+        if not method.is_chargeable or method not in active:
             raise ConflictError("This card has been removed and cannot be used.")
 
-        for existing in await self._methods.list_active():
-            existing.is_default = existing.id == method.id
+        for existing in active:
+            if existing.is_default and existing.id != method.id:
+                existing.is_default = False
+        await self._session.flush()
+        method.is_default = True
         await self._session.flush()
 
         logger.info(
@@ -159,26 +165,34 @@ async def remember_saved_method(
         method_id=method_id,
     )
 
-    try:
-        async with session.begin_nested():
-            created = methods.create(
-                method_id=method_id,
-                provider=provider,
-                provider_token=protected.ciphertext,
-                token_fingerprint=protected.fingerprint,
-                provider_token_id=saved.provider_token_id or None,
-                masked_pan=saved.masked_pan,
-                brand=saved.brand,
-                is_default=is_first,
-            )
-            await session.flush()
-    except IntegrityError:
-        # Another delivery of the same notification won. Re-read rather than
-        # raise: the caller answers 200 either way, and the card exists.
-        found = await unscoped.get_by_fingerprint(provider=provider, fingerprint=fingerprint)
-        if found is None:  # pragma: no cover - the row that just blocked us
-            raise
-        return found, False
+    # As the default when it looked like the first card, and - if the partial
+    # unique index says another card became the default in the meantime, two
+    # first cards saved at once (DB-018) - once more as an ordinary card.
+    attempts = (True, False) if is_first else (False,)
+    for as_default in attempts:
+        try:
+            async with session.begin_nested():
+                created = methods.create(
+                    method_id=method_id,
+                    provider=provider,
+                    provider_token=protected.ciphertext,
+                    token_fingerprint=protected.fingerprint,
+                    provider_token_id=saved.provider_token_id or None,
+                    masked_pan=saved.masked_pan,
+                    brand=saved.brand,
+                    is_default=as_default,
+                )
+                await session.flush()
+            break
+        except IntegrityError:
+            # Another delivery of the same notification won. Re-read rather
+            # than raise: the caller answers 200 either way, and the card
+            # exists.
+            found = await unscoped.get_by_fingerprint(provider=provider, fingerprint=fingerprint)
+            if found is not None:
+                return found, False
+            if not as_default:  # pragma: no cover - nothing else refuses a plain card
+                raise
 
     logger.info(
         "billing.payment_method_saved",

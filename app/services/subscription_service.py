@@ -31,6 +31,7 @@ change.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,6 +63,28 @@ from app.services.email_templates import EmailTemplate
 from app.services.plan_catalog import PlanCatalog
 
 logger = get_logger(__name__)
+
+# The audit reason a settled purchase records. Only a purchase: a period
+# granted with no payment names its own basis (`PlanGrant`).
+PURCHASE_SETTLED = "purchase_settled"
+# A free version put on a workspace by a platform operator.
+PLATFORM_GRANT = "platform_grant"
+# A priced version granted without payment, backed by a billing adjustment.
+COMPLIMENTARY_GRANT = "complimentary_grant"
+
+
+@dataclass(frozen=True, slots=True)
+class PlanGrant:
+    """Who put a workspace on a version without a purchase, and on what basis.
+
+    `basis` is `PLATFORM_GRANT` or `COMPLIMENTARY_GRANT`; `reason` is what the
+    operator wrote. Carried into the subscription's own audit row so the trail
+    says who granted what and that nothing was paid (PAY-E2E-02).
+    """
+
+    actor: User
+    basis: str
+    reason: str | None = None
 
 
 def add_interval(start: datetime, interval: BillingInterval) -> datetime:
@@ -391,6 +414,7 @@ class SubscriptionService:
         version: PlanVersion,
         now: datetime,
         keep_cancellation: bool = False,
+        grant: PlanGrant | None = None,
     ) -> tuple[Subscription, SubscriptionStatus | None]:
         """Put the workspace on the version a settled payment bought (BILL-01, BILL-03).
 
@@ -409,6 +433,12 @@ class SubscriptionService:
         `keep_cancellation` is for a customer who asked to cancel *after*
         opening the payment page they then paid: they receive the period they
         paid for and it does not renew.
+
+        `grant` is for the same period change made with **no** purchase - a
+        platform operator assigning a free version, or a priced one as a
+        complimentary grant. The trail then names that operator and the basis
+        instead of claiming a settlement nobody paid for (PAY-E2E-02). Absent,
+        the change is a settled purchase, recorded by the system.
         """
         await self._catalog.require_available(version, tenant_id=self._tenant_id)
         subscription = await self._subscriptions.get()
@@ -451,8 +481,10 @@ class SubscriptionService:
                     else AuditAction.SUBSCRIPTION_PLAN_CHANGED
                 )
             ),
-            actor=None,
-            actor_kind=AuditActorKind.SYSTEM,
+            actor=grant.actor if grant is not None else None,
+            actor_kind=(
+                AuditActorKind.PLATFORM_STAFF if grant is not None else AuditActorKind.SYSTEM
+            ),
             target_type="subscription",
             target_id=subscription.id,
             meta={
@@ -461,7 +493,8 @@ class SubscriptionService:
                 "period_start": now.isoformat(),
                 "period_end": period_end.isoformat(),
                 "from_status": previous.value if previous is not None else None,
-                "reason": "purchase_settled",
+                "reason": grant.basis if grant is not None else PURCHASE_SETTLED,
+                **({"operator_reason": grant.reason, "payment": None} if grant is not None else {}),
             },
         )
         return subscription, previous

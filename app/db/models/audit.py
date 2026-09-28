@@ -29,12 +29,12 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Final
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, func
+from sqlalchemy import DateTime, ForeignKey, Index, String, event, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, UUIDPrimaryKeyMixin
-from app.db.models.enums import _enum_type
+from app.db.models.enums import _enum_type, ordered_type_ddl
 
 MAX_ACTOR_LABEL_LENGTH: Final = 320
 MAX_TARGET_LABEL_LENGTH: Final = 200
@@ -488,7 +488,125 @@ class AuditAction(StrEnum):
 
 
 AUDIT_ACTOR_KIND_TYPE = _enum_type(AuditActorKind, name="audit_actor_kind")
-AUDIT_ACTION_TYPE = _enum_type(AuditAction, name="audit_action")
+# The order production holds the labels in: the order the migrations added
+# them, which is not the order the class groups them in (DB-015).
+AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
+    "member_invited",
+    "invitation_revoked",
+    "invitation_accepted",
+    "whatsapp_account_connected",
+    "whatsapp_account_disabled",
+    "whatsapp_account_enabled",
+    "subscription_started",
+    "subscription_plan_changed",
+    "subscription_cancelled",
+    "subscription_resumed",
+    "payment_recorded",
+    "invoice_voided",
+    "campaign_scheduled",
+    "campaign_cancelled",
+    "whatsapp_account_released",
+    "member_removed",
+    "member_left",
+    "member_reinstated",
+    "refresh_token_reused",
+    "whatsapp_account_verified",
+    "password_reset_completed",
+    "email_verification_requested",
+    "email_verified",
+    "email_verification_failed",
+    "payment_refund_requested",
+    "payment_refunded",
+    "subscription_past_due",
+    "google_login_succeeded",
+    "google_login_failed",
+    "google_identity_linked",
+    "google_identity_link_failed",
+    "google_identity_unlinked",
+    "agent_handoff_requested",
+    "agent_lead_recorded",
+    "agent_follow_up_scheduled",
+    "subscription_suspended",
+    "platform_role_granted",
+    "platform_role_revoked",
+    "platform_overview_read",
+    "platform_workspaces_read",
+    "platform_audit_log_read",
+    "subscription_plan_withdrawn",
+    "password_changed",
+    "user_disabled",
+    "user_enabled",
+    "user_sessions_revoked",
+    "user_deleted",
+    "workspace_created",
+    "workspace_updated",
+    "workspace_ownership_transferred",
+    "workspace_suspended",
+    "workspace_restored",
+    "workspace_deleted",
+    "workspace_ownership_repaired",
+    "workspace_purged",
+    "account_reauthenticated",
+    "login_succeeded",
+    "login_failed",
+    "knowledge_base_created",
+    "knowledge_document_submitted",
+    "knowledge_document_deleted",
+    "knowledge_document_reindex_requested",
+    "knowledge_document_indexing_failed",
+    "agent_tool_granted",
+    "agent_tool_revoked",
+    "media_downloaded",
+    "media_sent",
+    "conversation_taken_over",
+    "conversation_released_to_ai",
+    "conversation_assigned",
+    "conversation_reassigned",
+    "conversation_unassigned",
+    "conversation_closed",
+    "conversation_reopened",
+    "subscription_reactivated",
+    "subscription_plan_change_scheduled",
+    "subscription_scheduled_change_cancelled",
+    "subscription_complimentary_grant",
+    "payment_refund_review_requested",
+    "billing_plan_created",
+    "billing_plan_updated",
+    "billing_plan_version_created",
+    "billing_plan_activated",
+    "billing_plan_deactivated",
+    "billing_plan_deleted",
+    "billing_plan_migration_scheduled",
+    "billing_reconciliation_started",
+    "billing_reconciliation_resolved",
+    "billing_incident_resolved",
+    "platform_billing_read",
+    "billing_custom_plan_created",
+    "billing_custom_plan_version_created",
+    "billing_custom_plan_assigned",
+    "billing_custom_plan_assignment_scheduled",
+    "billing_topup_created",
+    "billing_topup_updated",
+    "billing_topup_activated",
+    "billing_topup_deactivated",
+    "billing_topup_deleted",
+    "billing_topup_checkout_created",
+    "billing_topup_payment_settled",
+    "billing_topup_granted",
+    "billing_topup_expired",
+    "billing_topup_cancelled",
+    "billing_topup_platform_granted",
+    "billing_topup_refund_reviewed",
+    "billing_custom_plan_offered",
+    "billing_custom_plan_offer_accepted",
+    "billing_custom_plan_offer_declined",
+    "billing_custom_plan_offer_activated",
+    "billing_custom_plan_offer_cancelled",
+    "billing_custom_plan_offer_expired",
+)
+AUDIT_ACTION_TYPE = _enum_type(
+    AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER
+)
 
 
 class AuditLog(Base, UUIDPrimaryKeyMixin):
@@ -546,3 +664,8 @@ class AuditLog(Base, UUIDPrimaryKeyMixin):
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
         return f"AuditLog(action={self.action!r}, actor={self.actor_label!r})"
+
+
+_CREATE_AUDIT_ACTION, _DROP_AUDIT_ACTION = ordered_type_ddl("audit_action")
+event.listen(AuditLog.__table__, "before_create", _CREATE_AUDIT_ACTION)
+event.listen(AuditLog.__table__, "after_drop", _DROP_AUDIT_ACTION)

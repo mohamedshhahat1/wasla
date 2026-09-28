@@ -427,6 +427,14 @@ class BillingWorker:
                 max_age_seconds=self._settings.billing_hosted_reconciliation_max_age_seconds,
                 limit=self._settings.billing_reconciliation_batch_size,
             )
+            # Refunds an operator asked for whose confirming callback never
+            # came (PAY-E2E-01): read back from the provider's own record.
+            refunds = await reconciler.run_refunds(
+                now=now,
+                grace_seconds=self._settings.billing_reconciliation_grace_seconds,
+                lease_seconds=self._settings.billing_reconciliation_lease_seconds,
+                limit=self._settings.billing_reconciliation_batch_size,
+            )
 
         await record_payment_reconciliation(
             settled=outcome.settled,
@@ -453,7 +461,12 @@ class BillingWorker:
                     "pending": pending,
                 },
             )
-        return outcome.examined + sum(hosted.values())
+        if refunds:
+            logger.info(
+                "billing.refund_reconciliation_completed",
+                extra={"event": "billing.refund_reconciliation_completed", **refunds},
+            )
+        return outcome.examined + sum(hosted.values()) + sum(refunds.values())
 
     async def _collect_batch(self, *, now: datetime) -> int:
         """Take due renewals from saved cards, where that is possible at all.

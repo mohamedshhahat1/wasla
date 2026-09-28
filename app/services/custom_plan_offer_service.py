@@ -196,6 +196,19 @@ class CustomPlanOfferService:
             await record_custom_plan("offer_accept", "refused")
             raise
 
+        # The page was opened with the offer lock released (DB-008), so the
+        # offer is read again under a fresh lock: a platform withdrawal or the
+        # owner's own decline may have landed while the provider was asked.
+        # Money paid on that page is held at settlement, as for any page paid
+        # after a withdrawal; this request says so rather than accepting.
+        relocked = await self._offers.lock(offer.id)
+        if relocked is None or not relocked.accepting_is_open(moment):
+            await record_custom_plan("offer_accept", "refused")
+            raise ConflictError(
+                "This offer can no longer be accepted.",
+                details={"status": relocked.status.value if relocked else "missing"},
+            )
+        offer = relocked
         first = offer.status is CustomPlanOfferStatus.OFFERED
         if first and offer_may_move(offer.status, CustomPlanOfferStatus.PENDING_PAYMENT):
             offer.status = CustomPlanOfferStatus.PENDING_PAYMENT

@@ -120,11 +120,15 @@ PURGED_TABLES: tuple[str, ...] = (
     "agent_turns",
     "message_sentiments",
     "message_media",
+    # Before `messages` and `conversations`, which they name with SET NULL
+    # keys: deleted first, the actions the parents' deletes fire find nothing
+    # to update (DB-002). Their lookups are indexed as well (migration 0075),
+    # so the order is a saving, not the fix.
+    "campaign_recipients",
+    "follow_ups",
     "messages",
     "conversations",
-    "campaign_recipients",
     "campaigns",
-    "follow_ups",
     "lead_activities",
     "lead_notes",
     "leads",
@@ -181,6 +185,14 @@ RETAINED_TABLES: frozenset[str] = frozenset(
         "media_purge_objects",
     }
 )
+
+# What a purge may take, in place of the application's per-session bounds. A
+# lock wait still ends - a purge blocked behind somebody else's transaction
+# retries on the next pass rather than holding everything it has deleted.
+PURGE_SESSION_BOUNDS: dict[str, str] = {
+    "statement_timeout": "15min",
+    "lock_timeout": "30s",
+}
 
 # The table whose deletion also records what it leaves in the object store.
 MEDIA_TABLE = "message_media"
@@ -255,7 +267,7 @@ class WorkspacePurgeService:
             .where(Tenant.purged_at.is_(None))
             .where(Tenant.purge_due_at.is_not(None))
             .where(Tenant.purge_due_at <= now)
-            .order_by(Tenant.purge_due_at)
+            .order_by(Tenant.purge_due_at, Tenant.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
@@ -285,6 +297,12 @@ class WorkspacePurgeService:
         if tenant.purge_due_at is None or tenant.purge_due_at > moment:
             raise ValueError("Refusing to purge a workspace before its retention has passed.")
 
+        # The one unit of work allowed to outlast the application's session
+        # bounds (DB-007): it erases a whole workspace in one transaction, which
+        # is linear in what the workspace holds (DB-002) and so may take
+        # minutes for a large one. `SET LOCAL` ends with this transaction.
+        for setting, value in PURGE_SESSION_BOUNDS.items():
+            await self._session.execute(text(f"SET LOCAL {setting} = '{value}'"))
         deleted = 0
         recorded = 0
         for table in PURGED_TABLES:

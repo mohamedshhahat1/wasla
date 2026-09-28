@@ -65,8 +65,15 @@ async def version_of(session: AsyncSession, plan: Plan) -> PlanVersion:
 
 
 async def pin(session: AsyncSession, subscription: Subscription, plan: Plan) -> PlanVersion:
-    """Pin a hand-built subscription to its plan's current version."""
+    """Pin a hand-built subscription to `plan` and that plan's current version.
+
+    Both columns in one flush, after the version is looked up: the pinned
+    version must be one of the subscription's own plan's (DB-004), and the
+    lookup flushes - a plan change staged before it would reach the database
+    alone and be refused.
+    """
     version = await version_of(session, plan)
+    subscription.plan_id = plan.id
     subscription.plan_version_id = version.id
     if subscription.billing_anchor_at is None:
         subscription.billing_anchor_at = subscription.current_period_start

@@ -104,6 +104,18 @@ class SubscriptionRepository(TenantScopedRepository[Subscription]):
     async def get(self) -> Subscription | None:
         return await self._first(self._select())
 
+    async def lock(self) -> Subscription | None:
+        """This workspace's subscription, row-locked and re-read.
+
+        The last lock settlement takes before the offer or top-up it may
+        grant (see `InvoiceSettlement.lock`). `FOR NO KEY UPDATE`, so an
+        invoice being opened for this subscription elsewhere - whose foreign
+        key takes a key-share lock on this row - is never blocked by it.
+        """
+        return await self._first(
+            self._select().with_for_update(key_share=True).execution_options(populate_existing=True)
+        )
+
     def create(
         self,
         *,
@@ -135,12 +147,18 @@ class PlatformSubscriptionRepository(BaseRepository[Subscription]):
     model = Subscription
 
     async def counts(self) -> list[SubscriptionCount]:
+        """How many subscriptions are in each status, in `SubscriptionStatus` order.
+
+        Sorted here rather than by `ORDER BY status`: a PostgreSQL enum sorts
+        by the order its labels were added, which is history, not
+        presentation (DB-015).
+        """
         result = await self.session.execute(
-            select(Subscription.status, func.count())
-            .group_by(Subscription.status)
-            .order_by(Subscription.status)
+            select(Subscription.status, func.count()).group_by(Subscription.status)
         )
-        return [SubscriptionCount(status=row[0], count=int(row[1])) for row in result.all()]
+        order = list(SubscriptionStatus)
+        rows = sorted(result.all(), key=lambda row: order.index(row[0]))
+        return [SubscriptionCount(status=row[0], count=int(row[1])) for row in rows]
 
     async def get_by_id(self, subscription_id: uuid.UUID | None) -> Subscription | None:
         """One subscription by its own id, across every workspace.
@@ -240,7 +258,7 @@ class PlatformSubscriptionRepository(BaseRepository[Subscription]):
                     ]
                 )
             )
-            .order_by(Subscription.current_period_end)
+            .order_by(Subscription.current_period_end, Subscription.id)
             .limit(limit)
             .with_for_update(skip_locked=True, of=Subscription)
         )
@@ -312,7 +330,7 @@ class PlanVersionMigrationRepository(BaseRepository[PlanVersionMigration]):
         return await self._all(
             self._select()
             .where(PlanVersionMigration.plan_id == plan_id)
-            .order_by(PlanVersionMigration.created_at.desc())
+            .order_by(PlanVersionMigration.created_at.desc(), PlanVersionMigration.id.desc())
         )
 
 
@@ -334,5 +352,5 @@ class BillingAdjustmentRepository(BaseRepository[BillingAdjustment]):
             .where(BillingAdjustment.kind == BillingAdjustmentKind.COMPLIMENTARY_GRANT)
             .where(BillingAdjustment.starts_at <= at)
             .where((BillingAdjustment.ends_at.is_(None)) | (BillingAdjustment.ends_at > at))
-            .order_by(BillingAdjustment.starts_at.desc())
+            .order_by(BillingAdjustment.starts_at.desc(), BillingAdjustment.id.desc())
         )

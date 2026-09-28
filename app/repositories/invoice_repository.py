@@ -151,6 +151,24 @@ class InvoiceRepository(TenantScopedRepository[Invoice]):
     async def require_by_id(self, invoice_id: uuid.UUID) -> Invoice:
         return await self._require(self._select().where(Invoice.id == invoice_id))
 
+    async def lock(self, invoice_id: uuid.UUID) -> Invoice | None:
+        """This workspace's invoice, row-locked and re-read from the database.
+
+        `FOR NO KEY UPDATE`, the lock an `UPDATE` of a non-key column takes
+        anyway, so it never blocks the key-share lock a child row's foreign
+        key takes - a payment, an incident or a top-up naming this invoice.
+        `populate_existing` because a copy already in the session was read
+        before the lock and may describe a state another transaction has
+        since committed (DB-001). Part of the settlement lock order; see
+        `InvoiceSettlement.lock`.
+        """
+        return await self._first(
+            self._select()
+            .where(Invoice.id == invoice_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+
     async def get_for_period(self, *, period_start: datetime) -> Invoice | None:
         """The renewal already issued for this period, if there is one.
 
@@ -229,7 +247,7 @@ class InvoiceRepository(TenantScopedRepository[Invoice]):
             .where(Invoice.status == InvoiceStatus.OPEN)
             .where(Invoice.issued_at.is_not(None))
             .where(Invoice.amount_paid < Invoice.amount_due)
-            .order_by(Invoice.period_start)
+            .order_by(Invoice.period_start, Invoice.id)
         )
 
     def create(
@@ -270,6 +288,15 @@ class PaymentRepository(TenantScopedRepository[Payment]):
 
     def _tenant_filter(self) -> ColumnElement[bool]:
         return Payment.tenant_id == self.tenant_id
+
+    async def lock(self, payment_id: uuid.UUID) -> Payment | None:
+        """This workspace's payment, row-locked and re-read. See `InvoiceRepository.lock`."""
+        return await self._first(
+            self._select()
+            .where(Payment.id == payment_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
 
     async def get_by_id(self, payment_id: uuid.UUID) -> Payment | None:
         """One payment of this workspace's.
@@ -566,7 +593,7 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
             .where(Invoice.collection_attempts < max_attempts)
             .where(~_has_unresolved_attempt())
             .where((Invoice.next_collection_at.is_(None)) | (Invoice.next_collection_at <= before))
-            .order_by(Invoice.period_start)
+            .order_by(Invoice.period_start, Invoice.id)
             .limit(limit)
             .with_for_update(skip_locked=True, of=Invoice)
         )
@@ -616,7 +643,7 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
             .where(Invoice.issued_at.is_not(None))
             .where(Invoice.issued_at < before)
             .where(Subscription.status == subscription_status)
-            .order_by(Invoice.issued_at)
+            .order_by(Invoice.issued_at, Invoice.id)
             .limit(limit)
             .with_for_update(skip_locked=True, of=(Invoice, Subscription))
         )
@@ -645,7 +672,7 @@ class PlatformInvoiceRepository(BaseRepository[Invoice]):
             self._select()
             .where(Invoice.status == InvoiceStatus.OPEN)
             .where(Invoice.period_start == period_start)
-            .order_by(Invoice.period_start)
+            .order_by(Invoice.period_start, Invoice.id)
             .limit(limit)
         )
 
@@ -702,7 +729,7 @@ class PlatformPaymentRepository(BaseRepository[Payment]):
             .where(Payment.collection_state.in_(UNRESOLVED_COLLECTION_STATES))
             .where(Payment.created_at < older_than)
             .where((Payment.reconciled_at.is_(None)) | (Payment.reconciled_at < lease_before))
-            .order_by(Payment.created_at)
+            .order_by(Payment.created_at, Payment.id)
             .limit(1)
             .with_for_update(skip_locked=True, of=Payment)
         )
@@ -743,7 +770,45 @@ class PlatformPaymentRepository(BaseRepository[Payment]):
             .where(Payment.created_at < older_than)
             .where(Payment.created_at > newer_than)
             .where((Payment.reconciled_at.is_(None)) | (Payment.reconciled_at < lease_before))
-            .order_by(Payment.created_at)
+            .order_by(Payment.created_at, Payment.id)
+            .limit(1)
+            .with_for_update(skip_locked=True, of=Payment)
+        )
+        payment = await self._first(statement)
+        if payment is None:
+            return None
+        payment.reconciled_at = now
+        await self.session.flush()
+        return payment
+
+    async def claim_refund_for_reconciliation(
+        self,
+        *,
+        provider: str,
+        older_than: datetime,
+        lease_before: datetime,
+        now: datetime,
+    ) -> Payment | None:
+        """Take the oldest payment whose requested refund was never confirmed, and lease it.
+
+        A refund the provider accepted is confirmed only by its callback; one
+        that never arrives leaves `refund_requested_amount` outstanding for
+        ever and the books claiming money the customer has had back
+        (PAY-E2E-01). Bounded to exactly those rows - collected, a request
+        standing longer than the grace period - so the provider is asked about
+        a handful of transactions this system recorded, never polled. Same
+        lease as the other claims: `reconciled_at` is written and committed
+        before the lookup.
+        """
+        statement = (
+            select(Payment)
+            .where(Payment.provider == provider)
+            .where(Payment.status == PaymentStatus.SUCCEEDED)
+            .where(Payment.refund_requested_amount.is_not(None))
+            .where(Payment.refund_requested_at < older_than)
+            .where(Payment.provider_reference.is_not(None))
+            .where((Payment.reconciled_at.is_(None)) | (Payment.reconciled_at < lease_before))
+            .order_by(Payment.refund_requested_at, Payment.id)
             .limit(1)
             .with_for_update(skip_locked=True, of=Payment)
         )

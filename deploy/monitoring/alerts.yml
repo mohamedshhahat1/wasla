@@ -1283,3 +1283,119 @@ groups:
             negotiated plans. Check the API error logs for the
             /platform/billing/tenants/*/custom-plan routes.
           runbook: docs/BILLING_OPERATIONS.md
+
+  # --------------------------------------------------------------- database
+  #
+  # DB-023. The server's own view of the database, read by the API at scrape
+  # time (`MetricsService._database_health_lines`), and the backup age the
+  # runbook always had a threshold for and nothing evaluated.
+  - name: wasla-database
+    interval: 30s
+    rules:
+      - alert: BackupStale
+        # The runbook's threshold ("Backups have stopped"): a daily backup that
+        # has missed one run and most of the next.
+        expr: max(wasla_backup_age_seconds) > 36 * 3600
+        for: 15m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "No backup has reached off-host storage for over 36 hours"
+          description: >-
+            The last backup that reached its off-host destination is older than
+            36 hours. Everything written since is recoverable only from the
+            live database. Read failed_stage in the backup status file.
+          runbook: docs/RUNBOOK.md
+
+      - alert: BackupStatusMissing
+        # A deployment that cannot say when it last backed up is not one that
+        # did. Absent for two hours, so an API restart is not an alert.
+        expr: absent(wasla_backup_age_seconds)
+        for: 2h
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "The API publishes no backup age"
+          description: >-
+            wasla_backup_age_seconds has been absent for two hours: the backup
+            status file is not mounted, has never been written, or no backup
+            has ever succeeded. See "Backups have stopped" in the runbook.
+          runbook: docs/RUNBOOK.md
+
+      - alert: DatabaseDeadlocks
+        # The settlement lock order (DB-003) is designed so the application
+        # never deadlocks. PostgreSQL breaks a deadlock by aborting one side,
+        # so any at all is a lock-order bug somewhere, not load.
+        expr: increase(wasla_db_deadlocks_total[15m]) > 0
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "PostgreSQL broke a deadlock"
+          description: >-
+            PostgreSQL detected a deadlock and aborted one of the transactions.
+            The server log names both statements (log_lock_waits is on); two
+            code paths are taking the same locks in opposite orders.
+          runbook: docs/RUNBOOK.md
+
+      - alert: DatabaseConnectionsNearLimit
+        expr: max(wasla_db_connections{state="all"}) / max(wasla_db_max_connections) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Database sessions are above 80% of max_connections"
+          description: >-
+            New connections will soon be refused. Compare wasla_db_pool_checked_out
+            per process with the connection budget in docs/DEPLOYMENT.md; a
+            replica added without resizing pools is the usual cause.
+          runbook: docs/RUNBOOK.md
+
+      - alert: DatabaseLockWaits
+        expr: max(wasla_db_lock_waiting_sessions) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Sessions are queueing on locks"
+          description: >-
+            More than five sessions have been waiting on locks for five minutes.
+            Runtime statements give up after DATABASE_LOCK_TIMEOUT_MS, so this is
+            usually one long transaction holding a hot row; see pg_stat_activity
+            and pg_blocking_pids.
+          runbook: docs/RUNBOOK.md
+
+      - alert: DatabaseLongTransaction
+        # Runtime transactions are bounded by the statement and idle timeouts
+        # (DB-007), so half an hour is a purge, a migration or something run
+        # by hand - which is still holding back vacuum on every table.
+        expr: max(wasla_db_oldest_transaction_age_seconds) > 1800
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "A transaction has been open for over half an hour"
+          description: >-
+            The oldest open transaction is older than 30 minutes. While it is
+            open, vacuum cannot remove the row versions it might still see.
+            Find it in pg_stat_activity by xact_start.
+          runbook: docs/RUNBOOK.md
+
+      - alert: DatabaseDeadTuplesHigh
+        expr: max by (table) (wasla_db_dead_tuples) > 1000000
+        for: 1h
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "{{ $labels.table }} holds over a million dead row versions"
+          description: >-
+            Autovacuum is not keeping up with {{ $labels.table }}. Check
+            last_autovacuum in pg_stat_user_tables and whether a long
+            transaction is holding it back.
+          runbook: docs/RUNBOOK.md

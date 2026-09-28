@@ -211,7 +211,7 @@ class PlatformTopupPurchaseRepository(BaseRepository[TopupPurchase]):
             self._select()
             .where(TopupPurchase.status == TopupStatus.GRANTED)
             .where(TopupPurchase.expires_at <= now)
-            .order_by(TopupPurchase.expires_at)
+            .order_by(TopupPurchase.expires_at, TopupPurchase.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )

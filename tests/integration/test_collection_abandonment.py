@@ -581,6 +581,8 @@ async def test_a_settled_invoice_stops_being_collected(db_session: AsyncSession)
 
     invoice.status = InvoiceStatus.PAID
     invoice.amount_paid = invoice.amount_due
+    # A paid invoice says when (DB-005, `ck_invoices_paid_is_dated`).
+    invoice.paid_at = NOW
     await db_session.flush()
 
     reason = await _sweep(

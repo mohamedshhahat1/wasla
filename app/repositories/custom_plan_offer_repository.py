@@ -56,7 +56,9 @@ class CustomPlanOfferRepository(TenantScopedRepository[CustomPlanOffer]):
     async def history(self, *, limit: int = 50) -> list[CustomPlanOffer]:
         """Newest first."""
         return await self._all(
-            self._select().order_by(CustomPlanOffer.created_at.desc()).limit(limit)
+            self._select()
+            .order_by(CustomPlanOffer.created_at.desc(), CustomPlanOffer.id.desc())
+            .limit(limit)
         )
 
 
@@ -72,7 +74,7 @@ class PlatformCustomPlanOfferRepository(BaseRepository[CustomPlanOffer]):
         return await self._all(
             self._select()
             .where(CustomPlanOffer.tenant_id == tenant_id)
-            .order_by(CustomPlanOffer.created_at.desc())
+            .order_by(CustomPlanOffer.created_at.desc(), CustomPlanOffer.id.desc())
         )
 
     async def due_to_expire(self, *, at: datetime, limit: int) -> list[CustomPlanOffer]:
@@ -82,7 +84,7 @@ class PlatformCustomPlanOfferRepository(BaseRepository[CustomPlanOffer]):
             .where(CustomPlanOffer.status.in_([status.value for status in OPEN_OFFER_STATUSES]))
             .where(CustomPlanOffer.expires_at.is_not(None))
             .where(CustomPlanOffer.expires_at <= at)
-            .order_by(CustomPlanOffer.expires_at)
+            .order_by(CustomPlanOffer.expires_at, CustomPlanOffer.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )

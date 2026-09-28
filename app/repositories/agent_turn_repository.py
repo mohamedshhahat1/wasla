@@ -358,7 +358,7 @@ class OwedReleaseSweep(BaseRepository[AgentTurn]):
         rows = await self._all(
             self._select()
             .where(self._owed(), AgentTurn.claim_expires_at < published_before)
-            .order_by(AgentTurn.claim_expires_at)
+            .order_by(AgentTurn.claim_expires_at, AgentTurn.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )

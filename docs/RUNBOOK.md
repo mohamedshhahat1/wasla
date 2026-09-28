@@ -1331,6 +1331,219 @@ last three need a person to read the row's activity or message and decide what
 really happened. The same queries, scoped to a test's own workspaces, are the
 permanent sweep in `tests/integration/crm_invariants.py`.
 
+### Settlement backstop (before and after deploying 0074)
+
+Migration 0074 (DB-001) records which payments an invoice counts
+(`payments.applied_at`) and installs two commit-time checks: an invoice's
+`amount_paid` is the net of its applied payments, and collected money that is
+not applied is held with a billing incident. It backfills `applied_at` for every
+collected payment that no refusal incident holds, then **refuses to install**
+if the existing ledger still does not balance, naming the counts. It never
+repairs: an unbalanced invoice is most likely a customer charged twice by the
+concurrent settlement DB-001 describes, and which payment was the duplicate is a
+person's decision.
+
+```sql
+-- collected payments no incident holds, beyond the first, on an invoice whose
+-- amount_paid they do not add up to: the candidates for "the duplicate"
+CREATE TEMP TABLE extra AS
+SELECT p.id, p.invoice_id FROM (
+  SELECT p.*, row_number() OVER (PARTITION BY p.invoice_id ORDER BY p.processed_at, p.id) n
+  FROM payments p
+  WHERE p.status IN ('succeeded', 'refunded')
+    AND NOT EXISTS (SELECT 1 FROM billing_incidents b WHERE b.payment_id = p.id)) p
+JOIN invoices i ON i.id = p.invoice_id
+WHERE p.n > 1
+  AND i.amount_paid <> (SELECT sum(q.amount - q.refunded_amount) FROM payments q
+        WHERE q.invoice_id = i.id AND q.status IN ('succeeded', 'refunded')
+          AND NOT EXISTS (SELECT 1 FROM billing_incidents b WHERE b.payment_id = q.id));
+SELECT e.invoice_id, p.id, p.amount, p.provider, p.provider_reference, p.processed_at
+FROM extra e JOIN payments p ON p.id = e.id ORDER BY e.invoice_id, p.processed_at;
+```
+
+For each row: check the provider's dashboard for the transactions. The earliest
+payment paid the invoice and stays; each listed one is the extra. Raise the
+incident settlement would have raised - so the money is held, visible in the
+`BillingDuplicatePayment` alert and the operator queue, and refunded through the
+platform API:
+
+```sql
+INSERT INTO billing_incidents (id, tenant_id, kind, status, dedupe_key, payment_id,
+  invoice_id, provider, provider_transaction_id, amount, currency, detail,
+  created_at, updated_at)
+SELECT gen_random_uuid(), p.tenant_id, 'duplicate_payment', 'open',
+       'duplicate_payment:' || p.id || ':' || coalesce(p.provider_reference, ''),
+       p.id, p.invoice_id, p.provider, p.provider_reference, p.amount, p.currency,
+       'Held by the 0074 reconciliation: a second payment for one invoice.', now(), now()
+FROM payments p WHERE p.id IN (SELECT id FROM extra);
+```
+
+This procedure was rehearsed on a copy of a 0073 database holding the ten double
+settlements the DB-001 reproduction left: 0074 refused naming 10 invoices, the
+query listed 10 extra payments, and after the insert 0074 installed.
+
+Then rerun the migration: the extra payment is left unapplied and held. After
+0074 the same state cannot be written - a commit that would leave it fails with
+SQLSTATE 23000 - and the settlement lock order means an ordinary race never
+reaches that check: it is refused and raised as an incident first.
+
+### Financial integrity (before and after deploying 0077)
+
+Migration 0077 (DB-004, DB-005) makes every financial binding name its own
+workspace, pins a subscription's version to its own plan, and freezes settled
+invoices and collected payments. It counts existing rows each new rule would
+refuse and fails, changing nothing, if any exist. Every query below must return
+no rows before it can run:
+
+```sql
+-- money bound across workspaces (DB-004)
+SELECT p.id FROM payments p JOIN invoices i ON i.id = p.invoice_id WHERE i.tenant_id <> p.tenant_id;
+SELECT p.id FROM payments p JOIN payment_methods m ON m.id = p.payment_method_id WHERE m.tenant_id <> p.tenant_id;
+SELECT i.id FROM invoices i JOIN subscriptions s ON s.id = i.subscription_id WHERE s.tenant_id <> i.tenant_id;
+SELECT t.id FROM topup_purchases t JOIN invoices i ON i.id = t.invoice_id WHERE i.tenant_id <> t.tenant_id;
+SELECT t.id FROM topup_purchases t JOIN payments p ON p.id = t.payment_id WHERE p.tenant_id <> t.tenant_id;
+SELECT b.id FROM billing_incidents b JOIN invoices i ON i.id = b.invoice_id WHERE i.tenant_id IS DISTINCT FROM b.tenant_id;
+SELECT b.id FROM billing_incidents b JOIN payments p ON p.id = b.payment_id WHERE p.tenant_id IS DISTINCT FROM b.tenant_id;
+SELECT a.id FROM billing_adjustments a JOIN invoices i ON i.id = a.invoice_id WHERE i.tenant_id <> a.tenant_id;
+SELECT a.id FROM billing_adjustments a JOIN subscriptions s ON s.id = a.subscription_id WHERE s.tenant_id <> a.tenant_id;
+SELECT s.id FROM subscriptions s JOIN plan_versions v ON v.id = s.plan_version_id WHERE v.plan_id <> s.plan_id;
+-- undated settled states, and grants without payment (DB-005)
+SELECT id FROM invoices WHERE status = 'paid' AND paid_at IS NULL;
+SELECT id FROM payments WHERE status IN ('succeeded', 'refunded') AND processed_at IS NULL;
+SELECT t.id FROM topup_purchases t LEFT JOIN invoices i ON i.id = t.invoice_id
+ WHERE t.source = 'purchase' AND t.status = 'granted' AND (i.id IS NULL OR i.status <> 'paid');
+SELECT o.id FROM custom_plan_offers o WHERE o.status = 'active' AND NOT EXISTS
+ (SELECT 1 FROM invoices i WHERE i.custom_plan_offer_id = o.id AND i.status = 'paid');
+```
+
+A crossed binding is evidence of a defect or of manual repair SQL: find it in
+the audit trail and the provider's dashboard, decide with the workspace owner
+which workspace the money belongs to, and correct it deliberately. A missing
+`paid_at` or `processed_at` is taken from the settling `payment_recorded` audit
+entry or the provider's transaction time, never from `now()`. A grant or an
+activation without a paid invoice is reversed through the platform API, which
+records why. Then run the migration.
+
+After 0077, the same states are refused as they are written: a crossed binding
+with SQLSTATE 23503, a rewrite of settled terms with 23000 (a settled invoice
+keeps its terms; collected money keeps what it was), and an unpaid grant or
+activation at commit with 23000. The documented reversals still work: a refund
+lowers `amount_paid` and may reopen or, for an operator's full refund, void
+the invoice, and a refunded payment's `refunded_amount` only rises.
+
+### Periods, default cards and addresses (before and after deploying 0078)
+
+Migration 0078 (DB-012, DB-018, DB-025) refuses to run while any of these
+return rows, and changes nothing when it refuses:
+
+```sql
+SELECT id FROM subscriptions WHERE ended_at IS NULL AND current_period_end <= current_period_start;
+SELECT id FROM invoices WHERE period_end < period_start;
+SELECT tenant_id, array_agg(id ORDER BY created_at DESC, id DESC) FROM payment_methods
+ WHERE is_default AND status = 'active' GROUP BY tenant_id HAVING count(*) > 1;
+SELECT lower(email), array_agg(id) FROM users GROUP BY lower(email) HAVING count(*) > 1;
+```
+
+- A reversed period: take the true period from the subscription's latest paid
+  invoice or its audit trail (`subscription_*` entries) - never guess.
+- Two active defaults: nothing about a card is lost by demoting one. Keep the
+  default the workspace owner chose last (the newest, first in the list above)
+  and demote the rest - `UPDATE payment_methods SET is_default = false WHERE id
+  IN (...)` - telling the owner which card renewals will use.
+- Two accounts for one address: this is an identity question, not a data one.
+  Establish with the owners which account is theirs; the other is closed
+  through the account API, never deleted, and its address changed only with
+  its owner's agreement.
+
+After 0078, each is refused as written (23514 for a period, 23505 for a second
+default or a case-variant address), and a concurrent first-card save keeps
+the second card as an ordinary one instead of a second default.
+
+### Downgrading past the billing migrations
+
+0071, 0072 and 0073 hold commercial records their downgrades would drop with
+their tables. Each downgrade counts them first and refuses, changing nothing,
+naming what it found (DB-019):
+
+| Downgrade | Refused while any exist |
+| --- | --- |
+| 0073 → 0072 | custom plan offers (open, declined, expired, cancelled or active), invoices naming an offer |
+| 0072 → 0071 | top-up invoices, top-up purchases and platform grants, top-up products, custom plans |
+| 0071 → 0070 | billing incidents, billing adjustments, plan version migrations, plan versions after the first, scheduled plan changes |
+
+There is no flag to override this. A release that must be rolled back past one
+of these is rolled back by redeploying the previous image against the current
+schema where that image can run on it (each migration's docstring says what it
+changes for older code), and otherwise fixed forward - never by dropping the
+ledger. If a
+downgrade really is intended (a scratch or staging database), export the
+records first, delete them deliberately, and then downgrade.
+`tests/integration/test_migration_recovery.py` walks each refusal.
+
+### A migration stopped half-way
+
+Migrations that add enum labels (0059, 0063, 0064, 0067, 0068, 0071, 0072,
+0073) or build indexes concurrently (0039, 0040, 0075, 0077, 0078, 0079) end
+with an `autocommit_block()`. **Alembic commits the migration's DDL before that
+block and records the version after it**, because `ALTER TYPE ... ADD VALUE`
+and `CREATE INDEX CONCURRENTLY` cannot run inside a transaction. A failure
+inside the block - a lost connection, a lock timeout, a killed container -
+therefore leaves the DDL committed and `alembic_version` still naming the
+previous revision. Rerunning fails on "already exists". Alembic does not make
+enum additions transactional, and nothing here pretends it does.
+
+1. Read the failure: which revision, and which statement in its block.
+2. Confirm the revision's objects are present - its tables, columns,
+   constraints and triggers (`\d table` in psql), and each enum label it adds
+   (`SELECT enumlabel FROM pg_enum JOIN pg_type t ON t.oid = enumtypid WHERE
+   typname = '...'`). Enum additions use `ADD VALUE IF NOT EXISTS` and index
+   builds drop an `INVALID` leftover before rebuilding, so the block itself is
+   safe to repeat.
+3. If everything before the block is present, record it:
+   `alembic stamp <revision>`, then `alembic upgrade head`, which reruns the
+   rest.
+4. `python -m scripts.db_preflight verify` must then report no unvalidated
+   constraint, invalid index or disabled trigger.
+
+If step 2 finds the DDL only partly present, the failure was before the block,
+the transaction rolled back, and nothing was committed: rerun normally.
+`tests/integration/test_migration_recovery.py` reproduces the half-applied
+state for 0073 and takes it through this path.
+
+### The database is struggling
+
+The API publishes the server's own view at each scrape (DB-023):
+`wasla_db_connections{state}`, `wasla_db_max_connections`,
+`wasla_db_lock_waiting_sessions`, `wasla_db_oldest_transaction_age_seconds`,
+`wasla_db_deadlocks_total`, `wasla_db_size_bytes` and
+`wasla_db_dead_tuples{table}`. The server log carries the detail: statements
+over a second, lock waits over `deadlock_timeout` with the blocking process,
+and long autovacuums.
+
+- **`DatabaseDeadlocks`** - the settlement lock order (payment, then invoice,
+  then subscription, then offer or top-up) is designed not to deadlock, so
+  one is a code path taking locks in another order. The server log names both
+  statements; find their call sites.
+- **`DatabaseConnectionsNearLimit`** - compare each process's
+  `wasla_db_pool_checked_out` with the budget in docs/DEPLOYMENT.md. Scaling
+  replicas without resizing pools is the usual cause.
+- **`DatabaseLockWaits` / `DatabaseLongTransaction`** -
+
+  ```sql
+  SELECT pid, usename, state, now() - xact_start AS open_for, wait_event_type,
+         pg_blocking_pids(pid) AS blocked_by, left(query, 120)
+    FROM pg_stat_activity WHERE datname = current_database() ORDER BY xact_start;
+  ```
+
+  Runtime sessions are bounded by `DATABASE_STATEMENT_TIMEOUT_MS`,
+  `DATABASE_LOCK_TIMEOUT_MS` and the idle-in-transaction timeout (DB-007), so
+  an old transaction is almost always a purge, a migration or somebody's psql.
+  `pg_cancel_backend(pid)` first; `pg_terminate_backend(pid)` only if it will
+  not stop.
+- **`DatabaseDeadTuplesHigh`** - check `last_autovacuum` in
+  `pg_stat_user_tables` and whether a long transaction is holding vacuum back;
+  a manual `VACUUM (ANALYZE) <table>` is safe at any time.
+
 ## What to watch
 
 **Start with the metrics.** `/metrics` publishes request rates and latency,
@@ -1433,6 +1646,7 @@ Stated plainly, because a runbook that pretends to cover everything is one that 
   in this repository.
 - **Media durability depends on `MEDIA_STORAGE_BACKEND`** ([ADR-077](../DECISIONS.md)). On `local` the volume is the only copy and losing the host loses every attachment. On `s3` the bytes outlive the host, and their durability, versioning and lifecycle are the bucket's - the PostgreSQL backup carries the rows and the keys, never the files, and is not meant to ([BACKUP.md](BACKUP.md)).
 - **`usage_events` and `audit_logs` grow without bound.** Neither is swept, deliberately — retention for billing records and audit trails is a legal question, not a disk-space one.
+- **Raw WhatsApp webhook payloads age out; the events do not.** A processed event's payload is cleared after `WHATSAPP_EVENT_PAYLOAD_RETENTION_DAYS` (30) by the `retention` worker, in batches of `WHATSAPP_EVENT_REDACTION_BATCH_SIZE`, each its own short transaction (DB-011). The rows stay, so the table's row count still grows with traffic; what stops growing is its size per row. `wasla_webhook_payload_retention_total{outcome="pending"}` that keeps rising across daily passes means the sweep is failing — look for `retention.webhook_redaction_failed` in the worker's log.
 - **The media store grows until a retention period is set.** `MEDIA_RETENTION_DAYS` defaults to zero, which keeps everything ([ADR-078](../DECISIONS.md)). Watch `wasla_media_retention_total{outcome="pending"}`: a number that stays above zero across sweeps is a store refusing deletions, which is otherwise invisible — the rows are claimed, the sweep reports itself as having run, and the volume does not shrink.
 - **An attachment that is in the bucket and invisible.** An object's key is committed before the object exists, so a worker killed between the two leaves a row in `pending` naming exactly what it was writing ([ADR-087](../DECISIONS.md)). The `uploads` worker settles those every five minutes. If `wasla_media_upload_reconciliation_total{outcome="pending"}` keeps rising while `finalized` stays flat, that loop is not running — check `WORKER_KINDS` — or the store is not answering, which shows up as `unreachable`.
 - **A collection attempt whose outcome nobody knows.** A charge is committed before Paymob is asked to move money, so a worker killed between the two leaves a row saying a card may already have been debited ([ADR-088](../DECISIONS.md)). The billing sweep asks Paymob about those every ten minutes — but only if `PAYMOB_API_KEY` is set, which is a *different* credential from `PAYMOB_SECRET_KEY`. Without it nothing is ever charged twice and nothing is ever resolved either: watch `wasla_payment_reconciliation_total{outcome="pending"}` and `wasla_oldest_pending_payment_age_seconds`.

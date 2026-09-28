@@ -121,7 +121,7 @@ An account row carries the workspace's own Meta token, encrypted (ADR-034, super
 
 ## Parsing
 
-The parser never raises. Meta adds fields and message types continuously, so entries that cannot be understood are counted (`ignored`) rather than rejected, and the raw payload of every stored event is kept whole so it can be reinterpreted after new support ships.
+The parser never raises. Meta adds fields and message types continuously, so entries that cannot be understood are counted (`ignored`) rather than rejected, and the raw payload of every stored event is kept whole while it can still matter: until the event is processed, and for `WHATSAPP_EVENT_PAYLOAD_RETENTION_DAYS` (30 by default) after that, so it can be reinterpreted after new support ships. Then the retention worker clears it (DB-011): the payload repeats customer text and phone numbers already held in `messages`, and nothing reads it once an event is handled. The event row itself is kept — its id, event id, state and timestamps — because that is what deduplicates Meta's retries and what recovery reads; `payload_redacted_at` says when the payload went, and a CHECK refuses a missing payload without it. A received or failed event keeps its payload however old it is. `wasla_webhook_payload_retention_total{outcome="pending"}` above zero across passes is a sweep that is not keeping up.
 
 ## Idempotency
 

@@ -280,6 +280,14 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Stored files the retention sweep removed, failed to remove, or is still holding.",
         ("outcome",),
     ),
+    # Raw webhook payload retention (DB-011). Two fixed values: `redacted`
+    # (cleared this pass) and `pending` (processed events past their window
+    # still holding a payload - a level written as a counter, as above). A
+    # `pending` that keeps growing is a sweep that has stopped keeping up.
+    "wasla_webhook_payload_retention_total": (
+        "Processed WhatsApp webhook payloads the retention sweep cleared, or still holds.",
+        ("outcome",),
+    ),
     # Upload reconciliation (ADR-087). One label again, six fixed values, and
     # nothing that identifies a workspace, a file or an object: no tenant, no
     # media id, no storage key, no filename, no hash, no bucket. The cardinality
@@ -866,6 +874,18 @@ async def record_retention_pass(*, purged: int, failed: int, pending: int) -> No
         await _increment_by("wasla_media_retention_total", {"outcome": "pending"}, pending)
 
 
+async def record_webhook_payload_retention(*, redacted: int, pending: int) -> None:
+    """One webhook payload retention pass (DB-011). See the counter's note."""
+    if redacted:
+        await _increment_by(
+            "wasla_webhook_payload_retention_total", {"outcome": "redacted"}, redacted
+        )
+    if pending:
+        await _increment_by(
+            "wasla_webhook_payload_retention_total", {"outcome": "pending"}, pending
+        )
+
+
 async def record_media_outcome(outcome: str) -> None:
     """One attachment reached its terminal state (MEDIA-15)."""
     label = outcome if outcome in MEDIA_OUTCOMES else "unknown"
@@ -1021,7 +1041,7 @@ BILLING_OUTCOMES: Final[dict[str, frozenset[str]]] = {
         {"requested", "refused", "confirmed", "review_requested"}
     ),
     "wasla_billing_hosted_reconciliation_total": frozenset(
-        {"settled", "declined", "still_pending", "not_found", "unreachable", "expired"}
+        {"settled", "declined", "still_pending", "not_found", "unreachable", "expired", "reversed"}
     ),
     "wasla_billing_incidents_total": frozenset(
         {

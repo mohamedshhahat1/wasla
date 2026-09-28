@@ -156,7 +156,7 @@ class DocumentRepository(TenantScopedRepository[Document]):
         return await self._all(
             self._select()
             .where(Document.status.in_((DocumentStatus.PENDING, DocumentStatus.PROCESSING)))
-            .order_by(Document.created_at)
+            .order_by(Document.created_at, Document.id)
             .limit(limit)
         )
 
@@ -602,7 +602,7 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
                     ),
                 ),
             )
-            .order_by(DocumentIndexGeneration.created_at)
+            .order_by(DocumentIndexGeneration.created_at, DocumentIndexGeneration.id)
             .limit(limit)
             .with_for_update(of=DocumentIndexGeneration, skip_locked=True)
         )
@@ -627,7 +627,7 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
                     (GenerationState.PENDING, GenerationState.PROCESSING)
                 )
             )
-            .order_by(DocumentIndexGeneration.created_at)
+            .order_by(DocumentIndexGeneration.created_at, DocumentIndexGeneration.id)
             .limit(limit)
         )
 
@@ -641,7 +641,7 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
                 DocumentIndexGeneration.state == GenerationState.ACTIVE,
                 _not_in(space),
             )
-            .order_by(DocumentIndexGeneration.published_at)
+            .order_by(DocumentIndexGeneration.published_at, DocumentIndexGeneration.id)
             .limit(limit)
         )
 

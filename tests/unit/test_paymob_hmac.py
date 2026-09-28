@@ -179,17 +179,26 @@ def test_the_event_id_pairs_the_transaction_with_what_is_reported() -> None:
     first a duplicate of it, so a 3-D Secure payment that reported `pending`
     before it reported `success` would settle nothing at all, and a refund
     notification on the original transaction would be silently swallowed.
+
+    A refund reported on the transaction also carries the running total
+    returned (PAY-E2E-01): Paymob sends every partial refund on the same
+    parent, so without it the second refund was a duplicate of the first.
+    With no `refunded_amount_cents` the state is the whole amount.
     """
     ids = {
         _verified(DOCUMENTED_TRANSACTION).event_id,
         _verified({**DOCUMENTED_TRANSACTION, "pending": True}).event_id,
         _verified({**DOCUMENTED_TRANSACTION, "is_refunded": True}).event_id,
+        _verified(
+            {**DOCUMENTED_TRANSACTION, "is_refunded": True, "refunded_amount_cents": 30000}
+        ).event_id,
     }
 
     assert ids == {
         "192036465:succeeded",
         "192036465:pending",
-        "192036465:refunded",
+        "192036465:refunded:100000",
+        "192036465:refunded:30000",
     }
 
 
@@ -419,7 +428,8 @@ def test_a_void_is_reported_apart_from_a_refund() -> None:
 
     assert event.kind is EventKind.VOIDED
     assert event.status is PaymentStatus.REFUNDED
-    assert event.event_id.endswith(":voided")
+    # A void reverses the whole amount, so that is the state it is keyed on.
+    assert event.event_id == "192036465:voided:100000"
 
 
 def test_a_reversal_carries_the_transaction_it_reverses() -> None:

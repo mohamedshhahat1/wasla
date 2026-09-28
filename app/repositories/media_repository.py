@@ -101,7 +101,7 @@ class MediaRepository(TenantScopedRepository[MessageMedia]):
         return await self._all(
             self._select()
             .where(MessageMedia.conversation_id == conversation_id)
-            .order_by(MessageMedia.created_at)
+            .order_by(MessageMedia.created_at, MessageMedia.id)
         )
 
     async def record(
@@ -330,7 +330,7 @@ class PlatformMediaRepository(BaseRepository[MessageMedia]):
                 ),
                 MessageMedia.created_at < cutoff,
             )
-            .order_by(MessageMedia.created_at)
+            .order_by(MessageMedia.created_at, MessageMedia.id)
             .limit(limit)
         )
         return list((await self._session.execute(statement)).scalars().all())
@@ -347,7 +347,7 @@ class PlatformMediaRepository(BaseRepository[MessageMedia]):
         statement = (
             select(MessageMedia)
             .where(MessageMedia.storage_state == MediaStorageState.PURGING)
-            .order_by(MessageMedia.purge_started_at)
+            .order_by(MessageMedia.purge_started_at, MessageMedia.id)
             .limit(limit)
         )
         return list((await self._session.execute(statement)).scalars().all())
@@ -397,7 +397,7 @@ class PlatformMediaRepository(BaseRepository[MessageMedia]):
                 MessageMedia.storage_state == MediaStorageState.PENDING,
                 MessageMedia.upload_started_at < cutoff,
             )
-            .order_by(MessageMedia.upload_started_at)
+            .order_by(MessageMedia.upload_started_at, MessageMedia.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
@@ -487,7 +487,7 @@ class PlatformMediaRepository(BaseRepository[MessageMedia]):
             select(MessageMedia)
             .join(Message, Message.id == MessageMedia.message_id)
             .where(self._stranded(claimed_before=claimed_before, created_before=created_before))
-            .order_by(MessageMedia.created_at)
+            .order_by(MessageMedia.created_at, MessageMedia.id)
             .limit(limit)
             .with_for_update(of=MessageMedia, skip_locked=True)
         )

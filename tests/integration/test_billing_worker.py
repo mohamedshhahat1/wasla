@@ -671,6 +671,7 @@ async def test_a_paid_renewal_is_never_chased(db_session: AsyncSession) -> None:
     invoice = await _overdue_invoice(db_session, tenant, subscription, issued=NOW)
     invoice.status = InvoiceStatus.PAID
     invoice.amount_paid = Decimal("99.00")
+    invoice.paid_at = NOW
     await _issued(db_session, invoice, at=NOW - timedelta(days=30))
 
     await _worker(db_session).run_once(now=NOW)

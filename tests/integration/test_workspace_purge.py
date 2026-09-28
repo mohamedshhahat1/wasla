@@ -127,6 +127,7 @@ async def _money(session: AsyncSession, tenant: Tenant) -> tuple[Invoice, Paymen
         amount_due=Decimal("50.00"),
         amount_paid=Decimal("50.00"),
         currency="EGP",
+        paid_at=NOW,
         period_start=NOW - timedelta(days=60),
         period_end=NOW - timedelta(days=30),
         lines=[],
@@ -141,6 +142,9 @@ async def _money(session: AsyncSession, tenant: Tenant) -> tuple[Invoice, Paymen
         status=PaymentStatus.SUCCEEDED,
         provider="paymob",
         provider_reference=f"txn-{tenant.slug}",
+        # As settlement leaves collected money: processed, and counted.
+        processed_at=NOW,
+        applied_at=NOW,
     )
     session.add(payment)
     await session.flush()

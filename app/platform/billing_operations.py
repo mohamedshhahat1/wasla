@@ -81,7 +81,12 @@ from app.services.invoice_service import InvoiceService
 from app.services.payment_reconciliation_service import PaymentReconciler
 from app.services.plan_catalog import PlanCatalog
 from app.services.refund_service import RefundService
-from app.services.subscription_service import SubscriptionService
+from app.services.subscription_service import (
+    COMPLIMENTARY_GRANT,
+    PLATFORM_GRANT,
+    PlanGrant,
+    SubscriptionService,
+)
 
 # A hosted payment still pending after this is worth an operator's attention.
 STUCK_HOSTED_AFTER: Final = timedelta(minutes=15)
@@ -201,7 +206,7 @@ class PlatformBillingOperations:
                 select(AuditLog)
                 .where(AuditLog.tenant_id == subscription.tenant_id)
                 .where(AuditLog.target_type.in_(["subscription", "invoice", "payment"]))
-                .order_by(AuditLog.occurred_at.desc())
+                .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
                 .limit(200)
             )
         ).all()
@@ -220,7 +225,7 @@ class PlatformBillingOperations:
             await self._session.scalars(
                 select(Invoice)
                 .where(Invoice.subscription_id == subscription.id)
-                .order_by(Invoice.created_at.desc())
+                .order_by(Invoice.created_at.desc(), Invoice.id.desc())
                 .limit(100)
             )
         ).all()
@@ -295,7 +300,13 @@ class PlatformBillingOperations:
             )
             action = AuditAction.SUBSCRIPTION_PLAN_CHANGE_SCHEDULED
         elif version.price <= 0:
-            await service.apply_purchase(version=version, now=moment)
+            # Nothing to pay, so nothing was purchased: the trail names the
+            # operator who assigned it (PAY-E2E-02).
+            await service.apply_purchase(
+                version=version,
+                now=moment,
+                grant=PlanGrant(actor=actor, basis=PLATFORM_GRANT, reason=payload.reason),
+            )
             action = AuditAction.SUBSCRIPTION_PLAN_CHANGED
         elif payload.financial_basis is FinancialBasis.COMPLIMENTARY:
             ends = payload.complimentary_until or billing_calendar.add_interval(
@@ -315,7 +326,11 @@ class PlatformBillingOperations:
                     ends_at=ends,
                 )
             )
-            await service.apply_purchase(version=version, now=moment)
+            await service.apply_purchase(
+                version=version,
+                now=moment,
+                grant=PlanGrant(actor=actor, basis=COMPLIMENTARY_GRANT, reason=payload.reason),
+            )
             action = AuditAction.SUBSCRIPTION_COMPLIMENTARY_GRANT
         elif payload.financial_basis is FinancialBasis.MANUAL_PAYMENT:
             details = payload.manual_payment
@@ -727,20 +742,26 @@ class PlatformBillingOperations:
             pending_hosted_payments=[
                 PlatformPaymentRead.from_model(row)
                 for row in (
-                    await self._session.scalars(hosted.order_by(Payment.created_at).limit(20))
+                    await self._session.scalars(
+                        hosted.order_by(Payment.created_at, Payment.id).limit(20)
+                    )
                 ).all()
             ],
             unresolved_automatic_attempts=[
                 PlatformPaymentRead.from_model(row)
                 for row in (
-                    await self._session.scalars(automatic.order_by(Payment.created_at).limit(20))
+                    await self._session.scalars(
+                        automatic.order_by(Payment.created_at, Payment.id).limit(20)
+                    )
                 ).all()
             ],
             open_incidents=[
                 IncidentRead.from_model(row)
                 for row in (
                     await self._session.scalars(
-                        incidents.order_by(BillingIncident.created_at.desc()).limit(50)
+                        incidents.order_by(
+                            BillingIncident.created_at.desc(), BillingIncident.id.desc()
+                        ).limit(50)
                     )
                 ).all()
             ],
@@ -818,7 +839,7 @@ class PlatformBillingOperations:
             statement = statement.where(BillingIncident.tenant_id == tenant_id)
         page = await _page(
             self._session,
-            statement.order_by(BillingIncident.created_at.desc()),
+            statement.order_by(BillingIncident.created_at.desc(), BillingIncident.id.desc()),
             limit=limit,
             offset=offset,
         )

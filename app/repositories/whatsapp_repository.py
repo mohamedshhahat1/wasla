@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, func, null, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -170,9 +170,63 @@ class WhatsAppAccountDirectory(BaseRepository[WhatsAppAccount]):
         return await self._all(
             self._select()
             .where(WhatsAppAccount.phone_number_id == phone_number_id)
-            .order_by(WhatsAppAccount.ownership_started_at.desc())
+            .order_by(WhatsAppAccount.ownership_started_at.desc(), WhatsAppAccount.id.desc())
             .limit(MAX_OWNERSHIP_HISTORY)
         )
+
+
+class WebhookPayloadRetention(BaseRepository[WhatsAppEvent]):
+    """The unscoped write that clears old raw webhook payloads (DB-011).
+
+    Unscoped for the same reason as InboundEventSweep below: retention is a
+    platform-wide rule, not one workspace's. It clears only the payload of an
+    event that has been processed and is older than the window, so every
+    workspace's rows are touched by one rule alike. The event's identity - its
+    id, event id, state, timestamps and workspace - stays, and that is what
+    deduplicates a Meta retry and what recovery reads.
+    """
+
+    model = WhatsAppEvent
+
+    async def redact(self, *, older_than: datetime, now: datetime, limit: int) -> int:
+        """Clear one batch of payloads; return how many were cleared.
+
+        SKIP LOCKED, so two sweepers split the backlog instead of queueing on
+        it, and an event a request is updating right now waits for next pass.
+        """
+        eligible = (
+            select(WhatsAppEvent.id)
+            .where(
+                WhatsAppEvent.state == WhatsAppEventState.PROCESSED,
+                WhatsAppEvent.payload.is_not(None),
+                WhatsAppEvent.processed_at < older_than,
+            )
+            .order_by(WhatsAppEvent.processed_at, WhatsAppEvent.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+            .scalar_subquery()
+        )
+        result = await self.session.execute(
+            update(WhatsAppEvent)
+            .where(WhatsAppEvent.id.in_(eligible))
+            # SQL NULL, spelled out: the JSONB type writes a Python None as
+            # the JSON value `null`, which IS NOT NULL - the row would still
+            # count as holding a payload and be "redacted" again every batch.
+            .values(payload=null(), payload_redacted_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    async def pending(self, *, older_than: datetime) -> int:
+        """Processed events past the window that still hold a payload."""
+        count = await self.session.scalar(
+            select(func.count(WhatsAppEvent.id)).where(
+                WhatsAppEvent.state == WhatsAppEventState.PROCESSED,
+                WhatsAppEvent.payload.is_not(None),
+                WhatsAppEvent.processed_at < older_than,
+            )
+        )
+        return int(count or 0)
 
 
 class InboundEventSweep(BaseRepository[WhatsAppEvent]):
@@ -220,7 +274,7 @@ class InboundEventSweep(BaseRepository[WhatsAppEvent]):
                 WhatsAppEvent.state == WhatsAppEventState.RECEIVED,
                 WhatsAppEvent.created_at < older_than,
             )
-            .order_by(WhatsAppEvent.created_at)
+            .order_by(WhatsAppEvent.created_at, WhatsAppEvent.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
@@ -280,7 +334,7 @@ class WhatsAppAccountRepository(TenantScopedRepository[WhatsAppAccount]):
         return await self._all(
             self._select()
             .where(WhatsAppAccount.released_at.is_(None))
-            .order_by(WhatsAppAccount.created_at.desc())
+            .order_by(WhatsAppAccount.created_at.desc(), WhatsAppAccount.id.desc())
             .limit(limit)
         )
 
@@ -369,7 +423,9 @@ class WhatsAppEventRepository(TenantScopedRepository[WhatsAppEvent]):
 
     async def list_recent(self, *, limit: int = 50) -> list[WhatsAppEvent]:
         return await self._all(
-            self._select().order_by(WhatsAppEvent.received_at.desc()).limit(limit)
+            self._select()
+            .order_by(WhatsAppEvent.received_at.desc(), WhatsAppEvent.id.desc())
+            .limit(limit)
         )
 
     async def record(

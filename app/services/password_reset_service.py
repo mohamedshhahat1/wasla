@@ -38,6 +38,7 @@ from app.core.security import (
     validate_password_strength,
 )
 from app.core.telemetry import observe_auth_event
+from app.db import advisory_locks
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.user import User
 from app.repositories import UserRepository
@@ -49,10 +50,10 @@ from app.services.email_templates import EmailTemplate
 logger = get_logger(__name__)
 
 RESET_TOKEN_TTL_MINUTES: Final = 30
-# Namespace for the advisory lock that serialises reset issuance per account.
-# Arbitrary but fixed, and distinct from every other advisory lock in the
-# system, so two unrelated operations cannot block each other.
-_RESET_REQUEST_LOCK_NAMESPACE: Final = 0x5741_5302
+# The advisory lock that serialises reset issuance per account, in its own
+# namespace (`app.db.advisory_locks`). It used to share the platform owners'
+# value while claiming to be distinct (DB-016).
+_RESET_REQUEST_LOCK_NAMESPACE: Final = advisory_locks.PASSWORD_RESET_REQUEST
 # The one answer the request endpoint ever gives. Registered, unknown,
 # disabled and passwordless addresses all receive it, so the endpoint cannot
 # be used to ask which addresses have accounts.

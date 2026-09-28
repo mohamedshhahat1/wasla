@@ -102,7 +102,9 @@ class MembershipRepository(TenantScopedRepository[Membership]):
         in this workspace" - cannot accidentally count somebody who was removed.
         """
         statement = self._select() if include_revoked else self._active()
-        return await self._all(statement.order_by(Membership.created_at))
+        # `id` breaks a tie: members invited in one transaction share
+        # `created_at`, and the roster must not reorder between reads (DB-013).
+        return await self._all(statement.order_by(Membership.created_at, Membership.id))
 
     async def count_active_owners(self) -> int:
         """How many people can still administer this workspace at the top level.
@@ -131,7 +133,7 @@ class MembershipRepository(TenantScopedRepository[Membership]):
         return await self._all(
             self._active()
             .where(Membership.role == TenantRole.TENANT_OWNER)
-            .order_by(Membership.created_at)
+            .order_by(Membership.created_at, Membership.id)
         )
 
     async def add_member(self, *, user_id: uuid.UUID, role: TenantRole) -> Membership:
@@ -177,7 +179,7 @@ class UserMembershipRepository(BaseRepository[Membership]):
                 Membership.user_id == user_id,
                 Membership.status == MembershipStatus.ACTIVE,
             )
-            .order_by(Membership.created_at)
+            .order_by(Membership.created_at, Membership.id)
         )
         return await self._all(statement)
 

@@ -41,14 +41,16 @@ against a model-built schema it can only ever tautologically pass.
 from __future__ import annotations
 
 import collections
+import uuid
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.db.models import Base
 from app.db.models.audit import AuditAction
-from tests.integration.conftest import built_from_migrations
+from tests.integration.conftest import REQUIRED_EXTENSIONS, built_from_migrations
 
 pytestmark = [
     pytest.mark.integration,
@@ -174,3 +176,51 @@ async def test_alembic_check_does_not_notice_a_missing_enum_label() -> None:
         "alembic autogenerate now appears to register an enum comparator; "
         "re-read whether `alembic check` closes the AUTH-01 class of drift"
     )
+
+
+async def test_the_models_and_the_migrations_build_the_same_catalog(
+    prepared_database: str, db_connection: AsyncConnection
+) -> None:
+    """The independent catalog diff the database audit ran by hand, made permanent.
+
+    A second database is built from the models, and `scripts/schema_catalog.py`
+    compares the two object by object: columns with their defaults, every
+    constraint with its definition, validation and deferrability, every index,
+    every trigger, every trigger function's body and settings (DB-024's pinned
+    `search_path` included), each enum's labels *in order* (DB-015), and table
+    storage options (DB-020's fillfactor). `alembic check` covers some of that;
+    triggers, function bodies, enum order and storage it does not look at.
+    """
+    from scripts.schema_catalog import differences, snapshot
+
+    url = sa.engine.make_url(prepared_database)
+    sibling = f"{url.database}_catalog_{uuid.uuid4().hex[:8]}"
+    admin = create_async_engine(prepared_database, poolclass=NullPool, isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as connection:
+            await connection.execute(sa.text(f'CREATE DATABASE "{sibling}" TEMPLATE template0'))
+        model_engine = create_async_engine(
+            url.set(database=sibling).render_as_string(hide_password=False), poolclass=NullPool
+        )
+        try:
+            async with model_engine.begin() as connection:
+                for extension in REQUIRED_EXTENSIONS:
+                    await connection.execute(
+                        sa.text(f'CREATE EXTENSION IF NOT EXISTS "{extension}"')
+                    )
+                await connection.run_sync(Base.metadata.create_all)
+            async with model_engine.connect() as connection:
+                from_models = await snapshot(connection)
+        finally:
+            await model_engine.dispose()
+    finally:
+        async with admin.connect() as connection:
+            await connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{sibling}" WITH (FORCE)'))
+        await admin.dispose()
+
+    from_migrations = await snapshot(db_connection)
+    # Non-vacuous: both builds have the ledger's history trigger.
+    assert "invoices.invoices_history_immutable" in from_migrations["triggers"]
+    assert "invoices.invoices_history_immutable" in from_models["triggers"]
+    found = differences(from_migrations, from_models)
+    assert not found, f"migration-built (left) and model-built (right) schemas differ: {found}"

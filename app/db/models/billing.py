@@ -45,6 +45,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -58,7 +59,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.db.base import Base, RevisionedMixin, TimestampMixin, UUIDPrimaryKeyMixin
-from app.db.models.enums import _enum_type
+from app.db.models.enums import _enum_type, ordered_type_ddl
 
 MAX_PLAN_NAME_LENGTH: Final = 100
 MAX_PLAN_CODE_LENGTH: Final = 50
@@ -303,7 +304,12 @@ class BillingAdjustmentKind(StrEnum):
 
 BILLING_INTERVAL_TYPE = _enum_type(BillingInterval, name="billing_interval")
 PLAN_SCOPE_TYPE = _enum_type(PlanScope, name="plan_scope")
-SUBSCRIPTION_STATUS_TYPE = _enum_type(SubscriptionStatus, name="subscription_status")
+SUBSCRIPTION_STATUS_TYPE = _enum_type(
+    SubscriptionStatus,
+    name="subscription_status",
+    # `suspended` was added by a later migration (0037), after `expired`.
+    database_order=("trialing", "active", "past_due", "cancelled", "expired", "suspended"),
+)
 SCHEDULED_CHANGE_SOURCE_TYPE = _enum_type(ScheduledChangeSource, name="scheduled_change_source")
 BILLING_ADJUSTMENT_KIND_TYPE = _enum_type(BillingAdjustmentKind, name="billing_adjustment_kind")
 
@@ -429,12 +435,18 @@ class Plan(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         return self.scope is not PlanScope.TENANT or self.tenant_id == tenant_id
 
     def limit_for(self, key: LimitKey) -> int | None:
-        """The ceiling for one key, or None for unlimited.
+        """The ceiling for one key, or None for unlimited. See `validated_limit`.
 
-        A stored value that is not a positive integer is treated as unlimited
-        rather than as zero. Zero would mean "this workspace may do nothing",
-        which is never what a malformed row was meant to say, and a plan edited
-        badly should not lock a paying customer out of their own product.
+        - a non-negative integer is the ceiling - **including 0**, which means
+          "none of this" (ADR-113: a plan may deliberately exclude a feature);
+        - a missing key or JSON `null` is unlimited;
+        - anything malformed - a negative number, a string such as `"5"`, a
+          float such as `5.5`, a boolean - is read as unlimited, never as zero:
+          a plan edited badly by hand should not lock a paying customer out of
+          their own product. The plan API refuses such values on the way in.
+
+        (This used to say non-positive values were unlimited, which the code
+        has not done since ADR-113 made 0 mean zero - DB-026.)
         """
         return validated_limit(self.limits.get(key.value))
 
@@ -460,6 +472,9 @@ class PlanVersion(Base, UUIDPrimaryKeyMixin):
     __tablename__ = "plan_versions"
     __table_args__ = (
         UniqueConstraint("plan_id", "version", name="uq_plan_versions_plan_id_version"),
+        # What a subscription names, so its pinned version is always one of its
+        # own plan's (DB-004).
+        UniqueConstraint("plan_id", "id", name="uq_plan_versions_plan_id_id"),
         Index("ix_plan_versions_plan_id_effective_at", "plan_id", "effective_at"),
         CheckConstraint("version >= 1", name="version_positive"),
         CheckConstraint("price >= 0", name="price_non_negative"),
@@ -511,7 +526,7 @@ _PLAN_VERSION_IMMUTABLE_FUNCTION = DDL("""
         RAISE EXCEPTION 'plan_versions rows are immutable; publish a new version'
             USING ERRCODE = 'integrity_constraint_violation';
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """)  # type: ignore[no-untyped-call]
 _PLAN_VERSION_IMMUTABLE_TRIGGER = DDL(  # type: ignore[no-untyped-call]
     "CREATE TRIGGER plan_versions_immutable BEFORE UPDATE ON plan_versions "
@@ -556,7 +571,7 @@ CUSTOM_PLAN_SCOPE_FUNCTION_SQL: Final = """
         END IF;
         RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """
 SUBSCRIPTIONS_CUSTOM_PLAN_TRIGGER_SQL: Final = (
     "CREATE TRIGGER subscriptions_custom_plan_scope BEFORE INSERT OR UPDATE OF "
@@ -574,7 +589,7 @@ PLAN_TENANT_IMMUTABLE_FUNCTION_SQL: Final = """
         END IF;
         RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """
 PLAN_TENANT_IMMUTABLE_TRIGGER_SQL: Final = (
     "CREATE TRIGGER plans_tenant_immutable BEFORE UPDATE OF tenant_id, scope ON plans "
@@ -592,7 +607,7 @@ PLAN_DERIVE_SCOPE_FUNCTION_SQL: Final = """
         END IF;
         RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """
 PLAN_DERIVE_SCOPE_TRIGGER_SQL: Final = (
     "CREATE TRIGGER plans_derive_scope BEFORE INSERT ON plans "
@@ -618,6 +633,28 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         # One per workspace. A workspace with two has two answers to "what am I
         # allowed to do", and no correct way to choose between them.
         UniqueConstraint("tenant_id", name="uq_subscriptions_tenant_id"),
+        # What an invoice or an adjustment names, so each can name only its
+        # own workspace's subscription (DB-004).
+        UniqueConstraint("tenant_id", "id", name="uq_subscriptions_tenant_id_id"),
+        # A live period ends after it starts (DB-012). The calendar never
+        # produces anything else; this keeps repair SQL from producing it
+        # either. An *ended* subscription is exempt: ending one - an immediate
+        # cancellation, a void under the cancel policy - sets the period's end
+        # to the moment service stopped, and with renewals billed in advance
+        # that moment can precede a period that has already begun, or equal it.
+        CheckConstraint(
+            "ended_at IS NOT NULL OR current_period_end > current_period_start",
+            name="period_ordered",
+        ),
+        # The pinned version is a version *of the subscription's plan*: the
+        # audit pinned one plan's subscription to another plan's version with
+        # plain SQL, and nothing refused it (DB-004).
+        ForeignKeyConstraint(
+            ["plan_id", "plan_version_id"],
+            ["plan_versions.plan_id", "plan_versions.id"],
+            name="fk_subscriptions_plan_version_of_plan",
+            ondelete="RESTRICT",
+        ),
         Index("ix_subscriptions_tenant_id", "tenant_id"),
         Index("ix_subscriptions_status", "status"),
         Index("ix_subscriptions_plan_id", "plan_id"),
@@ -644,7 +681,6 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     # then pins it to the plan's current version on first read.
     plan_version_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("plan_versions.id", ondelete="RESTRICT"),
         nullable=True,
     )
     status: Mapped[SubscriptionStatus] = mapped_column(SUBSCRIPTION_STATUS_TYPE, nullable=False)
@@ -750,6 +786,9 @@ class Subscription(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         return f"Subscription(tenant_id={self.tenant_id!r}, status={self.status!r})"
 
 
+_CREATE_SUBSCRIPTION_STATUS, _DROP_SUBSCRIPTION_STATUS = ordered_type_ddl("subscription_status")
+event.listen(Subscription.__table__, "before_create", _CREATE_SUBSCRIPTION_STATUS)
+event.listen(Subscription.__table__, "after_drop", _DROP_SUBSCRIPTION_STATUS)
 event.listen(Subscription.__table__, "after_create", DDL(CUSTOM_PLAN_SCOPE_FUNCTION_SQL))  # type: ignore[no-untyped-call]
 event.listen(Subscription.__table__, "after_create", DDL(SUBSCRIPTIONS_CUSTOM_PLAN_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 
@@ -821,6 +860,20 @@ class BillingAdjustment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Index("ix_billing_adjustments_tenant_id", "tenant_id"),
         Index("ix_billing_adjustments_subscription_id", "subscription_id"),
         CheckConstraint("ends_at IS NULL OR ends_at > starts_at", name="window_ordered"),
+        # An adjustment explains its own workspace's invoice and subscription
+        # (DB-004).
+        ForeignKeyConstraint(
+            ["tenant_id", "invoice_id"],
+            ["invoices.tenant_id", "invoices.id"],
+            name="fk_billing_adjustments_tenant_invoice",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "subscription_id"],
+            ["subscriptions.tenant_id", "subscriptions.id"],
+            name="fk_billing_adjustments_tenant_subscription",
+            ondelete="SET NULL (subscription_id)",
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -830,11 +883,7 @@ class BillingAdjustment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         ForeignKey("tenants.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    subscription_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("subscriptions.id", ondelete="SET NULL"),
-        nullable=True,
-    )
+    subscription_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     kind: Mapped[BillingAdjustmentKind] = mapped_column(
         BILLING_ADJUSTMENT_KIND_TYPE, nullable=False
     )
@@ -843,11 +892,7 @@ class BillingAdjustment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         ForeignKey("plan_versions.id", ondelete="RESTRICT"),
         nullable=True,
     )
-    invoice_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("invoices.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
+    invoice_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     reason: Mapped[str] = mapped_column(String(MAX_BILLING_REASON_LENGTH), nullable=False)
     actor_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

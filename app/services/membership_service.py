@@ -81,12 +81,15 @@ class MembershipService:
         workspace" and "who has ever been in this workspace" are different
         questions and only one of them is what a member list means.
         """
-        views: list[MemberView] = []
-        for membership in await self._memberships.list_members(include_revoked=include_revoked):
-            user = await self._users.get_by_id(membership.user_id)
-            if user is not None:
-                views.append(MemberView(membership=membership, user=user))
-        return views
+        memberships = await self._memberships.list_members(include_revoked=include_revoked)
+        # Two statements whatever the roster's size: the memberships, then
+        # their people by id. It was one query per member (DB-014).
+        users = await self._users.get_many([membership.user_id for membership in memberships])
+        return [
+            MemberView(membership=membership, user=users[membership.user_id])
+            for membership in memberships
+            if membership.user_id in users
+        ]
 
     async def revoke(
         self,

@@ -44,7 +44,13 @@ case "${command}" in
     ;;
   migrate)
     : "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL is required}"
+    # Asked before migrating, so a missing pgvector is an instruction rather
+    # than a failure half-way through a deploy (DB-010); checked after, so a
+    # constraint left NOT VALID or an index left INVALID fails the deploy
+    # rather than going unenforced (DB-027). See scripts/db_preflight.py.
+    python -m scripts.db_preflight prerequisites
     DATABASE_URL="$MIGRATION_DATABASE_URL" alembic upgrade head
+    python -m scripts.db_preflight verify
     exec python -m scripts.provision_runtime_db_role
     ;;
   queues)

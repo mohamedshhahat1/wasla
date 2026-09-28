@@ -38,7 +38,7 @@ class InvitationRepository(TenantScopedRepository[TenantInvitation]):
         statement = (
             self._select()
             .where(TenantInvitation.status == InvitationStatus.PENDING)
-            .order_by(TenantInvitation.created_at.desc())
+            .order_by(TenantInvitation.created_at.desc(), TenantInvitation.id.desc())
             .limit(limit)
         )
         return await self._all(statement)

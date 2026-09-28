@@ -46,6 +46,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Numeric,
     String,
@@ -264,6 +265,21 @@ class TopupPurchase(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         # One purchase per invoice: settling an invoice can only ever find one
         # grant to make, however many times its money is reported.
         UniqueConstraint("invoice_id", name="uq_topup_purchases_invoice_id"),
+        # A purchase is paid by its own workspace's invoice and payment
+        # (DB-004): the audit bound one workspace's top-up to another's
+        # invoice with plain SQL.
+        ForeignKeyConstraint(
+            ["tenant_id", "invoice_id"],
+            ["invoices.tenant_id", "invoices.id"],
+            name="fk_topup_purchases_tenant_invoice",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "payment_id"],
+            ["payments.tenant_id", "payments.id"],
+            name="fk_topup_purchases_tenant_payment",
+            ondelete="RESTRICT",
+        ),
         # A retried checkout request is the same purchase, never a second one.
         UniqueConstraint(
             "tenant_id", "idempotency_key", name="uq_topup_purchases_tenant_id_idempotency_key"
@@ -340,16 +356,8 @@ class TopupPurchase(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     status: Mapped[TopupStatus] = mapped_column(TOPUP_STATUS_TYPE, nullable=False)
     # The money behind a purchase. RESTRICT: the ledger outlives any attempt to
     # tidy it away.
-    invoice_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("invoices.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
-    payment_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("payments.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
+    invoice_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    payment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     granted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -411,7 +419,7 @@ TOPUP_SNAPSHOT_FUNCTION_SQL: Final = """
         END IF;
         RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """
 TOPUP_SNAPSHOT_TRIGGER_SQL: Final = (
     "CREATE TRIGGER topup_purchases_snapshot_immutable BEFORE UPDATE ON topup_purchases "
@@ -432,7 +440,7 @@ TOPUP_SCOPE_FUNCTION_SQL: Final = """
         END IF;
         RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql
+    $$ LANGUAGE plpgsql SET search_path = public, pg_catalog
     """
 TOPUP_SCOPE_TRIGGER_SQL: Final = (
     "CREATE TRIGGER topup_purchases_product_scope BEFORE INSERT OR UPDATE OF "
@@ -440,11 +448,48 @@ TOPUP_SCOPE_TRIGGER_SQL: Final = (
     "FOR EACH ROW EXECUTE FUNCTION topup_purchases_refuse_foreign_product()"
 )
 
+# **Unpaid is never granted** (ADR-113 §6, DB-005). A purchased allowance
+# becomes live only once its invoice is paid; a platform grant carries no
+# invoice and is untouched. Deferred to commit, because settlement marks the
+# invoice paid and grants the purchase in the same transaction in whichever
+# order its flushes run; checked when a purchase *becomes* granted, re-reading
+# both rows as the transaction leaves them.
+TOPUP_GRANT_PAID_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION topup_purchases_refuse_unpaid_grant() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = public, pg_catalog
+    AS $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM topup_purchases t
+              LEFT JOIN invoices i ON i.id = t.invoice_id
+             WHERE t.id = NEW.id
+               AND t.source::text = 'purchase'
+               AND t.status::text = 'granted'
+               AND (i.id IS NULL OR i.status::text <> 'paid')
+        ) THEN
+            RAISE EXCEPTION 'a purchased top-up is granted only once its invoice is paid'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NULL;
+    END;
+    $$
+    """
+TOPUP_GRANT_PAID_TRIGGER_SQL: Final = (
+    "CREATE CONSTRAINT TRIGGER topup_purchases_grant_paid "
+    "AFTER INSERT OR UPDATE OF status ON topup_purchases "
+    "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+    "WHEN (NEW.status::text = 'granted' AND NEW.source::text = 'purchase') "
+    "EXECUTE FUNCTION topup_purchases_refuse_unpaid_grant()"
+)
+
 for _statement in (
     TOPUP_SNAPSHOT_FUNCTION_SQL,
     TOPUP_SNAPSHOT_TRIGGER_SQL,
     TOPUP_SCOPE_FUNCTION_SQL,
     TOPUP_SCOPE_TRIGGER_SQL,
+    TOPUP_GRANT_PAID_FUNCTION_SQL,
+    TOPUP_GRANT_PAID_TRIGGER_SQL,
 ):
     event.listen(TopupPurchase.__table__, "after_create", DDL(_statement))  # type: ignore[no-untyped-call]
 

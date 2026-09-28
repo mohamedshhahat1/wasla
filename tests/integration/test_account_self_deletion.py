@@ -28,7 +28,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_entitlement_service
@@ -569,6 +569,55 @@ async def test_the_address_is_not_released_for_re_registration(
 
     assert response.status_code == 202, response.text
     assert response.json() == {"status": "accepted"}
+
+
+async def test_deletion_is_a_tombstone_not_an_erasure(
+    http: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """DB-021, stated as behaviour: what a closed account keeps, and why nothing reuses it.
+
+    The row stays, with its address and name, so every foreign key that names
+    the person keeps resolving and the address stays reserved; the audit trail
+    records the deletion under the address. A second registration - in any
+    letter case - produces no second account. Changing any of this is a product
+    and legal decision (docs/AUTH.md, "The tombstone policy, stated"), not a
+    database cleanup.
+    """
+    user = await _user(db_session, email="tombstone@example.com")
+    name = user.full_name
+    session = await _login(http, user.email)
+    assert (await _delete_self(http, session)).status_code == 200
+
+    response = await http.post(
+        f"{API}/auth/register",
+        json={
+            "email": "Tombstone@Example.com",
+            "password": PASSWORD,
+            "workspace_name": "Came Back",
+            "workspace_slug": "came-back",
+        },
+    )
+    assert response.status_code == 202, response.text
+
+    rows = (
+        await db_session.execute(
+            select(User.id, User.email, User.full_name, User.deleted_at).where(
+                func.lower(User.email) == "tombstone@example.com"
+            )
+        )
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].id == user.id
+    assert rows[0].email == "tombstone@example.com"
+    assert rows[0].full_name == name
+    assert rows[0].deleted_at is not None
+    recorded = await db_session.scalar(
+        select(func.count())
+        .select_from(AuditLog)
+        .where(AuditLog.action == AuditAction.USER_DELETED, AuditLog.target_id == user.id)
+    )
+    assert recorded == 1
 
 
 async def test_closing_one_account_leaves_everybody_else_signed_in(

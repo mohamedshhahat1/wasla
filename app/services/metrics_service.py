@@ -171,6 +171,7 @@ class MetricsService:
         lines = await self._external(now=now)
         lines.extend(self._pool_lines())
         lines.extend(self._backup_lines(now=now))
+        lines.extend(await self._database_health_lines())
         lines.extend(await self._consistency_lines())
         lines.extend(await self._messaging_lines(now=now))
         lines.extend(await self._media_lines(now=now))
@@ -469,6 +470,90 @@ class MetricsService:
             [({}, float(offenders or 0))],
         )
 
+    async def _database_health_lines(self) -> list[str]:
+        """The server's own view of this database, read at the moment of the scrape.
+
+        The pool gauges say how this process uses its connections; these say
+        what PostgreSQL is doing with all of them (DB-023): how many sessions
+        are open against `max_connections`, how many are waiting on a lock, how
+        old the oldest open transaction is, how many deadlocks it has broken,
+        and how large the database and the dead tuples of its busiest tables
+        have grown. Read through the application's own pool and identity - no
+        exporter, no second credential. The runtime role sees every session's
+        existence, and the state and wait of the sessions it owns, which are
+        the application's; `docs/OBSERVABILITY.md` says what a deployment that
+        also wants the migration and backup sessions grants.
+
+        `table` is a fixed list of five, not whatever tables exist.
+        """
+        database = self._database
+        if database is None:
+            return []
+        try:
+            async with database.session() as session:
+                activity = (await session.execute(text(DATABASE_ACTIVITY_SQL))).one()
+                database_row = (await session.execute(text(DATABASE_TOTALS_SQL))).one()
+                dead = (
+                    await session.execute(
+                        text(DEAD_TUPLES_SQL), {"tables": list(DEAD_TUPLE_TABLES)}
+                    )
+                ).all()
+        except Exception:
+            logger.warning(
+                "metrics.database_health_read_failed",
+                extra={"event": "metrics.database_health_read_failed"},
+            )
+            return []
+
+        total, active, idle_in_transaction, lock_waiting, oldest, maximum = activity
+        deadlocks, size = database_row
+        lines: list[str] = []
+        lines.extend(
+            render_gauge_lines(
+                "wasla_db_connections",
+                "Sessions open against this database, by state.",
+                [
+                    ({"state": "all"}, float(total)),
+                    ({"state": "active"}, float(active)),
+                    ({"state": "idle_in_transaction"}, float(idle_in_transaction)),
+                ],
+            )
+        )
+        for name, help_text, value in (
+            (
+                "wasla_db_max_connections",
+                "The server's max_connections, the ceiling wasla_db_connections approaches.",
+                float(maximum),
+            ),
+            (
+                "wasla_db_lock_waiting_sessions",
+                "Sessions currently waiting to acquire a lock.",
+                float(lock_waiting),
+            ),
+            (
+                "wasla_db_oldest_transaction_age_seconds",
+                "Age of the oldest open transaction in this database.",
+                float(oldest),
+            ),
+            ("wasla_db_size_bytes", "Size of this database on disk.", float(size)),
+        ):
+            lines.extend(render_gauge_lines(name, help_text, [({}, value)]))
+        lines.extend(
+            _counter(
+                "wasla_db_deadlocks_total",
+                "Deadlocks PostgreSQL detected and broke in this database since stats reset.",
+                [({}, float(deadlocks))],
+            )
+        )
+        lines.extend(
+            render_gauge_lines(
+                "wasla_db_dead_tuples",
+                "Dead row versions awaiting vacuum, on the busiest tables.",
+                [({"table": str(table)}, float(count)) for table, count in dead],
+            )
+        )
+        return lines
+
     def _pool_lines(self) -> list[str]:
         """This process's connection pool, read at the moment of the scrape.
 
@@ -664,6 +749,35 @@ class MetricsService:
             "Whether a worker kind has refreshed its liveness key inside its expiry.",
             samples,
         )
+
+
+# The tables whose bloat is worth a series (DB-020, DB-011): the conversation
+# row every message rewrites, the two fastest-growing logs, and the ledger.
+DEAD_TUPLE_TABLES: Final = ("conversations", "messages", "whatsapp_events", "invoices", "payments")
+
+# Every session counts towards the total, this one included - it holds a slot
+# like any other. The scrape's own session is left out of the rest: it is
+# always active, and its transaction is always young.
+DATABASE_ACTIVITY_SQL: Final = """
+    SELECT count(*),
+           count(*) FILTER (WHERE state = 'active' AND pid <> pg_backend_pid()),
+           count(*) FILTER (WHERE state LIKE 'idle in transaction%'),
+           count(*) FILTER (WHERE wait_event_type = 'Lock'),
+           coalesce(max(extract(epoch FROM clock_timestamp() - xact_start))
+                    FILTER (WHERE pid <> pg_backend_pid()), 0),
+           current_setting('max_connections')::int
+      FROM pg_stat_activity
+     WHERE datname = current_database()
+"""
+DATABASE_TOTALS_SQL: Final = """
+    SELECT deadlocks, pg_database_size(current_database())
+      FROM pg_stat_database WHERE datname = current_database()
+"""
+DEAD_TUPLES_SQL: Final = """
+    SELECT relname, n_dead_tup FROM pg_stat_user_tables
+     WHERE schemaname = current_schema() AND relname = ANY(:tables)
+     ORDER BY relname
+"""
 
 
 def _counter(

@@ -295,16 +295,52 @@ What it does, in order:
 
 1. Refuses the configured production database unless explicitly permitted.
 2. Creates the target, or refuses to touch an existing one without `--clean`.
-3. `pg_restore --exit-on-error`, so a partially restored database is never
+3. **Makes sure `vector` and `pgcrypto` are present in the target**, creating
+   them if this identity can, and stopping with instructions if it cannot (see
+   "Restore prerequisites" below). The dump's own extension entries are then
+   skipped.
+4. `pg_restore --exit-on-error`, so a partially restored database is never
    reported as a success. Without that flag `pg_restore` reports errors and
    carries on, and the shape of *that* failure is a database that looks
    restored and is missing a table.
-4. **Verifies.** This is the part that makes it a procedure rather than an
+5. **Verifies.** This is the part that makes it a procedure rather than an
    invocation:
    - the schema has tables;
    - `vector` and `pgcrypto` came back, so embeddings are usable;
    - `alembic_version` is populated, and matches `WASLA_EXPECTED_HEAD` if set;
-   - representative rows can be counted.
+   - representative rows can be counted;
+   - every constraint is validated, every index valid and every trigger
+     enabled (DB-027) — a rule the schema declares and is not enforcing fails
+     the restore.
+
+### Restore prerequisites
+
+**pgvector must already be installed, or the restoring identity must be a
+superuser.** `vector` is not a *trusted* extension, so `CREATE EXTENSION
+vector` needs a superuser. The database audit found this the hard way: a
+restore run as a `CREATEDB NOSUPERUSER` owner — which is what a managed
+provider hands out, and what docs/DEPLOYMENT.md recommends for migrations —
+failed at the dump's first statement with "permission denied to create
+extension" (DB-010). The same statement is migration 0001's.
+
+| Server | What to do before restoring or migrating |
+| --- | --- |
+| Self-hosted PostgreSQL | A superuser runs `CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pgcrypto;` in the target database (or in `template1`, so every new database has them). |
+| Managed provider | Enable `vector` (and `pgcrypto`) through the provider's extension allow-list and create them as it documents. Most providers let the database owner create allow-listed extensions. |
+
+Once present, `CREATE EXTENSION IF NOT EXISTS` is a no-op for any role, so
+neither the restore nor migration 0001 needs the superuser again.
+
+Both entry points ask first rather than failing half-way:
+
+- `restore_postgres.sh` checks the target before `pg_restore` and stops with
+  the table above if the extension is missing and cannot be created;
+- the `migrate` command runs `python -m scripts.db_preflight prerequisites`
+  before `alembic upgrade head`, and `python -m scripts.db_preflight verify`
+  after it.
+
+`tests/integration/test_database_preflight.py` runs both as a role that is not a
+superuser, against a database without pgvector, and requires the refusal.
 
 A restore that produces a database the application cannot query is not a
 recovery. The verification step is what says so out loud.
@@ -464,25 +500,96 @@ somebody will argue about.
 
 ## Recovery objectives
 
-Stated as two separate things, because conflating them is how a number nobody
-can meet ends up in a contract.
+**The contract (DB-009).** The database holds the financial ledger — payments,
+callbacks, incidents, grants — and a day of it cannot be rebuilt by hand. So a
+production deployment is held to:
 
-**What the schedule implies today** — observed facts, not promises:
+| Objective | Target | Mechanism |
+| --- | --- | --- |
+| **RPO** — writes that may be lost | **≤ 5 minutes** | continuous WAL archiving off-host (`archive_timeout = 60s`), or a managed provider's point-in-time recovery with an equal or shorter window |
+| **RTO** — time to serve again | **≤ 2 hours** for a database up to 50 GB | restore the newest base backup, replay WAL to the chosen moment, `alembic upgrade head`, readiness check |
+| Base backup frequency | daily, with the logical `pg_dump` kept alongside | base backups bound replay time; the dump is the format-independent second copy |
+| WAL / PITR window | ≥ 7 days | archive retention on the object store; a managed provider's PITR retention setting |
+| Logical dumps | daily, 14 days local staging, off-host retention per "Retention" | `backup_postgres.sh`, unchanged |
+| Restore ownership | the on-call engineer runs it; the platform owner decides the target moment | an operator chooses *when to recover to* because only they know when the bad write happened |
+| Alerting | `BackupStale` (36 h), `BackupStatusMissing` | `deploy/monitoring/alerts.yml`, tested by promtool |
+
+**What the repository proves, and what it cannot.** The logical dump, its
+off-host copy and its restore are proved by the drills on this page. The PITR
+*mechanism* is proved by `scripts/pitr_drill.sh` (below). **Whether a
+deployment actually archives WAL off-host, keeps it seven days and meets the
+RTO at its own data volume is a property of that deployment's infrastructure,
+and no production deployment exists to have verified it.** Until a deployment
+records its own PITR drill against its own archive, its RPO is the logical
+dump's: ~24 hours.
+
+**What the schedule alone implies** — observed facts, the floor if WAL
+archiving is not configured:
 
 | | |
 | --- | --- |
 | Backup frequency | daily at 02:17, jittered, `Persistent=true` |
 | Implied worst-case data loss | **~24 hours** of writes |
-| Observed restore duration | ~4 minutes for a 150 KB dump on a laptop, of which ~3½ was `pg_restore` |
+| Observed restore duration | ~4 minutes for a 150 KB dump on a laptop; 3 s for the audit's medium-scale dump |
 | What that says about a real database | very little — it scales with data volume and has never been measured against one |
 
-**What has not been adopted:** no RPO or RTO has been agreed by anybody. The
-numbers above are what the current configuration produces, not targets it is
-held to. Adopting an RPO shorter than a day means continuous archiving
-(`archive_command` plus base backups, or a managed provider's point-in-time
-recovery), which is a different mechanism rather than a more frequent
-`pg_dump`. Adopting an RTO means measuring a restore at production scale, which
-nobody has done because there is no production.
+### Point-in-time recovery
+
+Continuous archiving is a different mechanism from a more frequent `pg_dump`:
+PostgreSQL copies every completed WAL segment to an archive as it is written,
+and a recovery replays a base backup forward through those segments to any
+moment in the window.
+
+**Self-hosted.** Configure the server with
+
+```
+wal_level = replica
+archive_mode = on
+archive_timeout = 60
+archive_command = '<copy %p to the off-host archive as %f, failing if it exists>'
+```
+
+and take a base backup daily (`pg_basebackup -X stream`, or a tool such as
+WAL-G or pgBackRest, which also ship WAL to the same S3-compatible store the
+dumps go to and handle retention). **Do not enable `archive_mode` without a
+working `archive_command`:** PostgreSQL keeps every segment it failed to
+archive, and a disk filling with WAL takes the database down. This repository's
+compose file therefore does not enable it; a deployment that does must also
+alert on `pg_stat_archiver.failed_count`.
+
+**Managed.** Enable the provider's PITR, set its retention to at least seven
+days, and record where its restore procedure lives.
+
+**Recovering to a moment.** Restore the newest base backup taken *before* the
+moment into an empty data directory, add `recovery.signal` and
+
+```
+restore_command = '<copy %f from the archive to %p>'
+recovery_target_time = '2026-09-27 04:37:15+00'
+recovery_target_action = 'promote'
+```
+
+start the server, and it replays to that moment and opens for writes. Then run
+`python -m scripts.db_preflight verify`, `alembic upgrade head` if the code has
+moved on, and the readiness check, exactly as after a dump restore.
+
+**The drill.** `sh scripts/pitr_drill.sh` does all of that on throwaway
+containers of the production image, with the schema at the migration head:
+writes A, takes a base backup, writes B, records the target time, writes C and
+deletes A, destroys the server, recovers the base backup to the target from the
+archive alone, and requires A and B present, C absent and A's deletion not
+replayed. Run on 2026-09-27 at head 0080:
+
+```
+source at migration head 0080
+data A written; taking a base backup
+data B written; recovery target is 2026-09-27 04:37:15.301768+00
+after the target: data C written and data A deleted
+WAL through C archived: 5 segment(s)
+source server destroyed; recovering the base backup to the target
+recovered tenants: pitr-a,pitr-b; migration head 0080
+PASS: A present, B present, C absent, A's later deletion not replayed
+```
 
 ---
 
@@ -491,8 +598,10 @@ nobody has done because there is no production.
 Stated plainly, because a backup page that implies more than it delivers is how
 somebody discovers the gap during an incident:
 
-- **No agreed RPO or RTO.** See above: what the schedule implies is written
-  down; what anybody has committed to is nothing.
+- **Production PITR is not verified.** The RPO and RTO above are the contract a
+  deployment is held to, and the mechanism is drilled locally; no deployment
+  has yet shown its own WAL archive restoring to a moment. Until one has, treat
+  the RPO as the logical dump's ~24 hours.
 - **No off-host destination is configured by default.** The mechanism ships and
   is proved; choosing a bucket, a region and a lifecycle policy is the
   deployment's, and until that happens `BACKUP_DESTINATION=none` refuses to

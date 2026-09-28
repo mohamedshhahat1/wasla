@@ -42,14 +42,15 @@ from sqlalchemy import ColumnElement, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PermissionDeniedError, ValidationError
+from app.db import advisory_locks
 from app.db.models.enums import PlatformRole
 from app.db.models.user import User
 
-# Namespace for platform-security advisory locks, distinct from the workspace
-# creation namespace in `app.services.workspace_service` so the two cannot
-# block each other. The key is a constant rather than derived: the resource
-# being protected is "the set of platform owners", of which there is one.
-_PLATFORM_LOCK_NAMESPACE: Final = 0x5741_5302
+# The advisory lock over the set of platform owners, in its own namespace
+# (`app.db.advisory_locks`). The key is a constant rather than derived: the
+# resource being protected is "the set of platform owners", of which there is
+# one.
+_PLATFORM_LOCK_NAMESPACE: Final = advisory_locks.PLATFORM_OWNERS
 _PLATFORM_OWNER_LOCK_KEY: Final = 1
 
 LAST_PLATFORM_OWNER_MESSAGE: Final = (

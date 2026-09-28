@@ -13,6 +13,7 @@ from typing import Any, Final, cast
 from fastapi import FastAPI
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
+from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -273,6 +274,51 @@ def register_exception_handlers(app: FastAPI) -> None:
             headers=getattr(error, "headers", None),
         )
 
+    async def handle_database_error(request: Request, exc: Exception) -> Response:
+        # Contention and duplicates are expected under concurrency and are
+        # answered as such (DB-017); anything else PostgreSQL refuses is
+        # unexpected and goes to the generic handler. No SQLSTATE, constraint
+        # or statement reaches the caller: those describe the schema.
+        from app.db.errors import is_retryable, is_unique_violation, sqlstate
+
+        if is_retryable(exc):
+            logger.warning(
+                "request.database_contention",
+                extra={
+                    "event": "request.database_contention",
+                    "sqlstate": sqlstate(exc),
+                    "method": request.method,
+                    "path": request.url.path,
+                },
+            )
+            return JSONResponse(
+                status_code=503,
+                content=error_payload(
+                    "retryable_conflict",
+                    "The request conflicted with concurrent work. Retry it.",
+                    request_id=_request_id(request),
+                ),
+                headers={"Retry-After": "1"},
+            )
+        if is_unique_violation(exc):
+            logger.warning(
+                "request.duplicate_write",
+                extra={
+                    "event": "request.duplicate_write",
+                    "method": request.method,
+                    "path": request.url.path,
+                },
+            )
+            return JSONResponse(
+                status_code=409,
+                content=error_payload(
+                    "conflict",
+                    "The request conflicts with a record that already exists.",
+                    request_id=_request_id(request),
+                ),
+            )
+        return await handle_unexpected_error(request, exc)
+
     async def handle_unexpected_error(request: Request, exc: Exception) -> Response:
         logger.exception(
             "request.unhandled_error",
@@ -315,4 +361,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(WaslaError, handle_wasla_error)
     app.add_exception_handler(RequestValidationError, handle_request_validation_error)
     app.add_exception_handler(StarletteHTTPException, handle_http_exception)
+    app.add_exception_handler(DBAPIError, handle_database_error)
     app.add_exception_handler(Exception, handle_unexpected_error)

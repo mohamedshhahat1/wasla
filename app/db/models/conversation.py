@@ -17,6 +17,7 @@ from enum import StrEnum
 from typing import Any, Final
 
 from sqlalchemy import (
+    DDL,
     BigInteger,
     Connection,
     DateTime,
@@ -348,6 +349,21 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         return self.priority is not ConversationPriority.NORMAL
 
 
+# Every message writes its conversation twice: the sequence trigger bumps
+# `last_message_sequence`, and the projection or the send moves the indexed
+# `last_message_at`. The bump touches no indexed column, so it can be a HOT
+# update - if the page has room for the new version. Ten percent of each page is
+# left for exactly that (DB-020); measured, the bump went from 92% to 98.6% HOT
+# and the table's indexes stopped growing with it. Set by migration 0080.
+CONVERSATIONS_FILLFACTOR: Final = 90
+
+event.listen(
+    Conversation.__table__,
+    "after_create",
+    DDL(f"ALTER TABLE conversations SET (fillfactor = {CONVERSATIONS_FILLFACTOR})"),  # type: ignore[no-untyped-call]
+)
+
+
 class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     """One message in either direction.
 
@@ -511,10 +527,12 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
 # its own name, rather than a NOT NULL error describing a symptom.
 #
 # Migration 0058 carries its own frozen copy of this text; a change here needs a
-# migration of its own.
+# migration of its own. 0080 pinned its search_path (DB-024).
 MESSAGE_SEQUENCE_FUNCTION: Final = """
 CREATE OR REPLACE FUNCTION wasla_assign_message_sequence() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql
+SET search_path = public, pg_catalog
+AS $$
 BEGIN
     UPDATE conversations
        SET last_message_sequence = last_message_sequence + 1

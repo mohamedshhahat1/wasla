@@ -604,15 +604,16 @@ class AuthService:
     async def list_workspaces(self, *, user: User) -> list[WorkspaceContext]:
         """Every workspace this user may open.
 
-        One lookup per membership. People belong to a handful of workspaces, so
-        this stays cheap; if that ever stops being true it becomes a join.
+        Two statements whatever the number of workspaces: the memberships, then
+        their tenants by id (DB-014).
         """
-        contexts: list[WorkspaceContext] = []
-        for membership in await self._memberships.list_for_user(user.id):
-            tenant = await self._tenants.get_by_id(membership.tenant_id)
-            if tenant is not None and tenant.is_active:
-                contexts.append(WorkspaceContext(membership=membership, tenant=tenant))
-        return contexts
+        memberships = await self._memberships.list_for_user(user.id)
+        tenants = await self._tenants.get_many([membership.tenant_id for membership in memberships])
+        return [
+            WorkspaceContext(membership=membership, tenant=tenants[membership.tenant_id])
+            for membership in memberships
+            if membership.tenant_id in tenants and tenants[membership.tenant_id].is_active
+        ]
 
     async def _resolve_workspace(
         self,

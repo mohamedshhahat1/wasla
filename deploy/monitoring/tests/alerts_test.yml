@@ -1616,3 +1616,172 @@ tests:
     - eval_time: 20m
       alertname: BillingCustomPlanFailureSpike
       exp_alerts: []
+
+  # ---------------------------------------------------------------- database
+  - interval: 1m
+    name: a backup older than 36 hours fires after fifteen minutes
+    input_series:
+      # The age grows a minute per minute: no backup ever lands.
+      - series: 'wasla_backup_age_seconds{job="wasla-api"}'
+        values: "0+60x2200"
+    alert_rule_test:
+      - eval_time: 2100m
+        alertname: BackupStale
+        exp_alerts: []
+      - eval_time: 2190m
+        alertname: BackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: database
+            exp_annotations:
+              summary: "No backup has reached off-host storage for over 36 hours"
+              description: >-
+                The last backup that reached its off-host destination is older than 36 hours. Everything written since is recoverable only from the live database. Read failed_stage in the backup status file.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: a daily backup that keeps landing never fires
+    input_series:
+      # Resets to zero every 24 hours.
+      - series: 'wasla_backup_age_seconds{job="wasla-api"}'
+        values: "0+60x1440 0+60x1440"
+    alert_rule_test:
+      - eval_time: 2800m
+        alertname: BackupStale
+        exp_alerts: []
+
+  - interval: 1m
+    name: a missing backup age fires after two hours
+    input_series:
+      - series: 'wasla_db_size_bytes{job="wasla-api"}'
+        values: "1+0x200"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: BackupStatusMissing
+        exp_alerts: []
+      - eval_time: 150m
+        alertname: BackupStatusMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: database
+            exp_annotations:
+              summary: "The API publishes no backup age"
+              description: >-
+                wasla_backup_age_seconds has been absent for two hours: the backup status file is not mounted, has never been written, or no backup has ever succeeded. See "Backups have stopped" in the runbook.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: one deadlock fires, and no deadlocks do not
+    input_series:
+      - series: 'wasla_db_deadlocks_total{job="wasla-api"}'
+        values: "3+0x30 4+0x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: DatabaseDeadlocks
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: DatabaseDeadlocks
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: database
+              job: wasla-api
+            exp_annotations:
+              summary: "PostgreSQL broke a deadlock"
+              description: >-
+                PostgreSQL detected a deadlock and aborted one of the transactions. The server log names both statements (log_lock_waits is on); two code paths are taking the same locks in opposite orders.
+              runbook: docs/RUNBOOK.md
+      - eval_time: 80m
+        alertname: DatabaseDeadlocks
+        exp_alerts: []
+
+  - interval: 1m
+    name: sessions above 80% of max_connections fire after ten minutes
+    input_series:
+      - series: 'wasla_db_connections{job="wasla-api", state="all"}'
+        values: "100+0x20 250+0x30"
+      - series: 'wasla_db_max_connections{job="wasla-api"}'
+        values: "300+0x50"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: DatabaseConnectionsNearLimit
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: DatabaseConnectionsNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: database
+            exp_annotations:
+              summary: "Database sessions are above 80% of max_connections"
+              description: >-
+                New connections will soon be refused. Compare wasla_db_pool_checked_out per process with the connection budget in docs/DEPLOYMENT.md; a replica added without resizing pools is the usual cause.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: a queue of lock waiters fires after five minutes
+    input_series:
+      - series: 'wasla_db_lock_waiting_sessions{job="wasla-api"}'
+        values: "0+0x10 8+0x20"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: DatabaseLockWaits
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: DatabaseLockWaits
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: database
+            exp_annotations:
+              summary: "Sessions are queueing on locks"
+              description: >-
+                More than five sessions have been waiting on locks for five minutes. Runtime statements give up after DATABASE_LOCK_TIMEOUT_MS, so this is usually one long transaction holding a hot row; see pg_stat_activity and pg_blocking_pids.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: a transaction open for half an hour fires
+    input_series:
+      - series: 'wasla_db_oldest_transaction_age_seconds{job="wasla-api"}'
+        values: "0+60x60"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: DatabaseLongTransaction
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: DatabaseLongTransaction
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: database
+            exp_annotations:
+              summary: "A transaction has been open for over half an hour"
+              description: >-
+                The oldest open transaction is older than 30 minutes. While it is open, vacuum cannot remove the row versions it might still see. Find it in pg_stat_activity by xact_start.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 5m
+    name: dead tuples above a million for an hour fire per table
+    input_series:
+      - series: 'wasla_db_dead_tuples{job="wasla-api", table="conversations"}'
+        values: "2000000+0x30"
+      - series: 'wasla_db_dead_tuples{job="wasla-api", table="messages"}'
+        values: "1000+0x30"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: DatabaseDeadTuplesHigh
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: DatabaseDeadTuplesHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: database
+              table: conversations
+            exp_annotations:
+              summary: "conversations holds over a million dead row versions"
+              description: >-
+                Autovacuum is not keeping up with conversations. Check last_autovacuum in pg_stat_user_tables and whether a long transaction is holding it back.
+              runbook: docs/RUNBOOK.md
