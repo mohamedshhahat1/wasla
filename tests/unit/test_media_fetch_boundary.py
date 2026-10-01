@@ -51,6 +51,9 @@ CAP = 1_000_000
 FAKE_DNS = {
     GRAPH: "157.240.1.35",
     LOOKASIDE: "157.240.1.36",
+    # The fully qualified spelling of the same name, which the trailing-dot
+    # test resolves; without it the lookup fell through to live DNS (OMNI-024).
+    f"{LOOKASIDE}.": "157.240.1.36",
     SCONTENT: "157.240.1.37",
     ATTACKER: "1.1.1.1",
     "evilfbcdn.net": "1.0.0.1",

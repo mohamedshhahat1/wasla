@@ -7,8 +7,10 @@ PostgreSQL, Redis, Meta or OpenAI credentials.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import pathlib
+import socket
 
 # Set before anything imports `app`, and that ordering is load-bearing.
 # `app/main.py` builds a `Settings` at module scope, and the settings validator
@@ -21,6 +23,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -179,6 +182,51 @@ class FakeDependency:
 
     async def dispose(self) -> None:
         return None
+
+
+# What a test may still look up: an address literal (every service the suites
+# run against is reached by one, or by `localhost`) - never a name that only
+# the network could answer.
+_REAL_GETADDRINFO = socket.getaddrinfo
+_LOCAL_NAMES = frozenset({"localhost", "localhost.localdomain"})
+
+
+def _is_address_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
+@pytest.fixture(autouse=True)
+def _no_live_dns(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test resolves a real host name, so no test can reach a real provider (OMNI-024).
+
+    It happened: a seam moved under the delivery-protocol suite, the patch that
+    was its provider double reached nothing, and its sends went to the real
+    Graph API with a fixture token - silently, because the refusal looked like
+    any other provider answer. With every name lookup refused here, a double
+    that stops intercepting fails on the lookup instead.
+
+    Address literals and `localhost` still resolve, which is how the suites
+    reach PostgreSQL, Redis and the object store. A test that needs a name
+    answered injects a resolver (`app.core.net.static_resolver`) or patches
+    `getaddrinfo` itself, which overrides this for that test. The opt-in
+    real-provider suite is the one exception: reaching the provider is its point.
+    """
+    if "real_provider" in request.node.path.parts:
+        return
+
+    def guarded(host: Any, *args: Any, **kwargs: Any) -> Any:
+        name = host.decode() if isinstance(host, bytes) else host
+        if name is None or name.lower() in _LOCAL_NAMES or _is_address_literal(name):
+            return _REAL_GETADDRINFO(host, *args, **kwargs)
+        raise socket.gaierror(
+            socket.EAI_NONAME, f"live DNS is disabled in the test suite (asked for {name!r})"
+        )
+
+    monkeypatch.setattr(socket, "getaddrinfo", guarded)
 
 
 @pytest.fixture

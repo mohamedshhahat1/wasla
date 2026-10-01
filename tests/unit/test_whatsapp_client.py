@@ -19,6 +19,7 @@ from app.core.exceptions import (
     RateLimitedError,
     ValidationError,
 )
+from app.core.net import static_resolver
 from app.integrations.whatsapp.client import MediaTooLargeError, WhatsAppClient
 
 ACCESS_TOKEN = "meta-access-token"
@@ -69,6 +70,11 @@ def _client(recorder: Recorder, **overrides: Any) -> WhatsAppClient:
     separately, in `test_whatsapp_lifecycle_and_backoff.py`.
     """
     overrides.setdefault("jitter", lambda: 0.0)
+    # The CDN host a descriptor names is judged before it is fetched, and that
+    # judgement used to ask the real DNS - so this suite failed on a machine
+    # without it (OMNI-024). A fixed public answer keeps it hermetic; the
+    # public-address rule still judges it.
+    overrides.setdefault("resolver", static_resolver({"lookaside.fbsbx.com": ["157.240.1.36"]}))
     return WhatsAppClient(
         http=httpx.AsyncClient(transport=httpx.MockTransport(recorder.handler)),
         access_token=ACCESS_TOKEN,

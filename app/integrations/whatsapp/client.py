@@ -66,7 +66,13 @@ from app.core.exceptions import (
 )
 from app.core.hostnames import HostNotAuthorizedError, credential_host, normalize_roots, within
 from app.core.logging import get_logger
-from app.core.net import MAX_REDIRECTS, UnsafeUrlError, build_guarded_client, validate_outbound_url
+from app.core.net import (
+    MAX_REDIRECTS,
+    Resolver,
+    UnsafeUrlError,
+    build_guarded_client,
+    validate_outbound_url,
+)
 from app.core.telemetry import CallOutcome, Provider, ProviderCall
 
 logger = get_logger(__name__)
@@ -372,6 +378,7 @@ class WhatsAppClient:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[], float] | None = None,
         media_host_roots: Iterable[str] = DEFAULT_META_MEDIA_HOST_ROOTS,
+        resolver: Resolver | None = None,
     ) -> None:
         if not access_token:
             # An absent platform credential is our misconfiguration, not the
@@ -390,6 +397,11 @@ class WhatsAppClient:
         # The hosts the token may be sent to on a read (MEDIA-01). Normalised
         # once here; `_credential_headers` is the only place it is consulted.
         self._media_host_roots = normalize_roots(media_host_roots)
+        # Who answers "what address is this host?" when a provider-supplied URL
+        # is judged. The system's, always, in production; a fixed table in a
+        # test, so the suite needs no network (OMNI-024). The judgement itself
+        # is not injectable.
+        self._resolver = resolver
 
     async def send_text(
         self,
@@ -599,7 +611,7 @@ class WhatsAppClient:
         # network. Validated before the first request rather than only on
         # redirects, because the first hop is a hop like any other.
         try:
-            validate_outbound_url(url)
+            validate_outbound_url(url, resolver=self._resolver)
         except UnsafeUrlError as error:
             logger.warning(
                 "whatsapp.media_url_refused",
@@ -749,7 +761,7 @@ class WhatsAppClient:
                 raise ExternalServiceError("WhatsApp could not return this file.")
             url = hop.redirect_to
             try:
-                validate_outbound_url(url)
+                validate_outbound_url(url, resolver=self._resolver)
             except UnsafeUrlError as error:
                 logger.warning(
                     "whatsapp.media_redirect_refused",
@@ -881,7 +893,7 @@ class WhatsAppClient:
                 return response
             url = str(response.url.join(location))
             try:
-                validate_outbound_url(url)
+                validate_outbound_url(url, resolver=self._resolver)
             except UnsafeUrlError as error:
                 logger.warning(
                     "whatsapp.media_redirect_refused",
