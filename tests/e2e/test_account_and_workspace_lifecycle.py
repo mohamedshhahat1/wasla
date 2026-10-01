@@ -45,6 +45,7 @@ from app.core.redis import RedisClient
 from app.db.session import Database
 from app.main import create_app
 from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY
+from tests.redis_url import redis_url_for
 
 pytestmark = [pytest.mark.e2e, pytest.mark.integration]
 
@@ -52,7 +53,7 @@ API = "/api/v1"
 PASSWORD = "correct horse battery staple"
 # Its own logical database, so a lifecycle run cannot disturb the billing E2E's
 # token store or be disturbed by it.
-REDIS_URL = "redis://localhost:6379/13"
+REDIS_URL = redis_url_for(13)
 
 
 def _free_port() -> int:

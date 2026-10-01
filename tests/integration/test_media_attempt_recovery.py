@@ -61,10 +61,11 @@ from app.workers.media_worker import MediaWorker
 from app.workers.queue import AgentQueue
 from app.workers.retry import RetryPolicy
 from tests.fakes import as_media_reader, as_whatsapp
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
-REDIS_URL = "redis://localhost:6379/9"
+REDIS_URL = redis_url_for(9)
 PIXEL = b"\x89PNG\r\n\x1a\n" + b"0" * 64
 
 

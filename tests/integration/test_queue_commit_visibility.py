@@ -74,11 +74,12 @@ from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_queue import MediaJob
 from app.workers.media_worker import MediaWorker
 from app.workers.queue import AgentJob, AgentQueue, ReliableQueue
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
 # A database of its own, so a run cannot disturb whatever else uses this Redis.
-REDIS_URL = "redis://localhost:6379/12"
+REDIS_URL = redis_url_for(12)
 
 # Far enough past any backoff either policy can produce, so a promotion is a
 # decision rather than a race with the clock.

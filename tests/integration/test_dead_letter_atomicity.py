@@ -35,6 +35,7 @@ from app.workers.queue import (
     JobEnvelope,
 )
 from app.workers.retry import FailureCategory
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
@@ -52,7 +53,7 @@ async def _text(result: Awaitable[str | None] | str | None) -> str | None:
     return await cast("Awaitable[str | None]", result)
 
 
-REDIS_URL = "redis://localhost:6379/11"
+REDIS_URL = redis_url_for(11)
 NOW = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
 
 

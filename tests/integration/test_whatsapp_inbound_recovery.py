@@ -53,6 +53,7 @@ from app.repositories.whatsapp_repository import InboundEventSweep
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.queue import QUEUE_NAMESPACE, AgentQueue
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
@@ -67,7 +68,7 @@ async def _queued(redis: Redis, key: str) -> int:
     return await cast("Awaitable[int]", redis.llen(key))
 
 
-REDIS_URL = "redis://localhost:6379/12"
+REDIS_URL = redis_url_for(12)
 # A port nothing is listening on. The client built against it raises
 # `RedisError` on every command, which is exactly what a Redis outage looks
 # like from inside the webhook.

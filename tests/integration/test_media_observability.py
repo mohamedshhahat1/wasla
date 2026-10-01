@@ -42,10 +42,11 @@ from app.services.media_horizons import claim_lease
 from app.services.media_outcomes import MediaReason
 from app.services.metrics_service import MetricsService
 from tests import media_harness as h
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
-REDIS_URL = "redis://localhost:6379/11"
+REDIS_URL = redis_url_for(11)
 
 
 @pytest_asyncio.fixture

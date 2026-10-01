@@ -79,12 +79,13 @@ from app.workers.media_worker import MediaWorker
 from app.workers.queue import AgentJob, AgentQueue, JobEnvelope
 from app.workers.retry import IDEMPOTENT_RETRY
 from tests.fakes import as_media_reader, as_whatsapp
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
 # A database of this file's own, so a run cannot disturb whatever else is using
 # this Redis.
-REDIS_URL = "redis://localhost:6379/14"
+REDIS_URL = redis_url_for(14)
 
 PIXEL = b"\x89PNG\r\n\x1a\n" + b"0" * 64
 TRANSCRIPT = "A blue three-seat sofa with a wooden frame."

@@ -45,12 +45,13 @@ from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppEvent
 from app.main import create_app
 from app.services.whatsapp_service import WhatsAppIngestionService
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
 PATH = "/api/v1/webhooks/whatsapp"
 APP_SECRET = "media-metadata-app-secret"
-REDIS_URL = "redis://localhost:6379/12"
+REDIS_URL = redis_url_for(12)
 CUSTOMER = "201234567890"
 
 
