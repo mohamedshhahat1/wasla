@@ -56,6 +56,7 @@ from app.channels.metering import message_meters
 from app.channels.outcomes import ProviderAuthError, UncertainDeliveryError
 from app.channels.policy import ReplyPolicy, SendKind, require_sendable_text
 from app.channels.registry import ChannelRegistry, ChannelUnavailableError, default_registry
+from app.channels.throughput import THROTTLED_ORIGINS, ConnectionThrottledError
 from app.core.config import Settings
 from app.core.exceptions import (
     ConflictError,
@@ -715,6 +716,9 @@ class MessagingService:
             raise ValidationError(_DISABLED.get(connection.channel, "This connection is disabled."))
         participant = await self._identities.require_by_id(conversation.participant_identity_id)
         recipient = adapter.address(participant)
+        # The connection's allowance, shared by every sender on it (ADR-123).
+        # Before anything is staged: a refusal leaves no row to reconcile.
+        await self._take_allowance(connection.id, origin=origin)
 
         if idempotency_key is not None:
             message, claimed = await self._messages.claim_idempotency_key(
@@ -941,6 +945,33 @@ class MessagingService:
             return
         async with build_http_client() as http:
             yield http
+
+    async def _take_allowance(self, connection_id: uuid.UUID, *, origin: MessageOrigin) -> None:
+        """Spend one unit of the connection's sending allowance, or refuse (OMNI-017).
+
+        A no-op unless `CONNECTION_SENDS_PER_MINUTE` is configured, so a
+        deployment that has not chosen a limit behaves exactly as before. Only
+        a bulk sender is ever refused (`THROTTLED_ORIGINS`); a reply is counted.
+        """
+        per_minute = self._settings.connection_sends_per_minute
+        if per_minute is None:
+            return
+        now = datetime.now(UTC)
+        retry_at = await self._connections.take_send_allowance(
+            connection_id,
+            per_window=per_minute,
+            now=now,
+            may_refuse=origin in THROTTLED_ORIGINS,
+        )
+        if retry_at is not None:
+            logger.info(
+                "channel.connection_throttled",
+                extra={
+                    "event": "channel.connection_throttled",
+                    "connection_id": str(connection_id),
+                },
+            )
+            raise ConnectionThrottledError(connection_id=connection_id, retry_at=retry_at, now=now)
 
     def window_open(self, conversation: Conversation) -> bool:
         """Whether the channel's standard free-form window is open (`service_window_open`).

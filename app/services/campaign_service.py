@@ -35,6 +35,7 @@ from typing import Any, Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.channels.outcomes import ProviderAuthError
+from app.channels.throughput import ConnectionThrottledError
 from app.core.exceptions import (
     DependencyUnavailableError,
     ExternalServiceError,
@@ -478,6 +479,7 @@ class CampaignService:
             return self._complete(campaign, moment)
 
         sent = failed = skipped = 0
+        throttled_until: datetime | None = None
         for recipient in claimed:
             if await self._campaigns.is_cancelled(campaign.id):
                 # A cancel landing mid-batch now stops at the next recipient
@@ -507,6 +509,13 @@ class CampaignService:
                 break
             try:
                 outcome = await self._deliver(campaign, recipient, messaging=messaging, now=moment)
+            except ConnectionThrottledError as error:
+                # The number's shared allowance is spent (ADR-123). Nothing was
+                # staged, so this recipient is exactly as it was: still
+                # pending, no attempt spent. The rest of the batch would meet
+                # the same answer, so the campaign waits for the window instead.
+                throttled_until = error.retry_at
+                break
             except (DependencyUnavailableError, ProviderAuthError) as error:
                 # A credential that is missing, or one Meta refuses. Neither is
                 # this recipient's problem and neither is fixable by trying the
@@ -533,6 +542,9 @@ class CampaignService:
         campaign.next_send_at = moment + timedelta(
             minutes=len(claimed) / campaign.messages_per_minute
         )
+        if throttled_until is not None and throttled_until > campaign.next_send_at:
+            # Its own rate, or the connection's window - whichever is later.
+            campaign.next_send_at = throttled_until
 
         remaining = await self._recipients.pending_count(campaign.id)
         if remaining == 0:
@@ -666,6 +678,9 @@ class CampaignService:
             # would spend one attempt budget per person discovering the same
             # dead token and end with no single thing to tell anybody
             # (MSG-18). `dispatch_batch` fails the campaign once instead.
+            raise
+        except ConnectionThrottledError:
+            # Not this recipient's failure: `dispatch_batch` waits for the window.
             raise
         except (ExternalServiceError, RateLimitedError, ValidationError) as error:
             return self._fail_recipient(recipient, str(error))

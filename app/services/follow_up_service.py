@@ -60,6 +60,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.channels.outcomes import ProviderAuthError
 from app.channels.policy import FollowUpAction
 from app.channels.registry import ChannelRegistry, default_registry
+from app.channels.throughput import ConnectionThrottledError
 from app.core.config import Settings
 from app.core.exceptions import (
     ConflictError,
@@ -765,6 +766,11 @@ class FollowUpService:
             # the rest of the pass instead of discovering it one at a time
             # (MSG-18).
             raise
+        except ConnectionThrottledError as error:
+            # The number's shared allowance is spent (ADR-123). Nothing was
+            # staged, so this is a wait, not a failed attempt.
+            retry_at = error.retry_at
+            return await self._settle(follow_up, claim, lambda row: self._defer(row, retry_at))
         except (ExternalServiceError, RateLimitedError, ValidationError) as error:
             detail = str(error)
             return await self._settle(follow_up, claim, lambda row: self._fail(row, detail))
@@ -973,6 +979,22 @@ class FollowUpService:
             extra={"follow_up_id": str(follow_up.id), "attempts": follow_up.attempts},
         )
         return DispatchOutcome(follow_up, FollowUpStatus.PENDING, detail)
+
+    def _defer(self, follow_up: FollowUp, until: datetime) -> DispatchOutcome:
+        """Wait for the connection's allowance to reopen, spending no attempt (ADR-123).
+
+        Nothing was staged - the allowance refuses before a message exists - so
+        this nudge is exactly as it was, only later.
+        """
+        _release_claim(follow_up)
+        follow_up.scheduled_at = until
+        logger.info(
+            "follow_up.deferred_by_connection_allowance",
+            extra={"follow_up_id": str(follow_up.id)},
+        )
+        return DispatchOutcome(
+            follow_up, FollowUpStatus.PENDING, "The number's sending allowance is spent."
+        )
 
 
 def _release_claim(follow_up: FollowUp) -> None:

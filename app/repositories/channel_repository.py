@@ -15,9 +15,10 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import ColumnElement, update
+from sqlalchemy import ColumnElement, case, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.channels.throughput import SEND_WINDOW
 from app.core.logging import get_logger
 from app.db.models.channel import (
     MAX_HEALTH_REASON_LENGTH,
@@ -208,6 +209,48 @@ class ChannelConnectionRepository(TenantScopedRepository[ChannelConnection]):
             .execution_options(synchronize_session=False)
         )
         return bool(getattr(result, "rowcount", 0))
+
+    async def take_send_allowance(
+        self,
+        connection_id: uuid.UUID,
+        *,
+        per_window: int,
+        now: datetime,
+        may_refuse: bool = True,
+    ) -> datetime | None:
+        """Admit one send against this connection's allowance, or say when to come back.
+
+        Returns None when the send is admitted and the instant the current
+        window reopens when it is not (ADR-123). One conditional UPDATE: a
+        window that has run out restarts at `now` with this send as its first,
+        and a live one admits while its count is under `per_window`. Concurrent
+        callers queue on the row for one statement and re-read it, so the count
+        cannot pass the allowance. A refusal writes nothing.
+
+        `may_refuse=False` counts the send whatever the count: a reply to a
+        customer spends allowance, so bulk senders see it, and is never refused.
+        """
+        started = ChannelConnection.send_window_started_at
+        expired = or_(started.is_(None), started <= now - SEND_WINDOW)
+        conditions = [self._tenant_filter(), ChannelConnection.id == connection_id]
+        if may_refuse:
+            conditions.append(or_(expired, ChannelConnection.send_window_count < per_window))
+        admitted = await self.session.execute(
+            update(ChannelConnection)
+            .where(*conditions)
+            .values(
+                send_window_started_at=case((expired, now), else_=started),
+                send_window_count=case((expired, 1), else_=ChannelConnection.send_window_count + 1),
+            )
+            .returning(ChannelConnection.id)
+            .execution_options(synchronize_session=False)
+        )
+        if admitted.scalar_one_or_none() is not None:
+            return None
+        opened = await self.session.scalar(
+            select(started).where(self._tenant_filter(), ChannelConnection.id == connection_id)
+        )
+        return (opened or now) + SEND_WINDOW
 
 
 class ContactIdentityRepository(TenantScopedRepository[ContactIdentity]):
