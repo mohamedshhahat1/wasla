@@ -57,6 +57,11 @@ from typing import Any, Final, Literal
 
 import httpx
 
+from app.channels.outcomes import (
+    ProviderAuthError,
+    SendNotAttemptedError,
+    UncertainDeliveryError,
+)
 from app.core.config import DEFAULT_META_MEDIA_HOST_ROOTS
 from app.core.exceptions import (
     DependencyUnavailableError,
@@ -136,6 +141,8 @@ FORBIDDEN: Final = 403
 # nor the code is trusted on its own.
 META_AUTH_CODE: Final = 190
 MAX_REPLY_BUTTONS: Final = 3
+# What a refused credential is reported as. The neutral type, WhatsApp's words.
+CREDENTIALS_REFUSED: Final = "WhatsApp refused this number's credentials."
 # How much of a failed media response is ever read (MEDIA-09). Enough for Meta's
 # error envelope, whose code is the only part anything acts on; nothing near a
 # file. The error path must cost less memory than a success, not more - it used
@@ -217,28 +224,6 @@ def _retry_after(response: httpx.Response) -> float | None:
     return seconds if seconds > 0 else None
 
 
-class SendNotAttemptedError(ExternalServiceError):
-    """The request provably never reached Meta.
-
-    Raised only where nothing can have been delivered: a connection that was
-    never established, or a rejection issued before the message was read. The
-    caller may record the send as undelivered and, if it wants to, make a new
-    one - which is a decision it cannot safely take after any other failure
-    (ADR-093).
-    """
-
-
-class UncertainDeliveryError(ExternalServiceError):
-    """Meta may or may not have accepted the request, and nobody can tell.
-
-    A read timeout, a reset connection, a 5xx. The request left this process
-    and no answer came back, and Meta publishes no way to ask what became of
-    it - there is no idempotency key on the send endpoint and no lookup keyed
-    on anything this system generated. So this is terminal by construction: the
-    one thing that must not follow it is another send.
-    """
-
-
 class TemplateWithdrawnError(SendNotAttemptedError):
     """Meta refused this template, not this message.
 
@@ -257,28 +242,6 @@ class TemplateWithdrawnError(SendNotAttemptedError):
     def __init__(self, *, code: int) -> None:
         super().__init__(self.message)
         self.code = code
-
-
-class ProviderAuthError(SendNotAttemptedError):
-    """Meta refused the credential, so nothing was sent and nothing will be.
-
-    A subclass of `SendNotAttemptedError` because that is the truth about this
-    message - Meta declined before reading it, so nothing reached a customer
-    and the row is honestly `UNDELIVERED`. It is a *type* of its own because
-    the truth about the *workspace* is different: every other recipient will
-    fail identically until somebody reconnects the number.
-
-    Without the distinction a sweep works through its audience discovering the
-    same dead token ten thousand times, spending one attempt budget per person
-    and ending with no single thing to tell the operator (MSG-18). Campaigns
-    and follow-ups let this one out rather than filing it against a recipient,
-    which is the same shape `DependencyUnavailableError` already had for a
-    credential that is missing rather than refused.
-
-    Carries no credential material, here or in its message.
-    """
-
-    message = "WhatsApp refused this number's credentials."
 
 
 class MediaHostRefusedError(ExternalServiceError):
@@ -1085,7 +1048,7 @@ class WhatsAppClient:
                     # Not this message's problem, and not fixable by trying the
                     # next recipient. Raised as its own type so a sweep can
                     # stop rather than discover it once per person (MSG-18).
-                    raise ProviderAuthError
+                    raise ProviderAuthError(CREDENTIALS_REFUSED)
                 if error_code in TEMPLATE_WITHDRAWN_CODES:
                     # About the template rather than this message, and worth
                     # writing down: the caller marks the registry so the next
@@ -1288,3 +1251,25 @@ def _read_failure(status_code: int, meta_code: int | None) -> ExternalServiceErr
     if status_code in (UNAUTHORIZED, FORBIDDEN) or meta_code == META_AUTH_CODE:
         return MediaCredentialRefusedError()
     return MediaUnavailableError()
+
+
+# The send-outcome types are channel-neutral now (`app.channels.outcomes`); they
+# are re-exported under their old import path, as the same classes, so every
+# `except` and `isinstance` written against this module still holds.
+__all__ = [
+    "CREDENTIALS_REFUSED",
+    "DownloadedMedia",
+    "MalformedMediaDescriptorError",
+    "MediaCredentialRefusedError",
+    "MediaDescriptor",
+    "MediaHostRefusedError",
+    "MediaTooLargeError",
+    "MediaUnavailableError",
+    "ProviderAuthError",
+    "SendNotAttemptedError",
+    "SentMessage",
+    "TemplateWithdrawnError",
+    "UncertainDeliveryError",
+    "WhatsAppClient",
+    "build_http_client",
+]

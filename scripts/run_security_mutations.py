@@ -202,7 +202,7 @@ MUTANTS = (
     ),
     Mutant(
         "S04",
-        "app/integrations/whatsapp/signature.py",
+        "app/integrations/meta/signature.py",
         "return secrets_match(expected, header.strip())",
         "return expected == header.strip()",
         "tests/unit/test_constant_time_comparison.py::"

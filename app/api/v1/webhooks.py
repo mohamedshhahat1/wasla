@@ -35,7 +35,7 @@ from app.core.logging import get_logger
 from app.core.secure_compare import secrets_match
 from app.core.telemetry import CallOutcome, Provider, observe_auth_event, record_provider_call
 from app.db.errors import is_data_exception
-from app.integrations.whatsapp.signature import SIGNATURE_HEADER, verify_signature
+from app.integrations.meta.signature import SIGNATURE_HEADER, verify_signature
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.media_queue import MediaQueue
 from app.workers.queue import AgentQueue
