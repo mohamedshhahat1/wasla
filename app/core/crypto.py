@@ -12,10 +12,17 @@ backup or by a SQL injection fails to decrypt rather than yielding a token
 somebody chose. Plain AES-CBC would decrypt attacker-controlled bytes into
 something.
 
-**The workspace is bound into the ciphertext.** The tenant id is passed as
-additional authenticated data, so a ciphertext copied from one account row to
-another - the obvious attack once a column of tokens exists - fails to decrypt.
-The bytes are useless anywhere but the row they were written for.
+**What the ciphertext is for is bound into it.** The caller passes a context
+as additional authenticated data, and a ciphertext presented with any other
+context fails to decrypt. Which context depends on the envelope's version, and
+the version is what makes the binding honest:
+
+- `v1` binds the **workspace** (the tenant id). A ciphertext moved to another
+  workspace's row fails - but one moved to another connection *of the same
+  workspace* still decrypts, so this module used to overstate what it bound
+  (OMNI-012). Every value written before 0082 is `v1`, and still decrypts.
+- `v2` binds the **connection**: tenant, connection and channel together. Moved
+  to any other row, it fails. Every credential sealed since is `v2`.
 
 **A key ring, not a key.** Rotation is the half of "encryption at rest" that
 gets skipped and then cannot be added: the envelope records which key encrypted
@@ -23,8 +30,8 @@ it, so a new key can be prepended and old ciphertexts keep decrypting until they
 are rewritten. A deployment with one key behaves exactly as if there were no
 ring.
 
-The envelope is `v1.<key id>.<nonce>.<ciphertext>`, base64url without padding,
-version first so the scheme itself can change later without guessing.
+The envelope is `<version>.<key id>.<nonce>.<ciphertext>`, base64url without
+padding, version first so the binding and the scheme can change without guessing.
 """
 
 from __future__ import annotations
@@ -44,6 +51,9 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 VERSION: Final = "v1"
+# The same cipher, bound to a connection rather than a workspace (OMNI-012).
+CONNECTION_BOUND: Final = "v2"
+VERSIONS: Final = frozenset({VERSION, CONNECTION_BOUND})
 KEY_BYTES: Final = 32
 NONCE_BYTES: Final = 12
 # Enough of the key's digest to identify it in an envelope without being a
@@ -122,7 +132,7 @@ class Envelope:
         if len(parts) != 4:
             raise CredentialDecryptionError("The stored credential is malformed.")
         version, identifier, nonce, ciphertext = parts
-        if version != VERSION:
+        if version not in VERSIONS:
             raise CredentialDecryptionError(
                 f"The stored credential uses an unknown format ({version})."
             )
@@ -158,13 +168,16 @@ class CredentialCipher:
     def primary_key_id(self) -> str:
         return key_id(self._primary)
 
-    def encrypt(self, secret: str, *, context: str) -> str:
-        """Encrypt one credential, bound to `context`.
+    def encrypt(self, secret: str, *, context: str, version: str = VERSION) -> str:
+        """Encrypt one credential, bound to `context`, in an envelope of `version`.
 
-        `context` is the tenant id. It is authenticated but not encrypted, so a
-        ciphertext moved to another workspace's row fails to decrypt instead of
-        working - which is the attack a column full of tokens invites.
+        `context` is authenticated but not encrypted, so a ciphertext presented
+        with another context fails to decrypt instead of working - which is the
+        attack a column full of tokens invites. The version records which
+        context the caller bound, so decryption asks for the same one.
         """
+        if version not in VERSIONS:
+            raise ValidationError("That credential envelope version is not known.")
         if not secret:
             raise ValidationError("There is no credential to encrypt.")
         nonce = os.urandom(NONCE_BYTES)
@@ -174,7 +187,7 @@ class CredentialCipher:
             context.encode(),
         )
         return SEPARATOR.join(
-            (VERSION, self.primary_key_id, _b64(nonce), _b64(ciphertext)),
+            (version, self.primary_key_id, _b64(nonce), _b64(ciphertext)),
         )
 
     def decrypt(self, stored: str, *, context: str) -> str:
@@ -207,6 +220,11 @@ class CredentialCipher:
             )
             raise CredentialDecryptionError() from error
         return plaintext.decode()
+
+    @staticmethod
+    def version_of(stored: str) -> str:
+        """Which envelope version a stored credential is - and so which context it binds."""
+        return Envelope.parse(stored).version
 
     def needs_rotation(self, stored: str) -> bool:
         """Whether this ciphertext was written with a key that is no longer primary.

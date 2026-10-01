@@ -43,11 +43,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.agent import Agent, AgentStatus
 from app.db.models.agent_turn import TurnOutcome
+from app.db.models.channel import ChannelConnection, ConnectionStatus
 from app.db.models.conversation import Conversation, ConversationMode, ConversationStatus
 from app.db.models.enums import TenantStatus
 from app.db.models.tenant import Tenant
 from app.db.models.tool_execution import ToolExecutionReason
-from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,16 +88,18 @@ async def serving_state(
                 Conversation.mode,
                 Conversation.status,
                 Agent.status,
-                WhatsAppAccount.status,
-                WhatsAppAccount.released_at,
+                ChannelConnection.status,
+                ChannelConnection.released_at,
             )
             .select_from(Conversation)
             .join(Tenant, Tenant.id == Conversation.tenant_id)
+            # The conversation's connection, on any channel (OMNI-003): a
+            # paused or released one is a channel the agent cannot answer on.
             .join(
-                WhatsAppAccount,
+                ChannelConnection,
                 and_(
-                    WhatsAppAccount.id == Conversation.account_id,
-                    WhatsAppAccount.tenant_id == Conversation.tenant_id,
+                    ChannelConnection.id == Conversation.account_id,
+                    ChannelConnection.tenant_id == Conversation.tenant_id,
                 ),
             )
             .outerjoin(
@@ -133,7 +135,7 @@ async def serving_state(
         human=mode is ConversationMode.HUMAN,
         conversation_closed=conversation_status is ConversationStatus.CLOSED,
         agent_active=agent_status is AgentStatus.ACTIVE,
-        channel_available=(account_status is WhatsAppAccountStatus.ACTIVE and released_at is None),
+        channel_available=(account_status is ConnectionStatus.ACTIVE and released_at is None),
     )
 
 

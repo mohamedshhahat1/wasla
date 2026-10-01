@@ -7,20 +7,27 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, func, null, select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import ColumnElement
 from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import ConflictError
 from app.core.logging import get_logger
+from app.db.models.channel import Channel
 from app.db.models.whatsapp import (
     WhatsAppAccount,
     WhatsAppAccountStatus,
     WhatsAppEvent,
     WhatsAppEventKind,
-    WhatsAppEventState,
 )
 from app.repositories.base import BaseRepository, TenantScopedRepository
+
+# The inbound log's sweep and retention are channel-neutral; importable from
+# here under the names they have always had.
+from app.repositories.channel_event_repository import (
+    ChannelEventRepository,
+    InboundEventSweep,
+    WebhookPayloadRetention,
+)
 
 logger = get_logger(__name__)
 
@@ -175,133 +182,6 @@ class WhatsAppAccountDirectory(BaseRepository[WhatsAppAccount]):
         )
 
 
-class WebhookPayloadRetention(BaseRepository[WhatsAppEvent]):
-    """The unscoped write that clears old raw webhook payloads (DB-011).
-
-    Unscoped for the same reason as InboundEventSweep below: retention is a
-    platform-wide rule, not one workspace's. It clears only the payload of an
-    event that has been processed and is older than the window, so every
-    workspace's rows are touched by one rule alike. The event's identity - its
-    id, event id, state, timestamps and workspace - stays, and that is what
-    deduplicates a Meta retry and what recovery reads.
-    """
-
-    model = WhatsAppEvent
-
-    async def redact(self, *, older_than: datetime, now: datetime, limit: int) -> int:
-        """Clear one batch of payloads; return how many were cleared.
-
-        SKIP LOCKED, so two sweepers split the backlog instead of queueing on
-        it, and an event a request is updating right now waits for next pass.
-        """
-        eligible = (
-            select(WhatsAppEvent.id)
-            .where(
-                WhatsAppEvent.state == WhatsAppEventState.PROCESSED,
-                WhatsAppEvent.payload.is_not(None),
-                WhatsAppEvent.processed_at < older_than,
-            )
-            .order_by(WhatsAppEvent.processed_at, WhatsAppEvent.id)
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-            .scalar_subquery()
-        )
-        result = await self.session.execute(
-            update(WhatsAppEvent)
-            .where(WhatsAppEvent.id.in_(eligible))
-            # SQL NULL, spelled out: the JSONB type writes a Python None as
-            # the JSON value `null`, which IS NOT NULL - the row would still
-            # count as holding a payload and be "redacted" again every batch.
-            .values(payload=null(), payload_redacted_at=now)
-            .execution_options(synchronize_session=False)
-        )
-        return int(getattr(result, "rowcount", 0) or 0)
-
-    async def pending(self, *, older_than: datetime) -> int:
-        """Processed events past the window that still hold a payload."""
-        count = await self.session.scalar(
-            select(func.count(WhatsAppEvent.id)).where(
-                WhatsAppEvent.state == WhatsAppEventState.PROCESSED,
-                WhatsAppEvent.payload.is_not(None),
-                WhatsAppEvent.processed_at < older_than,
-            )
-        )
-        return int(count or 0)
-
-
-class InboundEventSweep(BaseRepository[WhatsAppEvent]):
-    """The unscoped read over the inbound log, for the recovery sweep only.
-
-    Deliberately not workspace-scoped, and deliberately its own class so that
-    is visible. A backlog of unfinished inbound work is a platform-wide
-    condition - the Redis outage that produced it did not choose a workspace -
-    and a sweeper constructed once per workspace would need a list of every
-    workspace to iterate, which is a worse thing to maintain than one honest
-    exception to scoping.
-
-    Nothing here is reachable from an API route. The two callers are
-    `InboundRecoveryWorker` and the metrics exposition, and both are counting
-    or finishing work rather than answering a person.
-    """
-
-    model = WhatsAppEvent
-
-    async def claim_unprocessed(
-        self,
-        *,
-        older_than: datetime,
-        limit: int,
-    ) -> list[WhatsAppEvent]:
-        """Events still owing work, locked so one sweeper gets each.
-
-        `FOR UPDATE SKIP LOCKED` rather than a plain read: several sweepers may
-        run, and two of them recovering one event would enqueue the same agent
-        turn twice - the duplicate customer reply the whole delivery design
-        exists to prevent.
-
-        `older_than` keeps the sweep off events that are merely in flight. An
-        event stored a second ago has not failed; it is being processed by the
-        request that stored it, whose transaction has not committed.
-
-        Compared against `created_at`, not `received_at`: `received_at` is
-        Meta's own timestamp, and a late redelivery carries one from days ago.
-        Sweeping on that would claim an event the request beside it is still
-        holding, which is exactly what the age threshold exists to prevent.
-        """
-        return await self._all(
-            self._select()
-            .where(
-                WhatsAppEvent.state == WhatsAppEventState.RECEIVED,
-                WhatsAppEvent.created_at < older_than,
-            )
-            .order_by(WhatsAppEvent.created_at, WhatsAppEvent.id)
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-        )
-
-    async def backlog(self, *, older_than: datetime) -> tuple[int, float]:
-        """How many events still owe work, and how old the oldest one is.
-
-        Returned together because they are read together: the count says
-        whether there is a backlog and the age says whether it is being
-        drained. Two queries would let an operator see a count from one moment
-        and an age from another.
-        """
-        rows = await self.session.execute(
-            select(
-                func.count(WhatsAppEvent.id),
-                func.min(WhatsAppEvent.created_at),
-            ).where(
-                WhatsAppEvent.state == WhatsAppEventState.RECEIVED,
-                WhatsAppEvent.created_at < older_than,
-            )
-        )
-        count, oldest = rows.one()
-        if not count or oldest is None:
-            return 0, 0.0
-        return int(count), max((datetime.now(UTC) - oldest).total_seconds(), 0.0)
-
-
 class WhatsAppAccountRepository(TenantScopedRepository[WhatsAppAccount]):
     """Accounts belonging to one workspace."""
 
@@ -410,23 +290,14 @@ class WhatsAppAccountRepository(TenantScopedRepository[WhatsAppAccount]):
         return account
 
 
-class WhatsAppEventRepository(TenantScopedRepository[WhatsAppEvent]):
-    """The append-only inbound log for one workspace."""
+class WhatsAppEventRepository(ChannelEventRepository):
+    """The inbound log, under the name and signature WhatsApp callers already use.
 
-    model = WhatsAppEvent
-
-    def _tenant_filter(self) -> ColumnElement[bool]:
-        return WhatsAppEvent.tenant_id == self.tenant_id
-
-    async def get_by_event_id(self, event_id: str) -> WhatsAppEvent | None:
-        return await self._first(self._select().where(WhatsAppEvent.event_id == event_id))
-
-    async def list_recent(self, *, limit: int = 50) -> list[WhatsAppEvent]:
-        return await self._all(
-            self._select()
-            .order_by(WhatsAppEvent.received_at.desc(), WhatsAppEvent.id.desc())
-            .limit(limit)
-        )
+    The log is channel-neutral now (`ChannelEventRepository`); this keeps
+    `record(account_id=...) -> (event, created)` for the callers written
+    against it. A WhatsApp event id is a Meta message id and cannot collide
+    across numbers, so a collision here is a broken invariant and raises.
+    """
 
     async def record(
         self,
@@ -437,97 +308,28 @@ class WhatsAppEventRepository(TenantScopedRepository[WhatsAppEvent]):
         payload: dict[str, Any],
         received_at: datetime,
     ) -> tuple[WhatsAppEvent, bool]:
-        """Store an event once. Returns the row and whether it is new.
-
-        The read is the fast path, not the guarantee, and the insert says so:
-        `ON CONFLICT DO NOTHING` makes a delivery that loses the race read back
-        the winner rather than raise. Before that, two simultaneous deliveries
-        of one event both missed the read, both inserted, and the loser turned
-        `UNIQUE(tenant_id, event_id)` into a 500 - an internal error for a
-        situation that is neither internal nor an error, on an endpoint whose
-        failure rate Meta watches (MSG-09). The data was always right; the
-        protocol was not.
-
-        The conflict target is named rather than left to the statement, so any
-        *other* integrity failure on this insert still raises. A duplicate
-        event is a race; anything else is a bug.
-        """
-        existing = await self.get_by_event_id(event_id)
-        if existing is not None:
-            return existing, False
-
-        values = {
-            "id": uuid.uuid4(),
-            "tenant_id": self.tenant_id,
-            "account_id": account_id,
-            "event_id": event_id,
-            "kind": kind,
-            "state": WhatsAppEventState.RECEIVED,
-            "payload": payload,
-            "received_at": received_at,
-        }
-        statement = (
-            pg_insert(WhatsAppEvent)
-            .values(**values)
-            .on_conflict_do_nothing(index_elements=["tenant_id", "event_id"])
-            .returning(WhatsAppEvent.id)
+        stored = await self.store(
+            connection_id=account_id,
+            channel=Channel.WHATSAPP,
+            event_id=event_id,
+            kind=kind,
+            payload=payload,
+            received_at=received_at,
         )
-        inserted = await self.session.execute(statement)
-        if inserted.scalar_one_or_none() is None:
-            # Somebody else stored it between the read and the insert. Their
-            # row is the canonical one; this delivery is a duplicate and its
-            # caller must not project a second time.
-            winner = await self.get_by_event_id(event_id)
-            if winner is not None:
-                return winner, False
-            # Unreachable in practice - the conflict proves a row exists - but
-            # a concurrent delete would get here, and inventing a row would be
-            # worse than saying so.
+        if stored.event is None:
             raise ConflictError("That WhatsApp event could not be stored.")
+        return stored.event, stored.created
 
-        # Read back rather than constructed, so the returned object is the
-        # session's mapped row: the caller advances its state, and a detached
-        # copy would drop that write on the floor.
-        stored = await self.get_by_event_id(event_id)
-        if stored is None:  # pragma: no cover - the insert above returned an id
-            raise ConflictError("That WhatsApp event could not be stored.")
-        return stored, True
 
-    def mark_processed(self, event: WhatsAppEvent) -> WhatsAppEvent:
-        """Every handoff this event needed has been made.
-
-        Not "the row was written" - a stored message nobody was ever asked to
-        answer is exactly the failure this state exists to make visible
-        (MSG-02). `PROCESSED` means the projection landed *and* whatever had to
-        be queued was accepted by the queue.
-        """
-        event.state = WhatsAppEventState.PROCESSED
-        event.processed_at = datetime.now(UTC)
-        event.error = None
-        return event
-
-    def mark_unprocessed(self, event: WhatsAppEvent, *, reason: str) -> WhatsAppEvent:
-        """The event is stored and something downstream did not happen.
-
-        Left at `RECEIVED` deliberately rather than moved to `FAILED`: the work
-        is still owed, and the sweeper claims exactly this state. The reason is
-        a bounded machine-readable token, never a payload fragment or a
-        provider message - this column is read by operators and shipped in
-        logs.
-        """
-        event.state = WhatsAppEventState.RECEIVED
-        event.error = reason[:500]
-        return event
-
-    def mark_failed(self, event: WhatsAppEvent, *, reason: str) -> WhatsAppEvent:
-        """The event can never be processed, and no retry will change that.
-
-        Terminal, and the one state the sweeper will not pick up again. Used
-        for an event whose ownership cannot be established and for one whose
-        payload this database cannot represent - both of which are permanent
-        facts about the event rather than transient facts about the system.
-        """
-        event.state = WhatsAppEventState.FAILED
-        event.processed_at = datetime.now(UTC)
-        event.error = reason[:500]
-        return event
+__all__ = [
+    "AMBIGUOUS_OWNERSHIP",
+    "LATE_UNOWNED",
+    "LIVE_NUMBER_INDEX",
+    "UNKNOWN_NUMBER",
+    "InboundEventSweep",
+    "OwnershipResolution",
+    "WebhookPayloadRetention",
+    "WhatsAppAccountDirectory",
+    "WhatsAppAccountRepository",
+    "WhatsAppEventRepository",
+]

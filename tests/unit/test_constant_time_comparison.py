@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # Every function that decides whether a caller-supplied secret is genuine,
 # by module. A new verifier belongs in this table.
 VERIFIERS: dict[str, tuple[str, ...]] = {
-    "app/integrations/whatsapp/signature.py": ("verify_signature",),
+    "app/integrations/meta/signature.py": ("verify_signature",),
     "app/api/v1/webhooks.py": ("verify_subscription",),
     "app/integrations/email/signature.py": ("verify_signature",),
     "app/integrations/billing/paymob.py": ("verify_callback", "verify_token_callback"),

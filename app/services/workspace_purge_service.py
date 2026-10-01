@@ -132,6 +132,11 @@ PURGED_TABLES: tuple[str, ...] = (
     "lead_activities",
     "lead_notes",
     "leads",
+    # How providers address a workspace's customers: phone numbers and
+    # business-scoped ids today (ADR-118). Personal data, erased with the
+    # contacts it belongs to. After `conversations` and `campaign_recipients`,
+    # which name one; before `contacts`, which each one names.
+    "contact_identities",
     "contacts",
     "document_chunks",
     # Indexing attempts, their errors and embedding identity. Between the chunks
@@ -144,6 +149,10 @@ PURGED_TABLES: tuple[str, ...] = (
     "whatsapp_events",
     "whatsapp_templates",
     "whatsapp_accounts",
+    # The workspace's connections (ADR-117). A WhatsApp number's connection
+    # goes with the number, by trigger; this is every other channel's, and the
+    # statement that proves none is left.
+    "channel_connections",
     "payment_methods",
     "tenant_invitations",
     "email_messages",

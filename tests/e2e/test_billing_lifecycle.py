@@ -51,11 +51,12 @@ from app.integrations.billing.paymob import hmac_signature
 from app.main import create_app
 from tests.billing_fixtures import erase_ledger
 from tests.paymob_orders import order_for, order_from_request
+from tests.redis_url import redis_url_for
 
 pytestmark = [pytest.mark.e2e, pytest.mark.integration]
 
 PASSWORD = "correct horse battery staple"
-REDIS_URL = "redis://localhost:6379/14"
+REDIS_URL = redis_url_for(14)
 HMAC_SECRET = "an-end-to-end-hmac-secret"
 CLIENT_SECRET = "csk_test_endtoend"
 INTENTION_ID = "pi_test_endtoend"

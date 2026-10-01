@@ -44,13 +44,14 @@ from app.db.models.media import MessageMedia
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppEvent
 from app.main import create_app
-from app.services.whatsapp_service import WhatsAppIngestionService
+from app.services.channel_ingestion_service import ChannelIngestionService
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
 PATH = "/api/v1/webhooks/whatsapp"
 APP_SECRET = "media-metadata-app-secret"
-REDIS_URL = "redis://localhost:6379/12"
+REDIS_URL = redis_url_for(12)
 CUSTOMER = "201234567890"
 
 
@@ -322,7 +323,8 @@ async def test_a_content_refusal_outside_the_savepoints_is_accepted_not_retried(
     async def refuse(*_: object, **__: object) -> None:
         raise _database_error("22001")
 
-    monkeypatch.setattr(WhatsAppIngestionService, "_enqueue_media", refuse)
+    # The neutral service the WhatsApp one delegates to holds these (OMNI-006).
+    monkeypatch.setattr(ChannelIngestionService, "_enqueue_media", refuse)
     response = await _post(
         client, _delivery(phone_number_id, [_document(uuid.uuid4().hex[:8], "c.pdf")])
     )
@@ -356,7 +358,7 @@ async def test_a_database_that_cannot_work_is_still_retried_by_meta(
         raise _database_error(sqlstate)
 
     target = "_enqueue_media" if where == "route" else "_ingest_one"
-    monkeypatch.setattr(WhatsAppIngestionService, target, fail)
+    monkeypatch.setattr(ChannelIngestionService, target, fail)
     response = await _post(
         client, _delivery(phone_number_id, [_document(uuid.uuid4().hex[:8], "d.pdf")])
     )

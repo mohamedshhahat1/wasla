@@ -350,3 +350,51 @@ def test_a_description_counts_against_the_token_budget() -> None:
     )
 
     assert window.estimated_tokens > 50
+
+
+def test_every_file_of_a_message_is_described_in_order() -> None:
+    """OMNI-009: a message may carry several files. Each is part of what the
+    customer said, so each is described - in the order it was sent - and the
+    second photograph is not dropped because the first was read."""
+    message = _message(body="which one is cheaper?", kind=MessageKind.IMAGE)
+    first = _attachment(message, transcript="A blue sofa.")[message.id]
+    second = _attachment(message, status=MediaStatus.PENDING)[message.id]
+    third = _attachment(message, transcript="A green armchair.")[message.id]
+
+    window = build_window(
+        [message],
+        message_limit=10,
+        token_budget=1000,
+        media={message.id: [first, second, third]},
+    )
+
+    assert window.turns[0].text == (
+        "which one is cheaper?\n"
+        "[image] A blue sofa.\n"
+        "[image, not yet read]\n"
+        "[image] A green armchair."
+    )
+
+
+def test_one_file_in_a_list_renders_as_one_file_did() -> None:
+    """Moving the orchestrator to lists changes nothing for a WhatsApp message."""
+    message = _message(body=None, kind=MessageKind.IMAGE)
+    single = _attachment(message, transcript="A blue sofa.")
+
+    as_one = build_window([message], message_limit=10, token_budget=1000, media=single)
+    as_list = build_window(
+        [message],
+        message_limit=10,
+        token_budget=1000,
+        media={message.id: [single[message.id]]},
+    )
+
+    assert as_list.turns[0].text == as_one.turns[0].text == "[image] A blue sofa."
+
+
+def test_an_empty_file_list_renders_like_no_attachment() -> None:
+    message = _message(body=None, kind=MessageKind.IMAGE)
+
+    window = build_window([message], message_limit=10, token_budget=1000, media={message.id: []})
+
+    assert window.turns[0].text == "[image]"

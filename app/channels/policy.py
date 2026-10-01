@@ -1,0 +1,287 @@
+"""What a channel allows, asked of the conversation's own channel (OMNI-008).
+
+Shared code used to answer these with WhatsApp's constants: a 24-hour window
+with an approved-template escape, a 4,096-character body, an agent told it was
+"replying over WhatsApp". The rules on other channels differ in *kind*, not only
+in number - Instagram bounds text in UTF-8 **bytes**, Messenger lets a person
+reply for seven days where a bot may not, neither has templates - so the answers
+come from a `ChannelPolicy` resolved from the conversation's channel, and the
+shared code only asks.
+
+Deliberately small. A policy answers the questions today's code actually asks
+and declares the capabilities that stop shared code assuming WhatsApp; it is not
+a feature matrix.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import StrEnum
+from typing import Literal, Protocol
+
+from app.core.exceptions import ValidationError
+from app.db.models.channel import Channel
+from app.db.models.conversation import Conversation, MessageOrigin
+
+
+class TextUnit(StrEnum):
+    """What a channel's text limit counts."""
+
+    CHARACTERS = "characters"
+    UTF8_BYTES = "utf8_bytes"
+
+
+class ReceiptModel(StrEnum):
+    """How a channel reports that a message was delivered or read."""
+
+    PER_MESSAGE = "per_message"
+    WATERMARK = "watermark"
+    NONE = "none"
+
+
+class OutOfWindow(StrEnum):
+    """What may still be sent once a channel's standard reply window has closed."""
+
+    #: An approved template (WhatsApp).
+    TEMPLATE = "template"
+    #: Nothing free-form, and no template mechanism to escape with.
+    NOTHING = "nothing"
+
+
+class SendKind(StrEnum):
+    """The form of an outbound message, as a policy judges it."""
+
+    TEXT = "text"
+    MEDIA = "media"
+    TEMPLATE = "template"
+
+
+class FollowUpAction(StrEnum):
+    """What a due follow-up may do on its conversation's channel now."""
+
+    FREE_TEXT = "free_text"
+    TEMPLATE = "template"
+    SKIP = "skip"
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelCapabilities:
+    """What a channel can carry. Declared by its adapter; read, never assumed."""
+
+    #: The longest text body the provider accepts, in `text_unit`.
+    text_limit: int
+    text_unit: TextUnit
+    #: Where an agent's reply is aimed, in `text_unit`: under the hard limit, so
+    #: an offer to continue always fits.
+    reply_budget: int
+    attachments_per_message: int
+    media_families: frozenset[str]
+    receipts: ReceiptModel
+    echoes: bool
+    reply_to: bool
+    reactions: bool
+    unsend: bool
+    templates: bool
+    out_of_window: OutOfWindow
+    #: Within what the provider guarantees a message id is unique: its
+    #: connection (Meta), or one chat (Telegram-shaped providers).
+    message_id_scope: Literal["connection", "conversation"]
+
+
+@dataclass(frozen=True, slots=True)
+class SendDecision:
+    """Whether a send may go now. A refusal carries the sentence the caller sees."""
+
+    allowed: bool
+    reason: str | None = None
+
+    @classmethod
+    def allow(cls) -> SendDecision:
+        return cls(allowed=True)
+
+    @classmethod
+    def refuse(cls, reason: str) -> SendDecision:
+        return cls(allowed=False, reason=reason)
+
+
+@dataclass(frozen=True, slots=True)
+class FollowUpDecision:
+    """What a due follow-up does. `reason` explains a skip."""
+
+    action: FollowUpAction
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyPolicy:
+    """What a person may send on a conversation now - the API's `reply_policy`.
+
+    Additive beside the older `service_window_open`, which keeps its WhatsApp
+    meaning (ADR-121): a new client reads this instead of inferring the rule.
+    """
+
+    free_text_allowed: bool
+    window_expires_at: datetime | None
+    out_of_window: OutOfWindow
+    templates: bool
+    text_limit: int
+    text_limit_unit: TextUnit
+
+
+def text_length(text: str, unit: TextUnit) -> int:
+    """How long `text` is in `unit`."""
+    if unit is TextUnit.UTF8_BYTES:
+        return len(text.encode("utf-8"))
+    return len(text)
+
+
+def longest_prefix(text: str, budget: int, unit: TextUnit) -> int:
+    """How many characters of `text` fit in `budget` units - never splitting a character.
+
+    For a byte budget the answer is found character by character, so a
+    multi-byte character (every Arabic letter is two bytes, an emoji four) is
+    either wholly inside the budget or wholly outside it.
+    """
+    if budget <= 0:
+        return 0
+    if unit is TextUnit.CHARACTERS:
+        return min(len(text), budget)
+    spent = 0
+    for index, character in enumerate(text):
+        spent += len(character.encode("utf-8"))
+        if spent > budget:
+            return index
+    return len(text)
+
+
+class ChannelPolicy(Protocol):
+    """The questions shared code asks about sending on one channel."""
+
+    channel: Channel
+    capabilities: ChannelCapabilities
+    #: How the channel is named in a sentence a person reads.
+    display_name: str
+
+    def may_send(
+        self,
+        conversation: Conversation,
+        *,
+        origin: MessageOrigin,
+        kind: SendKind,
+        now: datetime,
+    ) -> SendDecision:
+        """Whether `origin` may send `kind` on this conversation at `now`."""
+        ...
+
+    def standard_window_open(self, conversation: Conversation, *, now: datetime) -> bool:
+        """Whether the channel's standard free-form window is open."""
+        ...
+
+    def follow_up(
+        self,
+        conversation: Conversation,
+        *,
+        has_text: bool,
+        has_template: bool,
+        now: datetime,
+    ) -> FollowUpDecision:
+        """What a due follow-up may do now."""
+        ...
+
+    def reply_policy(self, conversation: Conversation, *, now: datetime) -> ReplyPolicy:
+        """What a person may send now, for a client to render."""
+        ...
+
+    def agent_instructions(self) -> str:
+        """What every agent is told about this channel, after its own prompt."""
+        ...
+
+
+class WindowedPolicy:
+    """A policy built on one rule: free text for a while after the customer writes.
+
+    WhatsApp's shape, and a starting point rather than a framework - a channel
+    whose rule depends on who is sending overrides `may_send`.
+    """
+
+    channel: Channel
+    capabilities: ChannelCapabilities
+    display_name: str
+    #: How long after the customer's last message free-form sends are allowed.
+    window: timedelta
+    #: The sentence a free-form send outside the window is refused with.
+    closed_window_refusal: str
+
+    def standard_window_open(self, conversation: Conversation, *, now: datetime) -> bool:
+        if conversation.last_inbound_at is None:
+            return False
+        return now - conversation.last_inbound_at <= self.window
+
+    def window_expires_at(self, conversation: Conversation) -> datetime | None:
+        if conversation.last_inbound_at is None:
+            return None
+        return conversation.last_inbound_at + self.window
+
+    def may_send(
+        self,
+        conversation: Conversation,
+        *,
+        origin: MessageOrigin,
+        kind: SendKind,
+        now: datetime,
+    ) -> SendDecision:
+        if kind is SendKind.TEMPLATE:
+            if not self.capabilities.templates:
+                return SendDecision.refuse("This channel has no message templates.")
+            return SendDecision.allow()
+        if not self.standard_window_open(conversation, now=now):
+            return SendDecision.refuse(self.closed_window_refusal)
+        return SendDecision.allow()
+
+    def reply_policy(self, conversation: Conversation, *, now: datetime) -> ReplyPolicy:
+        return ReplyPolicy(
+            free_text_allowed=self.standard_window_open(conversation, now=now),
+            window_expires_at=self.window_expires_at(conversation),
+            out_of_window=self.capabilities.out_of_window,
+            templates=self.capabilities.templates,
+            text_limit=self.capabilities.text_limit,
+            text_limit_unit=self.capabilities.text_unit,
+        )
+
+
+def require_sendable_text(body: str, policy: ChannelPolicy) -> None:
+    """Refuse a body the channel will not accept, before anything is staged.
+
+    Measured in the channel's own unit: a 700-character Arabic reply is about
+    1,300 bytes, which fits WhatsApp's 4,096 characters and does not fit
+    Instagram's 1,000 bytes. Counting characters for a byte-bounded channel is
+    the mistake that sends a reply the provider refuses after the workspace has
+    paid for the inference (OMNI-008).
+    """
+    if not body:
+        raise ValidationError("A message needs something to say.")
+    capabilities = policy.capabilities
+    if text_length(body, capabilities.text_unit) > capabilities.text_limit:
+        unit = "characters" if capabilities.text_unit is TextUnit.CHARACTERS else "bytes"
+        raise ValidationError(
+            f"A {policy.display_name} message may be at most {capabilities.text_limit} {unit}."
+        )
+
+
+__all__ = [
+    "ChannelCapabilities",
+    "ChannelPolicy",
+    "FollowUpAction",
+    "FollowUpDecision",
+    "OutOfWindow",
+    "ReceiptModel",
+    "ReplyPolicy",
+    "SendDecision",
+    "SendKind",
+    "TextUnit",
+    "WindowedPolicy",
+    "longest_prefix",
+    "require_sendable_text",
+    "text_length",
+]

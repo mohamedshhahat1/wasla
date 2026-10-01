@@ -51,6 +51,7 @@ from app.workers.ingestion_recovery import IngestionRecoveryWorker
 from app.workers.queue import JobEnvelope
 from tests.fake_embeddings import FakeEmbeddings
 from tests.fakes import as_embeddings
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
@@ -68,7 +69,7 @@ async def _text(result: Awaitable[str | None] | str | None) -> str | None:
     return await cast("Awaitable[str | None]", result)
 
 
-REDIS_URL = "redis://localhost:6379/14"
+REDIS_URL = redis_url_for(14)
 # A port nothing is listening on. Every command against it raises `RedisError`,
 # which is what a Redis outage looks like from inside an upload request.
 DEAD_REDIS_URL = "redis://127.0.0.1:6399/0"

@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+from collections.abc import Callable, Mapping, Sequence
 from typing import Final
 from urllib.parse import urlsplit
 
@@ -69,6 +70,37 @@ MAX_REDIRECTS: Final = 3
 # Used when a URL names no port, both for resolution and for deciding
 # whether the `Host` header needs one.
 DEFAULT_HTTPS_PORT: Final = 443
+
+
+#: How a host name becomes addresses: `(host, port) -> addresses`. Injectable so
+#: a test can answer without the network (OMNI-024) - never so it can skip the
+#: judgement: whatever a resolver returns is judged exactly as the system's
+#: answer would be, and a private address is refused either way.
+Resolver = Callable[[str, int], Sequence[str]]
+
+
+def system_resolver(host: str, port: int) -> list[str]:
+    """The operating system's answer, which is what production always uses."""
+    resolved = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    return sorted({str(entry[4][0]) for entry in resolved})
+
+
+def static_resolver(answers: Mapping[str, Sequence[str]]) -> Resolver:
+    """A resolver that answers from a fixed table, for hermetic tests.
+
+    An unknown name fails exactly like a lookup that failed. The addresses are
+    judged by the same rule as a real answer, so a table cannot be used to aim
+    a client at a private address: that is refused whoever resolved it.
+    """
+    table = {name.lower(): list(addresses) for name, addresses in answers.items()}
+
+    def resolve(host: str, port: int) -> list[str]:
+        found = table.get(host.lower())
+        if found is None:
+            raise OSError(f"no static answer for {host}")
+        return list(found)
+
+    return resolve
 
 
 class UnsafeUrlError(Exception):
@@ -118,7 +150,7 @@ def _judge(host: str, addresses: set[str]) -> None:
             raise UnsafeUrlError("the host resolves to a non-public address")
 
 
-def resolve_public_host(host: str, port: int) -> list[str]:
+def resolve_public_host(host: str, port: int, *, resolver: Resolver | None = None) -> list[str]:
     """Resolve a host once and return its addresses, or refuse.
 
     One resolution, and the caller connects to what comes back. Resolving again
@@ -143,18 +175,18 @@ def resolve_public_host(host: str, port: int) -> list[str]:
         return [host]
 
     try:
-        resolved = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        answered = (resolver or system_resolver)(host, port)
     except OSError as error:
         raise UnsafeUrlError("the host could not be resolved") from error
 
-    addresses = {str(entry[4][0]) for entry in resolved}
+    addresses = {str(address) for address in answered}
     _judge(host, addresses)
     # Ordered so a caller picking the first gets a stable choice, and so IPv4
     # and IPv6 answers stay distinguishable in a log or a test.
     return sorted(addresses)
 
 
-def validate_outbound_url(url: str) -> list[str]:
+def validate_outbound_url(url: str, *, resolver: Resolver | None = None) -> list[str]:
     """Raise `UnsafeUrlError` unless this URL is safe to fetch.
 
     Returns the validated addresses, so a caller that wants to connect to one
@@ -173,7 +205,7 @@ def validate_outbound_url(url: str) -> list[str]:
     if not host:
         raise UnsafeUrlError("the URL names no host")
 
-    return resolve_public_host(host, parts.port or DEFAULT_HTTPS_PORT)
+    return resolve_public_host(host, parts.port or DEFAULT_HTTPS_PORT, resolver=resolver)
 
 
 class GuardedTransport(httpx.AsyncHTTPTransport):
@@ -198,6 +230,10 @@ class GuardedTransport(httpx.AsyncHTTPTransport):
     separate resolution, judgement and pin.
     """
 
+    def __init__(self, *, resolver: Resolver | None = None) -> None:
+        super().__init__()
+        self._resolver = resolver
+
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         host = request.url.host
         if not host:
@@ -206,7 +242,7 @@ class GuardedTransport(httpx.AsyncHTTPTransport):
             raise UnsafeUrlError(f"scheme {request.url.scheme!r} is not permitted")
 
         port = request.url.port or DEFAULT_HTTPS_PORT
-        addresses = resolve_public_host(host, port)
+        addresses = resolve_public_host(host, port, resolver=self._resolver)
         pinned = addresses[0]
 
         if pinned == host:
@@ -234,10 +270,12 @@ def _authority(host: str, port: int | None) -> str:
     return f"{bracketed}:{port}"
 
 
-def build_guarded_client(*, timeout: httpx.Timeout) -> httpx.AsyncClient:
+def build_guarded_client(
+    *, timeout: httpx.Timeout, resolver: Resolver | None = None
+) -> httpx.AsyncClient:
     """An `AsyncClient` that cannot be aimed at the deployment network.
 
     The single constructor every integration uses, so "which clients are
     guarded?" has one answer.
     """
-    return httpx.AsyncClient(timeout=timeout, transport=GuardedTransport())
+    return httpx.AsyncClient(timeout=timeout, transport=GuardedTransport(resolver=resolver))

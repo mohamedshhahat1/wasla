@@ -29,9 +29,10 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
-    ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -61,6 +62,27 @@ MAX_TRANSCRIPT_LENGTH: Final = 8_000
 # this is not one Meta issued, and an inbound message carrying one is stored as a
 # message without a downloadable file rather than failing its delivery (MEDIA-05).
 MAX_MEDIA_HANDLE_LENGTH: Final = 255
+
+# Where a provider says a file can be fetched from: a handle (WhatsApp) or a URL
+# (Messenger and Instagram send signed CDN links, which routinely run past 255
+# characters). A deliberate ceiling well above any documented form; a longer one
+# is not a locator any provider issued and is recorded as no file.
+MAX_MEDIA_LOCATOR_LENGTH: Final = 4_096
+
+
+class MediaLocatorKind(StrEnum):
+    """How a provider tells us where a file is (OMNI-009).
+
+    A handle is resolved through the provider's API with the connection's
+    credential; a URL is fetched directly, through the same SSRF guard and a
+    host allow-list of that provider's own. Neither is ever a path on our side.
+    """
+
+    HANDLE = "handle"
+    URL = "url"
+
+
+MEDIA_LOCATOR_KIND_TYPE = _enum_type(MediaLocatorKind, name="media_locator_kind")
 
 
 class MediaStatus(StrEnum):
@@ -157,12 +179,19 @@ UNRESOLVED_MEDIA_STATUSES: Final = frozenset(
 
 
 class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
-    """One file attached to one message.
+    """One file attached to one message, at one position in it.
 
-    One row per message, enforced: WhatsApp sends a single attachment per
-    message, and a webhook replay must not add a second. That constraint is also
-    what makes the download job idempotent - a retry finds the existing row
-    rather than queueing another copy of the same file.
+    A message may carry several, in order (OMNI-009): WhatsApp sends one per
+    message, but Messenger and Instagram send an array, and a second photograph
+    in one message used to have nowhere to go. `UNIQUE(message_id, position)`
+    is what keeps a webhook replay from adding a copy - the position is the
+    provider's order, so a replay names the same one - and what makes the
+    download job idempotent: a retry finds the existing row rather than
+    queueing another copy of the same file.
+
+    The file's message and conversation are keyed together with the workspace
+    (OMNI-022): a row naming another workspace's message is refused by the
+    database, not merely never written by today's code.
 
     `storage_key` is the object this row owns, and it is committed **before**
     the object is written - that is the whole of ADR-087. So a key present does
@@ -174,7 +203,7 @@ class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
     __tablename__ = "message_media"
     # Restated, not inherited: see TenantScopedMixin.
     __table_args__ = (
-        UniqueConstraint("message_id", name="uq_message_media_message_id"),
+        UniqueConstraint("message_id", "position", name="uq_message_media_message_id_position"),
         # One media row owns one object key, asserted by the database rather
         # than by the odds. A generated UUID makes a collision impossible in
         # practice, but the property that matters here is not collision: it is
@@ -233,24 +262,53 @@ class MessageMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
             # too would produce `ck_message_media_ck_message_media_...`.
             name="storage_state",
         ),
+        # The file's message is in the file's conversation and workspace, and
+        # so is the conversation (ADR-100, OMNI-022). These replaced keys that
+        # named `messages.id` and `conversations.id` alone.
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "message_id"],
+            ["messages.tenant_id", "messages.conversation_id", "messages.id"],
+            name="fk_message_media_tenant_message",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"],
+            ["conversations.tenant_id", "conversations.id"],
+            name="fk_message_media_tenant_conversation",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("position >= 0", name="position_non_negative"),
+        CheckConstraint("(locator_kind IS NULL) = (locator IS NULL)", name="locator_shape"),
+        CheckConstraint(
+            f"locator IS NULL OR char_length(locator) <= {MAX_MEDIA_LOCATOR_LENGTH}",
+            name="locator_bounded",
+        ),
     )
 
-    message_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("messages.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    message_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     # Denormalised from the message. The worker asks "is anything still pending
     # on this conversation?" before it lets an agent answer, and that question
     # must be answerable without joining through the message table.
-    conversation_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("conversations.id", ondelete="CASCADE"),
-        nullable=False,
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # Where in its message this file sits: the provider's own order, from 0.
+    position: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=0, server_default=text("0")
     )
-    # Meta's handle for the file. Nullable because an outbound attachment has no
-    # inbound handle until it is uploaded.
+    # Meta's handle for the file, kept for the compatibility window beside the
+    # neutral locator below, which is what fetching reads. Nullable because an
+    # outbound attachment has no inbound handle until it is uploaded.
     wa_media_id: Mapped[str | None] = mapped_column(String(MAX_MEDIA_HANDLE_LENGTH), nullable=True)
+    # Where the provider says the file is (OMNI-009). Null for a file Wasla
+    # sent, which it holds rather than fetches.
+    locator_kind: Mapped[MediaLocatorKind | None] = mapped_column(
+        MEDIA_LOCATOR_KIND_TYPE, nullable=True
+    )
+    locator: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # When a provider's locator stops working, where it says: a signed CDN URL
+    # carries an expiry, a WhatsApp handle does not.
+    locator_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     status: Mapped[MediaStatus] = mapped_column(
         MEDIA_STATUS_TYPE,
         nullable=False,

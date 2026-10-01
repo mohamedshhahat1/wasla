@@ -32,12 +32,13 @@ PAYLOAD = {
         {
             "changes": [
                 {
+                    "field": "messages",
                     "value": {
                         "metadata": {"phone_number_id": "109876543210"},
                         "messages": [
                             {"from": "2012", "id": "wamid.one", "type": "text"},
                         ],
-                    }
+                    },
                 }
             ]
         }

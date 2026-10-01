@@ -17,21 +17,18 @@ from datetime import datetime
 from sqlalchemy import ColumnElement, and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.models.channel import ChannelConnection, ConnectionStatus
+from app.db.models.channel_event import ChannelEvent, ChannelEventState
 from app.db.models.conversation import Conversation, Message
 from app.db.models.enums import TenantStatus
 from app.db.models.media import (
     UNRESOLVED_MEDIA_STATUSES,
+    MediaLocatorKind,
     MediaStatus,
     MediaStorageState,
     MessageMedia,
 )
 from app.db.models.tenant import Tenant
-from app.db.models.whatsapp import (
-    WhatsAppAccount,
-    WhatsAppAccountStatus,
-    WhatsAppEvent,
-    WhatsAppEventState,
-)
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
 
@@ -65,7 +62,20 @@ class MediaRepository(TenantScopedRepository[MessageMedia]):
         return await self._require(self._select().where(MessageMedia.id == media_id))
 
     async def get_for_message(self, message_id: uuid.UUID) -> MessageMedia | None:
-        return await self._first(self._select().where(MessageMedia.message_id == message_id))
+        """The message's first file. A message may carry several; see `list_for_message`."""
+        return await self._first(
+            self._select()
+            .where(MessageMedia.message_id == message_id)
+            .order_by(MessageMedia.position)
+        )
+
+    async def list_for_message(self, message_id: uuid.UUID) -> list[MessageMedia]:
+        """Every file a message carries, in the provider's order (OMNI-009)."""
+        return await self._all(
+            self._select()
+            .where(MessageMedia.message_id == message_id)
+            .order_by(MessageMedia.position)
+        )
 
     async def lock_for_upload(self, media_id: uuid.UUID) -> MessageMedia:
         """Re-read this row under a row lock, so one object key is allocated once.
@@ -113,22 +123,41 @@ class MediaRepository(TenantScopedRepository[MessageMedia]):
         mime_type: str | None,
         filename: str | None,
         is_voice: bool,
+        position: int = 0,
+        locator_kind: MediaLocatorKind | None = None,
+        locator: str | None = None,
+        locator_expires_at: datetime | None = None,
     ) -> tuple[MessageMedia, bool]:
-        """Note that a message carries a file. Returns the row and whether it is new.
+        """Note that a message carries a file at `position`. Returns the row and whether it is new.
 
-        A message already carrying one is returned as it stands. That is a
-        webhook replay, and the unique constraint would refuse a second row
+        A position already recorded is returned as it stands. That is a webhook
+        replay, and `UNIQUE(message_id, position)` would refuse a second row
         anyway - checking first turns a crash into a no-op.
+
+        A WhatsApp handle given as `wa_media_id` is also recorded as a `handle`
+        locator, which is what fetching reads (OMNI-009); the column is kept
+        for the compatibility window.
         """
-        existing = await self.get_for_message(message_id)
+        existing = await self._first(
+            self._select().where(
+                MessageMedia.message_id == message_id,
+                MessageMedia.position == position,
+            )
+        )
         if existing is not None:
             return existing, False
 
+        if locator is None and wa_media_id is not None:
+            locator_kind, locator = MediaLocatorKind.HANDLE, wa_media_id
         media = MessageMedia(
             tenant_id=self.tenant_id,
             message_id=message_id,
             conversation_id=conversation_id,
+            position=position,
             wa_media_id=wa_media_id,
+            locator_kind=locator_kind if locator is not None else None,
+            locator=locator,
+            locator_expires_at=locator_expires_at,
             status=MediaStatus.PENDING,
             mime_type=mime_type,
             filename=filename,
@@ -150,8 +179,30 @@ class MediaRepository(TenantScopedRepository[MessageMedia]):
         if not message_ids:
             return {}
 
-        rows = await self._all(self._select().where(MessageMedia.message_id.in_(message_ids)))
+        rows = await self._all(
+            self._select()
+            .where(MessageMedia.message_id.in_(message_ids))
+            .order_by(MessageMedia.message_id, MessageMedia.position.desc())
+        )
+        # Descending, so each message keeps its first file when the dict is built.
         return {row.message_id: row for row in rows}
+
+    async def map_all_for_messages(
+        self,
+        message_ids: Sequence[uuid.UUID],
+    ) -> dict[uuid.UUID, list[MessageMedia]]:
+        """Every file of these messages, by message, each in the provider's order."""
+        if not message_ids:
+            return {}
+        rows = await self._all(
+            self._select()
+            .where(MessageMedia.message_id.in_(message_ids))
+            .order_by(MessageMedia.message_id, MessageMedia.position)
+        )
+        grouped: dict[uuid.UUID, list[MessageMedia]] = {}
+        for row in rows:
+            grouped.setdefault(row.message_id, []).append(row)
+        return grouped
 
     async def serving(self, conversation_id: uuid.UUID) -> MediaServing | None:
         """The lifecycle a file is processed under, read now (MEDIA-08).
@@ -164,16 +215,16 @@ class MediaRepository(TenantScopedRepository[MessageMedia]):
                 select(
                     Tenant.status,
                     Tenant.deleted_at,
-                    WhatsAppAccount.status,
-                    WhatsAppAccount.released_at,
+                    ChannelConnection.status,
+                    ChannelConnection.released_at,
                 )
                 .select_from(Conversation)
                 .join(Tenant, Tenant.id == Conversation.tenant_id)
                 .join(
-                    WhatsAppAccount,
+                    ChannelConnection,
                     and_(
-                        WhatsAppAccount.id == Conversation.account_id,
-                        WhatsAppAccount.tenant_id == Conversation.tenant_id,
+                        ChannelConnection.id == Conversation.account_id,
+                        ChannelConnection.tenant_id == Conversation.tenant_id,
                     ),
                 )
                 .where(
@@ -188,26 +239,25 @@ class MediaRepository(TenantScopedRepository[MessageMedia]):
         return MediaServing(
             workspace_active=workspace_status is TenantStatus.ACTIVE,
             workspace_deleted=deleted_at is not None,
-            channel_available=(
-                account_status is WhatsAppAccountStatus.ACTIVE and released_at is None
-            ),
+            channel_available=(account_status is ConnectionStatus.ACTIVE and released_at is None),
         )
 
-    async def account_for(self, conversation_id: uuid.UUID) -> WhatsAppAccount | None:
-        """The number a conversation's messages arrived on, read fresh.
+    async def connection_for(self, conversation_id: uuid.UUID) -> ChannelConnection | None:
+        """The connection a conversation's messages arrived on, read fresh.
 
-        The owner of the credential an inbound file is fetched with (MEDIA-13).
-        Decided here from the conversation, server-side - never from anything
-        the job, the customer or a model supplies.
+        The owner of the credential an inbound file is fetched with (MEDIA-13),
+        and the channel whose adapter fetches it. Decided here from the
+        conversation, server-side - never from anything the job, the customer
+        or a model supplies.
         """
-        found: WhatsAppAccount | None = (
+        found: ChannelConnection | None = (
             await self._session.execute(
-                select(WhatsAppAccount)
+                select(ChannelConnection)
                 .join(
                     Conversation,
                     and_(
-                        Conversation.account_id == WhatsAppAccount.id,
-                        Conversation.tenant_id == WhatsAppAccount.tenant_id,
+                        Conversation.account_id == ChannelConnection.id,
+                        Conversation.tenant_id == ChannelConnection.tenant_id,
                     ),
                 )
                 .where(
@@ -450,9 +500,10 @@ class PlatformMediaRepository(BaseRepository[MessageMedia]):
         conversation gets answered twice.
         """
         owed_to_inbound_recovery = exists().where(
-            WhatsAppEvent.tenant_id == MessageMedia.tenant_id,
-            WhatsAppEvent.event_id == Message.wa_message_id,
-            WhatsAppEvent.state == WhatsAppEventState.RECEIVED,
+            ChannelEvent.tenant_id == MessageMedia.tenant_id,
+            ChannelEvent.account_id == Message.connection_id,
+            ChannelEvent.event_id == Message.wa_message_id,
+            ChannelEvent.state == ChannelEventState.RECEIVED,
         )
         return and_(
             MessageMedia.status.in_(UNRESOLVED_MEDIA_STATUSES),

@@ -43,12 +43,13 @@ from redis.asyncio import Redis
 from app.core.oauth_flow import FlowKind, OAuthFlow, OAuthFlowStore
 from app.core.token_store import RefreshTokenStore
 from tests.fakes import as_redis_client
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
 # A database of its own, so a run cannot disturb whatever else uses this Redis.
 # The queue suites hold 12 and 14, the metric catalogue 13.
-REDIS_URL = "redis://localhost:6379/11"
+REDIS_URL = redis_url_for(11)
 
 # Enough contenders that a single accidental serialisation could not produce a
 # passing result by luck, and few enough that a failure names the interleaving

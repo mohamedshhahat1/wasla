@@ -59,6 +59,7 @@ from app.workers.ai_worker import AgentWorker
 from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.queue import AgentJob, AgentQueue
 from tests.integration.ai_harness import wait_for_lock_waiter
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
@@ -76,7 +77,7 @@ async def _text(result: Awaitable[str | None] | str | None) -> str | None:
     return await cast("Awaitable[str | None]", result)
 
 
-REDIS_URL = "redis://localhost:6379/13"
+REDIS_URL = redis_url_for(13)
 REPLY = "Yes, we are here."
 
 

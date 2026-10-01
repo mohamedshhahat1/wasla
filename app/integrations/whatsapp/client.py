@@ -57,6 +57,19 @@ from typing import Any, Final, Literal
 
 import httpx
 
+from app.channels.media import (
+    MalformedMediaDescriptorError,
+    MediaCredentialRefusedError,
+    MediaHostRefusedError,
+    MediaTooLargeError,
+    MediaUnavailableError,
+    read_capped,
+)
+from app.channels.outcomes import (
+    ProviderAuthError,
+    SendNotAttemptedError,
+    UncertainDeliveryError,
+)
 from app.core.config import DEFAULT_META_MEDIA_HOST_ROOTS
 from app.core.exceptions import (
     DependencyUnavailableError,
@@ -66,7 +79,13 @@ from app.core.exceptions import (
 )
 from app.core.hostnames import HostNotAuthorizedError, credential_host, normalize_roots, within
 from app.core.logging import get_logger
-from app.core.net import MAX_REDIRECTS, UnsafeUrlError, build_guarded_client, validate_outbound_url
+from app.core.net import (
+    MAX_REDIRECTS,
+    Resolver,
+    UnsafeUrlError,
+    build_guarded_client,
+    validate_outbound_url,
+)
 from app.core.telemetry import CallOutcome, Provider, ProviderCall
 
 logger = get_logger(__name__)
@@ -130,6 +149,8 @@ FORBIDDEN: Final = 403
 # nor the code is trusted on its own.
 META_AUTH_CODE: Final = 190
 MAX_REPLY_BUTTONS: Final = 3
+# What a refused credential is reported as. The neutral type, WhatsApp's words.
+CREDENTIALS_REFUSED: Final = "WhatsApp refused this number's credentials."
 # How much of a failed media response is ever read (MEDIA-09). Enough for Meta's
 # error envelope, whose code is the only part anything acts on; nothing near a
 # file. The error path must cost less memory than a success, not more - it used
@@ -211,28 +232,6 @@ def _retry_after(response: httpx.Response) -> float | None:
     return seconds if seconds > 0 else None
 
 
-class SendNotAttemptedError(ExternalServiceError):
-    """The request provably never reached Meta.
-
-    Raised only where nothing can have been delivered: a connection that was
-    never established, or a rejection issued before the message was read. The
-    caller may record the send as undelivered and, if it wants to, make a new
-    one - which is a decision it cannot safely take after any other failure
-    (ADR-093).
-    """
-
-
-class UncertainDeliveryError(ExternalServiceError):
-    """Meta may or may not have accepted the request, and nobody can tell.
-
-    A read timeout, a reset connection, a 5xx. The request left this process
-    and no answer came back, and Meta publishes no way to ask what became of
-    it - there is no idempotency key on the send endpoint and no lookup keyed
-    on anything this system generated. So this is terminal by construction: the
-    one thing that must not follow it is another send.
-    """
-
-
 class TemplateWithdrawnError(SendNotAttemptedError):
     """Meta refused this template, not this message.
 
@@ -251,80 +250,6 @@ class TemplateWithdrawnError(SendNotAttemptedError):
     def __init__(self, *, code: int) -> None:
         super().__init__(self.message)
         self.code = code
-
-
-class ProviderAuthError(SendNotAttemptedError):
-    """Meta refused the credential, so nothing was sent and nothing will be.
-
-    A subclass of `SendNotAttemptedError` because that is the truth about this
-    message - Meta declined before reading it, so nothing reached a customer
-    and the row is honestly `UNDELIVERED`. It is a *type* of its own because
-    the truth about the *workspace* is different: every other recipient will
-    fail identically until somebody reconnects the number.
-
-    Without the distinction a sweep works through its audience discovering the
-    same dead token ten thousand times, spending one attempt budget per person
-    and ending with no single thing to tell the operator (MSG-18). Campaigns
-    and follow-ups let this one out rather than filing it against a recipient,
-    which is the same shape `DependencyUnavailableError` already had for a
-    credential that is missing rather than refused.
-
-    Carries no credential material, here or in its message.
-    """
-
-    message = "WhatsApp refused this number's credentials."
-
-
-class MediaHostRefusedError(ExternalServiceError):
-    """A media hop named a host that may not receive the Meta token (MEDIA-01).
-
-    Refused outright rather than fetched anonymously. A provider response that
-    points outside Meta's own hosts is not a file Meta is serving, and reading
-    it without the token would still be downloading whatever that host chose to
-    send into a customer's conversation.
-    """
-
-    message = "WhatsApp could not return this file."
-
-
-class MediaUnavailableError(ExternalServiceError):
-    """Meta answered, permanently, that this file cannot be had (MEDIA-04).
-
-    A 400, 404 or 410 on the descriptor or the file: an expired handle, a
-    deleted file, one belonging to another account. No retry changes that, so a
-    caller records a decision rather than an attempt.
-    """
-
-    message = "WhatsApp no longer has this file."
-
-
-class MediaCredentialRefusedError(ExternalServiceError):
-    """Meta refused the credential a media read was made with.
-
-    A 401, a 403, or Meta's code 190 on any status. Kept apart from an
-    unavailable file because the remedy is different - reconnecting the number,
-    not asking the customer again - and an operator reading the reason should
-    see which.
-    """
-
-    message = "WhatsApp refused this number's credentials for the file."
-
-
-class MalformedMediaDescriptorError(ExternalServiceError):
-    """Meta's answer about a file could not be used: no location, not JSON, too big."""
-
-    message = "WhatsApp returned an unusable description of this file."
-
-
-class MediaTooLargeError(ExternalServiceError):
-    """A download passed the byte cap while it was being read.
-
-    Distinct from a fetch that broke. The caller records this as a decision not
-    to process the file, which no retry changes, rather than as an attempt worth
-    repeating - the same split `MediaStatus` draws between skipped and failed.
-    """
-
-    message = "This file is larger than the limit."
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,6 +297,7 @@ class WhatsAppClient:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[], float] | None = None,
         media_host_roots: Iterable[str] = DEFAULT_META_MEDIA_HOST_ROOTS,
+        resolver: Resolver | None = None,
     ) -> None:
         if not access_token:
             # An absent platform credential is our misconfiguration, not the
@@ -390,18 +316,25 @@ class WhatsAppClient:
         # The hosts the token may be sent to on a read (MEDIA-01). Normalised
         # once here; `_credential_headers` is the only place it is consulted.
         self._media_host_roots = normalize_roots(media_host_roots)
+        # Who answers "what address is this host?" when a provider-supplied URL
+        # is judged. The system's, always, in production; a fixed table in a
+        # test, so the suite needs no network (OMNI-024). The judgement itself
+        # is not injectable.
+        self._resolver = resolver
 
     async def send_text(
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None = None,
+        recipient_user_id: str | None = None,
         body: str,
         preview_url: bool = False,
     ) -> SentMessage:
         return await self._send(
             phone_number_id=phone_number_id,
             to=to,
+            recipient_user_id=recipient_user_id,
             content={"type": "text", "text": {"body": body, "preview_url": preview_url}},
         )
 
@@ -409,7 +342,8 @@ class WhatsAppClient:
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None = None,
+        recipient_user_id: str | None = None,
         kind: MediaKind,
         link: str | None = None,
         media_id: str | None = None,
@@ -430,6 +364,7 @@ class WhatsAppClient:
         return await self._send(
             phone_number_id=phone_number_id,
             to=to,
+            recipient_user_id=recipient_user_id,
             content={"type": kind, kind: media},
         )
 
@@ -437,7 +372,8 @@ class WhatsAppClient:
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None = None,
+        recipient_user_id: str | None = None,
         latitude: float,
         longitude: float,
         name: str | None = None,
@@ -452,6 +388,7 @@ class WhatsAppClient:
         return await self._send(
             phone_number_id=phone_number_id,
             to=to,
+            recipient_user_id=recipient_user_id,
             content={"type": "location", "location": location},
         )
 
@@ -459,7 +396,8 @@ class WhatsAppClient:
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None = None,
+        recipient_user_id: str | None = None,
         body: str,
         buttons: list[tuple[str, str]],
     ) -> SentMessage:
@@ -470,6 +408,7 @@ class WhatsAppClient:
         return await self._send(
             phone_number_id=phone_number_id,
             to=to,
+            recipient_user_id=recipient_user_id,
             content={
                 "type": "interactive",
                 "interactive": {
@@ -489,7 +428,8 @@ class WhatsAppClient:
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None = None,
+        recipient_user_id: str | None = None,
         body: str,
         button_text: str,
         sections: list[dict[str, Any]],
@@ -500,6 +440,7 @@ class WhatsAppClient:
         return await self._send(
             phone_number_id=phone_number_id,
             to=to,
+            recipient_user_id=recipient_user_id,
             content={
                 "type": "interactive",
                 "interactive": {
@@ -514,7 +455,8 @@ class WhatsAppClient:
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None = None,
+        recipient_user_id: str | None = None,
         name: str,
         language: str,
         components: list[dict[str, Any]] | None = None,
@@ -527,6 +469,7 @@ class WhatsAppClient:
         return await self._send(
             phone_number_id=phone_number_id,
             to=to,
+            recipient_user_id=recipient_user_id,
             content={"type": "template", "template": template},
         )
 
@@ -599,7 +542,7 @@ class WhatsAppClient:
         # network. Validated before the first request rather than only on
         # redirects, because the first hop is a hop like any other.
         try:
-            validate_outbound_url(url)
+            validate_outbound_url(url, resolver=self._resolver)
         except UnsafeUrlError as error:
             logger.warning(
                 "whatsapp.media_url_refused",
@@ -749,7 +692,7 @@ class WhatsAppClient:
                 raise ExternalServiceError("WhatsApp could not return this file.")
             url = hop.redirect_to
             try:
-                validate_outbound_url(url)
+                validate_outbound_url(url, resolver=self._resolver)
             except UnsafeUrlError as error:
                 logger.warning(
                     "whatsapp.media_redirect_refused",
@@ -833,18 +776,7 @@ class WhatsAppClient:
         worth repeating. Retrying an oversized download would spend the same
         bandwidth to reach the same conclusion.
         """
-        chunks: list[bytes] = []
-        total = 0
-        async for chunk in response.aiter_bytes():
-            total += len(chunk)
-            if total > max_bytes:
-                logger.info(
-                    "whatsapp.media_over_cap",
-                    extra={"event": "whatsapp.media_over_cap", "limit_bytes": max_bytes},
-                )
-                raise MediaTooLargeError()
-            chunks.append(chunk)
-        return b"".join(chunks)
+        return await read_capped(response, max_bytes=max_bytes)
 
     async def _get_json(self, url: str, *, max_bytes: int) -> dict[str, Any]:
         response = await self._get(url, max_bytes=max_bytes)
@@ -881,7 +813,7 @@ class WhatsAppClient:
                 return response
             url = str(response.url.join(location))
             try:
-                validate_outbound_url(url)
+                validate_outbound_url(url, resolver=self._resolver)
             except UnsafeUrlError as error:
                 logger.warning(
                     "whatsapp.media_redirect_refused",
@@ -969,19 +901,30 @@ class WhatsAppClient:
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None,
+        recipient_user_id: str | None,
         content: dict[str, Any],
     ) -> SentMessage:
+        """One message, addressed by phone number or by business-scoped user id.
+
+        Exactly one of the two, never both. Meta accepts a business-scoped id in
+        `recipient` (since July 2026) and lets `to` win when both are present;
+        sending both would make the conversation's pinned identity a suggestion
+        rather than the address (OMNI-004), so it is refused here instead.
+        """
+        if (to is None) == (recipient_user_id is None):
+            raise ValidationError("Address a WhatsApp message to exactly one recipient.")
+        address = {"to": to} if to is not None else {"recipient": recipient_user_id}
         payload: dict[str, Any] = {
             "messaging_product": MESSAGING_PRODUCT,
             "recipient_type": "individual",
-            "to": to,
+            **address,
             **content,
         }
         response = await self._post(phone_number_id=phone_number_id, payload=payload)
         return SentMessage(
             message_id=self._message_id(response),
-            recipient=self._recipient(response) or to,
+            recipient=self._recipient(response) or to or recipient_user_id or "",
             raw=response,
         )
 
@@ -1073,7 +1016,7 @@ class WhatsAppClient:
                     # Not this message's problem, and not fixable by trying the
                     # next recipient. Raised as its own type so a sweep can
                     # stop rather than discover it once per person (MSG-18).
-                    raise ProviderAuthError
+                    raise ProviderAuthError(CREDENTIALS_REFUSED)
                 if error_code in TEMPLATE_WITHDRAWN_CODES:
                     # About the template rather than this message, and worth
                     # writing down: the caller marks the registry so the next
@@ -1211,11 +1154,13 @@ class WhatsAppClient:
         raise UncertainDeliveryError("WhatsApp accepted the message without an identifier.")
 
     def _recipient(self, body: dict[str, Any]) -> str | None:
+        """Who Meta delivered to: the phone, or the business-scoped id if it named no phone."""
         contacts = body.get("contacts")
         if isinstance(contacts, list) and contacts and isinstance(contacts[0], dict):
-            recipient = contacts[0].get("wa_id")
-            if isinstance(recipient, str):
-                return recipient
+            for key in ("wa_id", "user_id"):
+                recipient = contacts[0].get(key)
+                if isinstance(recipient, str) and recipient:
+                    return recipient
         return None
 
 
@@ -1276,3 +1221,25 @@ def _read_failure(status_code: int, meta_code: int | None) -> ExternalServiceErr
     if status_code in (UNAUTHORIZED, FORBIDDEN) or meta_code == META_AUTH_CODE:
         return MediaCredentialRefusedError()
     return MediaUnavailableError()
+
+
+# The outcome and media types are channel-neutral now (`app.channels`); they are
+# re-exported under their old import path, as the same classes, so every
+# `except` and `isinstance` written against this module still holds.
+__all__ = [
+    "CREDENTIALS_REFUSED",
+    "DownloadedMedia",
+    "MalformedMediaDescriptorError",
+    "MediaCredentialRefusedError",
+    "MediaDescriptor",
+    "MediaHostRefusedError",
+    "MediaTooLargeError",
+    "MediaUnavailableError",
+    "ProviderAuthError",
+    "SendNotAttemptedError",
+    "SentMessage",
+    "TemplateWithdrawnError",
+    "UncertainDeliveryError",
+    "WhatsAppClient",
+    "build_http_client",
+]

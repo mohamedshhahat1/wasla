@@ -58,8 +58,17 @@ from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.channels.adapter import ChannelMediaFetcher, FetchedFile
+from app.channels.inbound import AttachmentLocator
+from app.channels.media import (
+    MalformedMediaDescriptorError,
+    MediaCredentialRefusedError,
+    MediaHostRefusedError,
+    MediaTooLargeError,
+    MediaUnavailableError,
+)
+from app.channels.registry import ChannelRegistry, ChannelUnavailableError, default_registry
 from app.core.config import Settings
-from app.core.crypto import CredentialDecryptionError
 from app.core.exceptions import (
     ExternalServiceError,
     NotFoundError,
@@ -73,8 +82,10 @@ from app.core.storage import MediaStorage, StorageError, build_key
 from app.core.telemetry import record_media_outcome
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey
+from app.db.models.channel import Channel
 from app.db.models.media import (
     MAX_TRANSCRIPT_LENGTH,
+    MediaLocatorKind,
     MediaStatus,
     MediaStorageState,
     MessageMedia,
@@ -82,15 +93,8 @@ from app.db.models.media import (
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
 from app.db.session import released
-from app.integrations.whatsapp.client import (
-    DownloadedMedia,
-    MalformedMediaDescriptorError,
-    MediaCredentialRefusedError,
-    MediaHostRefusedError,
-    MediaTooLargeError,
-    MediaUnavailableError,
-    WhatsAppClient,
-)
+from app.integrations.whatsapp.adapter import WhatsAppMediaFetcher
+from app.integrations.whatsapp.client import WhatsAppClient
 from app.repositories.media_repository import MediaRepository
 from app.services.audit_service import AuditTrail
 from app.services.credential_service import CredentialService
@@ -160,9 +164,33 @@ class MediaOutcome:
 class _Fetched:
     """What the network half of a download produced: bytes, or a reason not to."""
 
-    downloaded: DownloadedMedia | None = None
+    downloaded: FetchedFile | None = None
     refusal: MediaReason | None = None
     declared_type: str | None = None
+
+
+def _locator(row: MessageMedia) -> AttachmentLocator | None:
+    """Where the provider said this file is, or None if it named nowhere.
+
+    The neutral locator is the authority; a row that has only the WhatsApp
+    handle column - written before 0082, or by a writer from the compatibility
+    window - is read as a handle.
+    """
+    if row.locator is not None and row.locator_kind is not None:
+        kind, value = row.locator_kind, row.locator
+    elif row.wa_media_id is not None:
+        kind, value = MediaLocatorKind.HANDLE, row.wa_media_id
+    else:
+        return None
+    return AttachmentLocator(
+        locator_kind=kind,
+        locator=value,
+        media_kind="file",
+        mime_type=row.mime_type,
+        filename=row.filename,
+        is_voice=row.is_voice,
+        expires_at=row.locator_expires_at,
+    )
 
 
 def content_hash(data: bytes) -> str:
@@ -188,6 +216,8 @@ class MediaService:
         whatsapp: WhatsAppClient | None = None,
         whatsapp_for: Callable[[str], WhatsAppClient] | None = None,
         credentials: CredentialService | None = None,
+        channels: ChannelRegistry | None = None,
+        fetcher: ChannelMediaFetcher | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
@@ -200,6 +230,11 @@ class MediaService:
         # number the file arrived on, resolved when the file is claimed
         # (MEDIA-13). `whatsapp` above is the pre-built alternative tests use.
         self._whatsapp_for = whatsapp_for
+        # Which adapter fetches a file is the file's connection's channel's to
+        # say (OMNI-009); `fetcher` is a pre-built one for any channel, which is
+        # how a test drives a channel that has no production adapter.
+        self._channels = channels or default_registry()
+        self._fetcher = fetcher
         self._credentials = credentials or CredentialService(settings)
         self._media = MediaRepository(session, tenant_id=tenant_id)
         self._usage = UsageRecorder(session, tenant_id=tenant_id)
@@ -283,32 +318,35 @@ class MediaService:
             # Being purged, or quarantined: each has an owner, and it is not
             # this. Reported as it stands rather than restarted.
             return self._as_it_stands(row)
-        if row.wa_media_id is None:
+        locator = _locator(row)
+        if locator is None:
             return await self._finish(row, MediaReason.NO_FILE)
         refusal = await self._lifecycle_refusal(row)
         if refusal is not None:
-            # Before Meta is asked anything: no descriptor, no download, no
-            # object, no provider spend for a workspace the platform has
-            # stopped serving (MEDIA-08, PD-MEDIA-05).
+            # Before the provider is asked anything: no descriptor, no
+            # download, no object, no provider spend for a workspace the
+            # platform has stopped serving (MEDIA-08, PD-MEDIA-05).
             return await self._finish(row, refusal)
-        whatsapp = self._whatsapp
-        if whatsapp is None:
-            whatsapp = await self._client_for(row)
-        if whatsapp is None:
-            # No credential to fetch with. Terminal and observable rather than
-            # a job dead-lettered with the row left pending (MEDIA-03).
-            return await self._finish(row, MediaReason.CREDENTIAL_UNAVAILABLE)
+        fetcher = await self._fetcher_for(row)
+        if isinstance(fetcher, MediaReason):
+            # No adapter, or no credential to fetch with. Terminal and
+            # observable rather than a job dead-lettered with the row left
+            # pending (MEDIA-03).
+            return await self._finish(row, fetcher)
+        if locator.expires_at is not None and locator.expires_at <= datetime.now(UTC):
+            # A signed link past its own expiry is gone; asking would spend a
+            # request to learn it.
+            return await self._finish(row, MediaReason.UNAVAILABLE)
 
         claimed = await self._claim(row, status=MediaStatus.DOWNLOADING)
         if claimed is not None:
             return claimed
 
-        wa_media_id = row.wa_media_id
         announced = row.mime_type
         # TX1 commits here - the claim becomes visible to every other attempt -
         # and the connection goes back to the pool for the whole of the fetch.
         async with released(self._session):
-            fetched = await self._fetch(whatsapp, wa_media_id, announced=announced)
+            fetched = await self._fetch(fetcher, locator, announced=announced)
 
         try:
             row_or_none = await self._fenced(media.id)
@@ -399,9 +437,13 @@ class MediaService:
         return await self.finalize(row, key=key)
 
     async def _fetch(
-        self, whatsapp: WhatsAppClient, wa_media_id: str, *, announced: str | None
+        self, fetcher: ChannelMediaFetcher, locator: AttachmentLocator, *, announced: str | None
     ) -> _Fetched:
-        """The network half of a download: Meta's descriptor, then the body.
+        """The network half of a download: the provider's descriptor, then the body.
+
+        Through the channel's fetcher (OMNI-009) - a WhatsApp handle in Meta's
+        two steps, or a provider URL through the shared guard - and nothing
+        below this line knows which.
 
         Called with no transaction open. Returns bytes or a reason, never
         raises for anything a provider can do: the descriptor lookup is inside
@@ -421,13 +463,13 @@ class MediaService:
                 # Asked before fetching, not after. The alternative to asking is
                 # paying to move a file in order to discover it was too big to
                 # keep.
-                descriptor = await whatsapp.probe_media(wa_media_id)
+                descriptor = await fetcher.probe(locator)
                 declared_type = descriptor.mime_type or announced
                 if descriptor.byte_size is not None and descriptor.byte_size > cap:
                     return _Fetched(refusal=MediaReason.OVERSIZE)
                 if not self._is_readable(declared_type):
                     return _Fetched(refusal=MediaReason.UNSUPPORTED_TYPE)
-                downloaded = await whatsapp.fetch_media(wa_media_id, max_bytes=cap)
+                downloaded = await fetcher.fetch(locator, max_bytes=cap)
         except TimeoutError:
             logger.warning(
                 "media.download_timed_out",
@@ -820,54 +862,36 @@ class MediaService:
             return MediaReason.CHANNEL_UNAVAILABLE
         return None
 
-    async def _client_for(self, row: MessageMedia) -> WhatsAppClient | None:
-        """A client carrying the credential of the number this file arrived on.
+    async def _fetcher_for(self, row: MessageMedia) -> ChannelMediaFetcher | MediaReason:
+        """The fetcher for this file's connection, or why there is none.
 
-        The same authority model outbound sends use (ADR-034): a number the
-        workspace connected with its own token is fetched with that token, and
-        one without is fetched with the platform's. A workspace token this
-        process cannot decrypt is **not** downgraded to the platform's -
-        fetching as somebody else is a different act - and ends the file
-        without a fetch. The token lives only in the client built here; it is
-        never written to the row, a log line or anything an agent reads.
+        The same authority model outbound sends use (ADR-034, MEDIA-13): the
+        credential of the connection the file arrived on, resolved now by that
+        connection's adapter - never anything the job, the customer or a model
+        supplies. A channel Wasla cannot operate is refused rather than handed
+        WhatsApp's fetcher.
         """
-        if self._whatsapp_for is None:
-            return None
-        account = await self._media.account_for(row.conversation_id)
-        if account is None:
-            return None
+        if self._fetcher is not None:
+            return self._fetcher
+        connection = await self._media.connection_for(row.conversation_id)
+        if connection is None:
+            return MediaReason.CHANNEL_UNAVAILABLE
         try:
-            resolved = self._credentials.resolve(account)
-        except CredentialDecryptionError:
-            logger.error(
-                "media.credential_unreadable",
-                extra={
-                    "event": "media.credential_unreadable",
-                    "tenant_id": str(self._tenant_id),
-                    "media_id": str(row.id),
-                },
-            )
-            return None
-        if not resolved.token:
-            logger.warning(
-                "media.credential_missing",
-                extra={
-                    "event": "media.credential_missing",
-                    "tenant_id": str(self._tenant_id),
-                    "media_id": str(row.id),
-                },
-            )
-            return None
-        logger.info(
-            "media.credential_resolved",
-            extra={
-                "event": "media.credential_resolved",
-                "tenant_id": str(self._tenant_id),
-                "media_id": str(row.id),
-                "workspace_credential": resolved.is_own,
-            },
+            adapter = self._channels.adapter_for(connection.channel)
+        except ChannelUnavailableError:
+            return MediaReason.CHANNEL_UNAVAILABLE
+        if self._whatsapp is not None and connection.channel is Channel.WHATSAPP:
+            # A pre-built client a test injected.
+            return WhatsAppMediaFetcher(client=self._whatsapp)
+        fetcher = await adapter.media_fetcher(
+            session=self._session,
+            connection=connection,
+            settings=self._settings,
+            client_for=self._whatsapp_for,
+            credentials=self._credentials,
+            media_id=row.id,
         )
-        return self._whatsapp_for(resolved.token)
+        return fetcher if fetcher is not None else MediaReason.CREDENTIAL_UNAVAILABLE
 
     # --------------------------------------------------------------- claims
 

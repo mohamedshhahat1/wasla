@@ -51,6 +51,7 @@ from app.core.redis import RedisClient
 from app.db.session import Database
 from app.main import create_app
 from app.workers.queue import QUEUE_NAMESPACE
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
@@ -58,7 +59,7 @@ PATH = "/api/v1/webhooks/whatsapp"
 APP_SECRET = "concurrency-app-secret"
 # A Redis database of this file's own, so a run cannot disturb anything else
 # using this server and the agent queue depth means what it says.
-REDIS_URL = "redis://localhost:6379/13"
+REDIS_URL = redis_url_for(13)
 # Imported rather than spelled, so a namespace change cannot leave this file
 # asserting on a key nothing writes to - which would make every count below
 # read zero and pass for the wrong reason.
@@ -83,6 +84,7 @@ def _inbound(*, phone_number_id: str, wa_id: str, wamid: str, at: datetime) -> d
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": phone_number_id},
                             "contacts": [
@@ -97,7 +99,7 @@ def _inbound(*, phone_number_id: str, wa_id: str, wamid: str, at: datetime) -> d
                                     "text": {"body": "hello"},
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }
@@ -112,6 +114,7 @@ def _status(*, phone_number_id: str, wamid: str, status: str, at: datetime) -> d
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": phone_number_id},
                             "statuses": [
@@ -122,7 +125,7 @@ def _status(*, phone_number_id: str, wamid: str, status: str, at: datetime) -> d
                                     "recipient_id": "201555000111",
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }

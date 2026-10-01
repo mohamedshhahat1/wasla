@@ -35,7 +35,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import pytest_asyncio
@@ -43,8 +43,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.pool import QueuePool
 
+from app.channels.adapter import ChannelAdapter, ChannelSender
+from app.channels.registry import ChannelRegistry
 from app.core.config import Settings
 from app.core.exceptions import RateLimitedError
+from app.db.models.channel import Channel, ChannelConnection
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -58,10 +61,12 @@ from app.db.models.follow_up import FollowUp, FollowUpStatus
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.db.session import Database
+from app.integrations.whatsapp.adapter import WhatsAppAdapter, WhatsAppSender
 from app.integrations.whatsapp.client import (
     SendNotAttemptedError,
     SentMessage,
     UncertainDeliveryError,
+    WhatsAppClient,
 )
 from app.services.follow_up_service import FollowUpService
 from app.services.messaging_service import MessagingService
@@ -187,6 +192,39 @@ async def workspace(one_connection: Database) -> AsyncIterator[tuple[uuid.UUID, 
             await session.commit()
 
 
+class _DoubleClientAdapter(WhatsAppAdapter):
+    """The WhatsApp adapter as it ships, except for the client its sender holds.
+
+    The double goes in where the real client is built from the number's
+    credential - the adapter's `sender` - so the delivery protocol above it and
+    the WhatsApp sender's own addressing and content mapping are the code that
+    runs in production. Patching anything higher would test a double; this used
+    to patch `MessagingService._client`, and once the send seam moved into the
+    adapter that patch reached nothing and the suite's sends went to the real
+    Graph API, which refused the fixture token.
+    """
+
+    def __init__(self, provider: Provider) -> None:
+        self._provider = provider
+
+    @asynccontextmanager
+    async def sender(
+        self,
+        *,
+        session: AsyncSession,
+        connection: ChannelConnection,
+        settings: Settings,
+        http: Any | None = None,
+        credentials: Any | None = None,
+    ) -> AsyncIterator[ChannelSender]:
+        account = await self.account(session, connection)
+        yield WhatsAppSender(
+            client=cast(WhatsAppClient, self._provider),
+            phone_number_id=account.phone_number_id,
+            uploaded=[],
+        )
+
+
 def _messaging(
     session: AsyncSession,
     *,
@@ -194,24 +232,15 @@ def _messaging(
     provider: Provider,
     database_url: str = "",
 ) -> MessagingService:
-    """The service as it ships, with the provider client replaced.
-
-    The double goes in at `_client`, which is the seam where the real one is
-    built from the account's credential - so everything above it, including the
-    whole delivery protocol, is the code that runs in production.
-    """
-    service = MessagingService(
+    """The service as it ships, with the provider client replaced (see the adapter above)."""
+    return MessagingService(
         session=session,
         settings=_settings(database_url),
         tenant_id=tenant_id,
+        channels=ChannelRegistry(
+            {Channel.WHATSAPP: cast(ChannelAdapter, _DoubleClientAdapter(provider))}
+        ),
     )
-
-    @asynccontextmanager
-    async def client(account: WhatsAppAccount) -> AsyncIterator[Provider]:
-        yield provider
-
-    service._client = client  # type: ignore[assignment,method-assign]
-    return service
 
 
 def _pool(database: Database) -> QueuePool:

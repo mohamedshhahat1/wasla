@@ -35,7 +35,7 @@ from app.core.logging import get_logger
 from app.core.secure_compare import secrets_match
 from app.core.telemetry import CallOutcome, Provider, observe_auth_event, record_provider_call
 from app.db.errors import is_data_exception
-from app.integrations.whatsapp.signature import SIGNATURE_HEADER, verify_signature
+from app.integrations.meta.signature import SIGNATURE_HEADER, verify_signature
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.media_queue import MediaQueue
 from app.workers.queue import AgentQueue
@@ -240,6 +240,16 @@ async def receive_events(
             "ignored": outcome.ignored,
             "queued": outcome.queued,
             "rejected": outcome.rejected,
+            # What the parser refused, by bounded reason - a foreign `object`,
+            # a field this route does not handle, a malformed entry - so a
+            # delivery that became nothing says why (OMNI-010). Counted as
+            # well, in `wasla_inbound_entries_refused_total`.
+            "refused": dict(outcome.refused),
+            # The business's own sends coming back, and provider ids naming
+            # a message that is not this customer's: kept, never projected.
+            "echoes": outcome.echoes,
+            "collisions": outcome.collisions,
+            "identity_conflicts": outcome.identity_conflicts,
         },
     )
     return {"status": "accepted"}

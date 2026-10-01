@@ -245,12 +245,14 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
         *,
         campaign_id: uuid.UUID,
         contact_id: uuid.UUID,
+        participant_identity_id: uuid.UUID | None = None,
     ) -> CampaignRecipient:
         return self.add(
             CampaignRecipient(
                 tenant_id=self.tenant_id,
                 campaign_id=campaign_id,
                 contact_id=contact_id,
+                participant_identity_id=participant_identity_id,
                 status=RecipientStatus.PENDING,
                 attempts=0,
             )
@@ -377,16 +379,29 @@ class AudienceRepository(TenantScopedRepository[Contact]):
 
         return query.distinct()
 
-    async def list_eligible(
+    async def list_eligible_members(
         self,
         *,
         account_id: uuid.UUID,
         filters: AudienceFilter,
         limit: int,
-    ) -> list[Contact]:
-        return await self._all(
-            self._eligible(account_id=account_id, filters=filters).order_by(Contact.id).limit(limit)
+    ) -> list[tuple[Contact, uuid.UUID]]:
+        """Eligible contacts, each with the identity its conversation on this number addresses.
+
+        The identity is what a copy is sent to (OMNI-004): recorded on the
+        recipient when the audience is materialised, so "who exactly was this
+        sent to" is answerable from the row, and a contact holding a phone and a
+        business-scoped id is never addressed by whichever a send happened to
+        pick. One conversation per contact per number, so one pair per contact.
+        """
+        statement = (
+            self._eligible(account_id=account_id, filters=filters)
+            .add_columns(Conversation.participant_identity_id)
+            .order_by(Contact.id)
+            .limit(limit)
         )
+        rows = await self.session.execute(statement)
+        return [(contact, participant) for contact, participant in rows.all()]
 
     async def count_eligible(self, *, account_id: uuid.UUID, filters: AudienceFilter) -> int:
         subquery = self._eligible(account_id=account_id, filters=filters).subquery()

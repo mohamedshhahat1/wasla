@@ -78,6 +78,7 @@ def _inbound(wamid: str, *, at: datetime, body: str) -> dict[str, object]:
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": NUMBER},
                             "contacts": [{"wa_id": CUSTOMER, "profile": {"name": "Yara"}}],
@@ -90,7 +91,7 @@ def _inbound(wamid: str, *, at: datetime, body: str) -> dict[str, object]:
                                     "text": {"body": body},
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }
@@ -105,6 +106,7 @@ def _status(wamid: str, *, status: str, at: datetime) -> dict[str, object]:
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": NUMBER},
                             "statuses": [
@@ -115,7 +117,7 @@ def _status(wamid: str, *, status: str, at: datetime) -> dict[str, object]:
                                     "recipient_id": CUSTOMER,
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }

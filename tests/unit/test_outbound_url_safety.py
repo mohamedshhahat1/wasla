@@ -16,6 +16,9 @@ and can be read back through the API, which turns a blind request into a read.
 
 from __future__ import annotations
 
+import socket
+from typing import Any
+
 import httpx
 import pytest
 
@@ -88,10 +91,21 @@ def test_a_name_that_does_not_resolve_is_refused() -> None:
         validate_outbound_url("https://this-name-does-not-exist.invalid/f.jpg")
 
 
-def test_a_public_https_url_is_accepted() -> None:
+def test_a_public_https_url_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
     """The control for the whole module: a real provider URL must pass, or the
-    guard has broken media rather than secured it."""
-    validate_outbound_url("https://graph.facebook.com/v21.0/1234")
+    guard has broken media rather than secured it.
+
+    Through the system resolver - the path production takes - with the
+    operating system's answer fixed to a public address of Meta's, so the
+    control needs no network (OMNI-024).
+    """
+
+    def answer(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
+        assert host == "graph.facebook.com"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("157.240.1.35", port or 443))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", answer)
+    assert validate_outbound_url("https://graph.facebook.com/v21.0/1234") == ["157.240.1.35"]
 
 
 def test_httpx_strips_authorization_across_origins() -> None:

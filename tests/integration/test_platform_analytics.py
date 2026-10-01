@@ -26,9 +26,11 @@ from app.api.dependencies import (
 )
 from app.core.dependencies import get_session
 from app.db.models import PlatformRole, Tenant, TenantStatus, User
+from app.db.models.channel import Channel
 from app.db.models.usage import UsageEventType, UsageUnit
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.platform.platform_analytics import (
+    ConnectionCounts,
     PlatformAnalyticsService,
     PlatformOverview,
     WorkspacePage,
@@ -97,6 +99,11 @@ async def test_the_overview_counts_every_workspace_and_its_numbers(
     assert overview.tenants_suspended == 1
     assert overview.whatsapp_numbers == 2
     assert overview.whatsapp_numbers_active == 1
+    # The same numbers, as connections of their channel (OMNI-014): mirrored
+    # rows, so the two figures cannot disagree.
+    assert dict(overview.connections_by_channel) == {
+        Channel.WHATSAPP: ConnectionCounts(total=2, active=1)
+    }
 
 
 async def test_a_deleted_workspace_is_not_counted(db_session: AsyncSession) -> None:
@@ -320,6 +327,7 @@ class AnsweringPlatform:
             tenants_suspended=1,
             whatsapp_numbers=6,
             whatsapp_numbers_active=5,
+            connections_by_channel={Channel.WHATSAPP: ConnectionCounts(total=6, active=5)},
         )
 
     async def workspaces(
@@ -362,6 +370,7 @@ async def test_platform_staff_can_read_the_overview(
     body = response.json()
     assert body["tenants_active"] == 3
     assert body["whatsapp_numbers_active"] == 5
+    assert body["connections_by_channel"] == {"whatsapp": {"total": 6, "active": 5}}
     assert body["usage"]["messages_sent"] == 120
     # No revenue field, and none until there are subscriptions to compute one
     # from: a plausible zero is worse than an absent figure.

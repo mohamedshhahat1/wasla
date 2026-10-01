@@ -971,10 +971,12 @@ async def test_an_inbound_webhook_cancels_the_waiting_nudge(db_session: AsyncSes
     assert follow_up.status is FollowUpStatus.PENDING
 
     payload = {
+        "object": "whatsapp_business_account",
         "entry": [
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": "phone-acme-inbound"},
                             "contacts": [{"wa_id": "201555000111", "profile": {"name": "Ahmed"}}],
@@ -987,11 +989,11 @@ async def test_an_inbound_webhook_cancels_the_waiting_nudge(db_session: AsyncSes
                                     "text": {"body": "Yes, still interested."},
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }
-        ]
+        ],
     }
 
     outcome = await WhatsAppIngestionService(session=db_session).ingest(payload)
@@ -1038,10 +1040,12 @@ async def test_a_delivery_status_does_not_cancel_a_nudge(db_session: AsyncSessio
     await db_session.flush()
 
     payload = {
+        "object": "whatsapp_business_account",
         "entry": [
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": "phone-acme-status"},
                             "statuses": [
@@ -1052,11 +1056,11 @@ async def test_a_delivery_status_does_not_cancel_a_nudge(db_session: AsyncSessio
                                     "recipient_id": "201555000222",
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }
-        ]
+        ],
     }
 
     outcome = await WhatsAppIngestionService(session=db_session).ingest(payload)

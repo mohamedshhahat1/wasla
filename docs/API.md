@@ -306,7 +306,7 @@ All conversation routes are available to any member of the workspace. Restrictin
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/v1/conversations` | Open conversations, most recently active first; `?priority=` narrows |
+| GET | `/api/v1/conversations` | Open conversations, most recently active first; `?priority=`, `?channel=` and `?connection_id=` narrow |
 | GET | `/api/v1/conversations/{conversation_id}` | One conversation |
 | GET | `/api/v1/conversations/{conversation_id}/messages` | Messages, most recent first |
 | POST | `/api/v1/conversations/{conversation_id}/messages` | Send free text (`201`) |
@@ -328,6 +328,32 @@ Four behaviours worth knowing before integrating:
 - **A template message has no `body`.** It carries `template_name` and `template_language` instead, and `kind` is `template`. Meta renders the wording from its own approved copy, so Wasla has no text to return; a client should render the template it identifies rather than expecting the words the customer saw. Both fields are null on every other kind.
 
 - **Priority is raised automatically and lowered only by a person.** Every customer message is classified before an agent answers it; a negative or angry reading raises `priority` and may hand the conversation to a human. Nothing lowers it again, because a conversation quietly demoted out of somebody's queue is one nobody looks at. `POST .../priority` is the way back. The read model carries `sentiment`, `sentiment_score`, `intent` and `intent_confidence` so a client can show why a conversation is flagged. See [SENTIMENT.md](SENTIMENT.md).
+
+**Channels and connections (additive, OMNI-015).** The inbox is one list for
+every channel; nothing is a WhatsApp-only endpoint because of it. Each
+conversation read carries:
+
+| Field | Meaning |
+| --- | --- |
+| `channel` | `whatsapp` today; `instagram` and `messenger` are vocabulary no connection uses yet |
+| `connection_id` | The connection the conversation is on. Same value as `account_id`, which stays |
+| `participant` | `{id, channel, kind}` - who the conversation addresses (`kind` is `phone` or `bsuid` on WhatsApp). The identifier's value is deliberately not included |
+| `reply_policy` | `{free_text_allowed, window_expires_at, out_of_window, templates, text_limit, text_limit_unit}` - the channel's rule, stated rather than inferred. `text_limit_unit` is `characters` or `utf8_bytes` |
+
+`service_window_open` keeps exactly its old meaning - WhatsApp's 24-hour
+customer-service window is open - and is not widened for any other channel;
+`reply_policy` is where a channel's other rules appear. Messages carry
+`provider_message_id`, the provider's id on every channel.
+
+**Deprecated, kept until clients have moved** (each is marked `deprecated` in the
+OpenAPI schema; removal is announced here with a date first):
+
+| Field | Use instead |
+| --- | --- |
+| `MessageRead.wa_message_id` | `provider_message_id` (same value) |
+| `ContactOptOutRead.wa_id` | `identities` (the WhatsApp `phone` entry). Null for a customer WhatsApp knows only by a business-scoped id |
+
+`account_id` on a conversation is not deprecated: the name was always neutral.
 
 Conversations carry identifiers rather than embedded contact objects. The models declare no ORM relationships deliberately: a lazy load inside an async request is blocking I/O that only becomes visible under load.
 
@@ -464,6 +490,7 @@ Recording is any member's to do — the person handling the conversation is the 
 
 - **Recording is idempotent and never moves the timestamp.** The first refusal is the one that counts.
 - **A customer whose whole message is a stop word is opted out automatically**, on the inbound path. It does not silence the agent.
+- **The opt-out is the person's**, not one identifier's ([ADR-122](../DECISIONS.md)): the response lists every identity it covers in `identities` (`{id, channel, kind, value}`). `wa_id` is deprecated and null for a customer known only by a business-scoped id.
 
 ## Usage
 
@@ -532,6 +559,11 @@ before a suspension do not come back with it. `DELETE /platform/users/{user_id}`
 irreversible tombstone and has no `enable` counterpart; it is audited as `user_deleted`
 by a `platform_staff` actor, which is what distinguishes it in the trail from somebody
 closing their own account through `DELETE /auth/me`.
+
+**The overview counts connections by channel** (`connections_by_channel`:
+`{channel: {total, active}}`), beside the WhatsApp-named `whatsapp_numbers` and
+`whatsapp_numbers_active`, which keep their meaning. Counts only: no connection,
+number or customer identifier is part of any platform response.
 
 **Suspending a workspace is reversible; deleting one is not, and is not on this
 surface.** Staff suspend and restore; ending the business relationship is the customer's

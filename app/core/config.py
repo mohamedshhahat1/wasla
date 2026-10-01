@@ -567,6 +567,11 @@ class Settings(BaseSettings):
     # keeps its payload until it is processed or looked at.
     whatsapp_event_payload_retention_days: int = Field(default=30, ge=1)
     whatsapp_event_redaction_batch_size: int = Field(default=1_000, gt=0, le=10_000)
+    # How many messages one connection - one WhatsApp number - may send per
+    # minute, counted across every sender on it: campaigns, follow-ups, agent
+    # replies and people (OMNI-017, ADR-123). Unset, nothing is counted and a
+    # campaign is spaced by its own `messages_per_minute` alone (ADR-026).
+    connection_sends_per_minute: int | None = Field(default=None, ge=1)
     # How long an upload intent must sit untouched before reconciliation treats
     # it as abandoned rather than in progress (ADR-087).
     #
@@ -950,6 +955,14 @@ class Settings(BaseSettings):
     # is what makes open redirection structurally impossible here rather than
     # something a validator has to keep catching.
     google_redirect_uri: str | None = None
+
+    @field_validator("connection_sends_per_minute", mode="before")
+    @classmethod
+    def _blank_allowance_is_unset(cls, value: object) -> object:
+        """`CONNECTION_SENDS_PER_MINUTE=` left blank means no allowance, not an error."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @field_validator("paymob_callback_integration_ids", mode="before")
     @classmethod

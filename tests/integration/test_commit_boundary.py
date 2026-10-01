@@ -43,12 +43,13 @@ from app.core.config import Settings
 from app.core.redis import RedisClient
 from app.db.session import Database
 from app.main import create_app
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
 PASSWORD = "correct horse battery staple"
 # A database of its own, so a run cannot disturb whatever else uses this Redis.
-REDIS_URL = "redis://localhost:6379/14"
+REDIS_URL = redis_url_for(14)
 
 
 def _free_port() -> int:

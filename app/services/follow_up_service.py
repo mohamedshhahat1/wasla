@@ -57,6 +57,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.channels.outcomes import ProviderAuthError
+from app.channels.policy import FollowUpAction
+from app.channels.registry import ChannelRegistry, default_registry
+from app.channels.throughput import ConnectionThrottledError
 from app.core.config import Settings
 from app.core.exceptions import (
     ConflictError,
@@ -84,7 +88,6 @@ from app.db.models.follow_up import (
 )
 from app.db.models.lead import ActorKind
 from app.db.models.tenant import Tenant
-from app.integrations.whatsapp.client import ProviderAuthError
 from app.repositories.conversation_repository import (
     ContactRepository,
     ConversationRepository,
@@ -154,6 +157,7 @@ class FollowUpService:
         tenant_id: uuid.UUID,
         settings: Settings | None = None,
         messaging: MessagingService | None = None,
+        channels: ChannelRegistry | None = None,
     ) -> None:
         """`settings` is needed only to send; `messaging` overrides how.
 
@@ -167,6 +171,9 @@ class FollowUpService:
         self._tenant_id = tenant_id
         self._settings = settings
         self._messaging = messaging
+        # What a due follow-up may do is its conversation's channel's rule
+        # (OMNI-008), not a WhatsApp window written into this service.
+        self._channels = channels or default_registry()
         self._follow_ups = FollowUpRepository(session, tenant_id=tenant_id)
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._contacts = ContactRepository(session, tenant_id=tenant_id)
@@ -697,7 +704,12 @@ class FollowUpService:
                 "The customer has opted out of automated messages.",
             )
 
-        window_open = messaging.window_open(conversation)
+        decision = self._channels.policy_for(conversation.channel).follow_up(
+            conversation,
+            has_text=bool(follow_up.body),
+            has_template=follow_up.has_template,
+            now=datetime.now(UTC),
+        )
 
         def link(message: Message) -> None:
             """Name the send on this row, inside the transaction that commits it.
@@ -708,7 +720,7 @@ class FollowUpService:
             """
             follow_up.message_id = message.id
 
-        if window_open and follow_up.body:
+        if decision.action is FollowUpAction.FREE_TEXT and follow_up.body:
             send = messaging.send_text(
                 conversation_id=conversation.id,
                 body=follow_up.body,
@@ -718,7 +730,7 @@ class FollowUpService:
                 # (MSG-16).
                 origin=MessageOrigin.FOLLOW_UP,
             )
-        elif follow_up.has_template:
+        elif decision.action is FollowUpAction.TEMPLATE:
             # Checked again here, not only at scheduling. Meta pauses a template
             # that draws complaints without warning, and hours can pass between
             # the two moments; sending one it has since withdrawn is the thing
@@ -739,15 +751,11 @@ class FollowUpService:
                 link=link,
                 origin=MessageOrigin.FOLLOW_UP,
             )
-        elif window_open:
-            # In the window but nothing to say: a template-only follow-up whose
-            # template has gone missing.
-            return self._skip(follow_up, "The follow-up has no message to send.")
         else:
-            return self._skip(
-                follow_up,
-                "The 24-hour service window has closed and no approved template is configured.",
-            )
+            # The channel's policy says nothing may be sent now: on WhatsApp, a
+            # template-only nudge whose template is gone, or a closed window
+            # with no template configured.
+            return self._skip(follow_up, decision.reason or "The follow-up cannot be sent now.")
 
         try:
             message = await send
@@ -758,6 +766,11 @@ class FollowUpService:
             # the rest of the pass instead of discovering it one at a time
             # (MSG-18).
             raise
+        except ConnectionThrottledError as error:
+            # The number's shared allowance is spent (ADR-123). Nothing was
+            # staged, so this is a wait, not a failed attempt.
+            retry_at = error.retry_at
+            return await self._settle(follow_up, claim, lambda row: self._defer(row, retry_at))
         except (ExternalServiceError, RateLimitedError, ValidationError) as error:
             detail = str(error)
             return await self._settle(follow_up, claim, lambda row: self._fail(row, detail))
@@ -766,7 +779,7 @@ class FollowUpService:
             follow_up,
             claim,
             lambda row: self._record_sent(
-                row, message, used_template=not (window_open and row.body)
+                row, message, used_template=decision.action is FollowUpAction.TEMPLATE
             ),
         )
 
@@ -966,6 +979,22 @@ class FollowUpService:
             extra={"follow_up_id": str(follow_up.id), "attempts": follow_up.attempts},
         )
         return DispatchOutcome(follow_up, FollowUpStatus.PENDING, detail)
+
+    def _defer(self, follow_up: FollowUp, until: datetime) -> DispatchOutcome:
+        """Wait for the connection's allowance to reopen, spending no attempt (ADR-123).
+
+        Nothing was staged - the allowance refuses before a message exists - so
+        this nudge is exactly as it was, only later.
+        """
+        _release_claim(follow_up)
+        follow_up.scheduled_at = until
+        logger.info(
+            "follow_up.deferred_by_connection_allowance",
+            extra={"follow_up_id": str(follow_up.id)},
+        )
+        return DispatchOutcome(
+            follow_up, FollowUpStatus.PENDING, "The number's sending allowance is spent."
+        )
 
 
 def _release_claim(follow_up: FollowUp) -> None:

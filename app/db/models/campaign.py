@@ -27,6 +27,7 @@ from typing import Any, Final
 from sqlalchemy import (
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -258,6 +259,23 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
             "id",
             postgresql_where=text("status = 'pending'"),
         ),
+        Index(
+            "ix_campaign_recipients_participant_identity_id",
+            "participant_identity_id",
+            postgresql_where=text("participant_identity_id IS NOT NULL"),
+        ),
+        # The identity this copy is addressed to: one of this recipient's own
+        # contact's identities, in its own workspace (OMNI-004).
+        ForeignKeyConstraint(
+            ["tenant_id", "contact_id", "participant_identity_id"],
+            [
+                "contact_identities.tenant_id",
+                "contact_identities.contact_id",
+                "contact_identities.id",
+            ],
+            name="fk_campaign_recipients_tenant_participant",
+            ondelete="CASCADE",
+        ),
     )
 
     campaign_id: Mapped[uuid.UUID] = mapped_column(
@@ -282,6 +300,16 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
         UUID(as_uuid=True),
         ForeignKey("messages.id", ondelete="SET NULL"),
         nullable=True,
+    )
+    # Exactly who this copy is addressed to: the identity pinned on the
+    # contact's conversation with the campaign's connection, recorded when the
+    # audience is materialised (OMNI-004). A contact may hold a phone number and
+    # a business-scoped id, or more; this is the one, so "who was this sent to"
+    # is answerable from the row. The send refuses a conversation that no
+    # longer addresses it rather than choosing again. Null only on rows
+    # materialised before 0082 whose conversation could not be found.
+    participant_identity_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
     )
 
     status: Mapped[RecipientStatus] = mapped_column(

@@ -33,6 +33,8 @@ from app.agents.registry import (
     build_default_registry,
     validate_arguments,
 )
+from app.channels.policy import ChannelPolicy
+from app.channels.registry import ChannelRegistry, default_registry
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
 from app.core.telemetry import UNKNOWN_TOOL, record_tool_execution
@@ -58,7 +60,6 @@ from app.repositories.tool_execution_repository import (
     ToolExecutionRepository,
     terminal_values,
 )
-from app.services.messaging_service import WHATSAPP_TEXT_MAX_CHARS
 from app.services.sentiment_service import SentimentService
 
 logger = get_logger(__name__)
@@ -226,33 +227,18 @@ class ToolExecution:
     succeeded: bool
 
 
-# What every agent is told about the channel it is answering on, appended to
-# whatever the workspace wrote. Two reasons it is here rather than in the
-# workspace's own prompt: a workspace cannot be relied on to know Meta's limit,
-# and a workspace that deleted the sentence would get the failure back.
-#
-# Guidance, not a guarantee. A model asked for brevity usually obliges and
-# sometimes does not, and tokens are not characters - a budget in tokens cannot
-# bound a length in characters, least of all across languages. So this reduces
-# how often a reply has to be shortened; `app.agents.reply` is what guarantees
-# the reply that is sent fits (AI-05).
-_CHANNEL_INSTRUCTIONS = (
-    "\n\nYou are replying over WhatsApp. Keep every reply under "
-    f"{WHATSAPP_TEXT_MAX_CHARS} characters - WhatsApp will not deliver a longer "
-    "one, and it will not be split for you. Prefer several short paragraphs to "
-    "one long message, and offer to go into detail rather than doing it "
-    "unasked."
-)
-
-
-def _reply_instructions(system_prompt: str) -> str:
-    """The workspace's prompt plus what it cannot be expected to know.
+def _reply_instructions(system_prompt: str, policy: ChannelPolicy) -> str:
+    """The workspace's prompt plus what its channel's policy says it cannot be expected to know.
 
     Appended rather than prepended so the workspace's own instructions lead,
     and so an agent's personality is not introduced by a paragraph about
-    provider limits.
+    provider limits. What is appended is the conversation's channel's own
+    sentence (OMNI-008): it used to be "You are replying over WhatsApp" on every
+    agent's prompt whatever the conversation, with WhatsApp's limit in
+    characters - the wrong channel named, and the wrong unit for a channel that
+    bounds text in bytes.
     """
-    return f"{system_prompt}{_CHANNEL_INSTRUCTIONS}"
+    return f"{system_prompt}{policy.agent_instructions()}"
 
 
 def _nothing(
@@ -358,8 +344,11 @@ class AgentOrchestrator:
         agent_turn_id: uuid.UUID | None = None,
         trigger_message_id: uuid.UUID | None = None,
         unit_of_work: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None,
+        channels: ChannelRegistry | None = None,
     ) -> None:
         self._session = session
+        # Which channel's policy speaks to the agent: the conversation's.
+        self._channels = channels or default_registry()
         self._tenant_id = tenant_id
         self._client = client
         # Optional: an agent granted no knowledge tool never needs one, and a
@@ -432,6 +421,11 @@ class AgentOrchestrator:
                 outcome=plan.refusal or TurnOutcome.SUPPRESSED_AGENT,
             )
         resolved = plan.agent
+        # The conversation's channel decides what the agent is told about it.
+        # Read from the identity map `plan_turn` just filled.
+        channel_policy = self._channels.policy_for(
+            (await self._conversations.require_by_id(conversation_id)).channel
+        )
 
         # Read before the assessment, so the mood that gates this reply is taken
         # from exactly the history the reply answers (AI-04).
@@ -468,8 +462,9 @@ class AgentOrchestrator:
                 )
         # Fetched for the whole window at once. What a customer attached is
         # part of what they said, and an agent answering a photograph with
-        # "[image]" is the thing this phase exists to stop.
-        attachments = await self._media.map_for_messages([message.id for message in history])
+        # "[image]" is the thing this phase exists to stop. Every file of a
+        # message, not its first: a message may carry several (OMNI-009).
+        attachments = await self._media.map_all_for_messages([message.id for message in history])
         window = build_window(
             history,
             message_limit=resolved.memory_message_limit,
@@ -526,7 +521,7 @@ class AgentOrchestrator:
                 rounds = round_number
                 reply = await self._client.respond(
                     model=resolved.model,
-                    instructions=_reply_instructions(resolved.system_prompt),
+                    instructions=_reply_instructions(resolved.system_prompt, channel_policy),
                     turns=turns,
                     tools=specs,
                     tool_results=results,

@@ -32,6 +32,7 @@ the codebase goes through `released`, which commits first.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -42,6 +43,7 @@ from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
 from app.db.models.analytics import AnalyticsSource
 from app.db.models.audit import AuditAction, AuditActorKind
+from app.db.models.channel import Channel, ContactIdentity
 from app.db.models.conversation import (
     Conversation,
     ConversationMode,
@@ -50,6 +52,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.sentiment import ConversationPriority
 from app.db.models.user import User
+from app.repositories.channel_repository import ContactIdentityRepository
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.services.analytics_service import AnalyticsRecorder
@@ -97,6 +100,7 @@ class InboxService:
         self._tenant_id = tenant_id
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
+        self._identities = ContactIdentityRepository(session, tenant_id=tenant_id)
         self._memberships = MembershipRepository(session, tenant_id=tenant_id)
         self._analytics = AnalyticsRecorder(session, tenant_id=tenant_id)
         self._audit = AuditTrail(session, tenant_id=tenant_id)
@@ -110,15 +114,25 @@ class InboxService:
         limit: int = 50,
         cursor: str | None = None,
         priority: ConversationPriority | None = None,
+        channel: Channel | None = None,
+        connection_id: uuid.UUID | None = None,
     ) -> Page[Conversation]:
         """Everything not closed, most recently active first.
 
         `priority` narrows the list to conversations at one level, which is how
         somebody works the flagged queue without the default view changing under
-        everybody else.
+        everybody else. `channel` and `connection_id` narrow the same one inbox
+        to one channel or one connection (OMNI-014); a connection of another
+        workspace matches nothing rather than answering differently.
         """
         after = Cursor.decode(cursor) if cursor else None
-        rows = await self._conversations.list_open(limit=limit, after=after, priority=priority)
+        rows = await self._conversations.list_open(
+            limit=limit,
+            after=after,
+            priority=priority,
+            channel=channel,
+            connection_id=connection_id,
+        )
         return paginate(
             rows,
             limit=limit,
@@ -127,6 +141,20 @@ class InboxService:
 
     async def get_conversation(self, conversation_id: uuid.UUID) -> Conversation:
         return await self._conversations.require_by_id(conversation_id)
+
+    async def participants(
+        self, conversations: Sequence[Conversation]
+    ) -> dict[uuid.UUID, ContactIdentity]:
+        """The identity each of these conversations addresses, by identity id, in one query.
+
+        What the API's `participant` is read from (OMNI-015). Every conversation
+        has one - the column is NOT NULL and keyed to an identity of the same
+        workspace, contact and channel - so a missing entry is a broken
+        invariant, not an empty state.
+        """
+        return await self._identities.map_by_ids(
+            {conversation.participant_identity_id for conversation in conversations}
+        )
 
     async def list_messages(
         self,

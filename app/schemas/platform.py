@@ -12,6 +12,7 @@ from typing import Self
 
 from pydantic import BaseModel
 
+from app.db.models.channel import Channel
 from app.db.models.enums import TenantStatus
 from app.db.models.tenant import Tenant
 from app.platform.platform_analytics import PlatformOverview, WorkspacePage, WorkspaceRow
@@ -77,6 +78,11 @@ class WorkspacePageRead(BaseModel):
         )
 
 
+class ConnectionCountsRead(BaseModel):
+    total: int
+    active: int
+
+
 class PlatformOverviewRead(BaseModel):
     """The estate at a glance.
 
@@ -91,6 +97,9 @@ class PlatformOverviewRead(BaseModel):
     tenants_suspended: int
     whatsapp_numbers: int
     whatsapp_numbers_active: int
+    # Every channel's connections, keyed by channel (OMNI-014). Additive: the
+    # WhatsApp-named figures above keep their meaning.
+    connections_by_channel: dict[Channel, ConnectionCountsRead]
     usage: UsageCounters
 
     @classmethod
@@ -102,6 +111,10 @@ class PlatformOverviewRead(BaseModel):
             tenants_suspended=overview.tenants_suspended,
             whatsapp_numbers=overview.whatsapp_numbers,
             whatsapp_numbers_active=overview.whatsapp_numbers_active,
+            connections_by_channel={
+                channel: ConnectionCountsRead(total=counts.total, active=counts.active)
+                for channel, counts in overview.connections_by_channel.items()
+            },
             usage=_counters(overview.usage),
         )
 

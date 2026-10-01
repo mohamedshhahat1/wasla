@@ -234,10 +234,12 @@ async def test_a_released_numbers_file_is_recorded_terminal_and_never_queued(
         media_queue=as_media_queue(media_jobs),
     ).ingest(
         {
+            "object": "whatsapp_business_account",
             "entry": [
                 {
                     "changes": [
                         {
+                            "field": "messages",
                             "value": {
                                 "metadata": {"phone_number_id": "109876543299"},
                                 "contacts": [{"wa_id": "201234567890"}],
@@ -250,11 +252,11 @@ async def test_a_released_numbers_file_is_recorded_terminal_and_never_queued(
                                         "image": {"id": "media-old", "mime_type": "image/jpeg"},
                                     }
                                 ],
-                            }
+                            },
                         }
                     ]
                 }
-            ]
+            ],
         }
     )
 

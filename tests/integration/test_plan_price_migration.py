@@ -198,6 +198,7 @@ def test_0081_pins_every_row_to_its_published_price_and_invents_none(
         assert _one(url, "SELECT to_regclass('plan_prices') IS NULL")
         _alembic(url, "upgrade", "head")
         assert _one(url, "SELECT count(*) FROM plan_prices") == len(prices)
+        head = _one(url, "SELECT version_num FROM alembic_version")
 
         # A yearly price added to a monthly version cannot be represented below
         # 0081; a subscriber on it makes the downgrade refuse.
@@ -222,7 +223,8 @@ def test_0081_pins_every_row_to_its_published_price_and_invents_none(
         )
         with pytest.raises(RuntimeError, match="re-price"):
             _alembic(url, "downgrade", "0080")
-        assert _one(url, "SELECT version_num FROM alembic_version") == "0081"
+        # Refused as one transaction: nothing was downgraded, whatever the head.
+        assert _one(url, "SELECT version_num FROM alembic_version") == head
     finally:
         asyncio.run(_admin(admin, f"DROP DATABASE {name} WITH (FORCE)"))
 

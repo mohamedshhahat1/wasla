@@ -39,7 +39,9 @@ async def record_opt_out(
     decided.
     """
     contact = await campaigns.set_opt_out(contact_id=contact_id, source=payload.source)
-    return ContactOptOutRead.model_validate(contact)
+    return ContactOptOutRead.from_model(
+        contact, identities=await campaigns.opt_out_identities(contact.id)
+    )
 
 
 @router.delete("/{contact_id}/opt-out", summary="Let a customer receive campaigns again")
@@ -54,4 +56,6 @@ async def clear_opt_out(
     reaches this: a customer writing again after opting out is not re-enrolled.
     """
     contact = await campaigns.clear_opt_out(contact_id)
-    return ContactOptOutRead.model_validate(contact)
+    return ContactOptOutRead.from_model(
+        contact, identities=await campaigns.opt_out_identities(contact.id)
+    )

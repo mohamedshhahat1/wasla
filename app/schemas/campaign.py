@@ -14,6 +14,7 @@ reach are the ones who chose to write to this business.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, Any, Self
 
@@ -30,6 +31,8 @@ from app.db.models.campaign import (
     OptOutSource,
     RecipientStatus,
 )
+from app.db.models.channel import Channel, ContactIdentity, IdentityKind
+from app.db.models.conversation import Contact
 from app.db.models.lead import LeadStatus
 from app.repositories.campaign_repository import AudienceFilter, CampaignStatistics
 from app.schemas.text import StorableText
@@ -193,14 +196,53 @@ class CampaignStatisticsRead(BaseModel):
         )
 
 
-class ContactOptOutRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+class ContactIdentityRead(BaseModel):
+    """One way a channel addresses this person: a phone number, a business-scoped id."""
 
     id: uuid.UUID
-    wa_id: str
+    channel: Channel
+    kind: IdentityKind
+    value: str
+
+    @classmethod
+    def from_model(cls, identity: ContactIdentity) -> Self:
+        return cls(
+            id=identity.id, channel=identity.channel, kind=identity.kind, value=identity.value
+        )
+
+
+class ContactOptOutRead(BaseModel):
+    """A person's campaign opt-out, and every identity it covers.
+
+    The opt-out is the person's - the contact's - not one identifier's (ADR-122),
+    so `identities` lists everything it applies to. `wa_id` is the WhatsApp
+    phone number when there is one, and null for a customer WhatsApp knows only
+    by username (OMNI-002).
+    """
+
+    id: uuid.UUID
+    wa_id: str | None = Field(
+        deprecated=(
+            "Read the whatsapp `phone` entry of identities instead; null for a "
+            "customer known only by a business-scoped id. Kept until clients have "
+            "moved (docs/API.md)."
+        ),
+    )
     display_name: str | None
     marketing_opt_out_at: datetime | None
     opt_out_source: OptOutSource | None
+    identities: list[ContactIdentityRead]
+
+    @classmethod
+    def from_model(cls, contact: Contact, *, identities: Sequence[ContactIdentity]) -> Self:
+        return cls(
+            id=contact.id,
+            wa_id=contact.wa_id,
+            display_name=contact.display_name,
+            marketing_opt_out_at=contact.marketing_opt_out_at,
+            opt_out_source=contact.opt_out_source,
+            identities=[ContactIdentityRead.from_model(identity) for identity in identities],
+        )
 
 
 __all__ = [
@@ -214,6 +256,7 @@ __all__ = [
     "CampaignRead",
     "CampaignScheduleRequest",
     "CampaignStatisticsRead",
+    "ContactIdentityRead",
     "ContactOptOutRead",
     "OptOutRequest",
     "RecipientListResponse",

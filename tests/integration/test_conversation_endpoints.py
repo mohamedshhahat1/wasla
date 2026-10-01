@@ -23,6 +23,7 @@ from app.api.dependencies import (
     get_messaging_service,
     get_sentiment_service,
 )
+from app.channels.policy import ReplyPolicy
 from app.core.pagination import MAX_CURSOR_LENGTH, Cursor, Page
 from app.db.models import (
     Membership,
@@ -30,6 +31,13 @@ from app.db.models import (
     TenantRole,
     TenantStatus,
     User,
+)
+from app.db.models.channel import (
+    Channel,
+    ContactIdentity,
+    IdentityKind,
+    IdentityScope,
+    IdentitySource,
 )
 from app.db.models.conversation import (
     Conversation,
@@ -42,6 +50,7 @@ from app.db.models.conversation import (
     MessageStatus,
 )
 from app.db.models.sentiment import ConversationPriority
+from app.integrations.whatsapp.policy import WhatsAppChannelPolicy
 
 pytestmark = pytest.mark.integration
 
@@ -52,6 +61,9 @@ CONVERSATION_ID = uuid.UUID("44444444-4444-4444-4444-444444444444")
 CONTACT_ID = uuid.UUID("55555555-5555-5555-5555-555555555555")
 ACCOUNT_ID = uuid.UUID("66666666-6666-6666-6666-666666666666")
 MESSAGE_ID = uuid.UUID("77777777-7777-7777-7777-777777777777")
+PARTICIPANT_ID = uuid.UUID("88888888-8888-8888-8888-888888888888")
+# A synthetic business-scoped id in Meta's documented shape - nobody's.
+PARTICIPANT_VALUE = "EG.0synthetic0participant"
 MOMENT = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
 NEXT_CURSOR = Cursor(sort_value=MOMENT, id=CONVERSATION_ID).encode()
 
@@ -62,6 +74,8 @@ def _conversation() -> Conversation:
         tenant_id=TENANT_ID,
         contact_id=CONTACT_ID,
         account_id=ACCOUNT_ID,
+        channel=Channel.WHATSAPP,
+        participant_identity_id=PARTICIPANT_ID,
         status=ConversationStatus.OPEN,
         mode=ConversationMode.AI,
         # Set explicitly, like `mode` and `status` above: a column default is
@@ -108,9 +122,36 @@ class StubInbox:
         limit: int = 50,
         cursor: str | None = None,
         priority: ConversationPriority | None = None,
+        channel: Channel | None = None,
+        connection_id: uuid.UUID | None = None,
     ) -> Page[Any]:
-        self.conversation_calls.append({"limit": limit, "cursor": cursor, "priority": priority})
+        self.conversation_calls.append(
+            {
+                "limit": limit,
+                "cursor": cursor,
+                "priority": priority,
+                "channel": channel,
+                "connection_id": connection_id,
+            }
+        )
         return Page(items=[_conversation()], next_cursor=self.next_cursor)
+
+    async def participants(
+        self, conversations: list[Conversation]
+    ) -> dict[uuid.UUID, ContactIdentity]:
+        return {
+            PARTICIPANT_ID: ContactIdentity(
+                id=PARTICIPANT_ID,
+                tenant_id=TENANT_ID,
+                contact_id=CONTACT_ID,
+                channel=Channel.WHATSAPP,
+                kind=IdentityKind.BSUID,
+                scope=IdentityScope.PROVIDER_ACCOUNT,
+                scope_ref="waba-synthetic",
+                value=PARTICIPANT_VALUE,
+                source=IdentitySource.PROVIDER,
+            )
+        }
 
     async def list_messages(
         self, *, conversation_id: uuid.UUID, limit: int = 50, cursor: str | None = None
@@ -124,6 +165,9 @@ class StubInbox:
 class StubMessaging:
     def window_open(self, conversation: Conversation) -> bool:
         return True
+
+    def reply_policy(self, conversation: Conversation) -> ReplyPolicy:
+        return WhatsAppChannelPolicy().reply_policy(conversation, now=MOMENT)
 
 
 class StubSentiment:
@@ -189,7 +233,15 @@ async def test_the_conversation_list_answers_a_page_not_a_bare_array(
 async def test_the_cursor_reaches_the_service(client: AsyncClient, inbox: StubInbox) -> None:
     await client.get(PATH, params={"cursor": NEXT_CURSOR, "limit": 25})
 
-    assert inbox.conversation_calls == [{"limit": 25, "cursor": NEXT_CURSOR, "priority": None}]
+    assert inbox.conversation_calls == [
+        {
+            "limit": 25,
+            "cursor": NEXT_CURSOR,
+            "priority": None,
+            "channel": None,
+            "connection_id": None,
+        }
+    ]
 
 
 async def test_an_exhausted_collection_reports_a_null_cursor(
@@ -322,3 +374,89 @@ async def test_an_unknown_priority_is_refused_before_the_service(
 
     assert response.status_code == 422
     assert sentiment.calls == []
+
+
+# ---------------------------------------------- channel-neutral fields (OMNI-015)
+
+
+async def test_a_conversation_says_which_channel_and_connection_it_is_on(
+    client: AsyncClient, inbox: StubInbox
+) -> None:
+    """Additive: `account_id` keeps its value, and `connection_id` carries the
+    same one under the neutral name (docs/API.md)."""
+    conversation = (await client.get(PATH)).json()["items"][0]
+
+    assert conversation["channel"] == "whatsapp"
+    assert conversation["account_id"] == str(ACCOUNT_ID)
+    assert conversation["connection_id"] == str(ACCOUNT_ID)
+
+
+async def test_a_conversation_names_its_participant_without_the_identifier(
+    client: AsyncClient, inbox: StubInbox
+) -> None:
+    """Who the conversation is with, as its channel addresses them - a kind,
+    never the phone number or business-scoped id itself, which an inbox does not
+    need and which is personal data."""
+    response = await client.get(PATH)
+    conversation = response.json()["items"][0]
+
+    assert conversation["participant"] == {
+        "id": str(PARTICIPANT_ID),
+        "channel": "whatsapp",
+        "kind": "bsuid",
+    }
+    assert PARTICIPANT_VALUE not in response.text
+
+
+async def test_a_conversation_states_its_reply_policy_beside_the_old_flag(
+    client: AsyncClient, inbox: StubInbox
+) -> None:
+    """`service_window_open` keeps its meaning; `reply_policy` states the rule,
+    with the limit in the channel's own unit (ADR-121)."""
+    conversation = (await client.get(PATH)).json()["items"][0]
+
+    assert conversation["service_window_open"] is True
+    assert conversation["reply_policy"] == {
+        "free_text_allowed": True,
+        "window_expires_at": "2026-08-22T12:00:00Z",
+        "out_of_window": "template",
+        "templates": True,
+        "text_limit": 4096,
+        "text_limit_unit": "characters",
+    }
+
+
+async def test_the_channel_and_connection_filters_reach_the_service(
+    client: AsyncClient, inbox: StubInbox
+) -> None:
+    await client.get(PATH, params={"channel": "whatsapp", "connection_id": str(ACCOUNT_ID)})
+
+    assert inbox.conversation_calls[0]["channel"] is Channel.WHATSAPP
+    assert inbox.conversation_calls[0]["connection_id"] == ACCOUNT_ID
+
+
+async def test_a_channel_that_is_not_one_of_ours_is_refused(
+    client: AsyncClient, inbox: StubInbox
+) -> None:
+    response = await client.get(PATH, params={"channel": "telegram"})
+
+    assert response.status_code == 422
+    assert inbox.conversation_calls == []
+
+
+async def test_a_message_carries_its_provider_id_under_the_neutral_name(
+    client: AsyncClient, inbox: StubInbox
+) -> None:
+    message = (await client.get(f"{PATH}/{CONVERSATION_ID}/messages")).json()["items"][0]
+
+    assert message["provider_message_id"] == "wamid.one"
+    # Deprecated, not removed: same value until clients have moved.
+    assert message["wa_message_id"] == "wamid.one"
+
+
+async def test_the_deprecated_fields_say_so_in_the_schema(client: AsyncClient) -> None:
+    schemas = (await client.get("/openapi.json")).json()["components"]["schemas"]
+
+    assert schemas["MessageRead"]["properties"]["wa_message_id"]["deprecated"] is True
+    assert schemas["ContactOptOutRead"]["properties"]["wa_id"]["deprecated"] is True
+    assert "deprecated" not in schemas["ConversationRead"]["properties"]["account_id"]

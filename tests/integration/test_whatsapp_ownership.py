@@ -361,7 +361,8 @@ async def test_the_stored_credential_is_ciphertext_in_the_column(db_session: Asy
 
     assert value is not None
     assert TOKEN not in value
-    assert value.startswith("v1.")
+    # `v2`: bound to this connection, not only to the workspace (OMNI-012).
+    assert value.startswith("v2.")
 
 
 async def test_a_deployment_without_a_key_still_connects_but_keeps_nothing(

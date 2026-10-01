@@ -30,6 +30,7 @@ from app.agents.registry import (
 )
 from app.core.exceptions import ConflictError
 from app.db.models.agent import DEFAULT_MAX_OUTPUT_TOKENS, Agent, AgentStatus
+from app.db.models.channel import Channel
 from app.db.models.conversation import (
     Conversation,
     ConversationMode,
@@ -234,12 +235,12 @@ class FakeMedia:
     ) -> None:
         self._attachments = attachments or {}
 
-    async def map_for_messages(
+    async def map_all_for_messages(
         self,
         message_ids: Sequence[uuid.UUID],
-    ) -> dict[uuid.UUID, MessageMedia]:
+    ) -> dict[uuid.UUID, list[MessageMedia]]:
         return {
-            message_id: self._attachments[message_id]
+            message_id: [self._attachments[message_id]]
             for message_id in message_ids
             if message_id in self._attachments
         }
@@ -380,10 +381,12 @@ def _build(
     output_ceiling: int | None = None,
     serving: ServingState = ServingState(missing=False),
 ) -> AgentOrchestrator:
+    subject = conversation if conversation is not None else Conversation(mode=ConversationMode.AI)
+    # Stored conversations get their channel from the column default; one built
+    # in memory has none until it is said.
+    subject.channel = subject.channel or Channel.WHATSAPP
     fakes = {
-        "ConversationRepository": FakeConversations(
-            conversation if conversation is not None else Conversation(mode=ConversationMode.AI)
-        ),
+        "ConversationRepository": FakeConversations(subject),
         "AgentRepository": FakeAgents(agent),
         "AgentToolRepository": FakeGrants(grants),
         "MessageRepository": FakeMessages(

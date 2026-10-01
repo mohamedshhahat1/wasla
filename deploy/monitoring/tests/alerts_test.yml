@@ -431,6 +431,101 @@ tests:
                 Customer messages were accepted and no worker was told to answer them. They are recoverable and not lost. Check that a worker process is running the inbound_recovery loop and that Redis is reachable from it; list the backlog with `python -m app.workers.queues unprocessed-inbound`.
               runbook: docs/RUNBOOK.md
 
+  # ------------------------------------------ refused inbound (OMNI-021)
+  - interval: 30s
+    name: unsupported fields are a trickle, not an incident
+    input_series:
+      # A subscribed field the adapter deliberately does not handle, all day.
+      - series: 'wasla_inbound_entries_refused_total{job="wasla-api", channel="whatsapp", reason="unsupported_field"}'
+        values: "0+1x200"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: InboundEntriesRefused
+        exp_alerts: []
+
+  - interval: 30s
+    name: refused senders alert
+    input_series:
+      # Entries with no sender the adapter can identify, steadily: messages
+      # are being dropped at the parser.
+      - series: 'wasla_inbound_entries_refused_total{job="wasla-api", channel="whatsapp", reason="missing_sender"}'
+        values: "0+1x200"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: InboundEntriesRefused
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: InboundEntriesRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: messaging
+              channel: whatsapp
+              reason: missing_sender
+            exp_annotations:
+              summary: "Inbound whatsapp entries are being refused: missing_sender"
+              description: >-
+                Webhook deliveries are arriving with entries the adapter refuses, and a refused entry is a customer message or status that was not stored. Meta may have changed the payload shape - a new sender identifier, a new message type - so compare a raw delivery with docs/WHATSAPP.md before assuming misconfiguration. The webhook log line whatsapp.webhook_received carries the refusal counts per delivery.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 30s
+    name: a foreign object on a route alerts on its own rule
+    input_series:
+      - series: 'wasla_inbound_entries_refused_total{job="wasla-api", channel="whatsapp", reason="foreign_object"}'
+        values: "0+1x200"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: InboundEntriesRefused
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: InboundForeignPayloads
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: messaging
+              channel: whatsapp
+            exp_annotations:
+              summary: "The whatsapp webhook is receiving another product's payloads"
+              description: >-
+                A Meta webhook subscription - Instagram, a Page, or another app product - points at this channel's callback URL. Its deliveries are refused rather than misread. Check the App Dashboard's webhook subscriptions: each product needs its own callback, and Wasla operates only the channels it has an adapter for.
+              runbook: docs/RUNBOOK.md
+
+  # ---------------------------------------- connection health (OMNI-012)
+  - interval: 30s
+    name: a disabled connection with a refused credential is not an alert
+    input_series:
+      # Paused by its workspace: nothing is trying to send on it.
+      - series: 'wasla_channel_connections{job="wasla-api", channel="whatsapp", status="disabled", health="auth_failed"}'
+        values: "1+0x200"
+      - series: 'wasla_channel_connections{job="wasla-api", channel="whatsapp", status="active", health="ok"}'
+        values: "3+0x200"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ChannelConnectionCredentialRefused
+        exp_alerts: []
+
+  - interval: 30s
+    name: an active connection whose credential is refused alerts
+    input_series:
+      - series: 'wasla_channel_connections{job="wasla-api", channel="whatsapp", status="active", health="auth_failed"}'
+        values: "0+0x10 1+0x200"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ChannelConnectionCredentialRefused
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: ChannelConnectionCredentialRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: messaging
+              channel: whatsapp
+            exp_annotations:
+              summary: "A whatsapp connection's credential is being refused"
+              description: >-
+                At least one active connection had its last send refused as unauthorised, so replies, follow-ups and campaigns on it fail until its workspace re-verifies it with a working token. Find it with `python -m scripts.omnichannel_invariants` or the connection's health column; the send log carries whatsapp.credential_refused.
+              runbook: docs/RUNBOOK.md
+
   # ------------------------------------------------ unresolved outbound
   - interval: 30s
     name: a send in flight is not an unresolved send

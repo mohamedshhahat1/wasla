@@ -37,11 +37,12 @@ from app.core.telemetry import (
     set_counter_sink,
 )
 from app.services.metrics_service import MetricsService
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
 # A database of its own, so a run cannot disturb whatever else uses this Redis.
-REDIS_URL = "redis://localhost:6379/13"
+REDIS_URL = redis_url_for(13)
 
 # The counter and the histogram this file exists for. Named as constants so the
 # tests read as statements about them rather than about strings.

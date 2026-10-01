@@ -109,9 +109,9 @@ Stack traces are never exposed in production responses. Cross-tenant access is r
 
 1. `GET /api/v1/webhooks/whatsapp` verifies the Meta challenge token with a constant-time comparison. **Implemented**
 2. `POST /api/v1/webhooks/whatsapp` verifies the `X-Hub-Signature-256` signature over the payload. **Implemented**
-3. The payload is parsed; `phone_number_id` plus the event's own timestamp resolve which workspace **held that number when the event happened** (ADR-101). The tenant is never inferred from the customer phone number, and never from who holds the number now. **Implemented**
-4. Message and status events are persisted idempotently, keyed on the WhatsApp message/event ID (ADR-011). **Implemented**
-5. The contact, conversation and message are created or updated from the stored event. **Implemented**
+3. The WhatsApp adapter parses the payload into neutral `InboundEvent`s, refusing - and counting - another product's `object` or an unhandled `field` (ADR-121); `phone_number_id` plus the event's own timestamp resolve which workspace **held that connection when the event happened** (ADR-101). The tenant is never inferred from the customer's phone number or business-scoped id, and never from who holds the number now. **Implemented**
+4. Message and status events are persisted idempotently, keyed per connection on the provider's event ID (ADR-011, ADR-120). **Implemented**
+5. The sender's identifiers resolve to a contact through `contact_identities`; the conversation (pinned to that identity) and the message are created or updated from the stored event - only if it is this customer's new message (ADR-118 to ADR-120). **Implemented**
 6. One job per conversation that received a message is enqueued to Redis, the event is marked with whether that handoff landed (ADR-102), and the endpoint returns. **Implemented**
 
 No AI or media processing happens inside the webhook request.
@@ -162,6 +162,59 @@ Two details make the ordering total, and both matter:
 - **Nulls sort last, with their own keyset.** A conversation that has never carried a message has a null `last_message_at`, and a plain descending sort would put it *first*, ahead of live traffic. It is ordered `NULLS LAST`, and because null is not comparable, the block is paged by id alone once the cursor reaches it.
 
 The cursor is opaque by construction rather than by obfuscation. It carries nothing not already visible in the page it came from, and it is only ever applied inside a tenant-scoped query — so a cursor taken from another workspace is a position, not an authorisation, and can widen nothing. Encoding it keeps clients from building cursors by hand against a sort key that is ours to change. Every malformed cursor is one `422`; none may become a `500`, because cursors arrive in query strings and therefore arrive truncated, re-encoded and fuzzed.
+
+### 5.4 The omnichannel foundation
+
+**Status: Implemented for WhatsApp; no second channel is implemented.** What
+exists is the *omnichannel foundation*: the primitives and seams a second
+customer channel plugs into without copying the business layer
+(ADR-117 to ADR-123). Instagram and Messenger are names in the `Channel`
+vocabulary only - there is no adapter, route, connect flow or credential for
+either, and every path that would act on one refuses (`ChannelUnavailableError`).
+
+```
+Provider webhook (one route per product; Meta signature shared)
+      |
+Provider adapter: parse -> InboundEvent (refusals counted by reason)
+      |
+ChannelIngestionService: owner at event time -> event log -> screen
+      |
+channel_connections  +  contact_identities  ->  contacts
+      |
+conversations (connection + pinned participant identity)
+      |
+messages (provider id unique per connection) / message_media (ordered, located)
+      |
+AgentTurn, orchestrator, tools, InboxService, CRM, follow-ups, analytics  (unchanged)
+
+API / AI / follow-up / campaign
+      |
+MessagingService._dispatch  (ADR-093 delivery protocol, ADR-103 idempotency)
+      |
+conversation -> connection -> ChannelPolicy -> participant identity -> adapter.sender
+```
+
+| Concern | Neutral, shared by every channel | Stays WhatsApp's, behind its adapter |
+| --- | --- | --- |
+| Connections | `channel_connections`: workspace, tenure, live claim, health, send allowance | `whatsapp_accounts` (same id): phone number id, WABA, ownership proof, token, templates |
+| Customers | `contact_identities` scoped by workspace, provider account or connection | BSUID scoping by WABA; `to` vs `recipient` addressing |
+| Inbound | `InboundEvent`, `ChannelIngestionService`, the event log, recovery, payload retention | the parser, `object`/`field` discrimination, Meta type and status maps |
+| Outbound | `_dispatch`, the outcome taxonomy (`app.channels.outcomes`), metering per decided meter | the Graph client, retry policy, template registry and withdrawal |
+| Policy | `ChannelPolicy` / `ChannelCapabilities`: who may send what now, text limit **and its unit**, agent instructions, follow-up decision, `reply_policy` | the 24-hour window with the template escape; 4,096 characters |
+| Media | the pipeline: claim, bounds, hash, sniffed type, storage, reading, retention; `UrlMediaFetcher` | the two-step handle fetch and Meta's host roots |
+
+**Compatibility window.** Lifecycle is still written on `whatsapp_accounts` and
+mirrored to `channel_connections` by trigger; `contacts.wa_id` is kept equal to the
+contact's WhatsApp phone identity by trigger; `wa_message_id` and `wa_id` stay in
+the API beside `provider_message_id` and `identities`; the workspace-wide message
+and event uniques stay beside the per-connection ones. The cleanup that removes
+them (O8) waits until the neutral path has run a release, consumers have moved,
+and a restore of the pre-cleanup schema has been rehearsed.
+
+**Proved by** the contract suites (`tests/unit/test_channel_*_contract.py`), the
+status, concurrency, oracle and second-channel suites (a synthetic adapter never
+registered in the application), `scripts/omnichannel_invariants.py` and the
+mutation campaign `scripts/run_omnichannel_mutations.py`.
 
 ## 6. AI agent flow
 

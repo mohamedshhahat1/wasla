@@ -53,6 +53,7 @@ from app.repositories.whatsapp_repository import InboundEventSweep
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.queue import QUEUE_NAMESPACE, AgentQueue
+from tests.redis_url import redis_url_for
 
 pytestmark = pytest.mark.integration
 
@@ -67,7 +68,7 @@ async def _queued(redis: Redis, key: str) -> int:
     return await cast("Awaitable[int]", redis.llen(key))
 
 
-REDIS_URL = "redis://localhost:6379/12"
+REDIS_URL = redis_url_for(12)
 # A port nothing is listening on. The client built against it raises
 # `RedisError` on every command, which is exactly what a Redis outage looks
 # like from inside the webhook.
@@ -84,6 +85,7 @@ def _inbound(wamid: str, *, at: datetime, text: str = "anyone there?") -> dict[s
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": PHONE_NUMBER_ID},
                             "contacts": [{"wa_id": CUSTOMER, "profile": {"name": "Nadia"}}],
@@ -96,7 +98,7 @@ def _inbound(wamid: str, *, at: datetime, text: str = "anyone there?") -> dict[s
                                     "text": {"body": text},
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }
@@ -432,6 +434,7 @@ def _typed(wamid: str, *, message_type: str, at: datetime) -> dict[str, object]:
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": PHONE_NUMBER_ID},
                             "contacts": [{"wa_id": CUSTOMER, "profile": {"name": "Nadia"}}],
@@ -443,7 +446,7 @@ def _typed(wamid: str, *, message_type: str, at: datetime) -> dict[str, object]:
                                     "timestamp": str(int(at.timestamp())),
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }
@@ -536,6 +539,7 @@ async def test_a_status_event_owes_nothing_and_is_finished_immediately(
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": PHONE_NUMBER_ID},
                             "statuses": [
@@ -546,7 +550,7 @@ async def test_a_status_event_owes_nothing_and_is_finished_immediately(
                                     "recipient_id": CUSTOMER,
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }

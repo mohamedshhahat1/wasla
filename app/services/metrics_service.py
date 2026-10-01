@@ -53,11 +53,12 @@ from app.repositories.agent_turn_repository import (
     EngagedTurnSweep,
     OwedReleaseSweep,
 )
+from app.repositories.channel_event_repository import InboundEventSweep
+from app.repositories.channel_repository import ConnectionHealthCensus
 from app.repositories.conversation_repository import UnresolvedOutboundDirectory
 from app.repositories.knowledge_repository import IndexingBacklog, IndexingSweep
 from app.repositories.media_purge_repository import MediaPurgeLedger
 from app.repositories.media_repository import PlatformMediaRepository
-from app.repositories.whatsapp_repository import InboundEventSweep
 from app.services.backup_status import read_backup_status
 from app.services.media_horizons import claim_lease, release_horizon, unclaimed_horizon
 from app.workers.heartbeat import heartbeat_key
@@ -295,6 +296,13 @@ class MetricsService:
         command and the database - the alert fires on whether there is a
         backlog at all.
 
+        **By channel, and by connection health** (OMNI-021). The inbound
+        backlog is also split by `channel`, and connections are counted by
+        `channel`, `status` and `health` - every label a closed enum value, so
+        the cardinality is fixed however many workspaces connect. A connection
+        whose credential the provider refused reads `health="auth_failed"`
+        until a send succeeds on it again.
+
         Failures are swallowed and logged, like every other database-backed
         gauge here: losing the whole scrape because one count timed out is a
         worse outcome than losing this one, and during the outage that produced
@@ -309,6 +317,10 @@ class MetricsService:
                 inbound, inbound_age = await InboundEventSweep(session).backlog(
                     older_than=unprocessed_since(moment)
                 )
+                inbound_by_channel = await InboundEventSweep(session).backlog_by_channel(
+                    older_than=unprocessed_since(moment)
+                )
+                connections = await ConnectionHealthCensus(session).counts()
                 outbound, outbound_age = await UnresolvedOutboundDirectory(session).backlog()
                 indexing: IndexingBacklog = await IndexingSweep(session).backlog(
                     now=moment,
@@ -415,6 +427,26 @@ class MetricsService:
             ),
         ):
             lines.extend(render_gauge_lines(name, help_text, [({}, value)]))
+        lines.extend(
+            render_gauge_lines(
+                "wasla_unprocessed_inbound_events_by_channel",
+                "Stored inbound events still owing work, by channel.",
+                [
+                    ({"channel": channel}, float(count))
+                    for channel, count in inbound_by_channel.items()
+                ],
+            )
+        )
+        lines.extend(
+            render_gauge_lines(
+                "wasla_channel_connections",
+                "Connections by channel, status and provider health.",
+                [
+                    ({"channel": channel, "status": status, "health": health}, float(count))
+                    for channel, status, health, count in connections
+                ],
+            )
+        )
         return lines
 
     async def _consistency_lines(self) -> list[str]:

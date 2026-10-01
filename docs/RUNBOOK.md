@@ -59,9 +59,32 @@ The webhook is the one path that must never be refused. Work backwards:
 2. **Signature failures?** `grep whatsapp.invalid_signature`. A rotated `META_APP_SECRET` that reached only some replicas looks exactly like this.
 3. **Unknown number?** `grep whatsapp.unknown_phone_number_id`. The number is not connected to any workspace, or was disconnected. Not an error Meta can fix by retrying.
 4. **Signature failures, counted?** `WhatsAppWebhookSignatureFailures` fires on a sustained rate. A drifted `META_APP_SECRET` drops every customer message with a 403 while the endpoint keeps answering, and enough of those makes Meta disable the subscription for every workspace on the deployment.
-5. **Stored but unanswered?** Rows in `whatsapp_events` but silence from the agent means the queue, not the webhook. `python -m app.workers.queues unprocessed-inbound` lists them — see below.
+5. **Refused at the parser?** `wasla_inbound_entries_refused_total` counts entries the adapter could not turn into an event, by reason - see *Inbound entries are being refused*.
+6. **Stored but unanswered?** Rows in `whatsapp_events` but silence from the agent means the queue, not the webhook. `python -m app.workers.queues unprocessed-inbound` lists them — see below.
 
 Nothing rate-limits this path and nothing times it out ([ADR-032](../DECISIONS.md)). If you are considering adding either, read that record first.
+
+### Inbound entries are being refused
+
+**Alerts:** `InboundEntriesRefused`, `InboundForeignPayloads`. **Metric:** `wasla_inbound_entries_refused_total{channel, reason}`.
+
+The webhook answered 200 - it always does once the signature is good - but the
+adapter could not turn some entries into events. Before this counter existed
+such a delivery looked like a successful inbound call with nothing in it, which
+is how WhatsApp username senders were lost (OMNI-002). The `reason` says which:
+
+| Reason | What it means | What to do |
+| --- | --- | --- |
+| `foreign_object` | The payload is another Meta product's (`object` is `page` or `instagram`, not `whatsapp_business_account`) | A webhook subscription for another product points at `/api/v1/webhooks/whatsapp`. Fix it in the App Dashboard; nothing was misread |
+| `unsupported_field` | A WhatsApp change Wasla does not process: template updates, `user_id_update`, the Coexistence fields `history`, `smb_app_state_sync`, `smb_message_echoes` | Expected as a trickle if the app is subscribed to those fields; unsubscribe if they are not needed. Not alerted |
+| `missing_sender` | A message with neither `from` nor `from_user_id` | Meta changed the sender shape again. Compare a raw delivery with docs/WHATSAPP.md |
+| `identifier_too_long` | A sender identifier longer than any documented form (a phone past 32, a business-scoped id past 255) | Same: compare with Meta's current documentation |
+| `missing_event_id`, `missing_status`, `missing_connection`, `malformed` | An entry without the ids Wasla needs | A malformed or truncated delivery; check the log line below |
+
+Every webhook log line `whatsapp.webhook_received` carries the delivery's
+`refused` counts beside `stored`, `duplicates`, `echoes` and `collisions`. A
+refused entry is not stored, so there is nothing to replay - the fix is the
+subscription or the parser, and Meta's own retries will not bring it back.
 
 ### Inbound stored but never answered
 
@@ -316,6 +339,23 @@ Meta answered `401`, `403` or its own `code 190`: the number's access token is e
 This is deliberately not a per-message failure. A campaign stops on the first one rather than burning one attempt budget per recipient, and the follow-up sweep skips the rest of that workspace's nudges for the pass — so the symptom is a campaign that stopped early, not ten thousand individually-failed recipients.
 
 Reconnect the number in the workspace's WhatsApp settings, which re-runs the ownership check and stores a fresh credential. Follow-ups resume on the next sweep by themselves; a stopped campaign has to be restarted, which is the right point to confirm the credential works.
+
+### A connection's credential is being refused
+
+**Alert:** `ChannelConnectionCredentialRefused`. **Metric:** `wasla_channel_connections{status="active", health="auth_failed"}`.
+
+The provider refused a send on this connection as unauthorised (Meta's 401 or
+code 190). The connection's `health` is `auth_failed` until a send succeeds on
+it again, which clears it; nothing else moves it. Every reply, follow-up and
+campaign on that connection fails the same way until the workspace re-verifies
+the number with a working token (see the previous section). Find which:
+
+```
+docker compose exec api python -m scripts.omnichannel_invariants census
+```
+
+prints `connections_credential_refused`; the rows are
+`SELECT tenant_id, id, channel, health_changed_at FROM channel_connections WHERE health = 'auth_failed'`.
 
 ### Queue not draining
 
@@ -1486,6 +1526,85 @@ platform API.
 change, invoice or offer names a price other than its version's published terms
 (a yearly price added to a monthly version), or any live subscription's usage
 cycle differs from its billing term: dropping the columns would re-price them.
+
+### Omnichannel foundation (0082-0084)
+
+Migrations 0082-0084 (ADR-117 to ADR-121) add the channel-neutral primitives and
+move WhatsApp onto them without rewriting a conversation or a message:
+
+| Migration | What it does | Locks |
+| --- | --- | --- |
+| 0082 | `channel_connections` (one per WhatsApp number, **same id**), `contact_identities` (one phone identity per contact, from its own `wa_id`), the mirror and phone-identity triggers, `contacts.wa_id` nullable, nullable `participant_identity_id` / `messages.connection_id`, media position and locator, `whatsapp_events.channel` | Reads for the backfills; metadata-only ALTERs with a 15 s `lock_timeout` |
+| 0083 | Batched backfills (5,000 ids per transaction, keyset walk): conversation participants, message connections, media handle locators, campaign recipient identities. Idempotent: re-running finishes a stopped run | Row locks of one batch at a time |
+| 0084 | New uniques `CONCURRENTLY`, keys `NOT VALID` then `VALIDATE` each in its own transaction, NOT NULL via validated CHECKs; drops the keys they replace | SHARE UPDATE EXCLUSIVE while validating |
+
+**Before deploying**, on a replica (every statement is a `SELECT`; it runs under
+`default_transaction_read_only = on`):
+
+```
+INVARIANTS_DATABASE_URL=<replica> python -m scripts.omnichannel_invariants census
+```
+
+`q1_*` counts the phone/business-scoped-id pairs Meta asserted in raw payloads
+that retention has not yet cleared (30 days after processing, DB-011). Run it
+before 0082 if pairing history matters: the pairs it counts are not recoverable
+once the payloads are redacted. `q2`-`q8` are the audit's other operator checks.
+
+**0082 refuses, changing nothing,** while any of these return a count - each is a
+row the neutral model could map only by guessing:
+
+```sql
+SELECT phone_number_id FROM whatsapp_accounts WHERE released_at IS NULL
+ GROUP BY phone_number_id HAVING count(*) > 1;            -- a number claimed live twice
+SELECT id FROM whatsapp_accounts WHERE phone_number_id = '';
+SELECT id FROM contacts WHERE wa_id = '';
+SELECT c.id FROM conversations c WHERE NOT EXISTS (SELECT 1 FROM whatsapp_accounts a
+ WHERE a.id = c.account_id AND a.tenant_id = c.tenant_id);
+SELECT c.id FROM conversations c WHERE NOT EXISTS (SELECT 1 FROM contacts k
+ WHERE k.id = c.contact_id AND k.tenant_id = c.tenant_id);
+```
+
+**0083 refuses** while a conversation's contact holds no WhatsApp phone identity
+(no deterministic address to pin). **0084 refuses** while a row exists that a new
+key would refuse; its message lists each count. Fix the data deliberately -
+never by deleting conversations or contacts - and re-run.
+
+**After deploying:**
+
+```
+python -m scripts.db_preflight verify
+python -m scripts.omnichannel_invariants verify
+```
+
+The second must print `ok`: every number has its connection, every contact its
+phone identity, every conversation a participant of its own contact on its own
+channel, every outbound message a route that agrees end to end, no agent turn
+triggered by a non-customer message, every file in its message's workspace and
+conversation.
+
+**Rolling deploy.** Old application processes keep working against the new
+schema during the window: the triggers give every number written the old way
+its connection, every contact its phone identity, every conversation its
+participant and every message its connection; a media row written with only the
+WhatsApp handle is fetched through that handle. One thing an old process cannot
+do is reply to a customer WhatsApp knows only by a business-scoped id (a username
+sender): it reads `contacts.wa_id`, which such a contact does not have, so that
+reply is recorded as undelivered. Keep the overlap short. New processes must not
+run against a database before 0084: they read the new columns.
+
+**Downgrades refuse rather than lose data.** 0084 -> 0083 refuses while a
+conversation or event sits on a connection that is not a WhatsApp number, or a
+message holds more than one file. 0082 -> 0081 refuses while any contact has no
+phone (a username sender), any identity is not a contact's own phone, any
+connection is not a WhatsApp number, any file is at a position above 0 or
+located by URL, or any echo event exists. The 0084 downgrade is one transaction
+on purpose: a refusal anywhere rolls the whole run back, so the database is
+never left at "0084" with 0084's keys gone.
+
+**Sending allowance.** `CONNECTION_SENDS_PER_MINUTE` (unset by default) holds a
+per-connection allowance shared by every sender (ADR-123). When set, a campaign
+or follow-up over it waits for the next minute without spending an attempt
+(`channel.connection_throttled` in the log); replies are never refused.
 
 ### Downgrading past the billing migrations
 

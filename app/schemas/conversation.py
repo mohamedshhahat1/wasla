@@ -16,6 +16,8 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.channels.policy import OutOfWindow, ReplyPolicy, TextUnit
+from app.db.models.channel import Channel, ContactIdentity, IdentityKind
 from app.db.models.conversation import (
     Conversation,
     ConversationMode,
@@ -124,7 +126,14 @@ class CursorPage[ItemT](BaseModel):
 class MessageRead(BaseModel):
     id: uuid.UUID
     conversation_id: uuid.UUID
-    wa_message_id: str | None
+    # The provider's id for this message, whatever the channel (OMNI-015).
+    provider_message_id: str | None
+    wa_message_id: str | None = Field(
+        deprecated=(
+            "Use provider_message_id, which carries the same value on every "
+            "channel. Kept until clients have moved (docs/API.md)."
+        ),
+    )
     direction: MessageDirection
     kind: MessageKind
     status: MessageStatus
@@ -149,6 +158,7 @@ class MessageRead(BaseModel):
         return cls(
             id=message.id,
             conversation_id=message.conversation_id,
+            provider_message_id=message.wa_message_id,
             wa_message_id=message.wa_message_id,
             direction=message.direction,
             kind=message.kind,
@@ -166,10 +176,60 @@ class MessageRead(BaseModel):
         )
 
 
+class ParticipantRead(BaseModel):
+    """Who a conversation is with, as its channel addresses them - never the value itself.
+
+    The identifier (a phone number, a business-scoped id) is personal data and
+    is not needed to render an inbox; `kind` says what sort of address it is, so
+    a client can say "username" rather than showing an empty phone field.
+    """
+
+    id: uuid.UUID
+    channel: Channel
+    kind: IdentityKind
+
+    @classmethod
+    def from_model(cls, identity: ContactIdentity) -> Self:
+        return cls(id=identity.id, channel=identity.channel, kind=identity.kind)
+
+
+class ReplyPolicyRead(BaseModel):
+    """What a person may send on this conversation now (ADR-121).
+
+    The channel's rule, stated rather than inferred: whether free text is
+    allowed and until when, what may be sent after that, and the text limit in
+    the channel's own unit - characters on WhatsApp, UTF-8 bytes on a channel
+    that counts bytes.
+    """
+
+    free_text_allowed: bool
+    window_expires_at: datetime | None
+    out_of_window: OutOfWindow
+    templates: bool
+    text_limit: int
+    text_limit_unit: TextUnit
+
+    @classmethod
+    def from_policy(cls, policy: ReplyPolicy) -> Self:
+        return cls(
+            free_text_allowed=policy.free_text_allowed,
+            window_expires_at=policy.window_expires_at,
+            out_of_window=policy.out_of_window,
+            templates=policy.templates,
+            text_limit=policy.text_limit,
+            text_limit_unit=policy.text_limit_unit,
+        )
+
+
 class ConversationRead(BaseModel):
     id: uuid.UUID
     contact_id: uuid.UUID
+    # The connection this conversation is on. Kept under its first name; the
+    # name was always neutral, and `connection_id` carries the same value.
     account_id: uuid.UUID
+    connection_id: uuid.UUID
+    channel: Channel
+    participant: ParticipantRead
     status: ConversationStatus
     mode: ConversationMode
     assigned_to_id: uuid.UUID | None
@@ -183,17 +243,30 @@ class ConversationRead(BaseModel):
     priority: ConversationPriority
     intent: str | None
     intent_confidence: float | None
-    # Whether free-form messages are still allowed, so a client can disable its
-    # composer instead of discovering the rule by failing a send.
+    # Whether the channel's standard free-form window is open, so a client can
+    # disable its composer instead of discovering the rule by failing a send.
+    # Its meaning never widens: `reply_policy` is where a channel's other rules
+    # are stated (ADR-121).
     service_window_open: bool
+    reply_policy: ReplyPolicyRead
     created_at: datetime
 
     @classmethod
-    def from_model(cls, conversation: Conversation, *, service_window_open: bool) -> Self:
+    def from_model(
+        cls,
+        conversation: Conversation,
+        *,
+        service_window_open: bool,
+        reply_policy: ReplyPolicy,
+        participant: ContactIdentity,
+    ) -> Self:
         return cls(
             id=conversation.id,
             contact_id=conversation.contact_id,
             account_id=conversation.account_id,
+            connection_id=conversation.account_id,
+            channel=conversation.channel,
+            participant=ParticipantRead.from_model(participant),
             status=conversation.status,
             mode=conversation.mode,
             assigned_to_id=conversation.assigned_to_id,
@@ -206,5 +279,6 @@ class ConversationRead(BaseModel):
             intent=conversation.intent,
             intent_confidence=conversation.intent_confidence,
             service_window_open=service_window_open,
+            reply_policy=ReplyPolicyRead.from_policy(reply_policy),
             created_at=conversation.created_at,
         )

@@ -31,6 +31,12 @@ from app.db.models.conversation import (
 from app.db.models.media import UNRESOLVED_MEDIA_STATUSES, MessageMedia
 from app.integrations.openai.types import Turn
 
+#: What `build_window` accepts per message: its one file, or all of them in the
+#: provider's order. A WhatsApp message carries one; a message on a channel that
+#: sends several attachments together carries them all (OMNI-009), and every one
+#: of them is part of what the customer said.
+Attachments = MessageMedia | Sequence[MessageMedia]
+
 CHARACTERS_PER_TOKEN: Final = 4.0
 NON_ASCII_CHARACTERS_PER_TOKEN: Final = 2.0
 
@@ -89,7 +95,7 @@ def build_window(
     *,
     message_limit: int,
     token_budget: int,
-    media: Mapping[uuid.UUID, MessageMedia] | None = None,
+    media: Mapping[uuid.UUID, Attachments] | None = None,
 ) -> MemoryWindow:
     """Select the most recent history that fits both limits.
 
@@ -103,8 +109,9 @@ def build_window(
     whatever the caller happened to pass, and "oldest first" and "the newest
     always survives" both stop meaning anything.
 
-    `media` maps message id to the file attached to it, and is passed in rather
-    than reached through a relationship on purpose. Lazy loading inside an async
+    `media` maps message id to the files attached to it - one, or several in
+    the provider's order - and is passed in rather than reached through a
+    relationship on purpose. Lazy loading inside an async
     session raises rather than working, and even where it worked it would issue
     one query per message in the window; the caller fetches them in one.
     """
@@ -154,12 +161,20 @@ def _bounded(turn: Turn) -> Turn:
     return replace(turn, text=turn.text[:head] + TRUNCATION_NOTICE + turn.text[-tail:])
 
 
+def _files(attached: Attachments | None) -> tuple[MessageMedia, ...]:
+    if attached is None:
+        return ()
+    if isinstance(attached, MessageMedia):
+        return (attached,)
+    return tuple(attached)
+
+
 def _turn(
     message: Message,
-    media: Mapping[uuid.UUID, MessageMedia],
+    media: Mapping[uuid.UUID, Attachments],
 ) -> Turn | None:
     """Render one stored message as the model should see it, or skip it."""
-    text = _text(message, media.get(message.id))
+    text = _text(message, _files(media.get(message.id)))
     if message.direction is MessageDirection.OUTBOUND:
         if message.status is MessageStatus.FAILED:
             # Never delivered, so the customer never saw it. Including it would
@@ -169,7 +184,7 @@ def _turn(
     return Turn(role="user", text=text)
 
 
-def _text(message: Message, media: MessageMedia | None) -> str:
+def _text(message: Message, files: Sequence[MessageMedia]) -> str:
     """What the model should read for this message.
 
     A media message contributes up to two things, and they stay apart in the
@@ -182,20 +197,20 @@ def _text(message: Message, media: MessageMedia | None) -> str:
     agent answer as though nothing had been sent, and "the customer sent a
     photograph I could not open" is a far better turn than pretending there was
     no photograph.
+
+    Several files are described one per line, in the order they were sent:
+    the second photograph of three is not left out because the first was read.
     """
     caption = message.body or ""
-    described = _described(message, media)
+    described = "\n".join(line for line in (_described(message, file) for file in files) if line)
 
     if caption and described:
         return f"{caption}\n{described}"
     return described or caption or f"[{message.kind.value}]"
 
 
-def _described(message: Message, media: MessageMedia | None) -> str:
-    """The attached file, rendered for the model."""
-    if media is None:
-        return ""
-
+def _described(message: Message, media: MessageMedia) -> str:
+    """One attached file, rendered for the model."""
     label = message.kind.value
     if media.transcript:
         if media.is_voice:

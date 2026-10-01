@@ -9,7 +9,11 @@ later redelivery without re-queueing anything, and no query, metric or command
 could find it afterwards. The runbook told an operator to requeue those
 conversations; there was nothing to requeue them with (MSG-02).
 
-This is that mechanism. `whatsapp_events.state` now means something -
+**Every channel's events, by one sweep** (OMNI-007). The log is channel-neutral,
+and so is this: an adapter that stores its events there gets recovery without
+a line of its own.
+
+This is that mechanism. The event log's `state` now means something -
 `PROCESSED` is "projected *and* every handoff it needed was accepted", not
 merely "a row exists" - and this loop claims what is still `RECEIVED` and
 finishes it (ADR-102).
@@ -48,17 +52,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
-from app.db.models.conversation import MessageKind
+from app.db.models.channel_event import ChannelEvent, ChannelEventKind
+from app.db.models.conversation import MessageDirection, MessageKind, MessageOrigin
 from app.db.models.media import MediaStatus
-from app.db.models.whatsapp import WhatsAppEvent, WhatsAppEventKind
 from app.db.session import Database
+from app.repositories.channel_event_repository import ChannelEventRepository, InboundEventSweep
+from app.repositories.channel_repository import ChannelConnectionRepository
 from app.repositories.conversation_repository import MessageRepository
 from app.repositories.media_repository import MediaRepository
-from app.repositories.whatsapp_repository import (
-    InboundEventSweep,
-    WhatsAppAccountRepository,
-    WhatsAppEventRepository,
-)
 from app.workers.media_queue import MediaJob, MediaQueue
 from app.workers.queue import AgentJob, AgentQueue
 
@@ -165,7 +166,7 @@ class InboundRecoveryWorker:
 
             for event in events:
                 resolution = await self._recover(session, event)
-                repository = WhatsAppEventRepository(session, tenant_id=event.tenant_id)
+                repository = ChannelEventRepository(session, tenant_id=event.tenant_id)
                 if resolution.abandon is not None:
                     repository.mark_failed(event, reason=resolution.abandon)
                     abandoned += 1
@@ -201,7 +202,7 @@ class InboundRecoveryWorker:
             )
         return outcome
 
-    async def _recover(self, session: AsyncSession, event: WhatsAppEvent) -> _Resolution:
+    async def _recover(self, session: AsyncSession, event: ChannelEvent) -> _Resolution:
         """Work out what this event is still missing, and supply it.
 
         Every branch is a question about the current state of the database
@@ -209,15 +210,25 @@ class InboundRecoveryWorker:
         running this twice harmless: the second pass finds the work already
         done and completes the event without repeating it.
         """
-        if event.kind is not WhatsAppEventKind.MESSAGE:
-            # A status projects onto a message and queues nothing. Reaching
+        if event.kind is not ChannelEventKind.MESSAGE:
+            # A status projects onto a message and queues nothing, and an echo
+            # of the business's own send is never a customer's turn. Reaching
             # here means the request that stored it died before marking it, or
-            # that it predates this state machine existing; either way nothing
-            # is owed.
+            # that it predates this state machine existing; nothing is owed.
             return _Resolution()
 
         messages = MessageRepository(session, tenant_id=event.tenant_id)
-        message = await messages.get_by_wa_message_id(event.event_id)
+        # The message this event projected onto: on the event's own connection
+        # (ADR-120), and a customer's. A row with the id that is not - Wasla's
+        # own send - is not this event's to recover (OMNI-005).
+        message = await messages.find_provider_message(
+            connection_id=event.account_id, provider_message_id=event.event_id
+        )
+        if message is not None and (
+            message.direction is not MessageDirection.INBOUND
+            or message.origin is not MessageOrigin.CUSTOMER
+        ):
+            message = None
         if message is None:
             # The projection and the event insert share one transaction, so
             # this should be unreachable. It is recorded rather than repaired
@@ -233,20 +244,22 @@ class InboundRecoveryWorker:
             )
             return _Resolution(abandon=PROJECTION_MISSING)
 
-        media = await MediaRepository(session, tenant_id=event.tenant_id).get_for_message(
+        files = await MediaRepository(session, tenant_id=event.tenant_id).list_for_message(
             message.id
         )
-        if media is not None:
-            if media.status is not MediaStatus.PENDING:
-                # The worker has already picked it up, or finished with it.
-                return _Resolution()
+        if files:
+            # Every file still pending, not only the first: a message may carry
+            # several (OMNI-009). One the worker has picked up or finished is
+            # left alone.
+            pending = [media for media in files if media.status is MediaStatus.PENDING]
             try:
-                await self._media_queue.enqueue(
-                    MediaJob(tenant_id=event.tenant_id, media_id=media.id)
-                )
+                for media in pending:
+                    await self._media_queue.enqueue(
+                        MediaJob(tenant_id=event.tenant_id, media_id=media.id)
+                    )
             except RedisError:
                 return _Resolution(owing="media_enqueue_failed")
-            return _Resolution(media_jobs=1)
+            return _Resolution(media_jobs=len(pending))
 
         if message.kind is MessageKind.UNSUPPORTED:
             # Nothing to answer. Enqueueing a turn here is the cost MSG-19
@@ -254,12 +267,12 @@ class InboundRecoveryWorker:
             # `[unsupported]`, answering a message with no content.
             return _Resolution()
 
-        account = await WhatsAppAccountRepository(session, tenant_id=event.tenant_id).get_by_id(
-            event.account_id
-        )
-        if account is None or account.released_at is not None:
-            # The workspace no longer holds this number, so a reply could not
-            # leave the building. Recorded, not answered.
+        connection = await ChannelConnectionRepository(
+            session, tenant_id=event.tenant_id
+        ).get_by_id(event.account_id)
+        if connection is None or connection.released_at is not None:
+            # The workspace no longer holds this connection, so a reply could
+            # not leave the building. Recorded, not answered.
             return _Resolution()
 
         try:

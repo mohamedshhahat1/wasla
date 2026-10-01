@@ -1,8 +1,14 @@
-"""The projection's lookup tables and the status ordering rule."""
+"""The projection's lookup tables and the status ordering rule.
+
+The tables are WhatsApp's vocabulary - Meta's message types and statuses - and
+live in the WhatsApp adapter, which translates them into the neutral kinds and
+statuses before anything shared sees them (OMNI-006). The ordering rule is the
+projection's own, and channel-neutral.
+"""
 
 from app.db.models.conversation import MessageKind, MessageStatus
+from app.integrations.whatsapp.adapter import DELIVERY_STATUSES, MESSAGE_KINDS
 from app.repositories.conversation_repository import _STATUS_ORDER
-from app.services.conversation_service import DELIVERY_STATUSES, MESSAGE_KINDS
 
 # The four statuses Meta reports for a message a business sent.
 META_STATUSES = ("sent", "delivered", "read", "failed")
