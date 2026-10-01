@@ -429,6 +429,85 @@ groups:
             app.workers.queues unprocessed-inbound`.
           runbook: docs/RUNBOOK.md
 
+      - alert: InboundEntriesRefused
+        # Entries Meta delivered that the adapter could not turn into an event
+        # (OMNI-010, OMNI-021): a sender it cannot identify, an entry with no
+        # id, a shape it does not recognise. Before this counter such a delivery
+        # was a successful inbound call with nothing in it, and it is exactly
+        # how WhatsApp username senders' messages were dropped with every alert
+        # green (OMNI-002). A healthy deployment refuses none of these, so any
+        # sustained rate is the signal.
+        #
+        # `unsupported_field` is excluded: a webhook field the app is subscribed
+        # to and deliberately does not handle is a trickle, not an incident.
+        # `foreign_object` has its own rule below, because its cause is a
+        # subscription, not a parser.
+        expr: |
+          sum by (channel, reason) (
+            rate(wasla_inbound_entries_refused_total{reason!~"unsupported_field|foreign_object"}[30m])
+          ) > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: messaging
+        annotations:
+          summary: "Inbound {{ $labels.channel }} entries are being refused: {{ $labels.reason }}"
+          description: >-
+            Webhook deliveries are arriving with entries the adapter refuses,
+            and a refused entry is a customer message or status that was not
+            stored. Meta may have changed the payload shape - a new sender
+            identifier, a new message type - so compare a raw delivery with
+            docs/WHATSAPP.md before assuming misconfiguration. The webhook log
+            line whatsapp.webhook_received carries the refusal counts per
+            delivery.
+          runbook: docs/RUNBOOK.md
+
+      - alert: InboundForeignPayloads
+        # A route receiving another Meta product's webhook: an `object` other
+        # than its own (OMNI-010). The payload is refused and counted - never
+        # parsed as this channel's - so nothing is corrupted, but whatever that
+        # subscription was meant to deliver is going nowhere.
+        expr: |
+          sum by (channel) (
+            rate(wasla_inbound_entries_refused_total{reason="foreign_object"}[30m])
+          ) > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: messaging
+        annotations:
+          summary: "The {{ $labels.channel }} webhook is receiving another product's payloads"
+          description: >-
+            A Meta webhook subscription - Instagram, a Page, or another app
+            product - points at this channel's callback URL. Its deliveries are
+            refused rather than misread. Check the App Dashboard's webhook
+            subscriptions: each product needs its own callback, and Wasla
+            operates only the channels it has an adapter for.
+          runbook: docs/RUNBOOK.md
+
+      - alert: ChannelConnectionCredentialRefused
+        # A live connection whose provider refused its credential on the last
+        # send (OMNI-012). Recorded on the connection, cleared by the next
+        # successful send, so this is the level of connections that cannot
+        # send right now - not a count of failures.
+        expr: |
+          sum by (channel) (
+            wasla_channel_connections{status="active", health="auth_failed"}
+          ) > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: messaging
+        annotations:
+          summary: "A {{ $labels.channel }} connection's credential is being refused"
+          description: >-
+            At least one active connection had its last send refused as
+            unauthorised, so replies, follow-ups and campaigns on it fail until
+            its workspace re-verifies it with a working token. Find it with
+            `python -m scripts.omnichannel_invariants` or the connection's
+            health column; the send log carries whatsapp.credential_refused.
+          runbook: docs/RUNBOOK.md
+
       - alert: UnresolvedOutboundSends
         # Sends whose outcome Meta never confirmed. A few seconds' worth is
         # ordinary - a row is `requested` for the duration of the provider call

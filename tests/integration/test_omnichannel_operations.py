@@ -24,12 +24,13 @@ from typing import Any, cast
 import httpx
 import pytest
 from redis.exceptions import RedisError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.channels.adapter import ChannelAdapter
 from app.channels.outcomes import ProviderAuthError
 from app.core.config import Settings
+from app.core.metrics import MetricsRegistry
 from app.core.redis import RedisClient
 from app.db.models.campaign import Campaign, CampaignRecipient, CampaignStatus, RecipientStatus
 from app.db.models.channel import (
@@ -59,6 +60,7 @@ from app.services import messaging_service as messaging_module
 from app.services.campaign_service import CampaignService
 from app.services.channel_ingestion_service import ChannelIngestionService
 from app.services.messaging_service import MessagingService
+from app.services.metrics_service import MetricsService
 from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.media_queue import MediaQueue
 from app.workers.queue import AgentJob, AgentQueue
@@ -535,3 +537,47 @@ async def test_another_channels_payloads_age_out_like_whatsapps(db_session: Asyn
 
 
 # ------------------------------------------------------- gauges (OMNI-021)
+
+
+async def test_connections_and_backlog_are_counted_by_closed_labels(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await _tenant(db_session)
+    account = await _number(db_session, tenant)
+    await db_session.execute(
+        update(ChannelConnection)
+        .where(ChannelConnection.id == account.id)
+        .values(health=ConnectionHealth.AUTH_FAILED)
+    )
+    connection = await _synthetic(db_session, tenant)
+    db_session.add(
+        ChannelEvent(
+            tenant_id=tenant.id,
+            account_id=connection.id,
+            channel=Channel.INSTAGRAM,
+            event_id=f"syn.backlog.{uuid.uuid4().hex}",
+            kind=ChannelEventKind.MESSAGE,
+            payload={"seeded": True},
+            received_at=datetime.now(UTC),
+            state=ChannelEventState.RECEIVED,
+        )
+    )
+    await db_session.flush()
+    await db_session.execute(
+        update(ChannelEvent)
+        .where(ChannelEvent.account_id == connection.id)
+        .values(created_at=datetime.now(UTC) - timedelta(hours=1))
+    )
+
+    lines = await MetricsService(
+        None, registry=MetricsRegistry(), database=as_database(SessionHandle(db_session))
+    )._messaging_lines(now=datetime.now(UTC))
+
+    rendered = "\n".join(lines)
+    assert (
+        'wasla_channel_connections{channel="whatsapp",health="auth_failed",status="active"}'
+        in rendered
+    )
+    assert 'wasla_channel_connections{channel="instagram",health="ok",status="active"}' in rendered
+    assert 'wasla_unprocessed_inbound_events_by_channel{channel="instagram"} 1' in rendered
+    assert str(tenant.id) not in rendered and str(account.id) not in rendered

@@ -15,7 +15,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import ColumnElement, case, or_, select, update
+from sqlalchemy import ColumnElement, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.channels.throughput import SEND_WINDOW
@@ -253,6 +253,33 @@ class ChannelConnectionRepository(TenantScopedRepository[ChannelConnection]):
         return (opened or now) + SEND_WINDOW
 
 
+class ConnectionHealthCensus(BaseRepository[ChannelConnection]):
+    """Connections by channel, status and health, across the platform - for the gauge only.
+
+    Unscoped because it counts rather than reads anybody's rows, and every
+    label it returns is a closed enum value: no connection, workspace or
+    provider identifier reaches a metric (ADR-072).
+    """
+
+    model = ChannelConnection
+
+    async def counts(self) -> list[tuple[str, str, str, int]]:
+        rows = await self.session.execute(
+            select(
+                ChannelConnection.channel,
+                ChannelConnection.status,
+                ChannelConnection.health,
+                func.count(ChannelConnection.id),
+            ).group_by(
+                ChannelConnection.channel, ChannelConnection.status, ChannelConnection.health
+            )
+        )
+        return [
+            (channel.value, status.value, health.value, int(count))
+            for channel, status, health, count in rows.all()
+        ]
+
+
 class ContactIdentityRepository(TenantScopedRepository[ContactIdentity]):
     """How providers address one workspace's contacts."""
 
@@ -387,6 +414,7 @@ __all__ = [
     "UNKNOWN_CONNECTION",
     "ChannelConnectionRepository",
     "ConnectionDirectory",
+    "ConnectionHealthCensus",
     "ConnectionResolution",
     "ContactIdentityRepository",
 ]

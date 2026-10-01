@@ -237,6 +237,18 @@ class InboundEventSweep(BaseRepository[ChannelEvent]):
             return 0, 0.0
         return int(count), max((datetime.now(UTC) - oldest).total_seconds(), 0.0)
 
+    async def backlog_by_channel(self, *, older_than: datetime) -> dict[str, int]:
+        """The same backlog, split by channel - a closed label, never a connection."""
+        rows = await self.session.execute(
+            select(ChannelEvent.channel, func.count(ChannelEvent.id))
+            .where(
+                ChannelEvent.state == ChannelEventState.RECEIVED,
+                ChannelEvent.created_at < older_than,
+            )
+            .group_by(ChannelEvent.channel)
+        )
+        return {channel.value: int(count) for channel, count in rows.all()}
+
 
 __all__ = [
     "ChannelEventRepository",
