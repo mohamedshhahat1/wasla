@@ -59,6 +59,10 @@ customers.
 | `wasla_queue_*` | gauge | `queue` | Pending, in-flight, delayed, dead-lettered, expired reservations, and the age of the oldest waiting job. |
 | `wasla_unprocessed_inbound_events` | gauge | — | **A state invariant**: inbound stored whose agent or media handoff never reached a queue. Should be zero. |
 | `wasla_unprocessed_inbound_oldest_age_seconds` | gauge | — | Whether that backlog is being drained or is stuck. |
+| `wasla_unprocessed_inbound_events_by_channel` | gauge | `channel` | The same backlog split by channel, so one channel's outage is not hidden in another's traffic. |
+| `wasla_inbound_entries_refused_total` | counter | `channel`, `reason` | Webhook entries an adapter could not turn into an event (OMNI-021): `foreign_object`, `unsupported_field`, `missing_sender`, `identifier_too_long`, `missing_event_id`, `missing_status`, `missing_connection`, `malformed`. A delivery that became nothing is no longer a silent success. |
+| `wasla_inbound_events_total` | counter | `channel`, `outcome` | What ingestion made of accepted events: `stored`, `duplicate`, `echo`, `collision`, `unknown_connection`, `inactive_connection`, `unowned`, `rejected`, `identity_conflict`. |
+| `wasla_channel_connections` | gauge | `channel`, `status`, `health` | Connections by channel, lifecycle and what the provider last said about their credential (`ok`, `auth_failed`, ...). Closed labels only: never a connection id, page id or number. |
 | `wasla_unresolved_outbound_messages` | gauge | — | **A state invariant**: sends Meta may have delivered, whose outcome is unknown. |
 | `wasla_oldest_unresolved_outbound_age_seconds` | gauge | — | Whether the oldest is a send in flight or one that broke an hour ago. |
 | `wasla_media_outcomes_total` | counter | `outcome` | How inbound attachments ended: `ready` or one of the media reason tokens (closed vocabulary, MEDIA-15). Decisions and failures are both here; the alert reads only the failure subset. |
@@ -114,6 +118,9 @@ an oversight rather than a decision.
 | `WhatsAppRateLimited` | Sustained 429s from Meta | warning |
 | `UnprocessedInboundBacklog` | Stored inbound still owing work for 15m | critical |
 | `UnresolvedOutboundSends` | A send unconfirmed for over an hour | warning |
+| `InboundEntriesRefused` | An adapter refusing entries that may be customer messages (anything but `unsupported_field` and `foreign_object`) for 15m | warning |
+| `InboundForeignPayloads` | A channel's webhook receiving another Meta product's payloads for 15m | warning |
+| `ChannelConnectionCredentialRefused` | An active connection whose last send was refused as unauthorised, for 15m | warning |
 | `QueueJobsStuck` | The oldest unclaimed job is over 15m old | warning |
 | `DeadLetterGrowth` | Jobs are being dead-lettered | warning |
 

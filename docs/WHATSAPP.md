@@ -98,7 +98,7 @@ Meta retries any non-2xx response and eventually disables a subscription that ke
 
 ## Tenant resolution
 
-The workspace is resolved from `metadata.phone_number_id` and never from the customer's phone number, which the sender controls. `phone_number_id` is unique among *live* claims, so a number can never map to two workspaces at once. The lookup is the one deliberately unscoped query in this subsystem — the workspace is what is being discovered — and is isolated in `WhatsAppAccountDirectory`.
+The workspace is resolved from `metadata.phone_number_id` and never from the customer's phone number or business-scoped id, which the sender controls. A WhatsApp number is a channel connection with the same id ([ADR-117](../DECISIONS.md)); `phone_number_id` is its `external_account_id`, unique among *live* claims per channel, so a number can never map to two workspaces at once. The lookup is the one deliberately unscoped query in this subsystem — the workspace is what is being discovered — and is isolated in `ConnectionDirectory`, which answers it the same way for every channel.
 
 **The question is who held the number when the event happened, not who holds it now** ([ADR-101](../DECISIONS.md)). Meta retries an undelivered webhook for up to seven days, so for a week after a number changes hands a delivery can arrive carrying a message the *previous* owner's customer sent. Resolving to the current holder put that message, the customer's phone number and their profile name into a stranger's inbox — with both businesses having proved ownership of the number to Meta, so neither did anything wrong.
 
@@ -117,15 +117,57 @@ The live claim is still the fast path and, for a number that has never moved, th
 
 An event on a number the workspace has since **released** is still recorded, in that workspace, so its conversation history stays intact. It is not answered: the workspace cannot send through a claim it no longer holds, so an agent turn could only end in a refusal after paying for an inference.
 
-An account row carries the workspace's own Meta token, encrypted (ADR-034, superseding ADR-009). A token in a plain column would put a live sending capability in every database dump, so the column is AES-256-GCM with the tenant id as additional authenticated data — a ciphertext lifted into another workspace's row will not decrypt. A workspace that has supplied one sends as itself; one that has not sends through the platform credential from configuration.
+An account row carries the workspace's own Meta token, encrypted (ADR-034, superseding ADR-009). A token in a plain column would put a live sending capability in every database dump, so the column is AES-256-GCM with additional authenticated data. A token sealed since 0082 is envelope `v2`, bound to the workspace, the connection and the channel together, so a ciphertext lifted into any other row - another workspace's, or another number of the same workspace - will not decrypt; one sealed before is `v1`, bound to the workspace only, and still reads until it is re-sealed (OMNI-012). A workspace that has supplied one sends as itself; one that has not sends through the platform credential from configuration. That fallback is WhatsApp's alone: it is decided inside the WhatsApp adapter, so a connection on any other channel can never inherit it.
+
+## Who sent it: phone numbers and business-scoped ids
+
+Since April 2026 every message webhook carries a **business-scoped user id**
+(BSUID) for the sender, and as WhatsApp usernames roll out Meta **omits `from`
+and `wa_id` entirely** for a user whose phone number it is not allowed to show.
+Until the omnichannel remediation the parser required `from`, so such a
+customer's message was answered 200, never stored and never answered (OMNI-002).
+
+What the parser relies on, checked against Meta's documentation on 2026-10-01
+(*Business-scoped user IDs*, developers.facebook.com, page dated 2026-06-29):
+
+| Fact | Where it is used |
+| --- | --- |
+| `messages[].from_user_id` and `contacts[].user_id` carry the BSUID on every inbound message; `from` / `wa_id` only when Meta may share the number | The parser accepts a sender with either and keeps both |
+| A BSUID is a two-letter country code, a dot and up to 128 alphanumerics (131 in all); a parent BSUID adds `ENT.` | Identifiers are bounded at 255; a longer one is refused and counted, never truncated |
+| A BSUID is unique per business portfolio and user, and is regenerated when the user changes number (`user_id_update`) | Scoped by the WhatsApp Business Account the message arrived through - a WABA belongs to one portfolio, so a person can only be over-split, never merged |
+| `statuses[].recipient_user_id` carries the BSUID on sent/delivered/read | Kept on the status; statuses still resolve by message id |
+| Sending to a BSUID uses `recipient` (supported from July 2026); if `to` is also present, `to` wins | Exactly one of `to` / `recipient`, never both |
+| A send to a BSUID answers with `contacts[].user_id` and no `wa_id` | The client reads either |
+
+**One person, several identities** ([ADR-118](../DECISIONS.md)). A sender's
+identifiers are resolved in `contact_identities`: a phone across the workspace, a
+BSUID within its WABA. A phone and a BSUID named in the same signed delivery are
+the same person and attach to one contact; nothing else links two identities -
+not a display name, an email or a phone typed into a lead. If the identifiers in
+one delivery already belong to two different contacts, the message goes to the
+BSUID's contact, the conflict is counted, and nothing is merged.
+
+**Who a reply goes to** ([ADR-119](../DECISIONS.md)). A conversation is pinned to
+the identity that opened it: the phone when Meta named one, otherwise the BSUID.
+Replies, follow-ups and campaign copies are addressed to that pin - `to` for a
+phone, `recipient` for a BSUID - and never to whatever the contact holds now.
+`contacts.wa_id` is the contact's WhatsApp phone, kept equal to its phone identity
+by a trigger, and null for a customer known only by a BSUID.
+
+**Not processed:** a parent BSUID is carried on the event but never stored as an
+identity; `user_id_update` and the `system` message that announces a new number
+are not acted on, so the regenerated BSUID becomes a new contact on its next
+message rather than being merged.
 
 ## Parsing
 
-The parser never raises. Meta adds fields and message types continuously, so entries that cannot be understood are counted (`ignored`) rather than rejected, and the raw payload of every stored event is kept whole while it can still matter: until the event is processed, and for `WHATSAPP_EVENT_PAYLOAD_RETENTION_DAYS` (30 by default) after that, so it can be reinterpreted after new support ships. Then the retention worker clears it (DB-011): the payload repeats customer text and phone numbers already held in `messages`, and nothing reads it once an event is handled. The event row itself is kept — its id, event id, state and timestamps — because that is what deduplicates Meta's retries and what recovery reads; `payload_redacted_at` says when the payload went, and a CHECK refuses a missing payload without it. A received or failed event keeps its payload however old it is. `wasla_webhook_payload_retention_total{outcome="pending"}` above zero across passes is a sweep that is not keeping up.
+The parser never raises. A payload is WhatsApp's only if it says so: the top-level `object` must be `whatsapp_business_account` and each change's `field` must be `messages`; another product's delivery (`page`, `instagram`) and every other field (template updates, `user_id_update`, the Coexistence fields `history`, `smb_app_state_sync`, `smb_message_echoes`) are refused, never parsed by coincidence (OMNI-010). Meta adds fields and message types continuously, so entries that cannot be understood are counted - by a closed reason in `wasla_inbound_entries_refused_total` and in the webhook's log line - rather than rejected, a message type nobody maps is stored as `unsupported`, and the raw payload of every stored event is kept whole while it can still matter: until the event is processed, and for `WHATSAPP_EVENT_PAYLOAD_RETENTION_DAYS` (30 by default) after that, so it can be reinterpreted after new support ships. Then the retention worker clears it (DB-011): the payload repeats customer text and phone numbers already held in `messages`, and nothing reads it once an event is handled. The event row itself is kept — its id, event id, state and timestamps — because that is what deduplicates Meta's retries and what recovery reads; `payload_redacted_at` says when the payload went, and a CHECK refuses a missing payload without it. A received or failed event keeps its payload however old it is. `wasla_webhook_payload_retention_total{outcome="pending"}` above zero across passes is a sweep that is not keeping up.
 
 ## Idempotency
 
-Events are stored in `whatsapp_events` under `UNIQUE(tenant_id, event_id)`, so a redelivery is a no-op instead of a duplicate reply to a customer.
+Events are stored in `whatsapp_events` - the channel-neutral event log, every channel's - under `UNIQUE(tenant_id, account_id, event_id)`, so a redelivery is a no-op instead of a duplicate reply to a customer. The older `UNIQUE(tenant_id, event_id)` stays until the compatibility cleanup ([ADR-120](../DECISIONS.md)); it is stricter, so an event id already seen on another number of the workspace is counted as a collision rather than stored.
+
+**Only a new customer message has consequences.** A message id is identified per connection. The same customer message seen again on the same number is a duplicate; an id that names anything else - a message Wasla sent, another number's message - is a collision: the event is kept as failed evidence (`provider_id_collision`) and nothing is opened, touched, queued, cancelled or opted out. At the audit's HEAD an inbound event carrying the id of Wasla's own reply opened an empty conversation on the receiving number and queued an agent turn triggered by that reply (probe Y1).
 
 Status events compose their key as `{message_id}:{status}`, because Meta reports `sent`, `delivered` and `read` for the same message under the same id; keying on the id alone would keep the first status and discard the rest.
 
@@ -266,7 +308,8 @@ Stated here so a reader does not infer a capability from a client method:
 - **Outbound chunking.** One logical message is one provider message. A reply over WhatsApp's 4096-character body limit is refused by `MessagingService.send_text` rather than truncated (which puts words in a business's mouth) or split (which reintroduces chunk ordering, partial failure and duplicate chunks). Agents are told the limit in their instructions, which reduces how often a reply runs long without pretending a token budget can bound a character count. An agent's reply never reaches the refusal: `app/agents/reply.py` shortens an over-long reply at a sentence, with an offer to continue, before it is sent — still one message (AI-05).
 - **Message edit, delete and revoke.**
 - **Reactions as first-class.** A reaction is stored as an `unsupported` message and deliberately does not trigger an agent turn: it has no content to answer, and doing so cost one billed inference and possibly one reply to nothing.
-- **Coexistence.** See *Message origin* for the one piece of groundwork that is in place.
+- **Coexistence.** See *Message origin* for the groundwork in place; the Coexistence webhook fields are refused and counted, and an `echo` event kind exists so app-sent messages can be stored without ever being read as a customer's.
+- **BSUID rotation.** `user_id_update` is refused as an unsupported field; see *Who sent it*.
 
 ## Graph API version
 

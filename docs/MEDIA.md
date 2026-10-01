@@ -32,6 +32,38 @@ A message on a number the workspace has since **released** is recorded as histor
 
 The webhook does none of the work. It resolves the workspace, stores the event, notes the attachment and returns, exactly as it does for text ([WHATSAPP.md](WHATSAPP.md)).
 
+## Several files, and where each one is
+
+**A message may carry several files, in the provider's order** (OMNI-009).
+`message_media.position` numbers them from 0 and `UNIQUE(message_id, position)`
+replaced `UNIQUE(message_id)`: a webhook replay names the same positions, so it
+still adds nothing, and the download job stays idempotent per file. WhatsApp
+sends one file per message, so every WhatsApp row is position 0; Messenger and
+Instagram send an array. Every file of a message is queued, and the message is
+answered once all of them are resolved.
+
+**Where a file is, is a locator, not a WhatsApp handle.** `locator_kind` is
+`handle` (resolved through the provider's API with the connection's credential -
+WhatsApp's two-step Graph fetch) or `url` (a provider CDN link, up to 4,096
+characters, with an optional `locator_expires_at`). Migration 0083 copied every
+existing handle into the locator; `wa_media_id` stays for the compatibility
+window, and a row that has only it is fetched by that handle.
+
+**Fetching is the adapter's; everything else is shared.** The pipeline - claim,
+lifecycle, bounds, hashing, byte-sniffed type, storage, reading, retention - is
+one implementation for every channel. The edge that differs is a
+`ChannelMediaFetcher` from the conversation's channel adapter. A URL locator is
+fetched by `UrlMediaFetcher`: only through the SSRF guard (resolve once, refuse
+any non-public address, pin the connection), only to hosts inside that
+provider's own allow-list on every hop, an expired link refused without asking,
+and the byte cap enforced as the body arrives. A provider's credential is sent
+only to an allow-listed host.
+
+**A file's message and conversation are its workspace's** (OMNI-022): composite
+keys `(tenant_id, conversation_id, message_id)` and `(tenant_id, conversation_id)`
+refuse a row naming another workspace's message, which a plain `message_id` key
+accepted.
+
 ## Captions and transcripts are different things
 
 | | Where it lives | What it is |
