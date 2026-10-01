@@ -57,6 +57,14 @@ from typing import Any, Final, Literal
 
 import httpx
 
+from app.channels.media import (
+    MalformedMediaDescriptorError,
+    MediaCredentialRefusedError,
+    MediaHostRefusedError,
+    MediaTooLargeError,
+    MediaUnavailableError,
+    read_capped,
+)
 from app.channels.outcomes import (
     ProviderAuthError,
     SendNotAttemptedError,
@@ -244,58 +252,6 @@ class TemplateWithdrawnError(SendNotAttemptedError):
         self.code = code
 
 
-class MediaHostRefusedError(ExternalServiceError):
-    """A media hop named a host that may not receive the Meta token (MEDIA-01).
-
-    Refused outright rather than fetched anonymously. A provider response that
-    points outside Meta's own hosts is not a file Meta is serving, and reading
-    it without the token would still be downloading whatever that host chose to
-    send into a customer's conversation.
-    """
-
-    message = "WhatsApp could not return this file."
-
-
-class MediaUnavailableError(ExternalServiceError):
-    """Meta answered, permanently, that this file cannot be had (MEDIA-04).
-
-    A 400, 404 or 410 on the descriptor or the file: an expired handle, a
-    deleted file, one belonging to another account. No retry changes that, so a
-    caller records a decision rather than an attempt.
-    """
-
-    message = "WhatsApp no longer has this file."
-
-
-class MediaCredentialRefusedError(ExternalServiceError):
-    """Meta refused the credential a media read was made with.
-
-    A 401, a 403, or Meta's code 190 on any status. Kept apart from an
-    unavailable file because the remedy is different - reconnecting the number,
-    not asking the customer again - and an operator reading the reason should
-    see which.
-    """
-
-    message = "WhatsApp refused this number's credentials for the file."
-
-
-class MalformedMediaDescriptorError(ExternalServiceError):
-    """Meta's answer about a file could not be used: no location, not JSON, too big."""
-
-    message = "WhatsApp returned an unusable description of this file."
-
-
-class MediaTooLargeError(ExternalServiceError):
-    """A download passed the byte cap while it was being read.
-
-    Distinct from a fetch that broke. The caller records this as a decision not
-    to process the file, which no retry changes, rather than as an attempt worth
-    repeating - the same split `MediaStatus` draws between skipped and failed.
-    """
-
-    message = "This file is larger than the limit."
-
-
 @dataclass(frozen=True, slots=True)
 class SentMessage:
     """Meta's acknowledgement of one accepted message."""
@@ -370,13 +326,15 @@ class WhatsAppClient:
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None = None,
+        recipient_user_id: str | None = None,
         body: str,
         preview_url: bool = False,
     ) -> SentMessage:
         return await self._send(
             phone_number_id=phone_number_id,
             to=to,
+            recipient_user_id=recipient_user_id,
             content={"type": "text", "text": {"body": body, "preview_url": preview_url}},
         )
 
@@ -384,7 +342,8 @@ class WhatsAppClient:
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None = None,
+        recipient_user_id: str | None = None,
         kind: MediaKind,
         link: str | None = None,
         media_id: str | None = None,
@@ -405,6 +364,7 @@ class WhatsAppClient:
         return await self._send(
             phone_number_id=phone_number_id,
             to=to,
+            recipient_user_id=recipient_user_id,
             content={"type": kind, kind: media},
         )
 
@@ -412,7 +372,8 @@ class WhatsAppClient:
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None = None,
+        recipient_user_id: str | None = None,
         latitude: float,
         longitude: float,
         name: str | None = None,
@@ -427,6 +388,7 @@ class WhatsAppClient:
         return await self._send(
             phone_number_id=phone_number_id,
             to=to,
+            recipient_user_id=recipient_user_id,
             content={"type": "location", "location": location},
         )
 
@@ -434,7 +396,8 @@ class WhatsAppClient:
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None = None,
+        recipient_user_id: str | None = None,
         body: str,
         buttons: list[tuple[str, str]],
     ) -> SentMessage:
@@ -445,6 +408,7 @@ class WhatsAppClient:
         return await self._send(
             phone_number_id=phone_number_id,
             to=to,
+            recipient_user_id=recipient_user_id,
             content={
                 "type": "interactive",
                 "interactive": {
@@ -464,7 +428,8 @@ class WhatsAppClient:
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None = None,
+        recipient_user_id: str | None = None,
         body: str,
         button_text: str,
         sections: list[dict[str, Any]],
@@ -475,6 +440,7 @@ class WhatsAppClient:
         return await self._send(
             phone_number_id=phone_number_id,
             to=to,
+            recipient_user_id=recipient_user_id,
             content={
                 "type": "interactive",
                 "interactive": {
@@ -489,7 +455,8 @@ class WhatsAppClient:
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None = None,
+        recipient_user_id: str | None = None,
         name: str,
         language: str,
         components: list[dict[str, Any]] | None = None,
@@ -502,6 +469,7 @@ class WhatsAppClient:
         return await self._send(
             phone_number_id=phone_number_id,
             to=to,
+            recipient_user_id=recipient_user_id,
             content={"type": "template", "template": template},
         )
 
@@ -808,18 +776,7 @@ class WhatsAppClient:
         worth repeating. Retrying an oversized download would spend the same
         bandwidth to reach the same conclusion.
         """
-        chunks: list[bytes] = []
-        total = 0
-        async for chunk in response.aiter_bytes():
-            total += len(chunk)
-            if total > max_bytes:
-                logger.info(
-                    "whatsapp.media_over_cap",
-                    extra={"event": "whatsapp.media_over_cap", "limit_bytes": max_bytes},
-                )
-                raise MediaTooLargeError()
-            chunks.append(chunk)
-        return b"".join(chunks)
+        return await read_capped(response, max_bytes=max_bytes)
 
     async def _get_json(self, url: str, *, max_bytes: int) -> dict[str, Any]:
         response = await self._get(url, max_bytes=max_bytes)
@@ -944,19 +901,30 @@ class WhatsAppClient:
         self,
         *,
         phone_number_id: str,
-        to: str,
+        to: str | None,
+        recipient_user_id: str | None,
         content: dict[str, Any],
     ) -> SentMessage:
+        """One message, addressed by phone number or by business-scoped user id.
+
+        Exactly one of the two, never both. Meta accepts a business-scoped id in
+        `recipient` (since July 2026) and lets `to` win when both are present;
+        sending both would make the conversation's pinned identity a suggestion
+        rather than the address (OMNI-004), so it is refused here instead.
+        """
+        if (to is None) == (recipient_user_id is None):
+            raise ValidationError("Address a WhatsApp message to exactly one recipient.")
+        address = {"to": to} if to is not None else {"recipient": recipient_user_id}
         payload: dict[str, Any] = {
             "messaging_product": MESSAGING_PRODUCT,
             "recipient_type": "individual",
-            "to": to,
+            **address,
             **content,
         }
         response = await self._post(phone_number_id=phone_number_id, payload=payload)
         return SentMessage(
             message_id=self._message_id(response),
-            recipient=self._recipient(response) or to,
+            recipient=self._recipient(response) or to or recipient_user_id or "",
             raw=response,
         )
 
@@ -1186,11 +1154,13 @@ class WhatsAppClient:
         raise UncertainDeliveryError("WhatsApp accepted the message without an identifier.")
 
     def _recipient(self, body: dict[str, Any]) -> str | None:
+        """Who Meta delivered to: the phone, or the business-scoped id if it named no phone."""
         contacts = body.get("contacts")
         if isinstance(contacts, list) and contacts and isinstance(contacts[0], dict):
-            recipient = contacts[0].get("wa_id")
-            if isinstance(recipient, str):
-                return recipient
+            for key in ("wa_id", "user_id"):
+                recipient = contacts[0].get(key)
+                if isinstance(recipient, str) and recipient:
+                    return recipient
         return None
 
 
@@ -1253,8 +1223,8 @@ def _read_failure(status_code: int, meta_code: int | None) -> ExternalServiceErr
     return MediaUnavailableError()
 
 
-# The send-outcome types are channel-neutral now (`app.channels.outcomes`); they
-# are re-exported under their old import path, as the same classes, so every
+# The outcome and media types are channel-neutral now (`app.channels`); they are
+# re-exported under their old import path, as the same classes, so every
 # `except` and `isinstance` written against this module still holds.
 __all__ = [
     "CREDENTIALS_REFUSED",

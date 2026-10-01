@@ -173,6 +173,28 @@ async def _conversation(
     return conversation
 
 
+async def _customer_message(
+    session: AsyncSession, tenant: Tenant, conversation: Conversation
+) -> Message:
+    """What a turn answers: a customer's message, in this conversation.
+
+    A turn is only ever claimed for one (OMNI-005), so a test that drives the
+    worker has to give it a real one rather than an invented id.
+    """
+    message = Message(
+        tenant_id=tenant.id,
+        conversation_id=conversation.id,
+        wa_message_id=f"wamid.{uuid.uuid4().hex}",
+        direction=MessageDirection.INBOUND,
+        kind=MessageKind.TEXT,
+        body="Is this available?",
+        origin=MessageOrigin.CUSTOMER,
+    )
+    session.add(message)
+    await session.flush()
+    return message
+
+
 async def _answering_agent(session: AsyncSession, tenant: Tenant) -> Agent:
     """An agent allowed to answer, which a turn now checks for before it is charged.
 
@@ -195,10 +217,12 @@ async def _answering_agent(session: AsyncSession, tenant: Tenant) -> Agent:
 
 def _inbound(*, message_id: str = "wamid.in", text: str = "Hello") -> dict[str, Any]:
     return {
+        "object": "whatsapp_business_account",
         "entry": [
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": PHONE_NUMBER_ID},
                             "contacts": [{"wa_id": CUSTOMER, "profile": {"name": "Nour"}}],
@@ -211,11 +235,11 @@ def _inbound(*, message_id: str = "wamid.in", text: str = "Hello") -> dict[str, 
                                     "text": {"body": text},
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }
-        ]
+        ],
     }
 
 
@@ -682,6 +706,7 @@ async def test_an_agent_turn_meters_its_provider_calls_and_tokens(
     tenant = await _tenant(db_session)
     account = await _account(db_session, tenant)
     conversation = await _conversation(db_session, tenant, account)
+    trigger = await _customer_message(db_session, tenant, conversation)
     await _answering_agent(db_session, tenant)
 
     # Two tool rounds are two provider calls, and the tokens are their sum.
@@ -691,7 +716,7 @@ async def test_an_agent_turn_meters_its_provider_calls_and_tokens(
         AgentJob(
             tenant_id=tenant.id,
             conversation_id=conversation.id,
-            trigger_message_id=uuid.uuid4(),
+            trigger_message_id=trigger.id,
         ),
         progress,
     )
@@ -730,6 +755,7 @@ async def test_a_turn_that_says_nothing_is_still_metered(
     tenant = await _tenant(db_session)
     account = await _account(db_session, tenant)
     conversation = await _conversation(db_session, tenant, account)
+    trigger = await _customer_message(db_session, tenant, conversation)
     await _answering_agent(db_session, tenant)
 
     worker = _worker(monkeypatch, db_session, settings, _outcome(handed_off=True))
@@ -738,7 +764,7 @@ async def test_a_turn_that_says_nothing_is_still_metered(
         AgentJob(
             tenant_id=tenant.id,
             conversation_id=conversation.id,
-            trigger_message_id=uuid.uuid4(),
+            trigger_message_id=trigger.id,
         ),
         progress,
     )

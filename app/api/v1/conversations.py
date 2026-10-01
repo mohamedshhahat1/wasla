@@ -11,6 +11,7 @@ staff an inbox from using it.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Header, Query, Response, UploadFile, status
@@ -27,7 +28,8 @@ from app.api.route import CommittingRoute
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.media_types import CANONICAL_TYPES
 from app.core.pagination import MAX_CURSOR_LENGTH
-from app.db.models.conversation import MessageOrigin
+from app.db.models.channel import Channel
+from app.db.models.conversation import Conversation, MessageOrigin
 from app.db.models.invoice import MAX_IDEMPOTENCY_KEY_LENGTH
 from app.db.models.sentiment import ConversationPriority
 from app.schemas.conversation import (
@@ -41,7 +43,9 @@ from app.schemas.conversation import (
     SendTextRequest,
 )
 from app.schemas.text import StorableText
+from app.services.inbox_service import InboxService
 from app.services.media_retention_service import purge_reason
+from app.services.messaging_service import MessagingService
 
 # The header a caller sends to say "this is the same request as before", so a
 # double-clicked button or a retried mobile request produces one message rather
@@ -84,6 +88,34 @@ MAX_UPLOAD_BYTES = 16 * 1024 * 1024
 UPLOAD_CHUNK_BYTES = 64 * 1024
 
 
+async def _present_all(
+    conversations: Sequence[Conversation],
+    *,
+    inbox: InboxService,
+    messaging: MessagingService,
+) -> list[ConversationRead]:
+    """Render conversations for the API, their participants read in one query."""
+    participants = await inbox.participants(conversations)
+    return [
+        ConversationRead.from_model(
+            conversation,
+            service_window_open=messaging.window_open(conversation),
+            reply_policy=messaging.reply_policy(conversation),
+            participant=participants[conversation.participant_identity_id],
+        )
+        for conversation in conversations
+    ]
+
+
+async def _present(
+    conversation: Conversation,
+    *,
+    inbox: InboxService,
+    messaging: MessagingService,
+) -> ConversationRead:
+    return (await _present_all([conversation], inbox=inbox, messaging=messaging))[0]
+
+
 async def _read_capped(file: UploadFile) -> bytes:
     """Read an upload, refusing it as soon as it passes the cap.
 
@@ -110,6 +142,8 @@ async def list_conversations(
     limit: LimitQuery = 50,
     cursor: CursorQuery = None,
     priority: ConversationPriority | None = None,
+    channel: Channel | None = None,
+    connection_id: uuid.UUID | None = None,
 ) -> CursorPage[ConversationRead]:
     """Open conversations, most recently active first.
 
@@ -118,17 +152,19 @@ async def list_conversations(
     across the page boundary.
 
     `priority` narrows the list without reordering it, so the flagged queue can
-    be worked deliberately while the default view stays as it was.
+    be worked deliberately while the default view stays as it was. `channel`
+    and `connection_id` narrow it the same way, to one channel or one
+    connection.
     """
-    page = await inbox.list_conversations(limit=limit, cursor=cursor, priority=priority)
+    page = await inbox.list_conversations(
+        limit=limit,
+        cursor=cursor,
+        priority=priority,
+        channel=channel,
+        connection_id=connection_id,
+    )
     return CursorPage[ConversationRead](
-        items=[
-            ConversationRead.from_model(
-                conversation,
-                service_window_open=messaging.window_open(conversation),
-            )
-            for conversation in page.items
-        ],
+        items=await _present_all(page.items, inbox=inbox, messaging=messaging),
         next_cursor=page.next_cursor,
     )
 
@@ -140,10 +176,7 @@ async def get_conversation(
     messaging: MessagingServiceDep,
 ) -> ConversationRead:
     conversation = await inbox.get_conversation(conversation_id)
-    return ConversationRead.from_model(
-        conversation,
-        service_window_open=messaging.window_open(conversation),
-    )
+    return await _present(conversation, inbox=inbox, messaging=messaging)
 
 
 @router.get("/{conversation_id}/messages", response_model=CursorPage[MessageRead])
@@ -360,10 +393,7 @@ async def set_mode(
         # the audit trail, and made the owner of what they took over.
         actor=workspace.user,
     )
-    return ConversationRead.from_model(
-        conversation,
-        service_window_open=messaging.window_open(conversation),
-    )
+    return await _present(conversation, inbox=inbox, messaging=messaging)
 
 
 @router.post("/{conversation_id}/priority", response_model=ConversationRead)
@@ -371,6 +401,7 @@ async def set_priority(
     conversation_id: uuid.UUID,
     payload: PriorityUpdateRequest,
     sentiment: SentimentServiceDep,
+    inbox: InboxServiceDep,
     messaging: MessagingServiceDep,
 ) -> ConversationRead:
     """Set the priority by hand.
@@ -383,10 +414,7 @@ async def set_priority(
         conversation_id=conversation_id,
         priority=payload.priority,
     )
-    return ConversationRead.from_model(
-        conversation,
-        service_window_open=messaging.window_open(conversation),
-    )
+    return await _present(conversation, inbox=inbox, messaging=messaging)
 
 
 @router.post("/{conversation_id}/assignment", response_model=ConversationRead)
@@ -409,10 +437,7 @@ async def assign(
         expected_assigned_to_id=payload.expected_assigned_to_id,
         actor=workspace.user,
     )
-    return ConversationRead.from_model(
-        conversation,
-        service_window_open=messaging.window_open(conversation),
-    )
+    return await _present(conversation, inbox=inbox, messaging=messaging)
 
 
 @router.post("/{conversation_id}/close", response_model=ConversationRead)
@@ -423,10 +448,7 @@ async def close_conversation(
     messaging: MessagingServiceDep,
 ) -> ConversationRead:
     conversation = await inbox.close(conversation_id, actor=workspace.user)
-    return ConversationRead.from_model(
-        conversation,
-        service_window_open=messaging.window_open(conversation),
-    )
+    return await _present(conversation, inbox=inbox, messaging=messaging)
 
 
 @router.post("/{conversation_id}/reopen", response_model=ConversationRead)
@@ -437,7 +459,4 @@ async def reopen_conversation(
     messaging: MessagingServiceDep,
 ) -> ConversationRead:
     conversation = await inbox.reopen(conversation_id, actor=workspace.user)
-    return ConversationRead.from_model(
-        conversation,
-        service_window_open=messaging.window_open(conversation),
-    )
+    return await _present(conversation, inbox=inbox, messaging=messaging)

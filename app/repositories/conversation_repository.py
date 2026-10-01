@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import ConflictError
 from app.core.pagination import Cursor
+from app.db.models.channel import Channel
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -94,6 +95,30 @@ class OutboundMessageDirectory(BaseRepository[Message]):
             self._select().where(
                 Message.wa_message_id == wa_message_id,
                 Message.tenant_id.in_(tenant_ids),
+                Message.direction == MessageDirection.OUTBOUND,
+            )
+        )
+
+    async def find_by_provider_message_id(
+        self,
+        provider_message_id: str,
+        *,
+        connection_ids: Sequence[uuid.UUID],
+    ) -> Message | None:
+        """The outbound message a status names, among these connections' messages.
+
+        The neutral form of the lookup above, and stricter: a provider id is
+        unique per connection (ADR-120), so the candidates are the claims the
+        connection the status arrived on has carried - across workspaces
+        (MSG-04) - and a message on any other connection cannot match,
+        whoever owns it.
+        """
+        if not connection_ids:
+            return None
+        return await self._first(
+            self._select().where(
+                Message.wa_message_id == provider_message_id,
+                Message.connection_id.in_(connection_ids),
                 Message.direction == MessageDirection.OUTBOUND,
             )
         )
@@ -354,6 +379,8 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         *,
         contact_id: uuid.UUID,
         account_id: uuid.UUID,
+        channel: Channel | None = None,
+        participant_identity_id: uuid.UUID | None = None,
     ) -> tuple[Conversation, bool]:
         """Returns the conversation and whether it was created.
 
@@ -380,6 +407,14 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
             status=ConversationStatus.OPEN,
             mode=ConversationMode.AI,
         )
+        # Named by the caller that knows them - the ingestion service, from the
+        # connection and the identity that wrote (OMNI-004). A caller naming
+        # neither gets the channel default and the trigger's single-identity
+        # pin, or a refusal - never a guessed address.
+        if channel is not None:
+            conversation.channel = channel
+        if participant_identity_id is not None:
+            conversation.participant_identity_id = participant_identity_id
         try:
             async with self.session.begin_nested():
                 self.session.add(conversation)
@@ -399,6 +434,8 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         limit: int = 50,
         after: Cursor | None = None,
         priority: ConversationPriority | None = None,
+        channel: Channel | None = None,
+        connection_id: uuid.UUID | None = None,
     ) -> list[Conversation]:
         """Everything not closed, most recently active first.
 
@@ -423,6 +460,13 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         )
         if priority is not None:
             query = query.where(Conversation.priority == priority)
+        # Filters over the one unified inbox, like `priority` (OMNI-014). A
+        # connection id from another workspace matches nothing: the tenant
+        # predicate is already on the query.
+        if channel is not None:
+            query = query.where(Conversation.channel == channel)
+        if connection_id is not None:
+            query = query.where(Conversation.account_id == connection_id)
         if after is not None:
             query = query.where(_after_nullable(Conversation, after))
         return await self._all(query)
@@ -506,20 +550,41 @@ class MessageRepository(TenantScopedRepository[Message]):
             .order_by(Message.sequence.desc())
         )
 
-    async def record_inbound(
+    async def find_provider_message(
+        self,
+        *,
+        connection_id: uuid.UUID,
+        provider_message_id: str,
+    ) -> Message | None:
+        """The message this provider id names on this connection (ADR-120)."""
+        return await self._first(
+            self._select().where(
+                Message.connection_id == connection_id,
+                Message.wa_message_id == provider_message_id,
+            )
+        )
+
+    def record_inbound(
         self,
         *,
         conversation_id: uuid.UUID,
-        wa_message_id: str,
+        connection_id: uuid.UUID,
+        provider_message_id: str,
         kind: MessageKind,
         body: str | None,
         sent_at: datetime,
-    ) -> tuple[Message, bool]:
-        """Store a customer message once. Returns the row and whether it is new."""
-        existing = await self.get_by_wa_message_id(wa_message_id)
-        if existing is not None:
-            return existing, False
+    ) -> Message:
+        """Stage a customer message the caller has established is new.
 
+        Deciding *whether* a provider id is new is the projection's job, done
+        before this, direction-aware and per connection (OMNI-005). This used
+        to answer the question itself by returning *any* row with the id
+        anywhere in the workspace - another conversation's, an outbound one -
+        as a harmless duplicate, which is how Wasla's own reply came to be
+        handed to an agent as a customer's message. The keys still decide a
+        race: a concurrent insert of the same id on this connection fails at
+        the flush, inside the caller's savepoint.
+        """
         message = Message(
             # Named now rather than at insert: the caller hands this id to the
             # agent queue before anything flushes the row, and a job without it
@@ -528,7 +593,8 @@ class MessageRepository(TenantScopedRepository[Message]):
             id=uuid.uuid4(),
             tenant_id=self.tenant_id,
             conversation_id=conversation_id,
-            wa_message_id=wa_message_id,
+            connection_id=connection_id,
+            wa_message_id=provider_message_id,
             direction=MessageDirection.INBOUND,
             kind=kind,
             status=MessageStatus.RECEIVED,
@@ -536,7 +602,42 @@ class MessageRepository(TenantScopedRepository[Message]):
             sent_at=sent_at,
             origin=MessageOrigin.CUSTOMER,
         )
-        return self.add(message), True
+        return self.add(message)
+
+    async def advance_to_watermark(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        connection_id: uuid.UUID,
+        status: MessageStatus,
+        watermark: datetime,
+    ) -> int:
+        """Advance every outbound message sent at or before `watermark` - and nothing else.
+
+        A provider that reports receipts as a watermark ("everything sent before
+        this instant was read") names no message (OMNI-011). Only this
+        conversation's outbound messages on this connection qualify, and only
+        those already sent at or before the instant; each advances through
+        `advance_status`, so the monotonic rules of a per-message receipt apply
+        unchanged. A watermark can never move a message backwards, reach one
+        sent after it, or touch another connection's or workspace's.
+        """
+        rows = await self._all(
+            self._select().where(
+                Message.conversation_id == conversation_id,
+                Message.connection_id == connection_id,
+                Message.direction == MessageDirection.OUTBOUND,
+                Message.sent_at.is_not(None),
+                Message.sent_at <= watermark,
+            )
+        )
+        advanced = 0
+        for message in rows:
+            before = (message.status, message.delivered_at, message.read_at)
+            self.advance_status(message, status=status, at=watermark)
+            if (message.status, message.delivered_at, message.read_at) != before:
+                advanced += 1
+        return advanced
 
     async def stage_outbound(
         self,

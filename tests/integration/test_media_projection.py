@@ -67,10 +67,12 @@ def _media_delivery(
         body = {**body, "caption": caption}
 
     return {
+        "object": "whatsapp_business_account",
         "entry": [
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": phone_number_id},
                             "contacts": [{"wa_id": CUSTOMER, "profile": {"name": "Nour"}}],
@@ -83,11 +85,11 @@ def _media_delivery(
                                     message_type: body,
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }
-        ]
+        ],
     }
 
 
@@ -190,10 +192,12 @@ async def test_a_text_message_creates_no_media_row(db_session: AsyncSession) -> 
 
     await WhatsAppIngestionService(session=db_session).ingest(
         {
+            "object": "whatsapp_business_account",
             "entry": [
                 {
                     "changes": [
                         {
+                            "field": "messages",
                             "value": {
                                 "metadata": {"phone_number_id": PHONE_NUMBER_ID},
                                 "messages": [
@@ -205,11 +209,11 @@ async def test_a_text_message_creates_no_media_row(db_session: AsyncSession) -> 
                                         "text": {"body": "hello"},
                                     }
                                 ],
-                            }
+                            },
                         }
                     ]
                 }
-            ]
+            ],
         }
     )
 
@@ -352,10 +356,12 @@ async def test_a_text_message_is_still_queued_for_answering(db_session: AsyncSes
         media_queue=as_media_queue(media_queue),
     ).ingest(
         {
+            "object": "whatsapp_business_account",
             "entry": [
                 {
                     "changes": [
                         {
+                            "field": "messages",
                             "value": {
                                 "metadata": {"phone_number_id": PHONE_NUMBER_ID},
                                 "messages": [
@@ -367,11 +373,11 @@ async def test_a_text_message_is_still_queued_for_answering(db_session: AsyncSes
                                         "text": {"body": "hello"},
                                     }
                                 ],
-                            }
+                            },
                         }
                     ]
                 }
-            ]
+            ],
         }
     )
 

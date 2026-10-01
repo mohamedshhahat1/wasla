@@ -9,22 +9,30 @@ prints the plaintext.
 
 from __future__ import annotations
 
+import ast
 import base64
 import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from app.core.config import Settings
 from app.core.crypto import (
+    CONNECTION_BOUND,
     CredentialCipher,
     CredentialDecryptionError,
     generate_key,
     key_id,
 )
 from app.core.exceptions import DependencyUnavailableError, ValidationError
+from app.db.models.channel import Channel
 from app.db.models.whatsapp import WhatsAppAccount
-from app.services.credential_service import CredentialService, build_cipher
+from app.services.credential_service import (
+    CredentialService,
+    build_cipher,
+    connection_context,
+)
 
 TENANT = str(uuid.uuid4())
 OTHER_TENANT = str(uuid.uuid4())
@@ -128,7 +136,7 @@ def test_tampering_is_detected_rather_than_decrypted() -> None:
 def test_a_malformed_envelope_is_refused() -> None:
     cipher = CredentialCipher([generate_key()])
 
-    for broken in ("", "nonsense", "v1.only.three", "v9.a.b.c"):
+    for broken in ("", "nonsense", "v1.only.three", "v9.a.b.c", "v3.a.b.c"):
         with pytest.raises(CredentialDecryptionError):
             cipher.decrypt(broken, context=TENANT)
 
@@ -193,7 +201,9 @@ def test_a_deployment_without_a_key_cannot_store_a_credential() -> None:
 
     assert service.can_store is False
     with pytest.raises(ValidationError):
-        service.seal(TOKEN, tenant_id=uuid.uuid4())
+        service.seal(
+            TOKEN, tenant_id=uuid.uuid4(), connection_id=uuid.uuid4(), channel=Channel.WHATSAPP
+        )
 
 
 def test_a_workspace_without_its_own_token_uses_the_platform_credential() -> None:
@@ -212,10 +222,13 @@ def test_a_workspace_with_its_own_token_sends_as_itself() -> None:
     key = generate_key()
     settings = _settings(meta_access_token="platform-token", credential_encryption_keys=[key])
     service = CredentialService(settings)
-    tenant_id = uuid.uuid4()
+    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
     account = WhatsAppAccount(
+        id=account_id,
         tenant_id=tenant_id,
-        access_token_encrypted=service.seal(TOKEN, tenant_id=tenant_id),
+        access_token_encrypted=service.seal(
+            TOKEN, tenant_id=tenant_id, connection_id=account_id, channel=Channel.WHATSAPP
+        ),
     )
 
     resolved = service.resolve(account)
@@ -254,3 +267,145 @@ def test_no_cipher_is_built_when_no_key_is_configured() -> None:
 
 def test_a_cipher_is_built_when_a_key_is_configured() -> None:
     assert build_cipher(_settings(credential_encryption_keys=[generate_key()])) is not None
+
+
+# ------------------------------------------- bound to the connection (OMNI-012)
+
+
+def _service(key: str) -> CredentialService:
+    return CredentialService(_settings(credential_encryption_keys=[key]))
+
+
+def _number(tenant_id: uuid.UUID, stored: str | None = None) -> WhatsAppAccount:
+    return WhatsAppAccount(id=uuid.uuid4(), tenant_id=tenant_id, access_token_encrypted=stored)
+
+
+def test_a_new_credential_is_sealed_to_its_connection() -> None:
+    """Every credential sealed since 0082 is a `v2` envelope, bound to the
+    tenant, the connection and the channel together."""
+    service = _service(generate_key())
+    tenant_id = uuid.uuid4()
+    number = _number(tenant_id)
+
+    sealed = service.seal(
+        TOKEN, tenant_id=tenant_id, connection_id=number.id, channel=Channel.WHATSAPP
+    )
+
+    assert sealed.startswith(f"{CONNECTION_BOUND}.")
+    assert TOKEN not in sealed
+
+
+def test_a_credential_moved_to_another_number_of_the_same_workspace_is_refused() -> None:
+    """OMNI-012. The workspace-only binding let a token sealed for one number
+    decrypt on any other number of the same workspace - the move the old
+    docstring said was impossible. Bound to the connection, it fails."""
+    service = _service(generate_key())
+    tenant_id = uuid.uuid4()
+    first, second = _number(tenant_id), _number(tenant_id)
+    first.access_token_encrypted = service.seal(
+        TOKEN, tenant_id=tenant_id, connection_id=first.id, channel=Channel.WHATSAPP
+    )
+
+    second.access_token_encrypted = first.access_token_encrypted
+
+    assert service.resolve(first).token == TOKEN
+    with pytest.raises(CredentialDecryptionError):
+        service.resolve(second)
+
+
+def test_a_workspace_bound_credential_did_move_between_numbers() -> None:
+    """The unfixed behaviour, kept as evidence: a `v1` value is bound to the
+    workspace only, so it decrypts on a sibling number. It is still read -
+    every credential written before 0082 is `v1` - which is why nothing new is
+    ever written that way."""
+    key = generate_key()
+    service = _service(key)
+    tenant_id = uuid.uuid4()
+    legacy = CredentialCipher([key]).encrypt(TOKEN, context=str(tenant_id))
+    first, second = _number(tenant_id, legacy), _number(tenant_id, legacy)
+
+    assert legacy.startswith("v1.")
+    assert service.resolve(first).token == TOKEN
+    assert service.resolve(second).token == TOKEN
+
+
+def test_a_workspace_bound_credential_still_cannot_leave_its_workspace() -> None:
+    key = generate_key()
+    service = _service(key)
+    legacy = CredentialCipher([key]).encrypt(TOKEN, context=str(uuid.uuid4()))
+
+    with pytest.raises(CredentialDecryptionError):
+        service.resolve(_number(uuid.uuid4(), legacy))
+
+
+def test_a_connection_bound_credential_cannot_leave_its_workspace() -> None:
+    service = _service(generate_key())
+    tenant_id = uuid.uuid4()
+    number = _number(tenant_id)
+    sealed = service.seal(
+        TOKEN, tenant_id=tenant_id, connection_id=number.id, channel=Channel.WHATSAPP
+    )
+    elsewhere = WhatsAppAccount(id=number.id, tenant_id=uuid.uuid4(), access_token_encrypted=sealed)
+
+    with pytest.raises(CredentialDecryptionError):
+        service.resolve(elsewhere)
+
+
+def test_the_channel_is_part_of_what_a_credential_is_bound_to() -> None:
+    """A token sealed for a connection on another channel does not decrypt as
+    a WhatsApp credential, even on the same ids."""
+    key = generate_key()
+    tenant_id, connection_id = uuid.uuid4(), uuid.uuid4()
+    for_messenger = CredentialCipher([key]).encrypt(
+        TOKEN,
+        context=connection_context(
+            tenant_id=tenant_id, connection_id=connection_id, channel=Channel.MESSENGER
+        ),
+        version=CONNECTION_BOUND,
+    )
+    number = WhatsAppAccount(
+        id=connection_id, tenant_id=tenant_id, access_token_encrypted=for_messenger
+    )
+
+    with pytest.raises(CredentialDecryptionError):
+        _service(key).resolve(number)
+
+
+def test_a_rewritten_version_label_does_not_rebind_a_credential() -> None:
+    """The version only says which context to ask for. Relabelling a `v2`
+    value as `v1` makes the service ask for the workspace context - which the
+    ciphertext was never bound to, so it still fails."""
+    service = _service(generate_key())
+    tenant_id = uuid.uuid4()
+    number = _number(tenant_id)
+    sealed = service.seal(
+        TOKEN, tenant_id=tenant_id, connection_id=number.id, channel=Channel.WHATSAPP
+    )
+    relabelled = "v1" + sealed[len(CONNECTION_BOUND) :]
+
+    with pytest.raises(CredentialDecryptionError):
+        service.resolve(_number(tenant_id, relabelled))
+
+
+def test_an_unknown_envelope_version_is_never_written() -> None:
+    with pytest.raises(ValidationError):
+        CredentialCipher([generate_key()]).encrypt(TOKEN, context=TENANT, version="v3")
+
+
+def test_only_the_whatsapp_credential_path_reads_the_platform_token() -> None:
+    """OMNI-012: the platform token is a WhatsApp system-user token, and the
+    fallback to it is WhatsApp's alone. It is read in exactly one place - the
+    resolver that takes a `WhatsAppAccount` - so no other channel's send can
+    reach for it. Read means an attribute access in code; a docstring naming
+    it, or `config.py` declaring it, is not one."""
+    root = Path(__file__).resolve().parents[2] / "app"
+    readers = sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*.py")
+        if any(
+            isinstance(node, ast.Attribute) and node.attr == "meta_access_token"
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        )
+    )
+
+    assert readers == ["services/credential_service.py"]

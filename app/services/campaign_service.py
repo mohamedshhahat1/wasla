@@ -34,6 +34,7 @@ from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.channels.outcomes import ProviderAuthError
 from app.core.exceptions import (
     DependencyUnavailableError,
     ExternalServiceError,
@@ -56,10 +57,10 @@ from app.db.models.campaign import (
     OptOutSource,
     RecipientStatus,
 )
+from app.db.models.channel import ContactIdentity
 from app.db.models.conversation import Contact, Message, MessageOrigin, MessageStatus
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
-from app.integrations.whatsapp.client import ProviderAuthError
 from app.repositories.campaign_repository import (
     DEFAULT_RECIPIENT_BATCH,
     AudienceFilter,
@@ -68,6 +69,7 @@ from app.repositories.campaign_repository import (
     CampaignRepository,
     CampaignStatistics,
 )
+from app.repositories.channel_repository import ContactIdentityRepository
 from app.repositories.conversation_repository import ContactRepository, ConversationRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
@@ -292,12 +294,12 @@ class CampaignService:
         if campaign.status is not CampaignStatus.DRAFT:
             raise ValidationError("An audience can only be set while the campaign is a draft.")
 
-        contacts = await self._audience.list_eligible(
+        members = await self._audience.list_eligible_members(
             account_id=campaign.account_id,
             filters=filters,
             limit=MAX_AUDIENCE_SIZE + 1,
         )
-        if len(contacts) > MAX_AUDIENCE_SIZE:
+        if len(members) > MAX_AUDIENCE_SIZE:
             raise ValidationError(
                 f"This audience is larger than {MAX_AUDIENCE_SIZE:,} contacts. "
                 "Narrow it before sending."
@@ -305,10 +307,15 @@ class CampaignService:
 
         already = await self._recipients.existing_contact_ids(campaign.id)
         added = 0
-        for contact in contacts:
+        for contact, participant_identity_id in members:
             if contact.id in already:
                 continue
-            self._recipients.create(campaign_id=campaign.id, contact_id=contact.id)
+            # The exact identity this copy is addressed to (OMNI-004).
+            self._recipients.create(
+                campaign_id=campaign.id,
+                contact_id=contact.id,
+                participant_identity_id=participant_identity_id,
+            )
             added += 1
 
         campaign.audience = filters.as_dict()
@@ -598,11 +605,35 @@ class CampaignService:
                 "An earlier attempt could not be confirmed, so it was not sent again.",
             )
 
-        conversation, _ = await self._conversations.get_or_create(
-            contact_id=contact.id,
-            account_id=campaign.account_id,
-        )
-        await self._session.flush()
+        conversation = None
+        if recipient.conversation_id is not None:
+            # A retry: the conversation the first attempt resolved.
+            conversation = await self._conversations.get_by_id(recipient.conversation_id)
+        if conversation is None:
+            conversation, _ = await self._conversations.get_or_create(
+                contact_id=contact.id,
+                account_id=campaign.account_id,
+            )
+            await self._session.flush()
+        # **A campaign sends through its own connection, to the identity it was
+        # built for, and nowhere else** (OMNI-004). Whatever the recipient row
+        # names, a conversation on another number or with another customer is
+        # refused rather than sent through.
+        if conversation.account_id != campaign.account_id or conversation.contact_id != contact.id:
+            return self._skip(
+                recipient,
+                "This copy names a conversation outside this campaign's number.",
+            )
+        if recipient.participant_identity_id is None:
+            # A recipient materialised before identities existed: record the
+            # identity it is going to now, so the row still answers who.
+            recipient.participant_identity_id = conversation.participant_identity_id
+        elif recipient.participant_identity_id != conversation.participant_identity_id:
+            return self._skip(
+                recipient,
+                "This contact's conversation no longer addresses the identity this "
+                "campaign was built for.",
+            )
         recipient.conversation_id = conversation.id
 
         def link(message: Message) -> None:
@@ -751,6 +782,16 @@ class CampaignService:
             extra={"contact_id": str(contact.id), "source": source.value},
         )
         return contact
+
+    async def opt_out_identities(self, contact_id: uuid.UUID) -> list[ContactIdentity]:
+        """Every identity a contact's opt-out covers: all of them (ADR-122).
+
+        The opt-out is recorded on the person, so it applies to each way a
+        channel addresses them - their phone and any business-scoped id alike.
+        """
+        return await ContactIdentityRepository(
+            self._session, tenant_id=self._tenant_id
+        ).list_for_contact(contact_id)
 
     async def clear_opt_out(self, contact_id: uuid.UUID) -> Contact:
         """Let this person receive campaigns again.

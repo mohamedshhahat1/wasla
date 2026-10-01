@@ -1,24 +1,64 @@
-"""Webhook payload parsing.
+"""Webhook payload parsing - the WhatsApp adapter's view of what Meta sent.
 
 Nothing in this module raises. Meta adds fields and message types continuously,
 and a parser that rejects what it does not recognise would drop legitimate
-traffic the day a new type ships. Unrecognised entries are counted so the
-skipping is visible, and the raw payload is stored whole by the caller so
-anything not understood today can be replayed later.
+traffic the day a new type ships. Unrecognised entries are counted - by a
+bounded reason, so a metric can say *why* - and the raw payload is stored whole
+by the caller so anything not understood today can be replayed later.
+
+Two rules this module used to break, both silently:
+
+**A sender is whoever Meta says it is, and Meta no longer always says a phone
+number** (OMNI-002). Since April 2026 every message webhook carries a
+business-scoped user id (`messages[].from_user_id`, `contacts[].user_id`), and a
+user with a username may arrive with no `from` and no `wa_id` at all. The parser
+required `from`, so such a message was counted as ignored, answered 200, never
+stored and never recovered - a customer's first message lost without trace. A
+message is now accepted with any identifier Meta documents, and every one it
+carries is kept: a phone and a business-scoped id arriving together are Meta
+asserting they are the same person, which is the only basis on which Wasla ever
+links two identities (ADR-118).
+
+**A payload is WhatsApp's only if it says so** (OMNI-010). The top-level `object`
+must be `whatsapp_business_account` and each change's `field` must be one this
+adapter processes. A Page event posted here by a misconfigured subscription, or
+a Coexistence `smb_message_echoes` change, used to parse to nothing with
+`ignored: 0`; both are now refused and counted by reason.
+
+Provider facts relied on here were re-checked against Meta's documentation on
+2026-10-01 (OMNICHANNEL_READINESS_FINDINGS_REMEDIATION.md, section 5).
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any, Final
 
+from app.channels.inbound import RefusalReason
 from app.core.filenames import display_filename
 from app.core.media_types import MAX_MIME_TYPE_LENGTH
+from app.db.models.channel import MAX_IDENTITY_VALUE_LENGTH
 from app.db.models.media import MAX_MEDIA_HANDLE_LENGTH
 
 TEXT_TYPE = "text"
+
+# The one `object` a WhatsApp Business Account webhook carries.
+WHATSAPP_OBJECT: Final = "whatsapp_business_account"
+
+# The change fields this adapter processes. Messages and their statuses both
+# arrive under `messages`; everything else a WABA can be subscribed to -
+# template status updates, account updates, and the Coexistence fields
+# `history`, `smb_app_state_sync` and `smb_message_echoes` - is refused and
+# counted until something here handles it (ADR-120).
+SUPPORTED_FIELDS: Final = frozenset({"messages"})
+
+# The width of `contacts.wa_id`. A phone number is at most fifteen digits
+# (E.164); anything past this column is not a number Meta issued.
+MAX_PHONE_LENGTH: Final = 32
 
 # Meta's media message types. Voice notes arrive as "voice" rather than "audio"
 # and carry the same descriptor, so both are read the same way; the distinction
@@ -51,9 +91,14 @@ class InboundMedia:
 class InboundMessage:
     """A customer message. `event_id` is Meta's own message id.
 
+    The sender is `from_number` (the phone number, `from`) and/or
+    `from_user_id` (the business-scoped user id, `from_user_id`) - at least one
+    of the two, and since April 2026 usually both. `from_parent_user_id` is the
+    parent business-scoped id Meta adds for businesses managing several
+    portfolios; it is carried, never used to link anything.
+
     `profile_name` comes from the delivery's `contacts` block rather than from
-    the message itself, which is the only place Meta sends it. It is last and
-    optional so the parser's existing callers are unaffected.
+    the message itself, which is the only place Meta sends it.
 
     `text` carries a media message's caption as well as a text message's body,
     because a caption is what the customer actually typed. What Wasla later
@@ -63,13 +108,17 @@ class InboundMessage:
 
     event_id: str
     phone_number_id: str
-    from_number: str
+    from_number: str | None
     message_type: str
     timestamp: datetime | None
     text: str | None
     raw: dict[str, Any]
     profile_name: str | None = None
     media: InboundMedia | None = None
+    from_user_id: str | None = None
+    from_parent_user_id: str | None = None
+    #: `context.id`: the message this one replies to, as Meta names it.
+    context_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,13 +137,17 @@ class DeliveryStatus:
     status: str
     timestamp: datetime | None
     raw: dict[str, Any]
+    recipient_user_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class WebhookEnvelope:
+    """What one delivery held. `ignored` is every refusal; `refused` says why."""
+
     messages: tuple[InboundMessage, ...]
     statuses: tuple[DeliveryStatus, ...]
     ignored: int
+    refused: Mapping[RefusalReason, int] = field(default_factory=lambda: MappingProxyType({}))
 
     @property
     def is_empty(self) -> bool:
@@ -113,6 +166,12 @@ def _sequence(value: Any) -> list[Any]:
 
 def _text(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _bounded(value: Any, limit: int) -> str | None:
+    """An identifier Meta could have issued, or None."""
+    text = _text(value)
+    return text if text is not None and len(text) <= limit else None
 
 
 def _timestamp(value: Any) -> datetime | None:
@@ -197,34 +256,76 @@ def _mime_type(value: Any) -> str | None:
 
 
 def _profile_names(value: Mapping[str, Any]) -> dict[str, str]:
-    """Map WhatsApp id to profile name from the delivery's contacts block.
+    """Map every identifier Meta names a contact by to its profile name.
 
     The block is optional and a customer may have no name set, so a missing
-    entry is normal rather than a parse failure.
+    entry is normal rather than a parse failure. Keyed by the phone number and
+    by the business-scoped id alike, so a sender known by either finds it.
     """
     names: dict[str, str] = {}
     for raw_contact in _sequence(value.get("contacts")):
         contact = _mapping(raw_contact)
-        wa_id = _text(contact.get("wa_id"))
         name = _text(_mapping(contact.get("profile")).get("name"))
-        if wa_id is not None and name is not None:
-            names[wa_id] = name
+        if name is None:
+            continue
+        for key in ("wa_id", "user_id"):
+            identifier = _text(contact.get(key))
+            if identifier is not None:
+                names[identifier] = name
     return names
 
 
+def _sender(message: Mapping[str, Any]) -> tuple[str | None, str | None, bool]:
+    """The phone and business-scoped id a message was sent from, and whether one was dropped.
+
+    Each is kept only if it is within what Meta documents; one that is not is
+    dropped rather than stored, and reported so the caller can refuse the
+    message if nothing usable is left.
+    """
+    raw_phone = _text(message.get("from"))
+    raw_user = _text(message.get("from_user_id"))
+    phone = _bounded(raw_phone, MAX_PHONE_LENGTH)
+    user = _bounded(raw_user, MAX_IDENTITY_VALUE_LENGTH)
+    dropped = (raw_phone is not None and phone is None) or (raw_user is not None and user is None)
+    return phone, user, dropped
+
+
 def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
-    """Flatten Meta's nested envelope into messages and statuses."""
+    """Flatten Meta's nested envelope into messages and statuses, counting what is refused."""
     messages: list[InboundMessage] = []
     statuses: list[DeliveryStatus] = []
-    ignored = 0
+    refused: Counter[RefusalReason] = Counter()
+    entries = _sequence(payload.get("entry"))
 
-    for entry in _sequence(payload.get("entry")):
-        for change in _sequence(_mapping(entry).get("changes")):
-            value = _mapping(_mapping(change).get("value"))
+    obj = payload.get("object")
+    if obj != WHATSAPP_OBJECT:
+        # Not a WhatsApp Business Account delivery: another Meta product's
+        # (a misrouted subscription) or not Meta's shape at all. Every entry
+        # is refused and counted - and a payload with no entries still counts
+        # once, so it is never an empty success.
+        reason = (
+            RefusalReason.FOREIGN_OBJECT
+            if isinstance(obj, str) and obj
+            else RefusalReason.MALFORMED
+        )
+        refused[reason] += max(len(entries), 1)
+        return _envelope(messages, statuses, refused)
+
+    for entry in entries:
+        for raw_change in _sequence(_mapping(entry).get("changes")):
+            change = _mapping(raw_change)
+            change_field = change.get("field")
+            # A string first: a list is unhashable and would raise on the
+            # membership test, and this module does not raise.
+            if not isinstance(change_field, str) or change_field not in SUPPORTED_FIELDS:
+                refused[RefusalReason.UNSUPPORTED_FIELD] += 1
+                continue
+
+            value = _mapping(change.get("value"))
             phone_number_id = _text(_mapping(value.get("metadata")).get("phone_number_id"))
             if phone_number_id is None:
                 # Without it there is no way to know which workspace this is for.
-                ignored += 1
+                refused[RefusalReason.MISSING_CONNECTION] += 1
                 continue
 
             profile_names = _profile_names(value)
@@ -232,9 +333,18 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
             for raw_message in _sequence(value.get("messages")):
                 message = _mapping(raw_message)
                 event_id = _text(message.get("id"))
-                from_number = _text(message.get("from"))
-                if event_id is None or from_number is None:
-                    ignored += 1
+                if event_id is None:
+                    refused[RefusalReason.MISSING_EVENT_ID] += 1
+                    continue
+                phone, user_id, dropped = _sender(message)
+                if phone is None and user_id is None:
+                    refused[
+                        (
+                            RefusalReason.IDENTIFIER_TOO_LONG
+                            if dropped
+                            else RefusalReason.MISSING_SENDER
+                        )
+                    ] += 1
                     continue
 
                 message_type = _text(message.get("type")) or "unknown"
@@ -242,13 +352,19 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                     InboundMessage(
                         event_id=event_id,
                         phone_number_id=phone_number_id,
-                        from_number=from_number,
+                        from_number=phone,
                         message_type=message_type,
                         timestamp=_timestamp(message.get("timestamp")),
                         text=_message_text(message, message_type),
                         raw=message,
-                        profile_name=profile_names.get(from_number),
+                        profile_name=profile_names.get(phone or "")
+                        or profile_names.get(user_id or ""),
                         media=_media(message, message_type),
+                        from_user_id=user_id,
+                        from_parent_user_id=_bounded(
+                            message.get("from_parent_user_id"), MAX_IDENTITY_VALUE_LENGTH
+                        ),
+                        context_id=_text(_mapping(message.get("context")).get("id")),
                     )
                 )
 
@@ -256,8 +372,11 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                 status_payload = _mapping(raw_status)
                 message_id = _text(status_payload.get("id"))
                 status = _text(status_payload.get("status"))
-                if message_id is None or status is None:
-                    ignored += 1
+                if message_id is None:
+                    refused[RefusalReason.MISSING_EVENT_ID] += 1
+                    continue
+                if status is None:
+                    refused[RefusalReason.MISSING_STATUS] += 1
                     continue
 
                 statuses.append(
@@ -269,11 +388,23 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                         status=status,
                         timestamp=_timestamp(status_payload.get("timestamp")),
                         raw=status_payload,
+                        recipient_user_id=_bounded(
+                            status_payload.get("recipient_user_id"), MAX_IDENTITY_VALUE_LENGTH
+                        ),
                     )
                 )
 
+    return _envelope(messages, statuses, refused)
+
+
+def _envelope(
+    messages: list[InboundMessage],
+    statuses: list[DeliveryStatus],
+    refused: Counter[RefusalReason],
+) -> WebhookEnvelope:
     return WebhookEnvelope(
         messages=tuple(messages),
         statuses=tuple(statuses),
-        ignored=ignored,
+        ignored=sum(refused.values()),
+        refused=MappingProxyType(dict(refused)),
     )

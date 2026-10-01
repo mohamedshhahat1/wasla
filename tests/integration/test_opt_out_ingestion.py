@@ -52,10 +52,12 @@ async def _account(session: AsyncSession, *, slug: str) -> WhatsAppAccount:
 
 def _inbound(*, text: str, message_id: str = "wamid.one") -> dict[str, Any]:
     return {
+        "object": "whatsapp_business_account",
         "entry": [
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": PHONE_NUMBER_ID},
                             "contacts": [{"wa_id": CUSTOMER, "profile": {"name": "Nour"}}],
@@ -68,11 +70,11 @@ def _inbound(*, text: str, message_id: str = "wamid.one") -> dict[str, Any]:
                                     "text": {"body": text},
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }
-        ]
+        ],
     }
 
 

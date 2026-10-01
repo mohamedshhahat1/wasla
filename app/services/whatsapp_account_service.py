@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import DependencyUnavailableError
 from app.core.logging import get_logger
 from app.db.models.audit import AuditAction, AuditActorKind
+from app.db.models.channel import Channel
 from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.integrations.whatsapp.ownership import OwnershipVerifier
@@ -129,6 +130,8 @@ class WhatsAppAccountService:
             account.access_token_encrypted = self._credentials.seal(
                 access_token,
                 tenant_id=tenant_id,
+                connection_id=account.id,
+                channel=Channel.WHATSAPP,
             )
         else:
             # Proof happened; the token is simply not kept. Sending falls back
@@ -226,6 +229,8 @@ class WhatsAppAccountService:
             account.access_token_encrypted = self._credentials.seal(
                 access_token,
                 tenant_id=tenant_id,
+                connection_id=account.id,
+                channel=Channel.WHATSAPP,
             )
 
         await self._session.flush()

@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.logging import JsonFormatter
 from app.core.storage import LocalMediaStorage
+from app.db.models.channel import Channel
 from app.db.models.media import MediaStatus
 from app.services.credential_service import CredentialService
 from app.services.media_outcomes import MediaReason, text_for
@@ -113,7 +114,10 @@ async def test_a_number_with_its_own_credential_is_fetched_with_it(
     )
     where = await h.scene(db_session)
     where.account.access_token_encrypted = CredentialService(configured).seal(
-        WORKSPACE_TOKEN, tenant_id=where.tenant.id
+        WORKSPACE_TOKEN,
+        tenant_id=where.tenant.id,
+        connection_id=where.account.id,
+        channel=Channel.WHATSAPP,
     )
     media = await h.attachment(db_session, where)
 
@@ -157,7 +161,10 @@ async def test_an_unreadable_workspace_credential_is_never_downgraded_to_the_pla
     sealing = _settings(settings, credential_encryption_keys=[KEY])
     where = await h.scene(db_session)
     where.account.access_token_encrypted = CredentialService(sealing).seal(
-        WORKSPACE_TOKEN, tenant_id=where.tenant.id
+        WORKSPACE_TOKEN,
+        tenant_id=where.tenant.id,
+        connection_id=where.account.id,
+        channel=Channel.WHATSAPP,
     )
     media = await h.attachment(db_session, where)
     without_key = _settings(

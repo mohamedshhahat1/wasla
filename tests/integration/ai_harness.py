@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -50,8 +50,7 @@ from app.db.models.tool_execution import ToolExecution
 from app.db.models.usage import UsageEvent
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.db.session import Database
-from app.integrations.whatsapp.payload import InboundMessage
-from app.services.conversation_service import ConversationProjectionService
+from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.ai_worker import AgentWorker
 from app.workers.queue import AgentJob, AgentQueue
 
@@ -305,6 +304,20 @@ class FakeProviders:
         return embedding_response(body)
 
 
+class _TakesTheHandoff:
+    """Accepts the agent job a delivery hands off, and keeps it.
+
+    So the delivery settles its events as processed, the way a live queue
+    would, while the test decides which turn runs and when.
+    """
+
+    def __init__(self) -> None:
+        self.jobs: list[AgentJob] = []
+
+    async def enqueue(self, job: AgentJob) -> None:
+        self.jobs.append(job)
+
+
 @dataclass(frozen=True, slots=True)
 class Workspace:
     tenant_id: uuid.UUID
@@ -407,35 +420,62 @@ class TurnRunner:
         *,
         wa_id: str = "201555000111",
     ) -> tuple[uuid.UUID, list[uuid.UUID]]:
-        """Project `texts` exactly as one webhook delivery would.
+        """Deliver `texts` exactly as one webhook delivery would.
 
-        One transaction, one Meta timestamp, payload order - the production
-        write path, and the shape in which several messages share a
-        `created_at`.
+        One Meta payload, one transaction, one Meta timestamp, payload order -
+        and through the production write path itself (`WhatsAppIngestionService`):
+        the event log, the sender's identity, the participant the conversation
+        is pinned to. The agent job the delivery hands off is taken and kept by
+        a recording queue, so every event settles as processed; a test enqueues
+        the turn it wants to run itself, with `enqueue`.
         """
         moment = datetime.now(UTC).replace(microsecond=0)
+        wamids = [f"wamid.{uuid.uuid4().hex}" for _ in texts]
+        payload = {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "id": "waba-ai",
+                    "changes": [
+                        {
+                            "field": "messages",
+                            "value": {
+                                "messaging_product": "whatsapp",
+                                "metadata": {"phone_number_id": workspace.phone_number_id},
+                                "contacts": [{"wa_id": wa_id}],
+                                "messages": [
+                                    {
+                                        "id": wamid,
+                                        "from": wa_id,
+                                        "type": "text",
+                                        "timestamp": str(int(moment.timestamp())),
+                                        "text": {"body": text},
+                                    }
+                                    for wamid, text in zip(wamids, texts, strict=True)
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
         async with self.database.session() as session:
-            projection = ConversationProjectionService(
-                session=session, tenant_id=workspace.tenant_id
-            )
-            stored: list[Message] = []
-            for text in texts:
-                stored.append(
-                    await projection.project_message(
-                        account_id=workspace.account_id,
-                        message=InboundMessage(
-                            event_id=f"wamid.{uuid.uuid4().hex}",
-                            phone_number_id=workspace.phone_number_id,
-                            from_number=wa_id,
-                            message_type="text",
-                            timestamp=moment,
-                            text=text,
-                            raw={"type": "text"},
-                        ),
-                    )
+            outcome = await WhatsAppIngestionService(
+                session=session, queue=cast("AgentQueue", _TakesTheHandoff())
+            ).ingest(payload)
+            assert outcome.stored == len(texts), outcome
+            rows = await session.execute(
+                select(Message.wa_message_id, Message.id, Message.conversation_id).where(
+                    Message.tenant_id == workspace.tenant_id,
+                    Message.wa_message_id.in_(wamids),
                 )
-            await session.flush()
-            return stored[0].conversation_id, [message.id for message in stored]
+            )
+            found = {
+                wamid: (message_id, conversation_id)
+                for wamid, message_id, conversation_id in rows.all()
+            }
+            ids = [found[wamid][0] for wamid in wamids]
+            return found[wamids[0]][1], ids
 
     def worker(self, database: Database | None = None) -> AgentWorker:
         """A real worker on this runner's queue.

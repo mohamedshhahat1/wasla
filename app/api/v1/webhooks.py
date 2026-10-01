@@ -240,6 +240,16 @@ async def receive_events(
             "ignored": outcome.ignored,
             "queued": outcome.queued,
             "rejected": outcome.rejected,
+            # What the parser refused, by bounded reason - a foreign `object`,
+            # a field this route does not handle, a malformed entry - so a
+            # delivery that became nothing says why (OMNI-010). Counted as
+            # well, in `wasla_inbound_entries_refused_total`.
+            "refused": dict(outcome.refused),
+            # The business's own sends coming back, and provider ids naming
+            # a message that is not this customer's: kept, never projected.
+            "echoes": outcome.echoes,
+            "collisions": outcome.collisions,
+            "identity_conflicts": outcome.identity_conflicts,
         },
     )
     return {"status": "accepted"}

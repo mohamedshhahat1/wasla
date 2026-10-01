@@ -29,6 +29,13 @@ from app.db.models import (
     User,
 )
 from app.db.models.campaign import OptOutSource
+from app.db.models.channel import (
+    Channel,
+    ContactIdentity,
+    IdentityKind,
+    IdentityScope,
+    IdentitySource,
+)
 from app.db.models.conversation import Contact
 
 pytestmark = pytest.mark.integration
@@ -40,16 +47,47 @@ CONTACT_ID = uuid.UUID("55555555-5555-5555-5555-555555555555")
 MOMENT = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
 
 
+# Synthetic identifiers, not anybody's: a reserved-looking phone and a
+# business-scoped id in Meta's documented shape.
+PHONE = "201000000001"
+BSUID = "EG.1a2b3c4d5e6f"
+
+
+def _identity(kind: IdentityKind, value: str) -> ContactIdentity:
+    return ContactIdentity(
+        id=uuid.uuid4(),
+        tenant_id=TENANT_ID,
+        contact_id=CONTACT_ID,
+        channel=Channel.WHATSAPP,
+        kind=kind,
+        scope=(
+            IdentityScope.WORKSPACE
+            if kind is IdentityKind.PHONE
+            else IdentityScope.PROVIDER_ACCOUNT
+        ),
+        scope_ref="" if kind is IdentityKind.PHONE else "waba-synthetic",
+        value=value,
+        source=IdentitySource.PROVIDER,
+    )
+
+
 class StubCampaigns:
-    def __init__(self) -> None:
+    def __init__(self, *, wa_id: str | None = PHONE) -> None:
         self.set_calls: list[dict[str, Any]] = []
         self.cleared: list[uuid.UUID] = []
+        self.wa_id = wa_id
+        self.identities = [_identity(IdentityKind.BSUID, BSUID)]
+        if wa_id is not None:
+            self.identities.insert(0, _identity(IdentityKind.PHONE, wa_id))
+
+    async def opt_out_identities(self, contact_id: uuid.UUID) -> list[ContactIdentity]:
+        return self.identities
 
     def _contact(self, *, opted_out: bool, source: OptOutSource | None = None) -> Contact:
         return Contact(
             id=CONTACT_ID,
             tenant_id=TENANT_ID,
-            wa_id="201234567890",
+            wa_id=self.wa_id,
             display_name="Nour",
             marketing_opt_out_at=MOMENT if opted_out else None,
             opt_out_source=source,
@@ -142,3 +180,36 @@ async def test_an_admin_can_clear_one_recorded_in_error(
     assert response.status_code == 200
     assert response.json()["marketing_opt_out_at"] is None
     assert campaigns.cleared == [CONTACT_ID]
+
+
+async def test_an_opt_out_lists_every_identity_it_covers(
+    client: AsyncClient, campaigns: StubCampaigns
+) -> None:
+    """ADR-122: the opt-out is the person's, so it covers each way a channel
+    addresses them - and the read says which (OMNI-015, OMNI-016)."""
+    response = await client.post(f"{PATH}/{CONTACT_ID}/opt-out", json={})
+
+    body = response.json()
+    assert body["wa_id"] == PHONE
+    assert [(entry["kind"], entry["value"]) for entry in body["identities"]] == [
+        ("phone", PHONE),
+        ("bsuid", BSUID),
+    ]
+    assert {entry["channel"] for entry in body["identities"]} == {"whatsapp"}
+
+
+async def test_a_customer_known_only_by_username_can_be_opted_out(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    """OMNI-002: a username sender has no phone. The read used to require
+    `wa_id`, so opting such a customer out would have failed to serialise."""
+    stub = StubCampaigns(wa_id=None)
+    app.dependency_overrides[get_campaign_service] = lambda: stub
+    app.dependency_overrides[get_active_workspace] = lambda: _workspace(TenantRole.MEMBER)
+
+    response = await client.post(f"{PATH}/{CONTACT_ID}/opt-out", json={})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["wa_id"] is None
+    assert [(entry["kind"], entry["value"]) for entry in body["identities"]] == [("bsuid", BSUID)]

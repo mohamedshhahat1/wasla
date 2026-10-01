@@ -57,6 +57,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.channels.outcomes import ProviderAuthError
+from app.channels.policy import FollowUpAction
+from app.channels.registry import ChannelRegistry, default_registry
 from app.core.config import Settings
 from app.core.exceptions import (
     ConflictError,
@@ -84,7 +87,6 @@ from app.db.models.follow_up import (
 )
 from app.db.models.lead import ActorKind
 from app.db.models.tenant import Tenant
-from app.integrations.whatsapp.client import ProviderAuthError
 from app.repositories.conversation_repository import (
     ContactRepository,
     ConversationRepository,
@@ -154,6 +156,7 @@ class FollowUpService:
         tenant_id: uuid.UUID,
         settings: Settings | None = None,
         messaging: MessagingService | None = None,
+        channels: ChannelRegistry | None = None,
     ) -> None:
         """`settings` is needed only to send; `messaging` overrides how.
 
@@ -167,6 +170,9 @@ class FollowUpService:
         self._tenant_id = tenant_id
         self._settings = settings
         self._messaging = messaging
+        # What a due follow-up may do is its conversation's channel's rule
+        # (OMNI-008), not a WhatsApp window written into this service.
+        self._channels = channels or default_registry()
         self._follow_ups = FollowUpRepository(session, tenant_id=tenant_id)
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._contacts = ContactRepository(session, tenant_id=tenant_id)
@@ -697,7 +703,12 @@ class FollowUpService:
                 "The customer has opted out of automated messages.",
             )
 
-        window_open = messaging.window_open(conversation)
+        decision = self._channels.policy_for(conversation.channel).follow_up(
+            conversation,
+            has_text=bool(follow_up.body),
+            has_template=follow_up.has_template,
+            now=datetime.now(UTC),
+        )
 
         def link(message: Message) -> None:
             """Name the send on this row, inside the transaction that commits it.
@@ -708,7 +719,7 @@ class FollowUpService:
             """
             follow_up.message_id = message.id
 
-        if window_open and follow_up.body:
+        if decision.action is FollowUpAction.FREE_TEXT and follow_up.body:
             send = messaging.send_text(
                 conversation_id=conversation.id,
                 body=follow_up.body,
@@ -718,7 +729,7 @@ class FollowUpService:
                 # (MSG-16).
                 origin=MessageOrigin.FOLLOW_UP,
             )
-        elif follow_up.has_template:
+        elif decision.action is FollowUpAction.TEMPLATE:
             # Checked again here, not only at scheduling. Meta pauses a template
             # that draws complaints without warning, and hours can pass between
             # the two moments; sending one it has since withdrawn is the thing
@@ -739,15 +750,11 @@ class FollowUpService:
                 link=link,
                 origin=MessageOrigin.FOLLOW_UP,
             )
-        elif window_open:
-            # In the window but nothing to say: a template-only follow-up whose
-            # template has gone missing.
-            return self._skip(follow_up, "The follow-up has no message to send.")
         else:
-            return self._skip(
-                follow_up,
-                "The 24-hour service window has closed and no approved template is configured.",
-            )
+            # The channel's policy says nothing may be sent now: on WhatsApp, a
+            # template-only nudge whose template is gone, or a closed window
+            # with no template configured.
+            return self._skip(follow_up, decision.reason or "The follow-up cannot be sent now.")
 
         try:
             message = await send
@@ -766,7 +773,7 @@ class FollowUpService:
             follow_up,
             claim,
             lambda row: self._record_sent(
-                row, message, used_template=not (window_open and row.body)
+                row, message, used_template=decision.action is FollowUpAction.TEMPLATE
             ),
         )
 

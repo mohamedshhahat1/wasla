@@ -149,9 +149,12 @@ class _Descriptor:
 
 @dataclass(frozen=True, slots=True)
 class _Downloaded:
+    # The shape of `DownloadedMedia`, which the WhatsApp media fetcher reads -
+    # including what Meta declared, which the fetcher hands on beside the bytes.
     content: bytes
     mime_type: str | None
     byte_size: int
+    declared_size: int | None = None
 
 
 class FakeWhatsApp:

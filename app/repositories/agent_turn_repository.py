@@ -16,8 +16,10 @@ from typing import Any, Final, cast
 from sqlalchemy import ColumnElement, CursorResult, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
+from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.db.models.agent_turn import AgentTurn, AgentTurnState, TurnOutcome
+from app.db.models.conversation import Message, MessageDirection, MessageOrigin
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
 logger = get_logger(__name__)
@@ -44,6 +46,21 @@ STRANDED_TURN_AFTER: Final = timedelta(minutes=15)
 MEDIA_RELEASE_HOLDER: Final = "media-release"
 
 
+class TriggerNotAnswerableError(ValidationError):
+    """A turn's trigger is not a customer's inbound message of its conversation (OMNI-005).
+
+    The backstop behind ingestion: whatever produced the job - a regression
+    upstream, a replayed envelope, a hand-built one - a turn is only ever
+    claimed for a message a customer sent, in the conversation being answered,
+    in this workspace. Wasla's own reply, a campaign or follow-up send, another
+    conversation's message and another workspace's are all refused here, before
+    anything is charged, engaged or sent. At the audit's HEAD a turn was queued
+    and claimed with Wasla's own outbound message as its trigger (probe Y1).
+    """
+
+    message = "This turn's trigger is not a customer message of its conversation."
+
+
 class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
     """The durable identity of one agent turn, within one workspace."""
 
@@ -51,6 +68,49 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
 
     def _tenant_filter(self) -> ColumnElement[bool]:
         return AgentTurn.tenant_id == self._tenant_id
+
+    async def _require_answerable(
+        self, *, conversation_id: uuid.UUID, trigger_message_id: uuid.UUID
+    ) -> None:
+        """Refuse a trigger that is not this workspace's customer message in this conversation.
+
+        Two different answers, because they mean different things to a worker:
+
+        - **Not visible** raises `NotFoundError`. A job can reach a worker
+          before the webhook transaction that stored its message commits, and
+          the queue's first-attempt retry exists for exactly that window
+          (ADR-089): a row mid-commit is there on the retry, and one that never
+          existed is still missing and dead-letters, bounded. Treating it as
+          "not answerable" would drop the customer's message in that window.
+        - **Visible, and not a customer's message in this conversation** - an
+          outbound send, a campaign or follow-up copy, another conversation's
+          message - raises `TriggerNotAnswerableError`. Those are permanent
+          facts about the row, so no retry could change the answer.
+        """
+        row = (
+            await self._session.execute(
+                select(Message.conversation_id, Message.direction, Message.origin).where(
+                    Message.id == trigger_message_id,
+                    Message.tenant_id == self._tenant_id,
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            raise NotFoundError("This turn's trigger message is not visible.")
+        if (
+            row.conversation_id != conversation_id
+            or row.direction is not MessageDirection.INBOUND
+            or row.origin is not MessageOrigin.CUSTOMER
+        ):
+            logger.warning(
+                "agent.turn_trigger_refused",
+                extra={
+                    "event": "agent.turn_trigger_refused",
+                    "tenant_id": str(self._tenant_id),
+                    "conversation_id": str(conversation_id),
+                },
+            )
+            raise TriggerNotAnswerableError()
 
     async def claim(
         self,
@@ -83,8 +143,12 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
           repeating the work is free. Adopted, with a fresh lease.
 
         Returns whether this caller may proceed. The caller commits; this only
-        stages.
+        stages. A trigger that is not a customer's inbound message of this
+        conversation raises `TriggerNotAnswerableError` and claims nothing.
         """
+        await self._require_answerable(
+            conversation_id=conversation_id, trigger_message_id=trigger_message_id
+        )
         moment = now or datetime.now(UTC)
         expires = moment + timedelta(seconds=claim_seconds)
 
@@ -140,8 +204,12 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
 
         Returns whether this call recorded the obligation. A turn already there
         for this message is left untouched: it is either owed already or
-        somebody's, and neither is improved by writing over it.
+        somebody's, and neither is improved by writing over it. Only a
+        customer's message can be owed a turn (`TriggerNotAnswerableError`).
         """
+        await self._require_answerable(
+            conversation_id=conversation_id, trigger_message_id=trigger_message_id
+        )
         moment = now or datetime.now(UTC)
         statement = (
             insert(AgentTurn)

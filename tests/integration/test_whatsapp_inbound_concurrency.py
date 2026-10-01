@@ -84,6 +84,7 @@ def _inbound(*, phone_number_id: str, wa_id: str, wamid: str, at: datetime) -> d
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": phone_number_id},
                             "contacts": [
@@ -98,7 +99,7 @@ def _inbound(*, phone_number_id: str, wa_id: str, wamid: str, at: datetime) -> d
                                     "text": {"body": "hello"},
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }
@@ -113,6 +114,7 @@ def _status(*, phone_number_id: str, wamid: str, status: str, at: datetime) -> d
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": phone_number_id},
                             "statuses": [
@@ -123,7 +125,7 @@ def _status(*, phone_number_id: str, wamid: str, status: str, at: datetime) -> d
                                     "recipient_id": "201555000111",
                                 }
                             ],
-                        }
+                        },
                     }
                 ]
             }

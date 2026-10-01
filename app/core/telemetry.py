@@ -419,7 +419,56 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Purged workspaces' object deletes, by whether the store accepted them.",
         ("outcome",),
     ),
+    # What an adapter refused in a webhook delivery, by channel and reason
+    # (OMNI-010, OMNI-021). The signal the audit found missing: a delivery
+    # whose every entry was dropped still counted as a successful inbound
+    # call, so a WhatsApp username's message could be lost with every alert
+    # green. Both labels are closed - `channel` is `Channel`, `reason` is
+    # `RefusalReason` - and nothing identifying ever reaches them: no
+    # connection, number, sender, message or workspace.
+    "wasla_inbound_entries_refused_total": (
+        "Inbound webhook entries an adapter refused, by channel and reason.",
+        ("channel", "reason"),
+    ),
+    # What became of the events an adapter accepted, by channel and closed
+    # outcome: stored, a duplicate, an echo, a provider-id collision, an
+    # unknown or paused connection, no owner, refused by the database, an
+    # identity pairing that would have merged two contacts.
+    "wasla_inbound_events_total": (
+        "Inbound events by channel and what ingestion made of them.",
+        ("channel", "outcome"),
+    ),
 }
+
+# Closed domains of the two inbound counters. `app.core` imports nothing from
+# `app.channels`, so they are restated here; a test holds them equal to
+# `Channel` and `RefusalReason`. Anything else is counted as `other`.
+INBOUND_CHANNELS: Final = frozenset({"whatsapp", "instagram", "messenger"})
+INBOUND_REFUSAL_REASONS: Final = frozenset(
+    {
+        "foreign_object",
+        "unsupported_field",
+        "missing_connection",
+        "missing_event_id",
+        "missing_sender",
+        "identifier_too_long",
+        "missing_status",
+        "malformed",
+    }
+)
+INBOUND_OUTCOMES: Final = frozenset(
+    {
+        "stored",
+        "duplicate",
+        "echo",
+        "collision",
+        "unknown_connection",
+        "inactive_connection",
+        "unowned",
+        "rejected",
+        "identity_conflict",
+    }
+)
 
 # The closed label domain of `wasla_media_outcomes_total`: `ready` and the
 # media reason tokens (`app.services.media_outcomes.MediaReason`), restated here
@@ -883,6 +932,39 @@ async def record_webhook_payload_retention(*, redacted: int, pending: int) -> No
     if pending:
         await _increment_by(
             "wasla_webhook_payload_retention_total", {"outcome": "pending"}, pending
+        )
+
+
+def _inbound_channel(channel: str) -> str:
+    return channel if channel in INBOUND_CHANNELS else "other"
+
+
+async def record_inbound_refusals(channel: str, refused: Mapping[str, int]) -> None:
+    """Count what an adapter refused in one delivery (OMNI-021). Best-effort."""
+    label = _inbound_channel(channel)
+    for reason, count in refused.items():
+        if count <= 0:
+            continue
+        await _increment_by(
+            "wasla_inbound_entries_refused_total",
+            {
+                "channel": label,
+                "reason": reason if reason in INBOUND_REFUSAL_REASONS else "other",
+            },
+            count,
+        )
+
+
+async def record_inbound_outcomes(channel: str, outcomes: Mapping[str, int]) -> None:
+    """Count what ingestion made of one delivery's events, by closed outcome."""
+    label = _inbound_channel(channel)
+    for outcome, count in outcomes.items():
+        if count <= 0:
+            continue
+        await _increment_by(
+            "wasla_inbound_events_total",
+            {"channel": label, "outcome": outcome if outcome in INBOUND_OUTCOMES else "other"},
+            count,
         )
 
 

@@ -172,11 +172,15 @@ def test_an_unparseable_timestamp_does_not_lose_the_message() -> None:
 
 
 def test_several_entries_are_flattened() -> None:
+    def change(value: dict[str, Any]) -> dict[str, Any]:
+        return {"changes": [{"field": "messages", "value": value}]}
+
     payload = {
+        "object": "whatsapp_business_account",
         "entry": [
-            {"changes": [{"value": _value(messages=[{"from": "1", "id": "a", "type": "text"}])}]},
-            {"changes": [{"value": _value(messages=[{"from": "2", "id": "b", "type": "text"}])}]},
-        ]
+            change(_value(messages=[{"from": "1", "id": "a", "type": "text"}])),
+            change(_value(messages=[{"from": "2", "id": "b", "type": "text"}])),
+        ],
     }
 
     envelope = parse_webhook(payload)

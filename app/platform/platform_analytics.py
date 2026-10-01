@@ -4,7 +4,8 @@ Read-only, and narrower than the eventual dashboard on purpose. Everything here
 is a figure this system can actually compute from rows it holds:
 
 - how many workspaces exist and what state they are in
-- how many WhatsApp numbers are connected and live
+- how many WhatsApp numbers are connected and live, and how many connections
+  each channel has (OMNI-014)
 - what the platform consumed, and what each workspace consumed
 
 What is deliberately absent is revenue. MRR, ARR, subscription revenue and
@@ -21,13 +22,16 @@ lets it be read without an audit trail that does not exist yet.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import MappingProxyType
 from typing import Any
 
 from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.models.channel import Channel, ChannelConnection, ConnectionStatus
 from app.db.models.enums import TenantStatus
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
@@ -44,6 +48,14 @@ MAX_PAGE = 100
 
 
 @dataclass(frozen=True, slots=True)
+class ConnectionCounts:
+    """One channel's connections: every one on record, and those carrying traffic."""
+
+    total: int = 0
+    active: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class PlatformOverview:
     """The estate, at a glance, for one window."""
 
@@ -57,6 +69,11 @@ class PlatformOverview:
     tenants_suspended: int = 0
     whatsapp_numbers: int = 0
     whatsapp_numbers_active: int = 0
+    # Beside the WhatsApp-named figures, not instead of them (docs/API.md).
+    # Only channels with a connection on record appear.
+    connections_by_channel: Mapping[Channel, ConnectionCounts] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +122,20 @@ class PlatformAnalyticsService:
         )
         by_account_status = {status: int(count) for status, count in numbers.all()}
 
+        connections = await self._session.execute(
+            select(ChannelConnection.channel, ChannelConnection.status, func.count()).group_by(
+                ChannelConnection.channel, ChannelConnection.status
+            )
+        )
+        by_channel: dict[Channel, ConnectionCounts] = {}
+        for channel, connection_status, count in connections.all():
+            seen = by_channel.get(channel, ConnectionCounts())
+            by_channel[channel] = ConnectionCounts(
+                total=seen.total + int(count),
+                active=seen.active
+                + (int(count) if connection_status is ConnectionStatus.ACTIVE else 0),
+            )
+
         return PlatformOverview(
             window=window,
             tenants_total=sum(counts.values()),
@@ -112,6 +143,7 @@ class PlatformAnalyticsService:
             tenants_suspended=counts.get(TenantStatus.SUSPENDED, 0),
             whatsapp_numbers=sum(by_account_status.values()),
             whatsapp_numbers_active=by_account_status.get(WhatsAppAccountStatus.ACTIVE, 0),
+            connections_by_channel=MappingProxyType(by_channel),
             usage=await self._usage.totals(since=window.since, until=window.until),
         )
 

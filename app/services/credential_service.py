@@ -21,9 +21,10 @@ import uuid
 from dataclasses import dataclass
 
 from app.core.config import Settings
-from app.core.crypto import CredentialCipher, CredentialDecryptionError
+from app.core.crypto import CONNECTION_BOUND, CredentialCipher, CredentialDecryptionError
 from app.core.exceptions import ValidationError
 from app.core.logging import get_logger
+from app.db.models.channel import Channel
 from app.db.models.whatsapp import WhatsAppAccount
 
 logger = get_logger(__name__)
@@ -43,6 +44,11 @@ class ResolvedCredential:
 
     def __repr__(self) -> str:  # pragma: no cover - stops a token reaching a log
         return f"ResolvedCredential(is_own={self.is_own})"
+
+
+def connection_context(*, tenant_id: uuid.UUID, connection_id: uuid.UUID, channel: Channel) -> str:
+    """What a `v2` credential is bound to: this workspace's connection, on this channel."""
+    return f"{tenant_id}:{connection_id}:{channel.value}"
 
 
 def build_cipher(settings: Settings) -> CredentialCipher | None:
@@ -70,8 +76,20 @@ class CredentialService:
     def can_store(self) -> bool:
         return self._cipher is not None
 
-    def seal(self, token: str, *, tenant_id: uuid.UUID) -> str:
-        """Encrypt a credential for one workspace.
+    def seal(
+        self,
+        token: str,
+        *,
+        tenant_id: uuid.UUID,
+        connection_id: uuid.UUID,
+        channel: Channel,
+    ) -> str:
+        """Encrypt a credential for one connection of one workspace (`v2`, OMNI-012).
+
+        Bound to the tenant, the connection and the channel together, so the
+        ciphertext decrypts on its own row and nowhere else - not on another
+        workspace's row, and not on another connection of the same workspace,
+        which the workspace-only binding it replaces still allowed.
 
         Refused outright when no key is configured. Storing it in the clear
         "for now" is how a plaintext token column comes to exist, and ADR-009
@@ -85,20 +103,40 @@ class CredentialService:
         cleaned = token.strip()
         if not cleaned:
             raise ValidationError("The credential is empty.")
-        return self._cipher.encrypt(cleaned, context=str(tenant_id))
+        return self._cipher.encrypt(
+            cleaned,
+            context=connection_context(
+                tenant_id=tenant_id, connection_id=connection_id, channel=channel
+            ),
+            version=CONNECTION_BOUND,
+        )
 
     def resolve(self, account: WhatsAppAccount) -> ResolvedCredential:
-        """The token to send this account's messages with.
+        """The token to send this WhatsApp number's messages with.
 
         A workspace credential that cannot be decrypted does **not** silently
         fall back to the platform token. Sending as the platform when the
         workspace asked to send as itself is a different act with a different
         sender identity, and doing it quietly because a key was rotated badly
         would be the kind of failure nobody notices until a customer does.
+
+        **The platform fallback is WhatsApp's alone.** This takes a
+        `WhatsAppAccount` and is reached only through the WhatsApp adapter; a
+        connection on any other channel resolves its credential through its own
+        adapter, and a WhatsApp system-user token cannot send as a Page or an
+        Instagram account anyway (OMNI-012).
         """
         stored = account.access_token_encrypted
         if stored and self._cipher is not None:
-            token = self._cipher.decrypt(stored, context=str(account.tenant_id))
+            if self._cipher.version_of(stored) == CONNECTION_BOUND:
+                context = connection_context(
+                    tenant_id=account.tenant_id, connection_id=account.id, channel=Channel.WHATSAPP
+                )
+            else:
+                # Sealed before 0082: bound to the workspace only, and still
+                # readable until it is re-sealed.
+                context = str(account.tenant_id)
+            token = self._cipher.decrypt(stored, context=context)
             return ResolvedCredential(token=token, is_own=True)
 
         if stored and self._cipher is None:

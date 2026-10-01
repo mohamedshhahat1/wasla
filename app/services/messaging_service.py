@@ -22,22 +22,40 @@ What this module is careful about:
   nothing may send that message again on its own initiative.
 - A rejected send is recorded rather than raised. Raising would roll the request
   back and delete the row that proves the attempt happened.
-- The 24-hour service window is enforced on free text only. Writing outside it
-  is exactly what approved templates are for.
+- What may be sent, when and how long it may be is the conversation's channel
+  policy's to say - on WhatsApp, the 24-hour window with approved templates as
+  the way out (OMNI-008).
+- **A send goes where the conversation is, to whom it is pinned** (OMNI-004):
+  conversation -> connection -> policy -> participant identity -> adapter.
+  Nothing here reads a contact's phone number, and a participant the adapter
+  cannot address on its channel is refused before anything is staged.
 """
 
 from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, Final
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.channels.adapter import (
+    ChannelSender,
+    MediaContent,
+    OutboundContent,
+    ProviderReceipt,
+    Recipient,
+    TemplateContent,
+    TextContent,
+)
+from app.channels.metering import message_meters
+from app.channels.outcomes import ProviderAuthError, UncertainDeliveryError
+from app.channels.policy import ReplyPolicy, SendKind, require_sendable_text
+from app.channels.registry import ChannelRegistry, ChannelUnavailableError, default_registry
 from app.core.config import Settings
 from app.core.exceptions import (
     ConflictError,
@@ -52,6 +70,7 @@ from app.core.media_types import resolve as resolve_media_type
 from app.core.storage import EXTENSIONS, MediaStorage, StorageError, build_key
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey
+from app.db.models.channel import Channel, ConnectionHealth
 from app.db.models.conversation import (
     Conversation,
     Message,
@@ -61,27 +80,21 @@ from app.db.models.conversation import (
     MessageStatus,
 )
 from app.db.models.media import MediaStatus, MediaStorageState
-from app.db.models.usage import UsageEventType
 from app.db.models.user import User
-from app.db.models.whatsapp import WhatsAppAccount
 from app.db.models.whatsapp_template import TemplateStatus
 from app.db.session import released
-from app.integrations.whatsapp.client import (
-    ProviderAuthError,
-    SentMessage,
-    TemplateWithdrawnError,
-    UncertainDeliveryError,
-    WhatsAppClient,
-    build_http_client,
+from app.integrations.whatsapp.client import TemplateWithdrawnError, build_http_client
+from app.integrations.whatsapp.policy import SERVICE_WINDOW, WHATSAPP_TEXT_MAX_CHARS
+from app.repositories.channel_repository import (
+    ChannelConnectionRepository,
+    ContactIdentityRepository,
 )
 from app.repositories.conversation_repository import (
-    ContactRepository,
     ConversationRepository,
     MessageRepository,
 )
 from app.repositories.media_repository import MediaRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
-from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.audit_service import AuditTrail
 from app.services.credential_service import CredentialService
 from app.services.entitlement_service import EntitlementService
@@ -91,26 +104,19 @@ from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
-# Meta's own cap on a text message body. One constant, imported by the request
-# schema rather than restated there, because two copies of a provider's limit
-# drift and the one that drifts low silently refuses valid messages while the
-# one that drifts high sends messages the provider rejects.
-WHATSAPP_TEXT_MAX_CHARS: Final = 4_096
+# WhatsApp's limit and window live with WhatsApp's policy now (OMNI-008), and
+# are importable from here under the names the request schema and tests use.
+__all__ = ["SERVICE_WINDOW", "WHATSAPP_TEXT_MAX_CHARS", "MessagingService"]
 
-# What a message records when Meta refused the number's credential. A fixed
-# sentence: the failure reason is returned by the API and read by a person, and
-# nothing about a credential belongs in either.
+# What a message records when the provider refused the connection's credential.
+# A fixed sentence: the failure reason is returned by the API and read by a
+# person, and nothing about a credential belongs in either.
 CREDENTIAL_REFUSED = "WhatsApp refused this number's credentials."
+CONNECTION_CREDENTIAL_REFUSED = "The provider refused this connection's credentials."
 
-# Meta's rule: a business may send free-form messages for 24 hours after the
-# customer's last message. Outside it, only approved templates are accepted.
-SERVICE_WINDOW: Final = timedelta(hours=24)
+# The sentence a send on a paused connection is refused with, per channel.
+_DISABLED: Final[dict[Channel, str]] = {Channel.WHATSAPP: "This WhatsApp number is disabled."}
 
-SendCall = Callable[[WhatsAppClient, str, str], Awaitable[SentMessage]]
-# The half of a send that provably delivers nothing - today, uploading a file to
-# Meta before the message that carries it. Runs while the send intent is still
-# `CLAIMED`, so a failure in it is an ordinary undelivered send.
-PrepareCall = Callable[[WhatsAppClient, str], Awaitable[None]]
 # A caller tying its own row to this send, inside the transaction that commits
 # the intent. Synchronous and staging-only, like `UsageRecorder.record`: it must
 # not touch the session, because the commit that follows is the point.
@@ -118,12 +124,11 @@ LinkCall = Callable[[Message], None]
 
 
 async def _attempt(
-    send: SendCall,
-    client: WhatsAppClient,
-    phone_number_id: str,
-    recipient: str,
-) -> SentMessage | Exception:
-    """Ask Meta to deliver, returning the failure rather than raising it.
+    sender: ChannelSender,
+    recipient: Recipient,
+    content: OutboundContent,
+) -> ProviderReceipt | Exception:
+    """Ask the provider to deliver, returning the failure rather than raising it.
 
     A value rather than an exception because the caller is inside `released`,
     where nothing may touch the session - and the row that records what
@@ -131,7 +136,7 @@ async def _attempt(
     `MediaService._write` uses, for the same reason.
     """
     try:
-        return await send(client, phone_number_id, recipient)
+        return await sender.send(recipient, content)
     except (ExternalServiceError, RateLimitedError) as error:
         return error
 
@@ -197,24 +202,8 @@ def _require_same_request(
         raise ConflictError("That idempotency key was already used for a different message.")
 
 
-def _require_sendable_text(body: str) -> None:
-    """Refuse a body Meta will not accept, before anything is staged.
-
-    Before the send intent rather than after, so a refused reply costs no row
-    and no provider call. The caller sees a validation failure, which for the
-    agent path becomes a recorded, alertable job failure rather than a silent
-    message the customer never receives.
-    """
-    if not body:
-        raise ValidationError("A message needs something to say.")
-    if len(body) > WHATSAPP_TEXT_MAX_CHARS:
-        raise ValidationError(
-            f"A WhatsApp message may be at most {WHATSAPP_TEXT_MAX_CHARS} characters."
-        )
-
-
-def _whatsapp_kind(kind: MediaClass) -> str:
-    """Which of Meta's four attachment kinds a detected class is sent as.
+def _media_family(kind: MediaClass) -> str:
+    """Which attachment family a detected class is sent as.
 
     Total over `MediaClass`, because the refusal now happens earlier and in one
     place: `media_types.resolve` has already refused anything that is not a
@@ -252,6 +241,7 @@ class MessagingService:
         settings: Settings,
         tenant_id: uuid.UUID,
         http: httpx.AsyncClient | None = None,
+        channels: ChannelRegistry | None = None,
     ) -> None:
         """`http` lets a caller sending many messages share one connection pool.
 
@@ -264,12 +254,15 @@ class MessagingService:
         self._settings = settings
         self._http = http
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
-        self._contacts = ContactRepository(session, tenant_id=tenant_id)
+        # The route a send takes (OMNI-004): the conversation's connection and
+        # the identity it is pinned to, and the channel's adapter.
+        self._connections = ChannelConnectionRepository(session, tenant_id=tenant_id)
+        self._identities = ContactIdentityRepository(session, tenant_id=tenant_id)
+        self._channels = channels or default_registry()
         # The registry every template send is measured against, so the check
         # lives at the choke point rather than in each caller (MSG-10).
         self._templates = WhatsAppTemplateRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
-        self._accounts = WhatsAppAccountRepository(session, tenant_id=tenant_id)
         self._media = MediaRepository(session, tenant_id=tenant_id)
         self._usage = UsageRecorder(session, tenant_id=tenant_id)
         self._credentials = CredentialService(settings)
@@ -291,7 +284,7 @@ class MessagingService:
         idempotency_key: str | None = None,
         origin: MessageOrigin,
     ) -> Message:
-        """Send free text, refusing anything WhatsApp will not carry.
+        """Send free text, refusing anything the conversation's channel will not carry.
 
         The length check is here rather than only in the request schema, and
         that is the point of it. The API schema caps `body` at Meta's own
@@ -308,23 +301,15 @@ class MessagingService:
         is one provider message. Refusing costs one reply and produces a
         recorded, alertable failure, which is the smallest correct answer.
         """
-        _require_sendable_text(body)
-
-        async def send(client: WhatsAppClient, phone_number_id: str, to: str) -> SentMessage:
-            return await client.send_text(
-                phone_number_id=phone_number_id,
-                to=to,
-                body=body,
-                preview_url=preview_url,
-            )
-
+        if not body:
+            raise ValidationError("A message needs something to say.")
         return await self._dispatch(
             conversation_id=conversation_id,
             kind=MessageKind.TEXT,
             body=body,
             sent_by_id=sent_by_id,
-            send=send,
-            require_window=True,
+            content=TextContent(body=body, preview_url=preview_url),
+            send_kind=SendKind.TEXT,
             link=link,
             idempotency_key=idempotency_key,
             origin=origin,
@@ -368,15 +353,6 @@ class MessagingService:
         if refusal is not None:
             raise ValidationError(refusal)
 
-        async def send(client: WhatsAppClient, phone_number_id: str, to: str) -> SentMessage:
-            return await client.send_template(
-                phone_number_id=phone_number_id,
-                to=to,
-                name=name,
-                language=language,
-                components=components,
-            )
-
         return await self._dispatch(
             conversation_id=conversation_id,
             kind=MessageKind.TEMPLATE,
@@ -387,9 +363,10 @@ class MessagingService:
             template_name=name,
             template_language=language,
             sent_by_id=sent_by_id,
-            send=send,
-            # Templates are the sanctioned way out of the service window.
-            require_window=False,
+            content=TemplateContent(name=name, language=language, components=components),
+            # Templates are WhatsApp's sanctioned way out of the service window;
+            # the policy says so, and refuses them on a channel without any.
+            send_kind=SendKind.TEMPLATE,
             link=link,
             idempotency_key=idempotency_key,
             origin=origin,
@@ -463,7 +440,7 @@ class MessagingService:
 
         detected = resolve_media_type(claimed=mime_type, prefix=content[:SNIFF_BYTES])
         canonical = detected.mime_type
-        family = _whatsapp_kind(detected.kind)
+        family = _media_family(detected.kind)
         kind = MEDIA_KINDS[family]
 
         # Refused here, before Meta is asked to do anything.
@@ -488,37 +465,6 @@ class MessagingService:
 
         upload_name = _safe_filename(display_name, mime_type=canonical)
 
-        # The two halves of a media send, split because only the second one can
-        # reach a customer. Uploading a file to Meta creates a handle valid for
-        # one message and delivers nothing, so it runs while the send intent is
-        # still `CLAIMED` and a failure in it is an ordinary undelivered send
-        # rather than an outcome nobody can determine (ADR-093).
-        uploaded: list[str] = []
-
-        async def prepare(client: WhatsAppClient, phone_number_id: str) -> None:
-            uploaded.append(
-                await client.upload_media(
-                    phone_number_id=phone_number_id,
-                    content=content,
-                    # The canonical type, not the caller's. Meta renders an
-                    # attachment by what it is told it is, so sending the claim
-                    # would let a mislabelled file be mislabelled to the
-                    # customer as well.
-                    mime_type=canonical,
-                    filename=upload_name,
-                )
-            )
-
-        async def send(client: WhatsAppClient, phone_number_id: str, to: str) -> SentMessage:
-            return await client.send_media(
-                phone_number_id=phone_number_id,
-                to=to,
-                kind=family,  # type: ignore[arg-type]
-                media_id=uploaded[0],
-                caption=caption,
-                filename=upload_name,
-            )
-
         message = await self._dispatch(
             conversation_id=conversation_id,
             kind=kind,
@@ -526,9 +472,17 @@ class MessagingService:
             # inbound one: it is what the person typed.
             body=caption,
             sent_by_id=sent_by_id,
-            prepare=prepare,
-            send=send,
-            require_window=True,
+            # Two halves: uploading the file delivers nothing and runs while the
+            # intent is still `CLAIMED`; only the send can reach a customer
+            # (ADR-093). The canonical type, never the caller's claim.
+            content=MediaContent(
+                family=family,
+                content=content,
+                mime_type=canonical,
+                filename=upload_name,
+                caption=caption,
+            ),
+            send_kind=SendKind.MEDIA,
             idempotency_key=idempotency_key,
             origin=origin,
         )
@@ -705,11 +659,10 @@ class MessagingService:
         kind: MessageKind,
         body: str | None,
         sent_by_id: uuid.UUID | None,
-        send: SendCall,
-        require_window: bool,
+        content: OutboundContent,
+        send_kind: SendKind,
         template_name: str | None = None,
         template_language: str | None = None,
-        prepare: PrepareCall | None = None,
         link: LinkCall | None = None,
         idempotency_key: str | None = None,
         origin: MessageOrigin,
@@ -719,7 +672,7 @@ class MessagingService:
             TX1   the send intent, and whatever the caller ties to it   -> COMMIT
             --    (media only) upload the file. Provably not delivered.
             TX2   state REQUESTED                                       -> COMMIT
-            --    ask Meta to deliver it. No transaction, no connection.
+            --    ask the provider to deliver it. No transaction, no connection.
             TX3   record what came back
 
         The commits before the provider call are the point. Both orders fail;
@@ -728,10 +681,12 @@ class MessagingService:
         while commit-then-send leaves a row that says a message may have gone
         out, which a person can read a conversation and settle.
 
-        `prepare` exists because a media send is two Meta requests and only the
-        second one delivers anything. Uploading a file is not customer-visible,
-        so it happens while the state still says `CLAIMED` and a failure there
-        is an ordinary undelivered send rather than an unknown.
+        **Where it goes is decided here, once, for every sender** (OMNI-004,
+        OMNI-027): the conversation's connection, its channel's policy, the
+        identity the conversation is pinned to, and that channel's adapter. A
+        channel with no adapter is refused (`ChannelUnavailableError`) rather
+        than handed WhatsApp's, and a participant the adapter cannot address is
+        refused before anything is staged.
 
         `link` lets a caller tie its own row - a follow-up, a campaign
         recipient - to this send inside TX1, so that a worker which dies mid-send
@@ -739,22 +694,27 @@ class MessagingService:
         untouched and gets sent again.
         """
         conversation = await self._conversations.require_by_id(conversation_id)
-        if require_window and not self.window_open(conversation):
-            raise ValidationError(
-                "This conversation is outside the 24-hour service window. "
-                "Send an approved template instead."
-            )
+        adapter = self._channels.adapter_for(conversation.channel)
+        policy = adapter.policy
+        if isinstance(content, TextContent):
+            require_sendable_text(content.body, policy)
+        if isinstance(content, MediaContent) and (
+            content.family not in policy.capabilities.media_families
+        ):
+            raise ValidationError(f"This file cannot be sent over {policy.display_name}.")
+        decision = policy.may_send(
+            conversation, origin=origin, kind=send_kind, now=datetime.now(UTC)
+        )
+        if not decision.allowed:
+            raise ValidationError(decision.reason or "This message cannot be sent now.")
 
-        account = await self._accounts.require_by_id(conversation.account_id)
-        if not account.is_active:
-            raise ValidationError("This WhatsApp number is disabled.")
-        contact = await self._contacts.require_by_id(conversation.contact_id)
-        wa_id = contact.wa_id
-        if wa_id is None:
-            # A customer WhatsApp knows only by a business-scoped id has no number
-            # to send to `to`. Refused before anything is staged; sending to that
-            # id is the participant routing that replaces this (OMNI-004).
-            raise ValidationError("This customer has no WhatsApp number to send to.")
+        connection = await self._connections.require_by_id(conversation.account_id)
+        if connection.channel is not conversation.channel:  # pragma: no cover - keyed
+            raise ChannelUnavailableError()
+        if not connection.is_active:
+            raise ValidationError(_DISABLED.get(connection.channel, "This connection is disabled."))
+        participant = await self._identities.require_by_id(conversation.participant_identity_id)
+        recipient = adapter.address(participant)
 
         if idempotency_key is not None:
             message, claimed = await self._messages.claim_idempotency_key(
@@ -769,10 +729,10 @@ class MessagingService:
             )
             if not claimed:
                 # A repeat of a request already handled. The caller gets the
-                # original message back and Meta is not asked a second time -
-                # which is the entire point, because Meta's send endpoint has
-                # no idempotency key of its own and a second call is a second
-                # notification on somebody's phone (MSG-15).
+                # original message back and the provider is not asked a second
+                # time - which is the entire point, because no provider in scope
+                # has an idempotency key of its own and a second call is a
+                # second notification on somebody's phone (MSG-15).
                 _require_same_request(
                     message,
                     conversation_id=conversation_id,
@@ -803,13 +763,22 @@ class MessagingService:
         if link is not None:
             link(message)
 
-        async with self._client(account) as client:
-            if prepare is not None:
-                # TX1. Nothing has been asked of Meta, so a failure in the
-                # upload below is provably not a delivery.
+        async with (
+            self._pool() as http,
+            adapter.sender(
+                session=self._session,
+                connection=connection,
+                settings=self._settings,
+                http=http,
+                credentials=self._credentials,
+            ) as sender,
+        ):
+            if isinstance(content, MediaContent):
+                # TX1. Nothing has been asked of the provider, so a failure in
+                # the upload below is provably not a delivery.
                 async with released(self._session):
                     try:
-                        await prepare(client, account.phone_number_id)
+                        await sender.prepare(content)
                     except (ExternalServiceError, RateLimitedError) as error:
                         prepared_failure: Exception | None = error
                     else:
@@ -818,15 +787,15 @@ class MessagingService:
                     return await self._undelivered(message, reason=str(prepared_failure))
 
             # TX1 for a text or a template, TX2 for a file already uploaded.
-            # Either way the row says "Meta may have this" *before* Meta can.
-            # The gap between this commit and the socket resolves the safe way
-            # by construction: the row claims a send that did not happen, which
-            # costs somebody a look at the conversation rather than costing a
-            # customer a second message.
+            # Either way the row says "the provider may have this" *before* it
+            # can. The gap between this commit and the socket resolves the safe
+            # way by construction: the row claims a send that did not happen,
+            # which costs somebody a look at the conversation rather than
+            # costing a customer a second message.
             message.delivery_state = MessageDeliveryState.REQUESTED
             await self._session.flush()
             async with released(self._session):
-                outcome = await _attempt(send, client, account.phone_number_id, wa_id)
+                outcome = await _attempt(sender, recipient, content)
 
         if isinstance(outcome, UncertainDeliveryError):
             # Left exactly as it is. `REQUESTED` with `PENDING` is the honest
@@ -860,15 +829,26 @@ class MessagingService:
             # Nothing was delivered, so the row is recorded honestly as
             # undelivered - and then the failure is let out, because it is not
             # a fact about this message. Every other recipient this workspace
-            # has queued fails the same way until somebody reconnects the
-            # number, and a sweep that swallowed this would discover that once
-            # per person (MSG-18).
-            await self._undelivered(message, reason=CREDENTIAL_REFUSED)
+            # has queued fails the same way until somebody reconnects, and a
+            # sweep that swallowed this would discover that once per person
+            # (MSG-18). The connection says so too, for anybody looking at it
+            # rather than at a message (OMNI-012).
+            await self._undelivered(
+                message,
+                reason=(
+                    CREDENTIAL_REFUSED
+                    if connection.channel is Channel.WHATSAPP
+                    else CONNECTION_CREDENTIAL_REFUSED
+                ),
+            )
+            await self._connections.record_health(
+                connection.id, ConnectionHealth.AUTH_FAILED, reason="credential_refused"
+            )
             logger.error(
-                "whatsapp.credential_refused",
+                f"{connection.channel.value}.credential_refused",
                 extra={
-                    "event": "whatsapp.credential_refused",
-                    "account_id": str(account.id),
+                    "event": f"{connection.channel.value}.credential_refused",
+                    "account_id": str(connection.id),
                 },
             )
             raise outcome
@@ -883,15 +863,21 @@ class MessagingService:
             sent_at=now,
         )
         conversation.last_message_at = now
-        # Metered here and not before the call: a send that Meta refused cost
-        # the workspace nothing to deliver, and the failed row above already
-        # records that the attempt happened. Everything that leaves this way is
-        # counted once - an agent's reply, a person's, a follow-up, a campaign.
-        self._usage.record(
-            UsageEventType.WHATSAPP_MESSAGE_SENT,
-            occurred_at=now,
-            meta={"conversation_id": str(conversation_id), "kind": kind.value},
-        )
+        # A credential that works again clears a recorded refusal. Conditional:
+        # a healthy connection writes nothing here, on any send.
+        await self._connections.record_health(connection.id, ConnectionHealth.OK)
+        # Metered here and not before the call: a send the provider refused
+        # cost the workspace nothing to deliver, and the failed row above
+        # already records that the attempt happened. Everything that leaves this
+        # way is counted once - an agent's reply, a person's, a follow-up, a
+        # campaign - under the channel's decided meter (ADR-122).
+        meters = message_meters(connection.channel)
+        if meters is not None:
+            self._usage.record(
+                meters.sent,
+                occurred_at=now,
+                meta={"conversation_id": str(conversation_id), "kind": kind.value},
+            )
         await self._session.flush()
         return message
 
@@ -942,31 +928,33 @@ class MessagingService:
         return message
 
     @asynccontextmanager
-    async def _client(self, account: WhatsAppAccount) -> AsyncIterator[WhatsAppClient]:
-        """A WhatsApp client for one send, over a shared pool if there is one.
+    async def _pool(self) -> AsyncIterator[httpx.AsyncClient]:
+        """The connection pool a send goes out over: the caller's, or one for this send.
 
-        The token belongs to the account rather than to the process: a
-        workspace that supplied its own sends as itself, and one that did not
-        sends through the platform credential (ADR-034). Resolved per send
-        rather than held on the service, so the plaintext lives no longer than
-        the call that needs it.
+        Owned here, as it was before the adapter seam existed, so a campaign's
+        ten thousand sends share one pool whatever the channel, and a request
+        sending one message opens and closes its own. The adapter only borrows
+        it: the credential it holds is resolved per send.
         """
-        token = self._credentials.resolve(account).token
-        version = self._settings.meta_api_version
-
         if self._http is not None:
-            yield WhatsAppClient(http=self._http, access_token=token, api_version=version)
+            yield self._http
             return
-
         async with build_http_client() as http:
-            yield WhatsAppClient(http=http, access_token=token, api_version=version)
+            yield http
 
     def window_open(self, conversation: Conversation) -> bool:
-        """Whether free-form messages are still allowed.
+        """Whether the channel's standard free-form window is open (`service_window_open`).
 
-        A conversation the customer has never written in has no open window: the
-        business may only open it with a template.
+        The meaning is unchanged for WhatsApp - the 24-hour customer-service
+        window - and is now the conversation's channel policy's to answer
+        (ADR-121). A conversation the customer has never written in has no open
+        window: the business may only open it with a template.
         """
-        if conversation.last_inbound_at is None:
-            return False
-        return datetime.now(UTC) - conversation.last_inbound_at <= SERVICE_WINDOW
+        policy = self._channels.policy_for(conversation.channel)
+        return policy.standard_window_open(conversation, now=datetime.now(UTC))
+
+    def reply_policy(self, conversation: Conversation) -> ReplyPolicy:
+        """What a person may send on this conversation now - the API's `reply_policy`."""
+        return self._channels.policy_for(conversation.channel).reply_policy(
+            conversation, now=datetime.now(UTC)
+        )

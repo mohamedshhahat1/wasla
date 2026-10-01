@@ -390,6 +390,7 @@ async def test_an_attachment_is_uploaded_then_sent_and_recorded(
     """
     from datetime import UTC, datetime
 
+    from app.integrations.whatsapp import adapter as whatsapp_adapter
     from app.services import messaging_service as messaging_module
     from app.services.messaging_service import MessagingService
 
@@ -408,7 +409,9 @@ async def test_an_attachment_is_uploaded_then_sent_and_recorded(
             return False
 
     monkeypatch.setattr(messaging_module, "build_http_client", lambda: _Http())
-    monkeypatch.setattr(messaging_module, "WhatsAppClient", lambda **kwargs: whatsapp)
+    # The WhatsApp client is built by the WhatsApp adapter, which the shared
+    # messaging service reaches through the channel seam (OMNI-006).
+    monkeypatch.setattr(whatsapp_adapter, "WhatsAppClient", lambda **kwargs: whatsapp)
 
     service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
     message = await service.send_media(
@@ -447,6 +450,7 @@ async def test_a_hostile_filename_is_replaced_before_it_reaches_meta(
     """
     from datetime import UTC, datetime
 
+    from app.integrations.whatsapp import adapter as whatsapp_adapter
     from app.services import messaging_service as messaging_module
     from app.services.messaging_service import MessagingService
 
@@ -464,7 +468,9 @@ async def test_a_hostile_filename_is_replaced_before_it_reaches_meta(
             return False
 
     monkeypatch.setattr(messaging_module, "build_http_client", lambda: _Http())
-    monkeypatch.setattr(messaging_module, "WhatsAppClient", lambda **kwargs: whatsapp)
+    # The WhatsApp client is built by the WhatsApp adapter, which the shared
+    # messaging service reaches through the channel seam (OMNI-006).
+    monkeypatch.setattr(whatsapp_adapter, "WhatsAppClient", lambda **kwargs: whatsapp)
 
     service = MessagingService(session=db_session, settings=settings, tenant_id=tenant.id)
     await service.send_media(

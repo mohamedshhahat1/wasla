@@ -1,7 +1,8 @@
 """Fitting an agent's reply to the channel it is sent on.
 
-WhatsApp refuses a text body over 4096 characters, and a model cannot be relied
-on to stay under it however politely it is asked: tokens are not characters, and
+A channel refuses a text body over its limit - WhatsApp's is 4096 characters,
+Instagram's 1,000 UTF-8 *bytes* - and a model cannot be relied on to stay under
+it however politely it is asked: tokens are not characters, and
 the default 2,048-token budget of English is roughly twice the limit. Refusing at
 the send was correct for a person typing into a form and wrong for an agent: the
 turn had already engaged, so the refusal stranded it `ENGAGED` for ever, the job
@@ -19,6 +20,11 @@ budget below the hard limit - and followed by a short offer to continue, in the
 language the reply was written in. A word or URL is not cut in half unless the
 text contains no break at all, and a cut never leaves a combining mark or a
 joiner dangling at the end.
+
+**Measured in the channel's unit** (OMNI-008). A 900-character Arabic reply is
+about 1,700 bytes: inside a character limit of 4096, far outside a byte limit of
+1,000. The budget, the continuation and the result are all counted in the unit
+the conversation's channel policy declares, and a character is never split.
 """
 
 from __future__ import annotations
@@ -28,15 +34,25 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Final
 
+from app.channels.policy import ChannelCapabilities, longest_prefix, text_length
 from app.core.logging import get_logger
-from app.services.messaging_service import WHATSAPP_TEXT_MAX_CHARS
+from app.integrations.whatsapp.policy import (
+    MAX_SAFE_AI_WHATSAPP_REPLY_CHARS,
+    WHATSAPP_CAPABILITIES,
+    WHATSAPP_TEXT_MAX_CHARS,
+)
 
 logger = get_logger(__name__)
 
-# Where a shortened reply is aimed, continuation included. Below the hard limit
-# rather than at it, so the offer to continue always fits and nothing downstream
-# that counts characters slightly differently is left at the edge.
-MAX_SAFE_AI_WHATSAPP_REPLY_CHARS: Final = 3_800
+__all__ = [
+    "MAX_SAFE_AI_WHATSAPP_REPLY_CHARS",
+    "WHATSAPP_TEXT_MAX_CHARS",
+    "ChannelReply",
+    "fallback_reply",
+    "prepare_channel_reply",
+]
+
+_SEPARATOR: Final = "\n\n"
 
 # Egyptian Arabic, matching the product's main market and the register the
 # classification prompt already uses. Offered, never assumed: the customer asks.
@@ -65,20 +81,27 @@ class ChannelReply:
     original_length: int
 
 
-def prepare_channel_reply(text: str) -> ChannelReply:
-    """Return one WhatsApp-deliverable reply for `text`.
+def prepare_channel_reply(
+    text: str, capabilities: ChannelCapabilities = WHATSAPP_CAPABILITIES
+) -> ChannelReply:
+    """Return one reply the channel will deliver, for `text`.
 
     A reply that already fits is sent exactly as written (trimmed of surrounding
     whitespace). Only a reply over the hard limit is shortened, and the result
-    is always within it.
+    is always within it - in the channel's own unit. The default is WhatsApp's
+    capabilities, for callers written before the channel was a parameter.
     """
     body = text.strip()
-    if len(body) <= WHATSAPP_TEXT_MAX_CHARS:
+    unit = capabilities.text_unit
+    if text_length(body, unit) <= capabilities.text_limit:
         return ChannelReply(text=body, truncated=False, original_length=len(body))
 
     continuation = _continuation(body)
-    budget = MAX_SAFE_AI_WHATSAPP_REPLY_CHARS - len(continuation) - len("\n\n")
-    bounded = f"{_cut(body, budget)}\n\n{continuation}"
+    budget = (
+        capabilities.reply_budget - text_length(continuation, unit) - text_length(_SEPARATOR, unit)
+    )
+    # The budget in characters: every character that fits whole, in `unit`.
+    bounded = f"{_cut(body, longest_prefix(body, budget, unit))}{_SEPARATOR}{continuation}"
     logger.warning(
         "agent.reply_truncated",
         extra={

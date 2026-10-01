@@ -56,6 +56,7 @@ from app.agents.lifecycle import refusal_now
 from app.agents.orchestrator import AgentOrchestrator, plan_turn
 from app.agents.registry import ToolRegistry
 from app.agents.reply import fallback_reply, prepare_channel_reply
+from app.channels.registry import ChannelRegistry, default_registry
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
@@ -72,7 +73,10 @@ from app.db.session import Database
 from app.integrations.openai.client import ResponsesClient, build_http_client
 from app.integrations.openai.embeddings import EMBED_QUERY, EmbeddingsClient
 from app.repositories.agent_repository import AgentRepository
-from app.repositories.agent_turn_repository import AgentTurnRepository
+from app.repositories.agent_turn_repository import (
+    AgentTurnRepository,
+    TriggerNotAnswerableError,
+)
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
 from app.services.entitlement_service import EntitlementService
 from app.services.inbox_service import InboxService
@@ -207,10 +211,13 @@ class AgentWorker:
         redis: RedisClient,
         settings: Settings,
         registry: ToolRegistry | None = None,
+        channels: ChannelRegistry | None = None,
     ) -> None:
         self._database = database
         self._settings = settings
         self._registry = registry
+        # Whose policy bounds a reply: the conversation's channel's (OMNI-008).
+        self._channels = channels or default_registry()
         self._queue = AgentQueue(redis.client)
         self._running = False
 
@@ -408,11 +415,17 @@ class AgentWorker:
 
         async with self._database.session() as claim:
             turns = AgentTurnRepository(claim, tenant_id=job.tenant_id)
-            owned = await turns.claim(
-                conversation_id=job.conversation_id,
-                trigger_message_id=job.trigger_message_id,
-                worker_id=self._queue.worker_id,
-            )
+            try:
+                owned = await turns.claim(
+                    conversation_id=job.conversation_id,
+                    trigger_message_id=job.trigger_message_id,
+                    worker_id=self._queue.worker_id,
+                )
+            except TriggerNotAnswerableError:
+                # Not a customer's message in this conversation: there is no
+                # turn to run, now or on a retry, so the job ends here - with
+                # nothing charged, engaged or sent (OMNI-005).
+                return None
             turn_id = (
                 await turns.id_for(trigger_message_id=job.trigger_message_id) if owned else None
             )
@@ -584,7 +597,7 @@ class AgentWorker:
             # conversation that was merely mid-commit was dead-lettered on
             # attempt one. A read costs one indexed lookup and is safe to
             # repeat, so it belongs on the retryable side of the line.
-            await conversations.require_by_id(job.conversation_id)
+            conversation = await conversations.require_by_id(job.conversation_id)
 
             # The business-level half of the question the queue barrier asks
             # about the envelope: is this turn already somebody else's? Two
@@ -758,9 +771,12 @@ class AgentWorker:
             if reply:
                 await messaging.send_text(
                     conversation_id=job.conversation_id,
-                    # One message within WhatsApp's limit, shortened at a sentence
-                    # with an offer to continue if the model ran long (AI-05).
-                    body=prepare_channel_reply(reply).text,
+                    # One message within the conversation's channel's limit, in
+                    # its own unit, shortened at a sentence with an offer to
+                    # continue if the model ran long (AI-05, OMNI-008).
+                    body=prepare_channel_reply(
+                        reply, self._channels.policy_for(conversation.channel).capabilities
+                    ).text,
                     origin=MessageOrigin.AGENT,
                     # Deterministic, and derived from the message being answered
                     # rather than generated here, so the same turn produces the

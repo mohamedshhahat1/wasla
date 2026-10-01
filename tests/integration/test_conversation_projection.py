@@ -84,21 +84,23 @@ def _inbound(
         message["text"] = {"body": text}
 
     return {
+        "object": "whatsapp_business_account",
         "entry": [
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": phone_number_id},
                             "contacts": [
                                 {"wa_id": CUSTOMER, "profile": {"name": profile_name}},
                             ],
                             "messages": [message],
-                        }
+                        },
                     }
                 ]
             }
-        ]
+        ],
     }
 
 
@@ -106,10 +108,12 @@ def _status(
     *, state: str, message_id: str = WAMID_OUT, phone_number_id: str = PHONE_NUMBER_ID
 ) -> dict[str, Any]:
     return {
+        "object": "whatsapp_business_account",
         "entry": [
             {
                 "changes": [
                     {
+                        "field": "messages",
                         "value": {
                             "metadata": {"phone_number_id": phone_number_id},
                             "statuses": [
@@ -120,11 +124,11 @@ def _status(
                                     "timestamp": STATUS_AT,
                                 },
                             ],
-                        }
+                        },
                     }
                 ]
             }
-        ]
+        ],
     }
 
 
