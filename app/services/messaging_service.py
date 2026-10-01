@@ -749,6 +749,12 @@ class MessagingService:
         if not account.is_active:
             raise ValidationError("This WhatsApp number is disabled.")
         contact = await self._contacts.require_by_id(conversation.contact_id)
+        wa_id = contact.wa_id
+        if wa_id is None:
+            # A customer WhatsApp knows only by a business-scoped id has no number
+            # to send to `to`. Refused before anything is staged; sending to that
+            # id is the participant routing that replaces this (OMNI-004).
+            raise ValidationError("This customer has no WhatsApp number to send to.")
 
         if idempotency_key is not None:
             message, claimed = await self._messages.claim_idempotency_key(
@@ -820,7 +826,7 @@ class MessagingService:
             message.delivery_state = MessageDeliveryState.REQUESTED
             await self._session.flush()
             async with released(self._session):
-                outcome = await _attempt(send, client, account.phone_number_id, contact.wa_id)
+                outcome = await _attempt(send, client, account.phone_number_id, wa_id)
 
         if isinstance(outcome, UncertainDeliveryError):
             # Left exactly as it is. `REQUESTED` with `PENDING` is the honest

@@ -37,6 +37,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.campaign import OPT_OUT_SOURCE_TYPE, OptOutSource
+from app.db.models.channel import (
+    CHANNEL_TYPE,
+    Channel,
+    install_contact_phone_identity,
+    install_conversation_participant,
+)
 from app.db.models.enums import _enum_type
 from app.db.models.invoice import MAX_IDEMPOTENCY_KEY_LENGTH
 from app.db.models.sentiment import (
@@ -179,7 +185,18 @@ RESOLVED_DELIVERY_STATES: Final[frozenset[MessageDeliveryState]] = frozenset(
 
 
 class Contact(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
-    """A customer, identified by the WhatsApp id Meta reports.
+    """A customer: the person the CRM knows, in one workspace.
+
+    Who the customer *is to a provider* is not here any more. That is
+    `ContactIdentity` - a WhatsApp phone number, a WhatsApp business-scoped user
+    id, and on later channels whatever those providers call a person - and a
+    contact may hold several (OMNI-001, ADR-118).
+
+    `wa_id` stays for the compatibility window as the contact's WhatsApp phone
+    number, kept equal to its phone identity by a trigger. It is nullable
+    because a WhatsApp user with a username can write without Meta telling the
+    business their number at all (OMNI-002): that customer is a contact with a
+    business-scoped identity and no phone.
 
     Unique per workspace rather than globally: the same person may be a customer
     of two businesses on the platform, and those must be separate records.
@@ -197,7 +214,8 @@ class Contact(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         Index("ix_contacts_tenant_id", "tenant_id"),
     )
 
-    wa_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Deprecated: read a contact's identities instead (docs/API.md).
+    wa_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -226,11 +244,26 @@ class Contact(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
 
 
 class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
-    """One customer talking to one connected WhatsApp number.
+    """One customer talking to one connection, through one identity.
 
-    Scoped by account as well as contact, because a business with a sales number
-    and a support number is holding two genuinely separate conversations with
-    the same person.
+    Scoped by connection as well as contact, because a business with a sales
+    number and a support number is holding two genuinely separate
+    conversations with the same person - and a person who writes on WhatsApp
+    and on Instagram is holding two more. A unified inbox lists them together;
+    they are never one thread (ADR-119).
+
+    `account_id` is the connection. The name predates `channel_connections`
+    and is kept for the compatibility window; the API reports the same value
+    as `connection_id`.
+
+    **Who a reply goes to is pinned here, not read from the contact**
+    (OMNI-004). `participant_identity_id` is the identity this conversation
+    addresses - the one that wrote - so a contact holding a phone number and a
+    business-scoped id, or later an Instagram id too, is never addressed by
+    whichever of them a send happened to pick. Three keys make the pin
+    something the database checks: the connection and the conversation share a
+    channel, and the participant belongs to this conversation's contact, in its
+    workspace, on that same channel.
     """
 
     __tablename__ = "conversations"
@@ -250,11 +283,23 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         # alone finds the workspace and then discards most of what it read
         # by filter, which costs more the longer a workspace has existed.
         Index("ix_conversations_tenant_id_created_at", "tenant_id", "created_at"),
-        # The contact and the account this conversation is with must belong to
-        # the same workspace it does, and the database is what says so
+        # The inbox narrowed to one connection, in the inbox's own order
+        # (OMNI-014). Without it the filter walks the workspace's whole range
+        # and discards by predicate - slowest for the largest, oldest
+        # workspaces, the shape migration 0019 already fixed once.
+        Index(
+            "ix_conversations_tenant_id_account_id_last_message_at",
+            "tenant_id",
+            "account_id",
+            text("last_message_at DESC NULLS LAST"),
+            text("id DESC"),
+        ),
+        Index("ix_conversations_participant_identity_id", "participant_identity_id"),
+        # The contact and the connection this conversation is with must belong
+        # to the same workspace it does, and the database is what says so
         # (ADR-100). A plain `contact_id -> contacts.id` accepts a conversation
         # in tenant A against tenant B's contact; no API path builds one -
-        # ingestion derives every id from one resolved account inside one
+        # ingestion derives every id from one resolved connection inside one
         # tenant-scoped service - but "no path does this" is a property of
         # today's code, and this is a property of the schema.
         ForeignKeyConstraint(
@@ -263,11 +308,28 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
             name="fk_conversations_tenant_contact",
             ondelete="CASCADE",
         ),
+        # The connection, which for WhatsApp shares its number's id - so this
+        # replaced the key into `whatsapp_accounts` without rewriting a row
+        # (0084, ADR-117). The channel is part of the key.
         ForeignKeyConstraint(
-            ["tenant_id", "account_id"],
-            ["whatsapp_accounts.tenant_id", "whatsapp_accounts.id"],
-            name="fk_conversations_tenant_account",
+            ["tenant_id", "account_id", "channel"],
+            [
+                "channel_connections.tenant_id",
+                "channel_connections.id",
+                "channel_connections.channel",
+            ],
+            name="fk_conversations_tenant_connection",
             ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "contact_id", "participant_identity_id", "channel"],
+            [
+                "contact_identities.tenant_id",
+                "contact_identities.contact_id",
+                "contact_identities.id",
+                "contact_identities.channel",
+            ],
+            name="fk_conversations_tenant_participant",
         ),
         UniqueConstraint("tenant_id", "id", name="uq_conversations_tenant_id_id"),
         # Also redundant as uniqueness, and the target of the lead key that
@@ -278,10 +340,38 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
             "contact_id",
             name="uq_conversations_tenant_id_id_contact_id",
         ),
+        # The target of the key that makes a message's connection its
+        # conversation's connection.
+        UniqueConstraint(
+            "tenant_id",
+            "id",
+            "account_id",
+            name="uq_conversations_tenant_id_id_account_id",
+        ),
     )
 
     contact_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # The channel of `account_id`'s connection, held here so the key above can
+    # make the two agree and a policy can be chosen without a join. The
+    # default is for the compatibility window's older writers and is only ever
+    # right for WhatsApp: a writer that forgets it on another channel is
+    # refused by the connection key, never filed on the wrong channel.
+    channel: Mapped[Channel] = mapped_column(
+        CHANNEL_TYPE,
+        nullable=False,
+        server_default=Channel.WHATSAPP.value,
+    )
+    # Pinned at creation to the identity that wrote. A writer that names none
+    # gets the contact's only identity on this channel from a trigger, and a
+    # contact with none or with several gets no guess - the participant key
+    # refuses the row instead (`FetchedValue`: the value may come back from the
+    # database).
+    participant_identity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+        server_default=FetchedValue(),
+    )
     status: Mapped[ConversationStatus] = mapped_column(
         CONVERSATION_STATUS_TYPE,
         nullable=False,
@@ -367,18 +457,43 @@ event.listen(
 class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     """One message in either direction.
 
-    `wa_message_id` is nullable because an outbound row is written before Meta is
-    called: a send that fails must still leave evidence that it was attempted.
-    It is unique per workspace once set, which is what makes status projection
-    and inbound replay idempotent.
+    `wa_message_id` is the provider's id for this message - the API also calls
+    it `provider_message_id`. Nullable because an outbound row is written before
+    the provider is called: a send that fails must still leave evidence that it
+    was attempted.
+
+    **A provider id is unique per connection**, and that is the identity status
+    projection and inbound replay are judged by (OMNI-005). `connection_id` is
+    the conversation's connection, derived by the database at insert and held
+    to it by a key, so it is never a second fact somebody could set wrongly.
+    The older workspace-wide uniqueness stays until the compatibility cleanup
+    (O8): it is stricter, so it loses nothing for WhatsApp, and it must go
+    before a channel whose ids are only unique per connection ships.
     """
 
     __tablename__ = "messages"
     __table_args__ = (
+        # Legacy, kept until the compatibility cleanup (ADR-120).
         UniqueConstraint(
             "tenant_id",
             "wa_message_id",
             name="uq_messages_tenant_id_wa_message_id",
+        ),
+        # The provider message identity the neutral path is judged by.
+        UniqueConstraint(
+            "tenant_id",
+            "connection_id",
+            "wa_message_id",
+            name="uq_messages_tenant_id_connection_id_wa_message_id",
+        ),
+        # The target of the keys that make a file's message, and an agent
+        # turn's trigger, belong to the same conversation and workspace
+        # (OMNI-022, OMNI-005).
+        UniqueConstraint(
+            "tenant_id",
+            "conversation_id",
+            "id",
+            name="uq_messages_tenant_id_conversation_id_id",
         ),
         Index("ix_messages_tenant_id", "tenant_id"),
         Index("ix_messages_conversation_id_created_at", "conversation_id", "created_at"),
@@ -413,6 +528,13 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             name="fk_messages_tenant_conversation",
             ondelete="CASCADE",
         ),
+        # ...and its connection is that conversation's connection.
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "connection_id"],
+            ["conversations.tenant_id", "conversations.id", "conversations.account_id"],
+            name="fk_messages_tenant_conversation_connection",
+            ondelete="CASCADE",
+        ),
         # One position per conversation. Also the index a transcript is read
         # through, newest first.
         UniqueConstraint(
@@ -423,6 +545,14 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     )
 
     conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # The conversation's connection, written by the sequence trigger below for
+    # every writer that does not name it - which is every writer: a message's
+    # connection is not a choice, it is where its conversation lives.
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+        server_default=FetchedValue(),
+    )
     # Where this message sits in its conversation, assigned by the database at
     # insert (AI-01). The conversation's order is this column and never
     # `created_at`: `created_at` is PostgreSQL's `now()`, which is the start of
@@ -526,20 +656,31 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
 # never persisted: the composite foreign key refuses the row a moment later under
 # its own name, rather than a NOT NULL error describing a symptom.
 #
+# The same statement hands the row its connection (OMNI-005): the conversation's
+# own, read from the row it has just locked. A writer that names a connection
+# keeps it - and the key `fk_messages_tenant_conversation_connection` refuses it
+# if it is not the conversation's. A row naming no conversation here gets its
+# conversation id in place of a connection, which is never persisted for the
+# same reason position 0 is not.
+#
 # Migration 0058 carries its own frozen copy of this text; a change here needs a
-# migration of its own. 0080 pinned its search_path (DB-024).
+# migration of its own. 0080 pinned its search_path (DB-024); 0082 added the
+# connection.
 MESSAGE_SEQUENCE_FUNCTION: Final = """
 CREATE OR REPLACE FUNCTION wasla_assign_message_sequence() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = public, pg_catalog
 AS $$
+DECLARE
+    conversation_connection uuid;
 BEGIN
     UPDATE conversations
        SET last_message_sequence = last_message_sequence + 1
      WHERE id = NEW.conversation_id
        AND tenant_id = NEW.tenant_id
-    RETURNING last_message_sequence INTO NEW.sequence;
+    RETURNING last_message_sequence, account_id INTO NEW.sequence, conversation_connection;
     NEW.sequence = COALESCE(NEW.sequence, 0);
+    NEW.connection_id = COALESCE(NEW.connection_id, conversation_connection, NEW.conversation_id);
     RETURN NEW;
 END;
 $$
@@ -565,3 +706,7 @@ def _install_message_sequence(_target: object, connection: Connection, **_kwargs
 
 
 event.listen(Message.__table__, "after_create", _install_message_sequence)
+# The compatibility triggers of ADR-117/118, for a model-built schema. A
+# migrated one gets them from 0082.
+event.listen(Contact.__table__, "after_create", install_contact_phone_identity)
+event.listen(Conversation.__table__, "after_create", install_conversation_participant)

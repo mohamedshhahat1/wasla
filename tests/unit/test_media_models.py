@@ -9,6 +9,8 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from sqlalchemy import UniqueConstraint
+
 from app.db.models.media import (
     MAX_ATTEMPTS,
     UNRESOLVED_MEDIA_STATUSES,
@@ -69,11 +71,33 @@ def test_the_table_is_tenant_scoped() -> None:
     assert "tenant_id" in as_table(MessageMedia.__table__).columns
 
 
-def test_one_file_per_message() -> None:
-    """A webhook replay must not be able to add a second row for one message."""
-    constraints = {
-        constraint.name
-        for constraint in as_table(MessageMedia.__table__).constraints
+def test_one_file_per_position_in_a_message() -> None:
+    """A replay cannot add a copy; a second attachment has a place of its own.
+
+    This used to pin `UNIQUE(message_id)` - one file per message - which is
+    exactly what lost the second photograph of a Messenger or Instagram message
+    (OMNI-009). The replay protection is unchanged in substance: the position is
+    the provider's order, so a replay names the same one and is refused.
+    """
+    table = as_table(MessageMedia.__table__)
+    by_name = {
+        constraint.name: constraint
+        for constraint in table.constraints
         if constraint.name is not None
     }
-    assert "uq_message_media_message_id" in constraints
+    assert "uq_message_media_message_id" not in by_name
+    position = by_name["uq_message_media_message_id_position"]
+    assert isinstance(position, UniqueConstraint)
+    assert [column.name for column in position.columns] == ["message_id", "position"]
+
+
+def test_a_file_is_keyed_to_its_message_and_conversation_in_its_own_workspace() -> None:
+    """OMNI-022: the audit inserted a file naming another workspace's message."""
+    keys = {
+        key.name: [element.parent.name for element in key.elements]
+        for key in as_table(MessageMedia.__table__).foreign_key_constraints
+    }
+    assert keys["fk_message_media_tenant_message"] == ["tenant_id", "conversation_id", "message_id"]
+    assert keys["fk_message_media_tenant_conversation"] == ["tenant_id", "conversation_id"]
+    assert "fk_message_media_message_id_messages" not in keys
+    assert "fk_message_media_conversation_id_conversations" not in keys

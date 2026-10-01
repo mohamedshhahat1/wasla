@@ -1,4 +1,15 @@
-"""WhatsApp Business accounts and the raw inbound event log.
+"""WhatsApp Business accounts - the WhatsApp extension of a channel connection.
+
+A WhatsApp number is a `ChannelConnection` with the same id. What only WhatsApp
+has lives here: the phone number id, the WhatsApp Business Account, the display
+number, the verified name, the ownership proof and the credential. What every
+connection has - which workspace holds it and since when, whether it is paused
+or given up - is written here during the compatibility window and mirrored to
+`channel_connections` by a trigger in the same statement (ADR-117).
+
+The raw inbound event log that used to be defined here is channel-neutral now
+(`app.db.models.channel_event`); `WhatsAppEvent` and its enums remain as names
+for it.
 
 Two rules govern the account row.
 
@@ -15,26 +26,30 @@ control of it to Meta at claim time. See ADR-037.
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
 
 from sqlalchemy import (
-    CheckConstraint,
     DateTime,
-    ForeignKey,
     Index,
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
+from app.db.models.channel import install_whatsapp_connection_mirror
+from app.db.models.channel_event import (
+    CHANNEL_EVENT_KIND_TYPE,
+    CHANNEL_EVENT_STATE_TYPE,
+    ChannelEvent,
+    ChannelEventKind,
+    ChannelEventState,
+)
 from app.db.models.enums import _enum_type
 
 
@@ -54,28 +69,18 @@ class WhatsAppAccountStatus(StrEnum):
     RELEASED = "released"
 
 
-class WhatsAppEventKind(StrEnum):
-    """What Meta sent. `UNSUPPORTED` is kept rather than dropped."""
-
-    MESSAGE = "message"
-    STATUS = "status"
-    UNSUPPORTED = "unsupported"
-
-
-class WhatsAppEventState(StrEnum):
-    """How far an event has travelled through processing."""
-
-    RECEIVED = "received"
-    PROCESSED = "processed"
-    FAILED = "failed"
-
+# The inbound event log's names from before it served every channel. Aliases,
+# not copies: one class, one table, one enum per database type.
+WhatsAppEventKind = ChannelEventKind
+WhatsAppEventState = ChannelEventState
+WhatsAppEvent = ChannelEvent
 
 WHATSAPP_ACCOUNT_STATUS_TYPE = _enum_type(
     WhatsAppAccountStatus,
     name="whatsapp_account_status",
 )
-WHATSAPP_EVENT_KIND_TYPE = _enum_type(WhatsAppEventKind, name="whatsapp_event_kind")
-WHATSAPP_EVENT_STATE_TYPE = _enum_type(WhatsAppEventState, name="whatsapp_event_state")
+WHATSAPP_EVENT_KIND_TYPE = CHANNEL_EVENT_KIND_TYPE
+WHATSAPP_EVENT_STATE_TYPE = CHANNEL_EVENT_STATE_TYPE
 
 
 class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
@@ -87,7 +92,7 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
 
     The uniqueness is a partial index rather than a constraint, and that is what
     makes handing a number back possible. A released row keeps its history -
-    conversations and messages cascade from this table - while no longer
+    conversations and messages cascade from its connection - while no longer
     occupying the number. A plain `UNIQUE(phone_number_id)` would force the
     choice between deleting a customer's conversation history and never letting
     a number move, which is not a choice anyone should have to make.
@@ -225,62 +230,18 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
         return self.access_token_encrypted is not None
 
 
-class WhatsAppEvent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
-    """One raw webhook event, stored before it is interpreted.
+# The connection row every number has (ADR-117), for a model-built schema. A
+# migrated one gets the trigger from 0082.
+event.listen(WhatsAppAccount.__table__, "after_create", install_whatsapp_connection_mirror)
 
-    The payload is kept whole because Meta adds fields over time and a webhook
-    that discards what it does not yet understand cannot be replayed later.
 
-    `UNIQUE(tenant_id, event_id)` is the idempotency guarantee. It is scoped by
-    workspace rather than globally so one workspace's traffic can never suppress
-    another's. See ADR-011.
-    """
-
-    __tablename__ = "whatsapp_events"
-    # See WhatsAppAccount: the inherited tenant index does not survive a
-    # class-body __table_args__, so it is restated.
-    __table_args__ = (
-        UniqueConstraint(
-            "tenant_id",
-            "event_id",
-            name="uq_whatsapp_events_tenant_id_event_id",
-        ),
-        Index("ix_whatsapp_events_tenant_id", "tenant_id"),
-        Index("ix_whatsapp_events_account_id", "account_id"),
-        Index("ix_whatsapp_events_tenant_id_state", "tenant_id", "state"),
-        # What the retention sweep reads (DB-011): processed events whose raw
-        # payload is still held, oldest first. Partial, so it holds only the
-        # backlog, not every event the platform ever received.
-        Index(
-            "ix_whatsapp_events_redactable",
-            "processed_at",
-            postgresql_where=text("state = 'processed' AND payload IS NOT NULL"),
-        ),
-        # A payload is gone only because retention removed it, and says when.
-        CheckConstraint(
-            "payload IS NOT NULL OR payload_redacted_at IS NOT NULL",
-            name="payload_present_or_redacted",
-        ),
-    )
-
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("whatsapp_accounts.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    event_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    kind: Mapped[WhatsAppEventKind] = mapped_column(WHATSAPP_EVENT_KIND_TYPE, nullable=False)
-    state: Mapped[WhatsAppEventState] = mapped_column(
-        WHATSAPP_EVENT_STATE_TYPE,
-        nullable=False,
-        default=WhatsAppEventState.RECEIVED,
-    )
-    # The webhook exactly as Meta sent it, until retention clears it (DB-011).
-    # NULL only with `payload_redacted_at` set.
-    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    payload_redacted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+__all__ = [
+    "WHATSAPP_ACCOUNT_STATUS_TYPE",
+    "WHATSAPP_EVENT_KIND_TYPE",
+    "WHATSAPP_EVENT_STATE_TYPE",
+    "WhatsAppAccount",
+    "WhatsAppAccountStatus",
+    "WhatsAppEvent",
+    "WhatsAppEventKind",
+    "WhatsAppEventState",
+]

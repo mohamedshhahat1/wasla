@@ -119,6 +119,9 @@ def test_enum_values_match_the_migration_literals() -> None:
         "message",
         "status",
         "unsupported",
+        # Migration 0082. Appended, for the reason above: an echo of the
+        # business's own message, stored and never projected as a customer's.
+        "echo",
     ]
     assert [member.value for member in WhatsAppEventState] == [
         "received",
@@ -207,9 +210,37 @@ def test_the_encrypted_credential_is_nullable() -> None:
 
 def test_tenant_foreign_keys_cascade() -> None:
     for table in (WhatsAppAccount.__table__, WhatsAppEvent.__table__):
-        (foreign_key,) = table.c.tenant_id.foreign_keys
-        assert foreign_key.column.table.name == "tenants"
+        # `tenant_id` is also the first column of the event's connection key
+        # (ADR-100), so the key into `tenants` is picked out by its target.
+        (foreign_key,) = (
+            key for key in table.c.tenant_id.foreign_keys if key.column.table.name == "tenants"
+        )
         assert foreign_key.ondelete == "CASCADE"
+
+
+def test_an_event_is_keyed_to_a_connection_in_its_own_workspace_and_channel() -> None:
+    """The event's connection used to be `whatsapp_accounts.id` alone (OMNI-007)."""
+    keys = {
+        key.name: ([element.parent.name for element in key.elements], key.referred_table.name)
+        for key in as_table(WhatsAppEvent.__table__).foreign_key_constraints
+    }
+    assert keys["fk_whatsapp_events_tenant_connection"] == (
+        ["tenant_id", "account_id", "channel"],
+        "channel_connections",
+    )
+    assert "fk_whatsapp_events_account_id_whatsapp_accounts" not in keys
+
+
+def test_event_idempotency_is_also_scoped_to_the_connection() -> None:
+    """The neutral scope: a provider's event id is unique per connection (ADR-120).
+
+    The workspace-wide key above stays for the compatibility window.
+    """
+    columns = _unique_columns(
+        as_table(WhatsAppEvent.__table__),
+        "uq_whatsapp_events_tenant_id_account_id_event_id",
+    )
+    assert columns == ("tenant_id", "account_id", "event_id")
 
 
 def test_enum_defaults_are_application_side() -> None:
