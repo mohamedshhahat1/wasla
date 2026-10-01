@@ -521,6 +521,11 @@ class MessageRepository(TenantScopedRepository[Message]):
             return existing, False
 
         message = Message(
+            # Named now rather than at insert: the caller hands this id to the
+            # agent queue before anything flushes the row, and a job without it
+            # is refused as unkeyed (TOOL-17) - which is how every live text
+            # message came to be stored and never answered.
+            id=uuid.uuid4(),
             tenant_id=self.tenant_id,
             conversation_id=conversation_id,
             wa_message_id=wa_message_id,
