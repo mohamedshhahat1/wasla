@@ -49,6 +49,7 @@ from app.integrations.whatsapp.adapter import WhatsAppAdapter
 from app.integrations.whatsapp.policy import (
     AGENT_INSTRUCTIONS,
     CLOSED_WINDOW_REFUSAL,
+    WHATSAPP_CAPABILITIES,
     WHATSAPP_TEXT_MAX_CHARS,
     WhatsAppChannelPolicy,
 )
@@ -254,7 +255,7 @@ def test_the_same_reply_is_untouched_on_whatsapp() -> None:
     reply = (ARABIC * 20).strip()
     assert len(reply) < WHATSAPP_TEXT_MAX_CHARS
 
-    assert prepare_channel_reply(reply).text == reply
+    assert prepare_channel_reply(reply, WHATSAPP_CAPABILITIES).text == reply
     assert prepare_channel_reply(reply, BYTE_CAPABILITIES).truncated is True
 
 
@@ -408,3 +409,13 @@ def test_policy_answers_depend_on_the_channel_and_the_time_not_on_whatsapps_cons
     assert whatsapp.follow_up(on_whatsapp, has_text=True, has_template=True, now=now).action is (
         FollowUpAction.TEMPLATE
     )
+
+
+def test_every_adapter_fits_the_request_ceilings() -> None:
+    """The API's pre-channel ceilings are the largest any channel accepts (OMNI-044)."""
+    from app.channels.policy import REQUEST_TEXT_CEILING
+    from tests.channel_fakes import SyntheticAdapter
+
+    for adapter in (WhatsAppAdapter(), SyntheticAdapter(), SyntheticAdapter(tagged=True)):
+        # A byte limit is at least as many characters as it is bytes.
+        assert adapter.policy.capabilities.text_limit <= REQUEST_TEXT_CEILING

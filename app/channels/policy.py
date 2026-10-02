@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Literal, Protocol
+from typing import Final, Literal, Protocol
 
 from app.core.exceptions import ValidationError
 from app.db.models.channel import Channel
@@ -242,6 +242,22 @@ def inoperable_reply_policy(state: ChannelState, policy: ChannelPolicy | None) -
     )
 
 
+#: How a channel is named in a sentence a person reads, where shared code has a
+#: channel but no policy to ask (OMNI-044). WhatsApp's wording is unchanged.
+CHANNEL_DISPLAY_NAMES: Final[Mapping[Channel, str]] = {
+    Channel.WHATSAPP: "WhatsApp",
+    Channel.INSTAGRAM: "Instagram",
+    Channel.MESSENGER: "Messenger",
+}
+
+#: The request ceilings the API applies before any channel is known - the
+#: largest any supported channel accepts, each channel's own limit being applied
+#: by the send itself (OMNI-044). A test holds every adapter within them.
+REQUEST_TEXT_CEILING: Final = 4_096
+REQUEST_CAPTION_CEILING: Final = 1_024
+REQUEST_UPLOAD_CEILING_BYTES: Final = 16 * 1024 * 1024
+
+
 def text_length(text: str, unit: TextUnit) -> int:
     """How long `text` is in `unit`."""
     if unit is TextUnit.UTF8_BYTES:
@@ -407,6 +423,10 @@ def require_sendable_text(body: str, policy: ChannelPolicy) -> None:
 
 
 __all__ = [
+    "CHANNEL_DISPLAY_NAMES",
+    "REQUEST_CAPTION_CEILING",
+    "REQUEST_TEXT_CEILING",
+    "REQUEST_UPLOAD_CEILING_BYTES",
     "ChannelCapabilities",
     "ChannelPolicy",
     "ChannelState",

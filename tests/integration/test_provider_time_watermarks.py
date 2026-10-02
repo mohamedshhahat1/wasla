@@ -101,6 +101,11 @@ async def _deliver(
     await session.flush()
 
 
+async def _status(session: AsyncSession, message: Message) -> MessageStatus:
+    await session.refresh(message)
+    return message.status
+
+
 def _read(at: datetime) -> dict[str, Any]:
     stamp = int(at.timestamp())
     return {"type": "read", "from": READER, "watermark": stamp, "at": stamp}
@@ -142,12 +147,10 @@ async def test_without_a_provider_time_the_tolerance_is_bounded(
     assert message.provider_sent_at is None and message.sent_at is not None
 
     await _deliver(db_session, adapter, connection, _read(message.sent_at - timedelta(seconds=30)))
-    await db_session.refresh(message)
-    assert message.status is MessageStatus.SENT
+    assert await _status(db_session, message) is MessageStatus.SENT
 
     await _deliver(db_session, adapter, connection, _read(message.sent_at - timedelta(seconds=2)))
-    await db_session.refresh(message)
-    assert message.status is MessageStatus.READ
+    assert await _status(db_session, message) is MessageStatus.READ
 
 
 async def test_an_echo_of_the_send_supplies_the_providers_time(

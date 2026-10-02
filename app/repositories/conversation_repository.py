@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.channels.inbound import ReplyAction
-from app.core.exceptions import ConflictError
+from app.channels.policy import CHANNEL_DISPLAY_NAMES
 from app.core.pagination import Cursor
 from app.db.models.channel import Channel, ChannelConnection
 from app.db.models.conversation import (
@@ -189,87 +189,11 @@ class ContactRepository(TenantScopedRepository[Contact]):
     def _tenant_filter(self) -> ColumnElement[bool]:
         return Contact.tenant_id == self.tenant_id
 
-    async def get_by_wa_id(self, wa_id: str) -> Contact | None:
-        return await self._first(self._select().where(Contact.wa_id == wa_id))
-
     async def get_by_id(self, contact_id: uuid.UUID) -> Contact | None:
         return await self._first(self._select().where(Contact.id == contact_id))
 
     async def require_by_id(self, contact_id: uuid.UUID) -> Contact:
         return await self._require(self._select().where(Contact.id == contact_id))
-
-    async def upsert(
-        self,
-        *,
-        wa_id: str,
-        display_name: str | None = None,
-        last_seen_at: datetime | None = None,
-    ) -> Contact:
-        """Find or create the contact, refreshing what Meta told us.
-
-        Meta sends the profile name with inbound traffic and customers change
-        it, so the stored name is refreshed when a newer one arrives. An absent
-        name never erases a known one.
-
-        The read is the fast path; `UNIQUE(tenant_id, wa_id)` is the guarantee.
-        A customer's first two messages can arrive in one burst, and before
-        this handler both deliveries missed the read, both inserted, and the
-        loser's `IntegrityError` became a 500 (MSG-09). The savepoint is what
-        makes the loss recoverable: without it the failed insert poisons the
-        surrounding transaction and the request cannot even answer.
-        """
-        contact = await self.get_by_wa_id(wa_id)
-        if contact is None:
-            contact = await self._insert_contact(
-                wa_id=wa_id,
-                display_name=display_name,
-                last_seen_at=last_seen_at,
-            )
-            if contact is not None:
-                return contact
-            # Somebody else created it between the read and the insert. Their
-            # row is the one that exists, so fall through and refresh it as if
-            # the read had found it - which for this customer it now has.
-            contact = await self.get_by_wa_id(wa_id)
-            if contact is None:  # pragma: no cover - the conflict proves a row
-                raise ConflictError("That contact could not be stored.")
-
-        if display_name is not None:
-            contact.display_name = display_name
-        if last_seen_at is not None and (
-            contact.last_seen_at is None or last_seen_at > contact.last_seen_at
-        ):
-            contact.last_seen_at = last_seen_at
-        return contact
-
-    async def _insert_contact(
-        self,
-        *,
-        wa_id: str,
-        display_name: str | None,
-        last_seen_at: datetime | None,
-    ) -> Contact | None:
-        """Insert, or None if another delivery got there first.
-
-        The savepoint scopes the failure to this statement. Any integrity
-        failure that is not the identity constraint is re-raised, because a
-        duplicate `wa_id` is a race and anything else here is a bug.
-        """
-        contact = Contact(
-            tenant_id=self.tenant_id,
-            wa_id=wa_id,
-            display_name=display_name,
-            last_seen_at=last_seen_at,
-        )
-        try:
-            async with self.session.begin_nested():
-                self.session.add(contact)
-                await self.session.flush()
-        except IntegrityError as error:
-            if CONTACT_IDENTITY_CONSTRAINT not in str(error.orig):
-                raise
-            return None
-        return contact
 
 
 class ConversationRepository(TenantScopedRepository[Conversation]):
@@ -938,6 +862,7 @@ class MessageRepository(TenantScopedRepository[Message]):
         *,
         status: MessageStatus,
         at: datetime,
+        failure_text: str | None = None,
     ) -> Message:
         """Move a message forward, and never backwards.
 
@@ -963,7 +888,7 @@ class MessageRepository(TenantScopedRepository[Message]):
         elif status is MessageStatus.READ and message.read_at is None:
             message.read_at = at
         elif status is MessageStatus.FAILED and message.failure_reason is None:
-            message.failure_reason = PROVIDER_REPORTED_FAILURE
+            message.failure_reason = failure_text or PROVIDER_REPORTED_FAILURE
 
         if _STATUS_ORDER[status] > _STATUS_ORDER[message.status]:
             message.status = status
@@ -971,9 +896,18 @@ class MessageRepository(TenantScopedRepository[Message]):
 
 
 # What a provider `failed` status records when it cannot claim the message.
-# A fixed sentence rather than Meta's own error text: that text can echo
-# fragments of the request, and this column is read back by an API.
-PROVIDER_REPORTED_FAILURE = "WhatsApp reported this message as failed."
+# A fixed sentence rather than the provider's own error text: that text can echo
+# fragments of the request, and this column is read back by an API. Named for
+# the channel where the caller knows it (OMNI-044) - WhatsApp's wording is
+# unchanged - and neutral where it does not.
+PROVIDER_REPORTED_FAILURE = "The provider reported this message as failed."
+
+
+def provider_reported_failure(channel: Channel) -> str:
+    """The failure sentence for a `failed` status on this channel."""
+    name = CHANNEL_DISPLAY_NAMES.get(channel)
+    return f"{name} reported this message as failed." if name else PROVIDER_REPORTED_FAILURE
+
 
 # Only the outbound progression is ordered; the rest share the floor so an
 # unexpected status can never appear to advance a message.

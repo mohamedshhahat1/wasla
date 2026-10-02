@@ -784,9 +784,11 @@ class MessagingService:
                     template_language=template_language,
                 )
                 logger.info(
-                    "whatsapp.outbound_replayed",
+                    "channel.outbound_replayed",
                     extra={
-                        "event": "whatsapp.outbound_replayed",
+                        "event": "channel.outbound_replayed",
+                        # The name dashboards used until OMNI-044; kept a release.
+                        "legacy_event": "whatsapp.outbound_replayed",
                         "conversation_id": str(conversation_id),
                     },
                 )
@@ -846,9 +848,11 @@ class MessagingService:
             # record of a message that may be on somebody's phone, and the one
             # thing that must not follow is another send (ADR-093).
             logger.warning(
-                "whatsapp.outbound_uncertain",
+                "channel.outbound_uncertain",
                 extra={
-                    "event": "whatsapp.outbound_uncertain",
+                    "event": "channel.outbound_uncertain",
+                    # The name dashboards used until OMNI-044; kept a release.
+                    "legacy_event": "whatsapp.outbound_uncertain",
                     "conversation_id": str(conversation_id),
                 },
             )
@@ -1007,8 +1011,13 @@ class MessagingService:
         """
         await self._messages.mark_failed(message, reason=reason)
         logger.warning(
-            "whatsapp.outbound_failed",
-            extra={"conversation_id": str(message.conversation_id)},
+            "channel.outbound_failed",
+            extra={
+                "event": "channel.outbound_failed",
+                # The name dashboards used until OMNI-044; kept a release.
+                "legacy_event": "whatsapp.outbound_failed",
+                "conversation_id": str(message.conversation_id),
+            },
         )
         # The request's commit boundary only commits a session that is in a
         # transaction, and after `released` above this one is not until

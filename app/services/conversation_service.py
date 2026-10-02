@@ -45,6 +45,7 @@ from app.db.models.usage import UsageEventType
 from app.repositories.conversation_repository import (
     ConversationRepository,
     MessageRepository,
+    provider_reported_failure,
 )
 from app.repositories.media_repository import MediaRepository
 from app.services.contact_identity_service import SenderResolution
@@ -310,7 +311,12 @@ class ConversationProjectionService:
             ):
                 # The provider's own time for the send (OMNI-042).
                 message.provider_sent_at = event.occurred_at
-            return self._messages.advance_status(message, status=update.status, at=at)
+            return self._messages.advance_status(
+                message,
+                status=update.status,
+                at=at,
+                failure_text=provider_reported_failure(connection.channel),
+            )
         if update.message_id is not None:
             logger.info(
                 "channel.status_for_unknown_message",

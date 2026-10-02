@@ -36,17 +36,10 @@ from typing import Final
 
 from app.channels.policy import ChannelCapabilities, longest_prefix, text_length
 from app.core.logging import get_logger
-from app.integrations.whatsapp.policy import (
-    MAX_SAFE_AI_WHATSAPP_REPLY_CHARS,
-    WHATSAPP_CAPABILITIES,
-    WHATSAPP_TEXT_MAX_CHARS,
-)
 
 logger = get_logger(__name__)
 
 __all__ = [
-    "MAX_SAFE_AI_WHATSAPP_REPLY_CHARS",
-    "WHATSAPP_TEXT_MAX_CHARS",
     "ChannelReply",
     "fallback_reply",
     "prepare_channel_reply",
@@ -81,15 +74,14 @@ class ChannelReply:
     original_length: int
 
 
-def prepare_channel_reply(
-    text: str, capabilities: ChannelCapabilities = WHATSAPP_CAPABILITIES
-) -> ChannelReply:
+def prepare_channel_reply(text: str, capabilities: ChannelCapabilities) -> ChannelReply:
     """Return one reply the channel will deliver, for `text`.
 
     A reply that already fits is sent exactly as written (trimmed of surrounding
     whitespace). Only a reply over the hard limit is shortened, and the result
-    is always within it - in the channel's own unit. The default is WhatsApp's
-    capabilities, for callers written before the channel was a parameter.
+    is always within it - in the channel's own unit. The channel is always the
+    caller's to name: there is no default, and so no WhatsApp limit applied to
+    another channel by omission (OMNI-044).
     """
     body = text.strip()
     unit = capabilities.text_unit
@@ -134,8 +126,13 @@ def is_mostly_arabic(text: str) -> bool:
     return _mostly_arabic(text)
 
 
+#: How much of a text decides its script: enough for any reply, and a fixed
+#: number rather than one channel's limit (OMNI-044).
+SCRIPT_SAMPLE_CHARS: Final = 4_000
+
+
 def _mostly_arabic(text: str) -> bool:
-    sample = text[:MAX_SAFE_AI_WHATSAPP_REPLY_CHARS]
+    sample = text[:SCRIPT_SAMPLE_CHARS]
     arabic = sum(1 for character in sample if _is_arabic(character))
     latin = sum(1 for character in sample if character.isascii() and character.isalpha())
     return arabic > latin

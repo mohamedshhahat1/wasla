@@ -17,6 +17,7 @@ from typing import Any, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.channels.policy import (
+    REQUEST_TEXT_CEILING,
     ChannelState,
     OutOfWindow,
     ReplyPolicy,
@@ -38,14 +39,12 @@ from app.db.models.conversation import (
 from app.db.models.sentiment import ConversationPriority, SentimentLabel
 from app.schemas.bounds import TEMPLATE_COMPONENTS, check_json
 from app.schemas.text import StorableText
-from app.services.messaging_service import WHATSAPP_TEXT_MAX_CHARS
 
-# Meta's own limit for a text body, taken from the service that enforces it
-# rather than restated here. Two copies of a provider's limit drift, and the
-# copy that drifts is the one nobody is testing: the schema rejects early and
-# politely, `MessagingService.send_text` is the guarantee, and they have to be
-# the same number for the first to mean anything (MSG-25).
-MAX_TEXT_LENGTH = WHATSAPP_TEXT_MAX_CHARS
+# The largest text any supported channel accepts, before the conversation's
+# channel is known (OMNI-044). The schema rejects early and politely;
+# `MessagingService.send_text` applies the channel's own limit, in its own unit,
+# and is the guarantee (MSG-25). A test holds every adapter within this.
+MAX_TEXT_LENGTH = REQUEST_TEXT_CEILING
 
 
 class SendTextRequest(BaseModel):
