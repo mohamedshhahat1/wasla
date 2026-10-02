@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import ColumnElement, Select, and_, case, func, or_, select, update
@@ -684,6 +684,8 @@ class MessageRepository(TenantScopedRepository[Message]):
     ) -> Message:
         """Stage a reply the business sent from outside Wasla, reported back as an echo (OMNI-037).
 
+        Its time is the provider's - the echo's own timestamp (OMNI-042).
+
         Outbound and already sent - the provider delivered it - so it carries
         the sent state and its provider id, and never a delivery protocol of
         Wasla's own: nothing here may send it again.
@@ -700,6 +702,7 @@ class MessageRepository(TenantScopedRepository[Message]):
             delivery_state=MessageDeliveryState.SENT,
             body=body,
             sent_at=sent_at,
+            provider_sent_at=sent_at,
             origin=MessageOrigin.EXTERNAL,
         )
         return self.add(message)
@@ -729,8 +732,17 @@ class MessageRepository(TenantScopedRepository[Message]):
         connection_id: uuid.UUID,
         status: MessageStatus,
         watermark: datetime,
+        tolerance: timedelta = timedelta(0),
     ) -> int:
         """Advance every outbound message sent at or before `watermark` - and nothing else.
+
+        **Compared on the provider's clock** (OMNI-042). Messenger's watermark
+        is "all messages sent before or at this timestamp", in Meta's time;
+        `sent_at` is Wasla's, taken after the Send API answered, so the newest
+        message - the one a person actually just read - sat a round trip after
+        the watermark and was never marked read. `provider_sent_at` is the
+        comparison where the provider gave one; otherwise `sent_at` less a
+        small, bounded `tolerance`.
 
         A provider that reports receipts as a watermark ("everything sent before
         this instant was read") names no message (OMNI-011). Only this
@@ -746,7 +758,16 @@ class MessageRepository(TenantScopedRepository[Message]):
                 Message.connection_id == connection_id,
                 Message.direction == MessageDirection.OUTBOUND,
                 Message.sent_at.is_not(None),
-                Message.sent_at <= watermark,
+                or_(
+                    and_(
+                        Message.provider_sent_at.is_not(None),
+                        Message.provider_sent_at <= watermark,
+                    ),
+                    and_(
+                        Message.provider_sent_at.is_(None),
+                        Message.sent_at <= watermark + tolerance,
+                    ),
+                ),
             )
         )
         advanced = 0
@@ -869,10 +890,12 @@ class MessageRepository(TenantScopedRepository[Message]):
         *,
         wa_message_id: str,
         sent_at: datetime,
+        provider_sent_at: datetime | None = None,
     ) -> Message:
         message.wa_message_id = wa_message_id
         message.status = MessageStatus.SENT
         message.sent_at = sent_at
+        message.provider_sent_at = provider_sent_at
         message.delivery_state = MessageDeliveryState.SENT
         return message
 

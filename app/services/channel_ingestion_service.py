@@ -35,7 +35,7 @@ import uuid
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 from redis.exceptions import RedisError
@@ -70,6 +70,7 @@ from app.repositories.conversation_repository import (
 from app.repositories.media_repository import MediaRepository
 from app.services.contact_identity_service import ContactIdentityService
 from app.services.conversation_service import (
+    DEFAULT_WATERMARK_TOLERANCE,
     ConversationProjectionService,
     EchoKind,
     ProjectionOutcome,
@@ -184,7 +185,11 @@ class ChannelIngestionService:
         adapter: ChannelAdapter,
         queue: AgentQueue | None = None,
         media_queue: MediaQueue | None = None,
+        watermark_tolerance: timedelta = DEFAULT_WATERMARK_TOLERANCE,
     ) -> None:
+        """`watermark_tolerance` is `WATERMARK_CLOCK_TOLERANCE_SECONDS`, for a
+        channel whose reads arrive as a watermark (OMNI-042)."""
+        self._watermark_tolerance = watermark_tolerance
         self._session = session
         self._adapter = adapter
         self._queue = queue
@@ -347,7 +352,9 @@ class ChannelIngestionService:
         step.stored += 1
         record = stored.event
         projection = ConversationProjectionService(
-            session=self._session, tenant_id=connection.tenant_id
+            session=self._session,
+            tenant_id=connection.tenant_id,
+            watermark_tolerance=self._watermark_tolerance,
         )
 
         if event.kind is InboundKind.ECHO:

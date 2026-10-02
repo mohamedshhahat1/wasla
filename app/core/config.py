@@ -593,6 +593,11 @@ class Settings(BaseSettings):
     # fetches media by URL (OMNI-040, ADR-128). Long enough for the provider to
     # fetch it; never more than an hour, whatever is set.
     media_signed_url_ttl_seconds: int = Field(default=600, ge=1, le=3600)
+    # How far Wasla's own send clock may run ahead of a provider's when a read
+    # watermark is compared with a message the provider never timestamped
+    # (OMNI-042). Seconds, and bounded: a watermark is never taken to cover a
+    # message sent well after it.
+    watermark_clock_tolerance_seconds: int = Field(default=5, ge=0, le=60)
     # How long an upload intent must sit untouched before reconciliation treats
     # it as abandoned rather than in progress (ADR-087).
     #

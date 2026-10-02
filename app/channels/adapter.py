@@ -119,6 +119,8 @@ class ProviderReceipt:
 
     message_id: str
     raw: Mapping[str, Any] = field(default_factory=dict)
+    #: When the provider says it sent the message, if its answer says (OMNI-042).
+    sent_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

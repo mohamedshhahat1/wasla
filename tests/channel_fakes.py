@@ -186,6 +186,9 @@ class SendLog:
     fetched: list[str] = field(default_factory=list)
     #: When set, the provider declines every send before reading it.
     refuse: bool = False
+    #: How far the provider's clock is behind Wasla's when it timestamps a send;
+    #: None for a provider whose send answer carries no time (OMNI-042).
+    provider_clock_lag: timedelta | None = None
 
 
 @dataclass
@@ -210,7 +213,12 @@ class _Sender:
         self.log.contexts.append(context)
         if self.log.refuse:
             raise SendNotAttemptedError("The synthetic provider declined the message.")
-        return ProviderReceipt(message_id=f"syn.out.{uuid.uuid4().hex}")
+        stamped = (
+            datetime.now(UTC) - self.log.provider_clock_lag
+            if self.log.provider_clock_lag is not None
+            else None
+        )
+        return ProviderReceipt(message_id=f"syn.out.{uuid.uuid4().hex}", sent_at=stamped)
 
 
 @dataclass

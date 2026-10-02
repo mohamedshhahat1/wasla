@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +38,7 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageOrigin,
+    MessageStatus,
 )
 from app.db.models.media import MediaLocatorKind
 from app.db.models.usage import UsageEventType
@@ -50,6 +51,11 @@ from app.services.contact_identity_service import SenderResolution
 from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
+
+
+#: How far Wasla's send clock may run ahead of a provider's for a message the
+#: provider never timestamped (OMNI-042); `WATERMARK_CLOCK_TOLERANCE_SECONDS`.
+DEFAULT_WATERMARK_TOLERANCE = timedelta(seconds=5)
 
 
 class ProjectionOutcome(StrEnum):
@@ -93,9 +99,16 @@ class EchoOutcome:
 class ConversationProjectionService:
     """Turns one stored event into conversation and message rows, in one workspace."""
 
-    def __init__(self, *, session: AsyncSession, tenant_id: uuid.UUID) -> None:
+    def __init__(
+        self,
+        *,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        watermark_tolerance: timedelta = DEFAULT_WATERMARK_TOLERANCE,
+    ) -> None:
         self._session = session
         self._tenant_id = tenant_id
+        self._watermark_tolerance = watermark_tolerance
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._media = MediaRepository(session, tenant_id=tenant_id)
@@ -237,6 +250,10 @@ class ConversationProjectionService:
         )
         if existing is not None:
             if existing.direction is MessageDirection.OUTBOUND:
+                # Wasla's own send: the echo carries the provider's own time
+                # for it, which a read watermark is compared with (OMNI-042).
+                if existing.provider_sent_at is None and event.occurred_at is not None:
+                    existing.provider_sent_at = event.occurred_at
                 return EchoOutcome(EchoKind.OWN, message=existing)
             return EchoOutcome(EchoKind.ORPHAN)
         if conversation is None:
@@ -279,14 +296,22 @@ class ConversationProjectionService:
             return None
 
         at = event.occurred_at or datetime.now(UTC)
-        if message is not None:
-            return self._messages.advance_status(message, status=update.status, at=at)
-        if update.message_id is not None:
+        if message is None and update.message_id is not None:
             found = await self._messages.find_provider_message(
                 connection_id=connection.id, provider_message_id=update.message_id
             )
             if found is not None and found.direction is MessageDirection.OUTBOUND:
-                return self._messages.advance_status(found, status=update.status, at=at)
+                message = found
+        if message is not None:
+            if (
+                update.status is MessageStatus.SENT
+                and message.provider_sent_at is None
+                and event.occurred_at is not None
+            ):
+                # The provider's own time for the send (OMNI-042).
+                message.provider_sent_at = event.occurred_at
+            return self._messages.advance_status(message, status=update.status, at=at)
+        if update.message_id is not None:
             logger.info(
                 "channel.status_for_unknown_message",
                 extra={"event": "channel.status_for_unknown_message"},
@@ -309,6 +334,7 @@ class ConversationProjectionService:
             connection_id=connection.id,
             status=update.status,
             watermark=update.watermark,
+            tolerance=self._watermark_tolerance,
         )
 
     def _collision(self, connection: ChannelConnection, existing: Message) -> ProjectedMessage:

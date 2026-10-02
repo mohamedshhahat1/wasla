@@ -649,6 +649,13 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         nullable=True,
     )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the provider says it sent this message, on the provider's clock - a
+    # send receipt, an echo or a `sent` status. `sent_at` is Wasla's clock,
+    # taken after the provider answered, and a read watermark ("everything sent
+    # at or before this instant was read") is the provider's (OMNI-042).
+    provider_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)

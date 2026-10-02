@@ -946,6 +946,9 @@ class MessagingService:
             message,
             wa_message_id=outcome.message_id,
             sent_at=now,
+            # The provider's own time for it, where its answer gives one
+            # (OMNI-042); an echo or a `sent` status may fill it in later.
+            provider_sent_at=outcome.sent_at,
         )
         # Forward only (OMNI-036): a send never moves the inbox order back.
         await self._conversations.touch_outbound(conversation, at=now)
