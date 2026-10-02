@@ -345,7 +345,7 @@ def test_a_channel_without_a_decided_meter_cannot_be_registered(
 ) -> None:
     """M-E31's killer. A label added to the vocabulary with no meter must not
     go live uncounted: the registry refuses its adapter."""
-    decided = registry_module.message_meters
+    decided = message_meters
     monkeypatch.setattr(
         registry_module,
         "message_meters",

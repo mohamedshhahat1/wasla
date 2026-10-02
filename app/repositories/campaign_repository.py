@@ -31,6 +31,7 @@ from app.db.models.campaign import (
 from app.db.models.conversation import Contact, Conversation, Message, MessageStatus
 from app.db.models.lead import Lead, LeadStatus
 from app.repositories.base import BaseRepository, TenantScopedRepository
+from app.repositories.consent_repository import refused
 
 # How many campaigns one sweep takes on. Small: each one then sends a batch, and
 # a worker holding twenty campaigns' rows locked while it talks to Meta is
@@ -331,9 +332,10 @@ class AudienceRepository(TenantScopedRepository[Contact]):
     """Who a campaign of this workspace is allowed to reach.
 
     The base population is the rule, and it is written once, here: contacts with
-    an existing conversation on the sending number who have not opted out. There
-    is no route that uploads a list of phone numbers, and this is why — a
-    campaign can only reach someone who chose to write to this business.
+    an existing conversation on the sending number who have not opted out on
+    its channel (ENT-19). There is no route that uploads a list of phone
+    numbers, and this is why — a campaign can only reach someone who chose to
+    write to this business.
     """
 
     model = Contact
@@ -353,9 +355,10 @@ class AudienceRepository(TenantScopedRepository[Contact]):
             .where(
                 Conversation.tenant_id == self.tenant_id,
                 Conversation.account_id == account_id,
-                # The opt-out check. Not a filter a caller can turn off: it is
-                # part of the base population.
-                Contact.marketing_opt_out_at.is_(None),
+                # The opt-out check, on the conversation's channel - the
+                # sending connection's. Not a filter a caller can turn off: it
+                # is part of the base population.
+                ~refused(self.tenant_id, Contact.id, Conversation.channel),
             )
         )
 

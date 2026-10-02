@@ -34,6 +34,7 @@ from app.db.models.campaign import (
     CampaignStatus,
     OptOutSource,
 )
+from app.db.models.channel import Channel
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -60,6 +61,7 @@ from app.repositories.campaign_repository import (
 )
 from app.schemas.campaign import CampaignRead
 from app.services.campaign_service import CampaignService
+from tests.consent import seed_opt_out
 from tests.fakes import as_messaging
 
 pytestmark = pytest.mark.integration
@@ -183,14 +185,11 @@ async def _customer(
     with_conversation: bool = True,
 ) -> Contact:
     """A contact, and by default the conversation that makes them reachable."""
-    contact = Contact(
-        tenant_id=tenant.id,
-        wa_id=wa_id,
-        marketing_opt_out_at=datetime.now(UTC) if opted_out else None,
-        opt_out_source=OptOutSource.CUSTOMER if opted_out else None,
-    )
+    contact = Contact(tenant_id=tenant.id, wa_id=wa_id)
     session.add(contact)
     await session.flush()
+    if opted_out:
+        await seed_opt_out(session, tenant_id=tenant.id, contact_id=contact.id)
 
     if with_conversation:
         session.add(
@@ -615,6 +614,7 @@ async def test_somebody_who_opts_out_mid_campaign_is_skipped(db_session: AsyncSe
     ).list_for_campaign(campaign.id)
     await service.set_opt_out(
         contact_id=recipients[0].contact_id,
+        channel=Channel.WHATSAPP,
         source=OptOutSource.CUSTOMER,
     )
     await db_session.flush()

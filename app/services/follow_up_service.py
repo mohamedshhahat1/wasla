@@ -100,6 +100,7 @@ from app.db.models.follow_up import (
 )
 from app.db.models.lead import ActorKind
 from app.db.models.tenant import Tenant
+from app.repositories.consent_repository import ContactConsentRepository
 from app.repositories.conversation_repository import (
     ContactRepository,
     ConversationRepository,
@@ -806,11 +807,13 @@ class FollowUpService:
             # does not include. Terminal, like every policy refusal here.
             return self._skip(follow_up, CHANNEL_NOT_IN_PLAN_DETAIL)
 
-        contact = await self._contacts.require_by_id(conversation.contact_id)
-        if not contact.accepts_campaigns:
+        if not await ContactConsentRepository(
+            self._session, tenant_id=self._tenant_id
+        ).accepts_marketing(conversation.contact_id, conversation.channel):
             # Re-read here rather than trusted from scheduling, exactly as the
             # campaign sweep does: somebody who says STOP after the nudge was
-            # scheduled must not receive it (MSG-06).
+            # scheduled must not receive it (MSG-06) - on this conversation's
+            # channel, where the nudge would go (ENT-19).
             return self._skip(
                 follow_up,
                 "The customer has opted out of automated messages.",

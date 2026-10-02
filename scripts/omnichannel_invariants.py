@@ -191,9 +191,11 @@ CENSUS: tuple[Check, ...] = (
         " JOIN messages m ON m.tenant_id = e.tenant_id AND m.connection_id = e.account_id"
         " AND m.wa_message_id = e.event_id AND m.direction = 'inbound'"
         " JOIN conversations v ON v.tenant_id = m.tenant_id AND v.id = m.conversation_id"
-        " JOIN contacts c ON c.tenant_id = v.tenant_id AND c.id = v.contact_id"
+        # The tap was on WhatsApp: its consent there is what it speaks for (ENT-19).
+        " LEFT JOIN contact_channel_consents k ON k.tenant_id = v.tenant_id"
+        " AND k.contact_id = v.contact_id AND k.channel = 'whatsapp'"
         " WHERE e.kind = 'message' AND e.payload IS NOT NULL"
-        " AND c.marketing_opt_out_at IS NULL"
+        " AND k.marketing_opt_out_at IS NULL"
         " AND lower(btrim(coalesce(e.payload #>> '{button,text}',"
         " e.payload #>> '{interactive,button_reply,title}',"
         " e.payload #>> '{interactive,list_reply,title}'))) IN ('no more messages',"

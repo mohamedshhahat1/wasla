@@ -29,14 +29,17 @@ from app.db.models.campaign import (
     CampaignRecipient,
     CampaignStatus,
     OptOutSource,
+    OptOutVia,
     RecipientStatus,
 )
 from app.db.models.channel import Channel, ContactIdentity, IdentityKind
+from app.db.models.consent import ContactChannelConsent
 from app.db.models.conversation import Contact
 from app.db.models.lead import LeadStatus
 from app.repositories.campaign_repository import AudienceFilter, CampaignStatistics
 from app.schemas.text import StorableText
 from app.services.campaign_service import MAX_AUDIENCE_SIZE
+from app.services.entitlement_terms import ordered
 
 # How many variables a template can plausibly want. Meta's own limit is higher;
 # this is a bound on a request body, not a statement about templates.
@@ -117,6 +120,9 @@ class CampaignScheduleRequest(_Payload):
 
 
 class OptOutRequest(_Payload):
+    """Who decided, and on which channel (ENT-19): an opt-out is never person-wide."""
+
+    channel: Channel
     source: OptOutSource = OptOutSource.TEAM
 
 
@@ -211,13 +217,32 @@ class ContactIdentityRead(BaseModel):
         )
 
 
-class ContactOptOutRead(BaseModel):
-    """A person's campaign opt-out, and every identity it covers.
+class ChannelConsentRead(BaseModel):
+    """A person's marketing consent on one channel, and the identities it covers (ENT-19).
 
-    The opt-out is the person's - the contact's - not one identifier's (ADR-122),
-    so `identities` lists everything it applies to. `wa_id` is the WhatsApp
-    phone number when there is one, and null for a customer WhatsApp knows only
-    by username (OMNI-002).
+    A STOP on WhatsApp covers every WhatsApp number of the workspace and each
+    way WhatsApp addresses the person - phone and business-scoped id alike -
+    and nothing on another channel.
+    """
+
+    channel: Channel
+    opted_out: bool
+    marketing_opt_out_at: datetime | None
+    opt_out_source: OptOutSource | None
+    opt_out_via: OptOutVia | None
+    resumed_at: datetime | None
+    identities: list[ContactIdentityRead]
+
+
+class ContactOptOutRead(BaseModel):
+    """A person's marketing consent, channel by channel (ENT-19).
+
+    `channels` has one entry for every channel the person has an identity or a
+    recorded consent on, in vocabulary order; a channel with no entry has
+    never been written on and never opted out. `identities` lists every
+    identity, whatever its channel. `wa_id` is the WhatsApp phone number when
+    there is one, and null for a customer WhatsApp knows only by username
+    (OMNI-002).
     """
 
     id: uuid.UUID
@@ -229,18 +254,42 @@ class ContactOptOutRead(BaseModel):
         ),
     )
     display_name: str | None
-    marketing_opt_out_at: datetime | None
-    opt_out_source: OptOutSource | None
+    channels: list[ChannelConsentRead]
     identities: list[ContactIdentityRead]
 
     @classmethod
-    def from_model(cls, contact: Contact, *, identities: Sequence[ContactIdentity]) -> Self:
+    def from_model(
+        cls,
+        contact: Contact,
+        *,
+        identities: Sequence[ContactIdentity],
+        consents: Sequence[ContactChannelConsent],
+    ) -> Self:
+        by_channel = {consent.channel: consent for consent in consents}
+        present = {identity.channel for identity in identities} | set(by_channel)
+        channels = []
+        for channel in ordered(present):
+            consent = by_channel.get(channel)
+            channels.append(
+                ChannelConsentRead(
+                    channel=channel,
+                    opted_out=consent is not None and not consent.accepts_marketing,
+                    marketing_opt_out_at=consent.marketing_opt_out_at if consent else None,
+                    opt_out_source=consent.opt_out_source if consent else None,
+                    opt_out_via=consent.opt_out_via if consent else None,
+                    resumed_at=consent.resumed_at if consent else None,
+                    identities=[
+                        ContactIdentityRead.from_model(identity)
+                        for identity in identities
+                        if identity.channel is channel
+                    ],
+                )
+            )
         return cls(
             id=contact.id,
             wa_id=contact.wa_id,
             display_name=contact.display_name,
-            marketing_opt_out_at=contact.marketing_opt_out_at,
-            opt_out_source=contact.opt_out_source,
+            channels=channels,
             identities=[ContactIdentityRead.from_model(identity) for identity in identities],
         )
 
@@ -256,6 +305,7 @@ __all__ = [
     "CampaignRead",
     "CampaignScheduleRequest",
     "CampaignStatisticsRead",
+    "ChannelConsentRead",
     "ContactIdentityRead",
     "ContactOptOutRead",
     "OptOutRequest",

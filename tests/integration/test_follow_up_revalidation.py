@@ -43,7 +43,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.db.models.campaign import OptOutSource
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -65,6 +64,7 @@ from app.db.models.whatsapp import WhatsAppAccount
 from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
 from app.workers.follow_up_worker import FollowUpWorker
+from tests.consent import seed_opt_out
 
 pytestmark = pytest.mark.integration
 
@@ -139,14 +139,11 @@ async def _scenario(
         display_phone_number="+201000000001",
         ownership_started_at=datetime.now(UTC) - timedelta(days=1),
     )
-    contact = Contact(
-        tenant_id=tenant.id,
-        wa_id=f"2015{uuid.uuid4().int % 10_000_000:07d}",
-        marketing_opt_out_at=datetime.now(UTC) if opted_out else None,
-        opt_out_source=OptOutSource.CUSTOMER if opted_out else None,
-    )
+    contact = Contact(tenant_id=tenant.id, wa_id=f"2015{uuid.uuid4().int % 10_000_000:07d}")
     session.add_all([account, contact])
     await session.flush()
+    if opted_out:
+        await seed_opt_out(session, tenant_id=tenant.id, contact_id=contact.id)
 
     conversation = Conversation(
         tenant_id=tenant.id,

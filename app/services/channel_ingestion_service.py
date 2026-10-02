@@ -80,7 +80,7 @@ from app.services.conversation_service import (
 from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
 from app.services.media_outcomes import MediaReason, status_for, text_for
-from app.services.opt_out import is_stop_request, record_opt_out
+from app.services.opt_out import is_stop_request, record_opt_out, record_resume
 from app.workers.media_queue import MediaJob, MediaQueue
 from app.workers.queue import AgentJob, AgentQueue
 
@@ -477,12 +477,15 @@ class ChannelIngestionService:
             session=self._session, tenant_id=connection.tenant_id
         ).cancel_for_conversation(conversation_id=message.conversation_id)
         # A customer asking to stop is honoured here rather than by a worker.
+        # On this connection's channel only (ENT-19).
         if opt_out_tap:
-            self._record_opt_out(
-                sender.contact, via=OptOutVia.REPLY_ACTION, at=occurred_at, step=step
+            await self._record_opt_out(
+                connection, sender.contact, via=OptOutVia.REPLY_ACTION, at=occurred_at, step=step
             )
         elif is_stop_request(event.text):
-            self._record_opt_out(sender.contact, via=OptOutVia.MESSAGE, at=occurred_at, step=step)
+            await self._record_opt_out(
+                connection, sender.contact, via=OptOutVia.MESSAGE, at=occurred_at, step=step
+            )
 
     async def _project_echo(
         self,
@@ -537,6 +540,7 @@ class ChannelIngestionService:
         A resume is recorded as a re-admission, and lifts only an opt-out the
         provider's own preference record made - a stop word or a tap the
         customer sent this business is theirs, not the provider's, to undo.
+        Both on this connection's channel alone (ENT-19).
         """
         preference = event.preference
         if preference is None or preference.category != MARKETING_CATEGORY:
@@ -546,14 +550,20 @@ class ChannelIngestionService:
             return
         at = event.occurred_at or datetime.now(UTC)
         if preference.value == "stop":
-            self._record_opt_out(contact, via=OptOutVia.PROVIDER_PREFERENCE, at=at, step=step)
+            await self._record_opt_out(
+                connection, contact, via=OptOutVia.PROVIDER_PREFERENCE, at=at, step=step
+            )
         elif preference.value == "resume":
-            if contact.marketing_resumed_at is None or contact.marketing_resumed_at < at:
-                contact.marketing_resumed_at = at
-            if contact.opt_out_via is OptOutVia.PROVIDER_PREFERENCE:
-                contact.marketing_opt_out_at = None
-                contact.opt_out_source = None
-                contact.opt_out_via = None
+            await record_resume(
+                self._session,
+                tenant_id=connection.tenant_id,
+                contact_id=contact.id,
+                channel=connection.channel,
+                source=OptOutSource.CUSTOMER,
+                via=OptOutVia.PROVIDER_PREFERENCE,
+                at=at,
+                lifts=frozenset({OptOutVia.PROVIDER_PREFERENCE}),
+            )
 
     async def _contact_of(
         self, connection: ChannelConnection, sender: tuple[Identifier, ...]
@@ -633,15 +643,31 @@ class ChannelIngestionService:
             media.last_error = text_for(MediaReason.CHANNEL_UNAVAILABLE)
             media.processed_at = datetime.now(UTC)
 
-    @staticmethod
-    def _record_opt_out(contact: Contact, *, via: OptOutVia, at: datetime, step: _Step) -> None:
-        """Opt the sender out of campaigns, through the one writer every route uses.
+    async def _record_opt_out(
+        self,
+        connection: ChannelConnection,
+        contact: Contact,
+        *,
+        via: OptOutVia,
+        at: datetime,
+        step: _Step,
+    ) -> None:
+        """Opt the sender out of marketing on this channel, through the one writer.
 
         The sender's own contact, as resolved from what the provider said - not
         a lookup by a phone column, which a username sender does not have.
-        Dated by the provider's timestamp: when the customer asked.
+        Dated by the provider's timestamp: when the customer asked. The
+        connection's channel, and every connection of it (ENT-19).
         """
-        if record_opt_out(contact, source=OptOutSource.CUSTOMER, via=via, at=at):
+        if await record_opt_out(
+            self._session,
+            tenant_id=connection.tenant_id,
+            contact_id=contact.id,
+            channel=connection.channel,
+            source=OptOutSource.CUSTOMER,
+            via=via,
+            at=at,
+        ):
             step.opted_out += 1
             step.opt_outs_by_via[via.value] += 1
 

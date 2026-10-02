@@ -16,11 +16,13 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models.campaign import OptOutSource, OptOutVia
+from app.db.models.channel import Channel
+from app.db.models.consent import ContactChannelConsent
 from app.db.models.conversation import Contact, Message
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
@@ -28,6 +30,7 @@ from app.db.session import Database
 from app.services.campaign_service import CampaignService
 from app.services.opt_out_recovery import recover_button_opt_outs
 from app.services.whatsapp_service import WhatsAppIngestionService
+from tests.consent import consent_of, opted_out_at
 from tests.integration.test_omnichannel_reply_actions import (
     CUSTOMER,
     _button,
@@ -61,9 +64,9 @@ async def _lost_tap(
     )
     assert contact is not None
     # Undo what the fixed live path did, to stand where production stands.
-    contact.marketing_opt_out_at = None
-    contact.opt_out_source = None
-    contact.opt_out_via = None
+    await session.execute(
+        delete(ContactChannelConsent).where(ContactChannelConsent.contact_id == contact.id)
+    )
     message = await session.scalar(
         select(Message).where(
             Message.tenant_id == account.tenant_id,
@@ -80,6 +83,19 @@ async def _lost_tap(
     return contact
 
 
+async def _resumed(session: AsyncSession, contact: Contact, *, at: datetime) -> None:
+    """A re-admission on WhatsApp, recorded at `at`, as a colleague's would be."""
+    session.add(
+        ContactChannelConsent(
+            tenant_id=contact.tenant_id,
+            contact_id=contact.id,
+            channel=Channel.WHATSAPP,
+            resumed_at=at,
+        )
+    )
+    await session.flush()
+
+
 async def test_the_replay_counts_in_a_dry_run_and_writes_nothing(db_session: AsyncSession) -> None:
     account = await _number(db_session)
     contact = await _lost_tap(db_session, account)
@@ -88,7 +104,7 @@ async def test_the_replay_counts_in_a_dry_run_and_writes_nothing(db_session: Asy
 
     counts = report.by_workspace[account.tenant_id]
     assert (counts.candidates, counts.applied) == (1, 1)
-    assert contact.marketing_opt_out_at is None
+    assert await opted_out_at(db_session, contact.id) is None
 
 
 async def test_the_replay_applies_once_dated_by_the_tap(db_session: AsyncSession) -> None:
@@ -100,38 +116,38 @@ async def test_the_replay_applies_once_dated_by_the_tap(db_session: AsyncSession
     second = await recover_button_opt_outs(db_session, apply=True)
 
     assert first.by_workspace[account.tenant_id].applied == 1
-    assert contact.marketing_opt_out_at == tapped_at
-    assert contact.opt_out_source is OptOutSource.CUSTOMER
-    assert contact.opt_out_via is OptOutVia.REPLAY
+    consent = await consent_of(db_session, contact.id)
+    assert consent is not None and consent.marketing_opt_out_at == tapped_at
+    assert consent.channel is Channel.WHATSAPP
+    assert consent.opt_out_source is OptOutSource.CUSTOMER
+    assert consent.opt_out_via is OptOutVia.REPLAY
     # A second apply changes nothing.
     assert second.by_workspace[account.tenant_id].applied == 0
     assert second.by_workspace[account.tenant_id].already_opted_out == 1
-    assert contact.marketing_opt_out_at == tapped_at
+    assert await opted_out_at(db_session, contact.id) == tapped_at
 
 
 async def test_a_newer_resume_wins_over_older_evidence(db_session: AsyncSession) -> None:
     account = await _number(db_session)
     contact = await _lost_tap(db_session, account, tapped_at=datetime.now(UTC) - timedelta(days=4))
-    contact.marketing_resumed_at = datetime.now(UTC) - timedelta(days=1)
-    await db_session.flush()
+    await _resumed(db_session, contact, at=datetime.now(UTC) - timedelta(days=1))
 
     report = await recover_button_opt_outs(db_session, apply=True)
 
     counts = report.by_workspace[account.tenant_id]
     assert (counts.applied, counts.skipped_newer_resume) == (0, 1)
-    assert contact.marketing_opt_out_at is None
+    assert await opted_out_at(db_session, contact.id) is None
 
 
 async def test_an_older_resume_does_not_protect_a_later_tap(db_session: AsyncSession) -> None:
     account = await _number(db_session)
     contact = await _lost_tap(db_session, account, tapped_at=datetime.now(UTC) - timedelta(days=1))
-    contact.marketing_resumed_at = datetime.now(UTC) - timedelta(days=4)
-    await db_session.flush()
+    await _resumed(db_session, contact, at=datetime.now(UTC) - timedelta(days=4))
 
     report = await recover_button_opt_outs(db_session, apply=True)
 
     assert report.by_workspace[account.tenant_id].applied == 1
-    assert contact.marketing_opt_out_at is not None
+    assert await opted_out_at(db_session, contact.id) is not None
 
 
 async def test_a_colleague_clearing_the_opt_out_is_a_resume_the_replay_respects(
@@ -140,14 +156,16 @@ async def test_a_colleague_clearing_the_opt_out_is_a_resume_the_replay_respects(
     account = await _number(db_session)
     contact = await _lost_tap(db_session, account, tapped_at=datetime.now(UTC) - timedelta(days=2))
     campaigns = CampaignService(session=db_session, tenant_id=account.tenant_id)
-    await campaigns.set_opt_out(contact_id=contact.id, source=OptOutSource.CUSTOMER)
-    await campaigns.clear_opt_out(contact.id)
+    await campaigns.set_opt_out(
+        contact_id=contact.id, channel=Channel.WHATSAPP, source=OptOutSource.CUSTOMER
+    )
+    await campaigns.clear_opt_out(contact.id, channel=Channel.WHATSAPP)
     await db_session.flush()
 
     report = await recover_button_opt_outs(db_session, apply=True)
 
     assert report.by_workspace[account.tenant_id].skipped_newer_resume == 1
-    assert contact.marketing_opt_out_at is None
+    assert await opted_out_at(db_session, contact.id) is None
 
 
 async def test_the_replay_honours_the_workspaces_marked_payloads(db_session: AsyncSession) -> None:
@@ -161,8 +179,8 @@ async def test_the_replay_honours_the_workspaces_marked_payloads(db_session: Asy
     report = await recover_button_opt_outs(db_session, apply=True)
 
     assert report.by_workspace[account.tenant_id].applied == 1
-    assert marked.marketing_opt_out_at is not None
-    assert unmarked.marketing_opt_out_at is None
+    assert await opted_out_at(db_session, marked.id) is not None
+    assert await opted_out_at(db_session, unmarked.id) is None
 
 
 async def test_the_command_prints_counts_and_no_personal_data(
@@ -202,7 +220,7 @@ async def test_the_command_prints_counts_and_no_personal_data(
             assert "Stop promotions" not in output
             assert "STOP-PAYLOAD" not in output
         async with database.session() as session:
-            stored = await session.get(Contact, contact_id)
+            stored = await consent_of(session, contact_id)
             assert stored is not None and stored.opt_out_via is OptOutVia.REPLAY
         assert tool.main(["recover-button-opt-outs", "--yes"]) == 64
     finally:

@@ -36,12 +36,6 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
-from app.db.models.campaign import (
-    OPT_OUT_SOURCE_TYPE,
-    OPT_OUT_VIA_TYPE,
-    OptOutSource,
-    OptOutVia,
-)
 from app.db.models.channel import (
     CHANNEL_TYPE,
     Channel,
@@ -254,40 +248,9 @@ class Contact(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # When this person asked to stop receiving campaigns, and who recorded it.
-    # A timestamp rather than a boolean: "since when" is the question a dispute
-    # about a marketing message actually turns on.
-    marketing_opt_out_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-    opt_out_source: Mapped[OptOutSource | None] = mapped_column(
-        OPT_OUT_SOURCE_TYPE,
-        nullable=True,
-    )
-    # How the opt-out reached Wasla - a stop word, a tapped button, the
-    # provider's own preference webhook, a provider refusal, a replay of
-    # retained evidence, or a colleague (OMNI-030, OMNI-046). `source` says
-    # who decided; this says by which evidence. Null where it predates it.
-    opt_out_via: Mapped[OptOutVia | None] = mapped_column(OPT_OUT_VIA_TYPE, nullable=True)
-    # The last time this person was re-admitted to campaigns - a colleague
-    # clearing the opt-out, or the customer resuming marketing messages through
-    # the provider. A replay of older opt-out evidence never overrides a newer
-    # resume (OMNI-030).
-    marketing_resumed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
-    @property
-    def accepts_campaigns(self) -> bool:
-        """Whether a broadcast may include this person.
-
-        Opt-out is the only thing checked here. Opt-*in* is not a column,
-        because a campaign can only reach someone who has written to this
-        business at all — the audience is built from conversations, and there is
-        no route that uploads a list of numbers. See CAMPAIGNS.md.
-        """
-        return self.marketing_opt_out_at is None
+    # Marketing consent is not here: it is per channel, in
+    # `contact_channel_consents` (ENT-19). A STOP on WhatsApp is not a STOP on
+    # Instagram, so there is no person-level opt-out to read.
 
 
 class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):

@@ -201,7 +201,10 @@ async def test_a_retained_stop_tap_without_an_opt_out_is_counted(db_session: Asy
     before = await _census(db_session)
 
     await db_session.execute(
-        text("UPDATE contacts SET marketing_opt_out_at = NULL WHERE tenant_id = :t"),
+        text(
+            "UPDATE contact_channel_consents SET marketing_opt_out_at = NULL,"
+            " opt_out_source = NULL, opt_out_via = NULL WHERE tenant_id = :t"
+        ),
         {"t": account.tenant_id},
     )
 
