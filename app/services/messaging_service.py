@@ -61,6 +61,7 @@ from app.channels.outcomes import (
 )
 from app.channels.policy import (
     ChannelState,
+    PolicyRefusalError,
     ReplyPolicy,
     SendKind,
     SendMechanism,
@@ -724,18 +725,18 @@ class MessagingService:
         if isinstance(content, MediaContent) and (
             content.family not in policy.capabilities.media_families
         ):
-            raise ValidationError(f"This file cannot be sent over {policy.display_name}.")
+            raise PolicyRefusalError(f"This file cannot be sent over {policy.display_name}.")
         decision = policy.may_send(
             conversation, origin=origin, kind=send_kind, now=datetime.now(UTC)
         )
         if not decision.allowed:
-            raise ValidationError(decision.reason or "This message cannot be sent now.")
+            raise PolicyRefusalError(decision.reason or "This message cannot be sent now.")
         # The policy's decision travels to the adapter (OMNI-033). Held here as
         # well as in the policy: a human-agent tag is a person's permission,
         # and no other origin may carry one whatever a policy said.
         mechanism = decision.mechanism or SendMechanism.STANDARD_WINDOW
         if mechanism is SendMechanism.HUMAN_AGENT_TAG and origin is not MessageOrigin.HUMAN:
-            raise ValidationError("Only a person may reply under a human-agent tag.")
+            raise PolicyRefusalError("Only a person may reply under a human-agent tag.")
         context = SendContext(origin=origin, mechanism=mechanism)
 
         connection = await self._connections.require_by_id(conversation.account_id)

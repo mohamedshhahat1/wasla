@@ -31,12 +31,13 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, Final, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.channels.policy import ChannelPolicy, OutOfWindow, TextUnit
 from app.core.exceptions import ConflictError, ValidationError
 from app.core.logging import get_logger
 from app.core.text_safety import storable_problem
@@ -197,6 +198,9 @@ class ToolDefinition:
     #: release would defeat it (TOOL-09, ADR-080). Such a tool contains its own
     #: database failures, which `search_knowledge` has always done.
     releases_session: bool = False
+    #: How the tool is described on a given channel, where its advice or bounds
+    #: depend on the channel's rules (OMNI-039). None: the same everywhere.
+    for_channel: Callable[[ToolDefinition, ChannelPolicy], ToolDefinition] | None = None
 
     def json_schema(self) -> dict[str, Any]:
         """The parameters as the provider expects to see them."""
@@ -794,6 +798,58 @@ async def _schedule_follow_up(context: ToolContext, arguments: dict[str, Any]) -
     )
 
 
+def _follow_up_on_channel(definition: ToolDefinition, policy: ChannelPolicy) -> ToolDefinition:
+    """The follow-up tool as this conversation's channel allows it (OMNI-039).
+
+    The advice used to be WhatsApp's whatever the channel - "1440 for
+    tomorrow, 10080 for next week", a 4,096-character message - so on a
+    channel with no automated way out of its window the model was told to
+    schedule nudges that could never be sent. On such a channel the delay is
+    bounded by the window and the model is told why; the message bound is the
+    channel's own, in its own unit.
+    """
+    capabilities = policy.capabilities
+    delay, message, *rest = definition.parameters
+    unit = "characters" if capabilities.text_unit is TextUnit.CHARACTERS else "bytes"
+    limit = min(capabilities.text_limit, MAX_BODY_LENGTH)
+    message = replace(
+        message,
+        description=(
+            f"{message.description} At most {capabilities.text_limit} {unit} on "
+            f"{policy.display_name}."
+        ),
+        max_length=limit,
+    )
+    if capabilities.out_of_window is OutOfWindow.TEMPLATE:
+        return replace(definition, parameters=(delay, message, *rest))
+    window = getattr(policy, "window", None)
+    if not isinstance(window, timedelta):  # pragma: no cover - every policy is windowed today
+        return replace(definition, parameters=(delay, message, *rest))
+    hours = int(window.total_seconds() // 3600)
+    ceiling = max(
+        MIN_FOLLOW_UP_MINUTES, min(MAX_FOLLOW_UP_MINUTES, int(window.total_seconds() // 60))
+    )
+    delay = replace(
+        delay,
+        description=(
+            "How long to wait before following up, in minutes "
+            f"({MIN_FOLLOW_UP_MINUTES} to {ceiling}). On {policy.display_name} nothing "
+            f"automated may be sent more than {hours} hours after the customer's last "
+            "message, so a follow-up must fall due before then - offer tomorrow or next "
+            "week only if the customer is likely to write again first."
+        ),
+        maximum=ceiling,
+    )
+    return replace(
+        definition,
+        description=(
+            f"{definition.description} On {policy.display_name} a follow-up must fall due "
+            f"within {hours} hours of the customer's last message."
+        ),
+        parameters=(delay, message, *rest),
+    )
+
+
 SCHEDULE_FOLLOW_UP_DEFINITION: Final = ToolDefinition(
     name=SCHEDULE_FOLLOW_UP_TOOL,
     description=(
@@ -843,6 +899,7 @@ SCHEDULE_FOLLOW_UP_DEFINITION: Final = ToolDefinition(
         ),
     ),
     handler=_schedule_follow_up,
+    for_channel=_follow_up_on_channel,
 )
 
 
@@ -870,7 +927,7 @@ class ToolRegistry:
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._definitions))
 
-    def specs(self, names: Iterable[str]) -> list[ToolSpec]:
+    def specs(self, names: Iterable[str], *, policy: ChannelPolicy | None = None) -> list[ToolSpec]:
         """Describe the named tools to the model, skipping any it cannot call.
 
         An unknown name is logged and dropped rather than raised. Grants outlive
@@ -882,6 +939,8 @@ class ToolRegistry:
             if definition is None:
                 logger.warning("agent.tool_not_implemented", extra={"tool": name})
                 continue
+            if policy is not None and definition.for_channel is not None:
+                definition = definition.for_channel(definition, policy)
             specs.append(definition.to_spec())
         return specs
 

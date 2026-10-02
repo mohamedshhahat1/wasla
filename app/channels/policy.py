@@ -25,6 +25,16 @@ from app.db.models.channel import Channel
 from app.db.models.conversation import Conversation, MessageOrigin
 
 
+class PolicyRefusalError(ValidationError):
+    """The channel's policy refuses this send, and asking again will not change that.
+
+    A body too long for the channel, a closed window with no way out, a kind the
+    channel cannot carry. Distinct from a provider failure, which may pass: a
+    sweep treats this as terminal instead of spending its retries on it
+    (OMNI-039).
+    """
+
+
 class TextUnit(StrEnum):
     """What a channel's text limit counts."""
 
@@ -352,11 +362,11 @@ def require_sendable_text(body: str, policy: ChannelPolicy) -> None:
     paid for the inference (OMNI-008).
     """
     if not body:
-        raise ValidationError("A message needs something to say.")
+        raise PolicyRefusalError("A message needs something to say.")
     capabilities = policy.capabilities
     if text_length(body, capabilities.text_unit) > capabilities.text_limit:
         unit = "characters" if capabilities.text_unit is TextUnit.CHARACTERS else "bytes"
-        raise ValidationError(
+        raise PolicyRefusalError(
             f"A {policy.display_name} message may be at most {capabilities.text_limit} {unit}."
         )
 
@@ -368,6 +378,7 @@ __all__ = [
     "FollowUpAction",
     "FollowUpDecision",
     "OutOfWindow",
+    "PolicyRefusalError",
     "ReceiptModel",
     "ReplyPolicy",
     "SendDecision",

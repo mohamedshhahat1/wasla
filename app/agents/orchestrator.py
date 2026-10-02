@@ -481,7 +481,8 @@ class AgentOrchestrator:
         # the model is *offered*; `granted` decides what it is allowed to
         # actually run. See `_run`.
         granted = {grant.name for grant in grants}
-        specs = self._registry.specs(grant.name for grant in grants)
+        # Described as the conversation's channel allows (OMNI-039).
+        specs = self._registry.specs((grant.name for grant in grants), policy=channel_policy)
 
         turns = list(window.turns)
         results: list[ToolResult] = []
