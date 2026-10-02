@@ -31,6 +31,7 @@ evils, argued in ADR-089.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections import Counter
 from collections.abc import Mapping
@@ -49,6 +50,7 @@ from app.core.telemetry import (
     record_inbound_outcomes,
     record_inbound_refusals,
     record_opt_outs,
+    record_status_resolutions,
 )
 from app.db.errors import is_data_exception
 from app.db.models.analytics import AnalyticsSource
@@ -201,6 +203,7 @@ class ChannelIngestionService:
         self._outbound = OutboundMessageDirectory(session)
         self._live: dict[str, ChannelConnection | None] = {}
         self._holdings: dict[str, list[ChannelConnection]] = {}
+        self._status_lookup_seconds: list[float] = []
         self._scopes: dict[tuple[uuid.UUID, str], IdentityScopeRef] = {}
 
     async def ingest(self, delivery: ParsedDelivery) -> IngestionOutcome:
@@ -261,6 +264,8 @@ class ChannelIngestionService:
         )
         channel = self._adapter.channel.value
         await record_opt_outs(totals.opt_outs_by_via)
+        await record_status_resolutions(channel, self._status_lookup_seconds)
+        self._status_lookup_seconds.clear()
         await record_inbound_refusals(channel, outcome.refused)
         await record_inbound_outcomes(
             channel,
@@ -758,7 +763,9 @@ class ChannelIngestionService:
                 self._adapter.channel, event.connection_key
             )
         holders = self._holdings[event.connection_key]
+        started = time.perf_counter()
         message = await self._outbound.find_by_provider_message_id(message_id, holders=holders)
+        self._status_lookup_seconds.append(time.perf_counter() - started)
         if message is not None:
             owner = next((holder for holder in holders if holder.id == message.connection_id), None)
             if owner is not None:

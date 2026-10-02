@@ -28,7 +28,7 @@ is where that raising stops.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from time import perf_counter, time_ns
@@ -566,6 +566,21 @@ PENDING_PAYMENT_AGE_BUCKETS: Final[tuple[float, ...]] = (
     259_200.0,
 )
 
+# One indexed lookup on the database: a millisecond is normal, ten is a
+# warning, a hundred is the sequential scan OMNI-029 removed coming back.
+STATUS_RESOLUTION_BUCKETS: Final[tuple[float, ...]] = (
+    0.0005,
+    0.001,
+    0.0025,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    1.0,
+)
+
 # Passages per search, one bucket per possible count up to the top-k ceiling.
 RETRIEVED_PASSAGE_BUCKETS: Final[tuple[float, ...]] = (0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0)
 
@@ -608,6 +623,16 @@ REDIS_HISTOGRAMS: Final[dict[str, tuple[str, tuple[str, ...], tuple[float, ...]]
     # counter above, and crossing the two would multiply the series for a
     # question nobody asks. Provider-latency buckets, because the one tool that
     # calls anybody else dominates the distribution.
+    # How long resolving a delivery status to the message it names took
+    # (OMNI-029). Every status webhook takes this path - WhatsApp reports three
+    # per message - and it was a sequential scan of `messages` until the
+    # workspaces joined the predicate; this is how a regression would show.
+    # Labelled by channel alone, a closed domain.
+    "wasla_status_resolution_duration_seconds": (
+        "How long resolving a delivery status to its message took.",
+        ("channel",),
+        STATUS_RESOLUTION_BUCKETS,
+    ),
     "wasla_agent_tool_execution_duration_seconds": (
         "How long an agent tool call took, refusals included.",
         ("tool",),
@@ -1002,6 +1027,18 @@ async def record_inbound_outcomes(channel: str, outcomes: Mapping[str, int]) -> 
             "wasla_inbound_events_total",
             {"channel": label, "outcome": outcome if outcome in INBOUND_OUTCOMES else "other"},
             count,
+        )
+
+
+async def record_status_resolutions(channel: str, durations: Sequence[float]) -> None:
+    """Observe one delivery's status lookups (OMNI-029). Best-effort."""
+    label = _inbound_channel(channel)
+    for seconds in durations:
+        await _observe(
+            "wasla_status_resolution_duration_seconds",
+            {"channel": label},
+            seconds,
+            STATUS_RESOLUTION_BUCKETS,
         )
 
 
