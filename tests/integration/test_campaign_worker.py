@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.db.models.campaign import (
     Campaign,
     CampaignRecipient,
@@ -185,7 +186,7 @@ def _worker(session: AsyncSession, *, sends: list[StubMessaging] | None = None) 
 
     return CampaignWorker(
         database=SessionHandle(session),  # type: ignore[arg-type]
-        settings=None,  # type: ignore[arg-type]
+        settings=Settings(_env_file=None, environment="test"),
         messaging_factory=factory,
     )
 
@@ -265,7 +266,7 @@ async def test_one_broken_campaign_does_not_strand_the_others(db_session: AsyncS
 
     worker = CampaignWorker(
         database=SessionHandle(db_session),  # type: ignore[arg-type]
-        settings=None,  # type: ignore[arg-type]
+        settings=Settings(_env_file=None, environment="test"),
         messaging_factory=factory,
     )
 
@@ -280,7 +281,7 @@ async def test_an_idle_sweep_opens_one_session_and_returns(db_session: AsyncSess
     handle = SessionHandle(db_session)
     worker = CampaignWorker(
         database=handle,  # type: ignore[arg-type]
-        settings=None,  # type: ignore[arg-type]
+        settings=Settings(_env_file=None, environment="test"),
         messaging_factory=lambda session, tenant_id: as_messaging(
             StubMessaging(session, tenant_id=tenant_id)
         ),
@@ -310,7 +311,7 @@ async def test_stopping_wakes_a_sleeping_worker(db_session: AsyncSession) -> Non
     """Shutdown must not wait out a full poll interval."""
     worker = CampaignWorker(
         database=SessionHandle(db_session),  # type: ignore[arg-type]
-        settings=None,  # type: ignore[arg-type]
+        settings=Settings(_env_file=None, environment="test"),
         poll_seconds=60.0,
         messaging_factory=lambda session, tenant_id: as_messaging(
             StubMessaging(session, tenant_id=tenant_id)

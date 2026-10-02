@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -134,7 +135,7 @@ class StubMessaging:
 def _worker(session: AsyncSession, **kwargs: Any) -> FollowUpWorker:
     return FollowUpWorker(
         database=SessionHandle(session),  # type: ignore[arg-type]
-        settings=object(),  # type: ignore[arg-type]
+        settings=Settings(_env_file=None, environment="test"),
         messaging_factory=lambda db, tenant_id: StubMessaging(db, tenant_id),  # type: ignore[arg-type,return-value]
         **kwargs,
     )
@@ -257,7 +258,7 @@ async def test_the_worker_opens_one_session_per_sweep(db_session: AsyncSession) 
     handle = SessionHandle(db_session)
     worker = FollowUpWorker(
         database=handle,  # type: ignore[arg-type]
-        settings=object(),  # type: ignore[arg-type]
+        settings=Settings(_env_file=None, environment="test"),
         messaging_factory=lambda db, tenant_id: StubMessaging(db, tenant_id),  # type: ignore[arg-type,return-value]
     )
 

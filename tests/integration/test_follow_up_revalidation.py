@@ -42,6 +42,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.db.models.campaign import OptOutSource
 from app.db.models.conversation import (
     Contact,
@@ -217,7 +218,7 @@ async def test_an_agents_follow_up_on_a_human_owned_conversation_sends_nothing(
 
 
 async def test_a_colleagues_follow_up_on_a_human_owned_conversation_is_sent(
-    db_session: AsyncSession,
+    db_session: AsyncSession, settings: Settings
 ) -> None:
     """PD-CRM-1: a person's reminder on a conversation a person owns goes out (TG-5).
 
@@ -238,7 +239,7 @@ async def test_a_colleagues_follow_up_on_a_human_owned_conversation_is_sent(
 
     worker = FollowUpWorker(
         database=SessionHandle(db_session),  # type: ignore[arg-type]
-        settings=object(),  # type: ignore[arg-type]
+        settings=settings,
         messaging_factory=factory,  # type: ignore[arg-type]
     )
     handled = await worker.run_once()
@@ -394,7 +395,7 @@ async def test_handing_back_to_the_ai_does_not_cancel_anything(
 
 
 async def test_the_sweep_sends_nothing_when_the_takeover_lands_after_the_claim(
-    db_session: AsyncSession,
+    db_session: AsyncSession, settings: Settings
 ) -> None:
     """The race, driven through the real worker rather than the service.
 
@@ -420,7 +421,7 @@ async def test_the_sweep_sends_nothing_when_the_takeover_lands_after_the_claim(
 
     worker = FollowUpWorker(
         database=SessionHandle(db_session),  # type: ignore[arg-type]
-        settings=object(),  # type: ignore[arg-type]
+        settings=settings,
         messaging_factory=factory,  # type: ignore[arg-type]
     )
     handled = await worker.run_once()
