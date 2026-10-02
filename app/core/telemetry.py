@@ -463,6 +463,39 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Request bodies refused for size before reaching a route, by route group.",
         ("route_group",),
     ),
+    # Entitlements (ADR-131). Every label closed - the keys, reasons, outcomes,
+    # causes and actors below and nothing else; no workspace, connection,
+    # contact, product, invoice or amount, so each metric's cardinality is
+    # fixed for ever.
+    #
+    # An action the entitlements refused: a connection over capacity or of a
+    # type the plan does not include (409), or an AI turn with no allowance
+    # left (handed to a person).
+    "wasla_entitlement_refusals_total": (
+        "Actions the entitlements refused, by key and reason.",
+        ("key", "reason"),
+    ),
+    # Each AI turn's hold and how it settled (ENT-02, ENT-03): `held` at
+    # engagement, then `charged` or `released`; `hold_expired` when the sweep
+    # released one nobody settled within its TTL, and `late_charge` when a
+    # settle arrived after that and charged anyway. A rising `late_charge`
+    # says the TTL is shorter than real turns.
+    "wasla_ai_turn_charge_total": (
+        "AI turn holds, and whether each was charged, released or expired.",
+        ("outcome",),
+    ),
+    # Capacity reductions (ENT-14, ENT-15): `opened` at a boundary, then how
+    # each ended - an owner's choice, the automatic fallback, or capacity back.
+    "wasla_channel_capacity_reductions_total": (
+        "Channel capacity reductions opened and resolved, by cause and resolution.",
+        ("cause", "resolution"),
+    ),
+    # Connections a reduction disabled, by who chose: an owner, or the system
+    # at the grace end. Never released, never deleted.
+    "wasla_channel_capacity_reduction_disables_total": (
+        "Channel connections a capacity reduction disabled, by who chose.",
+        ("actor",),
+    ),
 }
 
 # Closed domains of the two inbound counters. `app.core` imports nothing from
@@ -1254,6 +1287,10 @@ BILLING_OUTCOMES: Final[dict[str, frozenset[str]]] = {
             "custom_plan_scope_mismatch",
         }
     ),
+    "wasla_ai_turn_charge_total": frozenset(
+        {"held", "charged", "released", "hold_expired", "late_charge"}
+    ),
+    "wasla_channel_capacity_reduction_disables_total": frozenset({"owner", "system"}),
 }
 
 
@@ -1314,6 +1351,18 @@ BILLING_LABEL_DOMAINS: Final[dict[str, dict[str, frozenset[str]]]] = {
             }
         ),
         "outcome": frozenset({"succeeded", "refused", "failed"}),
+    },
+    "wasla_entitlement_refusals_total": {
+        "key": frozenset({"channel_connections", "allowed_channel_types", "period_ai_turns"}),
+        "reason": frozenset({"capacity_exceeded", "type_not_allowed", "quota_exhausted"}),
+    },
+    "wasla_channel_capacity_reductions_total": {
+        "cause": frozenset(
+            {"downgrade", "topup_expired", "topup_withdrawn", "grant_expired", "migration"}
+        ),
+        "resolution": frozenset(
+            {"opened", "resolved_by_owner", "resolved_automatically", "no_longer_needed"}
+        ),
     },
 }
 
@@ -1402,6 +1451,34 @@ async def record_custom_plan(operation: str, outcome: str) -> None:
     metric = "wasla_billing_custom_plan_total"
     labels = _closed_labels(metric, {"operation": operation, "outcome": outcome})
     await _tolerate(_increment(metric, labels))
+
+
+async def record_entitlement_refusal(key: str, reason: str) -> None:
+    """An action the entitlements refused (ADR-131)."""
+    metric = "wasla_entitlement_refusals_total"
+    labels = _closed_labels(metric, {"key": key, "reason": reason})
+    await _tolerate(_increment(metric, labels))
+
+
+async def record_ai_turn_charge(outcome: str, *, amount: int = 1) -> None:
+    """An AI turn's hold was taken, charged, released or expired (ENT-02, ENT-03)."""
+    metric = "wasla_ai_turn_charge_total"
+    if amount > 0:
+        await _tolerate(_increment_by(metric, {"outcome": _closed(metric, outcome)}, amount))
+
+
+async def record_capacity_reduction(cause: str, resolution: str) -> None:
+    """A capacity reduction opened or resolved (ENT-14, ENT-15)."""
+    metric = "wasla_channel_capacity_reductions_total"
+    labels = _closed_labels(metric, {"cause": cause, "resolution": resolution})
+    await _tolerate(_increment(metric, labels))
+
+
+async def record_capacity_disables(actor: str, amount: int) -> None:
+    """Connections a capacity reduction disabled, by who chose (ENT-14)."""
+    metric = "wasla_channel_capacity_reduction_disables_total"
+    if amount > 0:
+        await _tolerate(_increment_by(metric, {"actor": _closed(metric, actor)}, amount))
 
 
 async def record_hosted_reconciliation(

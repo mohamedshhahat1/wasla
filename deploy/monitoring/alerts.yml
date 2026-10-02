@@ -1454,6 +1454,70 @@ groups:
             /platform/billing/tenants/*/custom-plan routes.
           runbook: docs/BILLING_OPERATIONS.md
 
+  # ----------------------------------------------------------- entitlements
+  #
+  # ADR-131. The AI turn holds the allowance is counted against, and the
+  # channel capacity flow that disables connections when capacity falls.
+  - name: wasla-entitlements
+    interval: 30s
+    rules:
+      - alert: AITurnHoldsStuck
+        # A state invariant counted at scrape time: AI turn holds still open
+        # past AI_TURN_HOLD_TTL_SECONDS. They stopped counting against the
+        # allowance by the clock; the billing worker's sweep should have
+        # released them, and has not.
+        expr: max(wasla_ai_turn_holds_past_ttl) > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: billing
+        annotations:
+          summary: "AI turn holds are not being released"
+          description: >-
+            AI turn holds older than their TTL have stayed open for fifteen
+            minutes, so the billing worker's expired-hold sweep is not running
+            or cannot finish. Customers are not affected - an expired hold no
+            longer counts - but the turns behind them never settled. Check the
+            billing worker's heartbeat and logs.
+          runbook: docs/RUNBOOK.md
+
+      - alert: ChannelCapacityAutoDisableSpike
+        # Connections the automatic fallback disabled at the end of a grace -
+        # nobody chose which to keep. Each one is a channel a business stopped
+        # receiving automation on. A few a day is normal; many in an hour is a
+        # capacity change applied to many workspaces at once.
+        expr: |
+          sum(increase(wasla_channel_capacity_reduction_disables_total{actor="system"}[1h])) > 20
+        labels:
+          severity: warning
+          component: billing
+        annotations:
+          summary: "Many channel connections were disabled automatically"
+          description: >-
+            More than twenty channel connections were disabled by the automatic
+            capacity fallback within an hour. Check whether a plan migration, a
+            withdrawn top-up product or an expiring grant reduced capacity for
+            many workspaces at once, and whether owners were warned. Nothing was
+            released or deleted; owners can enable a connection when a slot is free.
+          runbook: docs/RUNBOOK.md
+
+      - alert: AITurnLateChargeSpike
+        # Turns charged after the sweep had already released their hold: they
+        # outlived AI_TURN_HOLD_TTL_SECONDS. While that happens, concurrent
+        # turns could briefly be admitted past the allowance.
+        expr: sum(increase(wasla_ai_turn_charge_total{outcome="late_charge"}[1h])) > 5
+        labels:
+          severity: warning
+          component: billing
+        annotations:
+          summary: "AI turns are outliving their allowance hold"
+          description: >-
+            More than five AI turns in an hour were charged after their hold
+            expired. The TTL is shorter than real turns take, so the allowance
+            can be oversold while they run. Raise AI_TURN_HOLD_TTL_SECONDS above
+            the longest turn, or find what is making turns slow.
+          runbook: docs/RUNBOOK.md
+
   # --------------------------------------------------------------- database
   #
   # DB-023. The server's own view of the database, read by the API at scrape

@@ -66,7 +66,11 @@ from app.channels.registry import ChannelRegistry, default_registry
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
-from app.core.telemetry import record_agent_turn_outcome
+from app.core.telemetry import (
+    record_agent_turn_outcome,
+    record_ai_turn_charge,
+    record_entitlement_refusal,
+)
 from app.core.tracing import JOB_OUTCOME
 from app.db.models.agent import Agent
 from app.db.models.agent_turn import AITurnReleaseReason, TurnOutcome
@@ -83,7 +87,7 @@ from app.repositories.agent_turn_repository import (
     TriggerNotAnswerableError,
 )
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
-from app.services.ai_turn_charge import AITurnCharge
+from app.services.ai_turn_charge import AITurnCharge, SettleResult, record_settlement
 from app.services.entitlement_service import EntitlementService
 from app.services.inbox_service import InboxService
 from app.services.messaging_service import MessagingService
@@ -500,11 +504,12 @@ class AgentWorker:
         """
         try:
             async with self._database.session() as releasing:
-                await AITurnCharge(releasing, tenant_id=job.tenant_id).settle(
+                settled = await AITurnCharge(releasing, tenant_id=job.tenant_id).settle(
                     agent_turn_id=turn_id,
                     chargeable=False,
                     reason=AITurnReleaseReason.GENERATION_FAILED,
                 )
+            await record_settlement(settled)
         except Exception as error:
             logger.error(
                 "agent.turn_hold_release_failed",
@@ -518,7 +523,7 @@ class AgentWorker:
     @staticmethod
     async def _settle_turn(
         session: AsyncSession, job: AgentJob, turn_id: uuid.UUID, outcome: AgentOutcome
-    ) -> None:
+    ) -> SettleResult:
         """Charge the turn for a usable outcome, or give its hold back (ENT-02).
 
         Staged on the turn's session and committed with its token meter,
@@ -526,7 +531,7 @@ class AgentWorker:
         is charged whether or not it is then delivered, withheld by a re-read
         or refused by the channel - the generation happened.
         """
-        await AITurnCharge(session, tenant_id=job.tenant_id).settle(
+        return await AITurnCharge(session, tenant_id=job.tenant_id).settle(
             agent_turn_id=turn_id,
             chargeable=outcome.chargeable,
         )
@@ -694,8 +699,10 @@ class AgentWorker:
             if reservation is _Reservation.LOST:
                 return
             if reservation is _Reservation.REFUSED:
+                await record_entitlement_refusal("period_ai_turns", "quota_exhausted")
                 await self._quota_blocked(job)
                 return
+            await record_ai_turn_charge("held")
 
             # Past this line the turn holds its allowance and is engaged: it
             # can call the provider, run tools and send a customer a message,
@@ -714,7 +721,7 @@ class AgentWorker:
 
             # The charge, or the hold given back, commits with the tokens the
             # turn spent (ENT-02).
-            await self._settle_turn(session, job, turn_id, outcome)
+            settled = await self._settle_turn(session, job, turn_id, outcome)
             # Metered before the reply is sent, and outside the branch that
             # returns early. A turn that ended in a handoff or in silence still
             # called the provider, and a meter that only counted turns which
@@ -740,6 +747,7 @@ class AgentWorker:
             # them into the send's own transaction meant a send refused before
             # it began - an over-long body, once - rolled them back unmetered.
             await session.commit()
+            await record_settlement(settled)
 
             reply = outcome.reply
             ending = outcome.effective_outcome

@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
+from app.core.telemetry import record_capacity_disables, record_capacity_reduction
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey, Subscription
 from app.db.models.channel import Channel, ChannelConnection, ConnectionDisabledReason
@@ -285,6 +286,7 @@ class ChannelCapacityReductions:
                 "grace_ends_at": reduction.grace_ends_at.isoformat(),
             },
         )
+        await record_capacity_reduction(cause.value, "opened")
         logger.warning(
             "billing.channel_capacity_reduction_opened",
             extra={
@@ -564,6 +566,14 @@ class ChannelCapacityReductions:
                 meta={"reduction_id": str(reduction.id), "cause": reduction.cause.value},
             )
             disabled.append(connection.id)
+        await record_capacity_disables(
+            (
+                "system"
+                if reason is ConnectionDisabledReason.CAPACITY_REDUCTION_AUTOMATIC
+                else "owner"
+            ),
+            len(disabled),
+        )
         return disabled
 
     @staticmethod
@@ -616,6 +626,7 @@ class ChannelCapacityReductions:
                 "preselected": preselected,
             },
         )
+        await record_capacity_reduction(reduction.cause.value, status.value)
         logger.info(
             "billing.channel_capacity_reduction_resolved",
             extra={

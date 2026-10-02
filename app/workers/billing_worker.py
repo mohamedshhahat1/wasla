@@ -37,7 +37,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.core.telemetry import record_payment_reconciliation, record_topup_purchase
+from app.core.telemetry import (
+    record_ai_turn_charge,
+    record_payment_reconciliation,
+    record_topup_purchase,
+)
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import (
     LimitKey,
@@ -464,6 +468,7 @@ class BillingWorker:
                 "billing.ai_turn_holds_expired",
                 extra={"event": "billing.ai_turn_holds_expired", "count": len(released)},
             )
+            await record_ai_turn_charge("hold_expired", amount=len(released))
         return len(released)
 
     async def _expire_topups(self, *, now: datetime) -> int:

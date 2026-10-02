@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError
 from app.core.logging import get_logger
+from app.core.telemetry import record_entitlement_refusal
 from app.db.models.billing import LimitKey
 from app.db.models.channel import Channel
 from app.services.channel_fit import ChannelCapacity
@@ -180,7 +181,7 @@ class ChannelCapacityGuard:
         """Refuse before any provider is asked anything. No lock: a fast, early answer."""
         refused, _ = await self._judge(channel)
         if refused is not None:
-            self._log(refused, channel, stage="precheck")
+            await self._refused(refused, channel, stage="precheck")
             raise refused
 
     async def reserve_or_refuse(self, channel: Channel) -> ChannelSlot:
@@ -195,11 +196,16 @@ class ChannelCapacityGuard:
         )
         refused, capacity = await self._judge(channel)
         if refused is not None:
-            self._log(refused, channel, stage="reserve")
+            await self._refused(refused, channel, stage="reserve")
             raise refused
         return ChannelSlot(tenant_id=self._tenant_id, channel=channel, capacity=capacity)
 
-    def _log(self, refused: ConflictError, channel: Channel, *, stage: str) -> None:
+    async def _refused(self, refused: ConflictError, channel: Channel, *, stage: str) -> None:
+        """Log and count one refusal; a pre-check refusal never reaches the second check."""
+        if isinstance(refused, ChannelTypeNotAllowedError):
+            await record_entitlement_refusal("allowed_channel_types", "type_not_allowed")
+        else:
+            await record_entitlement_refusal("channel_connections", "capacity_exceeded")
         logger.info(
             "billing.channel_activation_refused",
             extra={

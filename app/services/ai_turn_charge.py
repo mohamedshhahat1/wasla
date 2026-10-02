@@ -34,6 +34,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.core.telemetry import record_ai_turn_charge
 from app.db.models.agent_turn import AgentTurn, AITurnChargeState, AITurnReleaseReason
 from app.db.models.conversation import Conversation
 from app.db.models.usage import UsageEvent, UsageEventType, unit_for
@@ -213,4 +214,10 @@ class AITurnCharge:
         )
 
 
-__all__ = ["AITurnCharge", "SettleResult"]
+async def record_settlement(result: SettleResult) -> None:
+    """Count how a hold settled, once its transaction has committed (section 32)."""
+    if result is not SettleResult.UNCHANGED:
+        await record_ai_turn_charge(result.value)
+
+
+__all__ = ["AITurnCharge", "SettleResult", "record_settlement"]

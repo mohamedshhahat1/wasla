@@ -25,7 +25,7 @@ the same thing it needed to know.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final
 
 from redis.asyncio import Redis
@@ -54,15 +54,19 @@ from app.db.session import Database
 from app.repositories.agent_turn_repository import (
     STRANDED_TURN_AFTER,
     EngagedTurnSweep,
+    ExpiredHoldSweep,
     OwedReleaseSweep,
 )
+from app.repositories.channel_capacity_repository import PlatformCapacityReductionRepository
 from app.repositories.channel_event_repository import InboundEventSweep
 from app.repositories.channel_repository import ConnectionHealthCensus
 from app.repositories.conversation_repository import UnresolvedOutboundDirectory
+from app.repositories.entitlement_census import ChannelCapacityCensus
 from app.repositories.knowledge_repository import IndexingBacklog, IndexingSweep
 from app.repositories.media_purge_repository import MediaPurgeLedger
 from app.repositories.media_repository import PlatformMediaRepository
 from app.services.backup_status import read_backup_status
+from app.services.entitlement_service import DEFAULT_AI_TURN_HOLD_TTL
 from app.services.media_horizons import claim_lease, release_horizon, unclaimed_horizon
 from app.workers.heartbeat import heartbeat_key
 from app.workers.inbound_recovery import unprocessed_since
@@ -179,7 +183,72 @@ class MetricsService:
         lines.extend(await self._consistency_lines())
         lines.extend(await self._messaging_lines(now=now))
         lines.extend(await self._media_lines(now=now))
+        lines.extend(await self._entitlement_lines(now=now))
         return self._registry.render(extra=lines)
+
+    async def _entitlement_lines(self, *, now: datetime | None) -> list[str]:
+        """AI turn holds and channel capacity across the deployment (ADR-131).
+
+        **Open holds, and those past their TTL.** A hold is spoken-for
+        allowance; one older than `AI_TURN_HOLD_TTL_SECONDS` has stopped
+        counting by the clock and the billing sweep should have released it.
+        Any that stay open past the TTL say the sweep is not running -
+        `AITurnHoldsStuck`.
+
+        **Workspaces over their channel capacity**, from the capacity census
+        (`ChannelCapacityCensus`): a reduction in its grace, a suspended
+        workspace on the default plan (ENT-16), or - if neither explains it -
+        a defect the invariants name. **Open reductions**, in their grace.
+
+        No labels: which workspace is the operator's question, answered by the
+        platform summary. Failures are swallowed like every database gauge.
+        """
+        database = self._database
+        if database is None:
+            return []
+        moment = now or datetime.now(UTC)
+        default_plan_code = self._settings.default_plan_code if self._settings else None
+        ttl = timedelta(
+            seconds=(
+                self._settings.ai_turn_hold_ttl_seconds
+                if self._settings
+                else DEFAULT_AI_TURN_HOLD_TTL.total_seconds()
+            )
+        )
+        try:
+            async with database.session() as session:
+                holds, stale = await ExpiredHoldSweep(session).open_holds(now=moment, ttl=ttl)
+                over = await ChannelCapacityCensus(
+                    session, default_plan_code=default_plan_code
+                ).over_limit_workspaces(now=moment)
+                reductions = await PlatformCapacityReductionRepository(session).open_count()
+        except Exception:
+            logger.warning(
+                "metrics.entitlement_read_failed",
+                extra={"event": "metrics.entitlement_read_failed"},
+            )
+            return []
+        lines: list[str] = []
+        for name, help_text, value in (
+            ("wasla_ai_turn_holds_open", "AI turns holding the allowance now.", float(holds)),
+            (
+                "wasla_ai_turn_holds_past_ttl",
+                "Open AI turn holds older than their TTL, which the billing sweep releases.",
+                float(stale),
+            ),
+            (
+                "wasla_channel_capacity_over_limit_workspaces",
+                "Workspaces holding more channel connections than their capacity in force.",
+                float(over),
+            ),
+            (
+                "wasla_channel_capacity_reductions_open",
+                "Channel capacity reductions in their grace.",
+                float(reductions),
+            ),
+        ):
+            lines.extend(render_gauge_lines(name, help_text, [({}, value)]))
+        return lines
 
     async def _media_lines(self, *, now: datetime | None) -> list[str]:
         """The two media backlogs that must drain to zero (MEDIA-15).
