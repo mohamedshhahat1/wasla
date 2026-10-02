@@ -654,9 +654,7 @@ class ChannelIngestionService:
                 self._adapter.channel, event.connection_key
             )
         holders = self._holdings[event.connection_key]
-        message = await self._outbound.find_by_provider_message_id(
-            message_id, connection_ids=[holder.id for holder in holders]
-        )
+        message = await self._outbound.find_by_provider_message_id(message_id, holders=holders)
         if message is not None:
             owner = next((holder for holder in holders if holder.id == message.connection_id), None)
             if owner is not None:

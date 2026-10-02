@@ -6,13 +6,13 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import ColumnElement, and_, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.channels.inbound import ReplyAction
 from app.core.exceptions import ConflictError
 from app.core.pagination import Cursor
-from app.db.models.channel import Channel
+from app.db.models.channel import Channel, ChannelConnection
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -67,61 +67,54 @@ class OutboundMessageDirectory(BaseRepository[Message]):
     nothing, and every message the previous workspace had in flight stays
     unreconciled for ever (MSG-04).
 
-    Unscoped, and therefore fenced three ways. The candidate workspaces are
-    supplied by the caller and come from `WhatsAppAccountDirectory.holders_of`,
-    so they are exactly the workspaces that have held the number Meta is
+    Unscoped, and therefore fenced three ways. The candidate claims are
+    supplied by the caller and come from `ConnectionDirectory.holders_of`, so
+    they are exactly the claims that have held the connection the provider is
     reporting about. An empty candidate set returns nothing rather than
     searching the platform. And no API route reaches this class: it is
-    constructed by the ingestion service and by the inbound sweeper, both of
-    which are answering Meta rather than a person.
+    constructed by the ingestion service, which is answering a provider rather
+    than a person.
     """
 
     model = Message
-
-    async def find_by_wa_message_id(
-        self,
-        wa_message_id: str,
-        *,
-        tenant_ids: Sequence[uuid.UUID],
-    ) -> Message | None:
-        """The outbound message this provider id names, among these workspaces.
-
-        `UNIQUE(tenant_id, wa_message_id)` makes at most one row match per
-        workspace, and a provider id belongs to one workspace because a number
-        resolves to one live claim at a time - so this is a single row or none.
-        """
-        if not tenant_ids:
-            return None
-        return await self._first(
-            self._select().where(
-                Message.wa_message_id == wa_message_id,
-                Message.tenant_id.in_(tenant_ids),
-                Message.direction == MessageDirection.OUTBOUND,
-            )
-        )
 
     async def find_by_provider_message_id(
         self,
         provider_message_id: str,
         *,
-        connection_ids: Sequence[uuid.UUID],
+        holders: Sequence[ChannelConnection],
     ) -> Message | None:
-        """The outbound message a status names, among these connections' messages.
+        """The outbound message a status names, among the messages of these claims.
 
-        The neutral form of the lookup above, and stricter: a provider id is
-        unique per connection (ADR-120), so the candidates are the claims the
-        connection the status arrived on has carried - across workspaces
-        (MSG-04) - and a message on any other connection cannot match,
-        whoever owns it.
+        A provider id is unique per connection (ADR-120), so the candidates are
+        the claims the connection the status arrived on has carried - across
+        workspaces (MSG-04) - and a message on any other connection cannot
+        match, whoever owns it.
+
+        **The workspaces are in the predicate as well as the connections**
+        (OMNI-029). Every status webhook takes this path - WhatsApp reports
+        sent, delivered and read separately, three per message - and with only
+        `connection_id IN (...)` no index served it: the plan was a parallel
+        sequential scan of `messages`, whose cost grew with the whole
+        platform's traffic. Each claim belongs to one workspace, so naming the
+        claims' workspaces changes no answer and lets
+        `uq_messages_tenant_id_connection_id_wa_message_id` serve an index seek
+        (`tests/integration/test_status_lookup_plan.py`).
         """
-        if not connection_ids:
+        if not holders:
             return None
-        return await self._first(
-            self._select().where(
-                Message.wa_message_id == provider_message_id,
-                Message.connection_id.in_(connection_ids),
-                Message.direction == MessageDirection.OUTBOUND,
-            )
+        return await self._first(self.provider_message_lookup(provider_message_id, holders=holders))
+
+    @staticmethod
+    def provider_message_lookup(
+        provider_message_id: str, *, holders: Sequence[ChannelConnection]
+    ) -> Select[tuple[Message]]:
+        """The statement the lookup issues - built here so its plan can be tested as issued."""
+        return select(Message).where(
+            Message.tenant_id.in_(sorted({holder.tenant_id for holder in holders})),
+            Message.connection_id.in_([holder.id for holder in holders]),
+            Message.wa_message_id == provider_message_id,
+            Message.direction == MessageDirection.OUTBOUND,
         )
 
 
