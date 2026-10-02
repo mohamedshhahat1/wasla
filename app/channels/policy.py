@@ -248,6 +248,8 @@ CHANNEL_DISPLAY_NAMES: Final[Mapping[Channel, str]] = {
     Channel.WHATSAPP: "WhatsApp",
     Channel.INSTAGRAM: "Instagram",
     Channel.MESSENGER: "Messenger",
+    Channel.TELEGRAM: "Telegram",
+    Channel.TIKTOK: "TikTok",
 }
 
 #: The request ceilings the API applies before any channel is known - the

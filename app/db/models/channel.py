@@ -85,11 +85,17 @@ class Channel(StrEnum):
     resolver; a connection on any other channel has none of those, and every
     path that would act on one refuses rather than guessing (ADR-117). Adding
     Instagram or Messenger is adapter work - the model does not change.
+
+    Telegram and TikTok are labels a plan can name in its allowed channel types
+    and a top-up can be typed for (ENT-21, ADR-131); like Instagram and
+    Messenger they have no adapter, so nothing can connect or send on them yet.
     """
 
     WHATSAPP = "whatsapp"
     INSTAGRAM = "instagram"
     MESSENGER = "messenger"
+    TELEGRAM = "telegram"
+    TIKTOK = "tiktok"
 
 
 class ConnectionStatus(StrEnum):
