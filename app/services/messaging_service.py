@@ -49,6 +49,7 @@ from app.channels.adapter import (
     OutboundContent,
     ProviderReceipt,
     Recipient,
+    SendContext,
     TemplateContent,
     TextContent,
 )
@@ -62,6 +63,7 @@ from app.channels.policy import (
     ChannelState,
     ReplyPolicy,
     SendKind,
+    SendMechanism,
     inoperable_reply_policy,
     require_sendable_text,
 )
@@ -147,6 +149,7 @@ async def _attempt(
     sender: ChannelSender,
     recipient: Recipient,
     content: OutboundContent,
+    context: SendContext,
 ) -> ProviderReceipt | Exception:
     """Ask the provider to deliver, returning the failure rather than raising it.
 
@@ -156,7 +159,7 @@ async def _attempt(
     `MediaService._write` uses, for the same reason.
     """
     try:
-        return await sender.send(recipient, content)
+        return await sender.send(recipient, content, context)
     except (ExternalServiceError, RateLimitedError) as error:
         return error
 
@@ -727,6 +730,13 @@ class MessagingService:
         )
         if not decision.allowed:
             raise ValidationError(decision.reason or "This message cannot be sent now.")
+        # The policy's decision travels to the adapter (OMNI-033). Held here as
+        # well as in the policy: a human-agent tag is a person's permission,
+        # and no other origin may carry one whatever a policy said.
+        mechanism = decision.mechanism or SendMechanism.STANDARD_WINDOW
+        if mechanism is SendMechanism.HUMAN_AGENT_TAG and origin is not MessageOrigin.HUMAN:
+            raise ValidationError("Only a person may reply under a human-agent tag.")
+        context = SendContext(origin=origin, mechanism=mechanism)
 
         connection = await self._connections.require_by_id(conversation.account_id)
         if connection.channel is not conversation.channel:  # pragma: no cover - keyed
@@ -818,7 +828,7 @@ class MessagingService:
             message.delivery_state = MessageDeliveryState.REQUESTED
             await self._session.flush()
             async with released(self._session):
-                outcome = await _attempt(sender, recipient, content)
+                outcome = await _attempt(sender, recipient, content, context)
 
         if isinstance(outcome, UncertainDeliveryError):
             # Left exactly as it is. `REQUESTED` with `PENDING` is the honest

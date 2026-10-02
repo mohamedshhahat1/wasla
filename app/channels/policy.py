@@ -45,8 +45,25 @@ class OutOfWindow(StrEnum):
 
     #: An approved template (WhatsApp).
     TEMPLATE = "template"
+    #: A message tag a *person* may reply under for a while longer - Messenger
+    #: and Instagram's `HUMAN_AGENT`, seven days. Never an automated sender's.
+    TAG = "tag"
     #: Nothing free-form, and no template mechanism to escape with.
     NOTHING = "nothing"
+
+
+class SendMechanism(StrEnum):
+    """How a permitted send is made - what the adapter must put on the wire (OMNI-033).
+
+    The policy decides it; the adapter only renders it. Messenger needs
+    `messaging_type` on every send and `MESSAGE_TAG` + `HUMAN_AGENT` for a
+    person's reply after the standard window; WhatsApp's two are implicit in
+    the content (free text or an approved template).
+    """
+
+    STANDARD_WINDOW = "standard_window"
+    TEMPLATE = "template"
+    HUMAN_AGENT_TAG = "human_agent_tag"
 
 
 class ChannelState(StrEnum):
@@ -101,14 +118,19 @@ class ChannelCapabilities:
 
 @dataclass(frozen=True, slots=True)
 class SendDecision:
-    """Whether a send may go now. A refusal carries the sentence the caller sees."""
+    """Whether a send may go now, and by which mechanism (OMNI-033).
+
+    A refusal carries the sentence the caller sees; an allowance carries what
+    the adapter must render, so a channel's rule about *how* reaches the wire.
+    """
 
     allowed: bool
     reason: str | None = None
+    mechanism: SendMechanism | None = None
 
     @classmethod
-    def allow(cls) -> SendDecision:
-        return cls(allowed=True)
+    def allow(cls, mechanism: SendMechanism = SendMechanism.STANDARD_WINDOW) -> SendDecision:
+        return cls(allowed=True, mechanism=mechanism)
 
     @classmethod
     def refuse(cls, reason: str) -> SendDecision:
@@ -140,6 +162,13 @@ class ReplyPolicy:
     #: Whether Wasla can act on the channel at all; anything but operational
     #: means nothing may be sent, whatever the window says (OMNI-031).
     state: ChannelState = ChannelState.OPERATIONAL
+    #: How a person's free text would go now - the standard window, or a
+    #: human-agent tag after it (OMNI-033). None when it may not go at all.
+    free_text_mechanism: SendMechanism | None = None
+    #: Whether an *agent's* free text may go now. Narrower than a person's on a
+    #: channel whose late replies need a human-agent tag, which an agent can
+    #: never use (OMNI-033).
+    agent_free_text_allowed: bool = False
 
 
 def inoperable_reply_policy(state: ChannelState, policy: ChannelPolicy | None) -> ReplyPolicy:
@@ -247,6 +276,16 @@ class WindowedPolicy:
     window: timedelta
     #: The sentence a free-form send outside the window is refused with.
     closed_window_refusal: str
+    #: How long after the customer's last message a *person* may still reply
+    #: under a human-agent tag (Messenger, Instagram: seven days). None where
+    #: the channel has no such tag. An agent never may, whatever this says.
+    human_tag_window: timedelta | None = None
+
+    def human_tag_open(self, conversation: Conversation, *, now: datetime) -> bool:
+        """Whether a person's late reply may still go under the human-agent tag."""
+        if self.human_tag_window is None or conversation.last_inbound_at is None:
+            return False
+        return now - conversation.last_inbound_at <= self.human_tag_window
 
     def standard_window_open(self, conversation: Conversation, *, now: datetime) -> bool:
         if conversation.last_inbound_at is None:
@@ -269,19 +308,33 @@ class WindowedPolicy:
         if kind is SendKind.TEMPLATE:
             if not self.capabilities.templates:
                 return SendDecision.refuse("This channel has no message templates.")
-            return SendDecision.allow()
-        if not self.standard_window_open(conversation, now=now):
-            return SendDecision.refuse(self.closed_window_refusal)
-        return SendDecision.allow()
+            return SendDecision.allow(SendMechanism.TEMPLATE)
+        if self.standard_window_open(conversation, now=now):
+            return SendDecision.allow(SendMechanism.STANDARD_WINDOW)
+        # After the window, only a person, only under the human-agent tag, and
+        # only for as long as the tag allows. An agent, a follow-up or a
+        # campaign never borrows a human agent's permission (OMNI-033).
+        if origin is MessageOrigin.HUMAN and self.human_tag_open(conversation, now=now):
+            return SendDecision.allow(SendMechanism.HUMAN_AGENT_TAG)
+        return SendDecision.refuse(self.closed_window_refusal)
 
     def reply_policy(self, conversation: Conversation, *, now: datetime) -> ReplyPolicy:
+        window_open = self.standard_window_open(conversation, now=now)
+        tagged = not window_open and self.human_tag_open(conversation, now=now)
+        mechanism = (
+            SendMechanism.STANDARD_WINDOW
+            if window_open
+            else SendMechanism.HUMAN_AGENT_TAG if tagged else None
+        )
         return ReplyPolicy(
-            free_text_allowed=self.standard_window_open(conversation, now=now),
+            free_text_allowed=window_open or tagged,
             window_expires_at=self.window_expires_at(conversation),
             out_of_window=self.capabilities.out_of_window,
             templates=self.capabilities.templates,
             text_limit=self.capabilities.text_limit,
             text_limit_unit=self.capabilities.text_unit,
+            free_text_mechanism=mechanism,
+            agent_free_text_allowed=window_open,
         )
 
 
@@ -315,6 +368,7 @@ __all__ = [
     "ReplyPolicy",
     "SendDecision",
     "SendKind",
+    "SendMechanism",
     "TextUnit",
     "WindowedPolicy",
     "inoperable_reply_policy",

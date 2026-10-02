@@ -43,6 +43,7 @@ from app.channels.adapter import (
     OutboundContent,
     ProviderReceipt,
     Recipient,
+    SendContext,
     TemplateContent,
     TextContent,
 )
@@ -56,7 +57,8 @@ from app.channels.inbound import (
     StatusUpdate,
 )
 from app.channels.media import MalformedMediaDescriptorError, locator_expired
-from app.channels.policy import ChannelPolicy
+from app.channels.outcomes import SendNotAttemptedError
+from app.channels.policy import ChannelPolicy, SendMechanism
 from app.core.config import Settings
 from app.core.crypto import CredentialDecryptionError
 from app.core.exceptions import ValidationError
@@ -206,7 +208,17 @@ class WhatsAppSender:
             )
         )
 
-    async def send(self, recipient: Recipient, content: OutboundContent) -> ProviderReceipt:
+    async def send(
+        self, recipient: Recipient, content: OutboundContent, context: SendContext
+    ) -> ProviderReceipt:
+        """One WhatsApp message. Its mechanism is implicit in the content (OMNI-033).
+
+        The standard window carries free text and files; outside it, only an
+        approved template - and WhatsApp has no human-agent tag, so a policy
+        that asked for one is refused rather than sent as free text.
+        """
+        if context.mechanism is SendMechanism.HUMAN_AGENT_TAG:
+            raise SendNotAttemptedError("WhatsApp has no human-agent tag.")
         address = _address_arguments(recipient)
         if isinstance(content, TextContent):
             sent = await self.client.send_text(

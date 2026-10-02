@@ -425,6 +425,9 @@ async def test_a_conversation_states_its_reply_policy_beside_the_old_flag(
         "text_limit_unit": "characters",
         # Additive (OMNI-031): whether Wasla can act on the channel at all.
         "state": "operational",
+        # Additive (OMNI-033): the rule per origin.
+        "free_text_mechanism": "standard_window",
+        "agent_free_text_allowed": True,
     }
 
 

@@ -46,6 +46,7 @@ from app.channels.adapter import (
     OutboundContent,
     ProviderReceipt,
     Recipient,
+    SendContext,
 )
 from app.channels.inbound import (
     AttachmentLocator,
@@ -142,11 +143,40 @@ class SyntheticPolicy(WindowedPolicy):
         return SYNTHETIC_INSTRUCTIONS
 
 
+#: A Messenger-shaped channel: 24 hours for anybody, then seven more days for a
+#: person under a human-agent tag, and never for an agent (OMNI-033).
+TAGGED_CAPABILITIES: Final = ChannelCapabilities(
+    text_limit=BYTE_LIMIT,
+    text_unit=TextUnit.UTF8_BYTES,
+    reply_budget=900,
+    attachments_per_message=4,
+    media_families=frozenset({"image", "video"}),
+    receipts=ReceiptModel.WATERMARK,
+    echoes=True,
+    reply_to=True,
+    reactions=True,
+    unsend=True,
+    templates=False,
+    out_of_window=OutOfWindow.TAG,
+    message_id_scope="connection",
+)
+
+
+class TaggedPolicy(SyntheticPolicy):
+    """The synthetic channel with Messenger's rules: a 24-hour window and a 7-day human tag."""
+
+    capabilities = TAGGED_CAPABILITIES
+    window = timedelta(hours=24)
+    human_tag_window = timedelta(days=7)
+    closed_window_refusal = "The tagged reply window has closed."
+
+
 @dataclass
 class SendLog:
     """Everything the synthetic provider was asked to do."""
 
     sent: list[tuple[Recipient, OutboundContent]] = field(default_factory=list)
+    contexts: list[SendContext] = field(default_factory=list)
     prepared: list[OutboundContent] = field(default_factory=list)
     fetched: list[str] = field(default_factory=list)
 
@@ -158,8 +188,11 @@ class _Sender:
     async def prepare(self, content: OutboundContent) -> None:
         self.log.prepared.append(content)
 
-    async def send(self, recipient: Recipient, content: OutboundContent) -> ProviderReceipt:
+    async def send(
+        self, recipient: Recipient, content: OutboundContent, context: SendContext
+    ) -> ProviderReceipt:
         self.log.sent.append((recipient, content))
+        self.log.contexts.append(context)
         return ProviderReceipt(message_id=f"syn.out.{uuid.uuid4().hex}")
 
 
@@ -189,9 +222,15 @@ class SyntheticAdapter:
     participant_preference: tuple[str, ...] = (IdentityKind.IGSID.value,)
     anchor_preference: tuple[str, ...] = (IdentityKind.IGSID.value,)
 
-    def __init__(self, channel: Channel = Channel.INSTAGRAM, *, file: bytes = b"") -> None:
+    def __init__(
+        self,
+        channel: Channel = Channel.INSTAGRAM,
+        *,
+        file: bytes = b"",
+        tagged: bool = False,
+    ) -> None:
         self.channel = channel
-        self.policy: ChannelPolicy = SyntheticPolicy(channel)
+        self.policy: ChannelPolicy = TaggedPolicy(channel) if tagged else SyntheticPolicy(channel)
         self.log = SendLog()
         self._file = file
 
@@ -388,8 +427,10 @@ __all__ = [
     "PAYLOAD_OBJECT",
     "SYNTHETIC_CAPABILITIES",
     "SYNTHETIC_INSTRUCTIONS",
+    "TAGGED_CAPABILITIES",
     "SendLog",
     "SyntheticAdapter",
     "SyntheticPolicy",
+    "TaggedPolicy",
     "synthetic_payload",
 ]

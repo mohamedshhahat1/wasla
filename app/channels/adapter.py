@@ -25,10 +25,11 @@ from typing import Any, Protocol
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.channels.inbound import AttachmentLocator, Identifier, ParsedDelivery, ReplyAction
-from app.channels.policy import ChannelPolicy
+from app.channels.policy import ChannelPolicy, SendMechanism
 from app.core.config import Settings
 from app.core.exceptions import ValidationError
 from app.db.models.channel import Channel, ChannelConnection, ContactIdentity, IdentityScope
+from app.db.models.conversation import MessageOrigin
 
 
 class IdentityNotAddressableError(ValidationError):
@@ -80,6 +81,21 @@ OutboundContent = TextContent | TemplateContent | MediaContent
 
 
 @dataclass(frozen=True, slots=True)
+class SendContext:
+    """Who is sending and by which mechanism - the policy's decision, carried to the wire.
+
+    OMNI-033. The adapter used to receive only a recipient and content, so a
+    Messenger or Instagram adapter could not know that a person, not the AI,
+    was replying on day three and must send under `HUMAN_AGENT` - nor refuse
+    to let an agent do so. The mechanism is the policy's; the adapter renders
+    it and never chooses it.
+    """
+
+    origin: MessageOrigin
+    mechanism: SendMechanism
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderReceipt:
     """The provider's acknowledgement of one accepted message."""
 
@@ -107,7 +123,9 @@ class ChannelSender(Protocol):
 
     async def prepare(self, content: OutboundContent) -> None: ...
 
-    async def send(self, recipient: Recipient, content: OutboundContent) -> ProviderReceipt: ...
+    async def send(
+        self, recipient: Recipient, content: OutboundContent, context: SendContext
+    ) -> ProviderReceipt: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +251,7 @@ __all__ = [
     "OutboundContent",
     "ProviderReceipt",
     "Recipient",
+    "SendContext",
     "TemplateContent",
     "TextContent",
 ]

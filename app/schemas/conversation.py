@@ -16,7 +16,13 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.channels.policy import ChannelState, OutOfWindow, ReplyPolicy, TextUnit
+from app.channels.policy import (
+    ChannelState,
+    OutOfWindow,
+    ReplyPolicy,
+    SendMechanism,
+    TextUnit,
+)
 from app.db.models.channel import Channel, ContactIdentity, IdentityKind
 from app.db.models.conversation import (
     Conversation,
@@ -235,6 +241,12 @@ class ReplyPolicyRead(BaseModel):
     # Additive; a client that ignores it still reads `free_text_allowed` and
     # `templates` as false.
     state: ChannelState = ChannelState.OPERATIONAL
+    # Per origin (OMNI-033), additive. How a person's free text would go now -
+    # `standard_window`, or `human_agent_tag` after the window on a channel
+    # that has one - and whether an agent's may go at all, which a human-agent
+    # tag never allows.
+    free_text_mechanism: SendMechanism | None = None
+    agent_free_text_allowed: bool = False
 
     @classmethod
     def from_policy(cls, policy: ReplyPolicy) -> Self:
@@ -246,6 +258,8 @@ class ReplyPolicyRead(BaseModel):
             text_limit=policy.text_limit,
             text_limit_unit=policy.text_limit_unit,
             state=policy.state,
+            free_text_mechanism=policy.free_text_mechanism,
+            agent_free_text_allowed=policy.agent_free_text_allowed,
         )
 
 
