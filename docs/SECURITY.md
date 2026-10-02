@@ -480,9 +480,13 @@ section should not leave believing the hole is open.
 
 ## Request limits
 
-The webhook has its own, tighter body cap (`WEBHOOK_MAX_REQUEST_BYTES`, 1 MB)
-because it is the one endpoint an unauthenticated caller can reach and signature
-verification happens *after* the body is read. The general 32 MB allowance exists
+The webhook has its own, tighter body cap (`WEBHOOK_MAX_REQUEST_BYTES`, 3 MiB -
+Meta's documented maximum delivery, OMNI-034) because it is the one endpoint an
+unauthenticated caller can reach and signature verification happens *after* the
+body is read. It was 1 MiB until the omnichannel final remediation, which
+refused legitimate 1.47 MB deliveries on every retry; a refusal is now counted
+(`wasla_http_body_too_large_total{route_group}`) and alerts
+(`WebhookBodyTooLarge`). The general 32 MB allowance exists
 for media uploads by signed-in colleagues. The cap is applied as a `min`, so
 lowering `MAX_REQUEST_BYTES` can never loosen the webhook — an existing test
 caught that exact regression.

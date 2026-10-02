@@ -490,6 +490,44 @@ tests:
                 A Meta webhook subscription - Instagram, a Page, or another app product - points at this channel's callback URL. Its deliveries are refused rather than misread. Check the App Dashboard's webhook subscriptions: each product needs its own callback, and Wasla operates only the channels it has an adapter for.
               runbook: docs/RUNBOOK.md
 
+  # ------------------------------------------ webhook body cap (OMNI-034)
+  - interval: 30s
+    name: one refused webhook delivery alerts at once
+    input_series:
+      - series: 'wasla_http_body_too_large_total{job="wasla-api", route_group="webhook"}'
+        values: "0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: WebhookBodyTooLarge
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: WebhookBodyTooLarge
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: messaging
+            exp_annotations:
+              summary: "A webhook delivery was refused as too large"
+              description: >-
+                The request size limit refused a provider's webhook delivery before it reached the route. Meta will retry it unchanged and refuse it unchanged, so its messages are lost unless the cap is raised to cover it. Compare WEBHOOK_MAX_REQUEST_BYTES with Meta's documented maximum and the request.body_too_large log line's declared size.
+              runbook: docs/RUNBOOK.md
+      # Quiet again once no refusal is inside the window.
+      - eval_time: 30m
+        alertname: WebhookBodyTooLarge
+        exp_alerts: []
+
+  - interval: 30s
+    name: no refusal and an oversized api request do not alert
+    input_series:
+      - series: 'wasla_http_body_too_large_total{job="wasla-api", route_group="webhook"}'
+        values: "0+0x60"
+      - series: 'wasla_http_body_too_large_total{job="wasla-api", route_group="api"}'
+        values: "0+1x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WebhookBodyTooLarge
+        exp_alerts: []
+
   # ---------------------------------------- connection health (OMNI-012)
   - interval: 30s
     name: a disabled connection with a refused credential is not an alert

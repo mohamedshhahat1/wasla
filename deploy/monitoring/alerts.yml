@@ -485,6 +485,28 @@ groups:
             operates only the channels it has an adapter for.
           runbook: docs/RUNBOOK.md
 
+      - alert: WebhookBodyTooLarge
+        # A webhook delivery refused for size before any route read it
+        # (OMNI-034). Meta retries a refused delivery identically for up to
+        # seven days, so one refusal is a delivery - and every message in it -
+        # that will never arrive; nothing else in this file can see it, because
+        # the refusal happens before ingestion counts anything. A healthy
+        # deployment refuses none: the cap is Meta's documented maximum.
+        expr: |
+          sum(increase(wasla_http_body_too_large_total{route_group="webhook"}[15m])) > 0
+        labels:
+          severity: critical
+          component: messaging
+        annotations:
+          summary: "A webhook delivery was refused as too large"
+          description: >-
+            The request size limit refused a provider's webhook delivery before
+            it reached the route. Meta will retry it unchanged and refuse it
+            unchanged, so its messages are lost unless the cap is raised to
+            cover it. Compare WEBHOOK_MAX_REQUEST_BYTES with Meta's documented
+            maximum and the request.body_too_large log line's declared size.
+          runbook: docs/RUNBOOK.md
+
       - alert: ChannelConnectionCredentialRefused
         # A live connection whose provider refused its credential on the last
         # send (OMNI-012). Recorded on the connection, cleared by the next

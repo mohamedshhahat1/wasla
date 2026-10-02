@@ -643,11 +643,16 @@ class Settings(BaseSettings):
     # Comfortably above the media cap, so an attachment upload is bounded by the
     # rule that understands attachments rather than by this blunt one.
     max_request_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
-    # The webhook's own cap. Far smaller because a WhatsApp delivery is a few
-    # kilobytes of JSON, and it is the one endpoint an unauthenticated caller
-    # can reach - the 32 MB above exists for media uploads by signed-in
-    # colleagues, which is not what arrives here.
-    webhook_max_request_bytes: int = Field(default=1024 * 1024, gt=0)
+    # The webhook's own cap: Meta's documented maximum and no more (OMNI-034).
+    # "Webhook payloads can be up to 3 MB", and Meta batches up to a thousand
+    # updates into one delivery; a burst of long Arabic replies - two bytes a
+    # character - passed the old 1 MiB cap at 1.47 MB. A refused delivery is
+    # refused identically on every retry for seven days, so a cap below Meta's
+    # maximum is message loss, not protection. Still far below the 32 MB above,
+    # which exists for media uploads by signed-in colleagues: this is the one
+    # endpoint an unauthenticated caller can reach, and the signature is only
+    # checked once the body has been read.
+    webhook_max_request_bytes: int = Field(default=3 * 1024 * 1024, gt=0)
     # What a caller with no verifiable access token may send to any route
     # (SEC-02). JSON is parsed in full - at about nine times its size - before
     # validation and before the rate limiter, so this, not the 32 MB above, is

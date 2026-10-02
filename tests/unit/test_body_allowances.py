@@ -204,4 +204,4 @@ def test_the_tiers_are_ordered_by_default() -> None:
         < DEFAULTS.max_request_bytes
     )
     assert DEFAULTS.max_json_request_bytes <= 64 * 1024
-    assert DEFAULTS.webhook_max_request_bytes == 1024 * 1024
+    assert DEFAULTS.webhook_max_request_bytes == 3 * 1024 * 1024

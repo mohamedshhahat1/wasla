@@ -446,6 +446,15 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Marketing opt-outs recorded, by the evidence they arrived by.",
         ("via",),
     ),
+    # Request bodies refused by the size limit before any route saw them
+    # (OMNI-034). A 413 used to be a log line and nothing else, so a Meta
+    # delivery refused on every retry for seven days lost its messages with
+    # every alert green. `route_group` is closed - `webhook` or `api` - and is
+    # never a path, which a caller chooses.
+    "wasla_http_body_too_large_total": (
+        "Request bodies refused for size before reaching a route, by route group.",
+        ("route_group",),
+    ),
 }
 
 # Closed domains of the two inbound counters. `app.core` imports nothing from
@@ -995,6 +1004,18 @@ async def record_opt_outs(by_via: Mapping[str, int]) -> None:
         await _increment_by(
             "wasla_opt_outs_total", {"via": via if via in OPT_OUT_VIAS else "other"}, count
         )
+
+
+#: The closed domain of `wasla_http_body_too_large_total{route_group}`.
+BODY_LIMIT_ROUTE_GROUPS: Final = frozenset({"webhook", "api"})
+
+
+async def record_body_too_large(route_group: str) -> None:
+    """One request body refused for size (OMNI-034). Best-effort."""
+    await _increment(
+        "wasla_http_body_too_large_total",
+        {"route_group": route_group if route_group in BODY_LIMIT_ROUTE_GROUPS else "other"},
+    )
 
 
 async def record_media_outcome(outcome: str) -> None:

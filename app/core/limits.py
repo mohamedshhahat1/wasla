@@ -60,6 +60,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.exceptions import AuthenticationError, error_payload
 from app.core.logging import get_logger
+from app.core.telemetry import record_body_too_large
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -154,14 +155,16 @@ class BodySizeLimitMiddleware:
         # The absolute ceiling, and the upload allowance. Nothing is ever
         # allowed more than this, whichever rule below applies.
         self.max_bytes = max_bytes
-        # The webhook gets its own, much smaller cap. It is the one endpoint
-        # that is unauthenticated, unlimited by policy (ADR-032) and reachable
-        # by anybody who finds the URL, and a WhatsApp delivery is a few
-        # kilobytes of JSON - so the general 32 MB allowance, which exists for
-        # media uploads by signed-in colleagues, is three orders of magnitude
-        # more than it can legitimately need. Signature verification happens
-        # after the body is read, so without this the cost of making the server
-        # buffer 32 MB is one unsigned request.
+        # The webhook gets its own, smaller cap. It is the one endpoint that is
+        # unauthenticated, unlimited by policy (ADR-032) and reachable by
+        # anybody who finds the URL, so the general 32 MB allowance, which
+        # exists for media uploads by signed-in colleagues, is an order of
+        # magnitude more than it can legitimately need. It is set at Meta's
+        # documented maximum delivery, 3 MB (OMNI-034): any lower and a
+        # legitimate delivery is refused on every retry until Meta gives up.
+        # Signature verification happens after the body is read, so without
+        # this the cost of making the server buffer 32 MB is one unsigned
+        # request.
         self.webhook_max_bytes = webhook_max_bytes or max_bytes
         # Left unset, every tier collapses to `max_bytes` - the single-cap
         # behaviour a directly constructed middleware has always had.
@@ -259,6 +262,7 @@ class BodySizeLimitMiddleware:
                     "declared_bytes": known,
                 },
             )
+            await self._count_refusal(scope)
             await self._refuse_oversize(send)
             return
 
@@ -304,10 +308,26 @@ class BodySizeLimitMiddleware:
             if not replaced:
                 await send(message)
 
-        await self.app(scope, limited_receive, guarded_send)
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except Exception:
+            # A route reading the body we cut off raises on the disconnect -
+            # Starlette's `ClientDisconnect` - rather than answering. That is
+            # this middleware's doing, not the route's failure, so it is
+            # answered as the refusal it is; anything else is let out.
+            if not exceeded:
+                raise
+        if exceeded:
+            await self._count_refusal(scope)
         if exceeded and not started:
             # The application said nothing at all about the disconnect.
             await self._refuse_oversize(send)
+
+    @staticmethod
+    async def _count_refusal(scope: Scope) -> None:
+        """Count a size refusal by closed route group, never by path (OMNI-034)."""
+        path = scope.get("path", "")
+        await record_body_too_large("webhook" if path.startswith(WEBHOOK_PREFIX) else "api")
 
     async def _refuse_oversize(self, send: Send) -> None:
         await _refuse(

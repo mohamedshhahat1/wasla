@@ -189,9 +189,10 @@ async def test_a_chunked_body_over_the_public_cap_is_refused_with_413(
     assert response.json()["error"]["code"] == "payload_too_large"
 
 
-async def test_the_webhook_keeps_its_own_one_mebibyte_cap(default_app: FastAPI) -> None:
-    under, _ = await _call(default_app, path="/api/v1/webhooks/whatsapp", declared=None)
-    over, spy = await _call(default_app, path="/api/v1/webhooks/whatsapp", declared=MiB + 1)
+async def test_the_webhook_keeps_its_own_cap_at_metas_maximum(default_app: FastAPI) -> None:
+    """3 MiB: Meta's documented maximum delivery, and no more (OMNI-034)."""
+    under, _ = await _call(default_app, path="/api/v1/webhooks/whatsapp", declared=3 * MiB)
+    over, spy = await _call(default_app, path="/api/v1/webhooks/whatsapp", declared=3 * MiB + 1)
 
     assert under != 413
     assert over == 413
@@ -377,7 +378,7 @@ async def test_a_token_does_not_raise_the_webhook_cap() -> None:
     status, _ = await _call(
         middleware,
         path="/api/v1/webhooks/whatsapp",
-        declared=MiB + 1,
+        declared=settings.webhook_max_request_bytes + 1,
         headers=_bearer(_access(settings)),
     )
 
