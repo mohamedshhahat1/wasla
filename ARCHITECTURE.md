@@ -203,6 +203,35 @@ conversation -> connection -> ChannelPolicy -> participant identity -> adapter.s
 | Policy | `ChannelPolicy` / `ChannelCapabilities`: who may send what now, text limit **and its unit**, agent instructions, follow-up decision, `reply_policy` | the 24-hour window with the template escape; 4,096 characters |
 | Media | the pipeline: claim, bounds, hash, sniffed type, storage, reading, retention; `UrlMediaFetcher` | the two-step handle fetch and Meta's host roots |
 
+**The seam after the final remediation (ADR-120/121 amended, ADR-124 to ADR-130).**
+
+- **Inbound.** A `MESSAGE` or `ECHO` event's `event_id` *is* its provider
+  message id, refused at construction otherwise, because recovery and the media
+  sweep find the message from the event. A tap travels as
+  `InboundEvent.action` (`ReplyAction`: source, id or payload, title) and is
+  stored on the message; a postback is a message with an action. A
+  `PREFERENCE` event carries a provider-side marketing stop or resume. An event
+  the legacy workspace-wide key refuses is kept as failed evidence on its own
+  connection. Conversation anchors only move forward (`GREATEST`). An unmatched
+  echo is an outbound message with origin `external` and hands the conversation
+  to a person.
+- **Channel state.** A channel is operational, paused (`PAUSED_CHANNELS`) or
+  unavailable. Acting goes through `ChannelRegistry.adapter_for` /
+  `policy_for`, which refuse anything but operational; describing goes through
+  `known_policy`, so the inbox renders every state.
+- **Outbound.** `policy.may_send` returns a `SendDecision` with a
+  `SendMechanism` (`standard_window`, `template`, `human_agent_tag`; only a
+  person, only inside the tag window, ever gets the last). The adapter gets
+  `prepare(content, media_url=...) -> PreparedContent` (an upload id or a
+  short-lived single-object URL) and `send(recipient, prepared,
+  SendContext(origin, mechanism))`. Per-family media limits and the text limit
+  in its unit are checked before anything is staged. On a channel whose
+  capabilities say `disclosure_required`, an AI reply carries the automation
+  disclosure when it is due, inside the same message.
+- **Provider errors** are classified by Meta's code (throttled, credential,
+  connection, per-message) in one table for every Meta product; the connection's
+  health records the last two kinds of refusal.
+
 **Compatibility window.** Lifecycle is still written on `whatsapp_accounts` and
 mirrored to `channel_connections` by trigger; `contacts.wa_id` is kept equal to the
 contact's WhatsApp phone identity by trigger; `wa_message_id` and `wa_id` stay in
@@ -621,7 +650,7 @@ One pitfall is recorded here because it already produced a defect. A model that 
 
 The schema carries one deliberate denormalisation. `conversations.last_inbound_at` duplicates the timestamp of the customer's most recent message, which could be derived from the `messages` table instead. It is stored because the 24-hour service window is checked on every outbound send and returned on every conversation read, so deriving it would make that the most frequent query in the system. The projection is the only writer.
 
-Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, the unique invitation token hash, `whatsapp_accounts (tenant_id)`, a platform-wide `UNIQUE(phone_number_id)`, `whatsapp_events (tenant_id)`, `whatsapp_events (account_id)`, `whatsapp_events (tenant_id, state)`, `UNIQUE(tenant_id, event_id)`, `contacts (tenant_id)`, `UNIQUE(tenant_id, wa_id)`, `conversations (tenant_id)`, `conversations (tenant_id, status)`, `conversations (tenant_id, last_message_at)`, `conversations (contact_id)`, `UNIQUE(tenant_id, contact_id, account_id)`, `messages (tenant_id)`, `messages (conversation_id, created_at)`, `UNIQUE(tenant_id, wa_message_id)`, `agents (tenant_id)`, `agents (tenant_id, status)`, `UNIQUE(tenant_id, name)` on agents, `agent_tools (tenant_id)`, `agent_tools (agent_id)`, and `UNIQUE(tenant_id, agent_id, name)`. Media adds `message_media (tenant_id)`, `message_media (tenant_id, status)`, `message_media (conversation_id)` and `UNIQUE(message_id)`. The conversation index is not an optimisation: before an agent is allowed to answer, the worker asks whether anything on the conversation is still unread, and it asks once per file that arrives. The unique constraint is what makes a webhook replay a no-op and the download job safe to retry.
+Indexes exist on `memberships (tenant_id)`, `memberships (user_id)`, `UNIQUE(user_id, tenant_id)`, `tenant_invitations (tenant_id)`, `tenant_invitations (tenant_id, email)`, the unique invitation token hash, `whatsapp_accounts (tenant_id)`, `UNIQUE(phone_number_id) WHERE released_at IS NULL` (unique among live claims; a released number may be claimed again, ADR-101), `whatsapp_events (tenant_id)`, `whatsapp_events (account_id)`, `whatsapp_events (tenant_id, state)`, `UNIQUE(tenant_id, event_id)`, `contacts (tenant_id)`, `UNIQUE(tenant_id, wa_id)`, `conversations (tenant_id)`, `conversations (tenant_id, status)`, `conversations (tenant_id, last_message_at)`, `conversations (contact_id)`, `UNIQUE(tenant_id, contact_id, account_id)`, `messages (tenant_id)`, `messages (conversation_id, created_at)`, `UNIQUE(tenant_id, wa_message_id)`, `agents (tenant_id)`, `agents (tenant_id, status)`, `UNIQUE(tenant_id, name)` on agents, `agent_tools (tenant_id)`, `agent_tools (agent_id)`, and `UNIQUE(tenant_id, agent_id, name)`. Media adds `message_media (tenant_id)`, `message_media (tenant_id, status)`, `message_media (conversation_id)` and `UNIQUE(message_id, position)` (ordered files per message, ADR-117). The conversation index is not an optimisation: before an agent is allowed to answer, the worker asks whether anything on the conversation is still unread, and it asks once per file that arrives. The unique constraint is what makes a webhook replay a no-op and the download job safe to retry.
 
 Migration `0019` closed a gap phase 12 left. Every tenant analytics figure is "this workspace, this window", and `conversations`, `messages`, `message_sentiments` and `campaign_recipients` each had a `(tenant_id)` index carrying no timestamp — so the workspace's rows were found and then most of them discarded by filter. The waste grew with how long a workspace had existed, making the dashboard slowest for the longest-paying customers. Measured on fifty workspaces and fifty thousand messages, the message count went from a bitmap heap scan touching 772 buffers and discarding 850 of 1,000 rows to an index-only scan touching 6 with no heap fetches at all. `leads` already had the index, which is why the lead figures were the only ones that were fast.
 

@@ -6252,3 +6252,224 @@ spending an attempt. Agent and human replies are counted and never refused.
 **Consequences.** With an allowance set, concurrent senders on one connection
 serialise on its row until their send intent commits; unrelated connections share
 nothing. Provider quotas are not invented: the number is a deployment's choice.
+
+## ADR-120 (amended 2026-10-02) — A Message Event Is Identified By Its Message Id; Collisions Are Kept
+
+**Context.** The final omnichannel audit found that ingestion stores a message
+under `InboundEvent.message_id` while inbound recovery and the stranded-media
+sweep find it again from the stored event by `event_id` - an equality no
+contract stated (OMNI-032) - and that the legacy workspace-wide
+`(tenant_id, event_id)` key, which stands until O8, discarded an event another
+connection of the same workspace already held (OMNI-043).
+
+**Decision.**
+
+1. **Option A of the remediation brief.** For `MESSAGE` and `ECHO` events
+   `event_id == message_id`, refused at construction
+   (`InboundEvent.__post_init__`) and pinned by the adapter contract suite. Every
+   Meta product identifies a message event by its `mid`; statuses keep their
+   composed `{message_id}:{status}` ids. No column is added. Option B (the
+   projected message's id stored on the event row) is the route if a future
+   provider composes message event ids.
+2. **Nothing refused disappears.** An event the legacy key refuses is stored on
+   its own connection as `failed` evidence, payload intact, under
+   `collision:<connection>:<event id>` (a SHA-256 for an id too long to prefix).
+   It is never projected, recovered or redacted; a replay finds it and writes
+   nothing. `wasla_inbound_events_total{outcome="collision"}` still counts it.
+
+**Consequences.** Recovery no longer depends on an unwritten assumption.
+Dropping the legacy uniques remains O8, with its conditions (`docs/RUNBOOK.md`).
+
+## ADR-121 (amended 2026-10-02) — The Send Seam Carries The Policy's Decision
+
+**Context.** `ChannelPolicy.may_send` answered allow or refuse and
+`ChannelSender.send` received only a recipient and content, so an adapter could
+not know whether a person or the AI was sending, nor by which mechanism - which
+Messenger and Instagram need for `HUMAN_AGENT` (OMNI-033). `prepare` modelled an
+upload by mutating the sender (OMNI-040), and the provider's per-type media
+limits were not capabilities (OMNI-045).
+
+**Decision.**
+
+1. `may_send` returns a `SendDecision(allowed, reason, mechanism)`;
+   `SendMechanism` is `standard_window`, `template` or `human_agent_tag`, and
+   `OutOfWindow` gains `TAG`. After the standard window only a `HUMAN` origin,
+   only inside the policy's `human_tag_window`, is allowed `human_agent_tag`. An
+   agent, a follow-up or a campaign never is, and the choke point refuses it
+   again if a policy ever said otherwise.
+2. `ChannelSender.send(recipient, prepared, context)` with
+   `SendContext(origin, mechanism)`. WhatsApp's mechanisms are implicit in its
+   content: its payloads are byte-identical to before (pinned), and it refuses a
+   human-agent tag rather than sending free text.
+3. `prepare(content, *, media_url)` returns
+   `PreparedContent(content, reference, reference_kind: upload | url)` instead
+   of mutating the sender.
+4. `ChannelCapabilities.media_limits` (per family: max bytes, accepted types) is
+   checked by `require_sendable_media` before anything is staged.
+5. `reply_policy` answers per origin, additively (`free_text_mechanism`,
+   `agent_free_text_allowed`), and carries the channel's `state` (ADR-126).
+
+**Consequences.** A Messenger/Instagram adapter can render `MESSAGE_TAG` from
+the context it is given and can never be asked to tag an AI reply.
+
+## ADR-123 (amended 2026-10-02) — A Connection May Carry Its Own Allowance
+
+**Context.** One deployment-wide `CONNECTION_SENDS_PER_MINUTE` fitted every
+connection, while Meta gives a number 80 messages a second by default, up to
+1,000 after an upgrade, and fixes a Coexistence number at 20 (OMNI-052).
+
+**Decision.** `channel_connections.sends_per_minute` (nullable, `> 0`, migration
+0090) overrides the deployment's value for that connection; null keeps it. The
+allowance mechanics are unchanged.
+
+**Consequences.** Setting it is an operator action today; no API writes it yet.
+
+## ADR-124 — What A Customer Tapped Is A Neutral Reply Action
+
+**Context.** WhatsApp delivers a template quick reply as `type: button` with
+`{payload, text}` and an interactive reply as `interactive.button_reply` or
+`list_reply` `{id, title}`. Both were stored with no text: the agent read
+`[interactive]`, and a customer tapping "Stop promotions" under a marketing
+template was never opted out (OMNI-030). Messenger's quick replies and postbacks
+have the same shape.
+
+**Decision.**
+
+1. `InboundEvent.action: ReplyAction(source, id_or_payload, title)`; `source`
+   is `button | button_reply | list_reply | quick_reply | postback`. The title is
+   also the message text. An id or payload longer than Meta issues is dropped,
+   never cut. `context.id` is carried.
+2. Persisted as `messages.action_source / action_payload / action_title`
+   (migration 0085) and exposed as `MessageRead.action`. The AI window renders a
+   tap as `[tapped: <title>]`.
+3. A tap opts the customer out when its words are a stop phrase
+   (`app/services/opt_out.py`) or its payload is one a template on that number
+   marks as the marketing opt-out (`PUT /templates/{id}/opt-out-payloads`,
+   admins only). Through the one opt-out writer; `contacts.opt_out_via` records
+   the evidence (`message`, `reply_action`, `provider_preference`,
+   `provider_refusal`, `replay`, `team`) and `marketing_resumed_at` re-admission.
+4. **An opt-out tap queues no agent turn.** A typed stop word is unchanged:
+   honoured and still answered.
+5. Taps the old code missed are replayed from retained raw payloads by
+   `scripts.omnichannel_invariants recover-button-opt-outs` (dry run by default,
+   provenance `replay`, idempotent; a newer resume wins).
+6. WhatsApp's `user_preferences` stop/resume and the `131050` refusal reach the
+   same writer (`provider_preference`, `provider_refusal`); a provider resume
+   lifts only an opt-out the provider's own preference record made (OMNI-046).
+
+**Consequences.** Routing reads payloads, never display text alone, where a
+payload exists. The production recovery run is time-bound by the 30-day
+raw-payload redaction (DB-011).
+
+## ADR-125 — Reactions, Edits, Unsend And Postbacks
+
+**Context.** Instagram and Messenger deliver `postback`, `reaction`,
+`message_edit` and `is_deleted`; the neutral message vocabulary had none of them
+(OMNI-053).
+
+**Decision.** A **postback** is a message carrying a reply action with source
+`postback` (ADR-124): its text is the title, the payload is kept for routing,
+and it needs nothing new. **Reactions, edits and unsend are deferred to the
+adapter stage**, with this direction recorded so it is not re-litigated: a
+reaction is an annotation on the message it names (not a message, never an
+agent turn); an edit replaces the stored text and keeps the original as
+evidence; an unsend withdraws the message from the transcript and from AI
+memory, keeping the event.
+
+**Consequences.** The first Instagram/Messenger adapter implements the three
+deferred representations before it claims those capability flags.
+
+## ADR-126 — A Channel Is Operational, Paused Or Unavailable
+
+**Context.** `GET /conversations` failed closed (422) for a whole page when any
+conversation's channel had no adapter, and the registry was a channel's only
+switch, so rolling a second channel back would have broken WhatsApp's inbox
+(OMNI-031).
+
+**Decision.** `ChannelState`: **operational** (inbound and outbound),
+**paused** (`PAUSED_CHANNELS`: inbound stored and shown; sends, agent turns,
+tool calls and file fetches refused; follow-ups and campaigns wait without
+spending an attempt) and **unavailable** (no adapter). Presentation tolerates
+every state: a non-operable conversation renders with
+`service_window_open: false`, nothing sendable, and `reply_policy.state`.
+Sending still refuses at the choke point (`ChannelPausedError`,
+`ChannelUnavailableError`) before anything is staged. Configuration only, no
+table; `wasla_channel_state` gauges it and `ChannelPausedForADay` reminds.
+
+**Consequences.** Rollback is a configuration change and never requires removing
+an adapter; the inbox renders a channel in any state.
+
+## ADR-127 — Automation Is Disclosed Where The Channel's Policy Requires It
+
+**Context.** Meta's Messenger and Instagram policy requires an automated chat to
+disclose that it is automated at the start, after significant lapses and when a
+conversation moves from a person back to automation (OMNI-041).
+
+**Decision.** `ChannelCapabilities.disclosure_required` (off for WhatsApp; the
+product may enable it later). The AI reply discloses when nothing was recorded,
+after `AUTOMATION_DISCLOSURE_GAP_HOURS` (default 24) or after a hand-back
+(`conversations.ai_resumed_at`), read from the columns after the inference. The
+disclosure is **prepended to the same message**, counted in the channel's unit,
+and the reply is bounded so both fit without splitting a character.
+`conversations.automation_disclosed_at` is written only when the send reaches
+`SENT`. Default wording per language (en, ar); a workspace may set its own
+(`tenants.automation_disclosure`) but cannot switch the obligation off. People's
+replies never carry it.
+
+**Consequences.** Migration 0086; the invariant
+`ai_reply_on_a_disclosure_channel_never_disclosed` watches it.
+
+## ADR-128 — Outbound Media By Short-Lived Single-Object URL
+
+**Context.** Instagram accepts video, audio and files only by URL; Wasla could
+only upload (OMNI-040).
+
+**Decision.** A store that can (`SignedUrlStorage`: the S3/MinIO backend) issues
+a SigV4 query-signed GET for exactly one object: `MEDIA_SIGNED_URL_TTL_SECONDS`
+(default 600), never more than an hour. `MediaUrlGrant` is built from the
+outbound message's own stored file and refuses a key outside its workspace or of
+the wrong shape before the store is asked. The URL goes to the adapter only:
+never logged, never stored on a message or an event. WhatsApp keeps uploading.
+
+**Privacy trade-off, accepted.** For its lifetime the URL is a bearer credential
+to that one file: whoever holds it - the provider, or anyone it leaks to - can
+fetch it. Bounded by one object, one method and a short expiry; no live channel
+uses it yet.
+
+## ADR-129 — An Echo Of A Reply Typed Outside Wasla Hands The Conversation To A Person
+
+**Context.** Instagram and Messenger echo every message the business sends, and
+Coexistence does for the WhatsApp Business app. Echoes were stored as evidence
+only, so a colleague's reply from the provider's app was invisible and the AI
+talked over them (OMNI-037).
+
+**Decision.** An echo whose provider id names Wasla's outbound message on the
+connection - or whose words match a Wasla send still in flight there - is
+confirmed and changes nothing (its time becomes the message's
+`provider_sent_at`). An **unmatched** echo is projected as an outbound message
+with origin `external` (migration 0087) and the conversation is handed to a
+person: pending agent nudges cancelled, a queued or composing agent turn
+suppressed by the mode it reads. An echo never opens, extends or moves a
+service window.
+
+**Consequences.** `MessageRead.origin` gains `external` additively.
+
+## ADR-130 — Meta Errors Are Classified By Meta's Code
+
+**Context.** Only HTTP 429 was a rate limit and only 401/190 a credential
+failure; a 400 carrying `130429` failed every campaign recipient and a revoked
+permission (`10`) burned every attempt with the connection reading healthy
+(OMNI-035).
+
+**Decision.** One table for every Meta product
+(`app/integrations/meta/errors.py`), code first, status as fallback:
+**throttled** `4, 80007, 130429, 131056, 131057` (or a bare 429);
+**credential** `0, 190` (or 401); **connection** `3, 10, 200-299, 131005, 368,
+131031, 133010`; **per-message** otherwise. A throttle is undelivered with health
+`rate_limited` and sweeps wait; a connection refusal is undelivered with health
+`permission_missing` and sweeps stop. ADR-093 is unchanged: a 5xx, timeout or
+transport failure stays uncertain and is never resent.
+`wasla_provider_errors_total{provider, class}` counts each.
+
+**Consequences.** Instagram and Messenger share the Graph error envelope and
+reuse the table.
