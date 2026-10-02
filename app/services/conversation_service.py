@@ -75,6 +75,21 @@ class ProjectedMessage:
         return self.outcome is ProjectionOutcome.STORED
 
 
+class EchoKind(StrEnum):
+    """What an echo turned out to be (OMNI-037)."""
+
+    OWN = "own"
+    EXTERNAL = "external"
+    ORPHAN = "orphan"
+
+
+@dataclass(frozen=True, slots=True)
+class EchoOutcome:
+    kind: EchoKind
+    message: Message | None = None
+    conversation: Conversation | None = None
+
+
 class ConversationProjectionService:
     """Turns one stored event into conversation and message rows, in one workspace."""
 
@@ -197,6 +212,50 @@ class ConversationProjectionService:
                 )
         return ProjectedMessage(ProjectionOutcome.STORED, message=stored, conversation=conversation)
 
+    async def project_echo(
+        self,
+        *,
+        connection: ChannelConnection,
+        event: InboundEvent,
+        conversation: Conversation | None,
+    ) -> EchoOutcome:
+        """What an echo is: Wasla's own send, or a reply typed outside Wasla (OMNI-037, ADR-129).
+
+        - **Wasla's own** - its provider id names an outbound message on this
+          connection, or a send of the same words is still in flight there:
+          confirmed, and nothing changes.
+        - **External** - a person answered from the provider's own app: the
+          reply is projected as an outbound message with origin `external`, the
+          inbox order moves, and the caller hands the conversation to a person.
+          The window never moves: only the customer opens it.
+        - **Orphan** - it names no conversation Wasla holds: kept as evidence.
+        """
+        if event.message_id is None:  # pragma: no cover - the event type refuses it
+            return EchoOutcome(EchoKind.ORPHAN)
+        existing = await self._messages.find_provider_message(
+            connection_id=connection.id, provider_message_id=event.message_id
+        )
+        if existing is not None:
+            if existing.direction is MessageDirection.OUTBOUND:
+                return EchoOutcome(EchoKind.OWN, message=existing)
+            return EchoOutcome(EchoKind.ORPHAN)
+        if conversation is None:
+            return EchoOutcome(EchoKind.ORPHAN)
+        if await self._messages.requested_with_body(conversation.id, event.text):
+            # Wasla's send, echoed before its response named it.
+            return EchoOutcome(EchoKind.OWN)
+        at = event.occurred_at or datetime.now(UTC)
+        message = self._messages.record_external(
+            conversation_id=conversation.id,
+            connection_id=connection.id,
+            provider_message_id=event.message_id,
+            kind=event.message_kind,
+            body=event.text,
+            sent_at=at,
+        )
+        await self._conversations.touch_outbound(conversation, at=at)
+        return EchoOutcome(EchoKind.EXTERNAL, message=message, conversation=conversation)
+
     async def project_status(
         self,
         *,
@@ -265,4 +324,10 @@ class ConversationProjectionService:
         return ProjectedMessage(ProjectionOutcome.COLLISION, message=existing)
 
 
-__all__ = ["ConversationProjectionService", "ProjectedMessage", "ProjectionOutcome"]
+__all__ = [
+    "ConversationProjectionService",
+    "EchoKind",
+    "EchoOutcome",
+    "ProjectedMessage",
+    "ProjectionOutcome",
+]

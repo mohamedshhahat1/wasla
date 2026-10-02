@@ -128,6 +128,11 @@ class MessageOrigin(StrEnum):
     # on its own behalf rather than on a workspace's - a service notice - so
     # that when one exists it is not filed as somebody's reply.
     SYSTEM = "system"
+    # Sent by the business from outside Wasla - the provider's own app, or the
+    # WhatsApp Business app under Coexistence - and reported back as an echo
+    # (OMNI-037, ADR-129). Nobody in Wasla sent it, and it is still the
+    # business talking: the AI stops and a person has the conversation.
+    EXTERNAL = "external"
 
 
 class ReplyActionSource(StrEnum):

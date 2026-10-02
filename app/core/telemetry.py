@@ -486,6 +486,7 @@ INBOUND_OUTCOMES: Final = frozenset(
         "stored",
         "duplicate",
         "echo",
+        "external_echo",
         "collision",
         "unknown_connection",
         "inactive_connection",

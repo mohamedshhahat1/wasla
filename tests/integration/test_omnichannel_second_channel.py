@@ -254,10 +254,16 @@ async def test_a_channel_without_a_decided_meter_is_not_metered_as_whatsapp(
 
 
 async def test_an_echo_of_our_own_send_is_evidence_not_a_turn(
-    db_session: AsyncSession, adapter: SyntheticAdapter
+    db_session: AsyncSession,
+    adapter: SyntheticAdapter,
+    registry: ChannelRegistry,
+    settings: Settings,
+    graph: NoWhatsApp,
 ) -> None:
     """M11: the business's own message reported back is never a customer's
-    message - it stores no message, opens no window and queues no turn."""
+    message - it stores no message, opens no window and queues no turn.
+    (An echo naming no Wasla send is a reply typed outside Wasla: see
+    test_external_echoes.py, OMNI-037.)"""
     tenant = await _workspace(db_session)
     connection = await _connection(db_session, tenant)
     await _ingest(
@@ -265,6 +271,12 @@ async def test_an_echo_of_our_own_send_is_evidence_not_a_turn(
     )
     conversation = await _the_conversation(db_session, connection)
     window = conversation.last_inbound_at
+    sent = await MessagingService(
+        session=db_session, settings=settings, tenant_id=tenant.id, channels=registry
+    ).send_text(conversation_id=conversation.id, body="We replied", origin=MessageOrigin.AGENT)
+    messages_before = await db_session.scalar(
+        select(func.count()).select_from(Message).where(Message.conversation_id == conversation.id)
+    )
     queue = RecordingQueue()
 
     outcome = await _ingest(
@@ -274,7 +286,7 @@ async def test_an_echo_of_our_own_send_is_evidence_not_a_turn(
             connection.external_account_id,
             {
                 "type": "echo",
-                "id": "syn.echo.1",
+                "id": sent.wa_message_id,
                 "to": SENDER,
                 "at": int(datetime.now(UTC).timestamp()),
                 "text": "We replied",
@@ -283,12 +295,12 @@ async def test_an_echo_of_our_own_send_is_evidence_not_a_turn(
         queue=queue,
     )
 
-    assert (outcome.echoes, outcome.stored) == (1, 1)
+    assert (outcome.echoes, outcome.stored, outcome.external_echoes) == (1, 1, 0)
     assert queue.jobs == []
-    echoed = await db_session.scalar(
-        select(func.count()).select_from(Message).where(Message.wa_message_id == "syn.echo.1")
+    messages_after = await db_session.scalar(
+        select(func.count()).select_from(Message).where(Message.conversation_id == conversation.id)
     )
-    assert echoed == 0
+    assert messages_after == messages_before
     await db_session.refresh(conversation)
     assert conversation.last_inbound_at == window
 

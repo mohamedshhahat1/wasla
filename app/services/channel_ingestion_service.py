@@ -51,6 +51,7 @@ from app.core.telemetry import (
     record_opt_outs,
 )
 from app.db.errors import is_data_exception
+from app.db.models.analytics import AnalyticsSource
 from app.db.models.campaign import OptOutSource, OptOutVia
 from app.db.models.channel import ChannelConnection
 from app.db.models.channel_event import ChannelEvent, ChannelEventKind
@@ -68,8 +69,13 @@ from app.repositories.conversation_repository import (
 )
 from app.repositories.media_repository import MediaRepository
 from app.services.contact_identity_service import ContactIdentityService
-from app.services.conversation_service import ConversationProjectionService, ProjectionOutcome
+from app.services.conversation_service import (
+    ConversationProjectionService,
+    EchoKind,
+    ProjectionOutcome,
+)
 from app.services.follow_up_service import FollowUpService
+from app.services.inbox_service import InboxService
 from app.services.media_outcomes import MediaReason, status_for, text_for
 from app.services.opt_out import is_stop_request, record_opt_out
 from app.workers.media_queue import MediaJob, MediaQueue
@@ -82,6 +88,9 @@ logger = get_logger(__name__)
 AGENT_NOT_QUEUED = "agent_enqueue_failed"
 MEDIA_NOT_QUEUED = "media_enqueue_failed"
 PROVIDER_ID_COLLISION = "provider_id_collision"
+# Why a conversation was handed to a person when a reply arrived from outside
+# Wasla (OMNI-037). The handoff reason a colleague reads in the inbox.
+EXTERNAL_REPLY_REASON = "A colleague replied from outside Wasla."
 
 _EVENT_KINDS: Mapping[InboundKind, ChannelEventKind] = MappingProxyType(
     {
@@ -130,6 +139,9 @@ class IngestionOutcome:
     rejected: int = 0
     # Echoes of the business's own sends: stored as evidence, never projected.
     echoes: int = 0
+    # Of those, replies a person sent from outside Wasla: projected, and the
+    # conversation handed to a person (OMNI-037).
+    external_echoes: int = 0
     # Provider ids naming a message that is not this customer's on this
     # connection (OMNI-005): stored as evidence, never projected.
     collisions: int = 0
@@ -152,6 +164,7 @@ class _Step:
     cancelled: int = 0
     opted_out: int = 0
     echoes: int = 0
+    external: int = 0
     collisions: int = 0
     paired: int = 0
     conflicts: int = 0
@@ -230,6 +243,7 @@ class ChannelIngestionService:
             unowned=totals.unowned,
             rejected=rejected,
             echoes=totals.echoes,
+            external_echoes=totals.external,
             collisions=totals.collisions,
             paired_identities=totals.paired,
             identity_conflicts=totals.conflicts,
@@ -246,6 +260,7 @@ class ChannelIngestionService:
                 "stored": outcome.stored,
                 "duplicate": outcome.duplicates,
                 "echo": outcome.echoes,
+                "external_echo": outcome.external_echoes,
                 "collision": outcome.collisions,
                 "unknown_connection": outcome.unknown_accounts,
                 "inactive_connection": outcome.inactive_accounts,
@@ -336,10 +351,13 @@ class ChannelIngestionService:
         )
 
         if event.kind is InboundKind.ECHO:
-            # The business's own message, reported back. Evidence only: it is
-            # nobody's turn to answer, it opens no window and it is not a
-            # customer being active (OMNI-005, OMNI-018).
+            # The business's own message, reported back. Never a customer's
+            # turn, and it opens no window (OMNI-005, OMNI-018). Wasla's own
+            # send is confirmed and nothing else; a reply a person typed in
+            # the provider's own app is projected, and the AI stops talking
+            # over them (OMNI-037).
             step.echoes += 1
+            await self._project_echo(event, connection, projection, step)
             step.owed.append(_Handoff(event=record))
             return
 
@@ -445,6 +463,30 @@ class ChannelIngestionService:
             )
         elif is_stop_request(event.text):
             self._record_opt_out(sender.contact, via=OptOutVia.MESSAGE, at=occurred_at, step=step)
+
+    async def _project_echo(
+        self,
+        event: InboundEvent,
+        connection: ChannelConnection,
+        projection: ConversationProjectionService,
+        step: _Step,
+    ) -> None:
+        conversation = await self._conversation_of(connection, event.sender)
+        echoed = await projection.project_echo(
+            connection=connection, event=event, conversation=conversation
+        )
+        if echoed.kind is not EchoKind.EXTERNAL or echoed.conversation is None:
+            return
+        step.external += 1
+        # A person answered from outside Wasla. The conversation is theirs:
+        # handed over (never assigned), the agent's pending nudges cancelled,
+        # and any queued agent turn suppressed by the mode it will read before
+        # it engages and again before it sends - the engagement barrier.
+        await InboxService(session=self._session, tenant_id=connection.tenant_id).hand_off(
+            conversation_id=echoed.conversation.id,
+            reason=EXTERNAL_REPLY_REASON,
+            source=AnalyticsSource.SYSTEM,
+        )
 
     async def _project_status(
         self,
@@ -682,6 +724,7 @@ def _fold(totals: _Step, step: _Step) -> None:
     totals.cancelled += step.cancelled
     totals.opted_out += step.opted_out
     totals.echoes += step.echoes
+    totals.external += step.external
     totals.collisions += step.collisions
     totals.paired += step.paired
     totals.conflicts += step.conflicts

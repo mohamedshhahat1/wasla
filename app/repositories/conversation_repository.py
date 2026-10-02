@@ -672,6 +672,56 @@ class MessageRepository(TenantScopedRepository[Message]):
         )
         return self.add(message)
 
+    def record_external(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        connection_id: uuid.UUID,
+        provider_message_id: str,
+        kind: MessageKind,
+        body: str | None,
+        sent_at: datetime,
+    ) -> Message:
+        """Stage a reply the business sent from outside Wasla, reported back as an echo (OMNI-037).
+
+        Outbound and already sent - the provider delivered it - so it carries
+        the sent state and its provider id, and never a delivery protocol of
+        Wasla's own: nothing here may send it again.
+        """
+        message = Message(
+            id=uuid.uuid4(),
+            tenant_id=self.tenant_id,
+            conversation_id=conversation_id,
+            connection_id=connection_id,
+            wa_message_id=provider_message_id,
+            direction=MessageDirection.OUTBOUND,
+            kind=kind,
+            status=MessageStatus.SENT,
+            delivery_state=MessageDeliveryState.SENT,
+            body=body,
+            sent_at=sent_at,
+            origin=MessageOrigin.EXTERNAL,
+        )
+        return self.add(message)
+
+    async def requested_with_body(self, conversation_id: uuid.UUID, body: str | None) -> bool:
+        """Whether a send of this body is in flight on this conversation (OMNI-037).
+
+        A provider can echo Wasla's own send before the send's response has
+        named it, so an echo that matches no provider id may still be ours.
+        """
+        if body is None:
+            return False
+        found = await self._first(
+            self._select().where(
+                Message.conversation_id == conversation_id,
+                Message.direction == MessageDirection.OUTBOUND,
+                Message.delivery_state == MessageDeliveryState.REQUESTED,
+                Message.body == body,
+            )
+        )
+        return found is not None
+
     async def advance_to_watermark(
         self,
         *,
