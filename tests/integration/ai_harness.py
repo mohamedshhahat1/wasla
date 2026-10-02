@@ -48,6 +48,7 @@ from app.db.models.lead import Lead
 from app.db.models.tenant import Tenant
 from app.db.models.tool_execution import ToolExecution
 from app.db.models.usage import UsageEvent
+from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.db.session import Database
 from app.services.whatsapp_service import WhatsAppIngestionService
@@ -349,6 +350,9 @@ class TurnRunner:
     settings: Settings
     tenants: list[uuid.UUID] = field(default_factory=list)
     plans: list[str] = field(default_factory=list)
+    # Platform-wide accounts a suite created; a workspace's deletion does not
+    # remove them, and a later suite counting users would see them.
+    users: list[uuid.UUID] = field(default_factory=list)
     #: A registry to run instead of the deployment's. See `worker`.
     registry: ToolRegistry | None = None
 
@@ -672,6 +676,8 @@ class TurnRunner:
                 await session.execute(delete(Tenant).where(Tenant.id.in_(self.tenants)))
             if self.plans:
                 await session.execute(delete(Plan).where(Plan.code.in_(self.plans)))
+            if self.users:
+                await session.execute(delete(User).where(User.id.in_(self.users)))
         async for key in self.redis.scan_iter(match=f"{self.namespace}*"):
             await self.redis.delete(key)
 

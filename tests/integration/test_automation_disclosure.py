@@ -203,6 +203,7 @@ async def test_a_hand_back_from_a_person_makes_the_next_reply_disclose(
         )
         session.add(colleague)
         await session.flush()
+        ai_turns.users.append(colleague.id)
         assert page.conversation_id is not None
         await session.execute(
             update(Conversation)
