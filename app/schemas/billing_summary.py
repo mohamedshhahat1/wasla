@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from app.db.models.billing import BillingInterval, PlanScope, ScheduledChangeSource
 from app.db.models.enums import TenantStatus
 from app.schemas.billing import EntitlementRead
+from app.schemas.channel_capacity import CapacityReductionRead
 from app.schemas.platform_billing import (
     IncidentRead,
     PlanVersionRead,
@@ -83,7 +84,13 @@ class PlatformTenantBillingSummary(BaseModel):
     # or the subscription has stopped.
     next_renewal_at: datetime | None
     scheduled_change: SummaryScheduledChange | None
+    # Includes `channel_connections` with its general and typed slots and
+    # active connections by channel, and `period_ai_turns` with its open holds
+    # and its charges by channel (ADR-131).
     entitlements: list[EntitlementRead]
+    # The workspace's latest capacity reduction - open, with its grace end, or
+    # how the last one ended (ENT-14, ENT-15). Null if it never had one.
+    channel_capacity_reduction: CapacityReductionRead | None = None
     active_topups: list[PlatformTopupPurchaseRead]
     recent_invoices: list[PlatformInvoiceRead]
     recent_payments: list[PlatformPaymentRead]

@@ -54,6 +54,7 @@ from app.schemas.billing import (
     PlanSelectionRequest,
     SubscriptionRead,
     SubscriptionStateRead,
+    entitlement_reads,
 )
 from app.schemas.channel_capacity import (
     CapacityReductionRead,
@@ -380,8 +381,7 @@ async def read_entitlements(
     Open to any member, unlike usage: "you have three agents left" is something
     the person about to create the fourth one needs to see, whoever pays.
     """
-    snapshot = await entitlements.snapshot()
-    return [EntitlementRead.from_entitlement(item) for item in snapshot]
+    return await entitlement_reads(entitlements)
 
 
 # --------------------------------------------------------- channel capacity

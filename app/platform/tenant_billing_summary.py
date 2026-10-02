@@ -23,7 +23,7 @@ from app.db.models.tenant import Tenant
 from app.platform.topup_admin import TopupAdmin
 from app.repositories.billing_repository import SubscriptionRepository
 from app.repositories.topup_repository import TopupPurchaseRepository
-from app.schemas.billing import EntitlementRead
+from app.schemas.billing import entitlement_reads
 from app.schemas.billing_summary import (
     SUMMARY_RECENT,
     SUMMARY_TIMELINE,
@@ -32,6 +32,7 @@ from app.schemas.billing_summary import (
     SummaryScheduledChange,
     SummaryTenant,
 )
+from app.schemas.channel_capacity import CapacityReductionRead
 from app.schemas.platform_billing import (
     IncidentRead,
     PlanVersionRead,
@@ -41,6 +42,7 @@ from app.schemas.platform_billing import (
     TimelineEntry,
 )
 from app.services.billing_calendar import current_usage_period
+from app.services.capacity_reduction import ChannelCapacityReductions
 from app.services.entitlement_service import EntitlementService
 from app.services.plan_catalog import PlanCatalog
 
@@ -119,10 +121,13 @@ class TenantBillingSummaryBuilder:
             default_plan_code=self._settings.default_plan_code,
             clock=lambda: moment,
         )
-        breakdown = [
-            EntitlementRead.from_entitlement(item)
-            for item in await entitlements.snapshot(SUMMARY_KEYS)
-        ]
+        breakdown = await entitlement_reads(entitlements, SUMMARY_KEYS)
+        reduction = await ChannelCapacityReductions(
+            self._session,
+            tenant_id=tenant.id,
+            default_plan_code=self._settings.default_plan_code,
+            clock=lambda: moment,
+        ).latest()
         admin = TopupAdmin(self._session, settings=self._settings)
         active = await TopupPurchaseRepository(self._session, tenant_id=tenant.id).active(at=moment)
 
@@ -177,6 +182,9 @@ class TenantBillingSummaryBuilder:
             ),
             scheduled_change=scheduled,
             entitlements=breakdown,
+            channel_capacity_reduction=(
+                CapacityReductionRead.from_model(reduction) if reduction is not None else None
+            ),
             active_topups=[await admin.read_purchase(row) for row in active],
             recent_invoices=[
                 PlatformInvoiceRead.from_model(row)

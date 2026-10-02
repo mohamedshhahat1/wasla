@@ -8,6 +8,7 @@ and may I do one more" — and the raw JSONB answers only the first of those.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal, Self
@@ -29,7 +30,7 @@ from app.db.models.billing import (
 from app.db.models.channel import Channel
 from app.schemas.text import StorableText
 from app.services.channel_fit import ChannelCapacity
-from app.services.entitlement_service import Entitlement
+from app.services.entitlement_service import Entitlement, EntitlementService
 from app.services.entitlement_terms import ordered, term_channel_types, term_limit
 
 MAX_PLAN_CODE_INPUT = 50
@@ -147,6 +148,17 @@ class ChannelCountRead(BaseModel):
     count: int
 
 
+class ChannelUsageRead(BaseModel):
+    """One channel's share of a workspace-wide meter (ENT-01). Display only.
+
+    `channel` is null for charges recorded before the channel dimension
+    existed. No limit is ever compared with one channel's figure.
+    """
+
+    channel: Channel | None
+    used: int
+
+
 class TypedSlotRead(BaseModel):
     """Slots only one channel type may use (ENT-11): how many, and how many are taken."""
 
@@ -210,6 +222,11 @@ class EntitlementRead(BaseModel):
     `period_messages`, which no customer message is ever refused over.
     `period_start`/`period_end` bound a usage key's count and are null for
     capacities.
+
+    `period_ai_turns` is one allowance for the whole workspace (ENT-01):
+    `used` counts every channel's charges, `held` the turns engaged and still
+    generating (spoken for, so `remaining` leaves them out - ENT-03), and
+    `used_by_channel` breaks `used` down for display only.
     """
 
     key: LimitKey
@@ -226,12 +243,21 @@ class EntitlementRead(BaseModel):
     allowed: bool
     period_start: datetime | None
     period_end: datetime | None
+    # `period_ai_turns` only: open holds, zero elsewhere (ENT-03).
+    held: int = 0
+    # `period_ai_turns` only: `used` by channel, for display (ENT-01).
+    used_by_channel: list[ChannelUsageRead] | None = None
     # `channel_connections` only (ADR-131): its general and typed slots, active
     # connections by channel and the plan's allowed channel types.
     channel_capacity: ChannelCapacityBreakdown | None = None
 
     @classmethod
-    def from_entitlement(cls, entitlement: Entitlement) -> Self:
+    def from_entitlement(
+        cls,
+        entitlement: Entitlement,
+        *,
+        by_channel: Mapping[Channel | None, int] | None = None,
+    ) -> Self:
         return cls(
             key=entitlement.key,
             kind="capacity" if entitlement.key in RESOURCE_LIMITS else "usage",
@@ -247,12 +273,43 @@ class EntitlementRead(BaseModel):
             allowed=entitlement.allowed,
             period_start=entitlement.period_start,
             period_end=entitlement.period_end,
+            held=entitlement.held,
+            used_by_channel=(
+                [
+                    ChannelUsageRead(channel=channel, used=used)
+                    for channel, used in sorted(
+                        by_channel.items(),
+                        key=lambda item: (item[0] is None, item[0].value if item[0] else ""),
+                    )
+                ]
+                if by_channel is not None
+                else None
+            ),
             channel_capacity=(
                 ChannelCapacityBreakdown.from_capacity(entitlement.capacity)
                 if entitlement.capacity is not None
                 else None
             ),
         )
+
+
+async def entitlement_reads(
+    entitlements: EntitlementService, keys: Iterable[LimitKey] | None = None
+) -> list[EntitlementRead]:
+    """A workspace's entitlements as the API reads them; AI turns carry `used_by_channel`.
+
+    The one place the tenant route and the platform summary build their
+    entitlement list, so the two can never show different figures.
+    """
+    reads = []
+    for entitlement in await entitlements.snapshot(keys):
+        by_channel = (
+            await entitlements.ai_turns_by_channel()
+            if entitlement.key is LimitKey.PERIOD_AI_TURNS
+            else None
+        )
+        reads.append(EntitlementRead.from_entitlement(entitlement, by_channel=by_channel))
+    return reads
 
 
 class ScheduledChangeRead(BaseModel):
