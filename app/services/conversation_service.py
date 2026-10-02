@@ -158,6 +158,7 @@ class ConversationProjectionService:
             # recorded separately and never merged into the customer's words.
             body=event.text,
             sent_at=occurred_at,
+            action=event.action,
         )
         # Only now, for a message that is new and the customer's: this is what
         # reopens a closed conversation and opens the reply window.

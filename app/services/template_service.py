@@ -118,6 +118,27 @@ class TemplateService:
     async def get(self, template_id: uuid.UUID) -> WhatsAppTemplate:
         return await self._templates.require_by_id(template_id)
 
+    async def set_opt_out_payloads(
+        self, template_id: uuid.UUID, payloads: list[str]
+    ) -> WhatsAppTemplate:
+        """Mark which quick-reply payloads of this template mean "stop" (OMNI-030).
+
+        The workspace's own marks, never written by a sync. Deduplicated in the
+        order given; an empty list clears them.
+        """
+        template = await self._templates.require_by_id(template_id)
+        kept = list(dict.fromkeys(payloads))
+        template.opt_out_payloads = kept or None
+        logger.info(
+            "template.opt_out_payloads_marked",
+            extra={
+                "event": "template.opt_out_payloads_marked",
+                "template_id": str(template.id),
+                "count": len(kept),
+            },
+        )
+        return template
+
     async def list_templates(
         self,
         *,

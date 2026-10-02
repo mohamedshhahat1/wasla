@@ -54,6 +54,7 @@ from app.channels.inbound import (
     InboundKind,
     ParsedDelivery,
     RefusalReason,
+    ReplyAction,
     StatusUpdate,
     tally,
 )
@@ -76,10 +77,17 @@ from app.db.models.channel import (
     IdentityKind,
     IdentityScope,
 )
-from app.db.models.conversation import Conversation, MessageKind, MessageStatus
+from app.db.models.conversation import (
+    Conversation,
+    MessageKind,
+    MessageStatus,
+    ReplyActionSource,
+)
 from app.db.models.media import MediaLocatorKind
 
 PAYLOAD_OBJECT: Final = "synthetic"
+#: The one quick-reply payload the synthetic provider treats as an opt-out.
+OPT_OUT_PAYLOAD: Final = "SYNTHETIC-STOP"
 BYTE_LIMIT: Final = 1_000
 SYNTHETIC_INSTRUCTIONS: Final = "\n\nYou are replying over the synthetic test channel."
 
@@ -278,6 +286,21 @@ class SyntheticAdapter:
             if attachments
             else MessageKind.TEXT
         )
+        # A Messenger-shaped quick reply: words beside a payload (OMNI-030).
+        action = None
+        quick = raw.get("quick_reply")
+        if isinstance(quick, Mapping):
+            payload = quick.get("payload")
+            title = quick.get("title")
+            action = ReplyAction(
+                source=ReplyActionSource.QUICK_REPLY,
+                id_or_payload=payload if isinstance(payload, str) else None,
+                title=title if isinstance(title, str) else None,
+            )
+            message_kind = MessageKind.INTERACTIVE
+        text = raw.get("text") if isinstance(raw.get("text"), str) else None
+        if text is None and action is not None:
+            text = action.title
         return InboundEvent(
             channel=self.channel,
             connection_key=account,
@@ -287,8 +310,9 @@ class SyntheticAdapter:
             sender=(Identifier(IdentityKind.IGSID, party),),
             message_id=event_id,
             message_kind=message_kind,
-            text=raw.get("text") if isinstance(raw.get("text"), str) else None,
+            text=text,
             attachments=attachments,
+            action=action,
             raw=dict(raw),
         )
 
@@ -306,6 +330,15 @@ class SyntheticAdapter:
             scope_ref=str(connection.id),
             connection_id=connection.id,
         )
+
+    async def marks_opt_out(
+        self,
+        session: AsyncSession,
+        connection: ChannelConnection,
+        action: ReplyAction,
+    ) -> bool:
+        """The synthetic provider marks one payload, as a workspace's template would."""
+        return action.id_or_payload == OPT_OUT_PAYLOAD
 
     # ------------------------------------------------------------ outbound
 
@@ -351,6 +384,7 @@ def synthetic_payload(account: str, *events: Mapping[str, Any]) -> dict[str, Any
 
 __all__ = [
     "BYTE_LIMIT",
+    "OPT_OUT_PAYLOAD",
     "PAYLOAD_OBJECT",
     "SYNTHETIC_CAPABILITIES",
     "SYNTHETIC_INSTRUCTIONS",

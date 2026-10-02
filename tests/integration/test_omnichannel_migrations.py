@@ -421,13 +421,13 @@ def test_the_channel_foundation_carries_real_rows_forward_and_back(database_url:
         asyncio.run(_execute(target, seed.statements()))
         before = _counts(target)
 
-        _alembic(target, "upgrade", "head")
+        _alembic(target, "upgrade", "0084")
         _assert_upgraded(target, seed, before)
 
         _alembic(target, "downgrade", "0081")
         _assert_at_0081(target, before)
 
-        _alembic(target, "upgrade", "head")
+        _alembic(target, "upgrade", "0084")
         _assert_upgraded(target, seed, before)
 
         # A username sender: a contact with no phone, and its business-scoped id.
@@ -469,7 +469,7 @@ def test_the_channel_foundation_carries_real_rows_forward_and_back(database_url:
         _alembic(target, "downgrade", "0083")
         assert _one(target, "SELECT version_num FROM alembic_version") == "0083"
         assert _one(target, "SELECT count(*) FROM contacts WHERE id = :id", {"id": username}) == 1
-        _alembic(target, "upgrade", "head")
+        _alembic(target, "upgrade", "0084")
         assert _one(target, "SELECT version_num FROM alembic_version") == "0084"
         assert _one(target, "SELECT count(*) FROM pg_index WHERE NOT indisvalid") == 0
     finally:

@@ -56,6 +56,7 @@ from app.db.models.campaign import (
     CampaignRecipient,
     CampaignStatus,
     OptOutSource,
+    OptOutVia,
     RecipientStatus,
 )
 from app.db.models.channel import ContactIdentity
@@ -77,6 +78,7 @@ from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.audit_service import AuditTrail
 from app.services.entitlement_service import EntitlementService
 from app.services.messaging_service import MessagingService
+from app.services.opt_out import record_opt_out
 from app.services.template_service import refusal_reason_for
 from app.services.usage_service import UsageRecorder
 
@@ -787,15 +789,9 @@ class CampaignService:
         must not make it look as though they only just decided.
         """
         contact = await self._contacts.require_by_id(contact_id)
-        if contact.marketing_opt_out_at is not None:
-            return contact
-
-        contact.marketing_opt_out_at = at or datetime.now(UTC)
-        contact.opt_out_source = source
-        logger.info(
-            "campaign.opt_out_recorded",
-            extra={"contact_id": str(contact.id), "source": source.value},
-        )
+        # The same writer every other route uses (OMNI-030): recorded by a
+        # colleague, whoever they say decided.
+        record_opt_out(contact, source=source, via=OptOutVia.TEAM, at=at or datetime.now(UTC))
         return contact
 
     async def opt_out_identities(self, contact_id: uuid.UUID) -> list[ContactIdentity]:
@@ -820,6 +816,10 @@ class CampaignService:
         contact = await self._contacts.require_by_id(contact_id)
         contact.marketing_opt_out_at = None
         contact.opt_out_source = None
+        contact.opt_out_via = None
+        # Evidence of the re-admission, so a replay of older opt-out evidence
+        # cannot undo it (OMNI-030).
+        contact.marketing_resumed_at = datetime.now(UTC)
         logger.info("campaign.opt_out_cleared", extra={"contact_id": str(contact.id)})
         return contact
 

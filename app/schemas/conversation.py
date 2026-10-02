@@ -27,6 +27,7 @@ from app.db.models.conversation import (
     MessageKind,
     MessageOrigin,
     MessageStatus,
+    ReplyActionSource,
 )
 from app.db.models.sentiment import ConversationPriority, SentimentLabel
 from app.schemas.bounds import TEMPLATE_COMPONENTS, check_json
@@ -123,6 +124,14 @@ class CursorPage[ItemT](BaseModel):
     next_cursor: str | None = None
 
 
+class ReplyActionRead(BaseModel):
+    """What a customer tapped (OMNI-030): the provider's id or payload, and its words."""
+
+    id_or_payload: str | None
+    title: str | None
+    source: ReplyActionSource
+
+
 class MessageRead(BaseModel):
     id: uuid.UUID
     conversation_id: uuid.UUID
@@ -142,6 +151,10 @@ class MessageRead(BaseModel):
     # campaigns and follow-ups wrong (MSG-16).
     origin: MessageOrigin
     body: str | None
+    # Set when the customer tapped a button or a list row rather than typing:
+    # `body` carries its words, this carries the payload a client routes on.
+    # Null on everything else. Additive (OMNI-030).
+    action: ReplyActionRead | None = None
     # Set on template messages only, so a client can render which template went
     # out in place of the text it has no copy of.
     template_name: str | None
@@ -165,6 +178,15 @@ class MessageRead(BaseModel):
             status=message.status,
             origin=message.origin,
             body=message.body,
+            action=(
+                ReplyActionRead(
+                    id_or_payload=message.action_payload,
+                    title=message.action_title,
+                    source=message.action_source,
+                )
+                if message.action_source is not None
+                else None
+            ),
             template_name=message.template_name,
             template_language=message.template_language,
             sent_by_id=message.sent_by_id,

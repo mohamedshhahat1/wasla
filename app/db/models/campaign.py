@@ -108,6 +108,33 @@ class OptOutSource(StrEnum):
     TEAM = "team"
 
 
+class OptOutVia(StrEnum):
+    """By which evidence an opt-out reached Wasla (OMNI-030, OMNI-046).
+
+    Beside `OptOutSource`, which says who decided: a customer's tapped button,
+    their stop word and the provider's own preference record are all the
+    customer's decision, arriving by different routes - and which route is what
+    an operator counts, and what tells a replay apart from a live request.
+    """
+
+    #: The whole message was a stop word.
+    MESSAGE = "message"
+    #: A tapped button: its words were a stop phrase, or its payload one the
+    #: workspace marked as the marketing opt-out.
+    REPLY_ACTION = "reply_action"
+    #: The provider's own record of the person's preference (WhatsApp
+    #: `user_preferences`, `marketing_messages: stop`).
+    PROVIDER_PREFERENCE = "provider_preference"
+    #: The provider refused a send because the person stopped marketing
+    #: messages (WhatsApp error 131050).
+    PROVIDER_REFUSAL = "provider_refusal"
+    #: Recovered from retained evidence by the operator command, after the
+    #: live path had missed it.
+    REPLAY = "replay"
+    #: Recorded by a colleague through the API.
+    TEAM = "team"
+
+
 # Statuses in which a campaign is finished and will never send again.
 TERMINAL_CAMPAIGN_STATUSES: Final[frozenset[CampaignStatus]] = frozenset(
     {
@@ -120,6 +147,7 @@ TERMINAL_CAMPAIGN_STATUSES: Final[frozenset[CampaignStatus]] = frozenset(
 CAMPAIGN_STATUS_TYPE = _enum_type(CampaignStatus, name="campaign_status")
 RECIPIENT_STATUS_TYPE = _enum_type(RecipientStatus, name="recipient_status")
 OPT_OUT_SOURCE_TYPE = _enum_type(OptOutSource, name="opt_out_source")
+OPT_OUT_VIA_TYPE = _enum_type(OptOutVia, name="opt_out_via")
 
 
 class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):

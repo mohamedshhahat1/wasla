@@ -32,6 +32,7 @@ evils, argued in ADR-089.
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -44,9 +45,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.channels.adapter import ChannelAdapter, IdentityScopeRef
 from app.channels.inbound import Identifier, InboundEvent, InboundKind, ParsedDelivery
 from app.core.logging import get_logger
-from app.core.telemetry import record_inbound_outcomes, record_inbound_refusals
+from app.core.telemetry import (
+    record_inbound_outcomes,
+    record_inbound_refusals,
+    record_opt_outs,
+)
 from app.db.errors import is_data_exception
-from app.db.models.campaign import OptOutSource
+from app.db.models.campaign import OptOutSource, OptOutVia
 from app.db.models.channel import ChannelConnection
 from app.db.models.channel_event import ChannelEvent, ChannelEventKind
 from app.db.models.conversation import Contact, Conversation, Message, MessageKind
@@ -66,7 +71,7 @@ from app.services.contact_identity_service import ContactIdentityService
 from app.services.conversation_service import ConversationProjectionService, ProjectionOutcome
 from app.services.follow_up_service import FollowUpService
 from app.services.media_outcomes import MediaReason, status_for, text_for
-from app.services.opt_out import is_stop_request
+from app.services.opt_out import is_stop_request, record_opt_out
 from app.workers.media_queue import MediaJob, MediaQueue
 from app.workers.queue import AgentJob, AgentQueue
 
@@ -150,6 +155,7 @@ class _Step:
     collisions: int = 0
     paired: int = 0
     conflicts: int = 0
+    opt_outs_by_via: Counter[str] = field(default_factory=Counter)
     attachments: list[tuple[uuid.UUID, uuid.UUID]] = field(default_factory=list)
     answering: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]] = field(default_factory=list)
     owed: list[_Handoff] = field(default_factory=list)
@@ -232,6 +238,7 @@ class ChannelIngestionService:
             ),
         )
         channel = self._adapter.channel.value
+        await record_opt_outs(totals.opt_outs_by_via)
         await record_inbound_refusals(channel, outcome.refused)
         await record_inbound_outcomes(
             channel,
@@ -403,6 +410,15 @@ class ChannelIngestionService:
             step.owed.append(_Handoff(event=record))
             return
 
+        # A tap that asks to stop - its words a stop phrase, or its payload one
+        # the workspace marked - is an opt-out and nothing else: it is honoured
+        # and not answered, because the only reply an agent could give is the
+        # sales message the customer just refused (OMNI-030). A typed "stop"
+        # is unchanged: honoured, and still answered.
+        opt_out_tap = event.action is not None and (
+            is_stop_request(event.text)
+            or await self._adapter.marks_opt_out(self._session, connection, event.action)
+        )
         if historical and event.attachments:
             await self._record_unprocessed_media(connection.tenant_id, message)
         step.owed.append(
@@ -412,6 +428,7 @@ class ChannelIngestionService:
                 message=message,
                 has_attachments=bool(event.attachments),
                 historical=historical,
+                answer=not opt_out_tap,
                 step=step,
             )
         )
@@ -422,7 +439,12 @@ class ChannelIngestionService:
             session=self._session, tenant_id=connection.tenant_id
         ).cancel_for_conversation(conversation_id=message.conversation_id)
         # A customer asking to stop is honoured here rather than by a worker.
-        step.opted_out += self._record_opt_out(sender.contact, text=event.text)
+        if opt_out_tap:
+            self._record_opt_out(
+                sender.contact, via=OptOutVia.REPLY_ACTION, at=occurred_at, step=step
+            )
+        elif is_stop_request(event.text):
+            self._record_opt_out(sender.contact, via=OptOutVia.MESSAGE, at=occurred_at, step=step)
 
     async def _project_status(
         self,
@@ -470,16 +492,17 @@ class ChannelIngestionService:
         message: Message,
         has_attachments: bool,
         historical: bool,
+        answer: bool,
         step: _Step,
     ) -> _Handoff:
         """What still has to happen for a new customer message.
 
         A message on a connection the workspace has released is recorded, not
         answered (MSG-01, MEDIA-08); one Wasla cannot read has no content to
-        answer (MSG-19); one carrying files is answered once they are read
-        (ADR-092).
+        answer (MSG-19); an opt-out tap is honoured, not answered (OMNI-030);
+        one carrying files is answered once they are read (ADR-092).
         """
-        if historical:
+        if historical or not answer:
             return _Handoff(event=record)
         if has_attachments:
             step.attachments.append((tenant_id, message.id))
@@ -502,18 +525,16 @@ class ChannelIngestionService:
             media.processed_at = datetime.now(UTC)
 
     @staticmethod
-    def _record_opt_out(contact: Contact, *, text: str | None) -> int:
-        """Opt the sender out of campaigns if the whole message is a stop word.
+    def _record_opt_out(contact: Contact, *, via: OptOutVia, at: datetime, step: _Step) -> None:
+        """Opt the sender out of campaigns, through the one writer every route uses.
 
         The sender's own contact, as resolved from what the provider said - not
         a lookup by a phone column, which a username sender does not have.
+        Dated by the provider's timestamp: when the customer asked.
         """
-        if not is_stop_request(text) or contact.marketing_opt_out_at is not None:
-            return 0
-        contact.marketing_opt_out_at = datetime.now(UTC)
-        contact.opt_out_source = OptOutSource.CUSTOMER
-        logger.info("campaign.opt_out_requested", extra={"contact_id": str(contact.id)})
-        return 1
+        if record_opt_out(contact, source=OptOutSource.CUSTOMER, via=via, at=at):
+            step.opted_out += 1
+            step.opt_outs_by_via[via.value] += 1
 
     # ----------------------------------------------------------- settlement
 
@@ -666,6 +687,7 @@ def _fold(totals: _Step, step: _Step) -> None:
     totals.collisions += step.collisions
     totals.paired += step.paired
     totals.conflicts += step.conflicts
+    totals.opt_outs_by_via.update(step.opt_outs_by_via)
     totals.attachments.extend(step.attachments)
     totals.answering.extend(step.answering)
     totals.owed.extend(step.owed)

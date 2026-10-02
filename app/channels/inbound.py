@@ -30,7 +30,13 @@ from types import MappingProxyType
 from typing import Any
 
 from app.db.models.channel import Channel, IdentityKind
-from app.db.models.conversation import MessageKind, MessageStatus
+from app.db.models.conversation import (
+    MAX_ACTION_PAYLOAD_LENGTH,
+    MAX_ACTION_TITLE_LENGTH,
+    MessageKind,
+    MessageStatus,
+    ReplyActionSource,
+)
 from app.db.models.media import MediaLocatorKind
 
 
@@ -86,6 +92,20 @@ MESSAGE_LOSS_REASONS: frozenset[RefusalReason] = frozenset(
         RefusalReason.MALFORMED,
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyAction:
+    """What a customer tapped: the provider's id or payload, and the words on it.
+
+    Kept apart from the event's text so that routing never has to read display
+    text where a payload exists - a button's title is translated and edited by
+    whoever wrote the template, its payload is not (OMNI-030).
+    """
+
+    source: ReplyActionSource
+    id_or_payload: str | None
+    title: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +180,9 @@ class InboundEvent:
     attachments: tuple[AttachmentLocator, ...] = ()
     #: The provider's id of the message this one replies to.
     reply_to: str | None = None
+    #: The control the customer tapped, when this message is a tap (OMNI-030).
+    #: `text` then carries its title, so a reader of the transcript sees words.
+    action: ReplyAction | None = None
     status: StatusUpdate | None = None
     profile_name: str | None = None
     #: The provider's own record of this event, stored as evidence and
@@ -192,6 +215,8 @@ def tally(reasons: Counter[RefusalReason]) -> Mapping[RefusalReason, int]:
 
 
 __all__ = [
+    "MAX_ACTION_PAYLOAD_LENGTH",
+    "MAX_ACTION_TITLE_LENGTH",
     "MESSAGE_LOSS_REASONS",
     "AttachmentLocator",
     "Identifier",
@@ -199,6 +224,8 @@ __all__ = [
     "InboundKind",
     "ParsedDelivery",
     "RefusalReason",
+    "ReplyAction",
+    "ReplyActionSource",
     "StatusUpdate",
     "tally",
 ]

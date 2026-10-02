@@ -24,7 +24,7 @@ from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.channels.inbound import AttachmentLocator, Identifier, ParsedDelivery
+from app.channels.inbound import AttachmentLocator, Identifier, ParsedDelivery, ReplyAction
 from app.channels.policy import ChannelPolicy
 from app.core.config import Settings
 from app.core.exceptions import ValidationError
@@ -171,6 +171,20 @@ class ChannelAdapter(Protocol):
 
     def address(self, identity: ContactIdentity) -> Recipient:
         """The recipient for a conversation pinned to `identity`, or a refusal."""
+        ...
+
+    async def marks_opt_out(
+        self,
+        session: AsyncSession,
+        connection: ChannelConnection,
+        action: ReplyAction,
+    ) -> bool:
+        """Whether this tap's payload is one the workspace marked as its opt-out (OMNI-030).
+
+        The stop-phrase match on the tap's words is shared and done by the core;
+        this is the part only a provider can answer - on WhatsApp, a payload a
+        template on this number is marked with.
+        """
         ...
 
     def sender(

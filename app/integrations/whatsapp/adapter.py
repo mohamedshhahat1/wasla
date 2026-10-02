@@ -52,6 +52,7 @@ from app.channels.inbound import (
     InboundEvent,
     InboundKind,
     ParsedDelivery,
+    ReplyAction,
     StatusUpdate,
 )
 from app.channels.media import MalformedMediaDescriptorError, locator_expired
@@ -73,6 +74,7 @@ from app.db.models.whatsapp import WhatsAppAccount
 from app.integrations.whatsapp.client import WhatsAppClient, build_http_client
 from app.integrations.whatsapp.payload import DeliveryStatus, InboundMessage, parse_webhook
 from app.integrations.whatsapp.policy import WhatsAppChannelPolicy
+from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.credential_service import CredentialService, ResolvedCredential
 
@@ -154,6 +156,7 @@ def message_event(message: InboundMessage) -> InboundEvent:
         text=message.text,
         attachments=attachments,
         reply_to=message.context_id,
+        action=message.action,
         profile_name=message.profile_name,
         raw=message.raw,
     )
@@ -310,6 +313,20 @@ class WhatsAppAdapter:
         ):
             raise IdentityNotAddressableError()
         return Recipient(identity_id=identity.id, kind=identity.kind.value, value=identity.value)
+
+    async def marks_opt_out(
+        self,
+        session: AsyncSession,
+        connection: ChannelConnection,
+        action: ReplyAction,
+    ) -> bool:
+        """Whether a template on this number marks the tap's payload as the opt-out."""
+        if action.id_or_payload is None or connection.channel is not Channel.WHATSAPP:
+            return False
+        templates = WhatsAppTemplateRepository(session, tenant_id=connection.tenant_id)
+        return await templates.marks_opt_out_payload(
+            account_id=connection.id, payload=action.id_or_payload
+        )
 
     @staticmethod
     async def account(session: AsyncSession, connection: ChannelConnection) -> WhatsAppAccount:

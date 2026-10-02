@@ -438,6 +438,14 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Inbound events by channel and what ingestion made of them.",
         ("channel", "outcome"),
     ),
+    # Opt-outs recorded, by the evidence they arrived by (OMNI-030, OMNI-046):
+    # a stop word, a tapped button, the provider's preference record, a
+    # provider refusal, a replay of retained evidence, a colleague. Closed
+    # domain (`OptOutVia`); no contact, phone or workspace.
+    "wasla_opt_outs_total": (
+        "Marketing opt-outs recorded, by the evidence they arrived by.",
+        ("via",),
+    ),
 }
 
 # Closed domains of the two inbound counters. `app.core` imports nothing from
@@ -467,6 +475,17 @@ INBOUND_OUTCOMES: Final = frozenset(
         "unowned",
         "rejected",
         "identity_conflict",
+    }
+)
+# `OptOutVia`, restated for the same reason; a test holds them equal.
+OPT_OUT_VIAS: Final = frozenset(
+    {
+        "message",
+        "reply_action",
+        "provider_preference",
+        "provider_refusal",
+        "replay",
+        "team",
     }
 )
 
@@ -965,6 +984,16 @@ async def record_inbound_outcomes(channel: str, outcomes: Mapping[str, int]) -> 
             "wasla_inbound_events_total",
             {"channel": label, "outcome": outcome if outcome in INBOUND_OUTCOMES else "other"},
             count,
+        )
+
+
+async def record_opt_outs(by_via: Mapping[str, int]) -> None:
+    """Count opt-outs recorded, by the evidence they arrived by. Best-effort."""
+    for via, count in by_via.items():
+        if count <= 0:
+            continue
+        await _increment_by(
+            "wasla_opt_outs_total", {"via": via if via in OPT_OUT_VIAS else "other"}, count
         )
 
 

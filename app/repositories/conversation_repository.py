@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
+from app.channels.inbound import ReplyAction
 from app.core.exceptions import ConflictError
 from app.core.pagination import Cursor
 from app.db.models.channel import Channel
@@ -573,6 +574,7 @@ class MessageRepository(TenantScopedRepository[Message]):
         kind: MessageKind,
         body: str | None,
         sent_at: datetime,
+        action: ReplyAction | None = None,
     ) -> Message:
         """Stage a customer message the caller has established is new.
 
@@ -601,6 +603,10 @@ class MessageRepository(TenantScopedRepository[Message]):
             body=body,
             sent_at=sent_at,
             origin=MessageOrigin.CUSTOMER,
+            # What the customer tapped, kept beside the words (OMNI-030).
+            action_source=action.source if action is not None else None,
+            action_payload=action.id_or_payload if action is not None else None,
+            action_title=action.title if action is not None else None,
         )
         return self.add(message)
 

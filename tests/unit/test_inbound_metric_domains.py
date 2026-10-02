@@ -18,10 +18,13 @@ from app.core import telemetry
 from app.core.telemetry import (
     INBOUND_OUTCOMES,
     INBOUND_REFUSAL_REASONS,
+    OPT_OUT_VIAS,
     REDIS_COUNTERS,
     record_inbound_outcomes,
     record_inbound_refusals,
+    record_opt_outs,
 )
+from app.db.models.campaign import OptOutVia
 from app.db.models.channel import Channel
 
 
@@ -72,3 +75,20 @@ async def test_outcomes_keep_their_channel_and_close_their_outcome(
         ("wasla_inbound_events_total", {"channel": "whatsapp", "outcome": "other"}, 3),
     ]
     assert "echo" in INBOUND_OUTCOMES and "collision" in INBOUND_OUTCOMES
+
+
+def test_the_opt_out_domain_is_the_models_vocabulary() -> None:
+    """`wasla_opt_outs_total{via}` is closed over `OptOutVia` (OMNI-030, OMNI-046)."""
+    assert frozenset(via.value for via in OptOutVia) == OPT_OUT_VIAS
+    assert REDIS_COUNTERS["wasla_opt_outs_total"][1] == ("via",)
+
+
+async def test_opt_outs_are_counted_by_route_and_close_an_unknown_one(
+    increments: list[tuple[str, dict[str, str], Any]],
+) -> None:
+    await record_opt_outs({"reply_action": 2, "message": 0, "a phone number": 1})
+
+    assert increments == [
+        ("wasla_opt_outs_total", {"via": "reply_action"}, 2),
+        ("wasla_opt_outs_total", {"via": "other"}, 1),
+    ]
