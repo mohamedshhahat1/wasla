@@ -40,6 +40,7 @@ from app.services.inbox_service import InboxService
 from app.services.messaging_service import MessagingService
 from app.workers.queue import AgentQueue
 from tests.channel_fakes import BYTE_LIMIT, SyntheticAdapter, synthetic_payload
+from tests.channel_plans import allow_channels
 from tests.integration.ai_harness import (
     FakeProviders,
     TurnRunner,
@@ -77,6 +78,8 @@ async def _page(ai_turns: TurnRunner) -> Page:
         tenant = Tenant(name="Disclosure", slug=f"disclosure-{uuid.uuid4().hex[:10]}")
         session.add(tenant)
         await session.flush()
+        # The AI answers on Messenger only under a plan that includes it (ENT-16).
+        await allow_channels(session, tenant.id)
         connection = ChannelConnection(
             id=uuid.uuid4(),
             tenant_id=tenant.id,

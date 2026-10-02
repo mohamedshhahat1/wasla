@@ -670,13 +670,15 @@ class AgentWorker:
             # The workspace, the conversation's status and the number, read as
             # columns before anything is charged or called (AI-06). A suspended
             # workspace, or a deleted one for however long retention keeps its
-            # data, gets no provider call, no tool and no message.
+            # data, gets no provider call, no tool and no message - nor does a
+            # conversation on a channel the plan in force excludes (ENT-16).
             refusal = await refusal_now(
                 session,
                 tenant_id=job.tenant_id,
                 conversation_id=job.conversation_id,
                 agent_id=plan.agent.id,
                 channels=self._channels,
+                default_plan_code=self._settings.default_plan_code,
             )
             if refusal is not None:
                 await self._complete_turn(job, refusal)
@@ -762,6 +764,7 @@ class AgentWorker:
                 # does not say: a reply is never checked against no agent at all.
                 agent_id=outcome.agent_id or plan.agent.id,
                 channels=self._channels,
+                default_plan_code=self._settings.default_plan_code,
             )
             if refusal is not None:
                 logger.info(

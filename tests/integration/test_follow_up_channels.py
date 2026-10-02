@@ -40,6 +40,7 @@ from app.services.channel_ingestion_service import ChannelIngestionService
 from app.services.follow_up_service import FollowUpService
 from app.services.messaging_service import MessagingService
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
+from tests.channel_plans import allow_channels
 from tests.integration.test_omnichannel_operations import _customer, _number, _tenant
 
 pytestmark = pytest.mark.integration
@@ -62,6 +63,8 @@ async def _synthetic_conversation(session: AsyncSession, adapter: SyntheticAdapt
     tenant = Tenant(name=f"Nudges {tag}", slug=f"nudges-{tag}")
     session.add(tenant)
     await session.flush()
+    # A nudge goes out on a channel only the plan in force includes (ENT-16).
+    await allow_channels(session, tenant.id)
     connection = ChannelConnection(
         id=uuid.uuid4(),
         tenant_id=tenant.id,

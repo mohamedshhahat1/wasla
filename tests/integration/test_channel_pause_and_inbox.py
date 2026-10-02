@@ -52,6 +52,7 @@ from app.services.follow_up_service import FollowUpService
 from app.services.messaging_service import MessagingService
 from app.services.whatsapp_service import WhatsAppIngestionService
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
+from tests.channel_plans import allow_channels
 from tests.conftest import AllowingEntitlements, FakeDependency
 from tests.integration.test_omnichannel_operations import (  # noqa: F401 - `meta` is a fixture
     Meta,
@@ -127,6 +128,8 @@ async def desk(db_session: AsyncSession, settings: Settings) -> Desk:
     )
     db_session.add_all([tenant, owner])
     await db_session.flush()
+    # Follow-ups run on Instagram only under a plan that includes it (ENT-16).
+    await allow_channels(db_session, tenant.id)
     db_session.add(Membership(tenant_id=tenant.id, user_id=owner.id, role=TenantRole.TENANT_OWNER))
     number = WhatsAppAccount(
         tenant_id=tenant.id,

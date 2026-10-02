@@ -72,12 +72,18 @@ from app.repositories.campaign_repository import (
     CampaignRepository,
     CampaignStatistics,
 )
-from app.repositories.channel_repository import ContactIdentityRepository
+from app.repositories.channel_repository import (
+    ChannelConnectionRepository,
+    ContactIdentityRepository,
+)
 from app.repositories.conversation_repository import ContactRepository, ConversationRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.audit_service import AuditTrail
-from app.services.entitlement_service import EntitlementService
+from app.services.entitlement_service import (
+    CHANNEL_NOT_IN_PLAN_DETAIL,
+    EntitlementService,
+)
 from app.services.messaging_service import MessagingService
 from app.services.opt_out import record_opt_out
 from app.services.template_service import refusal_reason_for
@@ -143,6 +149,7 @@ class CampaignService:
         tenant_id: uuid.UUID,
         messaging: MessagingService | None = None,
         entitlements: EntitlementService | None = None,
+        default_plan_code: str | None = None,
     ) -> None:
         """`messaging` is needed only to send.
 
@@ -162,6 +169,9 @@ class CampaignService:
         self._tenant_id = tenant_id
         self._messaging = messaging
         self._entitlements = entitlements
+        # The plan in force decides which channels a campaign may still send on
+        # (ENT-16); a workspace not served is on the default plan.
+        self._default_plan_code = default_plan_code
         self._campaigns = CampaignRepository(session, tenant_id=tenant_id)
         self._recipients = CampaignRecipientRepository(session, tenant_id=tenant_id)
         self._audience = AudienceRepository(session, tenant_id=tenant_id)
@@ -483,6 +493,8 @@ class CampaignService:
 
         sent = failed = skipped = 0
         throttled_until: datetime | None = None
+        # Asked once per batch: the plan in force does not change per person.
+        in_plan = await self._channel_in_plan(campaign)
         for recipient in claimed:
             if await self._campaigns.is_cancelled(campaign.id):
                 # A cancel landing mid-batch now stops at the next recipient
@@ -510,6 +522,12 @@ class CampaignService:
                     },
                 )
                 break
+            if not in_plan:
+                # ENT-16: a channel the plan in force does not include sends
+                # nothing automated. A policy outcome, never retried.
+                self._skip(recipient, CHANNEL_NOT_IN_PLAN_DETAIL)
+                skipped += 1
+                continue
             try:
                 outcome = await self._deliver(campaign, recipient, messaging=messaging, now=moment)
             except ConnectionThrottledError as error:
@@ -579,6 +597,17 @@ class CampaignService:
             failed=failed,
             skipped=skipped,
         )
+
+    async def _channel_in_plan(self, campaign: Campaign) -> bool:
+        """Whether the plan in force includes the channel this campaign sends on (ENT-16)."""
+        connection = await ChannelConnectionRepository(
+            self._session, tenant_id=self._tenant_id
+        ).get_by_id(campaign.account_id)
+        if connection is None:  # pragma: no cover - `_blocking_reason` stops a missing number
+            return True
+        return await EntitlementService(
+            self._session, tenant_id=self._tenant_id, default_plan_code=self._default_plan_code
+        ).channel_in_plan(connection.channel)
 
     async def _blocking_reason(self, campaign: Campaign) -> str | None:
         """Why this campaign must not send at all, or None.

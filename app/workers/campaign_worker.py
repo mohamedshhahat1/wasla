@@ -216,6 +216,9 @@ class CampaignWorker:
             session=session,
             tenant_id=campaign.tenant_id,
             messaging=messaging,
+            default_plan_code=(
+                self._settings.default_plan_code if self._settings is not None else None
+            ),
         )
         return await service.dispatch_batch(campaign, now=now)
 

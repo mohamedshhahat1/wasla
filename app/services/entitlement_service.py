@@ -90,6 +90,12 @@ from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
+#: The reason an automated send records when the plan in force excludes its
+#: channel (ENT-16). Led by a fixed code, so it can be filtered without parsing.
+CHANNEL_NOT_IN_PLAN_DETAIL: Final = (
+    "channel_not_in_plan: the plan in force does not include this conversation's channel."
+)
+
 #: How long an AI turn's hold counts when the caller names no TTL (ENT-03):
 #: the deployment's `AI_TURN_HOLD_TTL_SECONDS`, whose default this matches.
 DEFAULT_AI_TURN_HOLD_TTL: Final = timedelta(seconds=900)
@@ -548,6 +554,17 @@ class EntitlementService:
             if scheduled is not None:
                 terms = scheduled
         return await self._capacity(terms, at=subscription.current_period_end)
+
+    async def channel_in_plan(self, channel: Channel) -> bool:
+        """Whether the plan in force includes `channel` (ENT-16).
+
+        The question every automated send asks before it runs - an AI turn, a
+        campaign copy, a follow-up. A workspace whose subscription is not served
+        falls back to the default plan, so a channel a paid plan included may
+        not be one it includes now: inbound is still stored and a person may
+        still reply, but nothing automated runs on it until it is again.
+        """
+        return channel in await self.allowed_channel_types()
 
     async def allowed_channel_types(self) -> frozenset[Channel]:
         """The channel types the plan in force allows (ENT-09); WhatsApp alone if unstated."""

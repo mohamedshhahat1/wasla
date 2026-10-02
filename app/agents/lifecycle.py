@@ -45,11 +45,12 @@ from app.channels.policy import ChannelState
 from app.channels.registry import ChannelRegistry, default_registry
 from app.db.models.agent import Agent, AgentStatus
 from app.db.models.agent_turn import TurnOutcome
-from app.db.models.channel import ChannelConnection, ConnectionStatus
+from app.db.models.channel import Channel, ChannelConnection, ConnectionStatus
 from app.db.models.conversation import Conversation, ConversationMode, ConversationStatus
 from app.db.models.enums import TenantStatus
 from app.db.models.tenant import Tenant
 from app.db.models.tool_execution import ToolExecutionReason
+from app.services.entitlement_service import EntitlementService
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,9 @@ class ServingState:
     conversation_closed: bool = False
     agent_active: bool = True
     channel_available: bool = True
+    # The conversation's channel, for the one question this row cannot answer
+    # on its own: whether the plan in force includes it (ENT-16).
+    channel: Channel | None = None
 
 
 async def serving_state(
@@ -150,6 +154,7 @@ async def serving_state(
             and released_at is None
             and registry.state_for(channel) is ChannelState.OPERATIONAL
         ),
+        channel=channel,
     )
 
 
@@ -211,17 +216,28 @@ async def refusal_now(
     conversation_id: uuid.UUID,
     agent_id: uuid.UUID | None,
     channels: ChannelRegistry | None = None,
+    default_plan_code: str | None = None,
 ) -> TurnOutcome | None:
-    """Why an agent may not act on this conversation right now, or None if it may."""
-    return outcome_for(
-        await serving_state(
-            session,
-            tenant_id=tenant_id,
-            conversation_id=conversation_id,
-            agent_id=agent_id,
-            channels=channels,
-        )
+    """Why an agent may not act on this conversation right now, or None if it may.
+
+    After the row's own answers, the plan's: a conversation on a channel the
+    plan in force does not include is `CHANNEL_NOT_IN_PLAN` (ENT-16) - asked
+    before the turn holds anything, so it is never charged.
+    """
+    state = await serving_state(
+        session,
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        agent_id=agent_id,
+        channels=channels,
     )
+    refusal = outcome_for(state)
+    if refusal is not None or state.channel is None:
+        return refusal
+    in_plan = await EntitlementService(
+        session, tenant_id=tenant_id, default_plan_code=default_plan_code
+    ).channel_in_plan(state.channel)
+    return None if in_plan else TurnOutcome.CHANNEL_NOT_IN_PLAN
 
 
 __all__ = [

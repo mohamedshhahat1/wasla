@@ -718,7 +718,7 @@ async def test_one_allowance_is_shared_by_every_channel(
     decision_gate: Callable[[Database, int], DecisionGate],
 ) -> None:
     """M-E06's killer: a WhatsApp turn and a Messenger turn at once, against one turn."""
-    await ai_turns.plan({TURNS: 1})
+    await ai_turns.plan({TURNS: 1}, channels=(Channel.WHATSAPP, Channel.MESSENGER))
     workspace, page, adapter, registry = await _with_page(ai_turns)
     await _resolved(ai_turns, workspace)
     whatsapp, ids = await ai_turns.write(workspace, ["hello"])
@@ -742,7 +742,7 @@ async def test_one_allowance_is_shared_by_every_channel(
 async def test_each_channel_draws_from_the_workspace_total(
     ai_turns: TurnRunner, ai_providers: FakeProviders
 ) -> None:
-    await ai_turns.plan({TURNS: 2})
+    await ai_turns.plan({TURNS: 2}, channels=(Channel.WHATSAPP, Channel.MESSENGER))
     workspace, page, adapter, registry = await _with_page(ai_turns)
     whatsapp, ids = await ai_turns.write(workspace, ["hello"])
     await ai_turns.enqueue(workspace, whatsapp, ids[0])

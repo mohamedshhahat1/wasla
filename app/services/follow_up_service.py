@@ -108,6 +108,10 @@ from app.repositories.follow_up_repository import FollowUpRepository
 from app.repositories.lead_repository import LeadRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
+from app.services.entitlement_service import (
+    CHANNEL_NOT_IN_PLAN_DETAIL,
+    EntitlementService,
+)
 from app.services.messaging_service import MessagingService
 from app.services.template_service import refusal_reason_for
 
@@ -790,6 +794,17 @@ class FollowUpService:
             follow_up.cancelled_at = datetime.now(UTC)
             follow_up.cancelled_reason = MEMBER_REVOKED_REASON
             return DispatchOutcome(follow_up, FollowUpStatus.CANCELLED, MEMBER_REVOKED_REASON)
+
+        if not await EntitlementService(
+            self._session,
+            tenant_id=self._tenant_id,
+            default_plan_code=(
+                self._settings.default_plan_code if self._settings is not None else None
+            ),
+        ).channel_in_plan(conversation.channel):
+            # ENT-16: nothing automated runs on a channel the plan in force
+            # does not include. Terminal, like every policy refusal here.
+            return self._skip(follow_up, CHANNEL_NOT_IN_PLAN_DETAIL)
 
         contact = await self._contacts.require_by_id(conversation.contact_id)
         if not contact.accepts_campaigns:
