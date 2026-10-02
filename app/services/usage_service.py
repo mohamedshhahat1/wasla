@@ -213,9 +213,11 @@ class UsageRecorder:
         """Stage the request and its two token counts together.
 
         These are provider cost, not the customer's allowance (AI-02): a plan
-        counts `AI_TURN`, reserved once per turn by the agent worker, and
-        nothing here is ever checked against a limit. `purpose` says which
-        call this was - `AI_PURPOSE_AGENT` or `AI_PURPOSE_SENTIMENT`.
+        counts `AI_TURN`, charged once per turn that produced a usable outcome
+        (ENT-02), and nothing here is ever checked against a limit - a turn
+        that failed or answered nothing still recorded every request it made.
+        `purpose` says which call this was - `AI_PURPOSE_AGENT` or
+        `AI_PURPOSE_SENTIMENT`.
 
         Three rows rather than one with two extra columns. Tokens are priced
         separately from requests and from each other, so each is its own meter;

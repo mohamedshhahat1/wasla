@@ -47,7 +47,7 @@ import hashlib
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from sqlalchemy import Select, func, select
@@ -56,6 +56,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import PlanLimitExceededError
 from app.core.logging import get_logger
 from app.db.models.agent import Agent
+from app.db.models.agent_turn import AgentTurn, AITurnChargeState
 from app.db.models.billing import (
     ACCOUNT_LIMITS,
     RESOURCE_LIMITS,
@@ -72,7 +73,7 @@ from app.db.models.knowledge import Document
 from app.db.models.media import OCCUPYING_STORAGE_STATES, MessageMedia
 from app.db.models.membership import Membership
 from app.db.models.topup import TopupSource
-from app.db.models.usage import UsageEventType
+from app.db.models.usage import UsageEvent, UsageEventType
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
 from app.repositories.topup_repository import ActiveTotal, TopupPurchaseRepository
 from app.repositories.usage_repository import UsageEventRepository
@@ -88,6 +89,10 @@ from app.services.plan_catalog import PlanCatalog
 from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
+
+#: How long an AI turn's hold counts when the caller names no TTL (ENT-03):
+#: the deployment's `AI_TURN_HOLD_TTL_SECONDS`, whose default this matches.
+DEFAULT_AI_TURN_HOLD_TTL: Final = timedelta(seconds=900)
 
 # Which meters each period limit adds up. Messages count in both directions:
 # a conversation is two-sided, every WhatsApp platform prices it that way, and
@@ -234,10 +239,14 @@ class EntitlementService:
         tenant_id: uuid.UUID,
         default_plan_code: str | None = None,
         clock: Callable[[], datetime] | None = None,
+        ai_turn_hold_ttl: timedelta | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self._default_plan_code = default_plan_code
+        # Past this age an AI turn's hold stops counting (ENT-03): its worker
+        # died, and the billing sweep will release it.
+        self._hold_ttl = ai_turn_hold_ttl or DEFAULT_AI_TURN_HOLD_TTL
         # What "now" is for top-up expiry. Injected only by tests that need to
         # stand either side of a period boundary; production reads the clock.
         self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
@@ -330,8 +339,11 @@ class EntitlementService:
         # the plan's figure plus whatever live top-ups and grants add. Nothing
         # here writes to the plan version - a top-up is an addition beside it.
         limit = None if base is None else base + purchased + granted
-        used = await self._used(key, subscription=subscription)
-        allowed = limit is None or used + max(additional, 0) <= limit
+        used, held = await self._used_and_held(key, subscription=subscription)
+        # Holds are spoken for (ENT-03): a turn engaged and still generating
+        # has not been charged yet, and a concurrent turn that ignored it would
+        # oversell the allowance by every turn in flight.
+        allowed = limit is None or used + held + max(additional, 0) <= limit
         since, until = _period(subscription, self._clock())
         return Entitlement(
             key=key,
@@ -344,7 +356,93 @@ class EntitlementService:
             grant_limit=granted,
             period_start=since if key not in RESOURCE_LIMITS else None,
             period_end=until if key not in RESOURCE_LIMITS else None,
+            held=held,
         )
+
+    # ------------------------------------------------------------- AI turns
+
+    async def hold_ai_turn(self) -> Entitlement:
+        """Decide, under the workspace's lock, whether one more AI turn may hold a unit.
+
+        ENT-03. Taken in the transaction that engages the turn, which is what
+        writes the hold (`AgentTurnRepository.engage(hold=True)`): the lock is
+        held until that transaction commits, so the next turn's count sees this
+        one's hold, and N turns racing an allowance of N leave at most N holds.
+        The lock is released at that commit - never held across an inference
+        (ADR-080). `allowed` false means no hold: no provider is called, and the
+        conversation goes to a person (ENT-04).
+
+        `used + held + 1 <= limit`, where `used` is the cycle's `ai_turn` charges
+        and `held` the turns engaged and not yet settled, taken in one statement
+        so a settle committing between two reads can never be counted in
+        neither.
+        """
+        await self._session.execute(
+            select(func.pg_advisory_xact_lock(_lock_id(self._tenant_id, LimitKey.PERIOD_AI_TURNS)))
+        )
+        entitlement = await self.check(LimitKey.PERIOD_AI_TURNS, additional=1)
+        if not entitlement.allowed:
+            logger.info(
+                "billing.ai_turn_hold_refused",
+                extra={
+                    "event": "billing.ai_turn_hold_refused",
+                    "tenant_id": str(self._tenant_id),
+                    "used": entitlement.used,
+                    "held": entitlement.held,
+                },
+            )
+        return entitlement
+
+    async def ai_turns_by_channel(self) -> dict[Channel | None, int]:
+        """This cycle's AI turn charges, by the channel each was taken on (ENT-01).
+
+        For display only. The allowance is one per workspace, and no code path
+        compares a channel's figure with a limit. Charges recorded before the
+        channel dimension existed are under None.
+        """
+        _, subscription = await self._resolve()
+        since, until = _period(subscription, self._clock())
+        rows = await self._session.execute(
+            select(UsageEvent.channel, func.coalesce(func.sum(UsageEvent.quantity), 0))
+            .where(UsageEvent.tenant_id == self._tenant_id)
+            .where(UsageEvent.event_type == UsageEventType.AI_TURN)
+            .where(UsageEvent.occurred_at >= since)
+            .where(UsageEvent.occurred_at < until)
+            .group_by(UsageEvent.channel)
+        )
+        return {channel: int(total) for channel, total in rows.all()}
+
+    async def _used_and_held(
+        self, key: LimitKey, *, subscription: Subscription | None
+    ) -> tuple[int, int]:
+        """Usage against `key`, and for AI turns the open holds, in one snapshot."""
+        if key is not LimitKey.PERIOD_AI_TURNS:
+            return await self._used(key, subscription=subscription), 0
+        now = self._clock()
+        since, until = _period(subscription, now)
+        used = (
+            select(func.coalesce(func.sum(UsageEvent.quantity), 0))
+            .where(UsageEvent.tenant_id == self._tenant_id)
+            .where(UsageEvent.event_type == UsageEventType.AI_TURN)
+            .where(UsageEvent.occurred_at >= since)
+            .where(UsageEvent.occurred_at < until)
+            .scalar_subquery()
+        )
+        # A hold counts only inside the usage cycle it was taken in, and only
+        # until its TTL: a hold whose worker died stops counting by the clock,
+        # not when the sweep gets round to it.
+        held = (
+            select(func.count())
+            .select_from(AgentTurn)
+            .where(AgentTurn.tenant_id == self._tenant_id)
+            .where(AgentTurn.charge_state == AITurnChargeState.HELD)
+            .where(AgentTurn.held_at >= since)
+            .where(AgentTurn.held_at < until)
+            .where(AgentTurn.held_at > now - self._hold_ttl)
+            .scalar_subquery()
+        )
+        row = (await self._session.execute(select(used, held))).one()
+        return int(row[0]), int(row[1])
 
     async def _topped_up(self, key: LimitKey) -> tuple[int, int]:
         """What live top-ups add to `key`: (purchased, granted by the platform).
@@ -537,9 +635,11 @@ class EntitlementService:
 
         **Hold it briefly.** The lock lives until this transaction ends, so a
         caller must not keep the transaction open across slow work. The agent
-        worker reserves in a short transaction of its own for exactly this
-        reason: holding a workspace's lock across an inference would serialise
-        every conversation that workspace is having.
+        worker takes its AI turns' holds in a short transaction of its own
+        (`hold_ai_turn`) for exactly this reason: holding a workspace's lock
+        across an inference would serialise every conversation that workspace
+        is having. Agent turns are held and settled rather than consumed: one
+        is charged only when it produces a usable outcome (ENT-02).
 
         Returns the entitlement. When `allowed` is false nothing was recorded
         and the caller must not proceed; usage is append-only, so there is no

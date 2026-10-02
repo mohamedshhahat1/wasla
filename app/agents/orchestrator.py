@@ -140,10 +140,32 @@ class AgentOutcome:
     outcome: TurnOutcome = TurnOutcome.REPLIED
     # The provider's id for the last response, for support correlation (AI-12).
     response_id: str | None = None
+    # Whether the provider composed reply text in this turn, kept when `reply`
+    # is then withheld - a colleague took over mid-turn - because the words
+    # were generated and the cost was incurred (ENT-02). A `reply` implies it.
+    composed: bool = False
 
     @property
     def should_send(self) -> bool:
         return bool(self.reply) and not self.handed_off
+
+    @property
+    def chargeable(self) -> bool:
+        """Whether this turn is charged to the workspace's AI allowance (ENT-02).
+
+        Charged when the provider produced a usable outcome: reply text - sent,
+        refused by the channel, or withheld by a re-read after it was written,
+        because none of that un-spends the generation - or a handoff the
+        agent's own tool genuinely executed (AI-03). Not charged: an empty
+        answer, a sentiment escalation before any composition, a conversation
+        with nothing to answer, and every refusal before generation. A turn
+        that raised produced no outcome at all and never reaches this.
+        """
+        ending = self.effective_outcome
+        if ending is TurnOutcome.HANDED_OFF:
+            return True
+        composed = self.composed or bool(self.reply)
+        return composed and ending is not TurnOutcome.EMPTY_RESPONSE
 
     @property
     def effective_outcome(self) -> TurnOutcome:
@@ -608,6 +630,7 @@ class AgentOrchestrator:
                         total_tokens=total_tokens,
                     ),
                     response_id=response_id,
+                    composed=bool(text),
                 )
 
         if pending and not handed_off:
@@ -647,6 +670,7 @@ class AgentOrchestrator:
                     total_tokens=total_tokens,
                 ),
                 response_id=response_id,
+                composed=True,
             )
 
         logger.info(
@@ -685,6 +709,7 @@ class AgentOrchestrator:
             model=resolved.model,
             outcome=ending,
             response_id=response_id,
+            composed=bool(text),
         )
 
     @staticmethod
@@ -695,6 +720,7 @@ class AgentOrchestrator:
         rounds: int,
         usage: TokenUsage,
         response_id: str | None,
+        composed: bool,
     ) -> AgentOutcome:
         """A turn a colleague's takeover overtook: nothing to send, nothing handed off by us."""
         return AgentOutcome(
@@ -707,6 +733,7 @@ class AgentOrchestrator:
             model=agent.model,
             outcome=TurnOutcome.SUPPRESSED_HUMAN,
             response_id=response_id,
+            composed=composed,
         )
 
     def _max_output_tokens(self, agent: Agent) -> int:

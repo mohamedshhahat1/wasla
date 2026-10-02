@@ -802,6 +802,21 @@ class Settings(BaseSettings):
     # workspaces that were never given a chance to notice.
     billing_suspend_after_days: int = Field(default=30, ge=2)
 
+    # How long an AI turn's hold on the workspace's allowance stays counted
+    # (ENT-03, ADR-131). A turn holds one unit when it engages and settles it -
+    # charged on a usable outcome, released otherwise - when generation ends.
+    # A hold whose worker died never settles; past this age it stops counting
+    # and the billing sweep releases it. Set above the longest a healthy turn
+    # can take (a classification and three rounds of three sixty-second
+    # attempts is twelve minutes), so a slow turn is never released while it
+    # is still running - a late settle of one that was would still charge.
+    ai_turn_hold_ttl_seconds: int = Field(default=900, ge=60, le=3600)
+    # How long a workspace whose channel capacity fell below its active
+    # connections keeps every connection working while an owner chooses which
+    # to keep (ENT-14, ENT-15). After it, the oldest are kept and the rest
+    # disabled - never released, never deleted.
+    channel_capacity_grace_days: int = Field(default=7, ge=1, le=90)
+
     # Reconciling collection attempts whose outcome nobody knows (ADR-088).
     #
     # How long an attempt must have been outstanding before reconciliation

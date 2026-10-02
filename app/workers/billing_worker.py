@@ -51,6 +51,7 @@ from app.db.session import Database
 from app.integrations.billing import build_checkout_provider
 from app.integrations.billing.checkout import RecurringProvider
 from app.platform.custom_plan_offers import PlatformCustomPlanOffers
+from app.repositories.agent_turn_repository import ExpiredHoldSweep
 from app.repositories.billing_repository import (
     PlanVersionMigrationRepository,
     PlatformSubscriptionRepository,
@@ -187,6 +188,10 @@ class BillingWorker:
         # opens the new term's first cycle itself, and this phase only ever
         # touches cycles strictly inside a term that is still running.
         handled += await self._advance_usage(now=moment)
+        # Release the AI turn holds nobody settled within their TTL (ENT-03).
+        # Bookkeeping too: a hold past its TTL stopped counting by the clock,
+        # so this phase running late never keeps an allowance from anybody.
+        handled += await self._drain(self._release_expired_holds, now=moment)
         # Record the top-ups whose period has ended (ADR-113). Bookkeeping, not
         # enforcement: the limit arithmetic already ignores an expired top-up
         # by its clock, so this phase running late never extends an allowance.
@@ -413,6 +418,25 @@ class BillingWorker:
                 },
             )
             return 1
+
+    async def _release_expired_holds(self, *, now: datetime) -> int:
+        """Release one batch of AI turn holds older than the TTL; nothing is charged.
+
+        A hold this old belongs to a turn whose worker died or never settled.
+        A settle that arrives later still charges - usage that happened is
+        never refused afterwards - and is counted as a late charge.
+        """
+        ttl = timedelta(seconds=self._settings.ai_turn_hold_ttl_seconds)
+        async with self._database.session() as session:
+            released = await ExpiredHoldSweep(session).release_expired(
+                held_before=now - ttl, now=now, limit=self._claim_limit
+            )
+        if released:
+            logger.warning(
+                "billing.ai_turn_holds_expired",
+                extra={"event": "billing.ai_turn_holds_expired", "count": len(released)},
+            )
+        return len(released)
 
     async def _expire_topups(self, *, now: datetime) -> int:
         """Mark one batch of granted top-ups past `expires_at` as expired.

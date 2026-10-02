@@ -25,15 +25,17 @@ which is also what makes a monthly total reproducible after the fact.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Final
 
-from sqlalchemy import BigInteger, DateTime, Index, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, Index, func, text
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, UUIDPrimaryKeyMixin
+from app.db.models.channel import CHANNEL_TYPE, Channel
 from app.db.models.enums import _enum_type
 
 
@@ -151,6 +153,19 @@ class UsageEvent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):
         # The platform dashboard sums across every workspace for a window, which
         # no tenant-leading index can serve.
         Index("ix_usage_events_occurred_at", "occurred_at"),
+        # One `ai_turn` charge per turn, ever (ENT-02): the settle that records
+        # it is conditional on the turn's hold, and this is the backstop that
+        # makes a second one impossible whoever writes it.
+        Index(
+            "uq_usage_events_tenant_id_agent_turn_id",
+            "tenant_id",
+            "agent_turn_id",
+            unique=True,
+            postgresql_where=text("agent_turn_id IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "agent_turn_id IS NULL OR event_type = 'ai_turn'", name="agent_turn_only_for_ai_turn"
+        ),
     )
 
     event_type: Mapped[UsageEventType] = mapped_column(USAGE_EVENT_TYPE, nullable=False)
@@ -170,6 +185,16 @@ class UsageEvent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):
     # billed, the conversation it belonged to. Never load-bearing: nothing reads
     # a key out of here to make a decision, so adding one is always safe.
     meta: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB, nullable=True)
+    # Reporting dimensions (ENT-01, ENT-22): which channel and connection a
+    # message or an AI turn belonged to. Never a quota key - the AI allowance
+    # is one per workspace whatever the channel - and not a foreign key: usage
+    # is a ledger that outlives the connection it describes. Null on history.
+    channel: Mapped[Channel | None] = mapped_column(CHANNEL_TYPE, nullable=True)
+    connection_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # The agent turn an `ai_turn` charge settled, unique per turn. Not a foreign
+    # key either: a turn can be deleted with its conversation, and the charge
+    # must stay on the ledger.
+    agent_turn_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
         return (
