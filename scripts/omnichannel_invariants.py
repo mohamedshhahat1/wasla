@@ -56,6 +56,14 @@ class Check:
     query: str
 
 
+# The English stop phrases, as SQL literals, for the Q6 census - written out so
+# every statement here is a fixed string; a unit test holds them equal to
+# `STOP_WORDS`. Arabic phrases need the matcher's letter folding and are counted
+# by the replay command, which uses `is_stop_request` itself.
+STOP_PHRASES_SQL = (
+    "'no more messages', 'opt out', 'optout', 'stop', 'stop promotions', 'unsubscribe'"
+)
+
 # ------------------------------------------------------------------ census
 
 CENSUS: tuple[Check, ...] = (
@@ -167,6 +175,34 @@ CENSUS: tuple[Check, ...] = (
     Check(
         "connections_credential_refused",
         "SELECT count(*) FROM channel_connections WHERE health = 'auth_failed'",
+    ),
+    # The final audit's Q5 and Q6 (OMNI-030): exposure the old parser may
+    # already have left. Taps stored with no words, and retained "stop" taps
+    # whose customer is not opted out - which `recover-button-opt-outs`
+    # replays, and which must be run before retention redacts the payloads.
+    Check(
+        "q5_inbound_interactive_without_text",
+        "SELECT count(*) FROM messages WHERE direction = 'inbound'"
+        " AND kind = 'interactive' AND body IS NULL",
+    ),
+    Check(
+        "q6_retained_stop_taps_without_opt_out",
+        "SELECT count(*) FROM whatsapp_events e"
+        " JOIN messages m ON m.tenant_id = e.tenant_id AND m.connection_id = e.account_id"
+        " AND m.wa_message_id = e.event_id AND m.direction = 'inbound'"
+        " JOIN conversations v ON v.tenant_id = m.tenant_id AND v.id = m.conversation_id"
+        " JOIN contacts c ON c.tenant_id = v.tenant_id AND c.id = v.contact_id"
+        " WHERE e.kind = 'message' AND e.payload IS NOT NULL"
+        " AND c.marketing_opt_out_at IS NULL"
+        " AND lower(btrim(coalesce(e.payload #>> '{button,text}',"
+        " e.payload #>> '{interactive,button_reply,title}',"
+        " e.payload #>> '{interactive,list_reply,title}'))) IN ('no more messages',"
+        " 'opt out', 'optout', 'stop', 'stop promotions', 'unsubscribe')",
+    ),
+    # Deliveries the workspace-wide key refused, kept as evidence (OMNI-043).
+    Check(
+        "collision_evidence_events",
+        "SELECT count(*) FROM whatsapp_events WHERE event_id LIKE 'collision:%'",
     ),
 )
 
@@ -322,6 +358,29 @@ INVARIANTS: tuple[Check, ...] = (
         "SELECT count(*) FROM campaign_recipients r WHERE r.participant_identity_id IS NOT NULL"
         " AND NOT EXISTS (SELECT 1 FROM contact_identities i WHERE i.tenant_id = r.tenant_id"
         " AND i.contact_id = r.contact_id AND i.id = r.participant_identity_id)",
+    ),
+    # A processed message event projected onto its message, found under the
+    # event's own id on its own connection (OMNI-032, the audit's Q3). What
+    # inbound recovery and the stranded-media sweep rely on.
+    Check(
+        "message_event_without_its_projected_message",
+        "SELECT count(*) FROM whatsapp_events e WHERE e.kind = 'message'"
+        " AND e.state = 'processed' AND NOT EXISTS (SELECT 1 FROM messages m"
+        " WHERE m.tenant_id = e.tenant_id AND m.connection_id = e.account_id"
+        " AND m.wa_message_id = e.event_id)",
+    ),
+    # Collision evidence is evidence: failed, so never recovered or projected
+    # (OMNI-043).
+    Check(
+        "collision_evidence_not_failed",
+        "SELECT count(*) FROM whatsapp_events"
+        " WHERE event_id LIKE 'collision:%' AND state <> 'failed'",
+    ),
+    # A tap keeps its words beside its payload (OMNI-030).
+    Check(
+        "inbound_tap_without_its_words",
+        "SELECT count(*) FROM messages WHERE direction = 'inbound'"
+        " AND action_source IS NOT NULL AND action_title IS NOT NULL AND body IS NULL",
     ),
     # The window anchor is the newest thing the customer said (OMNI-036, the
     # audit's Q4). A late delivery used to move it backwards; on production

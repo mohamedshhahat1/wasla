@@ -92,3 +92,14 @@ async def test_opt_outs_are_counted_by_route_and_close_an_unknown_one(
         ("wasla_opt_outs_total", {"via": "reply_action"}, 2),
         ("wasla_opt_outs_total", {"via": "other"}, 1),
     ]
+
+
+def test_the_census_stop_phrases_are_the_matchers() -> None:
+    """Q6 counts in SQL what `is_stop_request` matches in English (OMNI-030)."""
+    from app.services.opt_out import STOP_WORDS
+    from scripts.omnichannel_invariants import CENSUS, STOP_PHRASES_SQL
+
+    expected = ", ".join(f"'{phrase}'" for phrase in sorted(STOP_WORDS) if phrase.isascii())
+    assert expected == STOP_PHRASES_SQL
+    (q6,) = [check for check in CENSUS if check.name == "q6_retained_stop_taps_without_opt_out"]
+    assert " ".join(q6.query.split()).endswith(f"IN ({STOP_PHRASES_SQL})")

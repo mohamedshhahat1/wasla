@@ -22,7 +22,7 @@ from app.db.models.conversation import Conversation
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.services.whatsapp_service import WhatsAppIngestionService
-from scripts.omnichannel_invariants import violations
+from scripts.omnichannel_invariants import census, violations
 
 pytestmark = pytest.mark.integration
 
@@ -104,3 +104,104 @@ async def test_a_window_anchor_moved_back_is_counted(db_session: AsyncSession) -
     )
 
     assert await _added(db_session, before) == {"window_anchor_older_than_newest_inbound": 1}
+
+
+async def _census(session: AsyncSession) -> dict[str, int]:
+    return await census(await session.connection(), read_only=False)
+
+
+async def test_a_processed_message_event_without_its_message_is_counted(
+    db_session: AsyncSession,
+) -> None:
+    """OMNI-032 (the audit's Q3): what recovery and the media sweep rely on."""
+    account = await _number(db_session)
+    await WhatsAppIngestionService(session=db_session).ingest(
+        _inbound(account, {"type": "text", "text": {"body": "hello"}})
+    )
+    await db_session.flush()
+    before = await _counts(db_session)
+
+    await db_session.execute(
+        text(
+            "UPDATE whatsapp_events SET event_id = 'evt.' || event_id, state = 'processed'"
+            " WHERE tenant_id = :t"
+        ),
+        {"t": account.tenant_id},
+    )
+
+    assert await _added(db_session, before) == {"message_event_without_its_projected_message": 1}
+
+
+async def test_collision_evidence_that_is_not_failed_is_counted(db_session: AsyncSession) -> None:
+    """OMNI-043: evidence is never recovered or projected."""
+    account = await _number(db_session)
+    before = await _counts(db_session)
+    census_before = await _census(db_session)
+
+    await db_session.execute(
+        text(
+            "INSERT INTO whatsapp_events (id, tenant_id, account_id, channel, event_id, kind,"
+            " state, payload, received_at) VALUES (gen_random_uuid(), :t, :a, 'whatsapp',"
+            " :key, 'message', 'received', '{}', now())"
+        ),
+        {"t": account.tenant_id, "a": account.id, "key": f"collision:{account.id.hex}:wamid.x"},
+    )
+
+    assert await _added(db_session, before) == {"collision_evidence_not_failed": 1}
+    census_after = await _census(db_session)
+    assert (
+        census_after["collision_evidence_events"] == census_before["collision_evidence_events"] + 1
+    )
+
+
+async def test_a_tap_stored_without_its_words_is_counted(db_session: AsyncSession) -> None:
+    """OMNI-030: the title is the body; and Q5 counts the old parser's exposure."""
+    account = await _number(db_session)
+    await WhatsAppIngestionService(session=db_session).ingest(
+        _inbound(
+            account,
+            {
+                "type": "interactive",
+                "interactive": {
+                    "type": "button_reply",
+                    "button_reply": {"id": "book-yes", "title": "Yes, book it"},
+                },
+            },
+        )
+    )
+    await db_session.flush()
+    before = await _counts(db_session)
+    census_before = await _census(db_session)
+
+    await db_session.execute(
+        text("UPDATE messages SET body = NULL WHERE tenant_id = :t"), {"t": account.tenant_id}
+    )
+
+    assert await _added(db_session, before) == {"inbound_tap_without_its_words": 1}
+    after = await _census(db_session)
+    assert after["q5_inbound_interactive_without_text"] == (
+        census_before["q5_inbound_interactive_without_text"] + 1
+    )
+
+
+async def test_a_retained_stop_tap_without_an_opt_out_is_counted(db_session: AsyncSession) -> None:
+    """OMNI-030 (the audit's Q6): the evidence `recover-button-opt-outs` replays."""
+    account = await _number(db_session)
+    await WhatsAppIngestionService(session=db_session).ingest(
+        _inbound(
+            account,
+            {"type": "button", "button": {"text": "Stop promotions", "payload": "STOP"}},
+        )
+    )
+    await db_session.flush()
+    before = await _census(db_session)
+
+    await db_session.execute(
+        text("UPDATE contacts SET marketing_opt_out_at = NULL WHERE tenant_id = :t"),
+        {"t": account.tenant_id},
+    )
+
+    after = await _census(db_session)
+    assert after["q6_retained_stop_taps_without_opt_out"] == (
+        before["q6_retained_stop_taps_without_opt_out"] + 1
+    )
