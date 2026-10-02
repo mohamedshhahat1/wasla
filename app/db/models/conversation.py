@@ -341,6 +341,15 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
             text("last_message_at DESC NULLS LAST"),
             text("id DESC"),
         ),
+        # The inbox narrowed to one channel, in the inbox's own order
+        # (OMNI-048); the connection index above does not serve it.
+        Index(
+            "ix_conversations_tenant_id_channel_last_message_at",
+            "tenant_id",
+            "channel",
+            text("last_message_at DESC NULLS LAST"),
+            text("id DESC"),
+        ),
         Index("ix_conversations_participant_identity_id", "participant_identity_id"),
         # The contact and the connection this conversation is with must belong
         # to the same workspace it does, and the database is what says so

@@ -223,6 +223,9 @@ class ChannelConnection(Base, TenantScopedMixin, TimestampMixin):
         ),
         CheckConstraint("external_account_id <> ''", name="external_account_id_present"),
         CheckConstraint("send_window_count >= 0", name="send_window_count_non_negative"),
+        CheckConstraint(
+            "sends_per_minute IS NULL OR sends_per_minute > 0", name="sends_per_minute_positive"
+        ),
     )
 
     # No generated default. A WhatsApp connection takes its number's id, which
@@ -268,6 +271,11 @@ class ChannelConnection(Base, TenantScopedMixin, TimestampMixin):
     send_window_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    # This connection's own allowance per minute, where it differs from the
+    # deployment's `CONNECTION_SENDS_PER_MINUTE` (OMNI-052): Meta gives a number
+    # 80 messages a second by default and up to 1,000 after an upgrade, and
+    # fixes a Coexistence number at 20. Null means the deployment's value.
+    sends_per_minute: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     @property
     def is_active(self) -> bool:

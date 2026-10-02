@@ -17,11 +17,13 @@ from typing import Self
 from pydantic import BaseModel
 
 from app.db.models.analytics import AnalyticsEvent, AnalyticsEventType, AnalyticsSource
+from app.db.models.channel import Channel
 from app.db.models.lead import LeadStatus
 from app.db.models.sentiment import SentimentLabel
 from app.repositories.analytics_repository import EventCount
 from app.repositories.metrics_repository import (
     CampaignMetrics,
+    ChannelMetrics,
     ConversationMetrics,
     LeadMetrics,
     MessageMetrics,
@@ -149,6 +151,24 @@ class HandoffCountRead(BaseModel):
         return cls(source=row.source, count=row.count)
 
 
+class ChannelMetricsRead(BaseModel):
+    """One channel's conversations and traffic in the window (OMNI-048)."""
+
+    channel: Channel
+    conversations_created: int
+    messages_received: int
+    messages_sent: int
+
+    @classmethod
+    def from_metrics(cls, metrics: ChannelMetrics) -> Self:
+        return cls(
+            channel=metrics.channel,
+            conversations_created=metrics.conversations_created,
+            messages_received=metrics.messages_received,
+            messages_sent=metrics.messages_sent,
+        )
+
+
 class TenantAnalyticsRead(BaseModel):
     """One workspace's numbers for one window."""
 
@@ -159,6 +179,8 @@ class TenantAnalyticsRead(BaseModel):
     sentiment: SentimentMetricsRead
     campaigns: CampaignMetricsRead
     handoffs_by_source: list[HandoffCountRead]
+    # Additive (OMNI-048): only channels with activity in the window.
+    by_channel: list[ChannelMetricsRead] = []
 
     @classmethod
     def from_report(cls, report: TenantAnalytics) -> Self:
@@ -170,6 +192,7 @@ class TenantAnalyticsRead(BaseModel):
             sentiment=SentimentMetricsRead.from_metrics(report.sentiment),
             campaigns=CampaignMetricsRead.from_metrics(report.campaigns),
             handoffs_by_source=[HandoffCountRead.from_count(row) for row in report.handoffs],
+            by_channel=[ChannelMetricsRead.from_metrics(row) for row in report.channels],
         )
 
 

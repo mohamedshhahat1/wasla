@@ -23,7 +23,7 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy.exc import DBAPIError
 
 from app.api.route import CommittingRoute
-from app.core.config import Settings
+from app.core.config import Settings, webhook_signing_secret
 from app.core.dependencies import (
     SESSION_STATE_ATTRIBUTE,
     RedisDep,
@@ -95,7 +95,7 @@ def _require_signature(*, body: bytes, header: str | None, settings: Settings) -
     ever reachable on staging. Both guards stay: the configuration gate is
     production-only on purpose, so the runtime one may not lean on it.
     """
-    app_secret = settings.meta_app_secret
+    app_secret = webhook_signing_secret(settings, "whatsapp")
     if not app_secret:
         if not settings.is_developer_environment:
             logger.error(

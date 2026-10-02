@@ -909,6 +909,14 @@ class Settings(BaseSettings):
     # Meta / WhatsApp: configuration only until the WhatsApp phase lands
     meta_app_id: str | None = None
     meta_app_secret: str | None = None
+    # The secret each Meta product's webhooks are signed with, where it is not
+    # `META_APP_SECRET` (OMNI-050). Meta documents Instagram's as "your app's
+    # App Secret" without saying which secret an Instagram-Login app uses;
+    # unset, each falls back to `META_APP_SECRET`. Read by
+    # `webhook_signing_secret`; the signature verifier already takes the secret
+    # as a parameter.
+    meta_instagram_app_secret: str | None = None
+    meta_messenger_app_secret: str | None = None
     meta_verify_token: str | None = None
     meta_access_token: str | None = None
     # Checked against `META_API_SUNSETS` at start-up, which warns when this
@@ -1573,6 +1581,19 @@ class Settings(BaseSettings):
                 "would be pretend and every customer would get the product free"
             ]
         return []
+
+
+def webhook_signing_secret(settings: Settings, product: str) -> str | None:
+    """The secret a Meta product's webhooks are verified with (OMNI-050).
+
+    `whatsapp`, `instagram` or `messenger`; a product-specific secret where one
+    is configured, else `META_APP_SECRET`.
+    """
+    specific = {
+        "instagram": settings.meta_instagram_app_secret,
+        "messenger": settings.meta_messenger_app_secret,
+    }.get(product)
+    return specific or settings.meta_app_secret
 
 
 @lru_cache

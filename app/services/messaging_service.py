@@ -94,7 +94,7 @@ from app.core.telemetry import record_opt_outs
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey
 from app.db.models.campaign import OptOutSource, OptOutVia
-from app.db.models.channel import Channel, ConnectionHealth
+from app.db.models.channel import Channel, ChannelConnection, ConnectionHealth, IdentityKind
 from app.db.models.conversation import (
     Conversation,
     Message,
@@ -105,7 +105,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.media import MediaStatus, MediaStorageState
 from app.db.models.user import User
-from app.db.models.whatsapp_template import TemplateStatus
+from app.db.models.whatsapp_template import TemplateCategory, TemplateStatus
 from app.db.session import released
 from app.integrations.whatsapp.client import TemplateWithdrawnError, build_http_client
 from app.integrations.whatsapp.policy import SERVICE_WINDOW, WHATSAPP_TEXT_MAX_CHARS
@@ -379,11 +379,12 @@ class MessagingService:
         top of this one, because setting a campaign up is a deliberate act that
         can afford to require a sync first.
         """
-        refusal = refusal_reason_for(
-            await self._templates.find_anywhere(name=name, language=language)
-        )
+        template = await self._templates.find_anywhere(name=name, language=language)
+        refusal = refusal_reason_for(template)
         if refusal is not None:
             raise ValidationError(refusal)
+        if template is not None and template.category is TemplateCategory.AUTHENTICATION:
+            await self._refuse_authentication_to_a_business_scoped_id(conversation_id)
 
         return await self._dispatch(
             conversation_id=conversation_id,
@@ -403,6 +404,23 @@ class MessagingService:
             idempotency_key=idempotency_key,
             origin=origin,
         )
+
+    async def _refuse_authentication_to_a_business_scoped_id(
+        self, conversation_id: uuid.UUID
+    ) -> None:
+        """Meta cannot deliver an authentication template to a business-scoped id (OMNI-054).
+
+        "BSUIDs cannot receive one-tap, zero-tap, and copy code authentication
+        templates" (Business-scoped user IDs, read 2026-10-02; the final audit's
+        M10). Refused before anything is staged, rather than sent to be refused.
+        """
+        conversation = await self._conversations.require_by_id(conversation_id)
+        participant = await self._identities.require_by_id(conversation.participant_identity_id)
+        if participant.kind is IdentityKind.BSUID:
+            raise PolicyRefusalError(
+                "WhatsApp cannot send an authentication template to a customer known only by "
+                "their business-scoped id."
+            )
 
     async def send_media(
         self,
@@ -762,7 +780,7 @@ class MessagingService:
         recipient = adapter.address(participant)
         # The connection's allowance, shared by every sender on it (ADR-123).
         # Before anything is staged: a refusal leaves no row to reconcile.
-        await self._take_allowance(connection.id, origin=origin)
+        await self._take_allowance(connection, origin=origin)
 
         if idempotency_key is not None:
             message, claimed = await self._messages.claim_idempotency_key(
@@ -1061,14 +1079,18 @@ class MessagingService:
         async with build_http_client() as http:
             yield http
 
-    async def _take_allowance(self, connection_id: uuid.UUID, *, origin: MessageOrigin) -> None:
+    async def _take_allowance(
+        self, connection: ChannelConnection, *, origin: MessageOrigin
+    ) -> None:
         """Spend one unit of the connection's sending allowance, or refuse (OMNI-017).
 
-        A no-op unless `CONNECTION_SENDS_PER_MINUTE` is configured, so a
+        The connection's own allowance where it has one (OMNI-052), else
+        `CONNECTION_SENDS_PER_MINUTE`; a no-op when neither is set, so a
         deployment that has not chosen a limit behaves exactly as before. Only
         a bulk sender is ever refused (`THROTTLED_ORIGINS`); a reply is counted.
         """
-        per_minute = self._settings.connection_sends_per_minute
+        connection_id = connection.id
+        per_minute = connection.sends_per_minute or self._settings.connection_sends_per_minute
         if per_minute is None:
             return
         now = datetime.now(UTC)
