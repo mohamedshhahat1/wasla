@@ -75,6 +75,7 @@ from app.channels.media import (
 from app.channels.outcomes import (
     ProviderAuthError,
     ProviderConnectionRefusedError,
+    RecipientOptedOutError,
     SendNotAttemptedError,
     UncertainDeliveryError,
 )
@@ -114,6 +115,10 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 #
 # 132000-132015 are Meta's template errors; only the ones whose meaning is
 # unambiguously "this template may not be sent" are listed.
+# "This message was not delivered to maintain healthy ecosystem engagement" is
+# 131049; 131050 is the person having chosen to stop marketing messages.
+MARKETING_OPTED_OUT_CODE: Final = 131050
+
 TEMPLATE_WITHDRAWN_CODES: Final[frozenset[int]] = frozenset(
     {
         # The template does not exist, or was deleted.
@@ -1033,6 +1038,10 @@ class WhatsAppClient:
                     raise ProviderConnectionRefusedError(
                         CONNECTION_REFUSED, reason=f"meta_code_{error_code}"
                     )
+                if error_code == MARKETING_OPTED_OUT_CODE:
+                    # The person stopped marketing messages in WhatsApp; Meta
+                    # says do not retry. Consent evidence (OMNI-046).
+                    raise RecipientOptedOutError()
                 if error_code in TEMPLATE_WITHDRAWN_CODES:
                     # About the template rather than this message, and worth
                     # writing down: the caller marks the registry so the next

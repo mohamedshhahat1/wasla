@@ -58,6 +58,7 @@ from app.channels.metering import message_meters
 from app.channels.outcomes import (
     ProviderAuthError,
     ProviderConnectionRefusedError,
+    RecipientOptedOutError,
     UncertainDeliveryError,
 )
 from app.channels.policy import (
@@ -89,8 +90,10 @@ from app.core.logging import get_logger
 from app.core.media_types import SNIFF_BYTES, MediaClass
 from app.core.media_types import resolve as resolve_media_type
 from app.core.storage import EXTENSIONS, MediaStorage, StorageError, build_key
+from app.core.telemetry import record_opt_outs
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey
+from app.db.models.campaign import OptOutSource, OptOutVia
 from app.db.models.channel import Channel, ConnectionHealth
 from app.db.models.conversation import (
     Conversation,
@@ -111,6 +114,7 @@ from app.repositories.channel_repository import (
     ContactIdentityRepository,
 )
 from app.repositories.conversation_repository import (
+    ContactRepository,
     ConversationRepository,
     MessageRepository,
 )
@@ -120,6 +124,7 @@ from app.services.audit_service import AuditTrail
 from app.services.credential_service import CredentialService
 from app.services.entitlement_service import EntitlementService
 from app.services.media_service import content_hash as media_content_hash
+from app.services.opt_out import record_opt_out
 from app.services.template_service import refusal_reason_for
 from app.services.usage_service import UsageRecorder
 
@@ -280,6 +285,7 @@ class MessagingService:
         self._settings = settings
         self._http = http
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
+        self._contacts = ContactRepository(session, tenant_id=tenant_id)
         # The route a send takes (OMNI-004): the conversation's connection and
         # the identity it is pinned to, and the channel's adapter.
         self._connections = ChannelConnectionRepository(session, tenant_id=tenant_id)
@@ -900,6 +906,21 @@ class MessagingService:
                 },
             )
             raise outcome
+
+        if isinstance(outcome, RecipientOptedOutError):
+            # The provider says the person stopped marketing messages: nothing
+            # was delivered, and their contact now says so too, through the
+            # one opt-out writer (OMNI-046).
+            await self._undelivered(message, reason=str(outcome))
+            contact = await self._contacts.require_by_id(conversation.contact_id)
+            if record_opt_out(
+                contact,
+                source=OptOutSource.CUSTOMER,
+                via=OptOutVia.PROVIDER_REFUSAL,
+                at=datetime.now(UTC),
+            ):
+                await record_opt_outs({OptOutVia.PROVIDER_REFUSAL.value: 1})
+            return message
 
         if isinstance(outcome, ProviderConnectionRefusedError):
             # The connection cannot send - a permission revoked, an account

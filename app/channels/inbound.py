@@ -51,6 +51,19 @@ class InboundKind(StrEnum):
     #: and Instagram `is_echo`, WhatsApp Coexistence app sends. Evidence, never
     #: a customer's turn.
     ECHO = "echo"
+    #: The person changed their marketing preference through the provider
+    #: (WhatsApp `user_preferences`, OMNI-046). Never a turn.
+    PREFERENCE = "preference"
+
+
+@dataclass(frozen=True, slots=True)
+class MarketingPreference:
+    """A person's marketing preference, as the provider recorded it (OMNI-046)."""
+
+    #: `stop` or `resume`.
+    value: str
+    #: The provider's category, `marketing_messages` for WhatsApp.
+    category: str
 
 
 class RefusalReason(StrEnum):
@@ -184,6 +197,8 @@ class InboundEvent:
     #: `text` then carries its title, so a reader of the transcript sees words.
     action: ReplyAction | None = None
     status: StatusUpdate | None = None
+    #: A marketing stop or resume, for a `PREFERENCE` event (OMNI-046).
+    preference: MarketingPreference | None = None
     profile_name: str | None = None
     #: The provider's own record of this event, stored as evidence and
     #: redacted on the retention schedule (DB-011).
@@ -242,6 +257,7 @@ __all__ = [
     "Identifier",
     "InboundEvent",
     "InboundKind",
+    "MarketingPreference",
     "ParsedDelivery",
     "RefusalReason",
     "ReplyAction",

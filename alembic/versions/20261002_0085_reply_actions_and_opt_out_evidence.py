@@ -82,7 +82,7 @@ def _refuse(checks: tuple[tuple[str, str], ...], preamble: str) -> None:
             found.append(f"{label}: {count}")
     if found:
         raise RuntimeError(
-            f"{preamble} (docs/RUNBOOK.md, 'Omnichannel final remediation (0085-0090)'). "
+            f"{preamble} (docs/RUNBOOK.md, 'Omnichannel final remediation (0085-0091)'). "
             "Nothing has been changed:\n  " + "\n  ".join(found)
         )
 

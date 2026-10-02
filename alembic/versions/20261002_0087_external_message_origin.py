@@ -42,6 +42,6 @@ def downgrade() -> None:
     if count:
         raise RuntimeError(
             "Messages sent from outside Wasla carry the 'external' origin "
-            "(docs/RUNBOOK.md, 'Omnichannel final remediation (0085-0090)'). "
+            "(docs/RUNBOOK.md, 'Omnichannel final remediation (0085-0091)'). "
             f"Nothing has been changed: {count} messages"
         )

@@ -61,6 +61,10 @@ INTERACTIVE_REPLIES: Final = {
     "list_reply": ReplyActionSource.LIST_REPLY,
 }
 
+# A person stopping or resuming marketing messages through WhatsApp itself
+# (OMNI-046; `user_preferences` webhook reference, read 2026-10-02).
+USER_PREFERENCES_FIELD: Final = "user_preferences"
+
 # The one `object` a WhatsApp Business Account webhook carries.
 WHATSAPP_OBJECT: Final = "whatsapp_business_account"
 
@@ -69,7 +73,7 @@ WHATSAPP_OBJECT: Final = "whatsapp_business_account"
 # template status updates, account updates, and the Coexistence fields
 # `history`, `smb_app_state_sync` and `smb_message_echoes` - is refused and
 # counted until something here handles it (ADR-120).
-SUPPORTED_FIELDS: Final = frozenset({"messages"})
+SUPPORTED_FIELDS: Final = frozenset({"messages", USER_PREFERENCES_FIELD})
 
 # The width of `contacts.wa_id`. A phone number is at most fifteen digits
 # (E.164); anything past this column is not a number Meta issued.
@@ -158,6 +162,30 @@ class DeliveryStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class UserPreference:
+    """A person's marketing preference change, from the `user_preferences` field (OMNI-046).
+
+    `{"wa_id", "user_id"?, "detail", "category": "marketing_messages",
+    "value": "stop" | "resume", "timestamp"}`. The sender is whoever Meta names,
+    by phone and/or business-scoped id, exactly as for a message.
+    """
+
+    phone_number_id: str
+    from_number: str | None
+    from_user_id: str | None
+    category: str
+    value: str
+    timestamp: datetime | None
+    raw: dict[str, Any]
+
+    @property
+    def event_id(self) -> str:
+        who = self.from_user_id or self.from_number or ""
+        stamp = int(self.timestamp.timestamp()) if self.timestamp else 0
+        return f"{USER_PREFERENCES_FIELD}:{who}:{self.category}:{self.value}:{stamp}"
+
+
+@dataclass(frozen=True, slots=True)
 class WebhookEnvelope:
     """What one delivery held. `ignored` is every refusal; `refused` says why."""
 
@@ -165,6 +193,7 @@ class WebhookEnvelope:
     statuses: tuple[DeliveryStatus, ...]
     ignored: int
     refused: Mapping[RefusalReason, int] = field(default_factory=lambda: MappingProxyType({}))
+    preferences: tuple[UserPreference, ...] = ()
 
     @property
     def is_empty(self) -> bool:
@@ -352,6 +381,7 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
     """Flatten Meta's nested envelope into messages and statuses, counting what is refused."""
     messages: list[InboundMessage] = []
     statuses: list[DeliveryStatus] = []
+    preferences: list[UserPreference] = []
     refused: Counter[RefusalReason] = Counter()
     entries = _sequence(payload.get("entry"))
 
@@ -367,7 +397,7 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
             else RefusalReason.MALFORMED
         )
         refused[reason] += max(len(entries), 1)
-        return _envelope(messages, statuses, refused)
+        return _envelope(messages, statuses, refused, preferences)
 
     for entry in entries:
         for raw_change in _sequence(_mapping(entry).get("changes")):
@@ -384,6 +414,10 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
             if phone_number_id is None:
                 # Without it there is no way to know which workspace this is for.
                 refused[RefusalReason.MISSING_CONNECTION] += 1
+                continue
+
+            if change_field == USER_PREFERENCES_FIELD:
+                preferences.extend(_preferences(value, phone_number_id, refused))
                 continue
 
             profile_names = _profile_names(value)
@@ -453,17 +487,50 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                     )
                 )
 
-    return _envelope(messages, statuses, refused)
+    return _envelope(messages, statuses, refused, preferences)
+
+
+def _preferences(
+    value: Mapping[str, Any], phone_number_id: str, refused: Counter[RefusalReason]
+) -> list[UserPreference]:
+    """Every marketing preference change in one `user_preferences` change (OMNI-046)."""
+    found: list[UserPreference] = []
+    for raw in _sequence(value.get("user_preferences")):
+        entry = _mapping(raw)
+        phone = _bounded(entry.get("wa_id"), MAX_PHONE_LENGTH)
+        user = _bounded(entry.get("user_id"), MAX_IDENTITY_VALUE_LENGTH)
+        category = _text(entry.get("category"))
+        choice = _text(entry.get("value"))
+        if phone is None and user is None:
+            refused[RefusalReason.MISSING_SENDER] += 1
+            continue
+        if category is None or choice is None:
+            refused[RefusalReason.MALFORMED] += 1
+            continue
+        found.append(
+            UserPreference(
+                phone_number_id=phone_number_id,
+                from_number=phone,
+                from_user_id=user,
+                category=category,
+                value=choice,
+                timestamp=_timestamp(entry.get("timestamp")),
+                raw=entry,
+            )
+        )
+    return found
 
 
 def _envelope(
     messages: list[InboundMessage],
     statuses: list[DeliveryStatus],
     refused: Counter[RefusalReason],
+    preferences: list[UserPreference] | None = None,
 ) -> WebhookEnvelope:
     return WebhookEnvelope(
         messages=tuple(messages),
         statuses=tuple(statuses),
         ignored=sum(refused.values()),
         refused=MappingProxyType(dict(refused)),
+        preferences=tuple(preferences or ()),
     )

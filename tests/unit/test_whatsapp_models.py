@@ -122,6 +122,8 @@ def test_enum_values_match_the_migration_literals() -> None:
         # Migration 0082. Appended, for the reason above: an echo of the
         # business's own message, stored and never projected as a customer's.
         "echo",
+        # Migration 0089 (OMNI-046): a marketing stop or resume.
+        "preference",
     ]
     assert [member.value for member in WhatsAppEventState] == [
         "received",

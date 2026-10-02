@@ -47,7 +47,7 @@ def downgrade() -> None:
     if count:
         raise RuntimeError(
             "Messages carry the provider's own send time "
-            "(docs/RUNBOOK.md, 'Omnichannel final remediation (0085-0090)'). "
+            "(docs/RUNBOOK.md, 'Omnichannel final remediation (0085-0091)'). "
             f"Nothing has been changed: {count} messages"
         )
     op.drop_column("messages", "provider_sent_at")

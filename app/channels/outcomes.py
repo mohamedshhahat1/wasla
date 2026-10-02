@@ -37,6 +37,17 @@ class SendNotAttemptedError(ExternalServiceError):
     """
 
 
+class RecipientOptedOutError(SendNotAttemptedError):
+    """The provider refused the send because the person stopped marketing messages.
+
+    WhatsApp's 131050 ("chosen to stop receiving marketing messages ... Don't
+    retry"). Nothing was delivered; and it is consent evidence the contact's
+    record should carry, so the next campaign does not try again (OMNI-046).
+    """
+
+    message = "The customer has stopped receiving marketing messages."
+
+
 class UncertainDeliveryError(ExternalServiceError):
     """The provider may or may not have accepted the request, and nobody can tell.
 
@@ -88,6 +99,7 @@ class ProviderAuthError(ProviderConnectionRefusedError):
 __all__ = [
     "ProviderAuthError",
     "ProviderConnectionRefusedError",
+    "RecipientOptedOutError",
     "SendNotAttemptedError",
     "UncertainDeliveryError",
 ]

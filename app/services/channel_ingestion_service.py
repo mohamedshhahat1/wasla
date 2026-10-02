@@ -89,6 +89,8 @@ logger = get_logger(__name__)
 AGENT_NOT_QUEUED = "agent_enqueue_failed"
 MEDIA_NOT_QUEUED = "media_enqueue_failed"
 PROVIDER_ID_COLLISION = "provider_id_collision"
+# The provider category a marketing preference is recorded under (OMNI-046).
+MARKETING_CATEGORY = "marketing_messages"
 # Why a conversation was handed to a person when a reply arrived from outside
 # Wasla (OMNI-037). The handoff reason a colleague reads in the inbox.
 EXTERNAL_REPLY_REASON = "A colleague replied from outside Wasla."
@@ -98,6 +100,7 @@ _EVENT_KINDS: Mapping[InboundKind, ChannelEventKind] = MappingProxyType(
         InboundKind.MESSAGE: ChannelEventKind.MESSAGE,
         InboundKind.STATUS: ChannelEventKind.STATUS,
         InboundKind.ECHO: ChannelEventKind.ECHO,
+        InboundKind.PREFERENCE: ChannelEventKind.PREFERENCE,
     }
 )
 
@@ -373,6 +376,11 @@ class ChannelIngestionService:
             step.owed.append(_Handoff(event=record))
             return
 
+        if event.kind is InboundKind.PREFERENCE:
+            await self._record_preference(event, connection, step)
+            step.owed.append(_Handoff(event=record))
+            return
+
         await self._project_message(
             event=event,
             record=record,
@@ -512,6 +520,53 @@ class ChannelIngestionService:
                 )
             return
         await projection.project_status(event=event, connection=connection, message=resolved)
+
+    async def _record_preference(
+        self, event: InboundEvent, connection: ChannelConnection, step: _Step
+    ) -> None:
+        """A marketing stop or resume made through the provider itself (OMNI-046).
+
+        The contact is found by the identities the provider named and never
+        created: a preference from somebody who never wrote is nothing to act
+        on. A stop is an opt-out through the one writer, `provider_preference`.
+        A resume is recorded as a re-admission, and lifts only an opt-out the
+        provider's own preference record made - a stop word or a tap the
+        customer sent this business is theirs, not the provider's, to undo.
+        """
+        preference = event.preference
+        if preference is None or preference.category != MARKETING_CATEGORY:
+            return
+        contact = await self._contact_of(connection, event.sender)
+        if contact is None:
+            return
+        at = event.occurred_at or datetime.now(UTC)
+        if preference.value == "stop":
+            self._record_opt_out(contact, via=OptOutVia.PROVIDER_PREFERENCE, at=at, step=step)
+        elif preference.value == "resume":
+            if contact.marketing_resumed_at is None or contact.marketing_resumed_at < at:
+                contact.marketing_resumed_at = at
+            if contact.opt_out_via is OptOutVia.PROVIDER_PREFERENCE:
+                contact.marketing_opt_out_at = None
+                contact.opt_out_source = None
+                contact.opt_out_via = None
+
+    async def _contact_of(
+        self, connection: ChannelConnection, sender: tuple[Identifier, ...]
+    ) -> Contact | None:
+        """The contact these identifiers name on this connection, found and never created."""
+        identities = ContactIdentityRepository(self._session, tenant_id=connection.tenant_id)
+        for identifier in sender:
+            scope = await self._scope(connection, identifier)
+            identity = await identities.find(
+                channel=connection.channel,
+                kind=identifier.kind,
+                scope=scope.scope,
+                scope_ref=scope.scope_ref,
+                value=identifier.value,
+            )
+            if identity is not None:
+                return await self._session.get(Contact, identity.contact_id)
+        return None
 
     async def _conversation_of(
         self, connection: ChannelConnection, sender: tuple[Identifier, ...]

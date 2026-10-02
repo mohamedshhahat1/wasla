@@ -62,6 +62,9 @@ class ChannelEventKind(StrEnum):
     STATUS = "status"
     UNSUPPORTED = "unsupported"
     ECHO = "echo"
+    #: The person changed their marketing preference through the provider -
+    #: WhatsApp's `user_preferences` stop or resume (OMNI-046).
+    PREFERENCE = "preference"
 
 
 class ChannelEventState(StrEnum):

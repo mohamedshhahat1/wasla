@@ -53,6 +53,7 @@ from app.channels.inbound import (
     Identifier,
     InboundEvent,
     InboundKind,
+    MarketingPreference,
     ParsedDelivery,
     ReplyAction,
     StatusUpdate,
@@ -76,7 +77,12 @@ from app.db.models.conversation import MessageKind, MessageStatus
 from app.db.models.media import MediaLocatorKind
 from app.db.models.whatsapp import WhatsAppAccount
 from app.integrations.whatsapp.client import WhatsAppClient, build_http_client
-from app.integrations.whatsapp.payload import DeliveryStatus, InboundMessage, parse_webhook
+from app.integrations.whatsapp.payload import (
+    DeliveryStatus,
+    InboundMessage,
+    UserPreference,
+    parse_webhook,
+)
 from app.integrations.whatsapp.policy import INBOUND_MEDIA_LIFETIME, WhatsAppChannelPolicy
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
@@ -191,6 +197,25 @@ def status_event(status: DeliveryStatus) -> InboundEvent:
             else None
         ),
         raw=status.raw,
+    )
+
+
+def preference_event(preference: UserPreference) -> InboundEvent:
+    """A marketing stop or resume made in WhatsApp itself, as a neutral event (OMNI-046)."""
+    sender: list[Identifier] = []
+    if preference.from_number is not None:
+        sender.append(Identifier(kind=IdentityKind.PHONE, value=preference.from_number))
+    if preference.from_user_id is not None:
+        sender.append(Identifier(kind=IdentityKind.BSUID, value=preference.from_user_id))
+    return InboundEvent(
+        channel=Channel.WHATSAPP,
+        connection_key=preference.phone_number_id,
+        kind=InboundKind.PREFERENCE,
+        event_id=preference.event_id,
+        occurred_at=preference.timestamp,
+        sender=tuple(sender),
+        preference=MarketingPreference(value=preference.value, category=preference.category),
+        raw=preference.raw,
     )
 
 
@@ -315,6 +340,7 @@ class WhatsAppAdapter:
         envelope = parse_webhook(payload)
         events = [message_event(message) for message in envelope.messages]
         events.extend(status_event(status) for status in envelope.statuses)
+        events.extend(preference_event(preference) for preference in envelope.preferences)
         return ParsedDelivery(events=tuple(events), refused=envelope.refused)
 
     async def identity_scope(
@@ -473,5 +499,6 @@ __all__ = [
     "WhatsAppMediaFetcher",
     "WhatsAppSender",
     "message_event",
+    "preference_event",
     "status_event",
 ]
