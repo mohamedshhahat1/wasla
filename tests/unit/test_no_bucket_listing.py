@@ -109,7 +109,15 @@ def test_neither_implementation_grew_a_listing_method() -> None:
         }
         # `from_settings` is a constructor, not an operation on objects.
         public.discard("from_settings")
-        assert public <= EXPECTED_OPERATIONS | {"root"}, implementation.__name__
+        # `signed_url` (OMNI-040) is a single-key operation like the rest.
+        assert public <= EXPECTED_OPERATIONS | {"root", "signed_url"}, implementation.__name__
+
+
+def test_a_signed_url_names_one_key_and_never_a_prefix() -> None:
+    hints = get_type_hints(S3MediaStorage.signed_url)
+    assert hints.get("key") is str
+    assert "prefix" not in hints
+    assert "pattern" not in hints
 
 
 def test_no_application_module_speaks_the_listing_api() -> None:

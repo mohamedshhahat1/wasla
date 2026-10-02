@@ -589,6 +589,10 @@ class Settings(BaseSettings):
     # the disclosure - Messenger and Instagram (OMNI-041). Meta's policy says
     # "after significant lapses of time" without a number; a day is the default.
     automation_disclosure_gap_hours: int = Field(default=24, ge=1, le=24 * 30)
+    # How long a signed URL for one outbound file lives, for a provider that
+    # fetches media by URL (OMNI-040, ADR-128). Long enough for the provider to
+    # fetch it; never more than an hour, whatever is set.
+    media_signed_url_ttl_seconds: int = Field(default=600, ge=1, le=3600)
     # How long an upload intent must sit untouched before reconciliation treats
     # it as abandoned rather than in progress (ADR-087).
     #

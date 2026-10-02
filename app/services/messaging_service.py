@@ -47,6 +47,7 @@ from app.channels.adapter import (
     ChannelSender,
     MediaContent,
     OutboundContent,
+    PreparedContent,
     ProviderReceipt,
     Recipient,
     SendContext,
@@ -66,6 +67,7 @@ from app.channels.policy import (
     SendKind,
     SendMechanism,
     inoperable_reply_policy,
+    require_sendable_media,
     require_sendable_text,
 )
 from app.channels.registry import ChannelRegistry, ChannelUnavailableError, default_registry
@@ -149,7 +151,7 @@ LinkCall = Callable[[Message], None]
 async def _attempt(
     sender: ChannelSender,
     recipient: Recipient,
-    content: OutboundContent,
+    prepared: PreparedContent,
     context: SendContext,
 ) -> ProviderReceipt | Exception:
     """Ask the provider to deliver, returning the failure rather than raising it.
@@ -160,7 +162,7 @@ async def _attempt(
     `MediaService._write` uses, for the same reason.
     """
     try:
-        return await sender.send(recipient, content, context)
+        return await sender.send(recipient, prepared, context)
     except (ExternalServiceError, RateLimitedError) as error:
         return error
 
@@ -722,10 +724,16 @@ class MessagingService:
         policy = adapter.policy
         if isinstance(content, TextContent):
             require_sendable_text(content.body, policy)
-        if isinstance(content, MediaContent) and (
-            content.family not in policy.capabilities.media_families
-        ):
-            raise PolicyRefusalError(f"This file cannot be sent over {policy.display_name}.")
+        if isinstance(content, MediaContent):
+            # The family, and the provider's own type and size limits for it,
+            # before anything is staged: an over-limit file is refused here,
+            # never uploaded to be refused by the provider (OMNI-045).
+            require_sendable_media(
+                family=content.family,
+                mime_type=content.mime_type,
+                byte_size=len(content.content),
+                policy=policy,
+            )
         decision = policy.may_send(
             conversation, origin=origin, kind=send_kind, now=datetime.now(UTC)
         )
@@ -807,12 +815,14 @@ class MessagingService:
                 credentials=self._credentials,
             ) as sender,
         ):
+            prepared = PreparedContent(content=content)
             if isinstance(content, MediaContent):
                 # TX1. Nothing has been asked of the provider, so a failure in
-                # the upload below is provably not a delivery.
+                # the upload below is provably not a delivery. What comes back
+                # is the provider's reference to the file (OMNI-040).
                 async with released(self._session):
                     try:
-                        await sender.prepare(content)
+                        prepared = await sender.prepare(content)
                     except (ExternalServiceError, RateLimitedError) as error:
                         prepared_failure: Exception | None = error
                     else:
@@ -829,7 +839,7 @@ class MessagingService:
             message.delivery_state = MessageDeliveryState.REQUESTED
             await self._session.flush()
             async with released(self._session):
-                outcome = await _attempt(sender, recipient, content, context)
+                outcome = await _attempt(sender, recipient, prepared, context)
 
         if isinstance(outcome, UncertainDeliveryError):
             # Left exactly as it is. `REQUESTED` with `PENDING` is the honest

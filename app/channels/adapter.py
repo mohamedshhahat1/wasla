@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,7 @@ from app.channels.inbound import AttachmentLocator, Identifier, ParsedDelivery, 
 from app.channels.policy import ChannelPolicy, SendMechanism
 from app.core.config import Settings
 from app.core.exceptions import ValidationError
+from app.core.storage import MediaUrlGrant
 from app.db.models.channel import Channel, ChannelConnection, ContactIdentity, IdentityScope
 from app.db.models.conversation import MessageOrigin
 
@@ -81,6 +82,23 @@ OutboundContent = TextContent | TemplateContent | MediaContent
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedContent:
+    """Content ready to send, with the provider reference a file needs (OMNI-040).
+
+    `prepare` used to stash an upload id on the sender; it now returns it. A
+    file is referenced either by an id the provider issued for an upload
+    (WhatsApp, Messenger's Attachment Upload API) or by a URL the provider
+    fetches (Instagram's video, audio and files): `reference_kind` says which.
+    Held in memory for one send only - a URL here is a short-lived bearer
+    credential, and nothing stores or logs this object.
+    """
+
+    content: OutboundContent
+    reference: str | None = None
+    reference_kind: Literal["upload", "url"] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SendContext:
     """Who is sending and by which mechanism - the policy's decision, carried to the wire.
 
@@ -121,10 +139,12 @@ class ChannelSender(Protocol):
     (`app.channels.outcomes`), `RateLimitedError` and `ExternalServiceError`.
     """
 
-    async def prepare(self, content: OutboundContent) -> None: ...
+    async def prepare(
+        self, content: OutboundContent, *, media_url: MediaUrlGrant | None = None
+    ) -> PreparedContent: ...
 
     async def send(
-        self, recipient: Recipient, content: OutboundContent, context: SendContext
+        self, recipient: Recipient, prepared: PreparedContent, context: SendContext
     ) -> ProviderReceipt: ...
 
 
@@ -249,6 +269,7 @@ __all__ = [
     "IdentityScopeRef",
     "MediaContent",
     "OutboundContent",
+    "PreparedContent",
     "ProviderReceipt",
     "Recipient",
     "SendContext",

@@ -56,7 +56,7 @@ import httpx
 
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.core.storage import SAFE_KEY, StorageError
+from app.core.storage import MAX_SIGNED_URL_TTL, SAFE_KEY, StorageError
 
 logger = get_logger(__name__)
 
@@ -106,10 +106,17 @@ class S3MediaStorage:
     deployment can move between them without rewriting a key.
 
     **The bucket is private, and nothing here asks for it not to be.** No ACL
-    header is ever sent, no presigned URL is ever produced, and bytes reach a
-    colleague only by being streamed back through the authenticated API. A
-    public-read object would be a link that leaves the workspace and never comes
-    back, which is the property the download route exists to avoid.
+    header is ever sent, and bytes reach a colleague only by being streamed
+    back through the authenticated API. A public-read object would be a link
+    that leaves the workspace and never comes back, which is the property the
+    download route exists to avoid.
+
+    The one exception is narrow by construction (OMNI-040, ADR-128):
+    `signed_url` issues a short-lived GET for exactly one object, for a
+    provider that only accepts outbound media by URL (Instagram's video, audio
+    and files). It is reached only through `MediaUrlGrant`, which scopes it to
+    one message's own object in its own workspace, and the URL it returns is
+    never logged or stored.
     """
 
     def __init__(
@@ -229,6 +236,66 @@ class S3MediaStorage:
         if response.status_code in _NOT_FOUND:
             return False
         self._refuse("head", response.status_code)
+
+    async def signed_url(self, key: str, *, ttl: dt.timedelta) -> str:
+        """A SigV4 query-signed GET for exactly this object, valid for `ttl` (OMNI-040).
+
+        One object, one method, one expiry: the signature covers the path, so
+        the URL cannot be pointed at any other key, and the store refuses it
+        once `ttl` has passed. Bounded by `MAX_SIGNED_URL_TTL` whatever the
+        caller asks. Nothing here logs the URL - it is a bearer credential for
+        its lifetime.
+        """
+        if not SAFE_KEY.match(key):
+            logger.warning("media.key_refused", extra={"event": "media.key_refused"})
+            raise StorageError()
+        seconds = int(ttl.total_seconds())
+        if seconds < 1 or seconds > int(MAX_SIGNED_URL_TTL.total_seconds()):
+            raise StorageError()
+        url, canonical_uri = self._address(key)
+        now = dt.datetime.now(dt.UTC)
+        timestamp = now.strftime("%Y%m%dT%H%M%SZ")
+        date = now.strftime("%Y%m%d")
+        scope = f"{date}/{self._region}/{SERVICE}/aws4_request"
+        query = {
+            "X-Amz-Algorithm": ALGORITHM,
+            "X-Amz-Credential": f"{self._access_key_id}/{scope}",
+            "X-Amz-Date": timestamp,
+            "X-Amz-Expires": str(seconds),
+            "X-Amz-SignedHeaders": "host",
+        }
+        canonical_query = "&".join(
+            f"{quote(name, safe='-_.~')}={quote(value, safe='-_.~')}"
+            for name, value in sorted(query.items())
+        )
+        canonical_request = "\n".join(
+            [
+                "GET",
+                canonical_uri,
+                canonical_query,
+                f"host:{self._host()}\n",
+                "host",
+                "UNSIGNED-PAYLOAD",
+            ]
+        )
+        to_sign = "\n".join(
+            [
+                ALGORITHM,
+                timestamp,
+                scope,
+                hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+            ]
+        )
+        signature = hmac.new(self._signing_key(date), to_sign.encode("utf-8"), hashlib.sha256)
+        return f"{url}?{canonical_query}&X-Amz-Signature={signature.hexdigest()}"
+
+    def _signing_key(self, date: str) -> bytes:
+        return _sign(
+            _sign(
+                _sign(_sign(f"AWS4{self._secret_access_key}".encode(), date), self._region), SERVICE
+            ),
+            "aws4_request",
+        )
 
     # ------------------------------------------------------------------ signing
 

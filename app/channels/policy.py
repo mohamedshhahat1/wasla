@@ -15,7 +15,8 @@ a feature matrix.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Literal, Protocol
@@ -103,6 +104,17 @@ class FollowUpAction(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class MediaLimit:
+    """What a provider accepts for one family of outbound file (OMNI-045).
+
+    `mime_types` empty means any type the family's detector accepts.
+    """
+
+    max_bytes: int
+    mime_types: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
 class ChannelCapabilities:
     """What a channel can carry. Declared by its adapter; read, never assumed."""
 
@@ -128,6 +140,29 @@ class ChannelCapabilities:
     #: the start, after a long gap, and after a person hands back to the AI
     #: (OMNI-041). Messenger's and Instagram's policy; off for WhatsApp.
     disclosure_required: bool = False
+    #: The provider's own limits per outbound family, checked before anything
+    #: is staged so an over-limit file is never uploaded to be refused
+    #: (OMNI-045). A family absent here has only Wasla's own caps.
+    media_limits: Mapping[str, MediaLimit] = field(default_factory=dict)
+
+
+def require_sendable_media(
+    *, family: str, mime_type: str, byte_size: int, policy: ChannelPolicy
+) -> None:
+    """Refuse a file the channel's provider would refuse, before it is staged (OMNI-045)."""
+    capabilities = policy.capabilities
+    if family not in capabilities.media_families:
+        raise PolicyRefusalError(f"This file cannot be sent over {policy.display_name}.")
+    limit = capabilities.media_limits.get(family)
+    if limit is None:
+        return
+    if limit.mime_types and mime_type not in limit.mime_types:
+        raise PolicyRefusalError(f"{policy.display_name} does not accept this type of {family}.")
+    if byte_size > limit.max_bytes:
+        megabytes = limit.max_bytes // (1024 * 1024)
+        raise PolicyRefusalError(
+            f"{policy.display_name} accepts a {family} of at most {megabytes} MB."
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,6 +412,7 @@ __all__ = [
     "ChannelState",
     "FollowUpAction",
     "FollowUpDecision",
+    "MediaLimit",
     "OutOfWindow",
     "PolicyRefusalError",
     "ReceiptModel",
@@ -388,6 +424,7 @@ __all__ = [
     "WindowedPolicy",
     "inoperable_reply_policy",
     "longest_prefix",
+    "require_sendable_media",
     "require_sendable_text",
     "text_length",
 ]

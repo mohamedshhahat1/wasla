@@ -44,6 +44,7 @@ from app.channels.adapter import (
     IdentityNotAddressableError,
     IdentityScopeRef,
     OutboundContent,
+    PreparedContent,
     ProviderReceipt,
     Recipient,
     SendContext,
@@ -72,6 +73,7 @@ from app.channels.policy import (
     WindowedPolicy,
 )
 from app.core.config import Settings
+from app.core.storage import MediaUrlGrant
 from app.db.models.channel import (
     Channel,
     ChannelConnection,
@@ -190,13 +192,21 @@ class SendLog:
 class _Sender:
     log: SendLog
 
-    async def prepare(self, content: OutboundContent) -> None:
+    async def prepare(
+        self, content: OutboundContent, *, media_url: MediaUrlGrant | None = None
+    ) -> PreparedContent:
         self.log.prepared.append(content)
+        if media_url is not None:
+            # A URL-only provider: the file is offered by a short-lived link.
+            return PreparedContent(
+                content=content, reference=await media_url.issue(), reference_kind="url"
+            )
+        return PreparedContent(content=content, reference="syn.upload", reference_kind="upload")
 
     async def send(
-        self, recipient: Recipient, content: OutboundContent, context: SendContext
+        self, recipient: Recipient, prepared: PreparedContent, context: SendContext
     ) -> ProviderReceipt:
-        self.log.sent.append((recipient, content))
+        self.log.sent.append((recipient, prepared.content))
         self.log.contexts.append(context)
         if self.log.refuse:
             raise SendNotAttemptedError("The synthetic provider declined the message.")

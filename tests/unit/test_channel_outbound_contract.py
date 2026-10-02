@@ -28,6 +28,7 @@ import pytest
 from app.channels import outcomes
 from app.channels.adapter import (
     IdentityNotAddressableError,
+    PreparedContent,
     Recipient,
     SendContext,
     TemplateContent,
@@ -77,7 +78,7 @@ def _sender(graph: Graph) -> WhatsAppSender:
         sleep=_no_wait,
         jitter=lambda: 0.0,
     )
-    return WhatsAppSender(client=client, phone_number_id="PN-contract", uploaded=[])
+    return WhatsAppSender(client=client, phone_number_id="PN-contract")
 
 
 def _accepted(message_id: str = "wamid.contract") -> httpx.Response:
@@ -111,7 +112,9 @@ async def test_a_phone_participant_is_sent_to_and_nothing_else() -> None:
     graph = Graph(_accepted())
     recipient = WhatsAppAdapter().address(_identity(IdentityKind.PHONE, PHONE))
 
-    receipt = await _sender(graph).send(recipient, TextContent(body="hello"), WINDOW)
+    receipt = await _sender(graph).send(
+        recipient, PreparedContent(TextContent(body="hello")), WINDOW
+    )
 
     (body,) = graph.bodies
     assert body["to"] == PHONE
@@ -123,7 +126,9 @@ async def test_a_business_scoped_participant_is_sent_as_recipient_and_never_to()
     graph = Graph(_accepted())
     recipient = WhatsAppAdapter().address(_identity(IdentityKind.BSUID, BSUID))
 
-    await _sender(graph).send(recipient, TemplateContent(name="welcome", language="ar"), TEMPLATE)
+    await _sender(graph).send(
+        recipient, PreparedContent(TemplateContent(name="welcome", language="ar")), TEMPLATE
+    )
 
     (body,) = graph.bodies
     assert body["recipient"] == BSUID
@@ -148,7 +153,7 @@ async def test_a_recipient_of_an_unknown_kind_reaches_no_provider() -> None:
     stray = Recipient(identity_id=uuid.uuid4(), kind="psid", value="someone")
 
     with pytest.raises(IdentityNotAddressableError):
-        await _sender(graph).send(stray, TextContent(body="hello"), WINDOW)
+        await _sender(graph).send(stray, PreparedContent(TextContent(body="hello")), WINDOW)
     assert graph.bodies == []
 
 
@@ -179,7 +184,7 @@ async def test_every_provider_answer_is_one_of_the_cores_outcomes(
     recipient = WhatsAppAdapter().address(_identity(IdentityKind.PHONE, PHONE))
 
     with pytest.raises(outcome) as raised:
-        await _sender(graph).send(recipient, TextContent(body="hello"), WINDOW)
+        await _sender(graph).send(recipient, PreparedContent(TextContent(body="hello")), WINDOW)
     if outcome is outcomes.SendNotAttemptedError:
         # Refused before reading, not a credential problem.
         assert not isinstance(raised.value, outcomes.ProviderAuthError)
@@ -195,7 +200,7 @@ async def test_an_uncertain_send_is_asked_exactly_once(answer: httpx.Response | 
     recipient = WhatsAppAdapter().address(_identity(IdentityKind.PHONE, PHONE))
 
     with pytest.raises(outcomes.UncertainDeliveryError):
-        await _sender(graph).send(recipient, TextContent(body="hello"), WINDOW)
+        await _sender(graph).send(recipient, PreparedContent(TextContent(body="hello")), WINDOW)
     assert len(graph.bodies) == 1
 
 
@@ -205,7 +210,7 @@ async def test_a_credential_refusal_is_its_own_outcome_not_a_recipients() -> Non
     recipient = WhatsAppAdapter().address(_identity(IdentityKind.PHONE, PHONE))
 
     with pytest.raises(outcomes.ProviderAuthError) as refused:
-        await _sender(graph).send(recipient, TextContent(body="hello"), WINDOW)
+        await _sender(graph).send(recipient, PreparedContent(TextContent(body="hello")), WINDOW)
     assert isinstance(refused.value, outcomes.SendNotAttemptedError)
     assert TOKEN not in str(refused.value)
 
@@ -226,8 +231,10 @@ async def test_the_send_context_leaves_whatsapps_payloads_byte_identical() -> No
     graph = Graph(_accepted())
     recipient = WhatsAppAdapter().address(_identity(IdentityKind.PHONE, PHONE))
 
-    await _sender(graph).send(recipient, TextContent(body="hello"), WINDOW)
-    await _sender(graph).send(recipient, TemplateContent(name="welcome", language="ar"), TEMPLATE)
+    await _sender(graph).send(recipient, PreparedContent(TextContent(body="hello")), WINDOW)
+    await _sender(graph).send(
+        recipient, PreparedContent(TemplateContent(name="welcome", language="ar")), TEMPLATE
+    )
 
     text, template = graph.bodies
     assert text == {
@@ -252,5 +259,7 @@ async def test_whatsapp_refuses_a_human_agent_tag_rather_than_sending_free_text(
     tagged = SendContext(origin=MessageOrigin.HUMAN, mechanism=SendMechanism.HUMAN_AGENT_TAG)
 
     with pytest.raises(outcomes.SendNotAttemptedError):
-        await _sender(graph).send(recipient, TextContent(body="late reply"), tagged)
+        await _sender(graph).send(
+            recipient, PreparedContent(TextContent(body="late reply")), tagged
+        )
     assert graph.bodies == []
