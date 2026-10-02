@@ -866,7 +866,8 @@ class MessagingService:
             wa_message_id=outcome.message_id,
             sent_at=now,
         )
-        conversation.last_message_at = now
+        # Forward only (OMNI-036): a send never moves the inbox order back.
+        await self._conversations.touch_outbound(conversation, at=now)
         # A credential that works again clears a recorded refusal. Conditional:
         # a healthy connection writes nothing here, on any send.
         await self._connections.record_health(connection.id, ConnectionHealth.OK)

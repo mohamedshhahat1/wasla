@@ -5,9 +5,11 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import ColumnElement, Select, and_, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, case, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.channels.inbound import ReplyAction
 from app.core.exceptions import ConflictError
@@ -470,11 +472,49 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
 
         A closed conversation reopens: a customer writing again is a live
         conversation whatever an agent previously decided.
+
+        **The anchors only ever move forward** (OMNI-036). `at` is the
+        provider's timestamp, and providers retry and reorder: Meta retries a
+        refused delivery for up to seven days. Assigning it unconditionally let
+        a late, older message move `last_inbound_at` backwards - closing a
+        service window the provider still held open, so every free-text reply
+        was refused until the customer wrote again - and moved the inbox order
+        back with it. `GREATEST` in one statement, not a read-modify-write, so
+        two concurrent deliveries cannot regress it either.
         """
-        conversation.last_inbound_at = at
-        conversation.last_message_at = at
-        if conversation.status is ConversationStatus.CLOSED:
-            conversation.status = ConversationStatus.OPEN
+        await self._advance(conversation, at=at, inbound=True)
+
+    async def touch_outbound(self, conversation: Conversation, *, at: datetime) -> None:
+        """Record that the business sent something: the inbox order, never the window."""
+        await self._advance(conversation, at=at, inbound=False)
+
+    async def _advance(self, conversation: Conversation, *, at: datetime, inbound: bool) -> None:
+        values: dict[str, Any] = {
+            "last_message_at": func.greatest(Conversation.last_message_at, at),
+        }
+        returning: list[Any] = [Conversation.last_message_at]
+        if inbound:
+            values["last_inbound_at"] = func.greatest(Conversation.last_inbound_at, at)
+            values["status"] = case(
+                (Conversation.status == ConversationStatus.CLOSED, ConversationStatus.OPEN),
+                else_=Conversation.status,
+            )
+            returning += [Conversation.last_inbound_at, Conversation.status]
+        row = (
+            await self.session.execute(
+                update(Conversation)
+                .where(self._tenant_filter(), Conversation.id == conversation.id)
+                .values(**values)
+                .returning(*returning)
+                .execution_options(synchronize_session=False)
+            )
+        ).one()
+        # The row's own answer, written back without marking the object dirty,
+        # so a later flush cannot write a stale in-memory value over it.
+        set_committed_value(conversation, "last_message_at", row[0])
+        if inbound:
+            set_committed_value(conversation, "last_inbound_at", row[1])
+            set_committed_value(conversation, "status", row[2])
 
 
 class MessageRepository(TenantScopedRepository[Message]):

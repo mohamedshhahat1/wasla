@@ -323,6 +323,15 @@ INVARIANTS: tuple[Check, ...] = (
         " AND NOT EXISTS (SELECT 1 FROM contact_identities i WHERE i.tenant_id = r.tenant_id"
         " AND i.contact_id = r.contact_id AND i.id = r.participant_identity_id)",
     ),
+    # The window anchor is the newest thing the customer said (OMNI-036, the
+    # audit's Q4). A late delivery used to move it backwards; on production
+    # this counts conversations that already happened to.
+    Check(
+        "window_anchor_older_than_newest_inbound",
+        "SELECT count(*) FROM conversations c WHERE c.last_inbound_at < ("
+        " SELECT max(m.sent_at) FROM messages m WHERE m.tenant_id = c.tenant_id"
+        " AND m.conversation_id = c.id AND m.direction = 'inbound')",
+    ),
     Check(
         "campaign_recipient_conversation_on_another_connection",
         "SELECT count(*) FROM campaign_recipients r JOIN campaigns k"
