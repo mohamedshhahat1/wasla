@@ -364,6 +364,11 @@ DEFAULT_META_MEDIA_HOST_ROOTS: Final[tuple[str, ...]] = (
 VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"})
 
 
+#: Channel names `PAUSED_CHANNELS` accepts. Restated rather than imported, so
+#: configuration loads without the models; a test holds it equal to `Channel`.
+KNOWN_CHANNELS: Final[frozenset[str]] = frozenset({"whatsapp", "instagram", "messenger"})
+
+
 class Settings(BaseSettings):
     """Typed application settings loaded from the environment."""
 
@@ -572,6 +577,13 @@ class Settings(BaseSettings):
     # replies and people (OMNI-017, ADR-123). Unset, nothing is counted and a
     # campaign is spaced by its own `messages_per_minute` alone (ADR-026).
     connection_sends_per_minute: int | None = Field(default=None, ge=1)
+    # Channels this deployment holds paused (OMNI-031, ADR-126): their inbound
+    # is still stored and shown, and nothing is sent, fetched or answered by an
+    # agent on them. The rollback for a misbehaving channel - a flag and a
+    # restart, never removing its adapter, so no other channel's inbox breaks.
+    # Comma-separated channel names; empty means every channel with an adapter
+    # is operational.
+    paused_channels: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # How long an upload intent must sit untouched before reconciliation treats
     # it as abandoned rather than in progress (ADR-087).
     #
@@ -967,6 +979,28 @@ class Settings(BaseSettings):
         """`CONNECTION_SENDS_PER_MINUTE=` left blank means no allowance, not an error."""
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("paused_channels", mode="before")
+    @classmethod
+    def _parse_paused_channels(cls, value: Any) -> Any:
+        """A comma-separated list, a JSON array, or a list - of channel names."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            if raw.startswith("["):
+                return json.loads(raw)
+            return [item.strip().lower() for item in raw.split(",") if item.strip()]
+        return value
+
+    @field_validator("paused_channels", mode="after")
+    @classmethod
+    def _known_channels_only(cls, value: list[str]) -> list[str]:
+        """A name that is no channel is a typo, refused at startup rather than ignored."""
+        unknown = sorted(set(value) - KNOWN_CHANNELS)
+        if unknown:
+            raise ValueError(f"PAUSED_CHANNELS names unknown channels: {', '.join(unknown)}")
         return value
 
     @field_validator("paymob_callback_integration_ids", mode="before")

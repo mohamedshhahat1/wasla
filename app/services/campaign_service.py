@@ -35,6 +35,7 @@ from typing import Any, Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.channels.outcomes import ProviderAuthError
+from app.channels.registry import PAUSED_RECHECK, ChannelPausedError
 from app.channels.throughput import ConnectionThrottledError
 from app.core.exceptions import (
     DependencyUnavailableError,
@@ -518,6 +519,11 @@ class CampaignService:
                 # the same answer, so the campaign waits for the window instead.
                 throttled_until = error.retry_at
                 break
+            except ChannelPausedError:
+                # The channel is paused (OMNI-031). Refused before anything was
+                # staged, so the recipient is untouched; the campaign waits.
+                throttled_until = moment + PAUSED_RECHECK
+                break
             except (DependencyUnavailableError, ProviderAuthError) as error:
                 # A credential that is missing, or one Meta refuses. Neither is
                 # this recipient's problem and neither is fixable by trying the
@@ -681,7 +687,7 @@ class CampaignService:
             # dead token and end with no single thing to tell anybody
             # (MSG-18). `dispatch_batch` fails the campaign once instead.
             raise
-        except ConnectionThrottledError:
+        except (ConnectionThrottledError, ChannelPausedError):
             # Not this recipient's failure: `dispatch_batch` waits for the window.
             raise
         except (ExternalServiceError, RateLimitedError, ValidationError) as error:

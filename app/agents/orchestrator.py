@@ -926,6 +926,7 @@ class AgentOrchestrator:
             tenant_id=context.tenant_id,
             conversation_id=context.conversation_id,
             agent_id=agent.id if agent is not None else None,
+            channels=self._channels,
         )
         blocked = tool_refusal_for(state)
         if blocked is not None:

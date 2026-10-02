@@ -54,7 +54,13 @@ from app.channels.adapter import (
 )
 from app.channels.metering import message_meters
 from app.channels.outcomes import ProviderAuthError, UncertainDeliveryError
-from app.channels.policy import ReplyPolicy, SendKind, require_sendable_text
+from app.channels.policy import (
+    ChannelState,
+    ReplyPolicy,
+    SendKind,
+    inoperable_reply_policy,
+    require_sendable_text,
+)
 from app.channels.registry import ChannelRegistry, ChannelUnavailableError, default_registry
 from app.channels.throughput import THROTTLED_ORIGINS, ConnectionThrottledError
 from app.core.config import Settings
@@ -981,12 +987,24 @@ class MessagingService:
         window - and is now the conversation's channel policy's to answer
         (ADR-121). A conversation the customer has never written in has no open
         window: the business may only open it with a template.
+
+        False, never an error, on a channel Wasla cannot act on (OMNI-031).
         """
+        if self._channels.state_for(conversation.channel) is not ChannelState.OPERATIONAL:
+            return False
         policy = self._channels.policy_for(conversation.channel)
         return policy.standard_window_open(conversation, now=datetime.now(UTC))
 
     def reply_policy(self, conversation: Conversation) -> ReplyPolicy:
-        """What a person may send on this conversation now - the API's `reply_policy`."""
+        """What a person may send on this conversation now - the API's `reply_policy`.
+
+        Presentation tolerates every channel state (OMNI-031): a paused or
+        unregistered channel's conversation is rendered with nothing sendable
+        rather than failing the page it is on. Sending still refuses.
+        """
+        state = self._channels.state_for(conversation.channel)
+        if state is not ChannelState.OPERATIONAL:
+            return inoperable_reply_policy(state, self._channels.known_policy(conversation.channel))
         return self._channels.policy_for(conversation.channel).reply_policy(
             conversation, now=datetime.now(UTC)
         )

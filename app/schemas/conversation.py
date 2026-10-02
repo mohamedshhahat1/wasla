@@ -16,7 +16,7 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.channels.policy import OutOfWindow, ReplyPolicy, TextUnit
+from app.channels.policy import ChannelState, OutOfWindow, ReplyPolicy, TextUnit
 from app.db.models.channel import Channel, ContactIdentity, IdentityKind
 from app.db.models.conversation import (
     Conversation,
@@ -230,6 +230,11 @@ class ReplyPolicyRead(BaseModel):
     templates: bool
     text_limit: int
     text_limit_unit: TextUnit
+    # `operational`, or `paused` / `unavailable` when Wasla cannot act on the
+    # channel: then nothing is sendable, whatever the window (OMNI-031).
+    # Additive; a client that ignores it still reads `free_text_allowed` and
+    # `templates` as false.
+    state: ChannelState = ChannelState.OPERATIONAL
 
     @classmethod
     def from_policy(cls, policy: ReplyPolicy) -> Self:
@@ -240,6 +245,7 @@ class ReplyPolicyRead(BaseModel):
             templates=policy.templates,
             text_limit=policy.text_limit,
             text_limit_unit=policy.text_limit_unit,
+            state=policy.state,
         )
 
 

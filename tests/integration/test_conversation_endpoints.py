@@ -423,6 +423,8 @@ async def test_a_conversation_states_its_reply_policy_beside_the_old_flag(
         "templates": True,
         "text_limit": 4096,
         "text_limit_unit": "characters",
+        # Additive (OMNI-031): whether Wasla can act on the channel at all.
+        "state": "operational",
     }
 
 

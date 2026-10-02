@@ -41,6 +41,8 @@ from dataclasses import dataclass
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.channels.policy import ChannelState
+from app.channels.registry import ChannelRegistry, default_registry
 from app.db.models.agent import Agent, AgentStatus
 from app.db.models.agent_turn import TurnOutcome
 from app.db.models.channel import ChannelConnection, ConnectionStatus
@@ -74,11 +76,16 @@ async def serving_state(
     tenant_id: uuid.UUID,
     conversation_id: uuid.UUID,
     agent_id: uuid.UUID | None,
+    channels: ChannelRegistry | None = None,
 ) -> ServingState:
     """One indexed read of everything an agent's authority depends on.
 
     Tenant-scoped on the conversation, so a conversation id from another
     workspace matches nothing and is reported missing rather than read.
+
+    The channel counts as well as the connection: a channel the deployment has
+    paused - or has no adapter for - is one an agent cannot answer on, however
+    healthy its connection (OMNI-031).
     """
     row = (
         await session.execute(
@@ -90,6 +97,7 @@ async def serving_state(
                 Agent.status,
                 ChannelConnection.status,
                 ChannelConnection.released_at,
+                Conversation.channel,
             )
             .select_from(Conversation)
             .join(Tenant, Tenant.id == Conversation.tenant_id)
@@ -124,7 +132,9 @@ async def serving_state(
         agent_status,
         account_status,
         released_at,
+        channel,
     ) = row
+    registry = channels or default_registry()
 
     return ServingState(
         missing=False,
@@ -135,7 +145,11 @@ async def serving_state(
         human=mode is ConversationMode.HUMAN,
         conversation_closed=conversation_status is ConversationStatus.CLOSED,
         agent_active=agent_status is AgentStatus.ACTIVE,
-        channel_available=(account_status is ConnectionStatus.ACTIVE and released_at is None),
+        channel_available=(
+            account_status is ConnectionStatus.ACTIVE
+            and released_at is None
+            and registry.state_for(channel) is ChannelState.OPERATIONAL
+        ),
     )
 
 
@@ -196,6 +210,7 @@ async def refusal_now(
     tenant_id: uuid.UUID,
     conversation_id: uuid.UUID,
     agent_id: uuid.UUID | None,
+    channels: ChannelRegistry | None = None,
 ) -> TurnOutcome | None:
     """Why an agent may not act on this conversation right now, or None if it may."""
     return outcome_for(
@@ -204,6 +219,7 @@ async def refusal_now(
             tenant_id=tenant_id,
             conversation_id=conversation_id,
             agent_id=agent_id,
+            channels=channels,
         )
     )
 

@@ -632,6 +632,7 @@ class AgentWorker:
                 tenant_id=job.tenant_id,
                 conversation_id=job.conversation_id,
                 agent_id=plan.agent.id,
+                channels=self._channels,
             )
             if refusal is not None:
                 await self._complete_turn(job, refusal)
@@ -750,6 +751,7 @@ class AgentWorker:
                 # The agent that answered, and the one planned if the outcome
                 # does not say: a reply is never checked against no agent at all.
                 agent_id=outcome.agent_id or plan.agent.id,
+                channels=self._channels,
             )
             if refusal is not None:
                 logger.info(

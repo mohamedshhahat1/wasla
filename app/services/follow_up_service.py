@@ -59,7 +59,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.channels.outcomes import ProviderAuthError
 from app.channels.policy import FollowUpAction
-from app.channels.registry import ChannelRegistry, default_registry
+from app.channels.registry import (
+    PAUSED_RECHECK,
+    ChannelPausedError,
+    ChannelRegistry,
+    ChannelUnavailableError,
+    default_registry,
+)
 from app.channels.throughput import ConnectionThrottledError
 from app.core.config import Settings
 from app.core.exceptions import (
@@ -704,7 +710,19 @@ class FollowUpService:
                 "The customer has opted out of automated messages.",
             )
 
-        decision = self._channels.policy_for(conversation.channel).follow_up(
+        try:
+            channel_policy = self._channels.policy_for(conversation.channel)
+        except ChannelPausedError:
+            # Paused deliberately (OMNI-031): nothing is staged, no attempt is
+            # spent, and the nudge waits for the channel to come back.
+            return self._defer(
+                follow_up,
+                datetime.now(UTC) + PAUSED_RECHECK,
+                detail="The channel is paused.",
+            )
+        except ChannelUnavailableError:
+            return self._skip(follow_up, "Wasla cannot operate this conversation's channel.")
+        decision = channel_policy.follow_up(
             conversation,
             has_text=bool(follow_up.body),
             has_template=follow_up.has_template,
@@ -980,21 +998,25 @@ class FollowUpService:
         )
         return DispatchOutcome(follow_up, FollowUpStatus.PENDING, detail)
 
-    def _defer(self, follow_up: FollowUp, until: datetime) -> DispatchOutcome:
-        """Wait for the connection's allowance to reopen, spending no attempt (ADR-123).
+    def _defer(
+        self,
+        follow_up: FollowUp,
+        until: datetime,
+        *,
+        detail: str = "The number's sending allowance is spent.",
+    ) -> DispatchOutcome:
+        """Wait for the allowance (ADR-123) or a paused channel, spending no attempt.
 
-        Nothing was staged - the allowance refuses before a message exists - so
-        this nudge is exactly as it was, only later.
+        Nothing was staged - the allowance and the pause both refuse before a
+        message exists - so this nudge is exactly as it was, only later.
         """
         _release_claim(follow_up)
         follow_up.scheduled_at = until
         logger.info(
-            "follow_up.deferred_by_connection_allowance",
-            extra={"follow_up_id": str(follow_up.id)},
+            "follow_up.deferred",
+            extra={"follow_up_id": str(follow_up.id), "detail": detail},
         )
-        return DispatchOutcome(
-            follow_up, FollowUpStatus.PENDING, "The number's sending allowance is spent."
-        )
+        return DispatchOutcome(follow_up, FollowUpStatus.PENDING, detail)
 
 
 def _release_claim(follow_up: FollowUp) -> None:

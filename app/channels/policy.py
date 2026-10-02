@@ -49,6 +49,16 @@ class OutOfWindow(StrEnum):
     NOTHING = "nothing"
 
 
+class ChannelState(StrEnum):
+    """Whether Wasla can act on a channel right now (OMNI-031, ADR-126)."""
+
+    OPERATIONAL = "operational"
+    #: Registered and deliberately switched off: inbound is still kept.
+    PAUSED = "paused"
+    #: No adapter in this deployment.
+    UNAVAILABLE = "unavailable"
+
+
 class SendKind(StrEnum):
     """The form of an outbound message, as a policy judges it."""
 
@@ -127,6 +137,31 @@ class ReplyPolicy:
     templates: bool
     text_limit: int
     text_limit_unit: TextUnit
+    #: Whether Wasla can act on the channel at all; anything but operational
+    #: means nothing may be sent, whatever the window says (OMNI-031).
+    state: ChannelState = ChannelState.OPERATIONAL
+
+
+def inoperable_reply_policy(state: ChannelState, policy: ChannelPolicy | None) -> ReplyPolicy:
+    """What a client is told about a conversation on a channel Wasla cannot act on.
+
+    Rendered rather than refused (OMNI-031): one conversation on a paused or
+    unregistered channel used to turn the whole inbox page into a 422,
+    WhatsApp's threads included. Nothing may be sent - no free text, no
+    template - and the limits are the channel's own where its adapter is known.
+    """
+    capabilities = policy.capabilities if policy is not None else None
+    return ReplyPolicy(
+        free_text_allowed=False,
+        window_expires_at=None,
+        out_of_window=OutOfWindow.NOTHING,
+        templates=False,
+        text_limit=capabilities.text_limit if capabilities is not None else 0,
+        text_limit_unit=(
+            capabilities.text_unit if capabilities is not None else TextUnit.CHARACTERS
+        ),
+        state=state,
+    )
 
 
 def text_length(text: str, unit: TextUnit) -> int:
@@ -272,6 +307,7 @@ def require_sendable_text(body: str, policy: ChannelPolicy) -> None:
 __all__ = [
     "ChannelCapabilities",
     "ChannelPolicy",
+    "ChannelState",
     "FollowUpAction",
     "FollowUpDecision",
     "OutOfWindow",
@@ -281,6 +317,7 @@ __all__ = [
     "SendKind",
     "TextUnit",
     "WindowedPolicy",
+    "inoperable_reply_policy",
     "longest_prefix",
     "require_sendable_text",
     "text_length",
