@@ -451,6 +451,14 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
     # delivery refused on every retry for seven days lost its messages with
     # every alert green. `route_group` is closed - `webhook` or `api` - and is
     # never a path, which a caller chooses.
+    # Refused provider requests by what they tell a sender to do (OMNI-035):
+    # throttled, a refused credential, a connection that cannot send, or one
+    # message declined. Classified by the provider's own code, the status only
+    # as a fallback. Both labels closed.
+    "wasla_provider_errors_total": (
+        "Refused provider requests by provider and error class.",
+        ("provider", "class"),
+    ),
     "wasla_http_body_too_large_total": (
         "Request bodies refused for size before reaching a route, by route group.",
         ("route_group",),
@@ -1004,6 +1012,22 @@ async def record_opt_outs(by_via: Mapping[str, int]) -> None:
         await _increment_by(
             "wasla_opt_outs_total", {"via": via if via in OPT_OUT_VIAS else "other"}, count
         )
+
+
+#: The closed domain of `wasla_provider_errors_total{class}` - `MetaErrorClass`,
+#: restated so `app.core` imports no integration; a test holds them equal.
+PROVIDER_ERROR_CLASSES: Final = frozenset({"throttled", "credential", "connection", "per_message"})
+
+
+async def record_provider_error(provider: Provider, error_class: str) -> None:
+    """One provider refusal, by the class its code puts it in (OMNI-035). Best-effort."""
+    await _increment(
+        "wasla_provider_errors_total",
+        {
+            "provider": str(provider),
+            "class": error_class if error_class in PROVIDER_ERROR_CLASSES else "other",
+        },
+    )
 
 
 #: The closed domain of `wasla_http_body_too_large_total{route_group}`.

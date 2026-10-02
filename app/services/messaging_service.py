@@ -53,7 +53,11 @@ from app.channels.adapter import (
     TextContent,
 )
 from app.channels.metering import message_meters
-from app.channels.outcomes import ProviderAuthError, UncertainDeliveryError
+from app.channels.outcomes import (
+    ProviderAuthError,
+    ProviderConnectionRefusedError,
+    UncertainDeliveryError,
+)
 from app.channels.policy import (
     ChannelState,
     ReplyPolicy,
@@ -62,7 +66,12 @@ from app.channels.policy import (
     require_sendable_text,
 )
 from app.channels.registry import ChannelRegistry, ChannelUnavailableError, default_registry
-from app.channels.throughput import THROTTLED_ORIGINS, ConnectionThrottledError
+from app.channels.throughput import (
+    PROVIDER_THROTTLE_BACKOFF,
+    THROTTLED_ORIGINS,
+    ConnectionThrottledError,
+    ProviderThrottledError,
+)
 from app.core.config import Settings
 from app.core.exceptions import (
     ConflictError,
@@ -120,6 +129,10 @@ __all__ = ["SERVICE_WINDOW", "WHATSAPP_TEXT_MAX_CHARS", "MessagingService"]
 # person, and nothing about a credential belongs in either.
 CREDENTIAL_REFUSED = "WhatsApp refused this number's credentials."
 CONNECTION_CREDENTIAL_REFUSED = "The provider refused this connection's credentials."
+# A connection-level refusal (OMNI-035), and a provider throttle. Fixed
+# sentences, for the same reason.
+CONNECTION_SEND_REFUSED = "The provider refused to send through this connection."
+PROVIDER_THROTTLED = "The provider is rate limiting this connection."
 
 # The sentence a send on a paused connection is refused with, per channel.
 _DISABLED: Final[dict[Channel, str]] = {Channel.WHATSAPP: "This WhatsApp number is disabled."}
@@ -862,6 +875,47 @@ class MessagingService:
                 },
             )
             raise outcome
+
+        if isinstance(outcome, ProviderConnectionRefusedError):
+            # The connection cannot send - a permission revoked, an account
+            # restricted (OMNI-035). Recorded on the message and on the
+            # connection's health; a bulk sender is stopped rather than left to
+            # spend every recipient's attempts on it. A person or an agent gets
+            # the undelivered message back, as with any refusal.
+            await self._undelivered(message, reason=CONNECTION_SEND_REFUSED)
+            await self._connections.record_health(
+                connection.id, ConnectionHealth(outcome.health), reason=outcome.reason
+            )
+            logger.error(
+                "channel.connection_refused",
+                extra={
+                    "event": "channel.connection_refused",
+                    "channel": connection.channel.value,
+                    "account_id": str(connection.id),
+                    "reason": outcome.reason,
+                },
+            )
+            if origin in THROTTLED_ORIGINS:
+                raise outcome
+            return message
+
+        if isinstance(outcome, RateLimitedError):
+            # The provider throttled the connection: declined before reading,
+            # so provably undelivered (OMNI-035). A bulk sender waits for the
+            # throttle to pass instead of failing this recipient - and the next,
+            # and the next; anyone else gets the undelivered message back.
+            await self._undelivered(message, reason=PROVIDER_THROTTLED)
+            await self._connections.record_health(
+                connection.id, ConnectionHealth.RATE_LIMITED, reason="provider_throttled"
+            )
+            if origin in THROTTLED_ORIGINS:
+                now = datetime.now(UTC)
+                raise ProviderThrottledError(
+                    connection_id=connection.id,
+                    retry_at=now + PROVIDER_THROTTLE_BACKOFF,
+                    now=now,
+                )
+            return message
 
         if isinstance(outcome, Exception):
             return await self._undelivered(message, reason=str(outcome))

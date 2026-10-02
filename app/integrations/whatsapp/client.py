@@ -6,14 +6,21 @@ definitely did not send are retried.
 
 | Failure | Retried | Raises | Reason |
 | --- | --- | --- | --- |
-| 429 | yes | `RateLimitedError` | Rejected outright; nothing was sent |
+| 429, or a throttling code | yes | `RateLimitedError` | Rejected outright; nothing was sent |
 | connection error | yes | `SendNotAttemptedError` | No connection, so no request arrived |
-| 401 / 403 / code 190 | no | `ProviderAuthError` | The credential is refused, not this message |
+| 401 / code 0 or 190 | no | `ProviderAuthError` | The credential is refused, not this message |
+| a connection-level code | no | `ProviderConnectionRefusedError` | The connection cannot send |
 | other 4xx | no | `SendNotAttemptedError` | Meta read it and declined; nothing delivered |
 | 5xx | no | `UncertainDeliveryError` | May have been accepted |
 | read timeout | no | `UncertainDeliveryError` | Same: the request may have landed |
 | transport failure | no | `UncertainDeliveryError` | The request left; no answer came back |
 | 2xx, no usable id | no | `UncertainDeliveryError` | Meta said it accepted the message |
+
+**Meta's code decides, the status is the fallback** (OMNI-035,
+`app.integrations.meta.errors`). Meta documents its throttling and
+connection-level codes without promising any HTTP status for them; classified
+by status, a 400 carrying 130429 was a per-message decline and a campaign marked
+each recipient failed instead of backing off.
 
 The last three rows were wrong, and two of them wrong in the direction that
 costs a customer a second copy of a message.
@@ -67,6 +74,7 @@ from app.channels.media import (
 )
 from app.channels.outcomes import (
     ProviderAuthError,
+    ProviderConnectionRefusedError,
     SendNotAttemptedError,
     UncertainDeliveryError,
 )
@@ -86,7 +94,8 @@ from app.core.net import (
     build_guarded_client,
     validate_outbound_url,
 )
-from app.core.telemetry import CallOutcome, Provider, ProviderCall
+from app.core.telemetry import CallOutcome, Provider, ProviderCall, record_provider_error
+from app.integrations.meta.errors import MetaErrorClass, classify_meta_error
 
 logger = get_logger(__name__)
 
@@ -151,6 +160,9 @@ META_AUTH_CODE: Final = 190
 MAX_REPLY_BUTTONS: Final = 3
 # What a refused credential is reported as. The neutral type, WhatsApp's words.
 CREDENTIALS_REFUSED: Final = "WhatsApp refused this number's credentials."
+# What a connection-level refusal is reported as (OMNI-035): a permission, an
+# account restriction or a registration - never Meta's own text.
+CONNECTION_REFUSED: Final = "WhatsApp refused to send from this number."
 # How much of a failed media response is ever read (MEDIA-09). Enough for Meta's
 # error envelope, whose code is the only part anything acts on; nothing near a
 # file. The error path must cost less memory than a success, not more - it used
@@ -989,14 +1001,44 @@ class WhatsAppClient:
                 await call.record(CallOutcome.UNAVAILABLE)
                 raise UncertainDeliveryError("WhatsApp did not complete the request.") from error
 
-            if response.status_code == TOO_MANY_REQUESTS:
-                if attempt >= self._max_attempts:
-                    logger.warning("whatsapp.send_rate_limited", extra={"attempts": attempt})
-                    await call.record(CallOutcome.RATE_LIMITED)
-                    raise RateLimitedError("WhatsApp is rate limiting this account.")
-                await self._backoff(attempt, retry_after=_retry_after(response))
-                attempt += 1
-                continue
+            if CLIENT_ERROR_FLOOR <= response.status_code < SERVER_ERROR_FLOOR:
+                # Meta read the request and declined it. Nothing was delivered,
+                # and that is known rather than assumed. What to do next is
+                # Meta's code's to say, and the status only where the body
+                # names none (OMNI-035).
+                error_code = self._log_failure(response)
+                kind = classify_meta_error(response.status_code, error_code)
+                if kind is MetaErrorClass.THROTTLED:
+                    if attempt >= self._max_attempts:
+                        logger.warning(
+                            "whatsapp.send_rate_limited",
+                            extra={"attempts": attempt, "meta_code": error_code},
+                        )
+                        await call.record(CallOutcome.RATE_LIMITED)
+                        await record_provider_error(Provider.WHATSAPP, kind.value)
+                        raise RateLimitedError("WhatsApp is rate limiting this account.")
+                    await self._backoff(attempt, retry_after=_retry_after(response))
+                    attempt += 1
+                    continue
+                await call.record(CallOutcome.FAILURE)
+                await record_provider_error(Provider.WHATSAPP, kind.value)
+                if kind is MetaErrorClass.CREDENTIAL:
+                    # Not this message's problem, and not fixable by trying the
+                    # next recipient. Raised as its own type so a sweep can
+                    # stop rather than discover it once per person (MSG-18).
+                    raise ProviderAuthError(CREDENTIALS_REFUSED, reason="credential_refused")
+                if kind is MetaErrorClass.CONNECTION:
+                    # The same, for a connection that cannot send at all: a
+                    # permission revoked, an account restricted.
+                    raise ProviderConnectionRefusedError(
+                        CONNECTION_REFUSED, reason=f"meta_code_{error_code}"
+                    )
+                if error_code in TEMPLATE_WITHDRAWN_CODES:
+                    # About the template rather than this message, and worth
+                    # writing down: the caller marks the registry so the next
+                    # send of it is refused locally (MSG-24).
+                    raise TemplateWithdrawnError(code=error_code)
+                raise SendNotAttemptedError("WhatsApp rejected the message.")
 
             if response.status_code >= SERVER_ERROR_FLOOR:
                 # 5xx is not retried, and it is not a refusal either: Meta may
@@ -1007,23 +1049,6 @@ class WhatsAppClient:
                 await call.record(CallOutcome.FAILURE)
                 raise UncertainDeliveryError("WhatsApp did not complete the request.")
 
-            if response.status_code >= CLIENT_ERROR_FLOOR:
-                # Meta read the request and declined it. Nothing was delivered,
-                # and that is known rather than assumed.
-                error_code = self._log_failure(response)
-                await call.record(CallOutcome.FAILURE)
-                if self._is_credential_failure(response.status_code, error_code):
-                    # Not this message's problem, and not fixable by trying the
-                    # next recipient. Raised as its own type so a sweep can
-                    # stop rather than discover it once per person (MSG-18).
-                    raise ProviderAuthError(CREDENTIALS_REFUSED)
-                if error_code in TEMPLATE_WITHDRAWN_CODES:
-                    # About the template rather than this message, and worth
-                    # writing down: the caller marks the registry so the next
-                    # send of it is refused locally (MSG-24).
-                    raise TemplateWithdrawnError(code=error_code)
-                raise SendNotAttemptedError("WhatsApp rejected the message.")
-
             await call.record(CallOutcome.SUCCESS)
             # Decoded here rather than by the caller, so a 2xx whose body will
             # not yield a message id is classified while the status code is
@@ -1031,22 +1056,6 @@ class WhatsAppClient:
             # it accepted the message, and a body that fails to name it changes
             # nothing about the customer's phone.
             return self._decode(response, accepted=True)
-
-    @staticmethod
-    def _is_credential_failure(status_code: int, error_code: int | None) -> bool:
-        """Whether Meta is refusing the credential rather than the message.
-
-        Both halves matter. A 401 is unambiguous; a 403 is not, because Meta
-        uses it for permission problems that are about the number rather than
-        the token, and treating every 403 as a dead credential would stop a
-        campaign that should have failed one recipient. Meta's own `code 190`
-        is the authoritative signal and arrives on a 400 as readily as a 401,
-        so either the unambiguous status or the explicit code is enough, and a
-        bare 403 with no code is not.
-        """
-        if status_code == UNAUTHORIZED:
-            return True
-        return error_code == META_AUTH_CODE
 
     async def _backoff(self, attempt: int, *, retry_after: float | None = None) -> None:
         """Wait before the next attempt, honouring Meta if it said how long.

@@ -33,10 +33,10 @@ from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.channels.outcomes import ProviderConnectionRefusedError
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.db.session import Database
-from app.integrations.whatsapp.client import ProviderAuthError
 from app.repositories.follow_up_repository import DEFAULT_CLAIM_LIMIT, DueFollowUpClaim
 from app.services.follow_up_service import FollowUpService
 from app.services.messaging_service import MessagingService
@@ -207,7 +207,7 @@ class FollowUpWorker:
             )
             try:
                 outcome = await service.dispatch(follow_up)
-            except ProviderAuthError:
+            except ProviderConnectionRefusedError:
                 # Not this row's fault and not fixable by trying the next one.
                 # The transaction rolls back, so the follow-up keeps its
                 # claim's lease and becomes due again once the lease elapses -

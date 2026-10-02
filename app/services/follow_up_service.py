@@ -57,7 +57,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.channels.outcomes import ProviderAuthError
+from app.channels.outcomes import ProviderConnectionRefusedError
 from app.channels.policy import FollowUpAction
 from app.channels.registry import (
     PAUSED_RECHECK,
@@ -777,16 +777,17 @@ class FollowUpService:
 
         try:
             message = await send
-        except ProviderAuthError:
+        except ProviderConnectionRefusedError:
             # Let out rather than recorded against this nudge. The number's
-            # credential is refused, so every other follow-up queued for this
-            # workspace fails the same way; the worker stops sweeping them for
-            # the rest of the pass instead of discovering it one at a time
-            # (MSG-18).
+            # credential - or the connection itself (OMNI-035) - is refused, so
+            # every other follow-up queued for this workspace fails the same
+            # way; the worker stops sweeping them for the rest of the pass
+            # instead of discovering it one at a time (MSG-18).
             raise
         except ConnectionThrottledError as error:
-            # The number's shared allowance is spent (ADR-123). Nothing was
-            # staged, so this is a wait, not a failed attempt.
+            # The number's shared allowance is spent (ADR-123), or the provider
+            # throttled it (OMNI-035): nothing reached the customer either way,
+            # so this is a wait, not a failed attempt.
             retry_at = error.retry_at
             return await self._settle(follow_up, claim, lambda row: self._defer(row, retry_at))
         except (ExternalServiceError, RateLimitedError, ValidationError) as error:
@@ -1007,10 +1008,13 @@ class FollowUpService:
     ) -> DispatchOutcome:
         """Wait for the allowance (ADR-123) or a paused channel, spending no attempt.
 
-        Nothing was staged - the allowance and the pause both refuse before a
-        message exists - so this nudge is exactly as it was, only later.
+        Nothing reached the customer - the allowance and the pause refuse before
+        a message exists, and a provider throttle is recorded undelivered - so
+        this nudge is exactly as it was, only later, and any message an attempt
+        staged is unlinked as the finished undelivered send it is.
         """
         _release_claim(follow_up)
+        follow_up.message_id = None
         follow_up.scheduled_at = until
         logger.info(
             "follow_up.deferred",

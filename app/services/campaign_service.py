@@ -34,7 +34,7 @@ from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.channels.outcomes import ProviderAuthError
+from app.channels.outcomes import ProviderConnectionRefusedError
 from app.channels.registry import PAUSED_RECHECK, ChannelPausedError
 from app.channels.throughput import ConnectionThrottledError
 from app.core.exceptions import (
@@ -513,10 +513,14 @@ class CampaignService:
             try:
                 outcome = await self._deliver(campaign, recipient, messaging=messaging, now=moment)
             except ConnectionThrottledError as error:
-                # The number's shared allowance is spent (ADR-123). Nothing was
-                # staged, so this recipient is exactly as it was: still
-                # pending, no attempt spent. The rest of the batch would meet
-                # the same answer, so the campaign waits for the window instead.
+                # The number's shared allowance is spent (ADR-123), or the
+                # provider throttled it (OMNI-035). Either way nothing reached
+                # the customer - the allowance refuses before staging, and a
+                # throttled send is recorded undelivered - so the recipient is
+                # unlinked from any such message and stays pending with no
+                # attempt spent. The rest of the batch would meet the same
+                # answer, so the campaign waits for the window instead.
+                recipient.message_id = None
                 throttled_until = error.retry_at
                 break
             except ChannelPausedError:
@@ -524,7 +528,7 @@ class CampaignService:
                 # staged, so the recipient is untouched; the campaign waits.
                 throttled_until = moment + PAUSED_RECHECK
                 break
-            except (DependencyUnavailableError, ProviderAuthError) as error:
+            except (DependencyUnavailableError, ProviderConnectionRefusedError) as error:
                 # A credential that is missing, or one Meta refuses. Neither is
                 # this recipient's problem and neither is fixable by trying the
                 # next one. Left as a per-recipient failure the first would
@@ -680,12 +684,13 @@ class CampaignService:
                 # (MSG-16).
                 origin=MessageOrigin.CAMPAIGN,
             )
-        except ProviderAuthError:
+        except ProviderConnectionRefusedError:
             # Let out rather than filed against this recipient. The credential
-            # is refused for the whole number, so working through the audience
-            # would spend one attempt budget per person discovering the same
-            # dead token and end with no single thing to tell anybody
-            # (MSG-18). `dispatch_batch` fails the campaign once instead.
+            # - or the connection itself (OMNI-035) - is refused for the whole
+            # number, so working through the audience would spend one attempt
+            # budget per person discovering the same dead token and end with no
+            # single thing to tell anybody (MSG-18). `dispatch_batch` fails the
+            # campaign once instead.
             raise
         except (ConnectionThrottledError, ChannelPausedError):
             # Not this recipient's failure: `dispatch_batch` waits for the window.
