@@ -151,7 +151,7 @@ def _registry() -> ChannelRegistry:
     adapters: dict[Channel, ChannelAdapter] = {Channel.WHATSAPP: WhatsAppAdapter()}
     for channel in (Channel.INSTAGRAM, Channel.MESSENGER):
         adapters[channel] = cast(ChannelAdapter, SyntheticAdapter(channel))
-    return ChannelRegistry(adapters, unmetered=True)
+    return ChannelRegistry(adapters)
 
 
 async def _together(*calls: Callable[[], Awaitable[str]]) -> list[str]:

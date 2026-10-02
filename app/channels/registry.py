@@ -61,21 +61,20 @@ class ChannelRegistry:
         self,
         adapters: Mapping[Channel, ChannelAdapter],
         *,
-        unmetered: bool = False,
         paused: Iterable[Channel] = (),
     ) -> None:
         """Register adapters. A channel with no decided usage meter is refused.
 
-        `unmetered` is for a synthetic adapter in a test, which opts out of the
-        rule explicitly; nothing in the application passes it (ADR-122).
-        `paused` may name a channel with no adapter; it is then simply
-        unavailable.
+        Every channel in the vocabulary has its meters decided (ENT-22), so the
+        refusal guards the next label added without one: it cannot go live
+        uncounted. `paused` may name a channel with no adapter; it is then
+        simply unavailable.
         """
         for channel, adapter in adapters.items():
             if adapter.channel is not channel:
                 raise ValueError(f"the {adapter.channel} adapter was registered for {channel}")
-            if not unmetered and message_meters(channel) is None:
-                raise ValueError(f"{channel} has no decided usage meter (ADR-122)")
+            if message_meters(channel) is None:
+                raise ValueError(f"{channel} has no decided usage meter (ENT-22)")
         self._adapters: Mapping[Channel, ChannelAdapter] = MappingProxyType(dict(adapters))
         self._paused: frozenset[Channel] = frozenset(paused)
 

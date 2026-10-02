@@ -201,6 +201,8 @@ class ConversationProjectionService:
                 meters.received,
                 occurred_at=occurred_at,
                 meta={"conversation_id": str(conversation.id)},
+                channel=connection.channel,
+                connection_id=connection.id,
             )
 
         if event.attachments:

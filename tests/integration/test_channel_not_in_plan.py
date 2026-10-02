@@ -80,7 +80,6 @@ async def _paid_workspace(
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             Channel.INSTAGRAM: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
     async with ai_turns.database.session() as session:
         page = ChannelConnection(
@@ -258,7 +257,6 @@ async def test_suspended_a_follow_up_on_instagram_is_skipped(
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             Channel.INSTAGRAM: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
     tag = uuid.uuid4().hex[:10]
     tenant = Tenant(name=f"Plan {tag}", slug=f"plan-{tag}")

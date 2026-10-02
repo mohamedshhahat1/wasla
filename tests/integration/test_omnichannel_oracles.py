@@ -340,7 +340,6 @@ async def test_no_write_path_breaks_an_invariant(
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             Channel.INSTAGRAM: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
     instagram = await _synthetic(db_session, acme)
     now = int(datetime.now(UTC).timestamp())

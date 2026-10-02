@@ -70,7 +70,7 @@ def _registry(*, instagram: bool, paused: tuple[Channel, ...] = ()) -> ChannelRe
     adapters: dict[Channel, ChannelAdapter] = {Channel.WHATSAPP: WhatsAppAdapter()}
     if instagram:
         adapters[Channel.INSTAGRAM] = cast(ChannelAdapter, SyntheticAdapter(Channel.INSTAGRAM))
-    return ChannelRegistry(adapters, unmetered=True, paused=paused)
+    return ChannelRegistry(adapters, paused=paused)
 
 
 @dataclass

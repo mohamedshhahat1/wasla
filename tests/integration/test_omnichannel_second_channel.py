@@ -30,9 +30,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.channels.adapter import ChannelAdapter
+from app.channels.metering import RECEIVED, SENT
 from app.channels.registry import ChannelRegistry, ChannelUnavailableError
 from app.core.config import Settings
 from app.core.exceptions import ValidationError
+from app.db.models.billing import LimitKey
 from app.db.models.channel import (
     Channel,
     ChannelConnection,
@@ -57,10 +59,13 @@ from app.integrations.whatsapp.adapter import WhatsAppAdapter
 from app.repositories.conversation_repository import ConversationRepository
 from app.services import messaging_service as messaging_module
 from app.services.channel_ingestion_service import ChannelIngestionService, IngestionOutcome
+from app.services.entitlement_service import EntitlementService
 from app.services.messaging_service import MessagingService
+from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.media_queue import MediaJob, MediaQueue
 from app.workers.queue import AgentJob, AgentQueue
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
+from tests.channel_plans import allow_channels
 
 pytestmark = pytest.mark.integration
 
@@ -125,7 +130,6 @@ def registry(adapter: SyntheticAdapter) -> ChannelRegistry:
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             Channel.INSTAGRAM: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
 
 
@@ -228,29 +232,74 @@ async def test_a_message_on_another_channel_lands_on_its_own_connection(
     assert [job.conversation_id for job in queue.jobs] == [conversation.id]
 
 
-async def test_a_channel_without_a_decided_meter_is_not_metered_as_whatsapp(
-    db_session: AsyncSession, adapter: SyntheticAdapter
+async def test_a_second_channel_is_metered_under_the_neutral_meters_never_as_whatsapp(
+    db_session: AsyncSession,
+    adapter: SyntheticAdapter,
+    registry: ChannelRegistry,
+    settings: Settings,
+    graph: NoWhatsApp,
 ) -> None:
-    """ADR-122: what another channel's message costs is undecided, so nothing
-    is written under a WhatsApp meter for it."""
+    """ENT-22: one received and one sent meter, stamped with the channel and
+    the connection; `period_messages` counts them with WhatsApp's own, still
+    unenforced. Nothing is written under a WhatsApp meter for Instagram."""
     tenant = await _workspace(db_session)
+    await allow_channels(db_session, tenant.id, limits={"period_messages": 1})
     connection = await _connection(db_session, tenant)
 
     await _ingest(
         db_session, adapter, synthetic_payload(connection.external_account_id, _message("syn.2"))
     )
+    conversation = await _the_conversation(db_session, connection)
+    await MessagingService(
+        session=db_session, settings=settings, tenant_id=tenant.id, channels=registry
+    ).send_text(conversation_id=conversation.id, body="Hi!", origin=MessageOrigin.HUMAN)
+    await db_session.flush()
 
-    whatsapp_meters = await db_session.scalar(
-        select(func.count())
-        .select_from(UsageEvent)
-        .where(
-            UsageEvent.tenant_id == tenant.id,
-            UsageEvent.event_type.in_(
-                [UsageEventType.WHATSAPP_MESSAGE_RECEIVED, UsageEventType.WHATSAPP_MESSAGE_SENT]
-            ),
+    rows = list(
+        await db_session.execute(
+            select(UsageEvent.event_type, UsageEvent.channel, UsageEvent.connection_id).where(
+                UsageEvent.tenant_id == tenant.id,
+                UsageEvent.event_type.in_([*RECEIVED, *SENT]),
+            )
         )
     )
-    assert whatsapp_meters == 0
+    assert sorted((row[0].value, row[1], row[2]) for row in rows) == [
+        ("message_received", Channel.INSTAGRAM, connection.id),
+        ("message_sent", Channel.INSTAGRAM, connection.id),
+    ]
+    messages = await EntitlementService(db_session, tenant_id=tenant.id).check(
+        LimitKey.PERIOD_MESSAGES, additional=0
+    )
+    # Two messages against an allowance of one: counted, never refused (ADR-030).
+    assert (messages.used, messages.limit, messages.over_limit) == (2, 1, True)
+
+
+async def test_a_whatsapp_message_is_counted_once_under_its_own_meter(
+    db_session: AsyncSession, adapter: SyntheticAdapter
+) -> None:
+    """WhatsApp keeps its two meters - the neutral meters' WhatsApp instance -
+    so a WhatsApp message is one row, never a second under the neutral label."""
+    tenant = await _workspace(db_session)
+    await allow_channels(db_session, tenant.id)
+    whatsapp = await _whatsapp_number(db_session, tenant)
+
+    await _whatsapp_inbound(db_session, whatsapp)
+
+    rows = list(
+        await db_session.execute(
+            select(UsageEvent.event_type, UsageEvent.channel, UsageEvent.connection_id).where(
+                UsageEvent.tenant_id == tenant.id,
+                UsageEvent.event_type.in_([*RECEIVED, *SENT]),
+            )
+        )
+    )
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        (UsageEventType.WHATSAPP_MESSAGE_RECEIVED, Channel.WHATSAPP, whatsapp.id)
+    ]
+    messages = await EntitlementService(db_session, tenant_id=tenant.id).check(
+        LimitKey.PERIOD_MESSAGES, additional=0
+    )
+    assert messages.used == 1
 
 
 async def test_an_echo_of_our_own_send_is_evidence_not_a_turn(
@@ -576,3 +625,52 @@ async def test_the_inbox_narrows_to_one_channel_and_one_connection(
     assert [row.account_id for row in instagram] == [connection.id]
     assert [row.channel for row in whatsapp] == [Channel.WHATSAPP]
     assert foreign == []
+
+
+async def _whatsapp_number(session: AsyncSession, tenant: Tenant) -> WhatsAppAccount:
+    number = WhatsAppAccount(
+        tenant_id=tenant.id,
+        phone_number_id=f"PN-{uuid.uuid4().hex[:10]}",
+        waba_id="waba-meters",
+        display_phone_number="+20 100 000 0010",
+    )
+    session.add(number)
+    await session.flush()
+    return number
+
+
+async def _whatsapp_inbound(session: AsyncSession, number: WhatsAppAccount) -> None:
+    """One customer text, through WhatsApp's own write path."""
+    wa_id = "201000000777"
+    outcome = await WhatsAppIngestionService(
+        session=session, queue=cast("AgentQueue", RecordingQueue())
+    ).ingest(
+        {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "id": "waba-meters",
+                    "changes": [
+                        {
+                            "field": "messages",
+                            "value": {
+                                "messaging_product": "whatsapp",
+                                "metadata": {"phone_number_id": number.phone_number_id},
+                                "contacts": [{"wa_id": wa_id}],
+                                "messages": [
+                                    {
+                                        "id": f"wamid.{uuid.uuid4().hex}",
+                                        "from": wa_id,
+                                        "type": "text",
+                                        "timestamp": str(int(datetime.now(UTC).timestamp())),
+                                        "text": {"body": "hello"},
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    assert outcome.stored == 1, outcome

@@ -54,7 +54,6 @@ def _registry(adapter: SyntheticAdapter) -> ChannelRegistry:
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             adapter.channel: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
 
 

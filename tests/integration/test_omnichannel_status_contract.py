@@ -302,7 +302,6 @@ async def test_a_watermark_never_moves_a_message_backwards(
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             Channel.INSTAGRAM: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
     connection = ChannelConnection(
         id=uuid.uuid4(),

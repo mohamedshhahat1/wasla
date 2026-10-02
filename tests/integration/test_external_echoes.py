@@ -159,7 +159,6 @@ async def test_an_echo_of_wasla_s_own_send_changes_nothing(
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             Channel.INSTAGRAM: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
     sent = await MessagingService(
         session=db_session, settings=settings, tenant_id=conversation.tenant_id, channels=registry

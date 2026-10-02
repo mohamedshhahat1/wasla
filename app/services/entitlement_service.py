@@ -105,9 +105,13 @@ DEFAULT_AI_TURN_HOLD_TTL: Final = timedelta(seconds=900)
 # counting only what the business sends would let a workspace be billed nothing
 # for a hundred thousand inbound messages it still had to store and process.
 PERIOD_METERS: Final[dict[LimitKey, tuple[UsageEventType, ...]]] = {
+    # Every channel's (ENT-22): WhatsApp's own two meters and the neutral two,
+    # each message counted under exactly one of them.
     LimitKey.PERIOD_MESSAGES: (
         UsageEventType.WHATSAPP_MESSAGE_SENT,
         UsageEventType.WHATSAPP_MESSAGE_RECEIVED,
+        UsageEventType.MESSAGE_SENT,
+        UsageEventType.MESSAGE_RECEIVED,
     ),
     # Turns, never provider requests (AI-02). `AI_REQUEST` is still recorded for
     # every call a turn makes - sentiment, each inference round - because that

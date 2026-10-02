@@ -1002,13 +1002,15 @@ class MessagingService:
         # cost the workspace nothing to deliver, and the failed row above
         # already records that the attempt happened. Everything that leaves this
         # way is counted once - an agent's reply, a person's, a follow-up, a
-        # campaign - under the channel's decided meter (ADR-122).
+        # campaign - under the channel's meter, stamped with it (ENT-22).
         meters = message_meters(connection.channel)
         if meters is not None:
             self._usage.record(
                 meters.sent,
                 occurred_at=now,
                 meta={"conversation_id": str(conversation_id), "kind": kind.value},
+                channel=connection.channel,
+                connection_id=connection.id,
             )
         await self._session.flush()
         return message

@@ -669,7 +669,6 @@ async def _with_page(
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             Channel.MESSENGER: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
     async with ai_turns.database.session() as session:
         page = ChannelConnection(

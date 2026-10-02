@@ -74,6 +74,14 @@ class UsageEventType(StrEnum):
     CONVERSATION_CREATED = "conversation_created"
     CAMPAIGN_MESSAGE = "campaign_message"
     API_REQUEST = "api_request"
+    # The channel-neutral message meters (ENT-22): one received and one sent,
+    # with the channel and connection as row dimensions. Every channel but
+    # WhatsApp writes these. WhatsApp keeps writing its own two meters above,
+    # which are these meters' WhatsApp instance, mapped 1:1 - so its history,
+    # invoices and analytics read exactly as they always have, and no cycle is
+    # split between two labels (`app.channels.metering`).
+    MESSAGE_RECEIVED = "message_received"
+    MESSAGE_SENT = "message_sent"
 
 
 class UsageUnit(StrEnum):
@@ -118,6 +126,8 @@ EVENT_UNITS: Final[dict[UsageEventType, UsageUnit]] = {
     UsageEventType.CONVERSATION_CREATED: UsageUnit.COUNT,
     UsageEventType.CAMPAIGN_MESSAGE: UsageUnit.COUNT,
     UsageEventType.API_REQUEST: UsageUnit.COUNT,
+    UsageEventType.MESSAGE_RECEIVED: UsageUnit.COUNT,
+    UsageEventType.MESSAGE_SENT: UsageUnit.COUNT,
 }
 
 USAGE_EVENT_TYPE = _enum_type(UsageEventType, name="usage_event_type")
@@ -165,6 +175,11 @@ class UsageEvent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):
         ),
         CheckConstraint(
             "agent_turn_id IS NULL OR event_type = 'ai_turn'", name="agent_turn_only_for_ai_turn"
+        ),
+        # A neutral message meter is meaningless without its channel (ENT-22).
+        CheckConstraint(
+            "event_type NOT IN ('message_received', 'message_sent') OR channel IS NOT NULL",
+            name="neutral_message_meter_has_channel",
         ),
     )
 

@@ -88,7 +88,6 @@ def _messaging(
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             Channel.MESSENGER: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
     return MessagingService(
         session=session, settings=settings, tenant_id=tenant_id, channels=registry

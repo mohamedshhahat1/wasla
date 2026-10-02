@@ -171,7 +171,7 @@ def _registry() -> ChannelRegistry:
     adapters: dict[Channel, ChannelAdapter] = {Channel.WHATSAPP: WhatsAppAdapter()}
     for channel in (Channel.INSTAGRAM, Channel.MESSENGER, Channel.TELEGRAM, Channel.TIKTOK):
         adapters[channel] = cast(ChannelAdapter, SyntheticAdapter(channel))
-    return ChannelRegistry(adapters, unmetered=True)
+    return ChannelRegistry(adapters)
 
 
 async def _plan(

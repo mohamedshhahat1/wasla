@@ -75,6 +75,9 @@ BILLED_METERS: tuple[UsageEventType, ...] = (
     UsageEventType.WHATSAPP_MESSAGE_RECEIVED,
     UsageEventType.AI_REQUEST,
     UsageEventType.CAMPAIGN_MESSAGE,
+    # Every other channel's messages (ENT-22), after WhatsApp's own lines.
+    UsageEventType.MESSAGE_SENT,
+    UsageEventType.MESSAGE_RECEIVED,
 )
 
 

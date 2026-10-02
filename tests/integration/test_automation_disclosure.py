@@ -72,7 +72,6 @@ async def _page(ai_turns: TurnRunner) -> Page:
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             Channel.MESSENGER: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
     async with ai_turns.database.session() as session:
         tenant = Tenant(name="Disclosure", slug=f"disclosure-{uuid.uuid4().hex[:10]}")

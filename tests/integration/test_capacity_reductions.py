@@ -145,7 +145,7 @@ def _registry() -> ChannelRegistry:
     adapters: dict[Channel, ChannelAdapter] = {WA: WhatsAppAdapter()}
     for channel in (IG, MS, TG, TT):
         adapters[channel] = cast(ChannelAdapter, SyntheticAdapter(channel))
-    return ChannelRegistry(adapters, unmetered=True)
+    return ChannelRegistry(adapters)
 
 
 def _neutral(session: AsyncSession, tenant: Tenant) -> ChannelConnectionService:

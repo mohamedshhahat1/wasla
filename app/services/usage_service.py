@@ -30,6 +30,7 @@ from typing import Any, Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ValidationError
+from app.db.models.channel import Channel
 from app.db.models.usage import UsageEvent, UsageEventType
 from app.repositories.usage_repository import (
     UsageEventRepository,
@@ -131,8 +132,11 @@ class UsageSummary:
 # Which named counter each meter fills. A meter absent from this map still
 # appears in `totals`; it simply has no shorthand yet.
 _SUMMARY_FIELDS: Final[dict[UsageEventType, str]] = {
+    # Both labels of each neutral message meter fill one counter (ENT-22).
     UsageEventType.WHATSAPP_MESSAGE_RECEIVED: "messages_received",
+    UsageEventType.MESSAGE_RECEIVED: "messages_received",
     UsageEventType.WHATSAPP_MESSAGE_SENT: "messages_sent",
+    UsageEventType.MESSAGE_SENT: "messages_sent",
     UsageEventType.AI_REQUEST: "ai_requests",
     UsageEventType.AI_TURN: "ai_turns",
     UsageEventType.AI_INPUT_TOKEN: "input_tokens",
@@ -151,11 +155,11 @@ _SUMMARY_FIELDS: Final[dict[UsageEventType, str]] = {
 def summarise(totals: Iterable[UsageTotal], *, window: UsageWindow) -> UsageSummary:
     """Fold raw totals into the named counters."""
     collected = tuple(totals)
-    values: dict[str, Any] = {
-        _SUMMARY_FIELDS[total.event_type]: total.quantity
-        for total in collected
-        if total.event_type in _SUMMARY_FIELDS
-    }
+    values: dict[str, Any] = {}
+    for total in collected:
+        field = _SUMMARY_FIELDS.get(total.event_type)
+        if field is not None:
+            values[field] = values.get(field, 0) + total.quantity
     return UsageSummary(window=window, totals=collected, **values)
 
 
@@ -180,8 +184,13 @@ class UsageRecorder:
         quantity: int = 1,
         occurred_at: datetime | None = None,
         meta: dict[str, Any] | None = None,
+        channel: Channel | None = None,
+        connection_id: uuid.UUID | None = None,
     ) -> UsageEvent | None:
         """Stage one occurrence, unless there is nothing to count.
+
+        `channel` and `connection_id` are reporting dimensions (ENT-01,
+        ENT-22) - a message's or a turn's - never a quota key.
 
         A zero or negative quantity is dropped rather than stored. A model that
         reports no output tokens, a file of no bytes: those are rows that add
@@ -197,6 +206,8 @@ class UsageRecorder:
             quantity=quantity,
             occurred_at=occurred_at,
             meta=meta,
+            channel=channel,
+            connection_id=connection_id,
         )
 
     def ai_request(
