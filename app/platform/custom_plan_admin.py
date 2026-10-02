@@ -85,6 +85,7 @@ from app.schemas.platform_billing import (
 from app.services import billing_calendar
 from app.services.custom_plan_offer_service import offer_read
 from app.services.entitlement_service import EntitlementService
+from app.services.entitlement_terms import ordered, term_channel_types, term_limit
 from app.services.plan_catalog import PlanCatalog
 
 logger = get_logger(__name__)
@@ -146,7 +147,7 @@ class CustomPlanAdmin:
         comparisons: list[LimitComparison] = []
         for key in CUSTOM_PLAN_KEYS:
             standing = await entitlements.check(key, additional=0)
-            old = current.limit_for(key) if current is not None else None
+            old = term_limit(current, key) if current is not None else None
             new = proposed[key.value]
             topped = standing.topup_limit + standing.grant_limit
             below = new is not None and standing.used > new
@@ -177,6 +178,16 @@ class CustomPlanAdmin:
             warnings.append(
                 "period_messages is metered, never enforced: no customer message is refused "
                 "over it."
+            )
+        current_types = term_channel_types(current) if current is not None else None
+        proposed_types = set(payload.allowed_channel_types)
+        active = await entitlements.active_connections()
+        stranded = sum(count for channel, count in active.items() if channel not in proposed_types)
+        if stranded:
+            warnings.append(
+                f"{stranded} active connection(s) are of a channel type these terms do not "
+                "allow. Nothing is disabled by creating the plan; once it applies, AI, "
+                "campaigns and follow-ups on them stop."
             )
 
         effective_at: datetime | None
@@ -221,6 +232,9 @@ class CustomPlanAdmin:
             ],
             limits=comparisons,
             inherited_limits=self._inherited(current),
+            current_channel_types=ordered(current_types) if current_types is not None else None,
+            proposed_channel_types=ordered(proposed_types),
+            connections_of_removed_types=stranded,
             effective_mode=payload.assignment_mode,
             effective_at=effective_at,
             estimated_next_charge=self._next_charge(
@@ -366,6 +380,7 @@ class CustomPlanAdmin:
                 currency=payload.currency,
                 prices=payload.resolved_prices,
                 limits=limits,
+                allowed_channel_types=payload.allowed_channel_types,
                 effective_at=payload.effective_at,
                 scope=PlanScope.TENANT,
                 tenant_id=tenant.id,
@@ -573,7 +588,7 @@ class CustomPlanAdmin:
     def _inherited(current: PlanVersion | None) -> dict[str, int | None]:
         """The limits a custom plan does not set, kept from the plan held now."""
         return {
-            key.value: (current.limit_for(key) if current is not None else None)
+            key.value: (term_limit(current, key) if current is not None else None)
             for key in LimitKey
             if key not in CUSTOM_PLAN_KEYS
         }

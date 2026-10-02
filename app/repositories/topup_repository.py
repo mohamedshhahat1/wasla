@@ -15,6 +15,7 @@ from datetime import datetime
 
 from sqlalchemy import ColumnElement, and_, func, or_, select
 
+from app.db.models.channel import Channel
 from app.db.models.topup import (
     ACTIVE_TOPUP_STATUSES,
     TopupEntitlement,
@@ -45,11 +46,16 @@ def _active_at(moment: datetime) -> ColumnElement[bool]:
 
 @dataclass(frozen=True, slots=True)
 class ActiveTotal:
-    """How much one entitlement is raised by one source, right now."""
+    """How much one entitlement is raised by one source, right now.
+
+    `channel_type` is set only for a typed channel slot (ENT-11); every other
+    total, a general channel slot included, has none.
+    """
 
     entitlement: TopupEntitlement
     source: TopupSource
     quantity: int
+    channel_type: Channel | None = None
 
 
 class TopupProductRepository(BaseRepository[TopupProduct]):
@@ -136,19 +142,24 @@ class TopupPurchaseRepository(TenantScopedRepository[TopupPurchase]):
         return purchase
 
     async def active_totals(self, *, at: datetime) -> list[ActiveTotal]:
-        """What every live top-up adds, per entitlement and source, at `at`."""
+        """What every live top-up adds, per entitlement, source and channel type, at `at`."""
         rows = await self.session.execute(
             select(
                 TopupPurchase.entitlement_key,
                 TopupPurchase.source,
+                TopupPurchase.channel_type,
                 func.coalesce(func.sum(TopupPurchase.quantity), 0),
             )
             .where(self._tenant_filter())
             .where(_active_at(at))
-            .group_by(TopupPurchase.entitlement_key, TopupPurchase.source)
+            .group_by(
+                TopupPurchase.entitlement_key, TopupPurchase.source, TopupPurchase.channel_type
+            )
         )
         return [
-            ActiveTotal(entitlement=row[0], source=row[1], quantity=int(row[2]))
+            ActiveTotal(
+                entitlement=row[0], source=row[1], channel_type=row[2], quantity=int(row[3])
+            )
             for row in rows.all()
         ]
 

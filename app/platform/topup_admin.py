@@ -63,6 +63,7 @@ from app.schemas.topup import (
     TopupRefundReview,
 )
 from app.services.entitlement_service import EntitlementService
+from app.services.entitlement_terms import term_limit
 from app.services.plan_catalog import PlanCatalog
 from app.services.topup_ledger import TopupLedger, move, purchase_state, validity_window
 
@@ -340,7 +341,7 @@ class TopupAdmin:
             raise ConflictError("The current billing period has ended. Try again in a moment.")
         key = payload.entitlement_key.limit_key
         terms = await PlanCatalog(self._session).pinned_version(subscription)
-        if terms is not None and terms.limit_for(key) is None:
+        if terms is not None and term_limit(terms, key) is None:
             raise ConflictError("The plan already allows this without limit.")
 
         entitlements = EntitlementService(

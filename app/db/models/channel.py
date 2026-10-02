@@ -43,6 +43,7 @@ from sqlalchemy import (
     CheckConstraint,
     Connection,
     DateTime,
+    ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
@@ -108,6 +109,27 @@ class ConnectionStatus(StrEnum):
     ACTIVE = "active"
     DISABLED = "disabled"
     RELEASED = "released"
+
+
+class ConnectionDisabledReason(StrEnum):
+    """Why a connection was disabled - a workspace's choice, or a capacity flow's.
+
+    ``MANUAL``
+        A workspace administrator disabled it.
+    ``CAPACITY_REDUCTION``
+        A workspace owner chose other connections to keep when capacity fell
+        (ENT-14); this one was not among them.
+    ``CAPACITY_REDUCTION_AUTOMATIC``
+        Nobody chose within the grace, so the automatic fallback disabled it -
+        a type the plan no longer allows first, then the newest.
+
+    A disabled connection keeps its claim, credential, history and contacts;
+    an owner may enable it again when a slot is free.
+    """
+
+    MANUAL = "manual"
+    CAPACITY_REDUCTION = "capacity_reduction"
+    CAPACITY_REDUCTION_AUTOMATIC = "capacity_reduction_automatic"
 
 
 class ConnectionHealth(StrEnum):
@@ -181,6 +203,9 @@ class IdentitySource(StrEnum):
 
 CHANNEL_TYPE = _enum_type(Channel, name="channel_kind")
 CONNECTION_STATUS_TYPE = _enum_type(ConnectionStatus, name="connection_status")
+CONNECTION_DISABLED_REASON_TYPE = _enum_type(
+    ConnectionDisabledReason, name="connection_disabled_reason"
+)
 CONNECTION_HEALTH_TYPE = _enum_type(ConnectionHealth, name="connection_health")
 IDENTITY_KIND_TYPE = _enum_type(IdentityKind, name="identity_kind")
 IDENTITY_SCOPE_TYPE = _enum_type(IdentityScope, name="identity_scope")
@@ -281,10 +306,26 @@ class ChannelConnection(Base, TenantScopedMixin, TimestampMixin):
     # 80 messages a second by default and up to 1,000 after an upgrade, and
     # fixes a Coexistence number at 20. Null means the deployment's value.
     sends_per_minute: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Why, when and by whom the connection was last disabled (ENT-07, ENT-14).
+    # Written by the disable itself and cleared when it is enabled again; the
+    # WhatsApp mirror never touches them. Null on a connection disabled before
+    # the columns existed.
+    disabled_reason: Mapped[ConnectionDisabledReason | None] = mapped_column(
+        CONNECTION_DISABLED_REASON_TYPE, nullable=True
+    )
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    disabled_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
 
     @property
     def is_active(self) -> bool:
         return self.status is ConnectionStatus.ACTIVE and self.released_at is None
+
+    @property
+    def counts_toward_capacity(self) -> bool:
+        """Whether this connection takes a channel slot (ENT-07): active, unreleased."""
+        return self.is_active
 
     @property
     def is_released(self) -> bool:
@@ -541,6 +582,7 @@ __all__ = [
     "MAX_SCOPE_REF_LENGTH",
     "Channel",
     "ChannelConnection",
+    "ConnectionDisabledReason",
     "ConnectionHealth",
     "ConnectionStatus",
     "ContactIdentity",

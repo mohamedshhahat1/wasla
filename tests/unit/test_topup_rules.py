@@ -11,6 +11,7 @@ from app.core import telemetry
 from app.db.models.billing import TOPUP_LIMITS, LimitKey, Plan, PlanScope
 from app.db.models.topup import (
     ACTIVE_TOPUP_STATUSES,
+    SELLABLE_TOPUP_ENTITLEMENTS,
     TOPUP_TRANSITIONS,
     TopupEntitlement,
     TopupStatus,
@@ -32,7 +33,11 @@ PRODUCT = {
 
 
 def test_the_topup_keys_are_exactly_the_seven() -> None:
-    assert {member.value for member in TopupEntitlement} == {key.value for key in TOPUP_LIMITS}
+    sellable = {member.value for member in SELLABLE_TOPUP_ENTITLEMENTS}
+    assert sellable == {key.value for key in TOPUP_LIMITS}
+    # The retired number key stays a database label, and only that (ENT-05).
+    assert {member.value for member in TopupEntitlement} - sellable == {"whatsapp_numbers"}
+    assert TopupEntitlement.WHATSAPP_NUMBERS.limit_key is LimitKey.CHANNEL_CONNECTIONS
     assert set(CUSTOM_PLAN_KEYS) == set(TOPUP_LIMITS)
     assert LimitKey.AGENTS not in TOPUP_LIMITS
     assert LimitKey.OWNED_WORKSPACES not in TOPUP_LIMITS
@@ -92,19 +97,24 @@ def test_every_custom_plan_limit_must_be_stated() -> None:
         "currency": "EGP",
         "billing_interval": "monthly",
         "reason": "Terms.",
+        "allowed_channel_types": ["whatsapp"],
         **{key.value: 1 for key in CUSTOM_PLAN_KEYS},
     }
     assert CustomPlanCreate.model_validate(body).limits()["team_members"] == 1
-    for key in CUSTOM_PLAN_KEYS:
-        missing = {name: value for name, value in body.items() if name != key.value}
+    # The seven limits and the channel types (ENT-09) are each required.
+    for name in [key.value for key in CUSTOM_PLAN_KEYS] + ["allowed_channel_types"]:
+        missing = {field: value for field, value in body.items() if field != name}
         with pytest.raises(ValidationError):
             CustomPlanCreate.model_validate(missing)
+    # The retired key is refused, not quietly ignored (ENT-05).
+    with pytest.raises(ValidationError):
+        CustomPlanCreate.model_validate({**body, "whatsapp_numbers": 1})
 
 
 def test_the_effective_limit_reports_over_limit_without_a_negative_remainder() -> None:
-    over = Entitlement(key=LimitKey.WHATSAPP_NUMBERS, limit=3, used=5, base_limit=3)
+    over = Entitlement(key=LimitKey.TEAM_MEMBERS, limit=3, used=5, base_limit=3)
     assert (over.over_limit, over.remaining) == (True, 0)
-    at = Entitlement(key=LimitKey.WHATSAPP_NUMBERS, limit=3, used=3, base_limit=1, topup_limit=2)
+    at = Entitlement(key=LimitKey.TEAM_MEMBERS, limit=3, used=3, base_limit=1, topup_limit=2)
     assert (at.over_limit, at.remaining) == (False, 0)
     unlimited = Entitlement(key=LimitKey.PERIOD_AI_TURNS, limit=None, used=10**9)
     assert (unlimited.over_limit, unlimited.remaining) == (False, None)

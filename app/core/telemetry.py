@@ -1263,7 +1263,7 @@ _TOPUP_ENTITLEMENTS: Final[frozenset[str]] = frozenset(
         "period_ai_turns",
         "period_campaign_messages",
         "storage_bytes",
-        "whatsapp_numbers",
+        "channel_connections",
         "team_members",
         "knowledge_documents",
     }

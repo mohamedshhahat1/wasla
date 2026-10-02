@@ -38,12 +38,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import DependencyUnavailableError
 from app.core.logging import get_logger
 from app.db.models.audit import AuditAction, AuditActorKind
-from app.db.models.channel import Channel
+from app.db.models.channel import Channel, ConnectionDisabledReason
 from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.integrations.whatsapp.ownership import OwnershipVerifier
+from app.repositories.channel_repository import ChannelConnectionRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.audit_service import AuditTrail
+from app.services.channel_capacity import ChannelCapacityGuard
 from app.services.credential_service import CredentialService
 
 logger = get_logger(__name__)
@@ -58,6 +60,7 @@ class WhatsAppAccountService:
         session: AsyncSession,
         ownership: OwnershipVerifier | None = None,
         credentials: CredentialService | None = None,
+        default_plan_code: str | None = None,
     ) -> None:
         self._session = session
         # Without a verifier nothing can be connected. Optional in the
@@ -68,9 +71,17 @@ class WhatsAppAccountService:
         # Optional: without one, a workspace cannot store its own token and
         # says so, rather than storing it unencrypted.
         self._credentials = credentials
+        # The plan a workspace without a serving subscription is held to, for
+        # the channel capacity guard (ENT-08). From settings, never a request.
+        self._default_plan_code = default_plan_code
 
     def _accounts(self, tenant_id: uuid.UUID) -> WhatsAppAccountRepository:
         return WhatsAppAccountRepository(self._session, tenant_id=tenant_id)
+
+    def _guard(self, tenant_id: uuid.UUID) -> ChannelCapacityGuard:
+        return ChannelCapacityGuard(
+            self._session, tenant_id=tenant_id, default_plan_code=self._default_plan_code
+        )
 
     async def connect(
         self,
@@ -93,6 +104,12 @@ class WhatsAppAccountService:
         a different business account the claim is refused rather than quietly
         corrected, because a mismatch means the person connecting believes
         something untrue about which account this number sits on.
+
+        **Channel capacity is asked twice** (ENT-08): before Meta - so a
+        workspace with no free slot, or whose plan does not include WhatsApp,
+        never makes Wasla call Meta - and again under the workspace's lock in
+        this transaction, after the proof and before the insert, which is the
+        answer that holds against a concurrent claim.
         """
         if self._ownership is None:
             # Our misconfiguration, not the caller's mistake, so 503. Failing
@@ -101,6 +118,9 @@ class WhatsAppAccountService:
             raise DependencyUnavailableError(
                 "WhatsApp number verification is not available in this deployment."
             )
+
+        guard = self._guard(tenant_id)
+        await guard.precheck(Channel.WHATSAPP)
 
         # Identifiers are stripped because they are copied by hand from the Meta
         # dashboard, and a trailing space would silently break webhook
@@ -114,11 +134,13 @@ class WhatsAppAccountService:
             claimed_waba_id=claimed_waba,
         )
 
+        slot = await guard.reserve_or_refuse(Channel.WHATSAPP)
         account = await self._accounts(tenant_id).connect(
             phone_number_id=verified.phone_number_id,
             # Meta's answer, not the request's claim.
             waba_id=verified.waba_id,
             display_phone_number=verified.display_phone_number,
+            slot=slot,
             display_name=display_name.strip() if display_name else None,
             verified_name=verified.verified_name,
             ownership_verified_at=datetime.now(UTC),
@@ -280,6 +302,14 @@ class WhatsAppAccountService:
         workspace is not found rather than refused, and it is restricted to live
         claims: re-enabling a number this workspace has given up would be
         meaningless at best and, once somebody else holds it, wrong.
+
+        **Enabling a disabled number takes a channel slot** (ENT-07): it freed
+        its slot when it was disabled, so it needs a free one back - asked of
+        the guard under the workspace's lock, and refused with 409 when there
+        is none. This closes the bypass the baseline measured, where enabling
+        a disabled number put a 1-slot workspace at 2 active. Enabling a number
+        that is already active changes nothing and asks nothing. Disabling is
+        never refused, at or over capacity alike.
         """
         if status is WhatsAppAccountStatus.RELEASED:
             # Releasing is its own operation with its own audit action and its
@@ -289,6 +319,19 @@ class WhatsAppAccountService:
             raise ValueError("Use release() to give up a number.")
 
         account = await self._accounts(tenant_id).require_live_by_id(account_id)
+        connection = await ChannelConnectionRepository(
+            self._session, tenant_id=tenant_id
+        ).require_by_id(account.id)
+        if status is WhatsAppAccountStatus.ACTIVE:
+            if account.status is not WhatsAppAccountStatus.ACTIVE:
+                await self._guard(tenant_id).reserve_or_refuse(Channel.WHATSAPP)
+            connection.disabled_reason = None
+            connection.disabled_at = None
+            connection.disabled_by = None
+        else:
+            connection.disabled_reason = ConnectionDisabledReason.MANUAL
+            connection.disabled_at = datetime.now(UTC)
+            connection.disabled_by = actor.id if actor is not None else None
         account.status = status
         await self._session.flush()
 

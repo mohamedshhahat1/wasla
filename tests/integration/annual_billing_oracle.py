@@ -206,20 +206,27 @@ async def oracle_entitlement(
             ),
             {"code": default_plan_code, "at": at},
         )
+    # Channel capacity on a version published before ADR-131 is its retired
+    # number limit (ENT-05) - restated here in SQL, independently of the engine.
     raw = await session.scalar(
-        text("SELECT v.limits -> :key FROM plan_versions v WHERE v.id = :id"),
+        text(
+            "SELECT CASE WHEN :key = 'channel_connections' AND v.allowed_channel_types IS NULL"
+            " AND NOT (v.limits ? 'channel_connections') THEN v.limits -> 'whatsapp_numbers'"
+            " ELSE v.limits -> :key END FROM plan_versions v WHERE v.id = :id"
+        ),
         {"key": key.value, "id": version_id},
     )
     base = raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else None
+    keys = [key.value] + (["whatsapp_numbers"] if key is LimitKey.CHANNEL_CONNECTIONS else [])
     added = int(
         await session.scalar(
             text(
                 "SELECT coalesce(sum(quantity), 0) FROM topup_purchases "
-                "WHERE tenant_id = :tenant AND entitlement_key::text = :key "
+                "WHERE tenant_id = :tenant AND entitlement_key::text = ANY(:keys) "
                 "AND status::text IN ('granted', 'refund_review') "
                 "AND granted_at <= :at AND expires_at > :at"
             ),
-            {"tenant": tenant_id, "key": key.value, "at": at},
+            {"tenant": tenant_id, "keys": keys, "at": at},
         )
         or 0
     )

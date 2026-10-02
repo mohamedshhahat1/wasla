@@ -34,7 +34,6 @@ from app.db.models.enums import TenantRole
 from app.db.models.invitation import TenantInvitation
 from app.db.models.knowledge import Document, KnowledgeBase
 from app.db.models.tenant import Tenant
-from app.db.models.whatsapp import WhatsAppAccount
 from app.services.entitlement_service import EntitlementService
 from app.services.plan_catalog import PlanCatalog
 from tests.billing_fixtures import erase_ledger
@@ -43,7 +42,7 @@ pytestmark = pytest.mark.integration
 
 LIMITS = {
     LimitKey.AGENTS.value: 1,
-    LimitKey.WHATSAPP_NUMBERS.value: 1,
+    LimitKey.CHANNEL_CONNECTIONS.value: 1,
     # One seat: the owner is not a member row here, so an invitation fills it.
     LimitKey.TEAM_MEMBERS.value: 1,
     LimitKey.KNOWLEDGE_DOCUMENTS.value: 1,
@@ -106,15 +105,6 @@ async def workspace(maker: async_sessionmaker[AsyncSession]) -> AsyncIterator[uu
 
 def _agent(tenant_id: uuid.UUID, index: int) -> object:
     return Agent(tenant_id=tenant_id, name=f"agent-{index}", model="gpt", system_prompt="x")
-
-
-def _number(tenant_id: uuid.UUID, index: int) -> object:
-    return WhatsAppAccount(
-        tenant_id=tenant_id,
-        phone_number_id=f"race-{uuid.uuid4().hex[:12]}",
-        waba_id=f"waba-{index}",
-        display_phone_number=f"+2010000000{index}",
-    )
 
 
 def _invitation(tenant_id: uuid.UUID, index: int) -> object:
@@ -188,7 +178,9 @@ async def _built(
     ("key", "model", "builder"),
     [
         (LimitKey.AGENTS, Agent, _agent),
-        (LimitKey.WHATSAPP_NUMBERS, WhatsAppAccount, _number),
+        # Channel connections race through `ChannelCapacityGuard`, which needs the
+        # channel being connected: `test_channel_capacity_concurrency.py` proves
+        # them, ten at a time and typed slots included (ENT-08).
         (LimitKey.TEAM_MEMBERS, TenantInvitation, _invitation),
     ],
 )

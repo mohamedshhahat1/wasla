@@ -71,7 +71,7 @@ def validity_window(
       annual customer who buys AI turns on 15 October has them until the
       cycle ends on 1 November, not until the year ends - usage allowances
       reset monthly, and a top-up adds to one month's allowance. No carry-over.
-    - **Capacity** (`storage_bytes`, `whatsapp_numbers`, `team_members`,
+    - **Capacity** (`storage_bytes`, `channel_connections`, `team_members`,
       `knowledge_documents`): the current *billing term*, unchanged from
       ADR-113 - a month on a monthly price, the whole paid year on a yearly
       one. Expiry deletes nothing; the workspace is over its limit and new

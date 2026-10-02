@@ -30,6 +30,7 @@ from app.core.config import Settings
 from app.core.exceptions import CustomPlanNotAvailableError, ValidationError
 from app.db.models.audit import AuditAction, AuditLog
 from app.db.models.billing import BillingInterval, LimitKey, PlanScope, PlanVersion
+from app.db.models.channel import Channel
 from app.db.models.enums import PlatformRole
 from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment
 from app.db.models.topup import TopupEntitlement, TopupPurchase, TopupStatus
@@ -72,7 +73,7 @@ SEVEN = {
     "period_ai_turns": 40_000,
     "period_campaign_messages": 50_000,
     "storage_bytes": 100 * GIB,
-    "whatsapp_numbers": 5,
+    "channel_connections": 5,
     "team_members": 30,
     "knowledge_documents": 3_000,
 }
@@ -120,6 +121,7 @@ async def test_a_custom_plan_is_bought_reversioned_and_migrated_once(
             price=Decimal("1500.00"),
             currency="EGP",
             interval=BillingInterval.MONTHLY,
+            allowed_channel_types=[Channel.WHATSAPP],
             limits={"agents": 5, **SEVEN},
             scope=PlanScope.TENANT,
             tenant_id=alpha.id,
@@ -186,6 +188,7 @@ async def test_a_custom_plan_is_bought_reversioned_and_migrated_once(
             price=Decimal("1800.00"),
             currency="EGP",
             interval=BillingInterval.MONTHLY,
+            allowed_channel_types=[Channel.WHATSAPP],
             limits={"agents": 5, **SEVEN, "period_ai_turns": 60_000},
             expected_version=1,
             reason="Year two.",

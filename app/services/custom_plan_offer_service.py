@@ -46,6 +46,7 @@ from app.schemas.custom_plan import (
 from app.services import billing_calendar
 from app.services.audit_service import AuditTrail
 from app.services.checkout_service import CheckoutService, StartedCheckout
+from app.services.entitlement_terms import ordered, term_channel_types, term_limit
 
 logger = get_logger(__name__)
 
@@ -95,12 +96,13 @@ async def offer_read(
             OfferLimitRead(
                 key=key,
                 kind="capacity" if key in RESOURCE_LIMITS else "usage",
-                limit=version.limit_for(key),
+                limit=term_limit(version, key),
             )
             for key in CUSTOM_PLAN_KEYS
         ],
+        allowed_channel_types=ordered(term_channel_types(version)),
         other_limits={
-            key.value: version.limit_for(key) for key in LimitKey if key not in CUSTOM_PLAN_KEYS
+            key.value: term_limit(version, key) for key in LimitKey if key not in CUSTOM_PLAN_KEYS
         },
         effective_period=OfferPeriodRead(
             interval=price.billing_interval,

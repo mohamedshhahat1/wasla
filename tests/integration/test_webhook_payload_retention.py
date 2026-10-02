@@ -34,6 +34,7 @@ from app.db.session import Database
 from app.repositories import WhatsAppAccountRepository, WhatsAppEventRepository
 from app.repositories.whatsapp_repository import WebhookPayloadRetention
 from app.workers.retention_worker import RetentionWorker
+from tests.channel_slots import whatsapp_slot
 from tests.fake_queue_redis import FakeQueueRedis
 from tests.fakes import as_redis
 
@@ -54,6 +55,7 @@ async def _workspace(session: AsyncSession) -> tuple[Tenant, WhatsAppAccount]:
     session.add(tenant)
     await session.flush()
     account = await WhatsAppAccountRepository(session, tenant_id=tenant.id).connect(
+        slot=await whatsapp_slot(session, tenant.id),
         phone_number_id=f"PN{tag}",
         waba_id="555000111",
         display_phone_number="+201000000000",

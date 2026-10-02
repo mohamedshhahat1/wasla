@@ -54,6 +54,7 @@ from app.db.models.billing import (
     PlanVersionMigration,
     Subscription,
 )
+from app.db.models.channel import Channel
 from app.db.models.invoice import Invoice
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
@@ -64,6 +65,7 @@ from app.repositories.billing_repository import (
     PlanVersionRepository,
 )
 from app.schemas.platform_billing import (
+    ChannelTypesChange,
     FeatureRead,
     LimitChange,
     MigrationRead,
@@ -80,6 +82,7 @@ from app.schemas.platform_billing import (
     PlatformPlanRead,
     _Terms,
 )
+from app.services.entitlement_terms import ordered, term_channel_types, term_limit
 from app.services.plan_catalog import PlanCatalog
 
 # The entitlement keys Wasla actually enforces, and how (spec: feature catalog).
@@ -87,7 +90,7 @@ from app.services.plan_catalog import PlanCatalog
 # code paths, and the catalogue must say what is true of them.
 FEATURES: Final[tuple[FeatureRead, ...]] = (
     FeatureRead(
-        key=LimitKey.AGENTS,
+        key=LimitKey.AGENTS.value,
         description="AI agents a workspace may configure.",
         unit="count",
         kind="hard_limit",
@@ -95,15 +98,53 @@ FEATURES: Final[tuple[FeatureRead, ...]] = (
         concurrency_safe=True,
     ),
     FeatureRead(
-        key=LimitKey.WHATSAPP_NUMBERS,
-        description="Connected WhatsApp numbers (disabled and released numbers do not count).",
+        key=LimitKey.CHANNEL_CONNECTIONS.value,
+        description=(
+            "Active channel connections on every channel - WhatsApp numbers, Instagram "
+            "accounts, Pages - each one slot; disabled and released ones free theirs. "
+            "Plus general and channel-typed top-ups and grants (ADR-131)."
+        ),
         unit="count",
         kind="hard_limit",
-        enforcement="Refused on connect (402), under a per-workspace advisory lock.",
+        enforcement=(
+            "Refused on connect, enable and reconnect with 409 channel_capacity_exceeded, "
+            "before any provider call and again under a per-workspace advisory lock. "
+            "A capacity reduction is resolved by the owner's selection or, after the "
+            "grace, by keeping the oldest; nothing is released or deleted."
+        ),
         concurrency_safe=True,
     ),
     FeatureRead(
-        key=LimitKey.TEAM_MEMBERS,
+        key="allowed_channel_types",
+        description=(
+            "Which channel types a workspace may connect and automate - a set of labels, "
+            "not a number, and never a top-up target (ADR-131)."
+        ),
+        unit="channel labels",
+        kind="channel_policy",
+        enforcement=(
+            "Refused on connect, enable and reconnect with 409 channel_type_not_allowed; "
+            "AI turns, campaigns and follow-ups on a connection of a type the plan in force "
+            "does not allow are refused as channel_not_in_plan and never charged. Inbound "
+            "and a person's own reply are never refused."
+        ),
+        concurrency_safe=True,
+        unlimited="every label named",
+    ),
+    FeatureRead(
+        key="whatsapp_numbers",
+        description="Retired: WhatsApp numbers are channel connections (ADR-131).",
+        unit="count",
+        kind="retired",
+        enforcement=(
+            "Refused on every new version, custom plan and top-up product; read as "
+            "channel_connections on versions published before ADR-131."
+        ),
+        concurrency_safe=True,
+        replaced_by=LimitKey.CHANNEL_CONNECTIONS.value,
+    ),
+    FeatureRead(
+        key=LimitKey.TEAM_MEMBERS.value,
         description="Active members plus open invitations, which reserve a seat.",
         unit="count",
         kind="hard_limit",
@@ -111,7 +152,7 @@ FEATURES: Final[tuple[FeatureRead, ...]] = (
         concurrency_safe=True,
     ),
     FeatureRead(
-        key=LimitKey.KNOWLEDGE_DOCUMENTS,
+        key=LimitKey.KNOWLEDGE_DOCUMENTS.value,
         description="Knowledge-base documents, whatever their indexing state.",
         unit="count",
         kind="hard_limit",
@@ -119,7 +160,7 @@ FEATURES: Final[tuple[FeatureRead, ...]] = (
         concurrency_safe=True,
     ),
     FeatureRead(
-        key=LimitKey.STORAGE_BYTES,
+        key=LimitKey.STORAGE_BYTES.value,
         description="Bytes of media currently held in object storage.",
         unit="bytes",
         kind="hard_limit",
@@ -127,7 +168,7 @@ FEATURES: Final[tuple[FeatureRead, ...]] = (
         concurrency_safe=True,
     ),
     FeatureRead(
-        key=LimitKey.PERIOD_AI_TURNS,
+        key=LimitKey.PERIOD_AI_TURNS.value,
         description="Customer turns an AI agent answered in the billing period.",
         unit="turns per period",
         kind="hard_limit",
@@ -135,7 +176,7 @@ FEATURES: Final[tuple[FeatureRead, ...]] = (
         concurrency_safe=True,
     ),
     FeatureRead(
-        key=LimitKey.PERIOD_CAMPAIGN_MESSAGES,
+        key=LimitKey.PERIOD_CAMPAIGN_MESSAGES.value,
         description="Campaign messages in the period, reserved when a campaign is scheduled.",
         unit="messages per period",
         kind="hard_limit",
@@ -146,7 +187,7 @@ FEATURES: Final[tuple[FeatureRead, ...]] = (
         concurrency_safe=True,
     ),
     FeatureRead(
-        key=LimitKey.PERIOD_MESSAGES,
+        key=LimitKey.PERIOD_MESSAGES.value,
         description="WhatsApp messages sent and received in the billing period.",
         unit="messages per period",
         kind="meter_only",
@@ -157,7 +198,7 @@ FEATURES: Final[tuple[FeatureRead, ...]] = (
         concurrency_safe=True,
     ),
     FeatureRead(
-        key=LimitKey.OWNED_WORKSPACES,
+        key=LimitKey.OWNED_WORKSPACES.value,
         description="Live workspaces one account may own. No plan currently sets a value.",
         unit="workspaces per account",
         kind="account_limit",
@@ -174,9 +215,9 @@ FEATURES: Final[tuple[FeatureRead, ...]] = (
 # `EntitlementService._resource_count` uses.
 _RESOURCE_COUNT_SQL: Final[dict[LimitKey, str]] = {
     LimitKey.AGENTS: "SELECT tenant_id, count(*) AS used FROM agents GROUP BY tenant_id",
-    LimitKey.WHATSAPP_NUMBERS: (
-        "SELECT tenant_id, count(*) AS used FROM whatsapp_accounts "
-        "WHERE status <> 'disabled' AND released_at IS NULL GROUP BY tenant_id"
+    LimitKey.CHANNEL_CONNECTIONS: (
+        "SELECT tenant_id, count(*) AS used FROM channel_connections "
+        "WHERE status = 'active' AND released_at IS NULL GROUP BY tenant_id"
     ),
     LimitKey.TEAM_MEMBERS: (
         "SELECT tenant_id, count(*) AS used FROM memberships "
@@ -201,6 +242,7 @@ def _terms(
         "interval": version.interval.value,
         "prices": [_price(price) for price in prices or []],
         "limits": dict(version.limits or {}),
+        "allowed_channel_types": version.allowed_channel_types,
         "effective_at": version.effective_at.isoformat(),
     }
 
@@ -363,6 +405,7 @@ class PlanCatalogAdmin:
             interval=_published_interval(payload),
             trial_days=payload.trial_days,
             limits=dict(payload.limits),
+            allowed_channel_types=[channel.value for channel in payload.allowed_channel_types],
             scope=scope,
             tenant_id=payload.tenant_id,
             is_public=scope is PlanScope.PUBLIC,
@@ -560,6 +603,7 @@ class PlanCatalogAdmin:
         plan.interval = version.interval
         plan.trial_days = version.trial_days
         plan.limits = dict(version.limits)
+        plan.allowed_channel_types = list(version.allowed_channel_types or [])
         await self._session.flush()
         record_platform_billing(
             self._session,
@@ -608,6 +652,9 @@ class PlanCatalogAdmin:
             interval=_published_interval(terms),
             trial_days=terms.trial_days,
             limits=dict(terms.limits),
+            # Required on every version published since ADR-131 (a trigger
+            # refuses NULL): the plan says which channel types it sells.
+            allowed_channel_types=[channel.value for channel in terms.allowed_channel_types],
             effective_at=effective_at,
             created_at=now,
             created_by=actor.id,
@@ -869,7 +916,9 @@ class PlanCatalogAdmin:
         scheduled = await self._scheduled_for_migration(plan)
         changes: list[LimitChange] = []
         for key in LimitKey:
-            old = current.limit_for(key) if current is not None else None
+            # As the current version is enforced - a legacy one's number limit
+            # is its channel capacity (ENT-05).
+            old = term_limit(current, key) if current is not None else None
             raw = payload.limits.get(key.value)
             new = raw if isinstance(raw, int) else None
             if old == new:
@@ -891,6 +940,9 @@ class PlanCatalogAdmin:
             subscriptions_staying_on_old_versions=active,
             subscriptions_scheduled_for_migration=scheduled,
             limits=changes,
+            channel_types=await self._channel_types_change(
+                plan, current, payload.allowed_channel_types
+            ),
             note=(
                 "Publishing changes no existing subscriber. They stay on their current "
                 "version until a migration is scheduled, which applies at each one's next "
@@ -1070,6 +1122,38 @@ class PlanCatalogAdmin:
                 or 0
             )
         return scheduled
+
+    async def _channel_types_change(
+        self, plan: Plan, current: PlanVersion | None, proposed: list[Channel]
+    ) -> ChannelTypesChange:
+        """What the proposed channel types remove, and who holds a removed one."""
+        old = term_channel_types(current) if current is not None else None
+        new = set(proposed)
+        removed = [channel for channel in ordered(old or ()) if channel not in new]
+        added = [channel for channel in ordered(new) if old is None or channel not in old]
+        holders = 0
+        if removed:
+            holders = int(
+                await self._session.scalar(
+                    text(
+                        "SELECT count(DISTINCT c.tenant_id) FROM channel_connections c "
+                        "JOIN subscriptions s ON s.tenant_id = c.tenant_id "
+                        "WHERE s.plan_id = :plan "
+                        "AND s.status IN ('trialing', 'active', 'past_due') "
+                        "AND c.status = 'active' AND c.released_at IS NULL "
+                        "AND c.channel::text = ANY(:removed)"
+                    ),
+                    {"plan": plan.id, "removed": [channel.value for channel in removed]},
+                )
+                or 0
+            )
+        return ChannelTypesChange(
+            old=ordered(old) if old is not None else None,
+            new=ordered(new),
+            removed=removed,
+            added=added,
+            workspaces_holding_a_removed_type=holders,
+        )
 
     async def _above(self, plan: Plan, key: LimitKey, limit: int) -> int:
         """Serving subscribers of this plan already above `limit` for `key`."""

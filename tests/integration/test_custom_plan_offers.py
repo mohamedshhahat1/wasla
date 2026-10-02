@@ -48,6 +48,7 @@ from app.db.models.billing import (
     SubscriptionStatus,
 )
 from app.db.models.billing_incident import BillingIncident, BillingIncidentKind
+from app.db.models.channel import Channel
 from app.db.models.custom_plan_offer import CustomPlanOffer, CustomPlanOfferStatus
 from app.db.models.enums import PlatformRole
 from app.db.models.invoice import (
@@ -111,7 +112,7 @@ SEVEN: dict[str, int] = {
     "period_ai_turns": 40_000,
     "period_campaign_messages": 50_000,
     "storage_bytes": 100 * GIB,
-    "whatsapp_numbers": 5,
+    "channel_connections": 5,
     "team_members": 30,
     "knowledge_documents": 3_000,
 }
@@ -141,6 +142,7 @@ async def _custom_plan(
             price=price,
             currency="EGP",
             interval=BillingInterval.MONTHLY,
+            allowed_channel_types=[Channel.WHATSAPP],
             limits={"agents": 5, **SEVEN},
             scope=PlanScope.TENANT,
             tenant_id=tenant.id,
@@ -353,6 +355,7 @@ async def test_the_page_opened_at_1500_buys_version_1_after_version_2_at_1800(
             price=Decimal("1800.00"),
             currency="EGP",
             interval=BillingInterval.MONTHLY,
+            allowed_channel_types=[Channel.WHATSAPP],
             limits={"agents": 5, **SEVEN, "period_ai_turns": 60_000},
             expected_version=1,
             reason="New pricing.",
@@ -405,6 +408,7 @@ async def test_accepting_after_a_new_version_still_buys_the_offered_version(
             price=Decimal("1800.00"),
             currency="EGP",
             interval=BillingInterval.MONTHLY,
+            allowed_channel_types=[Channel.WHATSAPP],
             limits={"agents": 5, **SEVEN, "period_ai_turns": 60_000},
             expected_version=1,
             reason="New pricing.",
@@ -816,6 +820,7 @@ async def test_the_database_keeps_offers_and_their_invoices_inside_one_workspace
             price=Decimal("1800.00"),
             currency="EGP",
             interval=BillingInterval.MONTHLY,
+            allowed_channel_types=[Channel.WHATSAPP],
             limits={"agents": 5, **SEVEN},
             expected_version=1,
             reason="Version two.",

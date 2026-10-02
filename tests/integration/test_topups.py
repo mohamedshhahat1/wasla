@@ -31,10 +31,11 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.exceptions import ConflictError, NotFoundError, PlanLimitExceededError
+from app.core.exceptions import ConflictError, NotFoundError
 from app.db.models.audit import AuditAction, AuditLog
 from app.db.models.billing import LimitKey, SubscriptionStatus
 from app.db.models.billing_incident import BillingIncident, BillingIncidentKind
+from app.db.models.channel import Channel
 from app.db.models.enums import PlatformRole
 from app.db.models.invoice import (
     CollectionState,
@@ -44,12 +45,19 @@ from app.db.models.invoice import (
     Payment,
     PaymentStatus,
 )
-from app.db.models.topup import TopupEntitlement, TopupPurchase, TopupSource, TopupStatus
+from app.db.models.topup import (
+    SELLABLE_TOPUP_ENTITLEMENTS,
+    TopupEntitlement,
+    TopupPurchase,
+    TopupSource,
+    TopupStatus,
+)
 from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount
 from app.platform.topup_admin import TopupAdmin
 from app.repositories.invoice_repository import PlatformInvoiceRepository
 from app.schemas.topup import TopupGrantCreate, TopupProductUpdate, TopupRefundReview
+from app.services.channel_capacity import ChannelCapacityExceededError, ChannelCapacityGuard
 from app.services.checkout_service import APPLIED, DECLINED, DUPLICATE, CheckoutService
 from app.services.entitlement_service import EntitlementService
 from app.services.invoice_service import InvoiceService
@@ -305,7 +313,7 @@ async def test_a_capacity_topup_expiry_keeps_every_number_and_blocks_new_ones(
     tenant, owner, subscription = await workspace(db_session, now=now)
     paymob = Paymob()
     item = await product(
-        db_session, entitlement=TopupEntitlement.WHATSAPP_NUMBERS, quantity=2, price="150.00"
+        db_session, entitlement=TopupEntitlement.CHANNEL_CONNECTIONS, quantity=2, price="150.00"
     )
     _, payment = await buy(db_session, tenant, owner, paymob, item, now=now)
     await apply(
@@ -316,20 +324,24 @@ async def test_a_capacity_topup_expiry_keeps_every_number_and_blocks_new_ones(
         now=now,
     )
 
-    guard = EntitlementService(db_session, tenant_id=tenant.id, clock=lambda: now)
+    guard = ChannelCapacityGuard(
+        db_session, tenant_id=tenant.id, default_plan_code=None, clock=lambda: now
+    )
     for index in range(3):
-        await guard.reserve_or_refuse(LimitKey.WHATSAPP_NUMBERS)
+        await guard.reserve_or_refuse(Channel.WHATSAPP)
         db_session.add(_number(tenant.id, index))
         await db_session.flush()
-    with pytest.raises(PlanLimitExceededError):
-        await guard.reserve_or_refuse(LimitKey.WHATSAPP_NUMBERS)
+    with pytest.raises(ChannelCapacityExceededError):
+        await guard.reserve_or_refuse(Channel.WHATSAPP)
 
     after = later(subscription.current_period_end, seconds=1)
     expired = EntitlementService(db_session, tenant_id=tenant.id, clock=lambda: after)
-    state = await expired.check(LimitKey.WHATSAPP_NUMBERS, additional=0)
+    state = await expired.check(LimitKey.CHANNEL_CONNECTIONS, additional=0)
     assert (state.limit, state.used, state.remaining, state.over_limit) == (1, 3, 0, True)
-    with pytest.raises(PlanLimitExceededError):
-        await expired.reserve_or_refuse(LimitKey.WHATSAPP_NUMBERS)
+    with pytest.raises(ChannelCapacityExceededError):
+        await ChannelCapacityGuard(
+            db_session, tenant_id=tenant.id, default_plan_code=None, clock=lambda: after
+        ).reserve_or_refuse(Channel.WHATSAPP)
     assert await held(db_session, WhatsAppAccount, tenant.id) == 3
 
     # The sweep records the expiry and rolls the period; it deletes nothing.
@@ -456,9 +468,9 @@ async def test_the_effective_limit_is_plan_plus_topups_plus_grants_for_every_key
     staff = await _staff(db_session)
     paymob = Paymob()
     admin = TopupAdmin(db_session, settings=_settings())
-    bought = {key: 11 * (index + 1) for index, key in enumerate(TopupEntitlement)}
-    given = {key: 3 * (index + 1) for index, key in enumerate(TopupEntitlement)}
-    for key in TopupEntitlement:
+    bought = {key: 11 * (index + 1) for index, key in enumerate(SELLABLE_TOPUP_ENTITLEMENTS)}
+    given = {key: 3 * (index + 1) for index, key in enumerate(SELLABLE_TOPUP_ENTITLEMENTS)}
+    for key in SELLABLE_TOPUP_ENTITLEMENTS:
         item = await product(db_session, entitlement=key, quantity=bought[key])
         _, payment = await buy(db_session, tenant, owner, paymob, item, now=now)
         await apply(
@@ -483,7 +495,7 @@ async def test_the_effective_limit_is_plan_plus_topups_plus_grants_for_every_key
 
     terms = await EntitlementService(db_session, tenant_id=tenant.id).terms()
     assert terms is not None
-    for key in TopupEntitlement:
+    for key in SELLABLE_TOPUP_ENTITLEMENTS:
         state = await standing(db_session, tenant, key.limit_key, at=now)
         base = terms.limit_for(key.limit_key)
         assert base is not None
@@ -639,7 +651,7 @@ async def test_a_refund_after_the_grant_never_subtracts_on_its_own(
     staff = await _staff(db_session)
     paymob = Paymob()
     item = await product(
-        db_session, entitlement=TopupEntitlement.WHATSAPP_NUMBERS, quantity=2, price="150.00"
+        db_session, entitlement=TopupEntitlement.CHANNEL_CONNECTIONS, quantity=2, price="150.00"
     )
     started, payment = await buy(db_session, tenant, owner, paymob, item, now=now)
     await apply(
@@ -659,7 +671,7 @@ async def test_a_refund_after_the_grant_never_subtracts_on_its_own(
 
     purchase = await _purchase(db_session, started.purchase_id)
     assert purchase.status is TopupStatus.REFUND_REVIEW
-    assert (await standing(db_session, tenant, LimitKey.WHATSAPP_NUMBERS, at=now)).limit == 3
+    assert (await standing(db_session, tenant, LimitKey.CHANNEL_CONNECTIONS, at=now)).limit == 3
     incident = await db_session.scalar(
         select(BillingIncident)
         .where(BillingIncident.tenant_id == tenant.id)
@@ -678,7 +690,7 @@ async def test_a_refund_after_the_grant_never_subtracts_on_its_own(
         now=now,
     )
     assert read.status is TopupStatus.CANCELLED
-    state = await standing(db_session, tenant, LimitKey.WHATSAPP_NUMBERS, at=now)
+    state = await standing(db_session, tenant, LimitKey.CHANNEL_CONNECTIONS, at=now)
     assert (state.limit, state.used, state.over_limit, state.remaining) == (1, 3, True, 0)
     held = await db_session.scalar(
         select(func.count())
@@ -959,13 +971,13 @@ PER_KEY_QUANTITY = {
     TopupEntitlement.PERIOD_AI_TURNS: 10_000,
     TopupEntitlement.PERIOD_CAMPAIGN_MESSAGES: 5_000,
     TopupEntitlement.STORAGE_BYTES: 25 * GIB,
-    TopupEntitlement.WHATSAPP_NUMBERS: 2,
+    TopupEntitlement.CHANNEL_CONNECTIONS: 2,
     TopupEntitlement.TEAM_MEMBERS: 5,
     TopupEntitlement.KNOWLEDGE_DOCUMENTS: 500,
 }
 
 
-@pytest.mark.parametrize("key", list(TopupEntitlement), ids=lambda key: key.value)
+@pytest.mark.parametrize("key", SELLABLE_TOPUP_ENTITLEMENTS, ids=lambda key: key.value)
 async def test_each_topup_raises_its_own_limit_once_and_leaves_the_plan_alone(
     db_session: AsyncSession, key: TopupEntitlement
 ) -> None:
@@ -990,7 +1002,9 @@ async def test_each_topup_raises_its_own_limit_once_and_leaves_the_plan_alone(
 
     item = await product(db_session, entitlement=key, quantity=PER_KEY_QUANTITY[key])
     _, payment = await buy(db_session, tenant, owner, paymob, item, now=now)
-    signed = callback(payment, transaction=930_000_000 + list(TopupEntitlement).index(key))
+    signed = callback(
+        payment, transaction=930_000_000 + list(SELLABLE_TOPUP_ENTITLEMENTS).index(key)
+    )
     assert await apply(db_session, tenant.id, paymob.provider(), signed, now=now) == APPLIED
     assert await apply(db_session, tenant.id, paymob.provider(), signed, now=now) == DUPLICATE
 

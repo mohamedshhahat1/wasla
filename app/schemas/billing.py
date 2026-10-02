@@ -26,8 +26,11 @@ from app.db.models.billing import (
     Subscription,
     SubscriptionStatus,
 )
+from app.db.models.channel import Channel
 from app.schemas.text import StorableText
+from app.services.channel_fit import ChannelCapacity
 from app.services.entitlement_service import Entitlement
+from app.services.entitlement_terms import ordered, term_channel_types, term_limit
 
 MAX_PLAN_CODE_INPUT = 50
 
@@ -91,6 +94,9 @@ class PlanRead(BaseModel):
     prices: list[PlanPriceOptionRead] = Field(default_factory=list)
     trial_days: int
     limits: list[PlanLimitRead]
+    # The channel types this plan includes (ENT-09), as enforced: a version
+    # published before ADR-131 includes WhatsApp alone.
+    allowed_channel_types: list[Channel] = Field(default_factory=list)
     # Written for this workspace alone (ADR-113). Never true for a plan another
     # workspace could see.
     is_custom: bool = False
@@ -128,8 +134,61 @@ class PlanRead(BaseModel):
             # Every key, including the ones this plan does not limit, so a
             # comparison table renders "unlimited" rather than a blank cell it
             # has to guess the meaning of.
-            limits=[PlanLimitRead(key=key, limit=terms.limit_for(key)) for key in LimitKey],
+            limits=[PlanLimitRead(key=key, limit=term_limit(terms, key)) for key in LimitKey],
+            allowed_channel_types=ordered(term_channel_types(terms)),
             is_custom=plan.is_custom,
+        )
+
+
+class ChannelCountRead(BaseModel):
+    """A count for one channel."""
+
+    channel: Channel
+    count: int
+
+
+class TypedSlotRead(BaseModel):
+    """Slots only one channel type may use (ENT-11): how many, and how many are taken."""
+
+    channel: Channel
+    capacity: int
+    used: int
+
+
+class ChannelCapacityBreakdown(BaseModel):
+    """Where a workspace's channel slots come from, and what takes them (ENT-05, ENT-11).
+
+    `general_limit` is the plan's slots plus general top-ups and grants - usable
+    by any allowed type; `typed_slots` are bought or granted for one type.
+    `remaining` on the entitlement is what is left for the next connection of a
+    type with no typed slot of its own.
+    """
+
+    general_limit: int | None
+    general_topup_limit: int
+    general_platform_grant_limit: int
+    typed_slots: list[TypedSlotRead]
+    active_by_channel: list[ChannelCountRead]
+    allowed_channel_types: list[Channel]
+
+    @classmethod
+    def from_capacity(cls, capacity: ChannelCapacity) -> Self:
+        typed = capacity.typed
+        return cls(
+            general_limit=capacity.general,
+            general_topup_limit=capacity.general_purchased,
+            general_platform_grant_limit=capacity.general_granted,
+            typed_slots=[
+                TypedSlotRead(
+                    channel=channel, capacity=typed[channel], used=capacity.typed_used(channel)
+                )
+                for channel in ordered(typed)
+            ],
+            active_by_channel=[
+                ChannelCountRead(channel=channel, count=capacity.active[channel])
+                for channel in ordered(capacity.active)
+            ],
+            allowed_channel_types=ordered(capacity.allowed),
         )
 
 
@@ -167,6 +226,9 @@ class EntitlementRead(BaseModel):
     allowed: bool
     period_start: datetime | None
     period_end: datetime | None
+    # `channel_connections` only (ADR-131): its general and typed slots, active
+    # connections by channel and the plan's allowed channel types.
+    channel_capacity: ChannelCapacityBreakdown | None = None
 
     @classmethod
     def from_entitlement(cls, entitlement: Entitlement) -> Self:
@@ -185,6 +247,11 @@ class EntitlementRead(BaseModel):
             allowed=entitlement.allowed,
             period_start=entitlement.period_start,
             period_end=entitlement.period_end,
+            channel_capacity=(
+                ChannelCapacityBreakdown.from_capacity(entitlement.capacity)
+                if entitlement.capacity is not None
+                else None
+            ),
         )
 
 

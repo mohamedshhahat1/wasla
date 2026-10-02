@@ -43,6 +43,7 @@ from app.repositories.invoice_repository import InvoiceRepository
 from app.repositories.topup_repository import TopupProductRepository, TopupPurchaseRepository
 from app.services.audit_service import AuditTrail
 from app.services.checkout_service import CheckoutService
+from app.services.entitlement_terms import term_limit
 from app.services.plan_catalog import PlanCatalog
 from app.services.topup_ledger import validity_window
 
@@ -297,7 +298,7 @@ class TopupService:
         if subscription.current_period_end <= now:
             raise ConflictError("This billing period has ended. Try again in a moment.")
         terms = await self._catalog.pinned_version(subscription)
-        if terms is not None and terms.limit_for(product.entitlement_key.limit_key) is None:
+        if terms is not None and term_limit(terms, product.entitlement_key.limit_key) is None:
             raise ConflictError("The plan already allows this without limit.")
 
 

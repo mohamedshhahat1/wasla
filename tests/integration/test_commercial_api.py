@@ -49,7 +49,7 @@ from app.db.models.enums import MembershipStatus, PlatformRole, TenantRole
 from app.db.models.invoice import Invoice, Payment
 from app.db.models.membership import Membership
 from app.db.models.tenant import Tenant
-from app.db.models.topup import TopupEntitlement
+from app.db.models.topup import SELLABLE_TOPUP_ENTITLEMENTS, TopupEntitlement
 from app.db.models.user import User
 from app.integrations.billing import paymob
 from app.main import create_app
@@ -229,7 +229,8 @@ def _custom_body(**overrides: Any) -> dict[str, Any]:
         "period_ai_turns": 40_000,
         "period_campaign_messages": 50_000,
         "storage_bytes": 100 * GIB,
-        "whatsapp_numbers": 5,
+        "channel_connections": 5,
+        "allowed_channel_types": ["whatsapp"],
         "team_members": 30,
         "knowledge_documents": 3_000,
         "reason": "Negotiated enterprise terms.",
@@ -366,7 +367,7 @@ async def test_a_custom_plan_preview_shows_everything_and_writes_nothing(
         "monthly",
     )
     rows = {row["key"]: row for row in preview["limits"]}
-    assert set(rows) == {key.value for key in TopupEntitlement}
+    assert set(rows) == {key.value for key in SELLABLE_TOPUP_ENTITLEMENTS}
     assert rows["period_ai_turns"]["current"] == 5_000
     assert rows["period_ai_turns"]["proposed"] == 40_000
     assert rows["period_ai_turns"]["difference"] == 35_000
@@ -403,7 +404,7 @@ async def test_a_custom_plan_is_one_workspaces_and_nobody_elses(
     assert result["plan"]["tenant_id"] == str(alpha.id)
     assert result["plan"]["is_custom"] is True and result["plan"]["is_public"] is False
     limits = {row["key"]: row["limit"] for row in result["version"]["limits"]}
-    for key in TopupEntitlement:
+    for key in SELLABLE_TOPUP_ENTITLEMENTS:
         assert limits[key.value] == body[key.value], key
     assert limits["agents"] == 5, "agents are inherited, never left unlimited"
     assert result["assignment"]["status"] == "not_assigned"
@@ -505,7 +506,7 @@ async def test_a_custom_plan_cannot_be_made_public_or_created_without_its_worksp
         {"billing_interval": "weekly"},
         {"period_ai_turns": -1},
         {"storage_bytes": -5},
-        {"whatsapp_numbers": -1},
+        {"channel_connections": -1},
         {"agents": 3},
     ],
 )
@@ -726,6 +727,7 @@ async def test_a_new_custom_version_changes_nobody_until_they_are_moved(
             "currency": "EGP",
             "interval": "monthly",
             "limits": {"period_ai_turns": 60_000},
+            "allowed_channel_types": ["whatsapp"],
             "expected_version": 1,
             "reason": "Year two pricing.",
         },
@@ -738,6 +740,7 @@ async def test_a_new_custom_version_changes_nobody_until_they_are_moved(
             "currency": "EGP",
             "interval": "monthly",
             "limits": {},
+            "allowed_channel_types": ["whatsapp"],
             "expected_version": 1,
             "reason": "Stale view.",
         },
@@ -930,7 +933,9 @@ async def test_a_workspace_buys_a_topup_through_its_own_checkout(
     summary = await http.get(f"{BILLING}/summary")
     assert summary.status_code == 200, summary.text
     state = summary.json()
-    assert {row["key"] for row in state["entitlements"]} == {key.value for key in TopupEntitlement}
+    assert {row["key"] for row in state["entitlements"]} == {
+        key.value for key in SELLABLE_TOPUP_ENTITLEMENTS
+    }
     ai = next(row for row in state["entitlements"] if row["key"] == "period_ai_turns")
     assert (ai["base_limit"], ai["topup_limit"], ai["effective_limit"]) == (5_000, 0, 5_000)
     messages = next(row for row in state["entitlements"] if row["key"] == "period_messages")
@@ -1115,7 +1120,7 @@ async def test_the_owner_sees_the_whole_offer_and_accepting_changes_nothing_unti
         "monthly",
     )
     assert {row["key"]: row["limit"] for row in offer["limits"]} == {
-        key.value: body[key.value] for key in TopupEntitlement
+        key.value: body[key.value] for key in SELLABLE_TOPUP_ENTITLEMENTS
     }
     assert offer["effective_period"]["starts"] == "on_payment"
     assert offer["can_accept"] is True and offer["status"] == "offered"

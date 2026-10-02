@@ -41,6 +41,7 @@ from app.db.models.billing import (
     DEFAULT_CURRENCY,
     MAX_LIMIT_VALUE,
     MAX_PLAN_PRICE,
+    RETIRED_LIMIT_KEY,
     SUPPORTED_CURRENCIES,
     SUPPORTED_INTERVAL_COUNTS,
     BillingInterval,
@@ -59,8 +60,15 @@ from app.db.models.billing_incident import (
     BillingIncidentKind,
     BillingIncidentStatus,
 )
+from app.db.models.channel import Channel
 from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.schemas.text import StorableText
+from app.services.entitlement_terms import (
+    is_legacy,
+    ordered,
+    term_channel_types,
+    term_limit,
+)
 
 MAX_PAGE = 100
 PlanCode = Field(min_length=2, max_length=50, pattern=r"^[a-z0-9][a-z0-9_-]*$")
@@ -88,9 +96,18 @@ LIMITS_SCHEMA: dict[str, Any] = {
 
 
 def validate_limits(value: dict[str, int | None]) -> dict[str, int | None]:
-    """Known keys only; `null` is unlimited; zero is zero; negative is refused."""
+    """Known keys only; `null` is unlimited; zero is zero; negative is refused.
+
+    `whatsapp_numbers` is retired (ENT-05): it is refused by name, pointing at
+    `channel_connections`, rather than as an unknown key.
+    """
     known = {key.value for key in LimitKey}
     for key, limit in value.items():
+        if key == RETIRED_LIMIT_KEY:
+            raise ValueError(
+                "whatsapp_numbers is retired: every channel, WhatsApp included, is counted "
+                "by channel_connections."
+            )
         if key not in known:
             raise ValueError(f"Unknown entitlement key: {key}.")
         if limit is None:
@@ -102,6 +119,13 @@ def validate_limits(value: dict[str, int | None]) -> dict[str, int | None]:
         if limit > MAX_LIMIT_VALUE:
             raise ValueError(f"The limit for {key} is too large; use null for unlimited.")
     return value
+
+
+def validate_channel_types(value: list[Channel]) -> list[Channel]:
+    """Each channel type once, in vocabulary order (ENT-09)."""
+    if len(value) != len(set(value)):
+        raise ValueError("Each allowed channel type is named once.")
+    return ordered(value)
 
 
 def _interval(value: object) -> object:
@@ -173,6 +197,11 @@ class _Terms(BaseModel):
       A price of 0 is a free version.
 
     The limits are the version's and are the same whichever price is paid.
+
+    `allowed_channel_types` is required (ENT-09): the channel types a workspace
+    on this version may connect and automate, as `Channel` labels. There is no
+    wildcard - "every channel" is all five labels, named - and an empty list is
+    an explicit "no channel". Adding a channel to a plan is a new version.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -185,6 +214,7 @@ class _Terms(BaseModel):
     prices: list[PriceSpec] | None = Field(default=None, max_length=4)
     # Keyed by entitlement key. `null` (or an absent key) is unlimited.
     limits: dict[str, int | None] = Field(default_factory=dict, json_schema_extra=LIMITS_SCHEMA)
+    allowed_channel_types: list[Channel] = Field(max_length=len(Channel))
     # Trials are not implemented: a free plan never needs one and a priced
     # plan's trial never applied (BILL-23). Zero is the only accepted value.
     trial_days: Literal[0] = 0
@@ -199,6 +229,11 @@ class _Terms(BaseModel):
     @classmethod
     def _limits(cls, value: dict[str, int | None]) -> dict[str, int | None]:
         return validate_limits(value)
+
+    @field_validator("allowed_channel_types")
+    @classmethod
+    def _channel_types(cls, value: list[Channel]) -> list[Channel]:
+        return validate_channel_types(value)
 
     @model_validator(mode="after")
     def _one_way_of_pricing(self) -> Self:
@@ -401,6 +436,11 @@ class LimitRead(BaseModel):
     limit: int | None
 
 
+def limits_of(terms: PlanVersion) -> list[LimitRead]:
+    """Every limit a version sets, read as it is enforced (ENT-05 alias included)."""
+    return [LimitRead(key=key, limit=term_limit(terms, key)) for key in LimitKey]
+
+
 class PlanVersionRead(BaseModel):
     """A version's entitlements and every price it has ever been sold at.
 
@@ -420,6 +460,11 @@ class PlanVersionRead(BaseModel):
     prices: list[PlanPriceRead] = Field(default_factory=list)
     trial_days: int
     limits: list[LimitRead]
+    # The channel types the version allows, as enforced (ENT-09): a version
+    # published before ADR-131 states none and allows WhatsApp alone, which
+    # `channel_types_stated: false` says.
+    allowed_channel_types: list[Channel]
+    channel_types_stated: bool
     effective_at: datetime
     created_at: datetime
     created_by: uuid.UUID | None
@@ -444,7 +489,9 @@ class PlanVersionRead(BaseModel):
             billing_required=not version.is_free,
             prices=[PlanPriceRead.from_model(price) for price in prices or []],
             trial_days=version.trial_days,
-            limits=[LimitRead(key=key, limit=version.limit_for(key)) for key in LimitKey],
+            limits=limits_of(version),
+            allowed_channel_types=ordered(term_channel_types(version)),
+            channel_types_stated=not is_legacy(version),
             effective_at=version.effective_at,
             created_at=version.created_at,
             created_by=version.created_by,
@@ -522,13 +569,22 @@ class Page[T](BaseModel):
 
 
 class FeatureRead(BaseModel):
-    key: LimitKey
+    """One thing a plan can set, and how Wasla enforces it.
+
+    `key` is a `LimitKey` value, `allowed_channel_types` (a set, not a number:
+    `kind: channel_policy`), or the retired `whatsapp_numbers`
+    (`kind: retired`), listed so an operator reading an old version knows
+    what replaced it.
+    """
+
+    key: str
     description: str
     unit: str
-    kind: Literal["hard_limit", "meter_only", "account_limit"]
+    kind: Literal["hard_limit", "meter_only", "account_limit", "channel_policy", "retired"]
     enforcement: str
     concurrency_safe: bool
     unlimited: str = "null"
+    replaced_by: str | None = None
 
 
 class LimitChange(BaseModel):
@@ -536,6 +592,21 @@ class LimitChange(BaseModel):
     old: int | None
     new: int | None
     workspaces_above_new_limit: int | None
+
+
+class ChannelTypesChange(BaseModel):
+    """What publishing these channel types would change (ENT-09).
+
+    `workspaces_holding_a_removed_type` counts serving subscribers of the plan
+    holding an active connection of a type the proposal no longer allows -
+    the workspaces a migration onto it would put over their allowed types.
+    """
+
+    old: list[Channel] | None
+    new: list[Channel]
+    removed: list[Channel]
+    added: list[Channel]
+    workspaces_holding_a_removed_type: int
 
 
 class PlanVersionPreview(BaseModel):
@@ -550,6 +621,7 @@ class PlanVersionPreview(BaseModel):
     subscriptions_staying_on_old_versions: int
     subscriptions_scheduled_for_migration: int
     limits: list[LimitChange]
+    channel_types: ChannelTypesChange
     note: str
 
 

@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.errors import sqlstate
 from app.db.models.billing import BillingInterval, Plan, PlanScope, Subscription, SubscriptionStatus
+from app.db.models.channel import Channel
 from app.db.models.enums import PlatformRole
 from app.db.models.invoice import (
     CollectionState,
@@ -63,7 +64,7 @@ COMPLETE_LIMITS = {
     "period_ai_turns": 1_000,
     "period_campaign_messages": 1_000,
     "storage_bytes": 1_000_000,
-    "whatsapp_numbers": 1,
+    "channel_connections": 1,
     "team_members": 3,
     "knowledge_documents": 10,
 }
@@ -442,6 +443,7 @@ async def test_a_declined_offer_cannot_be_made_active(db_session: AsyncSession) 
             price=PRICE,
             currency="EGP",
             interval=BillingInterval.MONTHLY,
+            allowed_channel_types=[Channel.WHATSAPP],
             limits={"agents": 9, **COMPLETE_LIMITS},
             scope=PlanScope.TENANT,
             tenant_id=a.tenant.id,
