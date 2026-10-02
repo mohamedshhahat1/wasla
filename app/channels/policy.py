@@ -114,6 +114,10 @@ class ChannelCapabilities:
     #: Within what the provider guarantees a message id is unique: its
     #: connection (Meta), or one chat (Telegram-shaped providers).
     message_id_scope: Literal["connection", "conversation"]
+    #: Whether an automated reply must tell the customer it is automated - at
+    #: the start, after a long gap, and after a person hands back to the AI
+    #: (OMNI-041). Messenger's and Instagram's policy; off for WhatsApp.
+    disclosure_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)

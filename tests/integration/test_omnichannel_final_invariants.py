@@ -12,17 +12,21 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.channels.adapter import ChannelAdapter
+from app.db.models.channel import Channel, ChannelConnection, ConnectionStatus
 from app.db.models.conversation import Conversation
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
+from app.services.channel_ingestion_service import ChannelIngestionService
 from app.services.whatsapp_service import WhatsAppIngestionService
 from scripts.omnichannel_invariants import census, violations
+from tests.channel_fakes import SyntheticAdapter, synthetic_payload
 
 pytestmark = pytest.mark.integration
 
@@ -205,3 +209,50 @@ async def test_a_retained_stop_tap_without_an_opt_out_is_counted(db_session: Asy
     assert after["q6_retained_stop_taps_without_opt_out"] == (
         before["q6_retained_stop_taps_without_opt_out"] + 1
     )
+
+
+async def test_an_undisclosed_ai_reply_on_a_disclosure_channel_is_counted(
+    db_session: AsyncSession,
+) -> None:
+    """OMNI-041: Messenger and Instagram require the disclosure on every AI conversation."""
+    tenant = Tenant(name="Disclosure oracle", slug=f"oracle-{uuid.uuid4().hex[:10]}")
+    db_session.add(tenant)
+    await db_session.flush()
+    connection = ChannelConnection(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        channel=Channel.MESSENGER,
+        external_account_id=f"page-{uuid.uuid4().hex[:10]}",
+        status=ConnectionStatus.ACTIVE,
+        ownership_started_at=datetime.now(UTC) - timedelta(days=1),
+    )
+    db_session.add(connection)
+    await db_session.flush()
+    adapter = SyntheticAdapter(Channel.MESSENGER, tagged=True)
+    await ChannelIngestionService(session=db_session, adapter=cast(ChannelAdapter, adapter)).ingest(
+        adapter.parse(
+            synthetic_payload(
+                connection.external_account_id,
+                {"type": "message", "id": "m.oracle", "from": "psid-oracle", "at": 1790000000},
+            )
+        )
+    )
+    await db_session.flush()
+    conversation = await db_session.scalar(
+        select(Conversation).where(Conversation.account_id == connection.id)
+    )
+    assert conversation is not None
+    before = await _counts(db_session)
+
+    await db_session.execute(
+        text(
+            "INSERT INTO messages (id, tenant_id, conversation_id, direction, kind, status,"
+            " origin, delivery_state, body, sent_at) VALUES (gen_random_uuid(), :t, :c,"
+            " 'outbound', 'text', 'sent', 'agent', 'sent', 'An automated reply', now())"
+        ),
+        {"t": tenant.id, "c": conversation.id},
+    )
+
+    assert await _added(db_session, before) == {
+        "ai_reply_on_a_disclosure_channel_never_disclosed": 1
+    }

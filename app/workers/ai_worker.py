@@ -47,15 +47,18 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.disclosure import compose, disclosure_due, disclosure_for
 from app.agents.lifecycle import refusal_now
 from app.agents.orchestrator import AgentOrchestrator, plan_turn
 from app.agents.registry import ToolRegistry
 from app.agents.reply import fallback_reply, prepare_channel_reply
+from app.channels.policy import ChannelCapabilities
 from app.channels.registry import ChannelRegistry, default_registry
 from app.core.config import Settings
 from app.core.logging import get_logger
@@ -66,8 +69,9 @@ from app.db.models.agent import Agent
 from app.db.models.agent_turn import TurnOutcome
 from app.db.models.analytics import AnalyticsSource
 from app.db.models.billing import LimitKey
-from app.db.models.conversation import MessageOrigin
+from app.db.models.conversation import Message, MessageDeliveryState, MessageOrigin
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
+from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEventType
 from app.db.session import Database
 from app.integrations.openai.client import ResponsesClient, build_http_client
@@ -697,6 +701,9 @@ class AgentWorker:
                     # A way to open a clean transaction if the turn's own is
                     # lost, so a terminal tool outcome is still written down.
                     unit_of_work=self._database.session,
+                    # The worker's own channels, so a turn is answered under
+                    # the registry that admitted it.
+                    channels=self._channels,
                 )
                 outcome = await orchestrator.answer(
                     conversation_id=job.conversation_id,
@@ -769,27 +776,74 @@ class AgentWorker:
                 session=session,
                 settings=self._settings,
                 tenant_id=job.tenant_id,
+                channels=self._channels,
             )
             if reply:
-                await messaging.send_text(
+                capabilities = self._channels.policy_for(conversation.channel).capabilities
+                body, disclosed = await self._with_disclosure(
+                    session, job, reply=reply, capabilities=capabilities
+                )
+                sent = await messaging.send_text(
                     conversation_id=job.conversation_id,
                     # One message within the conversation's channel's limit, in
                     # its own unit, shortened at a sentence with an offer to
-                    # continue if the model ran long (AI-05, OMNI-008).
-                    body=prepare_channel_reply(
-                        reply, self._channels.policy_for(conversation.channel).capabilities
-                    ).text,
+                    # continue if the model ran long (AI-05, OMNI-008) - the
+                    # automation disclosure included, where it is due.
+                    body=body,
                     origin=MessageOrigin.AGENT,
                     # Deterministic, and derived from the message being answered
                     # rather than generated here, so the same turn produces the
                     # same key however many times it is published (WQ-01).
                     idempotency_key=self._reply_key(job),
                 )
+                if disclosed:
+                    await self._record_disclosure(session, job, sent)
                 final = TurnOutcome.REPLIED
             else:
                 await self._answer_emptiness(messaging, session, job)
                 final = TurnOutcome.EMPTY_RESPONSE
         await self._complete_turn(job, final, response_id=outcome.response_id)
+
+    async def _with_disclosure(
+        self,
+        session: AsyncSession,
+        job: AgentJob,
+        *,
+        reply: str,
+        capabilities: ChannelCapabilities,
+    ) -> tuple[str, bool]:
+        """The reply to send, and whether it opens with the automation disclosure (OMNI-041).
+
+        Only on a channel whose policy requires it, and only when it is due -
+        first AI reply, a long gap, or a hand-back from a colleague - read from
+        the conversation's columns now, after the inference.
+        """
+        if not capabilities.disclosure_required:
+            return prepare_channel_reply(reply, capabilities).text, False
+        disclosed_at, resumed_at = await ConversationRepository(
+            session, tenant_id=job.tenant_id
+        ).disclosure_marks(job.conversation_id)
+        gap = timedelta(hours=self._settings.automation_disclosure_gap_hours)
+        if not disclosure_due(
+            disclosed_at=disclosed_at, resumed_at=resumed_at, now=datetime.now(UTC), gap=gap
+        ):
+            return prepare_channel_reply(reply, capabilities).text, False
+        tenant = await session.get(Tenant, job.tenant_id)
+        wording = disclosure_for(reply, tenant.automation_disclosure if tenant else None)
+        return compose(reply, wording, capabilities), True
+
+    @staticmethod
+    async def _record_disclosure(session: AsyncSession, job: AgentJob, sent: Message) -> None:
+        """Record a disclosure only once its reply was delivered (OMNI-041).
+
+        An undelivered reply - declined, or left uncertain - leaves the next one
+        still owing the disclosure: the customer was not told.
+        """
+        if sent.delivery_state is not MessageDeliveryState.SENT:
+            return
+        await ConversationRepository(session, tenant_id=job.tenant_id).record_disclosure(
+            job.conversation_id, at=sent.sent_at or datetime.now(UTC)
+        )
 
     async def _answer_emptiness(
         self,

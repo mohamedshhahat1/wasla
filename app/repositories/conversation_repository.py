@@ -484,6 +484,35 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         """
         await self._advance(conversation, at=at, inbound=True)
 
+    async def disclosure_marks(
+        self, conversation_id: uuid.UUID
+    ) -> tuple[datetime | None, datetime | None]:
+        """When automation was last disclosed, and when the AI last took over again (OMNI-041).
+
+        Columns read now, not the attributes of an object loaded before a long
+        inference: a colleague handing the conversation back mid-turn is what
+        this must see.
+        """
+        row = (
+            await self.session.execute(
+                select(Conversation.automation_disclosed_at, Conversation.ai_resumed_at).where(
+                    self._tenant_filter(), Conversation.id == conversation_id
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            return None, None
+        return row[0], row[1]
+
+    async def record_disclosure(self, conversation_id: uuid.UUID, *, at: datetime) -> None:
+        """Record a delivered disclosure. Forward only, so a late write never moves it back."""
+        await self.session.execute(
+            update(Conversation)
+            .where(self._tenant_filter(), Conversation.id == conversation_id)
+            .values(automation_disclosed_at=func.greatest(Conversation.automation_disclosed_at, at))
+            .execution_options(synchronize_session=False)
+        )
+
     async def touch_outbound(self, conversation: Conversation, *, at: datetime) -> None:
         """Record that the business sent something: the inbox order, never the window."""
         await self._advance(conversation, at=at, inbound=False)

@@ -14,6 +14,7 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.agents.disclosure import MAX_DISCLOSURE_LENGTH
 from app.db.models.enums import TenantRole, TenantStatus
 from app.schemas.auth import (
     MAXIMUM_NAME_LENGTH,
@@ -58,6 +59,17 @@ class WorkspaceCreateRequest(_Payload):
     )
 
 
+class DisclosureWording(_Payload):
+    """A workspace's wording of the automation disclosure, by language (OMNI-041).
+
+    A language left out keeps Wasla's wording; `{}` restores Wasla's for both.
+    An empty string is refused: the obligation is not the workspace's to blank.
+    """
+
+    en: StorableText | None = Field(default=None, min_length=1, max_length=MAX_DISCLOSURE_LENGTH)
+    ar: StorableText | None = Field(default=None, min_length=1, max_length=MAX_DISCLOSURE_LENGTH)
+
+
 class WorkspaceUpdateRequest(_Payload):
     """A change to the workspace's own details.
 
@@ -74,6 +86,11 @@ class WorkspaceUpdateRequest(_Payload):
         max_length=MAXIMUM_SLUG_LENGTH,
         pattern=SLUG_PATTERN,
     )
+    # The workspace's own wording of the automation disclosure, by language
+    # (OMNI-041). Replaces Wasla's for the languages given; `{}` restores
+    # Wasla's. Only the words: an empty one is refused, because the obligation
+    # to disclose is not the workspace's to switch off.
+    automation_disclosure: DisclosureWording | None = None
 
 
 class OwnershipTransferRequest(_Payload):
@@ -133,6 +150,8 @@ class WorkspaceRead(BaseModel):
     # deleted" is two fields and a client that checks one of them renders a
     # tombstoned workspace as usable.
     is_active: bool
+    # The workspace's own disclosure wording, where it set one (OMNI-041).
+    automation_disclosure: dict[str, str] | None = None
 
 
 class WorkspaceCreatedResponse(BaseModel):

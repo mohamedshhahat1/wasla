@@ -440,6 +440,14 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         DateTime(timezone=True),
         nullable=True,
     )
+    # When an automated reply last told this customer they were talking to an
+    # automated assistant - written once that reply was delivered (OMNI-041).
+    automation_disclosed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # When a colleague last handed the conversation back to the AI. A later
+    # AI reply discloses again: the customer may have been talking to a person.
+    ai_resumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # The most recent reading of how the customer sounds. Current state only;
     # every reading is kept on `message_sentiments`, which is where a history

@@ -584,6 +584,11 @@ class Settings(BaseSettings):
     # Comma-separated channel names; empty means every channel with an adapter
     # is operational.
     paused_channels: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # How long an AI conversation may go quiet before the next automated reply
+    # discloses again that it is automated, on a channel whose policy requires
+    # the disclosure - Messenger and Instagram (OMNI-041). Meta's policy says
+    # "after significant lapses of time" without a number; a day is the default.
+    automation_disclosure_gap_hours: int = Field(default=24, ge=1, le=24 * 30)
     # How long an upload intent must sit untouched before reconciliation treats
     # it as abandoned rather than in progress (ADR-087).
     #

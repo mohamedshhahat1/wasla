@@ -60,6 +60,7 @@ from app.channels.inbound import (
     tally,
 )
 from app.channels.media import locator_expired
+from app.channels.outcomes import SendNotAttemptedError
 from app.channels.policy import (
     ChannelCapabilities,
     ChannelPolicy,
@@ -159,6 +160,8 @@ TAGGED_CAPABILITIES: Final = ChannelCapabilities(
     templates=False,
     out_of_window=OutOfWindow.TAG,
     message_id_scope="connection",
+    # Messenger's and Instagram's policy (OMNI-041).
+    disclosure_required=True,
 )
 
 
@@ -179,6 +182,8 @@ class SendLog:
     contexts: list[SendContext] = field(default_factory=list)
     prepared: list[OutboundContent] = field(default_factory=list)
     fetched: list[str] = field(default_factory=list)
+    #: When set, the provider declines every send before reading it.
+    refuse: bool = False
 
 
 @dataclass
@@ -193,6 +198,8 @@ class _Sender:
     ) -> ProviderReceipt:
         self.log.sent.append((recipient, content))
         self.log.contexts.append(context)
+        if self.log.refuse:
+            raise SendNotAttemptedError("The synthetic provider declined the message.")
         return ProviderReceipt(message_id=f"syn.out.{uuid.uuid4().hex}")
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import DateTime, Index, String, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -71,6 +72,10 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
         nullable=True,
         default=None,
     )
+    # The workspace's own wording of the automation disclosure, by language
+    # (`{"en": ..., "ar": ...}`), where it has replaced Wasla's (OMNI-041).
+    # Only the wording: the obligation itself cannot be switched off.
+    automation_disclosure: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
 
     @property
     def is_purged(self) -> bool:

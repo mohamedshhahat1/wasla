@@ -382,6 +382,17 @@ INVARIANTS: tuple[Check, ...] = (
         "SELECT count(*) FROM messages WHERE direction = 'inbound'"
         " AND action_source IS NOT NULL AND action_title IS NOT NULL AND body IS NULL",
     ),
+    # An AI reply delivered on a channel whose policy requires the automation
+    # disclosure, on a conversation that has never recorded one (OMNI-041).
+    # Messenger and Instagram are the channels that require it.
+    Check(
+        "ai_reply_on_a_disclosure_channel_never_disclosed",
+        "SELECT count(*) FROM conversations c WHERE c.channel IN ('messenger', 'instagram')"
+        " AND c.automation_disclosed_at IS NULL AND EXISTS (SELECT 1 FROM messages m"
+        " WHERE m.tenant_id = c.tenant_id AND m.conversation_id = c.id"
+        " AND m.direction = 'outbound' AND m.origin = 'agent'"
+        " AND m.delivery_state = 'sent')",
+    ),
     # The window anchor is the newest thing the customer said (OMNI-036, the
     # audit's Q4). A late delivery used to move it backwards; on production
     # this counts conversations that already happened to.

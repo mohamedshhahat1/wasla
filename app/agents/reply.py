@@ -129,6 +129,11 @@ def _continuation(text: str) -> str:
     return ARABIC_CONTINUATION if _mostly_arabic(text) else ENGLISH_CONTINUATION
 
 
+def is_mostly_arabic(text: str) -> bool:
+    """Whether a text is written mostly in Arabic script - which language a fixed line takes."""
+    return _mostly_arabic(text)
+
+
 def _mostly_arabic(text: str) -> bool:
     sample = text[:MAX_SAFE_AI_WHATSAPP_REPLY_CHARS]
     arabic = sum(1 for character in sample if _is_arabic(character))
