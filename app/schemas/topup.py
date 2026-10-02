@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -24,7 +24,9 @@ from app.db.models.billing import (
     MAX_PLAN_PRICE,
     METER_ONLY_LIMITS,
     SUPPORTED_CURRENCIES,
+    LimitKey,
 )
+from app.db.models.channel import Channel
 from app.db.models.invoice import PaymentStatus
 from app.db.models.topup import (
     TopupEntitlement,
@@ -42,6 +44,12 @@ from app.schemas.text import StorableText
 ProductCode = Field(min_length=2, max_length=50, pattern=r"^[a-z0-9][a-z0-9_-]*$")
 Reason = Field(min_length=3, max_length=500)
 Quantity = Field(gt=0, le=MAX_LIMIT_VALUE)
+EligiblePlanCode = Annotated[
+    str, Field(min_length=2, max_length=50, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+]
+# How many plans one product may name. A guard on the request, not a product
+# rule: a catalogue has a handful of plans.
+MAX_ELIGIBLE_PLANS = 100
 
 
 def _money(value: Decimal) -> str:
@@ -53,6 +61,31 @@ def _currency(value: str) -> str:
     if upper not in SUPPORTED_CURRENCIES:
         raise ValueError(f"Only {', '.join(sorted(SUPPORTED_CURRENCIES))} is supported.")
     return upper
+
+
+def _sellable(entitlement: TopupEntitlement) -> TopupEntitlement:
+    """Refuse the retired number key by name: it is sold as channel slots now (ENT-05)."""
+    if entitlement.is_retired:
+        raise ValueError(
+            "whatsapp_numbers is retired; sell channel_connections instead "
+            "(typed whatsapp for a WhatsApp-only slot)."
+        )
+    return entitlement
+
+
+def _typed(entitlement: TopupEntitlement, channel_type: Channel | None) -> None:
+    """A slot is typed for a channel only on `channel_connections` (ENT-11)."""
+    if channel_type is not None and entitlement.limit_key is not LimitKey.CHANNEL_CONNECTIONS:
+        raise ValueError("Only a channel_connections top-up is typed for a channel.")
+
+
+def _distinct(codes: list[str] | None) -> list[str] | None:
+    if codes is None:
+        return None
+    lowered = [code.strip().lower() for code in codes]
+    if len(set(lowered)) != len(lowered):
+        raise ValueError("Each eligible plan is named once.")
+    return lowered
 
 
 # ------------------------------------------------------------------ products
@@ -75,6 +108,9 @@ class TopupProductRead(BaseModel):
     currency: str
     scope: TopupScope
     validity_policy: TopupValidity
+    # A channel slot only one channel type may use (ENT-11); null is a general
+    # slot any allowed channel may use, and on every other key.
+    channel_type: Channel | None = None
 
     @classmethod
     def from_model(cls, product: TopupProduct) -> Self:
@@ -91,6 +127,7 @@ class TopupProductRead(BaseModel):
             currency=product.currency,
             scope=product.scope,
             validity_policy=product.validity_policy,
+            channel_type=product.channel_type,
         )
 
 
@@ -104,9 +141,17 @@ class PlatformTopupProductRead(TopupProductRead):
     purchase_count: int
     created_at: datetime
     updated_at: datetime
+    # The plans this product is offered to (ENT-13); empty means every plan.
+    eligible_plan_codes: list[str] = Field(default_factory=list)
 
     @classmethod
-    def build(cls, product: TopupProduct, *, purchases: int) -> Self:
+    def build(
+        cls,
+        product: TopupProduct,
+        *,
+        purchases: int,
+        eligible_plan_codes: list[str] | None = None,
+    ) -> Self:
         base = TopupProductRead.from_model(product).model_dump()
         return cls(
             **base,
@@ -117,6 +162,7 @@ class PlatformTopupProductRead(TopupProductRead):
             purchase_count=purchases,
             created_at=product.created_at,
             updated_at=product.updated_at,
+            eligible_plan_codes=eligible_plan_codes or [],
         )
 
 
@@ -135,6 +181,13 @@ class TopupProductCreate(BaseModel):
     scope: TopupScope = TopupScope.GLOBAL
     tenant_id: uuid.UUID | None = None
     is_public: bool = True
+    # A slot only this channel type may use (ENT-11); `channel_connections`
+    # only. Null is a general slot.
+    channel_type: Channel | None = None
+    # The plans offered it (ENT-13). Null or empty: every plan.
+    eligible_plan_codes: list[EligiblePlanCode] | None = Field(
+        default=None, max_length=MAX_ELIGIBLE_PLANS
+    )
     reason: StorableText = Reason
 
     @field_validator("currency")
@@ -142,10 +195,21 @@ class TopupProductCreate(BaseModel):
     def _supported(cls, value: str) -> str:
         return _currency(value)
 
+    @field_validator("entitlement_key")
+    @classmethod
+    def _not_retired(cls, value: TopupEntitlement) -> TopupEntitlement:
+        return _sellable(value)
+
+    @field_validator("eligible_plan_codes")
+    @classmethod
+    def _each_once(cls, value: list[str] | None) -> list[str] | None:
+        return _distinct(value)
+
     @model_validator(mode="after")
     def _scope(self) -> Self:
         if (self.scope is TopupScope.TENANT) != (self.tenant_id is not None):
             raise ValueError("A tenant top-up names its workspace; a global one names none.")
+        _typed(self.entitlement_key, self.channel_type)
         return self
 
 
@@ -154,6 +218,11 @@ class TopupProductUpdate(BaseModel):
 
     Existing purchases keep the terms they were bought at; the entitlement,
     scope and owner cannot change - that is a different product.
+
+    `channel_type` and `eligible_plan_codes` change only when named: a
+    `channel_type` of null turns a typed slot general (ENT-11), and an
+    `eligible_plan_codes` of null or [] offers the product to every plan
+    (ENT-13).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -165,8 +234,17 @@ class TopupProductUpdate(BaseModel):
         default=None, ge=0, le=MAX_PLAN_PRICE, max_digits=12, decimal_places=2
     )
     is_public: bool | None = None
+    channel_type: Channel | None = None
+    eligible_plan_codes: list[EligiblePlanCode] | None = Field(
+        default=None, max_length=MAX_ELIGIBLE_PLANS
+    )
     expected_revision: int = Field(ge=1)
     reason: StorableText = Reason
+
+    @field_validator("eligible_plan_codes")
+    @classmethod
+    def _each_once(cls, value: list[str] | None) -> list[str] | None:
+        return _distinct(value)
 
 
 class TopupStateChange(BaseModel):
@@ -199,6 +277,7 @@ class TopupCheckoutStarted(BaseModel):
     entitlement_key: TopupEntitlement
     quantity: int
     expires_at: datetime
+    channel_type: Channel | None = None
 
 
 class TopupPurchaseRead(BaseModel):
@@ -224,6 +303,8 @@ class TopupPurchaseRead(BaseModel):
     invoice_id: uuid.UUID | None
     payment_id: uuid.UUID | None
     payment_status: PaymentStatus | None = None
+    # As frozen at purchase: a typed channel slot's channel (ENT-11).
+    channel_type: Channel | None = None
 
     @classmethod
     def from_model(
@@ -236,6 +317,7 @@ class TopupPurchaseRead(BaseModel):
             product_name=purchase.product_name,
             source=purchase.source,
             entitlement_key=purchase.entitlement_key,
+            channel_type=purchase.channel_type,
             quantity=purchase.quantity,
             unit_price=_money(purchase.unit_price),
             amount=_money(purchase.total_amount),
@@ -287,10 +369,23 @@ class TopupGrantCreate(BaseModel):
 
     entitlement_key: TopupEntitlement
     quantity: int = Quantity
+    # A typed channel slot (ENT-11), `channel_connections` only; it must be a
+    # channel the workspace's plan includes (ENT-12).
+    channel_type: Channel | None = None
     # One rule in v1: until the end of the subscription's current period.
     valid_until: Literal["current_period_end"] = "current_period_end"
     reason: StorableText = Reason
     expected_subscription_revision: int = Field(ge=1)
+
+    @field_validator("entitlement_key")
+    @classmethod
+    def _not_retired(cls, value: TopupEntitlement) -> TopupEntitlement:
+        return _sellable(value)
+
+    @model_validator(mode="after")
+    def _channel(self) -> Self:
+        _typed(self.entitlement_key, self.channel_type)
+        return self
 
 
 class TopupRefundReview(BaseModel):

@@ -692,9 +692,15 @@ def get_topup_service(
     session: SessionDep,
     workspace: ActiveWorkspaceDep,
     checkout: CheckoutServiceDep,
+    settings: SettingsDep,
 ) -> TopupService:
     """Workspace-scoped top-ups (ADR-113), buying through the one checkout path."""
-    return TopupService(session, tenant_id=workspace.tenant.id, checkout=checkout)
+    return TopupService(
+        session,
+        tenant_id=workspace.tenant.id,
+        checkout=checkout,
+        default_plan_code=settings.default_plan_code,
+    )
 
 
 TopupServiceDep = Annotated[TopupService, Depends(get_topup_service)]

@@ -104,6 +104,18 @@ class CustomPlanNotAvailableError(ValidationError):
     message = "That custom plan belongs to another workspace and cannot be assigned here."
 
 
+class TopupNotAvailableError(ValidationError):
+    """A channel slot typed for a channel the workspace's plan does not include (ENT-12).
+
+    A top-up never opens a channel type: the plan version alone decides which
+    channels a workspace may connect, so a slot for any other is one it could
+    never use. Refused at checkout and as a platform grant.
+    """
+
+    error_code = "topup_not_available"
+    message = "This top-up is for a channel your plan does not include."
+
+
 class PlanLimitExceededError(WaslaError):
     """The workspace's plan does not allow this, and no role change would.
 

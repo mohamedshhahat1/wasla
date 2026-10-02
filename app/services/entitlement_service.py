@@ -265,6 +265,11 @@ class EntitlementService:
         await self._resolve()
         return self._terms
 
+    async def plan(self) -> Plan | None:
+        """The plan in force: the serving subscription's, else the default; None if unenforced."""
+        plan, _ = await self._resolve()
+        return plan
+
     async def _resolve(self) -> tuple[Plan | None, Subscription | None]:
         if self._resolved is not None:
             return self._resolved

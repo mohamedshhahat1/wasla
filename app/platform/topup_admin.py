@@ -32,10 +32,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import (
+    ConflictError,
+    NotFoundError,
+    TopupNotAvailableError,
+    ValidationError,
+)
 from app.core.telemetry import record_topup_purchase
 from app.db.models.audit import AuditAction
-from app.db.models.billing import DEFAULT_CURRENCY, Subscription
+from app.db.models.billing import DEFAULT_CURRENCY, LimitKey, Plan, Subscription
+from app.db.models.channel import Channel
 from app.db.models.invoice import Payment, PaymentStatus
 from app.db.models.tenant import Tenant
 from app.db.models.topup import (
@@ -63,7 +69,7 @@ from app.schemas.topup import (
     TopupRefundReview,
 )
 from app.services.entitlement_service import EntitlementService
-from app.services.entitlement_terms import term_limit
+from app.services.entitlement_terms import term_channel_types, term_limit
 from app.services.plan_catalog import PlanCatalog
 from app.services.topup_ledger import TopupLedger, move, purchase_state, validity_window
 
@@ -74,11 +80,13 @@ class Page[T]:
     total: int
 
 
-def _product_state(product: TopupProduct) -> dict[str, Any]:
+def _product_state(product: TopupProduct, *, eligible: list[str]) -> dict[str, Any]:
     return {
         "code": product.code,
         "name": product.name,
         "entitlement_key": product.entitlement_key.value,
+        "channel_type": product.channel_type.value if product.channel_type is not None else None,
+        "eligible_plan_codes": eligible,
         "quantity": product.quantity,
         "price": str(product.price),
         "currency": product.currency,
@@ -110,8 +118,11 @@ class TopupAdmin:
         active: bool | None,
         limit: int,
         offset: int,
+        channel_type: Channel | None = None,
     ) -> Page[PlatformTopupProductRead]:
         statement = select(TopupProduct)
+        if channel_type is not None:
+            statement = statement.where(TopupProduct.channel_type == channel_type)
         if scope is not None:
             statement = statement.where(TopupProduct.scope == scope)
         if tenant_id is not None:
@@ -143,11 +154,13 @@ class TopupAdmin:
             tenant = await self._session.get(Tenant, payload.tenant_id)
             if tenant is None or tenant.deleted_at is not None:
                 raise NotFoundError("No such workspace.")
+        eligible = await self._plans_named(payload.eligible_plan_codes or [])
         product = TopupProduct(
             code=code,
             name=payload.name,
             description=payload.description,
             entitlement_key=payload.entitlement_key,
+            channel_type=payload.channel_type,
             quantity=payload.quantity,
             price=payload.price,
             currency=payload.currency,
@@ -164,6 +177,9 @@ class TopupAdmin:
                 await self._session.flush()
         except IntegrityError:
             raise ConflictError("A top-up with that code already exists.") from None
+        await self._products.set_eligible_plans(
+            product.id, (plan.id for plan in eligible), now=datetime.now(UTC)
+        )
         record_platform_billing(
             self._session,
             AuditAction.BILLING_TOPUP_CREATED,
@@ -173,7 +189,7 @@ class TopupAdmin:
             target_id=product.id,
             tenant_id=product.tenant_id,
             target_label=product.code,
-            after=_product_state(product),
+            after=_product_state(product, eligible=sorted(plan.code for plan in eligible)),
         )
         return await self._read(product)
 
@@ -182,7 +198,21 @@ class TopupAdmin:
     ) -> PlatformTopupProductRead:
         """Terms and presentation for *new* purchases; existing ones are frozen."""
         product = await self._lock_product(product_id, expected_revision=payload.expected_revision)
-        before = _product_state(product)
+        named = payload.model_fields_set
+        if (
+            "channel_type" in named
+            and payload.channel_type is not None
+            and product.entitlement_key.limit_key is not LimitKey.CHANNEL_CONNECTIONS
+        ):
+            raise ValidationError("Only a channel_connections top-up is typed for a channel.")
+        eligible = (
+            await self._plans_named(payload.eligible_plan_codes or [])
+            if "eligible_plan_codes" in named
+            else None
+        )
+        before = _product_state(
+            product, eligible=await self._products.eligible_plan_codes(product.id)
+        )
         if payload.name is not None:
             product.name = payload.name
         if payload.description is not None:
@@ -193,7 +223,13 @@ class TopupAdmin:
             product.price = payload.price
         if payload.is_public is not None:
             product.is_public = payload.is_public
+        if "channel_type" in named:
+            product.channel_type = payload.channel_type
         await self._session.flush()
+        if eligible is not None:
+            await self._products.set_eligible_plans(
+                product.id, (plan.id for plan in eligible), now=datetime.now(UTC)
+            )
         record_platform_billing(
             self._session,
             AuditAction.BILLING_TOPUP_UPDATED,
@@ -204,7 +240,9 @@ class TopupAdmin:
             tenant_id=product.tenant_id,
             target_label=product.code,
             before=before,
-            after=_product_state(product),
+            after=_product_state(
+                product, eligible=await self._products.eligible_plan_codes(product.id)
+            ),
         )
         return await self._read(product)
 
@@ -221,7 +259,8 @@ class TopupAdmin:
         product = await self._lock_product(product_id, expected_revision=expected_revision)
         if product.is_active is active:
             raise ConflictError(f"The top-up is already {'active' if active else 'inactive'}.")
-        before = _product_state(product)
+        eligible = await self._products.eligible_plan_codes(product.id)
+        before = _product_state(product, eligible=eligible)
         product.is_active = active
         await self._session.flush()
         record_platform_billing(
@@ -238,7 +277,7 @@ class TopupAdmin:
             tenant_id=product.tenant_id,
             target_label=product.code,
             before=before,
-            after=_product_state(product),
+            after=_product_state(product, eligible=eligible),
         )
         return await self._read(product)
 
@@ -249,7 +288,9 @@ class TopupAdmin:
             raise ConflictError(
                 "This top-up has purchases, which are financial history. Deactivate it instead."
             )
-        snapshot = _product_state(product)
+        snapshot = _product_state(
+            product, eligible=await self._products.eligible_plan_codes(product.id)
+        )
         await self._session.delete(product)
         await self._session.flush()
         record_platform_billing(
@@ -343,6 +384,14 @@ class TopupAdmin:
         terms = await PlanCatalog(self._session).pinned_version(subscription)
         if terms is not None and term_limit(terms, key) is None:
             raise ConflictError("The plan already allows this without limit.")
+        if payload.channel_type is not None and payload.channel_type not in term_channel_types(
+            terms
+        ):
+            # A grant never opens a channel type either (ENT-12).
+            raise TopupNotAvailableError(
+                "This workspace's plan does not include that channel, so a slot for it "
+                "could not be used."
+            )
 
         entitlements = EntitlementService(
             self._session,
@@ -362,6 +411,7 @@ class TopupAdmin:
             product_code=None,
             product_name=PLATFORM_GRANT_NAME,
             entitlement_key=payload.entitlement_key,
+            channel_type=payload.channel_type,
             quantity=payload.quantity,
             unit_price=Decimal("0.00"),
             total_amount=Decimal("0.00"),
@@ -390,6 +440,9 @@ class TopupAdmin:
             after={"effective_limit": after.limit, "platform_grant_limit": after.grant_limit},
             extra={
                 "entitlement_key": payload.entitlement_key.value,
+                "channel_type": (
+                    payload.channel_type.value if payload.channel_type is not None else None
+                ),
                 "quantity": payload.quantity,
                 "expires_at": purchase.expires_at.isoformat(),
                 "valid_until": payload.valid_until,
@@ -462,8 +515,22 @@ class TopupAdmin:
         # `updated_at`, and an async session cannot load it on attribute access.
         await self._session.refresh(product)
         return PlatformTopupProductRead.build(
-            product, purchases=await self._products.purchase_count(product.id)
+            product,
+            purchases=await self._products.purchase_count(product.id),
+            eligible_plan_codes=await self._products.eligible_plan_codes(product.id),
         )
+
+    async def _plans_named(self, codes: list[str]) -> list[Plan]:
+        """The plans `codes` name, every one of them, or a 422 naming those that do not exist."""
+        if not codes:
+            return []
+        plans = list(await self._session.scalars(select(Plan).where(Plan.code.in_(codes))))
+        missing = sorted(set(codes) - {plan.code for plan in plans})
+        if missing:
+            raise ValidationError(
+                "No such plan: " + ", ".join(missing) + ".", details={"plan_codes": missing}
+            )
+        return plans
 
     async def _count(self, statement: Select[Any]) -> int:
         return int(

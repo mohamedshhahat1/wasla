@@ -461,7 +461,9 @@ async def list_topups(
     """Top-ups this workspace may buy: active global ones and its own.
 
     Open to any member, like the plan catalogue. Another workspace's own
-    products never appear.
+    products never appear, nor one not offered to this workspace's plan
+    (ENT-13), nor a channel slot typed for a channel the plan does not include
+    (ENT-12).
     """
     return [
         TopupProductRead.from_model(product)
@@ -502,6 +504,7 @@ async def start_topup_checkout(
         entitlement_key=started.entitlement_key,
         quantity=started.quantity,
         expires_at=started.expires_at,
+        channel_type=started.channel_type,
     )
 
 
