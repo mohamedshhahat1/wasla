@@ -2,6 +2,8 @@
 
     python -m scripts.omnichannel_invariants census   # what the data holds; never fails
     python -m scripts.omnichannel_invariants verify   # invariants; exit 1 on any violation
+    python -m scripts.omnichannel_invariants recover-button-opt-outs --dry-run
+    python -m scripts.omnichannel_invariants recover-button-opt-outs --apply
 
 The URL is `INVARIANTS_DATABASE_URL`, else `DATABASE_URL`. Meant for a replica or
 a restored copy as much as for the primary: every statement is a `SELECT`, run
@@ -26,6 +28,13 @@ oracle), each agent turn a customer's message as its trigger (the echo oracle),
 each file its own message's workspace and conversation, and no identity scoped
 twice. Most are also enforced by keys; this says so of the data, and is what
 proves a backfill or a restore whole.
+
+`recover-button-opt-outs` is the one command here that can write, and only with
+`--apply` (OMNI-030). It replays the "stop" taps still held in retained raw
+payloads through the one opt-out writer, with the provenance `replay`; the dry
+run (the default) is read-only like everything else. It must run on production
+**before the 30-day payload redaction removes the evidence**. Output is counts
+per workspace id; never a phone, a business-scoped id or a message.
 """
 
 from __future__ import annotations
@@ -371,11 +380,61 @@ async def _run(command: str, url: str) -> int:
     return 0
 
 
+async def _recover(url: str, *, apply: bool) -> int:
+    """Replay retained stop taps; read-only unless `apply` (OMNI-030)."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.services.opt_out_recovery import recover_button_opt_outs
+
+    engine = create_async_engine(url, poolclass=NullPool)
+    try:
+        async with AsyncSession(engine, expire_on_commit=False) as session:
+            if not apply:
+                await session.execute(text("SET TRANSACTION READ ONLY"))
+            report = await recover_button_opt_outs(session, apply=apply)
+            if apply:
+                await session.commit()
+            else:
+                await session.rollback()
+    finally:
+        await engine.dispose()
+    verb = "applied" if apply else "would_apply"
+    for tenant_id, counts in sorted(report.by_workspace.items(), key=lambda item: str(item[0])):
+        sys.stdout.write(
+            f"workspace {tenant_id}: candidates {counts.candidates}, {verb} {counts.applied}, "
+            f"already_opted_out {counts.already_opted_out}, "
+            f"skipped_newer_resume {counts.skipped_newer_resume}, "
+            f"no_projected_message {counts.no_projected_message}\n"
+        )
+    sys.stdout.write(
+        f"recover-button-opt-outs {'apply' if apply else 'dry-run'}: taps_read {report.taps_read}, "
+        f"candidates {report.total('candidates')}, {verb} {report.total('applied')}, "
+        f"already_opted_out {report.total('already_opted_out')}, "
+        f"skipped_newer_resume {report.total('skipped_newer_resume')}\n"
+    )
+    return 0
+
+
+USAGE = (
+    "usage: python -m scripts.omnichannel_invariants census|verify\n"
+    "       python -m scripts.omnichannel_invariants recover-button-opt-outs [--dry-run|--apply]\n"
+)
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 1 or argv[0] not in ("census", "verify"):
-        sys.stderr.write("usage: python -m scripts.omnichannel_invariants census|verify\n")
-        return 64
     url = os.environ.get("INVARIANTS_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if argv and argv[0] == "recover-button-opt-outs":
+        mode = argv[1:] or ["--dry-run"]
+        if mode not in (["--dry-run"], ["--apply"]):
+            sys.stderr.write(USAGE)
+            return 64
+        if not url:
+            sys.stderr.write("omnichannel_invariants: INVARIANTS_DATABASE_URL or DATABASE_URL\n")
+            return 64
+        return asyncio.run(_recover(url, apply=mode == ["--apply"]))
+    if len(argv) != 1 or argv[0] not in ("census", "verify"):
+        sys.stderr.write(USAGE)
+        return 64
     if not url:
         sys.stderr.write("omnichannel_invariants: INVARIANTS_DATABASE_URL or DATABASE_URL\n")
         return 64
