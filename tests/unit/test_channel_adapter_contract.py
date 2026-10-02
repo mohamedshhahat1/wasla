@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 
 from app.channels.adapter import ChannelAdapter, IdentityNotAddressableError
-from app.channels.inbound import InboundKind, RefusalReason
+from app.channels.inbound import InboundEvent, InboundKind, RefusalReason
 from app.db.models.channel import (
     Channel,
     ContactIdentity,
@@ -441,3 +441,51 @@ def test_a_tap_meta_did_not_issue_is_kept_without_an_action(message: dict[str, A
     assert event.action is None
     assert event.text is None
     assert delivery.refused_total == 0
+
+
+# ------------------------------------------------- event identity (OMNI-032)
+
+
+@pytest.mark.parametrize("kind", [InboundKind.MESSAGE, InboundKind.ECHO])
+def test_a_message_event_with_a_composed_id_is_refused_at_construction(kind: InboundKind) -> None:
+    """Recovery finds the stored message by the event id: they must be one value."""
+    with pytest.raises(ValueError, match="message id as its event id"):
+        InboundEvent(
+            channel=Channel.INSTAGRAM,
+            connection_key="syn-account",
+            kind=kind,
+            event_id="evt.mid-1",
+            message_id="mid-1",
+            occurred_at=None,
+        )
+    with pytest.raises(ValueError):
+        InboundEvent(
+            channel=Channel.INSTAGRAM,
+            connection_key="syn-account",
+            kind=kind,
+            event_id="mid-1",
+            message_id=None,
+            occurred_at=None,
+        )
+
+
+def test_a_status_keeps_its_composed_id() -> None:
+    """`{message_id}:{status}` is how three statuses of one message stay three events."""
+    event = InboundEvent(
+        channel=Channel.WHATSAPP,
+        connection_key="PN",
+        kind=InboundKind.STATUS,
+        event_id="wamid.out:delivered",
+        message_id="wamid.out",
+        occurred_at=None,
+    )
+
+    assert event.event_id != event.message_id
+
+
+def test_every_message_an_adapter_produces_is_identified_by_its_message_id(case: Case) -> None:
+    adapter = case.build()
+
+    for event in adapter.parse(case.valid()).events:
+        if event.kind in (InboundKind.MESSAGE, InboundKind.ECHO):
+            assert event.event_id == event.message_id

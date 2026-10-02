@@ -189,6 +189,26 @@ class InboundEvent:
     #: redacted on the retention schedule (DB-011).
     raw: Mapping[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        """A message or an echo is identified by the provider's message id (OMNI-032, ADR-120).
+
+        Ingestion stores the message under `message_id`; inbound recovery and
+        the stranded-media sweep find it again from the stored event by
+        `event_id`. Those are one value for every Meta product - a message id
+        is the event's identity - and the contract used to say so nowhere: an
+        adapter that composed its event ids (as WhatsApp does for statuses)
+        would have had every message that missed the queue abandoned as
+        `projection_missing` and never answered. Refused at construction, so
+        such an adapter fails its contract suite rather than a customer.
+        Statuses are not messages and keep composed ids.
+        """
+        if self.kind in (InboundKind.MESSAGE, InboundKind.ECHO) and (
+            not self.message_id or self.event_id != self.message_id
+        ):
+            raise ValueError(
+                "a message or echo event must carry the provider's message id as its event id"
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class ParsedDelivery:

@@ -611,3 +611,77 @@ async def test_the_sweep_finishes_only_what_nothing_else_will(
         assert not row.is_resolved
         assert row.last_error is None
     assert (await _row(committing, live)).status is MediaStatus.DOWNLOADING
+
+
+async def test_two_sweeps_racing_for_one_stranded_file_requeue_it_once(
+    redis: Redis,
+    prepared_database: str,
+    committing: async_sessionmaker[AsyncSession],
+    workspace: tuple[uuid.UUID, uuid.UUID],
+    tmp_path: Path,
+) -> None:
+    """OMNI-032: deployments run several workers, and each sweeps.
+
+    A stranded file is claimed under `SKIP LOCKED`, so two passes started
+    together hand it to one of them - one media job, one fetch - and a file
+    whose inbound event still owes work (event id = message id, by contract) is
+    left to inbound recovery by both.
+    """
+    tenant_id, account_id = workspace
+    settings = _settings(prepared_database)
+    now = datetime.now(UTC)
+    long_ago = now - unclaimed_horizon(settings) - timedelta(seconds=5)
+    stranded = await _attachment(
+        committing, tenant_id=tenant_id, conversation_id=await _conversation(committing, workspace)
+    )
+    owed = await _attachment(
+        committing, tenant_id=tenant_id, conversation_id=await _conversation(committing, workspace)
+    )
+    async with committing() as session:
+        await session.execute(
+            update(MessageMedia)
+            .where(MessageMedia.id.in_([stranded, owed]))
+            .values(created_at=long_ago)
+        )
+        owed_message = (
+            await session.execute(
+                select(Message.wa_message_id)
+                .join(MessageMedia, MessageMedia.message_id == Message.id)
+                .where(MessageMedia.id == owed)
+            )
+        ).scalar_one()
+        session.add(
+            WhatsAppEvent(
+                tenant_id=tenant_id,
+                account_id=account_id,
+                event_id=owed_message,
+                kind=WhatsAppEventKind.MESSAGE,
+                state=WhatsAppEventState.RECEIVED,
+                payload={},
+                received_at=long_ago,
+            )
+        )
+        await session.commit()
+
+    first, second = Database(settings), Database(settings)
+    try:
+        outcomes = await asyncio.gather(
+            *(
+                MediaRecoveryWorker(
+                    database=database,
+                    redis=_RedisClient(redis),  # type: ignore[arg-type]
+                    settings=settings,
+                    storage=LocalMediaStorage(tmp_path),
+                ).run_once(now=now)
+                for database in (first, second)
+            )
+        )
+    finally:
+        await first.dispose()
+        await second.dispose()
+
+    requeued = [job.media_id for outcome in outcomes for job in outcome.requeued]
+    assert requeued == [stranded]
+    assert await MediaQueue(redis).depth() == 1
+    assert not (await _row(committing, owed)).is_resolved
+    assert (await _row(committing, owed)).attempts == 0
