@@ -328,6 +328,30 @@ class SyntheticAdapter:
                 ),
                 raw=dict(raw),
             )
+        if kind == "postback":
+            # Messenger/Instagram-shaped `postback {mid, title, payload}`: a
+            # message carrying an action, never a separate kind (ADR-125).
+            party = raw.get("from")
+            if not isinstance(party, str) or not party:
+                refused[RefusalReason.MISSING_SENDER] += 1
+                return None
+            title = raw.get("title") if isinstance(raw.get("title"), str) else None
+            payload = raw.get("payload") if isinstance(raw.get("payload"), str) else None
+            return InboundEvent(
+                channel=self.channel,
+                connection_key=account,
+                kind=InboundKind.MESSAGE,
+                event_id=event_id,
+                occurred_at=at,
+                sender=(Identifier(IdentityKind.IGSID, party),),
+                message_id=event_id,
+                message_kind=MessageKind.INTERACTIVE,
+                text=title,
+                action=ReplyAction(
+                    source=ReplyActionSource.POSTBACK, id_or_payload=payload, title=title
+                ),
+                raw=dict(raw),
+            )
         if kind not in ("message", "echo"):
             refused[RefusalReason.UNSUPPORTED_FIELD] += 1
             return None
