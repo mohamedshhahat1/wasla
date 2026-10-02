@@ -530,6 +530,25 @@ class EntitlementService:
             return None
         return await self._capacity(version, at=subscription.current_period_end)
 
+    async def next_term_channel_capacity(self) -> ChannelCapacity | None:
+        """The capacity the next billing term opens with (ENT-14, ENT-15).
+
+        The scheduled version's if a change is scheduled, else the current
+        terms', with only the top-ups and grants still live at the boundary -
+        capacity ones end with the term - so this is what the workspace holds
+        once the term rolls if nothing more is bought. None without a serving
+        subscription: there is no term ahead to judge.
+        """
+        plan, subscription = await self._resolve()
+        if plan is None or subscription is None:
+            return None
+        terms: PlanVersion | Plan = self._terms if self._terms is not None else plan
+        if subscription.scheduled_plan_version_id is not None:
+            scheduled = await self._catalog.get_version(subscription.scheduled_plan_version_id)
+            if scheduled is not None:
+                terms = scheduled
+        return await self._capacity(terms, at=subscription.current_period_end)
+
     async def allowed_channel_types(self) -> frozenset[Channel]:
         """The channel types the plan in force allows (ENT-09); WhatsApp alone if unstated."""
         plan, _ = await self._resolve()

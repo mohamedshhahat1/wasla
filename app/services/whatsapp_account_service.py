@@ -46,6 +46,7 @@ from app.repositories.channel_repository import ChannelConnectionRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.audit_service import AuditTrail
 from app.services.channel_capacity import ChannelCapacityGuard
+from app.services.channel_connection_service import stop_automation
 from app.services.credential_service import CredentialService
 
 logger = get_logger(__name__)
@@ -334,6 +335,9 @@ class WhatsAppAccountService:
             connection.disabled_by = actor.id if actor is not None else None
         account.status = status
         await self._session.flush()
+        if status is WhatsAppAccountStatus.DISABLED:
+            # The same consequence as every other disable path (ENT-14).
+            await stop_automation(self._session, tenant_id=tenant_id, connection_id=account.id)
 
         AuditTrail(self._session, tenant_id=tenant_id).record(
             (

@@ -499,6 +499,14 @@ class AuditAction(StrEnum):
     CHANNEL_CONNECTION_DISABLED = "channel_connection_disabled"
     CHANNEL_CONNECTION_RELEASED = "channel_connection_released"
 
+    # The capacity-reduction lifecycle (ENT-14, ENT-15): a reduction opened at a
+    # boundary, resolved - by an owner, automatically, or because capacity came
+    # back - and an owner's selection saved ahead of a boundary. Each disable
+    # it causes is its own `*_disabled` entry naming the reduction.
+    CHANNEL_CAPACITY_REDUCTION_OPENED = "channel_capacity_reduction_opened"
+    CHANNEL_CAPACITY_REDUCTION_RESOLVED = "channel_capacity_reduction_resolved"
+    CHANNEL_CAPACITY_SELECTION_SAVED = "channel_capacity_selection_saved"
+
 
 AUDIT_ACTOR_KIND_TYPE = _enum_type(AuditActorKind, name="audit_actor_kind")
 # The order production holds the labels in: the order the migrations added
@@ -624,6 +632,10 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     "channel_connection_enabled",
     "channel_connection_disabled",
     "channel_connection_released",
+    # 0095
+    "channel_capacity_reduction_opened",
+    "channel_capacity_reduction_resolved",
+    "channel_capacity_selection_saved",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER

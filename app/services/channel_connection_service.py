@@ -52,11 +52,26 @@ from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.repositories.channel_repository import ChannelConnectionRepository, ConnectionDirectory
 from app.services.audit_service import AuditTrail
 from app.services.channel_capacity import ChannelCapacityGuard, ChannelSlot
+from app.services.follow_up_service import FollowUpService
 
 logger = get_logger(__name__)
 
 # The partial unique index that makes one live claim per provider connection.
 LIVE_CONNECTION_INDEX = "uq_channel_connections_live_external_account"
+
+
+async def stop_automation(
+    session: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID
+) -> int:
+    """What disabling a connection stops, on every disable path (ENT-14).
+
+    The pending follow-ups of its conversations are cancelled, in the disable's
+    transaction - whether a person disabled it or a capacity reduction did. One
+    function, so the two paths cannot drift apart. Returns how many.
+    """
+    return await FollowUpService(session=session, tenant_id=tenant_id).cancel_for_connection(
+        connection_id=connection_id
+    )
 
 
 class ChannelConnectionService:
@@ -187,6 +202,11 @@ class ChannelConnectionService:
         The claim, the credential, the conversations and the contacts stay; an
         owner may enable it again when a slot is free. Disabling an already
         disabled connection only records the newer reason.
+
+        What disabling stops is `stop_automation`'s: the connection's pending
+        follow-ups are cancelled. Its queued AI turns need nothing - a turn
+        re-reads the connection before it holds or calls anything and ends
+        `suppressed_channel`, uncharged.
         """
         connection = await self._live(connection_id)
         await self._write_status(connection, ConnectionStatus.DISABLED)
@@ -194,12 +214,15 @@ class ChannelConnectionService:
         connection.disabled_at = datetime.now(UTC)
         connection.disabled_by = actor.id if actor is not None else None
         await self._session.flush()
+        cancelled = await stop_automation(
+            self._session, tenant_id=self._tenant_id, connection_id=connection.id
+        )
         self._record(
             AuditAction.CHANNEL_CONNECTION_DISABLED,
             connection,
             actor=actor,
             actor_kind=actor_kind,
-            meta={"reason": reason.value, **(meta or {})},
+            meta={"reason": reason.value, "follow_ups_cancelled": cancelled, **(meta or {})},
         )
         return await self._connections.require_by_id(connection.id)
 
@@ -294,4 +317,4 @@ class ChannelConnectionService:
         )
 
 
-__all__ = ["LIVE_CONNECTION_INDEX", "ChannelConnectionService"]
+__all__ = ["LIVE_CONNECTION_INDEX", "ChannelConnectionService", "stop_automation"]

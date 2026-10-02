@@ -26,18 +26,28 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.channels.adapter import ChannelAdapter
 from app.channels.registry import ChannelRegistry
+from app.core.config import Settings
+from app.db.models.audit import AuditAction, AuditLog
 from app.db.models.billing import BillingInterval, Plan, Subscription, SubscriptionStatus
 from app.db.models.channel import Channel, ChannelConnection, ConnectionStatus
+from app.db.models.channel_capacity import (
+    CapacityReductionCause,
+    CapacityReductionStatus,
+    ChannelCapacityReduction,
+)
 from app.db.models.enums import MembershipStatus, TenantRole
 from app.db.models.membership import Membership
 from app.db.models.tenant import Tenant
 from app.db.models.topup import TopupEntitlement, TopupPurchase, TopupSource, TopupStatus
 from app.db.models.user import User
+from app.db.session import Database
 from app.integrations.whatsapp.adapter import WhatsAppAdapter
+from app.services.capacity_reduction import ChannelCapacityReductions
 from app.services.channel_capacity import ChannelCapacityExceededError
 from app.services.channel_connection_service import ChannelConnectionService
 from app.services.plan_catalog import PlanCatalog
 from app.services.whatsapp_account_service import WhatsAppAccountService
+from app.workers.billing_worker import BillingWorker
 from tests.billing_fixtures import erase_ledger
 from tests.channel_fakes import SyntheticAdapter
 from tests.fake_ownership import FakeOwnershipVerifier
@@ -123,6 +133,9 @@ async def worlds(maker: async_sessionmaker[AsyncSession]) -> AsyncIterator[list[
             ids = [world.tenant_id for world in built]
             if ids:
                 await erase_ledger(session, ids)
+                # Audit rows keep the platform's history by SET NULL; a test's
+                # must not outlive it as platform-wide rows another suite counts.
+                await session.execute(delete(AuditLog).where(AuditLog.tenant_id.in_(ids)))
                 await session.execute(delete(Subscription).where(Subscription.tenant_id.in_(ids)))
                 await session.execute(delete(Tenant).where(Tenant.id.in_(ids)))
                 await session.execute(
@@ -433,3 +446,143 @@ async def _grant(
             )
         )
         await session.commit()
+
+
+# --------------------------------------------- capacity reductions (ENT-14)
+
+
+async def _open_reduction(
+    maker: async_sessionmaker[AsyncSession], world: World, *, active: int, ended_ago: timedelta
+) -> list[uuid.UUID]:
+    """`active` connections on a one-slot plan, and a reduction whose grace ended `ended_ago`."""
+    ids = []
+    start = datetime.now(UTC) - timedelta(days=60)
+    async with maker() as session:
+        for index in range(active):
+            connection = ChannelConnection(
+                id=uuid.uuid4(),
+                tenant_id=world.tenant_id,
+                channel=Channel.INSTAGRAM,
+                external_account_id=f"reduce-{uuid.uuid4().hex}",
+                status=ConnectionStatus.ACTIVE,
+                ownership_started_at=start + timedelta(hours=index),
+            )
+            session.add(connection)
+            ids.append(connection.id)
+        await session.flush()
+        grace = timedelta(days=7)
+        opened = await ChannelCapacityReductions(
+            session, tenant_id=world.tenant_id, grace=grace
+        ).boundary(
+            cause=CapacityReductionCause.DOWNGRADE,
+            now=datetime.now(UTC) - grace - ended_ago,
+        )
+        assert opened is not None and opened.status is CapacityReductionStatus.PENDING_SELECTION
+        await session.commit()
+    return ids
+
+
+def _billing_worker(database_url: str) -> tuple[BillingWorker, Database]:
+    settings = Settings(_env_file=None, environment="test", database_url=database_url)
+    database = Database(settings)
+    return BillingWorker(database=database, settings=settings), database
+
+
+async def _disables(maker: async_sessionmaker[AsyncSession], world: World) -> list[uuid.UUID]:
+    async with maker() as session:
+        rows = await session.scalars(
+            select(AuditLog.target_id)
+            .where(AuditLog.tenant_id == world.tenant_id)
+            .where(AuditLog.action == AuditAction.CHANNEL_CONNECTION_DISABLED)
+        )
+        return [row for row in rows if row is not None]
+
+
+async def test_two_billing_workers_at_the_grace_end_disable_once(
+    maker: async_sessionmaker[AsyncSession], worlds: list[World], prepared_database: str
+) -> None:
+    """One set of disables and one audit entry per connection, however many workers run."""
+    world = await _world(maker, slots=1)
+    worlds.append(world)
+    oldest, *newer = await _open_reduction(maker, world, active=3, ended_ago=timedelta(minutes=1))
+    first, first_db = _billing_worker(prepared_database)
+    second, second_db = _billing_worker(prepared_database)
+    now = datetime.now(UTC)
+
+    async def sweep(worker: BillingWorker) -> str:
+        return str(await worker.run_once(now=now))
+
+    try:
+        await _together(lambda: sweep(first), lambda: sweep(second))
+    finally:
+        await first_db.dispose()
+        await second_db.dispose()
+
+    assert await _final(maker, world) == 1
+    disabled = await _disables(maker, world)
+    assert sorted(map(str, disabled)) == sorted(map(str, newer)), "each disabled exactly once"
+    async with maker() as session:
+        reduction = await session.scalar(
+            select(ChannelCapacityReduction).where(
+                ChannelCapacityReduction.tenant_id == world.tenant_id
+            )
+        )
+        resolutions = await session.scalar(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.tenant_id == world.tenant_id)
+            .where(AuditLog.action == AuditAction.CHANNEL_CAPACITY_REDUCTION_RESOLVED)
+        )
+        kept = await session.get(ChannelConnection, oldest)
+    assert reduction is not None
+    assert reduction.status is CapacityReductionStatus.RESOLVED_AUTOMATICALLY
+    assert resolutions == 1
+    assert kept is not None and kept.status is ConnectionStatus.ACTIVE
+
+
+async def test_an_owner_choosing_while_the_fallback_runs_resolves_once(
+    maker: async_sessionmaker[AsyncSession], worlds: list[World], prepared_database: str
+) -> None:
+    """Whichever wins, the reduction is resolved once and nothing is disabled twice."""
+    world = await _world(maker, slots=1)
+    worlds.append(world)
+    ids = await _open_reduction(maker, world, active=3, ended_ago=timedelta(minutes=1))
+    newest = ids[-1]
+    worker, database = _billing_worker(prepared_database)
+    now = datetime.now(UTC)
+
+    async def owner_keeps_newest() -> str:
+        async with maker() as session:
+            owner = await session.get(User, world.owner_id)
+            assert owner is not None
+            reductions = ChannelCapacityReductions(session, tenant_id=world.tenant_id)
+            reduction = await reductions.open_reduction()
+            if reduction is None:
+                return "closed"
+            try:
+                await reductions.select([newest], expected_revision=reduction.revision, actor=owner)
+            except Exception as error:  # the fallback won: stale revision or nothing open
+                await session.rollback()
+                return type(error).__name__
+            await session.commit()
+            return "owner"
+
+    async def fallback() -> str:
+        return str(await worker.run_once(now=now))
+
+    try:
+        outcomes = await _together(owner_keeps_newest, fallback)
+    finally:
+        await database.dispose()
+
+    assert await _final(maker, world) == 1
+    disabled = await _disables(maker, world)
+    assert len(disabled) == 2 and len(set(disabled)) == 2, outcomes
+    async with maker() as session:
+        resolutions = await session.scalar(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.tenant_id == world.tenant_id)
+            .where(AuditLog.action == AuditAction.CHANNEL_CAPACITY_REDUCTION_RESOLVED)
+        )
+    assert resolutions == 1, outcomes

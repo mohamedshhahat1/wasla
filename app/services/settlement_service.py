@@ -83,6 +83,7 @@ from app.db.models.billing import (
     SubscriptionStatus,
 )
 from app.db.models.billing_incident import BillingIncidentKind
+from app.db.models.channel_capacity import CapacityReductionCause
 from app.db.models.invoice import (
     UNRESOLVED_COLLECTION_STATES,
     Invoice,
@@ -101,6 +102,7 @@ from app.repositories.billing_repository import (
 from app.repositories.invoice_repository import InvoiceRepository, PaymentRepository
 from app.services.audit_service import AuditTrail
 from app.services.billing_incident_service import raise_incident
+from app.services.capacity_reduction import ChannelCapacityReductions
 from app.services.custom_plan_offer_ledger import CustomPlanOfferLedger
 from app.services.plan_catalog import PlanCatalog
 from app.services.subscription_service import SubscriptionService
@@ -656,6 +658,11 @@ class InvoiceSettlement:
                 "invoice_id": str(invoice.id),
                 "source": ScheduledChangeSource.MIGRATION.value,
             },
+        )
+        # Adopting other terms is a capacity boundary (ENT-15): a migration to
+        # a smaller version opens the grace, a larger one closes any open.
+        await ChannelCapacityReductions(self._session, tenant_id=self._tenant_id).boundary(
+            cause=CapacityReductionCause.MIGRATION
         )
 
     # ------------------------------------------------------------ void

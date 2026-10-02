@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -42,6 +42,7 @@ from app.core.telemetry import record_topup_purchase
 from app.db.models.audit import AuditAction
 from app.db.models.billing import DEFAULT_CURRENCY, LimitKey, Plan, Subscription
 from app.db.models.channel import Channel
+from app.db.models.channel_capacity import CapacityReductionCause
 from app.db.models.invoice import Payment, PaymentStatus
 from app.db.models.tenant import Tenant
 from app.db.models.topup import (
@@ -68,6 +69,7 @@ from app.schemas.topup import (
     TopupProductUpdate,
     TopupRefundReview,
 )
+from app.services.capacity_reduction import ChannelCapacityReductions
 from app.services.entitlement_service import EntitlementService
 from app.services.entitlement_terms import term_channel_types, term_limit
 from app.services.plan_catalog import PlanCatalog
@@ -489,6 +491,14 @@ class TopupAdmin:
             move(purchase, TopupStatus.CANCELLED)
             purchase.ended_at = moment
         await self._session.flush()
+        if payload.decision == "withdraw" and purchase.limit_key is LimitKey.CHANNEL_CONNECTIONS:
+            # Withdrawn slots are a capacity boundary like any other (ENT-15).
+            await ChannelCapacityReductions(
+                self._session,
+                tenant_id=purchase.tenant_id,
+                default_plan_code=self._settings.default_plan_code,
+                grace=timedelta(days=self._settings.channel_capacity_grace_days),
+            ).boundary(cause=CapacityReductionCause.TOPUP_WITHDRAWN, now=moment)
         effective_after = (await entitlements.check(purchase.limit_key, additional=0)).limit
         record_platform_billing(
             self._session,

@@ -130,6 +130,10 @@ DISPATCH_IN_PROGRESS: Final = "dispatch_in_progress"
 #: workspace (PD-CRM-8).
 MEMBER_REVOKED_REASON: Final = "member_revoked"
 
+#: `cancelled_reason` for the nudges of a connection that was disabled - by a
+#: person or by a capacity reduction (ENT-14).
+CONNECTION_DISABLED_REASON: Final = "connection_disabled"
+
 
 @dataclass(frozen=True, slots=True)
 class _Intention:
@@ -559,6 +563,42 @@ class FollowUpService:
         ]
         for follow_up in pending:
             self._cancel(follow_up, reason=reason)
+        return len(pending)
+
+    async def cancel_for_connection(
+        self,
+        *,
+        connection_id: uuid.UUID,
+        reason: str = CONNECTION_DISABLED_REASON,
+    ) -> int:
+        """Cancel the nudges waiting on a connection being disabled. Returns how many.
+
+        Inside the disable's transaction, whoever disabled it - a person, or a
+        capacity reduction (ENT-14). A disabled connection sends nothing, so a
+        nudge left pending would only fail at dispatch and sit there; it is
+        cancelled instead, whoever scheduled it. A send already committed is
+        left to finish: it cannot be recalled.
+        """
+        pending = [
+            follow_up
+            for follow_up in await self._follow_ups.lock_pending_on_connection(connection_id)
+            if not follow_up.is_in_flight
+        ]
+        for follow_up in pending:
+            self._cancel(follow_up, reason=reason)
+        if pending:
+            # Flushed with the disable that caused it, so nothing read later in
+            # the transaction can see the connection disabled and its nudges
+            # still waiting.
+            await self._session.flush()
+            logger.info(
+                "follow_up.cancelled_on_disable",
+                extra={
+                    "event": "follow_up.cancelled_on_disable",
+                    "tenant_id": str(self._tenant_id),
+                    "cancelled": len(pending),
+                },
+            )
         return len(pending)
 
     async def cancel_member_follow_ups(self, *, user_id: uuid.UUID) -> int:

@@ -17,6 +17,7 @@ from sqlalchemy import ColumnElement, and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pagination import Cursor
+from app.db.models.conversation import Conversation
 from app.db.models.follow_up import FollowUp, FollowUpStatus
 from app.db.models.lead import ActorKind
 from app.repositories.base import BaseRepository, TenantScopedRepository
@@ -140,6 +141,32 @@ class FollowUpRepository(TenantScopedRepository[FollowUp]):
                 FollowUp.created_by_kind == kind,
             )
             .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+
+    async def lock_pending_on_connection(self, connection_id: uuid.UUID) -> list[FollowUp]:
+        """Every pending nudge in a conversation on this connection, free to lock, locked.
+
+        For a connection being disabled (ENT-14). `SKIP LOCKED` like
+        `list_pending_for_conversation`: a row the sweep holds is mid-dispatch,
+        and its dispatch-time check finds the connection disabled.
+        """
+        await self.session.flush()
+        return await self._all(
+            self._select()
+            .join(
+                Conversation,
+                and_(
+                    Conversation.id == FollowUp.conversation_id,
+                    Conversation.tenant_id == FollowUp.tenant_id,
+                ),
+            )
+            .where(
+                Conversation.account_id == connection_id,
+                FollowUp.status == FollowUpStatus.PENDING,
+            )
+            .order_by(FollowUp.id)
+            .with_for_update(of=FollowUp, skip_locked=True)
             .execution_options(populate_existing=True)
         )
 

@@ -55,6 +55,12 @@ class EmailTemplate(StrEnum):
     # notice, because the two say opposite things about who decided and about
     # what the reader should do next.
     SUBSCRIPTION_SUSPENDED = "subscription_suspended"
+    # The capacity-reduction lifecycle (ENT-14): a change ahead that will not
+    # hold every connection, the grace beginning at the boundary, and the
+    # warning before the automatic fallback disables anything.
+    CHANNEL_CAPACITY_SCHEDULED = "channel_capacity_scheduled"
+    CHANNEL_CAPACITY_REDUCTION_STARTED = "channel_capacity_reduction_started"
+    CHANNEL_CAPACITY_REDUCTION_WARNING = "channel_capacity_reduction_warning"
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +89,13 @@ _SUBJECTS: Final[dict[EmailTemplate, str]] = {
     EmailTemplate.TRIAL_EXPIRED: "Your Wasla trial has ended",
     EmailTemplate.SUBSCRIPTION_CANCELLED: "Your Wasla subscription has been cancelled",
     EmailTemplate.SUBSCRIPTION_SUSPENDED: "Your Wasla workspace has been suspended",
+    EmailTemplate.CHANNEL_CAPACITY_SCHEDULED: "Your Wasla plan change will hold fewer channels",
+    EmailTemplate.CHANNEL_CAPACITY_REDUCTION_STARTED: (
+        "Choose which Wasla channel connections to keep"
+    ),
+    EmailTemplate.CHANNEL_CAPACITY_REDUCTION_WARNING: (
+        "Wasla will choose your channel connections in two days"
+    ),
 }
 
 _REQUIRED_KEYS: Final[dict[EmailTemplate, frozenset[str]]] = {
@@ -104,6 +117,15 @@ _REQUIRED_KEYS: Final[dict[EmailTemplate, frozenset[str]]] = {
     EmailTemplate.TRIAL_EXPIRED: frozenset({"workspace_name"}),
     EmailTemplate.SUBSCRIPTION_CANCELLED: frozenset({"workspace_name"}),
     EmailTemplate.SUBSCRIPTION_SUSPENDED: frozenset({"workspace_name", "amount_due", "currency"}),
+    EmailTemplate.CHANNEL_CAPACITY_SCHEDULED: frozenset(
+        {"workspace_name", "effective_at", "capacity", "active", "grace_days"}
+    ),
+    EmailTemplate.CHANNEL_CAPACITY_REDUCTION_STARTED: frozenset(
+        {"workspace_name", "grace_ends_at", "capacity", "active"}
+    ),
+    EmailTemplate.CHANNEL_CAPACITY_REDUCTION_WARNING: frozenset(
+        {"workspace_name", "grace_ends_at"}
+    ),
 }
 
 
@@ -406,6 +428,74 @@ def render(
                 "and settle the outstanding invoice to restore service.",
                 "This message contains no payment link - Wasla never asks you "
                 "to pay through a link in an email.",
+            ],
+            None,
+        )
+    elif template is EmailTemplate.CHANNEL_CAPACITY_SCHEDULED:
+        workspace = context["workspace_name"]
+        effective = context["effective_at"]
+        capacity, active = context["capacity"], context["active"]
+        grace_days = context["grace_days"]
+        text = (
+            f'The plan change scheduled for your workspace "{workspace}" on Wasla takes '
+            f"effect on {effective}. It holds {capacity} channel connections, and "
+            f"{active} are connected now.\n\n"
+            "Nothing changes until then. Sign in to choose which connections to keep; "
+            f"if you do not, you will have {grace_days} days from that date to choose."
+        )
+        html_body = _layout(
+            subject,
+            [
+                "The plan change scheduled for your workspace "
+                f"<strong>{html.escape(workspace)}</strong> on Wasla takes effect on "
+                f"{html.escape(effective)}. It holds {html.escape(capacity)} channel "
+                f"connections, and {html.escape(active)} are connected now.",
+                "Nothing changes until then. Sign in to choose which connections to "
+                f"keep; if you do not, you will have {html.escape(grace_days)} days from "
+                "that date to choose.",
+            ],
+            None,
+        )
+    elif template is EmailTemplate.CHANNEL_CAPACITY_REDUCTION_STARTED:
+        workspace = context["workspace_name"]
+        ends = context["grace_ends_at"]
+        capacity, active = context["capacity"], context["active"]
+        text = (
+            f'Your workspace "{workspace}" on Wasla now holds {capacity} channel '
+            f"connections, and {active} are connected.\n\n"
+            f"Every connection keeps working until {ends}. Sign in and choose which "
+            "to keep before then; the others will be disabled, never deleted, and "
+            "you can enable one again whenever a slot is free. If nobody chooses, "
+            "Wasla keeps the oldest."
+        )
+        html_body = _layout(
+            subject,
+            [
+                f"Your workspace <strong>{html.escape(workspace)}</strong> on Wasla now "
+                f"holds {html.escape(capacity)} channel connections, and "
+                f"{html.escape(active)} are connected.",
+                f"Every connection keeps working until {html.escape(ends)}. Sign in and "
+                "choose which to keep before then; the others will be disabled, never "
+                "deleted, and you can enable one again whenever a slot is free.",
+                "If nobody chooses, Wasla keeps the oldest.",
+            ],
+            None,
+        )
+    elif template is EmailTemplate.CHANNEL_CAPACITY_REDUCTION_WARNING:
+        workspace = context["workspace_name"]
+        ends = context["grace_ends_at"]
+        text = (
+            f"On {ends} Wasla will choose which channel connections your workspace "
+            f'"{workspace}" keeps: the oldest, and only channels its plan includes.\n\n'
+            "Sign in before then to choose yourself. Nothing is ever deleted."
+        )
+        html_body = _layout(
+            subject,
+            [
+                f"On {html.escape(ends)} Wasla will choose which channel connections "
+                f"your workspace <strong>{html.escape(workspace)}</strong> keeps: the "
+                "oldest, and only channels its plan includes.",
+                "Sign in before then to choose yourself. Nothing is ever deleted.",
             ],
             None,
         )

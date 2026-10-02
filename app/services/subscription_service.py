@@ -63,11 +63,13 @@ from app.db.models.billing import (
     Subscription,
     SubscriptionStatus,
 )
+from app.db.models.channel_capacity import CapacityReductionCause
 from app.db.models.user import User
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.services import billing_calendar
 from app.services.audit_service import AuditTrail
+from app.services.capacity_reduction import ChannelCapacityReductions
 from app.services.commercial_policy import ChangeTiming, Terms, change_timing
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
@@ -641,6 +643,12 @@ class SubscriptionService:
                 "reason": grant.basis if grant is not None else PURCHASE_SETTLED,
                 **({"operator_reason": grant.reason, "payment": None} if grant is not None else {}),
             },
+        )
+        # New terms from now are a capacity boundary (ENT-14): an upgrade that
+        # makes everything fit closes an open reduction, a purchase of fewer
+        # slots opens one, and an owner's pre-selection for the old term ends.
+        await ChannelCapacityReductions(self._session, tenant_id=self._tenant_id).boundary(
+            cause=CapacityReductionCause.DOWNGRADE, now=now
         )
         return subscription, previous
 
