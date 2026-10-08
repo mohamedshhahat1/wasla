@@ -137,6 +137,9 @@ PURGED_TABLES: tuple[str, ...] = (
     # contacts it belongs to. After `conversations` and `campaign_recipients`,
     # which name one; before `contacts`, which each one names.
     "contact_identities",
+    # A person's marketing consent on each channel (ENT-19): personal data,
+    # erased with the contact it belongs to and before it.
+    "contact_channel_consents",
     "contacts",
     "document_chunks",
     # Indexing attempts, their errors and embedding identity. Between the chunks
@@ -149,6 +152,12 @@ PURGED_TABLES: tuple[str, ...] = (
     "whatsapp_events",
     "whatsapp_templates",
     "whatsapp_accounts",
+    # An owner's choice of connections to keep at a capacity boundary, and the
+    # reductions that disabled the others (ENT-14, ENT-15). Both name the
+    # connections erased next; the audit trail keeps what was decided. Before
+    # `channel_connections`.
+    "channel_capacity_preselections",
+    "channel_capacity_reductions",
     # The workspace's connections (ADR-117). A WhatsApp number's connection
     # goes with the number, by trigger; this is every other channel's, and the
     # statement that proves none is left.
