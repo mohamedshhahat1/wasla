@@ -59,6 +59,6 @@ def downgrade() -> None:
     if found:
         raise RuntimeError(
             "Rows name the telegram or tiktok channel "
-            "(docs/RUNBOOK.md, 'Entitlements and channel capacity (0092-0097)'). "
+            "(docs/RUNBOOK.md, 'Entitlements and channel capacity (0092-0098)'). "
             "Nothing has been changed:\n  " + "\n  ".join(found)
         )

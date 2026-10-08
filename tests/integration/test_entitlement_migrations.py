@@ -21,7 +21,10 @@ What is proved:
 - **The round trip is lossless** while nothing new-shaped exists.
 - **A refused downgrade changes nothing**: with a change scheduled onto a
   placeholder version, the downgrade is refused and the database is still at
-  head with the catalogue in place.
+  head with the catalogue in place. A refusal further down - 0092's, with a
+  Telegram connection - also rolls back everything above it: no downgrade in
+  0092-0098 commits part-way, so 0094's indexes, the one-charge-per-turn
+  unique among them, are still there and the stamp still says head.
 """
 
 from __future__ import annotations
@@ -399,5 +402,68 @@ def test_the_entitlement_migrations_carry_real_rows_forward_and_back(database_ur
             {"c": list(PLACEHOLDER_PRODUCTS)},
         ) == len(PLACEHOLDER_PRODUCTS)
         assert _one(target, "SELECT count(*) FROM plan_versions WHERE version = 2") == 4
+    finally:
+        asyncio.run(_admin(admin, f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+
+
+INDEXES_0094 = ("ix_agent_turns_held", "uq_usage_events_tenant_id_agent_turn_id")
+
+
+def test_a_downgrade_refused_below_0094_rolls_back_the_whole_run(database_url: str) -> None:
+    """0092 refuses a Telegram connection; 0098 to 0093 must not stay downgraded.
+
+    0094's downgrade used to drop its indexes `CONCURRENTLY` in an autocommit
+    block, which commits every step above it: the refusal then left the stamp at
+    0094 with 0094's columns and without its indexes, and a following
+    `upgrade head` never rebuilt them - the database at head without the
+    unique index that keeps one `ai_turn` charge per turn (E05).
+    """
+    name = f"wasla_ent_mig_{uuid.uuid4().hex[:12]}"
+    source = make_url(database_url)
+    target = source.set(database=name).render_as_string(hide_password=False)
+    admin = source.set(database="postgres").render_as_string(hide_password=False)
+    asyncio.run(_admin(admin, f"CREATE DATABASE {name}"))
+    tenant = uuid.uuid4()
+    try:
+        _alembic(target, "upgrade", "head")
+        asyncio.run(
+            _execute(
+                target,
+                [
+                    (
+                        "INSERT INTO tenants (id, name, slug, status)"
+                        " VALUES (:t, 'Bots', :slug, 'active')",
+                        {"t": tenant, "slug": f"bots-{tenant.hex[:10]}"},
+                    ),
+                    (
+                        "INSERT INTO channel_connections"
+                        " (id, tenant_id, channel, external_account_id, status,"
+                        " ownership_started_at)"
+                        " VALUES (:id, :t, 'telegram', 'bot-1', 'active', now())",
+                        {"id": uuid.uuid4(), "t": tenant},
+                    ),
+                ],
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="channel_connections: 1"):
+            _alembic(target, "downgrade", "0091")
+
+        assert _one(target, "SELECT version_num FROM alembic_version") == "0098"
+        valid = _all(
+            target,
+            "SELECT c.relname, i.indisvalid FROM pg_index i"
+            " JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = ANY(:n)",
+            {"n": list(INDEXES_0094)},
+        )
+        assert dict(valid) == dict.fromkeys(INDEXES_0094, True)
+        assert _one(target, "SELECT to_regclass('channel_capacity_reductions') IS NOT NULL")
+        assert _one(target, "SELECT to_regclass('contact_channel_consents') IS NOT NULL")
+        assert _one(
+            target,
+            "SELECT count(*) FROM topup_products WHERE code = ANY(:c)",
+            {"c": list(PLACEHOLDER_PRODUCTS)},
+        ) == len(PLACEHOLDER_PRODUCTS)
+        _assert_keys_valid(target)
     finally:
         asyncio.run(_admin(admin, f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))

@@ -31,6 +31,8 @@ while a turn ended `channel_not_in_plan`, an outcome the earlier schema cannot
 explain. Otherwise it drops what this revision added: a charge stays on the
 ledger as its `ai_turn` event, whose conversation its metadata names; the
 dimension columns go with the knowledge they carried. The enum label stays.
+The downgrade is one transaction - its indexes are dropped in it - so a
+refusal below 0094 rolls back the whole run.
 """
 
 from __future__ import annotations
@@ -170,11 +172,14 @@ def downgrade() -> None:
             "Nothing has been changed:\n  " + "\n  ".join(found)
         )
 
-    with op.get_context().autocommit_block():
-        for name, _table, _definition in INDEXES:
-            op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
-
+    # In the transaction, not `CONCURRENTLY`: an autocommit block would commit
+    # every downgrade above this one, so a refusal further down would leave the
+    # stamp at 0094 without these indexes, and `upgrade head` would never
+    # rebuild them. The column drops below take the same ACCESS EXCLUSIVE locks
+    # on both tables, so the concurrent drop never spared a writer anything.
     op.execute(f"SET lock_timeout = '{LOCK_TIMEOUT}'")
+    for name, _table, _definition in INDEXES:
+        op.execute(f"DROP INDEX IF EXISTS {name}")
     op.execute(f"ALTER TABLE usage_events DROP CONSTRAINT IF EXISTS {AI_TURN_ONLY_CONSTRAINT}")
     for column in USAGE_COLUMNS:
         op.drop_column("usage_events", column)
