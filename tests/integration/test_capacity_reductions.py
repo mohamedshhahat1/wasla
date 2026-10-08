@@ -66,7 +66,7 @@ from app.integrations.whatsapp.adapter import WhatsAppAdapter
 from app.main import create_app
 from app.platform.topup_admin import TopupAdmin
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
-from app.schemas.topup import TopupRefundReview
+from app.schemas.topup import TopupGrantCreate, TopupRefundReview
 from app.services.capacity_reduction import CapacitySelectionError, ChannelCapacityReductions
 from app.services.channel_capacity import (
     ChannelCapacityExceededError,
@@ -650,6 +650,59 @@ async def test_slots_still_under_refund_review_at_the_term_end_open_the_same_flo
         .where(AuditLog.action == AuditAction.BILLING_TOPUP_EXPIRED)
     )
     assert expiries == 1
+
+
+async def _staff(session: AsyncSession) -> User:
+    staff = User(
+        email=f"staff-{uuid.uuid4().hex[:8]}@example.com",
+        hashed_password="x",
+        is_active=True,
+        platform_role=PlatformRole.PLATFORM_ADMIN,
+    )
+    session.add(staff)
+    await session.flush()
+    return staff
+
+
+async def test_an_expiring_platform_grant_opens_the_same_flow(db_session: AsyncSession) -> None:
+    """ENT-15: slots a platform grant gave end with the term; the same grace opens.
+
+    Granted through the platform's own path - no invoice, no payment, no price -
+    and expired by the real billing sweep, which names the cause.
+    """
+    now = base_now()
+    starter = await own_plan(
+        db_session,
+        code="starter",
+        price=Decimal("0.00"),
+        limits={"channel_connections": 1},
+        allowed_channel_types=THREE,
+    )
+    tenant, owner, _ = await topup_workspace(db_session, now=now, plan_code=starter.code)
+    subscription = await SubscriptionService(db_session, tenant_id=tenant.id).get()
+    assert subscription is not None
+    granted = await TopupAdmin(db_session, settings=_settings()).grant(
+        tenant.id,
+        TopupGrantCreate(
+            entitlement_key=TopupEntitlement.CHANNEL_CONNECTIONS,
+            quantity=2,
+            reason="Launch goodwill.",
+            expected_subscription_revision=subscription.revision,
+        ),
+        actor=await _staff(db_session),
+        now=now,
+    )
+    assert granted.source == "platform_grant"
+    ids = [await _connect(db_session, tenant, owner, channel) for channel in (WA, IG, MS)]
+
+    at = await _boundary(db_session, tenant)
+
+    reduction = await _reduction(db_session, tenant)
+    assert reduction is not None
+    assert (reduction.cause, reduction.status) == (CapacityReductionCause.GRANT_EXPIRED, PENDING)
+    assert reduction.grace_ends_at == at + GRACE
+    assert reduction.target_general == 1
+    assert await _active(db_session, tenant) == set(ids), "the grace keeps every connection"
 
 
 # ------------------------------------------------- ENT-16: never for suspension
