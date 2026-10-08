@@ -169,10 +169,18 @@ FEATURES: Final[tuple[FeatureRead, ...]] = (
     ),
     FeatureRead(
         key=LimitKey.PERIOD_AI_TURNS.value,
-        description="Customer turns an AI agent answered in the billing period.",
+        description=(
+            "Customer turns an AI agent answered in the usage cycle - one allowance for the "
+            "whole workspace, every channel drawing from it (ADR-131)."
+        ),
         unit="turns per period",
         kind="hard_limit",
-        enforcement="Consumed under an advisory lock; exhausted hands the conversation to a human.",
+        enforcement=(
+            "Held at engagement under a per-workspace advisory lock, counting turns still "
+            "generating, and charged only for a usable outcome - a reply or an executed "
+            "handoff; a failed or empty generation gives its hold back. With none left no "
+            "provider is called and the conversation is handed to a person."
+        ),
         concurrency_safe=True,
     ),
     FeatureRead(
@@ -188,7 +196,7 @@ FEATURES: Final[tuple[FeatureRead, ...]] = (
     ),
     FeatureRead(
         key=LimitKey.PERIOD_MESSAGES.value,
-        description="WhatsApp messages sent and received in the billing period.",
+        description="Messages sent and received on every channel in the usage cycle.",
         unit="messages per period",
         kind="meter_only",
         enforcement=(
