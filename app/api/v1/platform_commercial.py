@@ -38,9 +38,11 @@ from app.schemas.custom_plan import (
 from app.schemas.platform_billing import MAX_PAGE, Page
 from app.schemas.text import StorableText
 from app.schemas.topup import (
+    GrantWithdrawalResult,
     PlatformTopupProductRead,
     PlatformTopupPurchaseRead,
     TopupGrantCreate,
+    TopupGrantWithdraw,
     TopupProductCreate,
     TopupProductUpdate,
     TopupRefundReview,
@@ -363,3 +365,21 @@ async def review_topup_refund(
 ) -> PlatformTopupPurchaseRead:
     """Keep or withdraw a refunded top-up's allowance. Withdrawal deletes nothing."""
     return await topups.review_refund(purchase_id, payload, actor=staff.user)
+
+
+@router.post("/topup-purchases/{purchase_id}/withdraw", response_model=GrantWithdrawalResult)
+async def withdraw_grant(
+    purchase_id: uuid.UUID,
+    payload: TopupGrantWithdraw,
+    staff: PlatformStaffDep,
+    topups: TopupsDep,
+) -> GrantWithdrawalResult:
+    """Take a platform grant back before it ends (PLAT-G1). Never a refund, never a disable.
+
+    The grant stops counting now. Channel capacity it leaves short opens a
+    capacity reduction (`grant_withdrawn`) with the same grace, owner choice
+    and automatic fallback as a downgrade; usage already recorded stays. 404
+    for a grant of any other workspace than `tenant_id`; 409 for a paid
+    purchase, a stale revision, or a grant that no longer counts.
+    """
+    return await topups.withdraw_grant(purchase_id, payload, actor=staff.user)

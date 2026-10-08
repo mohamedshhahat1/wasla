@@ -38,6 +38,7 @@ from typing import Any
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -46,6 +47,9 @@ from app.repositories.entitlement_census import CAPACITY_CENSUS_SQL
 
 pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[2]
+# The single head. A later revision (0099 onwards) runs above 0092-0098 in
+# every round trip here, which is the point: they must not get in the way.
+HEAD = ScriptDirectory(str(ROOT / "alembic")).get_current_head()
 
 PLACEHOLDERS = {
     "starter": (1, ["whatsapp"]),
@@ -204,7 +208,7 @@ def _assert_keys_valid(url: str) -> None:
 
 
 def _assert_upgraded(url: str, seed: Seed) -> None:
-    assert _one(url, "SELECT version_num FROM alembic_version") == "0098"
+    assert _one(url, "SELECT version_num FROM alembic_version") == HEAD
     _assert_keys_valid(url)
 
     # 0093: the number product sells WhatsApp slots; the frozen grant is untouched.
@@ -395,7 +399,7 @@ def test_the_entitlement_migrations_carry_real_rows_forward_and_back(database_ur
         )
         with pytest.raises(RuntimeError, match="subscriptions on a placeholder version"):
             _alembic(target, "downgrade", "0097")
-        assert _one(target, "SELECT version_num FROM alembic_version") == "0098"
+        assert _one(target, "SELECT version_num FROM alembic_version") == HEAD
         assert _one(
             target,
             "SELECT count(*) FROM topup_products WHERE code = ANY(:c)",
@@ -449,7 +453,7 @@ def test_a_downgrade_refused_below_0094_rolls_back_the_whole_run(database_url: s
         with pytest.raises(RuntimeError, match="channel_connections: 1"):
             _alembic(target, "downgrade", "0091")
 
-        assert _one(target, "SELECT version_num FROM alembic_version") == "0098"
+        assert _one(target, "SELECT version_num FROM alembic_version") == HEAD
         valid = _all(
             target,
             "SELECT c.relname, i.indisvalid FROM pg_index i"

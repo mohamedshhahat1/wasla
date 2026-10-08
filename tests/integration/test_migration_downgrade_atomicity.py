@@ -34,6 +34,7 @@ import pytest
 from sqlalchemy.engine import make_url
 
 from tests.integration.test_entitlement_migrations import (
+    HEAD,
     INDEXES_0094,
     PLACEHOLDER_PRODUCTS,
     _admin,
@@ -61,7 +62,6 @@ INDEXES_0075 = (
     "ix_follow_ups_message_id",
     "ix_agent_turns_conversation_id",
 )
-HEAD = "0098"
 
 
 @pytest.fixture

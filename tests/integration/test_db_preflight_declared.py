@@ -26,7 +26,7 @@ import pytest
 from sqlalchemy.engine import make_url
 
 from scripts.db_preflight import MIGRATION_ONLY_INDEXES, declared_schema
-from tests.integration.test_entitlement_migrations import _admin, _alembic, _one
+from tests.integration.test_entitlement_migrations import HEAD, _admin, _alembic, _one
 
 pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[2]
@@ -146,7 +146,7 @@ def test_preflight_detects_the_pre_fix_damage(copy: str) -> None:
     asyncio.run(_admin(copy, f"DROP INDEX {INDEX}"))
     assert _one(copy, "SELECT version_num FROM alembic_version") == "0091"
     _alembic(copy, "upgrade", "head")
-    assert _one(copy, "SELECT version_num FROM alembic_version") == "0098"
+    assert _one(copy, "SELECT version_num FROM alembic_version") == HEAD
     assert not _present(copy, INDEX)
 
     result = _verify(copy)

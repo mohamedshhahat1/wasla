@@ -14,9 +14,13 @@ is audited with actor, platform role, reason, before, after and request id.
   no invoice, no payment, no price, a reason - the database refuses anything
   else. It expires at the end of the subscription's current period like any
   top-up.
-* **Refund review** is the one way a granted top-up is withdrawn. Nothing
-  withdraws one automatically; withdrawing deletes nothing and never makes
-  usage negative.
+* **Refund review** decides a refunded, paid top-up. Nothing withdraws one
+  automatically; withdrawing deletes nothing and never makes usage negative.
+* **Withdrawing a grant** (PLAT-G1, ADR-132) takes a platform grant back before
+  it ends: it stops counting at once. Channel capacity it leaves short enters
+  the reduction lifecycle through `boundary()` - the same grace, owner choice
+  and fallback as a downgrade - and nothing is disabled by the withdrawal
+  itself. Usage already recorded stays.
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ from app.core.exceptions import (
     TopupNotAvailableError,
     ValidationError,
 )
-from app.core.telemetry import record_topup_purchase
+from app.core.telemetry import record_grant_withdrawal, record_topup_purchase
 from app.db.models.audit import AuditAction
 from app.db.models.billing import DEFAULT_CURRENCY, LimitKey, Plan, Subscription
 from app.db.models.channel import Channel
@@ -61,16 +65,19 @@ from app.repositories.topup_repository import (
     PlatformTopupPurchaseRepository,
     TopupProductRepository,
 )
+from app.schemas.channel_capacity import CapacityReductionRead
 from app.schemas.topup import (
+    GrantWithdrawalResult,
     PlatformTopupProductRead,
     PlatformTopupPurchaseRead,
     TopupGrantCreate,
+    TopupGrantWithdraw,
     TopupProductCreate,
     TopupProductUpdate,
     TopupRefundReview,
 )
 from app.services.capacity_reduction import ChannelCapacityReductions
-from app.services.entitlement_service import EntitlementService
+from app.services.entitlement_service import EntitlementService, hold_limit_lock
 from app.services.entitlement_terms import term_channel_types, term_limit
 from app.services.plan_catalog import PlanCatalog
 from app.services.topup_ledger import TopupLedger, move, purchase_state, validity_window
@@ -525,6 +532,119 @@ class TopupAdmin:
             purchase.entitlement_key.value, "kept" if payload.decision == "keep" else "withdrawn"
         )
         return await self.read_purchase(purchase)
+
+    async def withdraw_grant(
+        self,
+        purchase_id: uuid.UUID,
+        payload: TopupGrantWithdraw,
+        *,
+        actor: User,
+        now: datetime | None = None,
+    ) -> GrantWithdrawalResult:
+        """Take a platform grant back now (PLAT-G1, ADR-132).
+
+        Under the workspace's lock on the grant's key - the lock the capacity
+        guard, a grant and an AI turn's hold take - so a connection or a turn
+        racing the withdrawal is judged against the limit before it or after
+        it, never between. The status, the audit entry and any reduction
+        commit together.
+
+        Refused: a grant of another workspace than `payload.tenant_id`, or
+        none (404); a stale revision, a paid purchase, or a grant that no
+        longer counts - withdrawn, expired, cancelled (409).
+
+        Capacity (`channel_connections`): if the workspace no longer fits, a
+        reduction opens through `ChannelCapacityReductions.boundary` with
+        `cause = grant_withdrawn` and the full grace; nothing is disabled here.
+        Usage keys: the limit drops at once; recorded usage and open holds are
+        left exactly as they are, so the next AI turn over the new limit is
+        handed to a person (ENT-04).
+        """
+        moment = now if now is not None else datetime.now(UTC)
+        found = await self._purchases.get_by_id(purchase_id)
+        if found is None or found.tenant_id != payload.tenant_id:
+            raise NotFoundError("No such top-up purchase.")
+        tenant_id, key = found.tenant_id, found.limit_key
+        # The workspace's lock first, then the row: the order every path that
+        # moves this limit takes them.
+        await hold_limit_lock(self._session, tenant_id=tenant_id, key=key)
+        purchase = await self._purchases.lock(purchase_id)
+        if purchase is None:  # pragma: no cover - purchases are never deleted
+            raise NotFoundError("No such top-up purchase.")
+        if purchase.revision != payload.expected_revision:
+            raise ConflictError(
+                f"The purchase has changed (revision {purchase.revision}); reload it and retry."
+            )
+        if purchase.source is not TopupSource.PLATFORM_GRANT:
+            raise ConflictError(
+                "Only a platform grant can be withdrawn; a paid top-up is refunded instead."
+            )
+        if purchase.status is TopupStatus.WITHDRAWN:
+            raise ConflictError("This grant has already been withdrawn.")
+        if purchase.status is not TopupStatus.GRANTED or purchase.expires_at <= moment:
+            raise ConflictError("This grant no longer counts; there is nothing to withdraw.")
+
+        entitlements = EntitlementService(
+            self._session,
+            tenant_id=tenant_id,
+            default_plan_code=self._settings.default_plan_code,
+            clock=lambda: moment,
+        )
+        effective_before = (await entitlements.check(key, additional=0)).limit
+        before = purchase_state(purchase)
+        move(purchase, TopupStatus.WITHDRAWN)
+        purchase.withdrawn_at = moment
+        purchase.withdrawn_by = actor.id
+        purchase.withdrawal_reason = payload.reason
+        purchase.ended_at = moment
+        await self._session.flush()
+
+        reduction = None
+        if key is LimitKey.CHANNEL_CONNECTIONS:
+            reduction = await ChannelCapacityReductions(
+                self._session,
+                tenant_id=tenant_id,
+                default_plan_code=self._settings.default_plan_code,
+                grace=timedelta(days=self._settings.channel_capacity_grace_days),
+            ).boundary(
+                cause=CapacityReductionCause.GRANT_WITHDRAWN,
+                now=moment,
+                topup_purchase_id=purchase.id,
+            )
+        effective_after = (await entitlements.check(key, additional=0)).limit
+        record_platform_billing(
+            self._session,
+            AuditAction.BILLING_TOPUP_GRANT_WITHDRAWN,
+            actor=actor,
+            reason=payload.reason,
+            target_type="topup_purchase",
+            target_id=purchase.id,
+            tenant_id=tenant_id,
+            target_label=purchase.entitlement_key.value,
+            before={**before, "effective_limit": effective_before},
+            after={
+                **purchase_state(purchase),
+                "effective_limit": effective_after,
+                "withdrawn_at": moment.isoformat(),
+            },
+            extra={
+                "entitlement_key": purchase.entitlement_key.value,
+                "channel_type": (
+                    purchase.channel_type.value if purchase.channel_type is not None else None
+                ),
+                "quantity": purchase.quantity,
+                "reduction_id": str(reduction.id) if reduction is not None else None,
+            },
+        )
+        await record_grant_withdrawal(key.value)
+        return GrantWithdrawalResult(
+            purchase=await self.read_purchase(purchase),
+            effective_limit_before=effective_before,
+            effective_limit_after=effective_after,
+            reduction=(
+                CapacityReductionRead.from_model(reduction) if reduction is not None else None
+            ),
+        )
 
     # --------------------------------------------------------------- helpers
 

@@ -507,6 +507,11 @@ class AuditAction(StrEnum):
     CHANNEL_CAPACITY_REDUCTION_RESOLVED = "channel_capacity_reduction_resolved"
     CHANNEL_CAPACITY_SELECTION_SAVED = "channel_capacity_selection_saved"
 
+    # A platform grant taken back before it ended (PLAT-G1, ADR-132): the
+    # grant stops counting at once; any capacity it leaves short goes through
+    # the reduction lifecycle above, never a disable of its own.
+    BILLING_TOPUP_GRANT_WITHDRAWN = "billing_topup_grant_withdrawn"
+
 
 AUDIT_ACTOR_KIND_TYPE = _enum_type(AuditActorKind, name="audit_actor_kind")
 # The order production holds the labels in: the order the migrations added
@@ -636,6 +641,7 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     "channel_capacity_reduction_opened",
     "channel_capacity_reduction_resolved",
     "channel_capacity_selection_saved",
+    "billing_topup_grant_withdrawn",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER

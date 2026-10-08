@@ -496,6 +496,13 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Channel connections a capacity reduction disabled, by who chose.",
         ("actor",),
     ),
+    # Platform grants staff withdrew before they ended (PLAT-G1), by the key
+    # each raised. A capacity the withdrawal leaves short shows up as a
+    # `grant_withdrawn` reduction above, never as a disable of its own.
+    "wasla_platform_grant_withdrawals_total": (
+        "Platform grants withdrawn by staff before they ended, by entitlement key.",
+        ("key",),
+    ),
 }
 
 # Closed domains of the two inbound counters. `app.core` imports nothing from
@@ -1352,13 +1359,21 @@ BILLING_LABEL_DOMAINS: Final[dict[str, dict[str, frozenset[str]]]] = {
         ),
         "outcome": frozenset({"succeeded", "refused", "failed"}),
     },
+    "wasla_platform_grant_withdrawals_total": {"key": _TOPUP_ENTITLEMENTS},
     "wasla_entitlement_refusals_total": {
         "key": frozenset({"channel_connections", "allowed_channel_types", "period_ai_turns"}),
         "reason": frozenset({"capacity_exceeded", "type_not_allowed", "quota_exhausted"}),
     },
     "wasla_channel_capacity_reductions_total": {
         "cause": frozenset(
-            {"downgrade", "topup_expired", "topup_withdrawn", "grant_expired", "migration"}
+            {
+                "downgrade",
+                "topup_expired",
+                "topup_withdrawn",
+                "grant_expired",
+                "migration",
+                "grant_withdrawn",
+            }
         ),
         "resolution": frozenset(
             {"opened", "resolved_by_owner", "resolved_automatically", "no_longer_needed"}
@@ -1472,6 +1487,12 @@ async def record_capacity_reduction(cause: str, resolution: str) -> None:
     metric = "wasla_channel_capacity_reductions_total"
     labels = _closed_labels(metric, {"cause": cause, "resolution": resolution})
     await _tolerate(_increment(metric, labels))
+
+
+async def record_grant_withdrawal(key: str) -> None:
+    """Staff withdrew a platform grant before it ended (PLAT-G1)."""
+    metric = "wasla_platform_grant_withdrawals_total"
+    await _tolerate(_increment(metric, _closed_labels(metric, {"key": key})))
 
 
 async def record_capacity_disables(actor: str, amount: int) -> None:

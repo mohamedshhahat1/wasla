@@ -187,6 +187,10 @@ class TopupStatus(StrEnum):
         Refunded after it was granted. **Still counts** - withdrawing an
         allowance somebody may already have used is an operator's decision,
         never an automatic one (ADR-113).
+    ``WITHDRAWN``
+        A platform grant staff took back before it ended (PLAT-G1, ADR-132).
+        Contributes nothing from `withdrawn_at`; usage already recorded
+        stays. Only a grant reaches it - a paid purchase is refunded instead.
     """
 
     PENDING = "pending"
@@ -195,6 +199,8 @@ class TopupStatus(StrEnum):
     EXPIRED = "expired"
     CANCELLED = "cancelled"
     REFUND_REVIEW = "refund_review"
+    # Appended, as `ALTER TYPE ... ADD VALUE` appends (0099).
+    WITHDRAWN = "withdrawn"
 
 
 # The statuses whose quantity counts toward the effective limit, while
@@ -207,10 +213,13 @@ ACTIVE_TOPUP_STATUSES: Final[frozenset[TopupStatus]] = frozenset(
 TOPUP_TRANSITIONS: Final[dict[TopupStatus, frozenset[TopupStatus]]] = {
     TopupStatus.PENDING: frozenset({TopupStatus.PAID, TopupStatus.GRANTED, TopupStatus.CANCELLED}),
     TopupStatus.PAID: frozenset({TopupStatus.GRANTED, TopupStatus.CANCELLED}),
-    TopupStatus.GRANTED: frozenset({TopupStatus.EXPIRED, TopupStatus.REFUND_REVIEW}),
+    TopupStatus.GRANTED: frozenset(
+        {TopupStatus.EXPIRED, TopupStatus.REFUND_REVIEW, TopupStatus.WITHDRAWN}
+    ),
     TopupStatus.REFUND_REVIEW: frozenset({TopupStatus.GRANTED, TopupStatus.CANCELLED}),
     TopupStatus.EXPIRED: frozenset(),
     TopupStatus.CANCELLED: frozenset(),
+    TopupStatus.WITHDRAWN: frozenset(),
 }
 
 
@@ -396,6 +405,15 @@ class TopupPurchase(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
             name="purchase_is_invoiced",
         ),
         CheckConstraint(_TYPED_CHECK, name="channel_type_for_channel_capacity"),
+        # Only a grant is withdrawn, and a withdrawal says when and why
+        # (PLAT-G1). `withdrawn_by` may be emptied by the person's deletion.
+        CheckConstraint(
+            "status <> 'withdrawn' OR source = 'platform_grant'", name="withdrawn_is_a_grant"
+        ),
+        CheckConstraint(
+            "(status = 'withdrawn') = (withdrawn_at IS NOT NULL AND withdrawal_reason IS NOT NULL)",
+            name="withdrawal_recorded",
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -450,6 +468,17 @@ class TopupPurchase(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
+    )
+    # A grant staff withdrew (PLAT-G1): when, by whom and why. Outside the
+    # frozen snapshot - only the status and these change.
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    withdrawn_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    withdrawal_reason: Mapped[str | None] = mapped_column(
+        String(MAX_BILLING_REASON_LENGTH), nullable=True
     )
 
     @property

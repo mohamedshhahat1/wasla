@@ -29,12 +29,13 @@ each file its own message's workspace and conversation, and no identity scoped
 twice. Most are also enforced by keys; this says so of the data, and is what
 proves a backfill or a restore whole.
 
-`verify` also runs the entitlement ledger, E01-E15 (ADR-131): active
+`verify` also runs the entitlement ledger, E01-E18 (ADR-131, ADR-132): active
 connections fit the capacity in force and its channel types, AI turns are
 charged once and only for a usable outcome and no hold outlives its TTL and the
 sweep, every capacity reduction disables - never releases or deletes - and says
 so on the audit trail, the retired `whatsapp_numbers` key is on nothing new,
-and every marketing opt-out names its channel. Those checks read the clock, the
+every marketing opt-out names its channel, and a grant staff withdrew stops
+counting, is audited and is named by the reduction it opened. Those checks read the clock, the
 deployment's `DEFAULT_PLAN_CODE` and `AI_TURN_HOLD_TTL_SECONDS` from the
 environment the command runs in.
 
@@ -460,14 +461,17 @@ class Bindings:
 
 # --------------------------------------------------------- entitlements
 #
-# ADR-131's ledger, E01-E15. Each is zero on a healthy database. Several are
+# ADR-131's ledger, E01-E15, and ADR-132's E16-E18. Each is zero on a healthy database. Several are
 # also enforced by a key, a constraint or a trigger; this says so of the data.
 
 # What explains a workspace holding more connections than its capacity, or one
 # of a type its plan does not allow (E01, E02): an open reduction (ENT-14,
 # ENT-15); a subscription that is not served (ENT-16 - nothing is disabled for
 # that); or a channel slot that stopped counting by the clock within the last
-# sweep, whose boundary the billing worker's next pass judges.
+# sweep, whose boundary the billing worker's next pass judges. A grant staff
+# withdrew (PLAT-G1) opens its reduction in the withdrawal's own transaction, so
+# the open-reduction clause - `cause = 'grant_withdrawn'` among the others -
+# explains it from the moment it stops counting.
 _EXPLAINED = (
     "(EXISTS (SELECT 1 FROM channel_capacity_reductions r"
     " WHERE r.tenant_id = census.tenant_id AND r.status = 'pending_selection')"
@@ -641,6 +645,31 @@ ENTITLEMENT_INVARIANTS: tuple[Check, ...] = (
         " OR cardinality(v.allowed_channel_types)"
         " <> (SELECT count(DISTINCT label) FROM unnest(v.allowed_channel_types) label))",
     ),
+    # E16 - no withdrawn grant counts toward any capacity or allowance
+    # (PLAT-G1): a purchase that records a withdrawal holds a status the
+    # entitlement queries never count.
+    Check(
+        "e16_withdrawn_grant_still_counting",
+        "SELECT count(*) FROM topup_purchases"
+        " WHERE (withdrawn_at IS NOT NULL OR status::text = 'withdrawn')"
+        " AND status::text IN ('granted', 'refund_review')",
+    ),
+    # E17 - every withdrawn grant has its audit entry: who, why, before, after.
+    Check(
+        "e17_withdrawn_grant_without_its_audit",
+        "SELECT count(*) FROM topup_purchases tp WHERE tp.status::text = 'withdrawn'"
+        " AND NOT EXISTS (SELECT 1 FROM audit_logs a WHERE a.tenant_id = tp.tenant_id"
+        " AND a.target_id = tp.id AND a.action = 'billing_topup_grant_withdrawn')",
+    ),
+    # E18 - every reduction a withdrawal opened names a withdrawn platform
+    # grant of its own workspace; a CHECK makes it name one at all.
+    Check(
+        "e18_grant_withdrawn_reduction_without_its_grant",
+        "SELECT count(*) FROM channel_capacity_reductions r"
+        " WHERE r.cause::text = 'grant_withdrawn' AND NOT EXISTS (SELECT 1 FROM topup_purchases tp"
+        " WHERE tp.id = r.topup_purchase_id AND tp.tenant_id = r.tenant_id"
+        " AND tp.source::text = 'platform_grant' AND tp.status::text = 'withdrawn')",
+    ),
 )
 
 
@@ -686,7 +715,7 @@ async def violations(
 async def entitlement_violations(
     connection: AsyncConnection, *, read_only: bool = True, bindings: Bindings | None = None
 ) -> dict[str, int]:
-    """The entitlement ledger alone (E01-E15). All zero on a healthy database."""
+    """The entitlement ledger alone (E01-E18). All zero on a healthy database."""
     return await _counts(connection, ENTITLEMENT_INVARIANTS, read_only=read_only, bindings=bindings)
 
 

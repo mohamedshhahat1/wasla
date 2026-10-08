@@ -507,6 +507,7 @@ PLATFORM_ROUTE_POLICY = {
     ("GET", "/platform/billing/topup-purchases"): "staff",
     ("GET", "/platform/billing/topup-purchases/{purchase_id}"): "staff",
     ("POST", "/platform/billing/topup-purchases/{purchase_id}/refund-review"): "staff",
+    ("POST", "/platform/billing/topup-purchases/{purchase_id}/withdraw"): "staff",
     # Custom plan offers (ADR-114).
     ("GET", "/platform/billing/tenants/{tenant_id}/custom-offers"): "staff",
     ("POST", "/platform/billing/tenants/{tenant_id}/custom-offers"): "staff",

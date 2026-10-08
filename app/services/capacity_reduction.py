@@ -206,24 +206,39 @@ class ChannelCapacityReductions:
     # --------------------------------------------------------------- boundary
 
     async def boundary(
-        self, *, cause: CapacityReductionCause, now: datetime | None = None
+        self,
+        *,
+        cause: CapacityReductionCause,
+        now: datetime | None = None,
+        topup_purchase_id: uuid.UUID | None = None,
     ) -> ChannelCapacityReduction | None:
         """A capacity boundary passed: fit, apply the pre-selection, or open the flow.
 
         Called in the transaction that moved the capacity: the plan change
         applied, the top-up or grant expired, the refund withdrawn, the
-        migration adopted. Every boundary consumes the pre-selection - applied
-        if it still fits, discarded otherwise - so one made for a change that
-        never happened cannot surprise anybody later.
+        migration adopted, a grant withdrawn by staff. Every boundary of the
+        term consumes the pre-selection - applied if it still fits, discarded
+        otherwise - so one made for a change that never happened cannot
+        surprise anybody later.
+
+        **A grant withdrawn by staff** (`GRANT_WITHDRAWN`, PLAT-G1) is not the
+        boundary a pre-selection was made for, and it never disables anything
+        in the request that withdrew the grant: the pre-selection is neither
+        applied nor discarded, and a reduction that has to open opens with the
+        full grace, naming the grant (`topup_purchase_id`).
         """
         moment = now if now is not None else self._clock()
+        staff_withdrawal = cause is CapacityReductionCause.GRANT_WITHDRAWN
+        if staff_withdrawal and topup_purchase_id is None:
+            raise ValueError("a withdrawn grant's boundary names the grant")
         await hold_limit_lock(
             self._session, tenant_id=self._tenant_id, key=LimitKey.CHANNEL_CONNECTIONS
         )
         if not await self._serving():
             # ENT-16: a workspace not served reads over its limit and keeps
             # every connection; nothing is disabled for that.
-            await self._reductions.clear_preselection()
+            if not staff_withdrawal:
+                await self._reductions.clear_preselection()
             return None
         capacity = await self._entitlements(moment).channel_capacity(at=moment)
         active = await self._reductions.active_connections()
@@ -231,7 +246,8 @@ class ChannelCapacityReductions:
         open_ = await self._reductions.open(lock=True)
 
         if not needs_reduction(capacity, counts):
-            await self._reductions.clear_preselection()
+            if not staff_withdrawal:
+                await self._reductions.clear_preselection()
             if open_ is not None:
                 await self._close(open_, CapacityReductionStatus.NO_LONGER_NEEDED, moment=moment)
             return open_
@@ -249,13 +265,15 @@ class ChannelCapacityReductions:
                     "cause": cause.value,
                 },
             )
-            await self._reductions.clear_preselection()
+            if not staff_withdrawal:
+                await self._reductions.clear_preselection()
             return open_
 
-        applied = await self._apply_preselection(active, capacity, cause=cause, moment=moment)
-        await self._reductions.clear_preselection()
-        if applied is not None:
-            return applied
+        if not staff_withdrawal:
+            applied = await self._apply_preselection(active, capacity, cause=cause, moment=moment)
+            await self._reductions.clear_preselection()
+            if applied is not None:
+                return applied
 
         reduction = ChannelCapacityReduction(
             tenant_id=self._tenant_id,
@@ -266,6 +284,7 @@ class ChannelCapacityReductions:
             target_general=0,
             target_typed={},
             target_allowed_types=[],
+            topup_purchase_id=topup_purchase_id if staff_withdrawal else None,
         )
         self._snapshot(reduction, capacity)
         self._reductions.add(reduction)
