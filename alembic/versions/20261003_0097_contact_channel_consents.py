@@ -112,7 +112,8 @@ def upgrade() -> None:
 
     # Every opt-out and resume recorded so far was recorded on WhatsApp.
     op.execute(
-        f"INSERT INTO {TABLE} (tenant_id, contact_id, channel, marketing_opt_out_at,"
+        f"INSERT INTO {TABLE}"  # noqa: S608 - module constant
+        " (tenant_id, contact_id, channel, marketing_opt_out_at,"
         " opt_out_source, opt_out_via, resumed_at)"
         " SELECT tenant_id, id, 'whatsapp', marketing_opt_out_at, opt_out_source,"
         " CASE WHEN marketing_opt_out_at IS NULL THEN NULL ELSE opt_out_via END,"
@@ -166,7 +167,8 @@ def downgrade() -> None:
         "contacts", sa.Column("marketing_resumed_at", sa.DateTime(timezone=True), nullable=True)
     )
     op.execute(
-        "UPDATE contacts c SET marketing_opt_out_at = k.marketing_opt_out_at,"
+        "UPDATE contacts c"  # noqa: S608 - module constant
+        " SET marketing_opt_out_at = k.marketing_opt_out_at,"
         " opt_out_source = k.opt_out_source, opt_out_via = k.opt_out_via,"
         " marketing_resumed_at = k.resumed_at"
         f" FROM {TABLE} k"
