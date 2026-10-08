@@ -99,6 +99,18 @@ class ChannelConnectionService:
 
     # ------------------------------------------------------------ connect
 
+    async def precheck(self, channel: Channel) -> None:
+        """Refuse, before an adapter asks its provider anything, a connection that cannot fit.
+
+        ENT-08's first check, for a connect flow that proves ownership with its
+        provider before it can call `connect`: such a flow calls this first, so
+        a workspace with no free slot, or whose plan does not include
+        `channel`, never makes Wasla call the provider (409 either way, capacity
+        judged first). Writes and locks nothing - `connect` asks the guard again,
+        authoritatively, under the workspace's lock.
+        """
+        await self._guard().precheck(channel)
+
     async def connect(
         self,
         *,
@@ -109,8 +121,9 @@ class ChannelConnectionService:
     ) -> ChannelConnection:
         """Make a new active connection on `channel`, having asked the guard twice.
 
-        For an adapter's connect flow, which proves the workspace controls the
-        provider account before calling this (its own proof, like WhatsApp's).
+        For an adapter's connect flow, which calls `precheck` before asking its
+        provider anything, then proves the workspace controls the provider
+        account (its own proof, like WhatsApp's), then calls this.
         Refused: WhatsApp, whose numbers are claimed only with proof of
         ownership through `WhatsAppAccountService`; a channel Wasla does not
         operate (`ChannelUnavailableError`); no free slot or a type the plan

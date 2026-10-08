@@ -425,6 +425,30 @@ async def test_a_type_the_plan_does_not_include_is_refused_with_a_slot_free(
     assert connected.is_active
 
 
+async def test_an_adapter_is_refused_before_it_asks_its_provider(
+    db_session: AsyncSession,
+) -> None:
+    """ENT-08's pre-check, for the adapters to come.
+
+    A connect flow proves ownership with its provider before it can call
+    `connect`, so `precheck` is what it calls first: refused at capacity and
+    for a type the plan does not include, writing nothing - the provider is
+    never asked. M-E12b's killer.
+    """
+    plan = await _plan(db_session, "starter", 1, ["whatsapp", "instagram"])
+    tenant, owner = await _workspace(db_session, None, plan=plan)
+    neutral = _neutral(db_session, tenant)
+    await neutral.precheck(Channel.INSTAGRAM)
+    with pytest.raises(ChannelTypeNotAllowedError):
+        await neutral.precheck(Channel.TIKTOK)
+    await neutral.connect(channel=Channel.INSTAGRAM, external_account_id="ig-pre", actor=owner)
+    with pytest.raises(ChannelCapacityExceededError) as full:
+        await neutral.precheck(Channel.INSTAGRAM)
+    assert full.value.details is not None
+    assert (full.value.details["effective_limit"], full.value.details["active"]) == (1, 1)
+    assert await _active(db_session, tenant) == 1
+
+
 async def test_capacity_is_judged_before_type(db_session: AsyncSession) -> None:
     """Both fail: the workspace is told it is full before it is told the type is not on its plan."""
     plan = await _plan(db_session, "starter", 1, ["whatsapp", "instagram"])
