@@ -1241,7 +1241,7 @@ class BillingWorker:
                 if created and invoice.status.value == "paid":
                     await InvoiceSettlement(
                         session, tenant_id=subscription.tenant_id
-                    ).adopt_renewal_version(invoice, subscription=subscription)
+                    ).adopt_renewal_version(invoice, subscription=subscription, now=now)
         except Exception:
             logger.exception(
                 "billing.invoice_failed",

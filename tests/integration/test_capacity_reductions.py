@@ -64,8 +64,10 @@ from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.integrations.whatsapp.adapter import WhatsAppAdapter
 from app.main import create_app
+from app.platform.plan_admin import PlanCatalogAdmin
 from app.platform.topup_admin import TopupAdmin
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
+from app.schemas.platform_billing import PlanMigrationCreate
 from app.schemas.topup import TopupGrantCreate, TopupRefundReview
 from app.services.capacity_reduction import CapacitySelectionError, ChannelCapacityReductions
 from app.services.channel_capacity import (
@@ -702,6 +704,57 @@ async def test_an_expiring_platform_grant_opens_the_same_flow(db_session: AsyncS
     assert (reduction.cause, reduction.status) == (CapacityReductionCause.GRANT_EXPIRED, PENDING)
     assert reduction.grace_ends_at == at + GRACE
     assert reduction.target_general == 1
+    assert await _active(db_session, tenant) == set(ids), "the grace keeps every connection"
+
+
+async def test_a_migration_to_a_smaller_version_opens_the_same_flow(
+    db_session: AsyncSession,
+) -> None:
+    """ENT-15: staff move Business's subscribers to a smaller version at their renewal.
+
+    The cohort migration (`POST /plans/{id}/migrations`) changes nothing until
+    the term ends; there the real billing sweep adopts the version and opens the
+    same grace, naming the migration - never a disable at the moment staff act.
+    """
+    business, _ = await _plans(db_session)
+    tenant, owner = await _workspace(db_session, business)
+    ids = await _seven(db_session, tenant, owner)
+    subscription = await SubscriptionService(db_session, tenant_id=tenant.id).get()
+    assert subscription is not None
+    catalog = PlanCatalog(db_session)
+    pinned = await catalog.get_version(subscription.plan_version_id)
+    smaller = await own_plan(
+        db_session,
+        code="business",
+        price=Decimal("0.00"),
+        limits={"channel_connections": 3},
+        allowed_channel_types=THREE,
+    )
+    target = await catalog.current_version(smaller)
+    assert pinned is not None and target is not None and target.version > pinned.version
+    await PlanCatalogAdmin(db_session).schedule_migration(
+        business.id,
+        PlanMigrationCreate(
+            from_version=pinned.version,
+            to_version=target.version,
+            reason="Business now holds three connections.",
+            confirm=True,
+        ),
+        actor=await _staff(db_session),
+    )
+    assert await _reduction(db_session, tenant) is None, "nothing happens before the renewal"
+    assert await _active(db_session, tenant) == set(ids)
+
+    at = await _boundary(db_session, tenant)
+
+    await db_session.refresh(subscription)
+    assert subscription.plan_version_id == target.id
+    reduction = await _reduction(db_session, tenant)
+    assert reduction is not None
+    assert (reduction.cause, reduction.status) == (CapacityReductionCause.MIGRATION, PENDING)
+    assert reduction.grace_ends_at == at + GRACE
+    assert reduction.target_general == 3
+    assert sorted(reduction.target_allowed_types) == sorted(THREE)
     assert await _active(db_session, tenant) == set(ids), "the grace keeps every connection"
 
 
