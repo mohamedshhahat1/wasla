@@ -738,7 +738,18 @@ async def test_e17_a_withdrawn_grant_without_its_audit(db_session: AsyncSession)
     tenant = await _tenant(db_session)
     before = await _counts(db_session)
 
-    db_session.add(_grant(tenant, status=TopupStatus.WITHDRAWN, withdrawn=True))
+    grant = _grant(tenant, status=TopupStatus.WITHDRAWN, withdrawn=True)
+    db_session.add(grant)
+    await db_session.flush()
+    # The grant's creation was audited, its withdrawal was not: only an entry
+    # of the withdrawal itself explains a withdrawn grant.
+    AuditTrail(db_session, tenant_id=tenant.id).record(
+        AuditAction.BILLING_TOPUP_PLATFORM_GRANTED,
+        actor=None,
+        actor_kind=AuditActorKind.SYSTEM,
+        target_type="topup_purchase",
+        target_id=grant.id,
+    )
 
     assert await _added(db_session, before) == {"e17_withdrawn_grant_without_its_audit": 1}
 
