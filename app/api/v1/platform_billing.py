@@ -370,10 +370,15 @@ async def list_subscriptions(
     renews_after: datetime | None = None,
     billing_interval: BillingInterval | None = None,
     plan_price_id: uuid.UUID | None = None,
+    plan_version_id: uuid.UUID | None = None,
     limit: LimitQuery = 50,
     offset: OffsetQuery = 0,
 ) -> Page[PlatformSubscriptionRead]:
-    """Subscriptions, filterable by the billing term and exact price they renew at."""
+    """Subscriptions, filterable by the billing term, exact price and version they hold.
+
+    `plan_version_id` (PLAT-G4) is exact: the subscribers on that version of a
+    plan - the ones a new version or a migration would affect.
+    """
     page = await operations.list_subscriptions(
         tenant_id=tenant_id,
         plan_code=plan,
@@ -383,6 +388,7 @@ async def list_subscriptions(
         renews_after=renews_after,
         billing_interval=billing_interval,
         plan_price_id=plan_price_id,
+        plan_version_id=plan_version_id,
         limit=limit,
         offset=offset,
     )

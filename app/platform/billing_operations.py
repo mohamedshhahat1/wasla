@@ -181,8 +181,11 @@ class PlatformBillingOperations:
         offset: int,
         billing_interval: BillingInterval | None = None,
         plan_price_id: uuid.UUID | None = None,
+        plan_version_id: uuid.UUID | None = None,
     ) -> Page[PlatformSubscriptionRead]:
         statement = select(Subscription)
+        if plan_version_id is not None:
+            statement = statement.where(Subscription.plan_version_id == plan_version_id)
         if plan_price_id is not None:
             statement = statement.where(Subscription.plan_price_id == plan_price_id)
         if billing_interval is not None:

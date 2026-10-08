@@ -57,6 +57,7 @@ from app.db.models.billing import (
 from app.db.models.channel import Channel
 from app.db.models.invoice import Invoice
 from app.db.models.tenant import Tenant
+from app.db.models.topup import SELLABLE_TOPUP_ENTITLEMENTS
 from app.db.models.user import User
 from app.platform.billing_audit import record_platform_billing
 from app.repositories.billing_repository import (
@@ -301,7 +302,11 @@ class PlanCatalogAdmin:
 
     @staticmethod
     def features() -> list[FeatureRead]:
-        return list(FEATURES)
+        eligible = {member.value for member in SELLABLE_TOPUP_ENTITLEMENTS}
+        return [
+            feature.model_copy(update={"topup_eligible": feature.key in eligible})
+            for feature in FEATURES
+        ]
 
     async def list_plans(
         self,

@@ -659,6 +659,15 @@ class AuditLog(Base, UUIDPrimaryKeyMixin):
         Index("ix_audit_logs_occurred_at", "occurred_at"),
         Index("ix_audit_logs_action_occurred_at", "action", "occurred_at"),
         Index("ix_audit_logs_actor_id", "actor_id"),
+        # One object's history, newest first, paged by (occurred_at, id):
+        # a product's, a grant's (PLAT-G6). Built CONCURRENTLY by 0100.
+        Index(
+            "ix_audit_logs_target_type_target_id_occurred_at",
+            "target_type",
+            "target_id",
+            "occurred_at",
+            "id",
+        ),
     )
 
     # Nullable: a platform administrator acts across workspaces rather than

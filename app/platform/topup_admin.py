@@ -31,7 +31,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -107,6 +107,10 @@ def _product_state(product: TopupProduct, *, eligible: list[str]) -> dict[str, A
     }
 
 
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+
+
 class TopupAdmin:
     """The platform operator's top-up catalogue and ledger."""
 
@@ -128,10 +132,23 @@ class TopupAdmin:
         limit: int,
         offset: int,
         channel_type: Channel | None = None,
+        code: str | None = None,
+        search: str | None = None,
     ) -> Page[PlatformTopupProductRead]:
         statement = select(TopupProduct)
         if channel_type is not None:
             statement = statement.where(TopupProduct.channel_type == channel_type)
+        if code:
+            statement = statement.where(TopupProduct.code == code.strip().lower())
+        if search:
+            # A literal fragment: `%` and `_` typed by an operator match themselves.
+            pattern = "%" + _escape_like(search.strip()) + "%"
+            statement = statement.where(
+                or_(
+                    TopupProduct.code.ilike(pattern, escape="\\"),
+                    TopupProduct.name.ilike(pattern, escape="\\"),
+                )
+            )
         if scope is not None:
             statement = statement.where(TopupProduct.scope == scope)
         if tenant_id is not None:
@@ -329,8 +346,11 @@ class TopupAdmin:
         entitlement: TopupEntitlement | None,
         limit: int,
         offset: int,
+        channel_type: Channel | None = None,
     ) -> Page[PlatformTopupPurchaseRead]:
         statement = select(TopupPurchase)
+        if channel_type is not None:
+            statement = statement.where(TopupPurchase.channel_type == channel_type)
         if tenant_id is not None:
             statement = statement.where(TopupPurchase.tenant_id == tenant_id)
         if status is not None:

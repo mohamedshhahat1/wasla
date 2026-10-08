@@ -222,9 +222,12 @@ async def list_topup_products(
     entitlement_key: TopupEntitlement | None = None,
     channel_type: Channel | None = None,
     active: bool | None = None,
+    code: Annotated[StorableText | None, Query(min_length=1, max_length=50)] = None,
+    search: Annotated[StorableText | None, Query(min_length=1, max_length=50)] = None,
     limit: LimitQuery = 50,
     offset: OffsetQuery = 0,
 ) -> Page[PlatformTopupProductRead]:
+    """Top-up products. `code` is exact; `search` matches code or name, any case (PLAT-G7)."""
     page = await topups.list_products(
         scope=scope,
         tenant_id=tenant_id,
@@ -233,6 +236,8 @@ async def list_topup_products(
         limit=limit,
         offset=offset,
         channel_type=channel_type,
+        code=code,
+        search=search,
     )
     result: Page[PlatformTopupProductRead] = Page(
         items=page.items, total=page.total, limit=limit, offset=offset
@@ -324,9 +329,11 @@ async def list_topup_purchases(
     purchase_status: Annotated[TopupStatus | None, Query(alias="status")] = None,
     source: TopupSource | None = None,
     entitlement_key: TopupEntitlement | None = None,
+    channel_type: Channel | None = None,
     limit: LimitQuery = 50,
     offset: OffsetQuery = 0,
 ) -> Page[PlatformTopupPurchaseRead]:
+    """Purchases and grants. `channel_type` (PLAT-G8) finds the slots typed for one channel."""
     page = await topups.list_purchases(
         tenant_id=tenant_id,
         status=purchase_status,
@@ -334,6 +341,7 @@ async def list_topup_purchases(
         entitlement=entitlement_key,
         limit=limit,
         offset=offset,
+        channel_type=channel_type,
     )
     result: Page[PlatformTopupPurchaseRead] = Page(
         items=page.items, total=page.total, limit=limit, offset=offset
