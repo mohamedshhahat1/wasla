@@ -830,6 +830,35 @@ The single-column keys were dropped rather than kept alongside, since the
 composite already implies them and keeping both is the same check paid for twice
 on every insert.
 
+### 6.20 Platform entitlement operations (ADR-132)
+
+Seven routes under `/api/v1/platform/billing`, each **PLATFORM_STAFF**
+(`PLATFORM_OWNER` or `PLATFORM_ADMIN`), each `403 permission_denied` for every
+workspace role - a workspace owner included - and none rate-limited, like the
+rest of the platform billing plane:
+
+| Method | Path | What it may touch |
+|---|---|---|
+| `POST` | `/topup-purchases/{purchase_id}/withdraw` | One platform grant of the workspace the body names (`tenant_id`); another workspace's grant, or an unknown id, is `404` |
+| `GET` | `/capacity-reductions` | Every workspace's reductions - a platform read, audited |
+| `GET` | `/capacity-reductions/{reduction_id}` | One reduction; audited against its workspace |
+| `GET` | `/tenants/{tenant_id}/capacity-reductions` | One workspace's; `404` for no such workspace |
+| `GET` | `/tenants/{tenant_id}/channel-capacity` | One workspace's capacity view - the tenant route's own computation |
+| `GET` | `/tenants/{tenant_id}/channel-connections` | One workspace's connections - the tenant route's own schema, no credential |
+| `GET` | `/channel-types` | The vocabulary; no workspace data |
+
+A platform role grants nothing inside a workspace, and these routes do not
+change that: staff read a workspace's channels and take back a grant staff gave,
+but cannot connect, enable, disable or release a connection, select which to
+keep, or resolve a reduction. A withdrawal never disables anything itself - any
+disable follows only from the reduction lifecycle after its grace. Every read
+writes a `platform_billing_read` access entry (against the workspace when the
+read is one workspace's) and the withdrawal a `billing_topup_grant_withdrawn`
+entry with actor, platform role, reason, before, after and request id.
+`tests/integration/test_platform_entitlement_reads.py` and
+`test_grant_withdrawal.py` prove the refusals, the 404s and the audit; the route
+policy table in `test_platform_hierarchy.py` pins each guard.
+
 ## 7. Known gaps, not fixed here
 
 Recorded rather than silently carried.

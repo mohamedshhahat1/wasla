@@ -109,7 +109,7 @@ never renews.
 
 | Task | Call | Notes |
 | --- | --- | --- |
-| List products | `GET /topups?scope=…&tenant_id=…&entitlement_key=…&active=…` | |
+| List products | `GET /topups?scope=…&tenant_id=…&entitlement_key=…&channel_type=…&active=…` | `code=` finds one product by its code (any case); `search=` matches part of a code or name, any case (`%` and `_` match themselves). |
 | Create a product | `POST /topups` | `code` (permanent), `name`, `entitlement_key` (one of the seven), `quantity` (> 0; storage in bytes), `price`, `currency` (EGP), `scope` (`global`, or `tenant` with `tenant_id`), `is_public`, `reason`. A `tenant` product is visible, purchasable and grantable to that company only. For `channel_connections`: `channel_type` (omit for a general slot any allowed type may use) and `eligible_plan_codes` (omit or `[]` for every plan). |
 | Price a placeholder | `PATCH /topups/{id}` with `price`, then `POST /topups/{id}/activate` | Migration 0098 seeds six channel products - `channel-connection-1` (general) and `whatsapp-`, `instagram-`, `messenger-`, `telegram-`, `tiktok-connection-1` - each +1, inactive and **unpriced**. Activating one with no price is refused (409, and a database check). Wasla invents no price. |
 | Change price, quantity, name, visibility, channel type or eligible plans | `PATCH /topups/{id}` with `expected_revision` | For new purchases only. Every existing purchase keeps what it was bought at, its channel type included. |
@@ -120,14 +120,38 @@ never renews.
 
 | Task | Call | Notes |
 | --- | --- | --- |
-| Find purchases | `GET /topup-purchases?tenant_id=…&status=…&source=…&entitlement_key=…` | `status=paid` lists money taken and not granted - each has an incident and needs a refund. |
+| Find purchases | `GET /topup-purchases?tenant_id=…&status=…&source=…&entitlement_key=…&channel_type=…` | `status=paid` lists money taken and not granted - each has an incident and needs a refund. `status=withdrawn` lists grants staff took back. |
 | Give allowance without payment | `POST /tenants/{tenant_id}/topups/grant` | `entitlement_key`, `quantity`, `valid_until: "current_period_end"`, `reason`, `expected_subscription_revision`, and for channel slots optionally `channel_type`. Recorded as `source: platform_grant` with no invoice, payment or price. Refused for a key the plan leaves unlimited, and for a channel type the company's plan does not allow (422). |
 | Decide a refunded top-up | `POST /topup-purchases/{id}/refund-review` | Only for `status: refund_review`. `decision: keep` leaves the allowance; `withdraw` removes it from the limit from now on. Withdrawing deletes nothing and never makes usage negative - the company is just over its limit until it fits again. |
+| Take a grant back (ADR-132) | `POST /topup-purchases/{id}/withdraw` with `tenant_id`, `reason`, `expected_revision` | A platform grant that still counts, given by mistake or no longer due. It stops counting now. `tenant_id` must be the grant's company (else 404). A paid purchase is refused (409) - refund it instead. See below for what the company sees. |
 
 To refund a top-up, refund its payment with `POST /payments/{id}/refund` as
 usual. Nothing is withdrawn automatically: before the grant a full refund cancels
 the purchase, after it the purchase waits in `refund_review` for your decision.
 A top-up refund never changes the plan and never starts dunning.
+
+### Withdrawing a grant (ADR-132)
+
+What happens depends on the key:
+
+- **Channel slots.** If the company still fits without the slot, nothing else
+  happens. If it does not, a capacity reduction opens with cause
+  `grant_withdrawn`, naming the grant, and the ordinary 7-day grace below: the
+  owner chooses what to keep, otherwise the fallback runs at the grace end.
+  The withdrawal itself never disables a connection.
+- **Usage keys** (AI turns, messages, campaign messages). The allowance drops at
+  once. Turns and messages already used stay used - nothing is refunded or
+  removed - and if the company is now at or past its new limit, the next AI
+  turn is handed to a person exactly as when an allowance runs out.
+- **Other capacity keys** (storage, team members, knowledge documents). The limit
+  drops; nothing is deleted; new creation is refused until the company fits.
+
+The response names the limit before and after and the reduction the company is
+now in, if any. The withdrawal is audited (`billing_topup_grant_withdrawn`)
+and visible in the purchase's history:
+`GET /api/v1/platform/audit-logs?target_type=topup_purchase&target_id={id}`.
+There is no operation to shorten a grant to a later date: withdraw it, or let
+it end with the period.
 
 ### Channel slots (ADR-131)
 
@@ -149,11 +173,25 @@ particular to it:
 
 When a company's channel capacity falls below its active connections - a
 downgrade or migration taking effect, a channel top-up or grant expiring, a
-refund you withdrew - a **reduction** opens. Read it on
-`GET /tenants/{tenant_id}/summary`: the `channel_connections` entitlement carries
-the slots in force (general and typed) and the active connections by channel, and
-`channel_capacity_reduction` the latest reduction with its cause, status and
-grace end.
+refund you withdrew, a grant you withdrew - a **reduction** opens.
+
+**The reduction queue** (ADR-132):
+
+| Task | Call |
+| --- | --- |
+| Everyone in a grace, soonest end first | `GET /capacity-reductions?status=pending_selection` |
+| Graces ending this week | `GET /capacity-reductions?status=pending_selection&grace_ends_before=…` |
+| By cause | `GET /capacity-reductions?cause=grant_withdrawn` (repeatable, as is `status`) |
+| One reduction: kept, disabled, the owner's pre-selection, what the fallback would do | `GET /capacity-reductions/{id}` |
+| One company's history | `GET /tenants/{tenant_id}/capacity-reductions` |
+| Exactly what the company's capacity page shows | `GET /tenants/{tenant_id}/channel-capacity` |
+| The company's connections, as it lists them | `GET /tenants/{tenant_id}/channel-connections` |
+
+Each queue row shows the company's name, its active connections now and how
+many the fallback would disable if the grace ended now. The summary
+(`GET /tenants/{tenant_id}/summary`) still carries the latest reduction. You can
+read a reduction but not act on it: extending, shortening or resolving one on a
+customer's behalf is not offered (a product decision not yet made).
 
 What to tell the customer during the grace (`CHANNEL_CAPACITY_GRACE_DAYS`, 7):
 

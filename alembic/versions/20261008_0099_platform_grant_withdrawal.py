@@ -134,7 +134,7 @@ def downgrade() -> None:
     if found:
         raise RuntimeError(
             "Grant withdrawals cannot be downgraded "
-            "(docs/RUNBOOK.md, 'Platform entitlement operations (0099)'). "
+            "(docs/RUNBOOK.md, 'Platform entitlement operations (0099-0100)'). "
             "Nothing has been changed:\n  " + "\n  ".join(found)
         )
 

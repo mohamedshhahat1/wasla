@@ -319,6 +319,7 @@ grants exactly what the customer was shown, whatever the product becomes.
 | `expired` | Past `expires_at`, recorded by the sweep | No |
 | `cancelled` | Abandoned, refunded before the grant, or withdrawn by an operator | No |
 | `refund_review` | Refunded after the grant; an operator decides | **Yes**, until decided |
+| `withdrawn` | A platform grant staff took back before it ended (ADR-132); `withdrawn_at`, `withdrawn_by`, `withdrawal_reason` say when, who and why | No |
 
 ### Buying a top-up: the Paymob flow
 
@@ -358,6 +359,18 @@ refuses one that carries any of them - and it appears as `platform_grant_limit`,
 never as paid top-up. The audit entry records actor, platform role, workspace,
 key, quantity, expiry, reason, the effective limit before and after, and the
 request id.
+
+**Withdrawing one** (ADR-132): `POST
+/platform/billing/topup-purchases/{id}/withdraw` with the grant's `tenant_id`,
+a `reason` and `expected_revision`. Only a platform grant that still counts can
+be withdrawn - a paid purchase is refunded instead (`409`). It moves to
+`withdrawn` and stops counting at once, under the workspace's lock for its key;
+the status, the audit entry (`billing_topup_grant_withdrawn`, with the effective
+limit before and after) and any reduction commit together. Channel slots it
+leaves short open a capacity reduction with cause `grant_withdrawn` (below);
+a usage allowance just drops - recorded usage is never removed, open AI holds
+settle as they would have, and the next turn over the new limit is handed to a
+person. Nothing is disabled by the withdrawal itself.
 
 ### Refunds
 
@@ -508,13 +521,16 @@ general slot and one per channel type.
 ### When capacity falls: the reduction
 
 A downgrade or migration taking effect, a channel top-up or grant expiring
-(one still in refund review included), or a refund withdrawn can leave a
-workspace with more connections than slots, or a connection of a type the plan
-dropped. That boundary opens one **capacity reduction** per workspace:
+(one still in refund review included), a refund withdrawn, or a platform grant
+withdrawn by staff (`grant_withdrawn`, ADR-132; the reduction names the grant)
+can leave a workspace with more connections than slots, or a connection of a
+type the plan dropped. That boundary opens one **capacity reduction** per
+workspace:
 
 1. A pre-selection the owner made while the change was scheduled
    (`POST /billing/channel-capacity/selection`) is applied at once if it still
-   fits.
+   fits - at a term boundary. A grant withdrawal is not the boundary it was
+   made for: the pre-selection stays for the term end, and the grace opens.
 2. Otherwise a grace of `CHANNEL_CAPACITY_GRACE_DAYS` (7) begins. Every
    connection keeps working; no new connection or re-enable fits; owners are
    emailed at scheduling, at the boundary and 48 hours before the end.

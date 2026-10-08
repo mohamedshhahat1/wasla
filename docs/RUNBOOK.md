@@ -1804,7 +1804,7 @@ python -m scripts.db_preflight verify
 python -m scripts.omnichannel_invariants verify
 ```
 
-`verify` runs the entitlement ledger E01-E15 with the omnichannel invariants;
+`verify` runs the entitlement ledger E01-E18 with the omnichannel invariants;
 every one must read 0. It reads the clock, `DEFAULT_PLAN_CODE` and
 `AI_TURN_HOLD_TTL_SECONDS` from the environment it runs in, so run it with the
 deployment's values. E01 and E02 (connections over capacity, or of a type the
@@ -1905,6 +1905,10 @@ fallback disabled channel types the plan no longer allows first, then the
 newest. Many at once is usually one cause applied to many companies - a plan
 migration, a withdrawn product, an expiring grant:
 
+`GET /api/v1/platform/billing/capacity-reductions?status=resolved_automatically`
+lists them with their companies and causes (`cause=grant_withdrawn` when staff
+withdrew a grant). By hand:
+
 ```sql
 SELECT cause, status, count(*), min(effective_at), max(resolved_at)
   FROM channel_capacity_reductions
@@ -1924,10 +1928,15 @@ were not.
 
 #### Reading a company's channel capacity
 
-`GET /api/v1/platform/billing/tenants/{tenant_id}/summary` gives the slots in
-force (general and typed, with what each came from), the active connections by
-channel, the AI turns used, held and by channel, and the latest capacity
-reduction with its cause, status and grace end. By hand:
+`GET /api/v1/platform/billing/tenants/{tenant_id}/channel-capacity` is exactly
+the company's own capacity page - slots in force by kind, active connections by
+channel, the scheduled plan's capacity, the open reduction and what the
+fallback would keep and disable - and `.../channel-connections` its list of
+connections (ADR-132). `.../capacity-reductions` is its history, and
+`GET /api/v1/platform/billing/capacity-reductions?status=pending_selection` every
+company in a grace, the soonest end first. The summary
+(`.../tenants/{tenant_id}/summary`) adds the AI turns used, held and by channel.
+No SQL is needed; by hand, for an investigation:
 
 ```sql
 SELECT channel, status, disabled_reason, ownership_started_at
@@ -1942,6 +1951,59 @@ SELECT cause, status, target_general, target_typed, target_allowed_types,
 
 What to tell a customer during a grace is in `docs/BILLING_OPERATIONS.md`
 (*Channel capacity reductions*).
+
+### Platform entitlement operations (0099-0100)
+
+ADR-132: staff withdraw a platform grant, read the capacity-reduction queue and
+a company's channels, and filter by plan version, product code, channel type
+and audit target - all through the platform API.
+
+| Migration | What it does | Locks |
+| --- | --- | --- |
+| 0099 | `topup_status` gains `withdrawn`, `channel_capacity_reduction_cause` gains `grant_withdrawn`, `audit_action` gains `billing_topup_grant_withdrawn` (autocommit, first); `topup_purchases.withdrawn_at/withdrawn_by/withdrawal_reason`; `channel_capacity_reductions.topup_purchase_id`; CHECKs that only a grant is withdrawn, that a withdrawal says when and why, and that exactly a `grant_withdrawn` reduction names a grant | Metadata-only `ADD COLUMN`s on two small tables; constraints `NOT VALID` then validated; 15 s `lock_timeout` |
+| 0100 | `ix_audit_logs_target_type_target_id_occurred_at`, `CONCURRENTLY`; an INVALID leftover is dropped and rebuilt | None blocking writes |
+
+The previous image runs on this schema - every change is additive and nothing
+it reads changes - so the ordinary rolling deploy applies. A process of the
+previous image that read a withdrawn grant's status would fail on the unknown
+label; there is none until staff withdraw one with the new image.
+
+**Downgrades.** 0100 → 0099 drops the index in the run's transaction; nothing
+is lost. 0099 → 0098 refuses, naming the counts, while any grant is withdrawn,
+any reduction names one or any audit entry records a withdrawal - the earlier
+schema cannot say why a grant stopped counting. Both run in the run's
+transaction, so a refusal anywhere below rolls back everything above it. The
+labels stay.
+
+**After deploying:** `python -m scripts.db_preflight verify` and
+`python -m scripts.omnichannel_invariants verify`, as above; E16-E18 read 0.
+
+#### Withdrawing a grant
+
+A grant given to the wrong company, or no longer due:
+
+1. `GET /api/v1/platform/billing/topup-purchases?tenant_id=…&source=platform_grant&status=granted`
+   and note the grant's `id` and `revision`.
+2. `POST /api/v1/platform/billing/topup-purchases/{id}/withdraw` with
+   `{"tenant_id": "…", "reason": "…", "expected_revision": …}`.
+3. Read the answer: `effective_limit_before` and `_after`, and `reduction` -
+   null if the company still fits, else the `grant_withdrawn` reduction with its
+   `grace_ends_at`. Tell the owner they have the grace to choose
+   (`docs/BILLING_OPERATIONS.md`, *Withdrawing a grant*).
+
+`409` means a paid purchase (refund it instead), a stale revision (reload), or
+a grant that already ended. Nothing is disabled by the withdrawal itself. There
+is no undo; if the withdrawal was the mistake, grant again, which closes the
+reduction with nothing disabled.
+
+#### Reading the reduction queue
+
+`GET /api/v1/platform/billing/capacity-reductions?status=pending_selection`
+lists every company in a grace, the soonest end first, with its active
+connections and how many the fallback would disable. Narrow with
+`grace_ends_before` to the ones ending this week; `GET
+.../capacity-reductions/{id}` shows what the fallback would keep. Staff cannot
+extend, shorten or resolve a reduction - reach the owner instead.
 
 ### Downgrading past the billing migrations
 
