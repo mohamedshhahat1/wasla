@@ -507,6 +507,53 @@ async def test_a_duplicate_job_holds_and_charges_once(
     assert len(await _charges(ai_turns, workspace.tenant_id)) == 1
 
 
+async def test_a_turn_that_cannot_get_the_allowance_lock_is_retried_not_lost(
+    ai_turns: TurnRunner, ai_providers: FakeProviders, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Contention on the workspace's lock ends in a retry, never a dead letter (ENT-03).
+
+    Found at runtime (APP-E2E R-3): ten turns on one workspace, under load,
+    queued on the lock past the session's lock timeout and six were
+    dead-lettered unanswered. Here the lock is held by another transaction for
+    longer than the hold may wait.
+    """
+    import app.services.entitlement_service as entitlement_module
+
+    await ai_turns.plan({TURNS: 5})
+    workspace = await ai_turns.workspace()
+    conversation_id, ids = await ai_turns.write(workspace, ["hello"])
+    await ai_turns.enqueue(workspace, conversation_id, ids[0])
+    monkeypatch.setattr(entitlement_module, "AI_TURN_HOLD_LOCK_WAIT", timedelta(milliseconds=300))
+    lock = entitlement_module._lock_id(workspace.tenant_id, LimitKey.PERIOD_AI_TURNS)
+    worker = ai_turns.worker()
+    queue = worker.queue
+
+    async with ai_turns.database.session() as blocker:
+        await blocker.execute(select(func.pg_advisory_xact_lock(lock)))
+        assert await worker.run_once(wait_seconds=1)
+
+        # Retried, with nothing held, engaged, called or charged - and the
+        # claim given back, so the retry can adopt it at once.
+        assert await queue.delayed_depth() == 1
+        assert await queue.dead_letters() == []
+        [turn] = await _turns(ai_turns, workspace.tenant_id)
+        assert (str(turn.state), turn.charge_state) == ("claimed", None)
+        assert turn.claim_expires_at is not None
+        assert turn.claim_expires_at <= datetime.now(UTC)
+        assert ai_providers.inference == 0
+        assert await _charges(ai_turns, workspace.tenant_id) == []
+        await blocker.rollback()
+
+    assert await queue.promote_due(now=datetime.now(UTC) + timedelta(minutes=5)) == 1
+    assert await ai_turns.drain() == 1
+
+    assert ai_providers.inference == 1
+    assert len(ai_providers.sends) == 1
+    [turn] = await _turns(ai_turns, workspace.tenant_id)
+    assert turn.charge_state is CHARGED
+    assert len(await _charges(ai_turns, workspace.tenant_id)) == 1
+
+
 # ------------------------------------------------- ENT-03: never oversold
 
 

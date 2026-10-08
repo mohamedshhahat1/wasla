@@ -54,6 +54,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Final
 
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.disclosure import compose, disclosure_due, disclosure_for
@@ -64,6 +65,7 @@ from app.agents.reply import fallback_reply, prepare_channel_reply
 from app.channels.policy import ChannelCapabilities
 from app.channels.registry import ChannelRegistry, default_registry
 from app.core.config import Settings
+from app.core.exceptions import DependencyUnavailableError
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
 from app.core.telemetry import (
@@ -72,6 +74,7 @@ from app.core.telemetry import (
     record_entitlement_refusal,
 )
 from app.core.tracing import JOB_OUTCOME
+from app.db.errors import is_retryable, sqlstate
 from app.db.models.agent import Agent
 from app.db.models.agent_turn import AITurnReleaseReason, TurnOutcome
 from app.db.models.analytics import AnalyticsSource
@@ -466,7 +469,37 @@ class AgentWorker:
         turn that turns out not to be ours to engage writes no hold: the
         conditional engage matches no row, and the transaction is rolled back.
         Nothing is charged here; the turn is charged when it settles.
+
+        Contention outlasting even the hold's own lock wait - a burst of turns
+        on one workspace - is retried rather than lost (ENT-03): nothing has
+        engaged and nothing is held, so the claim is given back and the job
+        fails as a dependency that is unavailable, which the queue retries
+        before engagement. A turn refused for contention is not a customer's
+        message to dead-letter.
         """
+        try:
+            return await self._hold_and_engage(job, trigger_message_id)
+        except DBAPIError as error:
+            if not is_retryable(error):
+                raise
+            async with self._database.session() as giving_back:
+                await AgentTurnRepository(giving_back, tenant_id=job.tenant_id).release_claim(
+                    trigger_message_id=trigger_message_id, worker_id=self._queue.worker_id
+                )
+            logger.warning(
+                "agent.turn_hold_contended",
+                extra={
+                    "event": "agent.turn_hold_contended",
+                    "conversation_id": str(job.conversation_id),
+                    "sqlstate": sqlstate(error),
+                },
+            )
+            raise DependencyUnavailableError(
+                "The workspace's AI allowance is busy; the turn will be retried."
+            ) from error
+
+    async def _hold_and_engage(self, job: AgentJob, trigger_message_id: uuid.UUID) -> _Reservation:
+        """The reservation itself: hold under the workspace's lock, then engage, one commit."""
         async with self._database.session() as reservation:
             entitlements = EntitlementService(
                 reservation,

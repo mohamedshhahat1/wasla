@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PlanLimitExceededError
@@ -99,6 +99,14 @@ CHANNEL_NOT_IN_PLAN_DETAIL: Final = (
 #: How long an AI turn's hold counts when the caller names no TTL (ENT-03):
 #: the deployment's `AI_TURN_HOLD_TTL_SECONDS`, whose default this matches.
 DEFAULT_AI_TURN_HOLD_TTL: Final = timedelta(seconds=900)
+
+#: How long a turn waits for its workspace's allowance lock (ENT-03), in place
+#: of the session's `DATABASE_LOCK_TIMEOUT_MS`. The lock guards a few
+#: milliseconds of counting and is never held across an inference, so a burst
+#: of turns on one workspace queues behind it: waiting is cheap, and a turn
+#: that gave up at five seconds was a customer's message lost to the dead-letter
+#: list. Below the statement timeout, so the lock wait is what ends first.
+AI_TURN_HOLD_LOCK_WAIT: Final = timedelta(seconds=20)
 
 # Which meters each period limit adds up. Messages count in both directions:
 # a conversation is two-sided, every WhatsApp platform prices it that way, and
@@ -392,6 +400,8 @@ class EntitlementService:
         so a settle committing between two reads can never be counted in
         neither.
         """
+        wait_ms = int(AI_TURN_HOLD_LOCK_WAIT.total_seconds() * 1000)
+        await self._session.execute(text(f"SET LOCAL lock_timeout = {wait_ms}"))
         await self._session.execute(
             select(func.pg_advisory_xact_lock(_lock_id(self._tenant_id, LimitKey.PERIOD_AI_TURNS)))
         )

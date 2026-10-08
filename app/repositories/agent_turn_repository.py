@@ -294,6 +294,36 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
             )
         return adopted
 
+    async def release_claim(
+        self,
+        *,
+        trigger_message_id: uuid.UUID,
+        worker_id: str | None,
+        now: datetime | None = None,
+    ) -> bool:
+        """Give back a claim this worker holds and never engaged, so a retry adopts it now.
+
+        For an attempt that stops before engaging and will be retried: nothing
+        has left the process, so the turn is free to repeat - but its lease
+        would refuse the retry until it lapsed, and a retry refused as "owned"
+        ends the job with the customer unanswered. Lapsing the lease here is
+        the same hand-on a dead worker's expiry makes, made at once. Only a
+        `CLAIMED` turn held by `worker_id` is touched.
+        """
+        moment = now or datetime.now(UTC)
+        statement = (
+            update(AgentTurn)
+            .where(
+                AgentTurn.tenant_id == self._tenant_id,
+                AgentTurn.trigger_message_id == trigger_message_id,
+                AgentTurn.state == AgentTurnState.CLAIMED,
+                AgentTurn.claimed_by == worker_id,
+            )
+            .values(claim_expires_at=moment)
+        )
+        result = cast("CursorResult[Any]", await self._session.execute(statement))
+        return bool(result.rowcount)
+
     async def engage(
         self,
         *,
