@@ -73,6 +73,7 @@ from scripts.omnichannel_invariants import (
     violations,
 )
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
+from tests.channel_plans import allow_channels
 
 pytestmark = pytest.mark.integration
 
@@ -132,6 +133,11 @@ async def _tenant(session: AsyncSession, label: str) -> Tenant:
     tenant = Tenant(name=f"Oracle {label} {tag}", slug=f"oracle-{label}-{tag}")
     session.add(tenant)
     await session.flush()
+    # A workspace holds a plan (ADR-131): one allowing every channel and the
+    # connections this population makes. Without it the workspace reads the
+    # deployment's default plan - one WhatsApp number on a migration-built
+    # schema - and the entitlement ledger would judge that, not the write paths.
+    await allow_channels(session, tenant.id, limits={"channel_connections": 10})
     return tenant
 
 
