@@ -466,8 +466,11 @@ unlimited version is unlimited.
 /whatsapp/accounts`, `POST /whatsapp/accounts/{id}/enable`, a reconnect, the
 neutral `ChannelConnectionService` every adapter's connect flow uses - first
 before any provider call, then under the workspace's lock in the activating
-transaction. While a downgrade is scheduled a new connection must also fit the
-scheduled plan.
+transaction. An adapter proves ownership with its provider before it can call
+`ChannelConnectionService.connect`, so its flow starts with
+`ChannelConnectionService.precheck(channel)` - the same lock-free first answer
+WhatsApp's flow gives itself before Meta's ownership read. While a downgrade is
+scheduled a new connection must also fit the scheduled plan.
 
 | Refusal | Status | Details |
 | --- | --- | --- |

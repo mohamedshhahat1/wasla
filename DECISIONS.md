@@ -6624,7 +6624,8 @@ records why, when and by whom it was last disabled (`disabled_reason`:
 a connection.
 
 **Consequences.** `ChannelConnectionService` is the neutral connect, enable,
-disable and release path every adapter's connect flow uses.
+disable and release path every adapter's connect flow uses: `precheck` before
+the adapter asks its provider anything, then `connect`.
 
 ## ADR-122 (superseded in part 2026-10-08)
 
