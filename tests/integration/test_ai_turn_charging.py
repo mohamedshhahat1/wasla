@@ -51,7 +51,7 @@ from app.integrations.whatsapp.adapter import WhatsAppAdapter
 from app.repositories.agent_turn_repository import AgentTurnRepository
 from app.services.ai_turn_charge import AITurnCharge, SettleResult
 from app.services.channel_ingestion_service import ChannelIngestionService
-from app.services.entitlement_service import EntitlementService
+from app.services.entitlement_service import Entitlement, EntitlementService
 from app.workers.ai_worker import QUOTA_HANDOFF_REASON
 from app.workers.billing_worker import BillingWorker
 from app.workers.queue import AgentQueue
@@ -184,13 +184,31 @@ class DecisionGate:
     are, and without it (M-E05) is never true until all have counted. So with
     the lock the turns decide one after another, each seeing the holds before
     it; without it, every one of them counts the same empty figure.
+
+    Every armed turn first arrives at the decision (`arrive`) before any of
+    them asks for the lock. Without that, the first turn would wait at the
+    gate *holding* the lock for as long as the slowest worker took to dequeue
+    and claim, and on a cold database the early waiters' lock wait
+    (`AI_TURN_HOLD_LOCK_WAIT`) could run out first - a harness artefact a
+    production turn, which holds the lock for milliseconds, never meets.
     """
 
     def __init__(self, database: Database, expected: int) -> None:
         self.database = database
         self.expected = expected
+        self.arrived = 0
         self.counted = 0
         self.decided = 0
+
+    async def arrive(self) -> None:
+        if self.arrived >= self.expected:
+            return
+        self.arrived += 1
+
+        async def everyone_has_arrived() -> bool:
+            return self.arrived >= self.expected
+
+        await _poll(everyone_has_arrived, what="every turn to arrive at the hold decision")
 
     async def wait(self) -> None:
         self.counted += 1
@@ -208,9 +226,14 @@ class DecisionGate:
 def decision_gate(monkeypatch: pytest.MonkeyPatch) -> Callable[[Database, int], DecisionGate]:
     """Install a `DecisionGate` behind the AI turn count of `EntitlementService`."""
     original = EntitlementService._used_and_held
+    original_hold = EntitlementService.hold_ai_turn
 
     def install(database: Database, expected: int) -> DecisionGate:
         gate = DecisionGate(database, expected)
+
+        async def arriving(self: EntitlementService) -> Entitlement:
+            await gate.arrive()
+            return await original_hold(self)
 
         async def gated(self: EntitlementService, key: LimitKey, **kwargs: Any) -> tuple[int, int]:
             counted = await original(self, key, **kwargs)
@@ -218,6 +241,7 @@ def decision_gate(monkeypatch: pytest.MonkeyPatch) -> Callable[[Database, int], 
                 await gate.wait()
             return counted
 
+        monkeypatch.setattr(EntitlementService, "hold_ai_turn", arriving)
         monkeypatch.setattr(EntitlementService, "_used_and_held", gated)
         return gate
 
