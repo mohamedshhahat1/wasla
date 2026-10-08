@@ -65,7 +65,13 @@ from app.services.messaging_service import MessagingService
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.media_queue import MediaQueue
 from app.workers.queue import AgentJob, AgentQueue
-from scripts.omnichannel_invariants import CENSUS, INVARIANTS, census, violations
+from scripts.omnichannel_invariants import (
+    CENSUS,
+    ENTITLEMENT_INVARIANTS,
+    INVARIANTS,
+    census,
+    violations,
+)
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
 
 pytestmark = pytest.mark.integration
@@ -375,7 +381,7 @@ async def test_no_write_path_breaks_an_invariant(
 
     after, census_after = await _sweep(db_session)
 
-    assert set(after) == {check.name for check in INVARIANTS}
+    assert set(after) == {check.name for check in INVARIANTS + ENTITLEMENT_INVARIANTS}
     added = {name: after[name] - before[name] for name in after if after[name] != before[name]}
     assert added == {}, f"the population broke invariants: {added}"
     grew = {name: census_after[name] - census_before[name] for name in census_after}
@@ -507,7 +513,7 @@ async def test_the_operator_checks_run_on_a_read_only_replica(prepared_database:
                 async with connection.begin():
                     await connection.execute(text("CREATE TEMPORARY TABLE oracle_probe (x int)"))
         assert "read-only" in str(refused.value).lower()
-        assert set(found) == {check.name for check in INVARIANTS}
+        assert set(found) == {check.name for check in INVARIANTS + ENTITLEMENT_INVARIANTS}
         assert set(counted) == {check.name for check in CENSUS}
     finally:
         await engine.dispose()
