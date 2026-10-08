@@ -76,7 +76,15 @@ CHARGED, HELD, RELEASED = (
     AITurnChargeState.HELD,
     AITurnChargeState.RELEASED,
 )
-GATE_DEADLINE_SECONDS = 30.0
+GATE_DEADLINE_SECONDS = 120.0
+# The races prove the allowance cannot be oversold, which does not depend on
+# how fast the database is. They decide one turn at a time under the lock, and
+# on a loaded machine a single count was measured at 16.6 s, so ten in a row
+# could outlast the production lock wait (20 s) and send the tail to the retry
+# path - correct behaviour, proven by its own test with a 300 ms wait, but not
+# this race. The racing workers get room instead.
+RACE_LOCK_WAIT = timedelta(seconds=100)
+RACE_SESSION_TIMEOUT_MS = 150_000
 
 
 # ---------------------------------------------------------------- helpers
@@ -191,6 +199,13 @@ class DecisionGate:
     and claim, and on a cold database the early waiters' lock wait
     (`AI_TURN_HOLD_LOCK_WAIT`) could run out first - a harness artefact a
     production turn, which holds the lock for milliseconds, never meets.
+
+    Once one decision has seen every undecided turn blocked on the lock, the
+    rest decide without asking again: a turn blocked on the lock cannot move
+    without it. Re-polling the database at every decision made ten decisions
+    in a row outlast the lock wait on a loaded machine. Without the lock
+    every turn has counted before the first one proceeds, so the race stays
+    exactly as decisive.
     """
 
     def __init__(self, database: Database, expected: int) -> None:
@@ -199,6 +214,7 @@ class DecisionGate:
         self.arrived = 0
         self.counted = 0
         self.decided = 0
+        self.everyone_seen = False
 
     async def arrive(self) -> None:
         if self.arrived >= self.expected:
@@ -212,21 +228,26 @@ class DecisionGate:
 
     async def wait(self) -> None:
         self.counted += 1
+        if not self.everyone_seen:
 
-        async def everyone_is_here() -> bool:
-            undecided = self.expected - self.decided
-            in_flight = self.counted - self.decided
-            return in_flight + await _advisory_waiters(self.database) >= undecided
+            async def everyone_is_here() -> bool:
+                undecided = self.expected - self.decided
+                in_flight = self.counted - self.decided
+                return in_flight + await _advisory_waiters(self.database) >= undecided
 
-        await _poll(everyone_is_here, what="every turn to reach the hold decision")
+            await _poll(everyone_is_here, what="every turn to reach the hold decision")
+            self.everyone_seen = True
         self.decided += 1
 
 
 @pytest.fixture
 def decision_gate(monkeypatch: pytest.MonkeyPatch) -> Callable[[Database, int], DecisionGate]:
     """Install a `DecisionGate` behind the AI turn count of `EntitlementService`."""
+    import app.services.entitlement_service as entitlement_module
+
     original = EntitlementService._used_and_held
     original_hold = EntitlementService.hold_ai_turn
+    monkeypatch.setattr(entitlement_module, "AI_TURN_HOLD_LOCK_WAIT", RACE_LOCK_WAIT)
 
     def install(database: Database, expected: int) -> DecisionGate:
         gate = DecisionGate(database, expected)
@@ -278,8 +299,19 @@ async def _customers(ai_turns: TurnRunner, workspace: Workspace, count: int) -> 
 
 
 async def _race(ai_turns: TurnRunner, workers: int, registry: ChannelRegistry | None = None) -> int:
-    """`TurnRunner.race`, with the worker's channel registry replaceable."""
-    databases = [Database(ai_turns.settings) for _ in range(workers)]
+    """`TurnRunner.race`, with the worker's channel registry replaceable.
+
+    Each worker's sessions may wait out `RACE_LOCK_WAIT` (statement and
+    idle-in-transaction bounds raised to match); every other bound is the
+    deployment's.
+    """
+    settings = ai_turns.settings.model_copy(
+        update={
+            "database_statement_timeout_ms": RACE_SESSION_TIMEOUT_MS,
+            "database_idle_in_transaction_timeout_ms": RACE_SESSION_TIMEOUT_MS,
+        }
+    )
+    databases = [Database(settings) for _ in range(workers)]
     try:
         runners = []
         for database in databases:

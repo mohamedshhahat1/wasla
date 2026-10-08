@@ -196,6 +196,9 @@ class GuardGate:
     either at the gate too or blocked on the advisory lock. With the lock the
     racers decide one after another, each counting the commits before it;
     without it (M-E11) every one of them judges the same committed count.
+    Once one decision has seen that, the rest do not ask again: a racer blocked
+    on the lock cannot move without it, and re-polling at every decision made
+    the last waiters outlast the lock timeout on a loaded machine.
     """
 
     def __init__(self, maker: async_sessionmaker[AsyncSession], expected: int) -> None:
@@ -204,6 +207,7 @@ class GuardGate:
         self.arrived = 0
         self.at_gate = 0
         self.decided = 0
+        self.everyone_seen = False
 
     async def arrive(self) -> bool:
         if self.arrived >= self.expected:
@@ -218,12 +222,14 @@ class GuardGate:
 
     async def hold(self) -> None:
         self.at_gate += 1
+        if not self.everyone_seen:
 
-        async def everyone_is_here() -> bool:
-            undecided = self.expected - self.decided
-            return self.at_gate + await _advisory_waiters(self.maker) >= undecided
+            async def everyone_is_here() -> bool:
+                undecided = self.expected - self.decided
+                return self.at_gate + await _advisory_waiters(self.maker) >= undecided
 
-        await _poll(everyone_is_here, what="every undecided activation to block on the lock")
+            await _poll(everyone_is_here, what="every undecided activation to block on the lock")
+            self.everyone_seen = True
         self.at_gate -= 1
         self.decided += 1
 
