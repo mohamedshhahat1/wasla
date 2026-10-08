@@ -6,6 +6,14 @@ how many connections were active in its own transaction just before it
 committed, *under the guard's lock*, so "never above capacity" is checked at
 every commit rather than only at the end.
 
+A barrier lines up the starts, not the decisions: on a loaded machine one
+activation could connect, judge and commit before the others reached the guard,
+and a race without the guard's lock (M-E11) would then still leave exactly one -
+it did, two runs in three. So the races that count slots go through a
+`GuardGate`: every racer arrives at the authoritative check before any of them
+asks for the lock, and one the guard allows waits, holding the lock, until every
+undecided racer is provably blocked on it.
+
 The suite is run six consecutive times for the report (ENT-08's stability bar).
 """
 
@@ -21,12 +29,13 @@ from typing import Any, cast
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.channels.adapter import ChannelAdapter
 from app.channels.registry import ChannelRegistry
 from app.core.config import Settings
+from app.core.exceptions import ConflictError
 from app.db.models.audit import AuditAction, AuditLog
 from app.db.models.billing import BillingInterval, Plan, Subscription, SubscriptionStatus
 from app.db.models.channel import Channel, ChannelConnection, ConnectionStatus
@@ -43,7 +52,11 @@ from app.db.models.user import User
 from app.db.session import Database
 from app.integrations.whatsapp.adapter import WhatsAppAdapter
 from app.services.capacity_reduction import ChannelCapacityReductions
-from app.services.channel_capacity import ChannelCapacityExceededError
+from app.services.channel_capacity import (
+    ChannelCapacityExceededError,
+    ChannelCapacityGuard,
+    ChannelSlot,
+)
 from app.services.channel_connection_service import ChannelConnectionService
 from app.services.plan_catalog import PlanCatalog
 from app.services.whatsapp_account_service import WhatsAppAccountService
@@ -55,6 +68,7 @@ from tests.fake_ownership import FakeOwnershipVerifier
 pytestmark = pytest.mark.integration
 
 TYPES = ["whatsapp", "instagram", "messenger"]
+GATE_DEADLINE_SECONDS = 30.0
 
 
 @dataclass
@@ -145,6 +159,100 @@ async def worlds(maker: async_sessionmaker[AsyncSession]) -> AsyncIterator[list[
                     delete(User).where(User.id.in_([world.owner_id for world in built]))
                 )
             await session.commit()
+
+
+async def _poll(
+    condition: Callable[[], Awaitable[bool]], *, what: str, deadline: float = GATE_DEADLINE_SECONDS
+) -> None:
+    """Wait until `condition` holds, or fail - a condition wait, never an ordering by sleep."""
+    loop = asyncio.get_running_loop()
+    until = loop.time() + deadline
+    while not await condition():
+        if loop.time() > until:
+            raise AssertionError(f"timed out waiting for {what}")
+        await asyncio.sleep(0.02)
+
+
+async def _advisory_waiters(maker: async_sessionmaker[AsyncSession]) -> int:
+    """Connections to this database blocked on an advisory lock right now."""
+    async with maker() as session:
+        return int(
+            await session.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                    " AND wait_event_type = 'Lock' AND wait_event = 'advisory'"
+                )
+            )
+            or 0
+        )
+
+
+class GuardGate:
+    """Holds every authoritative capacity decision until all racers are provably at it.
+
+    Armed for `expected` activations. Each arrives at `reserve_or_refuse` before
+    any of them asks for the workspace's `channel_connections` lock; one the guard
+    allows then waits, still holding the lock, until every undecided racer is
+    either at the gate too or blocked on the advisory lock. With the lock the
+    racers decide one after another, each counting the commits before it;
+    without it (M-E11) every one of them judges the same committed count.
+    """
+
+    def __init__(self, maker: async_sessionmaker[AsyncSession], expected: int) -> None:
+        self.maker = maker
+        self.expected = expected
+        self.arrived = 0
+        self.at_gate = 0
+        self.decided = 0
+
+    async def arrive(self) -> bool:
+        if self.arrived >= self.expected:
+            return False
+        self.arrived += 1
+
+        async def everyone_has_arrived() -> bool:
+            return self.arrived >= self.expected
+
+        await _poll(everyone_has_arrived, what="every activation to reach the guard")
+        return True
+
+    async def hold(self) -> None:
+        self.at_gate += 1
+
+        async def everyone_is_here() -> bool:
+            undecided = self.expected - self.decided
+            return self.at_gate + await _advisory_waiters(self.maker) >= undecided
+
+        await _poll(everyone_is_here, what="every undecided activation to block on the lock")
+        self.at_gate -= 1
+        self.decided += 1
+
+
+@pytest.fixture
+def guard_gate(
+    monkeypatch: pytest.MonkeyPatch, maker: async_sessionmaker[AsyncSession]
+) -> Callable[[int], GuardGate]:
+    """Install a `GuardGate` around `ChannelCapacityGuard.reserve_or_refuse`."""
+    original = ChannelCapacityGuard.reserve_or_refuse
+
+    def install(expected: int) -> GuardGate:
+        gate = GuardGate(maker, expected)
+
+        async def gated(self: ChannelCapacityGuard, channel: Channel) -> ChannelSlot:
+            if not await gate.arrive():
+                return await original(self, channel)
+            try:
+                slot = await original(self, channel)
+            except ConflictError:
+                gate.decided += 1
+                raise
+            await gate.hold()
+            return slot
+
+        monkeypatch.setattr(ChannelCapacityGuard, "reserve_or_refuse", gated)
+        return gate
+
+    return install
 
 
 def _registry() -> ChannelRegistry:
@@ -247,17 +355,24 @@ async def _final(maker: async_sessionmaker[AsyncSession], world: World) -> int:
 
 
 async def test_ten_whatsapp_connects_against_one_free_slot_leave_exactly_one(
-    maker: async_sessionmaker[AsyncSession], worlds: list[World]
+    maker: async_sessionmaker[AsyncSession],
+    worlds: list[World],
+    guard_gate: Callable[[int], GuardGate],
 ) -> None:
-    """Capacity 3, two active, ten concurrent WhatsApp claims: one succeeds, nine are 409."""
+    """Capacity 3, two active, ten concurrent WhatsApp claims: one succeeds, nine are 409.
+
+    M-E11's killer: all ten are at the guard's decision together.
+    """
     world = await _world(maker, slots=3)
     worlds.append(world)
     await _seed(maker, world, 2)
+    gate = guard_gate(10)
 
     outcomes = await _together(
         *(_connect(maker, world, Channel.WHATSAPP, capacity=3) for _ in range(10))
     )
 
+    assert gate.decided == 10, "every claim reached the guard's decision"
     assert outcomes.count("whatsapp:created") == 1, outcomes
     assert outcomes.count("whatsapp:refused") == 9, outcomes
     assert await _final(maker, world) == 3
@@ -265,11 +380,14 @@ async def test_ten_whatsapp_connects_against_one_free_slot_leave_exactly_one(
 
 
 async def test_ten_connects_of_two_channels_against_one_free_slot_leave_exactly_one(
-    maker: async_sessionmaker[AsyncSession], worlds: list[World]
+    maker: async_sessionmaker[AsyncSession],
+    worlds: list[World],
+    guard_gate: Callable[[int], GuardGate],
 ) -> None:
     world = await _world(maker, slots=3)
     worlds.append(world)
     await _seed(maker, world, 2)
+    gate = guard_gate(10)
 
     outcomes = await _together(
         *(
@@ -278,6 +396,7 @@ async def test_ten_connects_of_two_channels_against_one_free_slot_leave_exactly_
         )
     )
 
+    assert gate.decided == 10
     created = [outcome for outcome in outcomes if outcome.endswith(":created")]
     assert len(created) == 1, outcomes
     assert await _final(maker, world) == 3
@@ -311,11 +430,14 @@ async def test_a_disable_racing_connects_never_puts_more_than_capacity_active(
 
 
 async def test_two_enables_against_one_slot_leave_exactly_one(
-    maker: async_sessionmaker[AsyncSession], worlds: list[World]
+    maker: async_sessionmaker[AsyncSession],
+    worlds: list[World],
+    guard_gate: Callable[[int], GuardGate],
 ) -> None:
     world = await _world(maker, slots=1)
     worlds.append(world)
     disabled = await _seed(maker, world, 2, status=ConnectionStatus.DISABLED)
+    gate = guard_gate(2)
 
     def enable(connection_id: uuid.UUID) -> Callable[[], Awaitable[str]]:
         async def run() -> str:
@@ -338,12 +460,15 @@ async def test_two_enables_against_one_slot_leave_exactly_one(
 
     outcomes = await _together(enable(disabled[0]), enable(disabled[1]))
 
+    assert gate.decided == 2
     assert sorted(outcomes) == ["enabled", "refused"]
     assert await _final(maker, world) == 1
 
 
 async def test_typed_and_general_slots_hold_under_concurrency(
-    maker: async_sessionmaker[AsyncSession], worlds: list[World]
+    maker: async_sessionmaker[AsyncSession],
+    worlds: list[World],
+    guard_gate: Callable[[int], GuardGate],
 ) -> None:
     """1 general + 1 Instagram slot; five Instagram and five WhatsApp race.
 
@@ -357,8 +482,10 @@ async def test_typed_and_general_slots_hold_under_concurrency(
 
     calls = [_connect(maker, world, Channel.INSTAGRAM, capacity=2) for _ in range(5)]
     calls += [_connect(maker, world, Channel.WHATSAPP, capacity=2) for _ in range(5)]
+    gate = guard_gate(10)
     outcomes = await _together(*calls)
 
+    assert gate.decided == 10
     assert outcomes.count("whatsapp:created") <= 1, outcomes
     assert outcomes.count("instagram:created") <= 2, outcomes
     assert len([o for o in outcomes if o.endswith(":created")]) == 2, outcomes
