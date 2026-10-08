@@ -19,7 +19,12 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from scripts.db_preflight import Problem, prerequisite_problems, verification_problems
+from scripts.db_preflight import (
+    Declared,
+    Problem,
+    prerequisite_problems,
+    verification_problems,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -71,7 +76,9 @@ async def _problems(url: str, check: str) -> list[Problem]:
         async with engine.connect() as connection:
             if check == "prerequisites":
                 return await prerequisite_problems(connection)
-            return await verification_problems(connection)
+            # The scratch database holds none of the application's tables.
+            nothing = Declared(frozenset(), frozenset(), frozenset())
+            return await verification_problems(connection, nothing)
     finally:
         await engine.dispose()
 
