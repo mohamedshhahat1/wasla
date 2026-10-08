@@ -208,6 +208,7 @@ class TopupService:
         subscription = await self._subscriptions.get()
         if subscription is None:  # pragma: no cover - `_refuse` has just checked
             raise ConflictError("Top-ups need an active subscription.")
+        price = _sale_price(product)
         # A usage top-up covers the current monthly usage cycle and a capacity
         # top-up the current billing term (ADR-116), frozen here.
         valid_from, valid_until = validity_window(subscription, product.entitlement_key, now=moment)
@@ -216,7 +217,7 @@ class TopupService:
                 invoice = self._invoices.create(
                     subscription_id=subscription.id,
                     plan_code=(TOPUP_INVOICE_PREFIX + product.code)[:_PLAN_CODE_LENGTH],
-                    amount_due=product.price,
+                    amount_due=price,
                     currency=product.currency,
                     period_start=valid_from,
                     period_end=valid_until,
@@ -232,7 +233,7 @@ class TopupService:
                                 else None
                             ),
                             "quantity": product.quantity,
-                            "amount": str(product.price),
+                            "amount": str(price),
                             "valid_until": valid_until.isoformat(),
                         }
                     ],
@@ -252,8 +253,8 @@ class TopupService:
                     # Frozen with the rest: the slot stays typed as it was sold.
                     channel_type=product.channel_type,
                     quantity=product.quantity,
-                    unit_price=product.price,
-                    total_amount=product.price,
+                    unit_price=price,
+                    total_amount=price,
                     currency=product.currency,
                     billing_period_start=valid_from,
                     billing_period_end=valid_until,
@@ -314,7 +315,7 @@ class TopupService:
                     product.channel_type.value if product.channel_type is not None else None
                 ),
                 "quantity": product.quantity,
-                "amount": str(product.price),
+                "amount": str(price),
                 "currency": product.currency,
                 "expires_at": purchase.expires_at.isoformat(),
                 # The plan in force at checkout, the channel types it allowed
@@ -351,10 +352,7 @@ class TopupService:
 
     async def _refuse(self, product: TopupProduct, *, now: datetime) -> None:
         """Why this workspace cannot buy this product now (409), or nothing."""
-        if product.price <= 0:
-            raise ConflictError(
-                "This top-up has no price. Free allowance is granted by the platform."
-            )
+        _sale_price(product)
         subscription = await self._subscriptions.get()
         if subscription is None or subscription.status is not SubscriptionStatus.ACTIVE:
             if subscription is not None and subscription.status is SubscriptionStatus.PAST_DUE:
@@ -365,6 +363,18 @@ class TopupService:
         terms = await self._catalog.pinned_version(subscription)
         if terms is not None and term_limit(terms, product.entitlement_key.limit_key) is None:
             raise ConflictError("The plan already allows this without limit.")
+
+
+def _sale_price(product: TopupProduct) -> Decimal:
+    """What a product sells at, or a 409: one without a price is never sold.
+
+    A price of zero is a free allowance, which is a platform grant, not a
+    sale; no price at all is a product staff have not priced yet (ENT-20) -
+    inactive, so never listed, and refused here all the same.
+    """
+    if product.price is None or product.price <= 0:
+        raise ConflictError("This top-up has no price. Free allowance is granted by the platform.")
+    return product.price
 
 
 __all__ = ["TOPUP_INVOICE_PREFIX", "StartedTopupCheckout", "TopupService"]

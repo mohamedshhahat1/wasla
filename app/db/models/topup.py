@@ -244,6 +244,8 @@ class TopupProduct(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         # Only channel capacity can be typed (ENT-11): a slot usable by one
         # channel type. Every other key is untyped.
         CheckConstraint(_TYPED_CHECK, name="channel_type_for_channel_capacity"),
+        # A product nobody has priced is never offered (ENT-20, 0098).
+        CheckConstraint("NOT is_active OR price IS NOT NULL", name="priced_when_active"),
     )
 
     code: Mapped[str] = mapped_column(String(MAX_PLAN_CODE_LENGTH), nullable=False)
@@ -260,7 +262,9 @@ class TopupProduct(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     # BIGINT: a storage top-up is counted in bytes, and 25 GiB does not fit in
     # an INTEGER.
     quantity: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # Null until platform staff price it - the placeholder products the
+    # catalogue is seeded with wait here, inactive (ENT-20). Never invented.
+    price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     currency: Mapped[str] = mapped_column(
         String(CURRENCY_LENGTH), nullable=False, default=DEFAULT_CURRENCY
     )

@@ -104,7 +104,9 @@ class TopupProductRead(BaseModel):
     # never enforced (ADR-030). Said here so a client can say so too.
     enforced: bool
     quantity: int
-    price: str
+    # Null only on a product staff have not priced yet, which is inactive and
+    # so never in a workspace's catalogue (ENT-20).
+    price: str | None
     currency: str
     scope: TopupScope
     validity_policy: TopupValidity
@@ -123,7 +125,7 @@ class TopupProductRead(BaseModel):
             kind="capacity" if product.entitlement_key.is_capacity else "usage",
             enforced=product.entitlement_key.limit_key not in METER_ONLY_LIMITS,
             quantity=product.quantity,
-            price=_money(product.price),
+            price=_money(product.price) if product.price is not None else None,
             currency=product.currency,
             scope=product.scope,
             validity_policy=product.validity_policy,

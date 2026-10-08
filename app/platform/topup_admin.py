@@ -90,7 +90,7 @@ def _product_state(product: TopupProduct, *, eligible: list[str]) -> dict[str, A
         "channel_type": product.channel_type.value if product.channel_type is not None else None,
         "eligible_plan_codes": eligible,
         "quantity": product.quantity,
-        "price": str(product.price),
+        "price": str(product.price) if product.price is not None else None,
         "currency": product.currency,
         "scope": product.scope.value,
         "tenant_id": str(product.tenant_id) if product.tenant_id else None,
@@ -261,6 +261,10 @@ class TopupAdmin:
         product = await self._lock_product(product_id, expected_revision=expected_revision)
         if product.is_active is active:
             raise ConflictError(f"The top-up is already {'active' if active else 'inactive'}.")
+        if active and product.price is None:
+            # A placeholder product waits for a price staff set (ENT-20); the
+            # database refuses an active one without it too.
+            raise ConflictError("Set this top-up's price before offering it.")
         eligible = await self._products.eligible_plan_codes(product.id)
         before = _product_state(product, eligible=eligible)
         product.is_active = active

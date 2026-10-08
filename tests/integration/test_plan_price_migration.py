@@ -221,10 +221,15 @@ def test_0081_pins_every_row_to_its_published_price_and_invents_none(
                 ],
             )
         )
+        # 0091's downgrade drops an index CONCURRENTLY, outside any transaction,
+        # which commits whatever lies above it on the way down; below it a
+        # downgrade is one transaction again. So the refusal is made from there.
+        assert head >= "0091"
+        _alembic(url, "downgrade", "0090")
         with pytest.raises(RuntimeError, match="re-price"):
             _alembic(url, "downgrade", "0080")
-        # Refused as one transaction: nothing was downgraded, whatever the head.
-        assert _one(url, "SELECT version_num FROM alembic_version") == head
+        # Refused as one transaction: nothing was downgraded.
+        assert _one(url, "SELECT version_num FROM alembic_version") == "0090"
     finally:
         asyncio.run(_admin(admin, f"DROP DATABASE {name} WITH (FORCE)"))
 

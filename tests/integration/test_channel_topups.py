@@ -37,13 +37,19 @@ from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError as SchemaError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.channels.adapter import ChannelAdapter
 from app.channels.registry import ChannelRegistry
 from app.core.config import Settings
-from app.core.exceptions import NotFoundError, TopupNotAvailableError, ValidationError
+from app.core.exceptions import (
+    ConflictError,
+    NotFoundError,
+    TopupNotAvailableError,
+    ValidationError,
+)
 from app.db.models.audit import AuditAction, AuditLog
 from app.db.models.billing import BillingInterval, LimitKey, Plan, Subscription
 from app.db.models.billing_incident import BillingIncident, BillingIncidentKind
@@ -51,7 +57,15 @@ from app.db.models.channel import Channel
 from app.db.models.enums import PlatformRole
 from app.db.models.invoice import Invoice, InvoicePurpose, Payment
 from app.db.models.tenant import Tenant
-from app.db.models.topup import TopupEntitlement, TopupPurchase, TopupSource, TopupStatus
+from app.db.models.topup import (
+    TopupEntitlement,
+    TopupProduct,
+    TopupPurchase,
+    TopupScope,
+    TopupSource,
+    TopupStatus,
+    TopupValidity,
+)
 from app.db.models.user import User
 from app.integrations.whatsapp.adapter import WhatsAppAdapter
 from app.platform.plan_admin import PlanCatalogAdmin
@@ -738,6 +752,68 @@ async def test_staff_state_a_products_channel_and_plans_and_every_change_is_audi
             actor=staff,
         )
     assert unknown.value.details == {"plan_codes": ["no-such-plan"]}
+
+
+async def test_a_placeholder_product_is_offered_only_once_staff_price_it(
+    db_session: AsyncSession,
+) -> None:
+    """ENT-20: seeded unpriced and inactive; activation waits for a price."""
+    now = base_now()
+    await _catalogue(db_session)
+    tenant, owner, _ = await workspace(db_session, now=now, plan_code="pro", name="Priced")
+    staff = await _staff(db_session)
+    admin = TopupAdmin(db_session, settings=_settings())
+    placeholder = TopupProduct(
+        code=f"slot-{uuid.uuid4().hex[:6]}",
+        name="Channel connection +1",
+        entitlement_key=CHANNELS,
+        quantity=1,
+        price=None,
+        currency="EGP",
+        scope=TopupScope.GLOBAL,
+        is_active=False,
+        is_public=True,
+        validity_policy=TopupValidity.CURRENT_PERIOD_END,
+    )
+    db_session.add(placeholder)
+    await db_session.flush()
+    service = _service(db_session, tenant, Paymob())
+    assert placeholder.id not in {item.id for item in await service.catalogue()}
+
+    with pytest.raises(ConflictError, match="price before offering"):
+        await admin.set_active(
+            placeholder.id,
+            active=True,
+            expected_revision=placeholder.revision,
+            reason="Launch it.",
+            actor=staff,
+        )
+    # And the database says the same to anything that skips the service.
+    with pytest.raises(IntegrityError, match="priced_when_active"):
+        async with db_session.begin_nested():
+            await db_session.execute(
+                update(TopupProduct).where(TopupProduct.id == placeholder.id).values(is_active=True)
+            )
+
+    priced = await admin.update_product(
+        placeholder.id,
+        TopupProductUpdate(
+            price=Decimal("150.00"), expected_revision=placeholder.revision, reason="Priced."
+        ),
+        actor=staff,
+    )
+    assert priced.price == "150.00"
+    active = await admin.set_active(
+        placeholder.id,
+        active=True,
+        expected_revision=priced.revision,
+        reason="Launch it.",
+        actor=staff,
+    )
+    assert active.is_active
+    assert placeholder.id in {item.id for item in await service.catalogue()}
+    started, _ = await buy(db_session, tenant, owner, Paymob(), placeholder, now=now)
+    assert started.amount == Decimal("150.00")
 
 
 def test_the_schemas_refuse_a_typed_slot_on_another_key_and_the_retired_key() -> None:
