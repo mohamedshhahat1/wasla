@@ -23,6 +23,11 @@ migration fails without changing anything, naming them (docs/RUNBOOK.md,
 "Periods, default cards and addresses (0078)"). The two unique indexes are
 built `CONCURRENTLY`; a failed build's INVALID leftover is dropped and rebuilt
 on a retry. The CHECKs are added `NOT VALID` and validated separately.
+
+**Downgrade (MIG-0091 survey, ADR-132)** drops the two unique indexes in the run's transaction
+under a 15 s lock_timeout, no longer `CONCURRENTLY` in an autocommit block: a
+lower migration refusing used to leave the stamp at this revision without the two unique indexes,
+and `upgrade head` never rebuilt them. The upgrade is unchanged.
 """
 
 from __future__ import annotations
@@ -124,8 +129,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    with op.get_context().autocommit_block():
-        for name, _ in reversed(INDEXES):
-            op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+    # In the run's transaction, not `CONCURRENTLY` (MIG-0091): an autocommit
+    # block commits every downgrade step above this one, so a refusal further
+    # down would leave the stamp here without these indexes, and `upgrade head` would
+    # never rebuild them. Run with the application stopped (docs/RUNBOOK.md);
+    # the drop waits at most 15 s for its lock, then fails the whole run.
+    op.execute("SET LOCAL lock_timeout = '15s'")
+    for name, _ in reversed(INDEXES):
+        op.execute(f"DROP INDEX IF EXISTS {name}")
     for name, table, _ in CHECKS:
         op.drop_constraint(op.f(name), table, type_="check")

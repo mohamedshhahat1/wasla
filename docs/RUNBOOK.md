@@ -1637,7 +1637,8 @@ ADR-130). Every migration is additive and online:
 **Downgrades refuse rather than lose data**: 0085, 0086, 0088 and 0090 while any
 row holds what they added; 0087 and 0089 while a row carries the new label -
 **an enum label cannot be dropped**, so those two downgrades leave the label in
-the type. 0091's downgrade drops the index concurrently.
+the type. 0091's downgrade drops the index in the run's transaction (MIG-0091,
+below), so a refusal further down rolls it back.
 
 **After deploying:**
 
@@ -1816,31 +1817,44 @@ them until staff set a price and activate them (`docs/BILLING_OPERATIONS.md`,
 *Channel slots*). The placeholder plan values are staff's to confirm or replace
 through the platform API.
 
-#### A downgrade that crosses 0091 is not all-or-nothing
+#### A refused downgrade leaves the database where it started (MIG-0091)
 
-0091 (the omnichannel inbox index, before this release) drops its index
-`CONCURRENTLY` in an autocommit block, which commits every downgrade above it.
-So a downgrade from head to below 0091 that an older migration then refuses -
-0090 with a connection carrying its own sending allowance, 0081 with a price it
-cannot keep - stops with the database **stamped `0091`, without 0091's index**,
-0092-0098 already downgraded, and the refusal still saying "Nothing has been
-changed" about its own step. A plain `alembic upgrade head` from there reaches
-head *without* the index, and `db_preflight verify` does not notice; the inbox's
-channel filter is then correct but slow. Measured on a migration-built database
-(2026-10-08):
+Alembic runs a whole `downgrade` in one transaction, and every refusal is
+raised before its migration changes anything. Until MIG-0091 was fixed, five
+downgrades - 0075, 0078, 0079, 0081 and 0091 - dropped their indexes
+`CONCURRENTLY` in an autocommit block, which **commits every step above them**.
+A downgrade from head that a lower migration then refused stopped stamped at
+the last of those revisions it had passed, without that revision's indexes, and
+a plain `alembic upgrade head` never rebuilt them. Measured on migration-built
+databases (2026-10-08, before the fix):
 
-| After the refused downgrade | `alembic_version` | `ix_conversations_tenant_id_channel_last_message_at` |
+| Refused at | `alembic_version` after | Lost |
 | --- | --- | --- |
-| as it stops | 0091 | absent |
-| then `alembic upgrade head` | 0098 | **absent** |
-| instead `alembic stamp 0090`, then `alembic upgrade head` | 0098 | present |
+| 0090 (a connection with its own sending allowance) | 0091 | `ix_conversations_tenant_id_channel_last_message_at` |
+| 0081 (a price its version never published) | 0091 | the same index |
+| 0069 (a stored card) | 0075 | 0075's four purge indexes; 0078's, 0079's and 0081's dropped with the run |
 
-Either remove what the refusal names and run the same downgrade again (0091's
-drop is `IF EXISTS`), or go back up with `alembic stamp 0090` followed by
-`alembic upgrade head` - the schema at "0091 without its index" is exactly
-0090's. If `upgrade head` already ran, build the index by hand with the
-statement in `20261002_0091_channel_inbox_index.py` (`CREATE INDEX CONCURRENTLY
-IF NOT EXISTS ...`).
+All five now drop their indexes in the run's transaction (`SET LOCAL
+lock_timeout = '15s'`, as 0094's has since 9695ec0). A refusal anywhere below
+rolls the whole run back: the stamp stays at the starting head and every index
+is present and valid (`tests/integration/test_migration_downgrade_atomicity.py`).
+The drops take a brief ACCESS EXCLUSIVE lock on their tables, which is why a
+downgrade runs with the application stopped. Only the downgrades changed; a
+database at head is unaffected.
+
+**Finding a database damaged before the fix.** Any database that was ever
+downgraded across one of those revisions and refused below it may be missing
+indexes. `python -m scripts.db_preflight verify` now compares the database with
+every table, index and named constraint the models declare and names each one
+missing (`index missing: conversations.ix_conversations_tenant_id_channel_last_message_at`),
+exiting 1. Run it on every such database.
+
+**Repairing one.** Build each index it names with the statement in its
+migration (each is `CREATE INDEX CONCURRENTLY IF NOT EXISTS ...`; 0078's are
+unique - check for duplicates first, as that migration does), then run `verify`
+again until it prints `ok`. If the damage is found before `upgrade head` ran -
+the stamp still names the revision whose indexes are gone - `alembic stamp
+<the revision below it>` followed by `alembic upgrade head` rebuilds them too.
 
 #### AI turn holds are not being released
 
@@ -1973,7 +1987,8 @@ enum additions transactional, and nothing here pretends it does.
    `alembic stamp <revision>`, then `alembic upgrade head`, which reruns the
    rest.
 4. `python -m scripts.db_preflight verify` must then report no unvalidated
-   constraint, invalid index or disabled trigger.
+   constraint, invalid index or disabled trigger, and nothing the models
+   declare missing.
 
 If step 2 finds the DDL only partly present, the failure was before the block,
 the transaction rolled back, and nothing was committed: rerun normally.
