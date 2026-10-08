@@ -43,12 +43,23 @@ The two platform roles are **ranked**: `PLATFORM_OWNER` outranks `PLATFORM_ADMIN
 
 Plans are stored and configurable, never hardcoded across the codebase. Limits are enforced centrally by a usage/entitlement service.
 
-| Plan | Numbers | Agents | Messages | AI turns | Members |
-| --- | --- | --- | --- | --- | --- |
-| Starter | 1 | 1 | 1,000 | 100 | 2 |
-| Pro | 3 | 5 | 10,000 | 5,000 | 10 |
-| Business | 10 | 20 | 50,000 | 25,000 | 50 |
-| Enterprise | Custom | Custom | Custom | Custom | Custom |
+| Plan | Channel connections | Channel types | Agents | Messages | AI turns | Members |
+| --- | --- | --- | --- | --- | --- | --- |
+| Starter | 1 | WhatsApp | 1 | 1,000 | 100 | 2 |
+| Pro | 3 | WhatsApp, Instagram, Messenger | 5 | 10,000 | 5,000 | 10 |
+| Business | 10 | all five | 20 | 50,000 | 25,000 | 50 |
+| Enterprise | Custom (unlimited) | all five | Custom | Custom | Custom | Custom |
+
+The figures are **placeholders** platform staff confirm or replace (ADR-131,
+ENT-20, ENT-24); migration 0098 publishes the channel columns as new versions of
+the seeded plans, and existing subscribers keep the version they bought. A
+*channel connection* is one active connection on any channel - a WhatsApp number
+is one - and the channel types are the ones a workspace on the plan may connect
+and automate. "All five" is WhatsApp, Instagram, Messenger, Telegram and TikTok;
+only WhatsApp has an adapter today, so the others are vocabulary until theirs
+ship. Channel slots can be added with top-ups, general or for one channel type,
+which staff price before they are sold. The AI turn allowance is one per
+workspace, shared by every channel. See [BILLING.md](BILLING.md).
 
 An **AI turn** is one customer message an agent took on, however many provider calls answering it took — a sentiment classification and up to three inference rounds are one turn. The figure was written "AI requests" until the AI remediation; migration 0059 moved each plan's number to the turn allowance unchanged, and provider requests are now metered as cost only (ADR-104).
 

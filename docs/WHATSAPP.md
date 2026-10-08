@@ -54,6 +54,8 @@ The reason this exists: `phone_number_id` is not secret. It appears in every web
 | Two claims arriving at once | One `201` and one `409`, in either order. The read check gives the clean answer in the ordinary case; the partial unique index is the guarantee, and its violation is translated rather than surfacing as a `500` |
 | This deployment cannot verify | `503`. Our misconfiguration, not the caller's mistake — and it refuses rather than accepting an unproven claim |
 | Another workspace's account id | `404`, through the same scoped lookup that protects every other row |
+| No free channel slot | `409 channel_capacity_exceeded` - asked **before** Meta is called, so a workspace at capacity never makes Wasla read Graph, and again under the workspace's lock when the row is written (ADR-131) |
+| The plan does not include WhatsApp | `409 channel_type_not_allowed` |
 
 Meta's own error text is logged with its numeric code and never returned: provider error strings quote the request back, and this request carries a live credential.
 
@@ -61,9 +63,11 @@ Meta's own error text is logged with its numeric code and never returned: provid
 
 Disable and enable are named transitions rather than a general `PATCH` on status, because status is the only field with an operational meaning and the named transition keeps the audit trail readable.
 
+**A number is one channel connection and takes one channel slot while it is active** (ADR-131). The workspace's capacity is `channel_connections` - every channel together, not a separate number limit. Disabling frees the slot and is never refused, at or over capacity; enabling takes a slot back, so `ChannelCapacityGuard` is asked under the workspace's lock and answers `409 channel_capacity_exceeded` when there is none. Enabling a number that is already active asks nothing. A disable records why and by whom (`disabled_reason`: `manual`, or a capacity reduction's), and cancels the number's pending follow-ups. When capacity falls below the active connections - a downgrade, an expired channel top-up - the owner chooses which to keep, and after a week of no choice the newest are disabled (never released) - see [BILLING.md](BILLING.md).
+
 **Release is a different act and is kept separate.** Disabling pauses traffic while the workspace keeps the claim; releasing hands the number back so another workspace can prove and claim it. A support request to "turn it off for a week" and one to "hand it back" have opposite consequences for everyone else on the platform.
 
-Releasing is not a delete. The account row carries the workspace's conversations and messages by foreign key, and destroying a customer's history is not an acceptable price for moving a phone number. Setting `released_at` takes the row out of the partial uniqueness index instead — the claim ends, the history stays — and the same column removes it from inbound resolution, from `is_active`, and from the plan's number count. The stored credential is dropped on the way out, because a credential for a number the workspace no longer holds is a live sending capability retained past any authority to use it.
+Releasing is not a delete. The account row carries the workspace's conversations and messages by foreign key, and destroying a customer's history is not an acceptable price for moving a phone number. Setting `released_at` takes the row out of the partial uniqueness index instead — the claim ends, the history stays — and the same column removes it from inbound resolution, from `is_active`, and from the workspace's channel connections. The stored credential is dropped on the way out, because a credential for a number the workspace no longer holds is a live sending capability retained past any authority to use it.
 
 It is not reversible from here. Taking the number back means proving control of it again, at the bar anybody else has to clear — otherwise "release" becomes a way to hold a number in reserve without holding it.
 

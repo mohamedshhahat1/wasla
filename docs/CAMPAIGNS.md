@@ -114,7 +114,9 @@ A missing platform credential fails the campaign rather than each recipient in t
 
 ## Marketing opt-out
 
-Recorded on the contact as a timestamp and a source, not a boolean. "Since when" is the question a dispute about a marketing message actually turns on, and a colleague's note is not the same fact as a customer's own refusal.
+Recorded **per contact and channel** (`contact_channel_consents`, ADR-131 / ENT-19) as a timestamp and a source, not a boolean. "Since when" is the question a dispute about a marketing message actually turns on, and a colleague's note is not the same fact as a customer's own refusal.
+
+**An opt-out belongs to the channel it was said on.** A STOP on WhatsApp stops WhatsApp marketing from every WhatsApp number of the workspace, and nothing else: the same person on Instagram or Messenger is still reachable there until they say so there. A resume is per channel too, and newer resume evidence still wins over an older stop being replayed (OMNI-030). Every writer records the channel - a stop word or tap arriving on a connection (that connection's channel), WhatsApp's `user_preferences` stop and the `131050` refusal, the `recover-button-opt-outs` replay (WhatsApp), a colleague (the channel they name) - and every reader asks about the recipient's channel: the audience builder excludes a contact opted out on the sending connection's channel, and the campaign send guard and the follow-up guard re-read it there at delivery. Migration 0097 moved every earlier, person-level opt-out to the contact's WhatsApp row, the only channel one could have been said on.
 
 ### A customer saying stop
 
@@ -171,8 +173,8 @@ A message Meta accepted is `sent`; whether it arrived is Meta's news to bring. A
 | `POST /api/v1/campaigns/{id}/cancel` | admin | Stop, finally |
 | `GET /api/v1/campaigns/{id}/statistics` | member | Outcomes and delivery |
 | `GET /api/v1/campaigns/{id}/recipients` | member | Who it reached, and who it did not |
-| `POST /api/v1/contacts/{id}/opt-out` | member | Record a refusal |
-| `DELETE /api/v1/contacts/{id}/opt-out` | admin | Undo one recorded in error |
+| `POST /api/v1/contacts/{id}/opt-out` | member | Record a refusal on one channel (`channel` required) |
+| `DELETE /api/v1/contacts/{id}/opt-out?channel=…` | admin | Undo one recorded in error, on that channel |
 
 Reading is ordinary inbox work. Composing, targeting and starting a campaign take an administrator, because a campaign writes to thousands of customers at once and is the least reversible thing this platform does. Recording an opt-out is any member's to do — the person handling the conversation is the one a customer says "stop" to — while clearing one takes an administrator, because undoing somebody's own refusal should be deliberate.
 

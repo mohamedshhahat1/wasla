@@ -6473,3 +6473,160 @@ transport failure stays uncertain and is never resent.
 
 **Consequences.** Instagram and Messenger share the Graph error envelope and
 reuse the table.
+
+## ADR-131 — One AI Allowance Per Workspace, Channel Capacity And Channel Policy
+
+**Context.** ADR-122 refused to guess the commercial rules a second channel
+needs: which meters its messages count under, what a connection limit counts,
+and what an opt-out covers. The product owner decided them (ENT-01..ENT-24), and
+the AI allowance had a flaw of its own: a turn was charged at engagement, before
+the provider was called, so a provider failure still cost the customer a turn
+(ADR-104).
+
+**Decision.**
+
+1. **One AI allowance per workspace** (ENT-01). `period_ai_turns` is one meter
+   whatever the channel; an `ai_turn` event carries `channel`, `connection_id`
+   and `agent_turn_id` as reporting dimensions only. `GET /billing/entitlements`
+   reports `used`, `held`, `remaining` and `used_by_channel`; nothing compares a
+   channel's share with a limit.
+2. **Held at engagement, charged on a usable outcome** (ENT-02, ENT-03). In the
+   transaction that engages the turn, under the workspace's `period_ai_turns`
+   advisory lock, the worker counts charges plus open holds (`charge_state =
+   held`, taken inside the usage cycle in force, younger than
+   `AI_TURN_HOLD_TTL_SECONDS`, 900) and either writes a hold or refuses. The
+   lock is released at that commit, never held across an inference (ADR-080),
+   and waited for up to 20 s; contention past that gives the claim back and
+   retries the job before engagement. When generation ends the turn settles in
+   one short transaction on its own row: **charged** - one `ai_turn` event,
+   stamped with the hold's moment - for reply text (sent, refused by the
+   channel, or withheld by a re-read after it was written) or a handoff the
+   agent's tool executed; **released** for a provider error or timeout past the
+   turn's retries, an empty answer, an escalation before composition. Settling
+   is idempotent (row lock; a unique index on `usage_events (tenant_id,
+   agent_turn_id)`). The billing sweep releases holds past their TTL; a late
+   settle still charges (`late_charge`), because usage that happened is never
+   refused afterwards.
+3. **Exhaustion is unchanged** (ENT-04): no hold, no provider call, the
+   conversation handed to a person with `AI_QUOTA_EXHAUSTED`; the customer is
+   not told; no overage.
+4. **Channel capacity replaces the number limit** (ENT-05..08). The key is
+   `channel_connections`; `whatsapp_numbers` is retired. Versions published
+   before this ADR - those with no channel types - are read with their number
+   limit as their channel capacity (choice A, `entitlement_terms`, the only
+   place that knows the old name); migration 0098 publishes the catalogue's
+   plans again with the key (choice B). Effective capacity is general slots
+   (the version's figure plus general top-ups and grants) and typed slots (top-
+   ups and grants for one channel type); a set of active connections fits when
+   `sum(max(0, active[T] - typed[T])) <= general`. Every connection weighs one;
+   only an active, unreleased one takes a slot. `ChannelCapacityGuard` is asked
+   on every activation - connect, enable, reconnect - once before any provider
+   call and once under the workspace's `channel_connections` lock in the
+   activating transaction; a writer of an active connection takes its
+   `ChannelSlot`. Refusals are **409** `channel_capacity_exceeded` or
+   `channel_type_not_allowed`, capacity judged first. Disable, release, reads,
+   inbound and re-authorising an active connection are never refused.
+5. **Channel types are a plan's** (ENT-09, ENT-12). `allowed_channel_types` is
+   part of an immutable version, required on every new one (a trigger), a set of
+   vocabulary labels, never a wildcard; unstated reads as WhatsApp alone. It is
+   enforced on connect and enable, on typed top-ups (not listed, checkout and
+   grant 422) and on automation; a top-up never opens a channel type.
+6. **Channel top-ups are WhatsApp-number top-ups with a type** (ENT-10, ENT-11,
+   ENT-13): `topup_products.channel_type` (null for a general slot),
+   `topup_product_plans` (none means every plan), the type frozen in the
+   purchase. Valid until the billing term ends; bought, granted once, refunded
+   and expired exactly as before. A product nobody has priced is never active.
+7. **A capacity reduction is resolved by its owner or, after a week, by age**
+   (ENT-14, ENT-15). A scheduled downgrade refuses new connections that would
+   not fit the scheduled plan. At a boundary - the downgrade or a migration
+   applied, a channel top-up or grant expired (also one still in refund
+   review), a refund withdrawn - connections that no longer fit open one
+   `channel_capacity_reductions` row per workspace with a grace of
+   `CHANNEL_CAPACITY_GRACE_DAYS` (7). An owner's pre-selection is applied at
+   the boundary if it still fits; during the grace an owner selects; after it
+   the billing worker disables types the plan dropped first, then the newest,
+   keeping the oldest by `ownership_started_at`. Disabled, never released or
+   deleted; audited with the reduction; capacity coming back closes it.
+8. **Suspension, cancellation and expiry disable nothing** (ENT-16). The
+   default plan applies; the workspace reads over its limit; and an AI turn,
+   campaign copy or follow-up on a channel that plan does not include is
+   refused as `channel_not_in_plan` and never charged. Inbound and a person's
+   reply are never refused (ADR-030).
+9. **Marketing consent is per channel** (ENT-19). `contact_channel_consents`
+   holds one row per contact and channel; every writer records the channel the
+   STOP arrived on; every reader - the audience, the campaign send guard, the
+   follow-up guard, the opt-out read - checks the recipient's channel. A STOP on
+   WhatsApp covers every WhatsApp number of the workspace and nothing else.
+10. **Meters are channel-neutral** (ENT-22). `message_received` /
+    `message_sent` carry the channel; WhatsApp keeps its two meters as their
+    WhatsApp instance, 1:1, so history and analytics are unchanged;
+    `period_messages` adds all four and stays unenforced. The registry still
+    refuses a channel with no meter mapping; an operable channel still needs an
+    adapter. Telegram and TikTok are vocabulary labels (ENT-21).
+11. **Unchanged** (ENT-17, ENT-18, ENT-23): subscribers keep their version until
+    an explicit migration at renewal; no limit other than AI turns, channel
+    capacity and channel types is new; agents and continuity are ADR-122's
+    decisions 4 and 5. Every figure is a placeholder staff edit; no code reads a
+    plan's name (ENT-24).
+
+**Supersedes** ADR-122 decisions 1 (meters), 2 (connection limits) and 3
+(opt-out scope); decisions 4 and 5 stand. **Amends** ADR-104 (when a turn is
+charged), ADR-113 (the key set) and ADR-117 (what a connection's lifecycle
+does to capacity), each below.
+
+**Consequences.** A second channel needs an adapter and its meter mapping, not
+a commercial decision. The ledger E01-E15 in `scripts/omnichannel_invariants.py`
+and an independent SQL oracle hold the data to these rules. Real prices for
+the six channel top-ups and confirmation of the placeholder catalogue are an
+operator's to set.
+
+## ADR-104 (amended 2026-10-08) — A Turn Is Held At Engagement And Charged For A Usable Outcome
+
+**Context.** ADR-104 charged a turn when it engaged, so a provider failure, an
+empty answer or an escalation before composition each cost the customer a turn
+nobody received (ENT-02).
+
+**Decision.** The engagement transaction writes a **hold**, not a charge, under
+the same advisory lock, counting charges and open holds together; the turn is
+charged when it settles with a usable outcome and its hold is released
+otherwise (ADR-131 decision 2). Refusal, the quota handoff and the cost meters
+are unchanged.
+
+**Consequences.** The allowance cannot be oversold by concurrent turns and is
+never spent on a failed generation. A hold whose worker died stops counting at
+its TTL.
+
+## ADR-113 (amended 2026-10-08) — The Key Set Names Channel Connections
+
+**Context.** ADR-113's seven top-up and custom-plan keys included
+`whatsapp_numbers`, which ADR-131 retires (ENT-05).
+
+**Decision.** The seven keys are `period_messages`, `period_ai_turns`,
+`period_campaign_messages`, `storage_bytes`, `channel_connections`,
+`team_members` and `knowledge_documents`. A new version, custom plan or top-up
+product naming `whatsapp_numbers` is refused (schemas and triggers); purchases
+made before keep it and count as typed WhatsApp slots. `allowed_channel_types`
+is required beside the seven keys and is never a top-up target.
+
+**Consequences.** Everything else in ADR-113 - effective limit, frozen
+purchases, grants, refund review - is unchanged.
+
+## ADR-117 (amended 2026-10-08) — An Active Connection Takes A Channel Slot
+
+**Context.** A connection's status had no commercial meaning; capacity counted
+WhatsApp numbers only (ENT-07).
+
+**Decision.** A connection takes one channel slot while it is active and not
+released. Disabling and releasing free it and are never refused; enabling and
+reconnecting need a free slot from `ChannelCapacityGuard`. The connection
+records why, when and by whom it was last disabled (`disabled_reason`:
+`manual`, `capacity_reduction`, `capacity_reduction_automatic`). Nothing deletes
+a connection.
+
+**Consequences.** `ChannelConnectionService` is the neutral connect, enable,
+disable and release path every adapter's connect flow uses.
+
+## ADR-122 (superseded in part 2026-10-08)
+
+Decisions 1, 2 and 3 are superseded by ADR-131 (ENT-22, ENT-05, ENT-19).
+Decisions 4 (the workspace default agent) and 5 (separate threads) stand.

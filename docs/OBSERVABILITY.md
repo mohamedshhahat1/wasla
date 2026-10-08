@@ -51,7 +51,15 @@ customers.
 | `wasla_jobs_total`, `wasla_job_failures_total` | counter | `queue`, `outcome` / `category` | Worker throughput and failures. |
 | `wasla_provider_requests_total` | counter | `provider`, `operation`, `outcome` | External calls, one final outcome per call. OpenAI calls are labelled `respond_agent`, `respond_sentiment` or `respond_vision`, so the classifier that runs on every message is never mistaken for the agent. |
 | `wasla_provider_attempts_total` | counter | `provider`, `operation`, `outcome` | Every attempt, retries included. A call that succeeded on its third try is one success above and two `rate_limited` attempts here — throttling the retry absorbed is visible only in this series. |
-| `wasla_agent_turn_outcomes_total` | counter | `outcome` | How agent turns ended: `replied`, `handed_off`, `escalated`, `empty_response`, `nothing_to_answer`, `quota_blocked`, or `suppressed_human` / `_agent` / `_workspace` / `_closed` / `_channel`. Eleven fixed values. |
+| `wasla_agent_turn_outcomes_total` | counter | `outcome` | How agent turns ended: `replied`, `handed_off`, `escalated`, `empty_response`, `nothing_to_answer`, `quota_blocked`, `channel_not_in_plan`, or `suppressed_human` / `_agent` / `_workspace` / `_closed` / `_channel`. Twelve fixed values. |
+| `wasla_ai_turn_charge_total` | counter | `outcome` | The AI allowance (ADR-131): `held` at engagement, then `charged` or `released` when the turn settles, `hold_expired` by the billing sweep, `late_charge` for a settle after that sweep. |
+| `wasla_ai_turn_holds_open` | gauge | — | Turns holding a unit of their workspace's allowance right now - generating. |
+| `wasla_ai_turn_holds_past_ttl` | gauge | — | **A state invariant**: holds older than `AI_TURN_HOLD_TTL_SECONDS` the sweep has not released. Should be zero. |
+| `wasla_entitlement_refusals_total` | counter | `key`, `reason` | What the entitlements refused: `channel_connections`/`capacity_exceeded`, `allowed_channel_types`/`type_not_allowed` (the capacity guard, pre-check and authoritative check each counted), `period_ai_turns`/`quota_exhausted`. |
+| `wasla_channel_capacity_reductions_total` | counter | `cause`, `resolution` | Capacity reductions `opened` and resolved - `resolved_by_owner`, `resolved_automatically`, `no_longer_needed` - by cause: `downgrade`, `topup_expired`, `topup_withdrawn`, `grant_expired`, `migration`. |
+| `wasla_channel_capacity_reduction_disables_total` | counter | `actor` | Connections a reduction disabled, `owner` or `system`. Never a release or a delete. |
+| `wasla_channel_capacity_reductions_open` | gauge | — | Workspaces in a grace now. |
+| `wasla_channel_capacity_over_limit_workspaces` | gauge | — | Workspaces holding more connections than their capacity in force - a grace running, a subscription not served, or an expiry the sweep has not reached. Recomputed set-wise in SQL at scrape time (`ChannelCapacityCensus`), never per workspace. |
 | `wasla_agent_tool_executions_total` | counter | `tool`, `outcome` | Agent tool calls by tool and by how they ended: `succeeded`, `rejected`, `denied`, `failed`, `duplicate`, `ambiguous`. `tool` is a name from the deployment's registry; a name the model invented counts as `unknown`, so the label domain cannot be extended by a stranger's message (TOOL-11). |
 | `wasla_agent_tool_execution_duration_seconds` | histogram | `tool` | How long one tool call took, refusals included. The outcome split is the counter above. |
 | `wasla_agent_turns_engaged_unfinished` | gauge | — | **A state invariant**: agent turns engaged longer than any healthy turn takes (15 minutes) and never finished. Those customers were not answered and nothing retries them. Should be zero. |
@@ -184,6 +192,24 @@ A quota-blocked turn has no alert of its own. It is a commercial condition
 rather than an operational one, and the conversation has already been handed to
 a person; `wasla_agent_turn_outcomes_total{outcome="quota_blocked"}` is there
 for a dashboard.
+
+### Entitlements
+
+Added with ADR-131. A hold that is never released keeps an allowance spoken for
+by nobody; a burst of automatic disables means owners were not choosing; and a
+charge arriving after its hold was swept means the TTL is shorter than turns
+take.
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `AITurnHoldsStuck` | `wasla_ai_turn_holds_past_ttl > 0` for 15m - holds past their TTL are not being released | warning |
+| `ChannelCapacityAutoDisableSpike` | More than 20 connections disabled by the automatic fallback in an hour | warning |
+| `AITurnLateChargeSpike` | More than 5 late charges in an hour | warning |
+
+Each was proved with `promtool test rules` to fire, clear, and stay silent on
+ordinary traffic. A refused connection or an exhausted allowance has no alert:
+both are commercial conditions answered to the customer, counted in
+`wasla_entitlement_refusals_total` for a dashboard.
 
 ### Media
 

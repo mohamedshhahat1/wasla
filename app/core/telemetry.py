@@ -243,9 +243,9 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Individual attempts at an external provider, retries included, by outcome.",
         ("provider", "operation", "outcome"),
     ),
-    # How agent turns ended (AI-09). `outcome` is one of `TurnOutcome`'s eleven
+    # How agent turns ended (AI-09). `outcome` is one of `TurnOutcome`'s twelve
     # fixed values and nothing else: no workspace, conversation or message id,
-    # so the cardinality of this metric is eleven for ever. The silent endings
+    # so the cardinality of this metric is twelve for ever. The silent endings
     # the AI audit found - an allowance refused, an empty answer, a reply
     # suppressed - each have a series here instead of a warning line.
     "wasla_agent_turn_outcomes_total": (
