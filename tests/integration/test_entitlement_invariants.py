@@ -488,7 +488,10 @@ def _resolved(tenant: Tenant, disabled: list[uuid.UUID]) -> ChannelCapacityReduc
 
 
 async def test_e09_a_reduction_disable_without_its_audit(db_session: AsyncSession) -> None:
-    tenant = await _tenant(db_session)
+    # On a plan that allows the connection: a workspace with none reads the
+    # deployment's default plan - WhatsApp alone on a migration-built schema - and
+    # the setup itself would count under E02 before anything is injected.
+    tenant = await _workspace(db_session, channels=(Channel.INSTAGRAM,), capacity=1)
     connection = await _connection(db_session, tenant, Channel.INSTAGRAM)
     before = await _counts(db_session)
 
@@ -502,7 +505,7 @@ async def test_e09_a_reduction_disable_without_its_audit(db_session: AsyncSessio
 async def test_e10_a_connection_a_reduction_lists_but_released_instead(
     db_session: AsyncSession,
 ) -> None:
-    tenant = await _tenant(db_session)
+    tenant = await _workspace(db_session, channels=(Channel.MESSENGER,), capacity=1)
     connection = await _connection(db_session, tenant, Channel.MESSENGER)
     before = await _counts(db_session)
 
