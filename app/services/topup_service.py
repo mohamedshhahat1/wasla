@@ -191,6 +191,9 @@ class TopupService:
         plan_id, channel_types = await self._offer()
         if not await self._products.offered_to(product.id, plan_id):
             raise NotFoundError("No such top-up.")
+        # The plans the product is offered to as this sale saw them (ENT-13),
+        # for the audit entry, so a later edit cannot rewrite what was decided.
+        eligible_plans = await self._products.eligible_plan_ids(product.id)
         try:
             await self._refuse(product, now=moment)
         except ConflictError:
@@ -314,6 +317,13 @@ class TopupService:
                 "amount": str(product.price),
                 "currency": product.currency,
                 "expires_at": purchase.expires_at.isoformat(),
+                # The plan in force at checkout, the channel types it allowed
+                # and the plans the product was offered to: what ENT-12 and
+                # ENT-13 were judged against, kept so the invariants can
+                # re-judge every sale (E03, E04). Empty eligibility is every plan.
+                "plan_id": str(plan_id) if plan_id is not None else None,
+                "allowed_channel_types": sorted(channel.value for channel in channel_types),
+                "eligible_plan_ids": sorted(str(eligible) for eligible in eligible_plans),
             },
         )
         await record_topup_checkout(product.entitlement_key.value, "created")

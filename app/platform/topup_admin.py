@@ -448,6 +448,10 @@ class TopupAdmin:
                 "quantity": payload.quantity,
                 "expires_at": purchase.expires_at.isoformat(),
                 "valid_until": payload.valid_until,
+                # The channel types the plan allowed when granted (E03).
+                "allowed_channel_types": sorted(
+                    channel.value for channel in term_channel_types(terms)
+                ),
             },
         )
         return await self.read_purchase(purchase)

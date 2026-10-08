@@ -29,6 +29,15 @@ each file its own message's workspace and conversation, and no identity scoped
 twice. Most are also enforced by keys; this says so of the data, and is what
 proves a backfill or a restore whole.
 
+`verify` also runs the entitlement ledger, E01-E15 (ADR-131): active
+connections fit the capacity in force and its channel types, AI turns are
+charged once and only for a usable outcome and no hold outlives its TTL and the
+sweep, every capacity reduction disables - never releases or deletes - and says
+so on the audit trail, the retired `whatsapp_numbers` key is on nothing new,
+and every marketing opt-out names its channel. Those checks read the clock, the
+deployment's `DEFAULT_PLAN_CODE` and `AI_TURN_HOLD_TTL_SECONDS` from the
+environment the command runs in.
+
 `recover-button-opt-outs` is the one command here that can write, and only with
 `--apply` (OMNI-030). It replays the "stop" taps still held in retained raw
 payloads through the one opt-out writer, with the provenance `replay`; the dry
@@ -44,16 +53,32 @@ import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
+
+from app.repositories.entitlement_census import CAPACITY_CENSUS_SQL
+
+# The deployment defaults the entitlement checks bind (`app.core.config`),
+# overridable from the environment the command runs in.
+DEFAULT_PLAN_CODE = os.environ.get("DEFAULT_PLAN_CODE", "starter")
+DEFAULT_HOLD_TTL_SECONDS = int(os.environ.get("AI_TURN_HOLD_TTL_SECONDS", "900"))
+# The billing worker's pause between passes (`billing_worker.POLL_SECONDS`, held
+# equal by a unit test): how late its bookkeeping may be without being wrong.
+SWEEP_SECONDS = 600
 
 
 @dataclass(frozen=True, slots=True)
 class Check:
     name: str
     query: str
+    # Whether the statement binds `:now`, `:default_plan_code`,
+    # `:hold_cutoff_seconds` and `:sweep_seconds` - the entitlement checks,
+    # whose answer depends on the clock, the deployment's default plan, the AI
+    # turn hold TTL and how late the billing sweep may be.
+    bound: bool = False
 
 
 # The English stop phrases, as SQL literals, for the Q6 census - written out so
@@ -414,15 +439,229 @@ INVARIANTS: tuple[Check, ...] = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class Bindings:
+    """What the entitlement checks are judged against (ADR-131)."""
+
+    now: datetime | None = None
+    default_plan_code: str = DEFAULT_PLAN_CODE
+    hold_ttl_seconds: int = DEFAULT_HOLD_TTL_SECONDS
+
+    def values(self) -> dict[str, object]:
+        return {
+            "now": self.now or datetime.now(UTC),
+            "default_plan_code": self.default_plan_code,
+            # A hold is released by the billing worker's next pass after its
+            # TTL; one past both has outlived the sweep.
+            "hold_cutoff_seconds": self.hold_ttl_seconds + SWEEP_SECONDS,
+            "sweep_seconds": SWEEP_SECONDS,
+        }
+
+
+# --------------------------------------------------------- entitlements
+#
+# ADR-131's ledger, E01-E15. Each is zero on a healthy database. Several are
+# also enforced by a key, a constraint or a trigger; this says so of the data.
+
+# What explains a workspace holding more connections than its capacity, or one
+# of a type its plan does not allow (E01, E02): an open reduction (ENT-14,
+# ENT-15); a subscription that is not served (ENT-16 - nothing is disabled for
+# that); or a channel slot that stopped counting by the clock within the last
+# sweep, whose boundary the billing worker's next pass judges.
+_EXPLAINED = (
+    "(EXISTS (SELECT 1 FROM channel_capacity_reductions r"
+    " WHERE r.tenant_id = census.tenant_id AND r.status = 'pending_selection')"
+    " OR (NOT census.serving AND EXISTS (SELECT 1 FROM subscriptions s"
+    " WHERE s.tenant_id = census.tenant_id))"
+    " OR EXISTS (SELECT 1 FROM topup_purchases tp WHERE tp.tenant_id = census.tenant_id"
+    " AND tp.entitlement_key::text IN ('channel_connections', 'whatsapp_numbers')"
+    " AND tp.status::text IN ('granted', 'refund_review') AND tp.ended_at IS NULL"
+    " AND tp.expires_at <= CAST(:now AS timestamptz)"
+    " AND tp.expires_at > CAST(:now AS timestamptz) - make_interval(secs => :sweep_seconds)))"
+)
+# Outcomes no generation produced (ENT-02): never charged, whatever else is true.
+_NOT_CHARGEABLE = (
+    "('escalated', 'empty_response', 'nothing_to_answer', 'quota_blocked', 'channel_not_in_plan')"
+)
+_REDUCTION_DISABLE = "('capacity_reduction', 'capacity_reduction_automatic')"
+_DISABLED = "('channel_connection_disabled', 'whatsapp_account_disabled')"
+_RELEASED = "('channel_connection_released', 'whatsapp_account_released')"
+
+ENTITLEMENT_INVARIANTS: tuple[Check, ...] = (
+    # E01 - active connections fit the capacity in force (ENT-05, ENT-08),
+    # unless an open reduction, a subscription not served or an expiry the
+    # sweep has not reached yet explains it.
+    Check(
+        "e01_connections_over_capacity_unexplained",
+        f"SELECT count(*) FROM ({CAPACITY_CENSUS_SQL}) census"  # noqa: S608 - module constants
+        f" WHERE census.over_limit AND NOT {_EXPLAINED}",
+        bound=True,
+    ),
+    # E02 - no active connection of a type the plan in force does not allow
+    # (ENT-09), unless explained the same way.
+    Check(
+        "e02_connection_of_a_type_not_allowed_unexplained",
+        f"SELECT count(*) FROM ({CAPACITY_CENSUS_SQL}) census"  # noqa: S608 - module constants
+        f" WHERE census.outside_allowed_types AND NOT {_EXPLAINED}",
+        bound=True,
+    ),
+    # E03 - no typed channel slot sold or granted for a type the plan did not
+    # allow then (ENT-12), judged against what the sale's audit entry recorded.
+    Check(
+        "e03_typed_slot_for_a_type_not_allowed",
+        "SELECT count(*) FROM audit_logs a"
+        " WHERE a.action IN ('billing_topup_checkout_created', 'billing_topup_platform_granted')"
+        " AND a.metadata ->> 'entitlement_key' = 'channel_connections'"
+        " AND a.metadata ->> 'channel_type' IS NOT NULL"
+        " AND a.metadata ? 'allowed_channel_types'"
+        " AND NOT (a.metadata -> 'allowed_channel_types') ? (a.metadata ->> 'channel_type')",
+    ),
+    # E04 - no channel top-up sold to a workspace whose plan the product was
+    # not offered to then (ENT-13); an empty list is every plan.
+    Check(
+        "e04_channel_topup_sold_to_an_ineligible_plan",
+        "SELECT count(*) FROM audit_logs a"
+        " WHERE a.action = 'billing_topup_checkout_created'"
+        " AND a.metadata ->> 'entitlement_key' = 'channel_connections'"
+        " AND jsonb_typeof(a.metadata -> 'eligible_plan_ids') = 'array'"
+        " AND jsonb_array_length(a.metadata -> 'eligible_plan_ids') > 0"
+        " AND (a.metadata ->> 'plan_id' IS NULL"
+        " OR NOT (a.metadata -> 'eligible_plan_ids') ? (a.metadata ->> 'plan_id'))",
+    ),
+    # E05 - at most one ai_turn charge per turn (ENT-02); a partial unique
+    # index enforces it too.
+    Check(
+        "e05_turn_charged_twice",
+        "SELECT count(*) FROM (SELECT tenant_id, agent_turn_id FROM usage_events"
+        " WHERE event_type = 'ai_turn' AND agent_turn_id IS NOT NULL"
+        " GROUP BY tenant_id, agent_turn_id HAVING count(*) > 1) s",
+    ),
+    # E06 - no charge for a turn whose outcome no generation produced, nor for
+    # one its own row does not record as charged (ENT-02).
+    Check(
+        "e06_charge_for_a_turn_not_chargeable",
+        "SELECT count(*) FROM usage_events e JOIN agent_turns t"  # noqa: S608 - module constants
+        " ON t.tenant_id = e.tenant_id AND t.id = e.agent_turn_id"
+        " WHERE e.event_type = 'ai_turn'"
+        f" AND (t.outcome::text IN {_NOT_CHARGEABLE}"
+        " OR t.charge_state IS DISTINCT FROM 'charged')",
+    ),
+    # E07 - no hold open past its TTL and the sweep that follows it (ENT-03).
+    Check(
+        "e07_hold_outliving_its_ttl_and_the_sweep",
+        "SELECT count(*) FROM agent_turns WHERE charge_state = 'held'"
+        " AND held_at < CAST(:now AS timestamptz)"
+        " - make_interval(secs => :hold_cutoff_seconds)",
+        bound=True,
+    ),
+    # E08 - a turn charged without its ai_turn event: charged turns and charges
+    # are the same set, by turn (E06 is the other direction).
+    Check(
+        "e08_charged_turn_without_its_charge",
+        "SELECT count(*) FROM agent_turns t WHERE t.charge_state = 'charged'"
+        " AND NOT EXISTS (SELECT 1 FROM usage_events e WHERE e.tenant_id = t.tenant_id"
+        " AND e.agent_turn_id = t.id AND e.event_type = 'ai_turn')",
+    ),
+    # E09 - every connection a reduction disabled names that reduction on its
+    # disable's audit entry, and the reduction lists it (ENT-14).
+    Check(
+        "e09_reduction_disable_without_its_audit",
+        "SELECT count(*) FROM channel_connections c"  # noqa: S608 - module constants
+        f" WHERE c.status = 'disabled' AND c.disabled_reason::text IN {_REDUCTION_DISABLE}"
+        " AND NOT EXISTS (SELECT 1 FROM audit_logs a"
+        " JOIN channel_capacity_reductions r ON r.tenant_id = a.tenant_id"
+        " AND r.id::text = a.metadata ->> 'reduction_id'"
+        " WHERE a.tenant_id = c.tenant_id AND a.target_id = c.id"
+        f" AND a.action IN {_DISABLED} AND c.id = ANY (r.disabled_connection_ids))",
+    ),
+    # E10 - the reduction flow never released or deleted a connection: each one
+    # a reduction lists still exists and was disabled - not released - by it.
+    Check(
+        "e10_reduction_released_or_deleted_a_connection",
+        "SELECT count(*) FROM channel_capacity_reductions r"  # noqa: S608 - module constants
+        " CROSS JOIN LATERAL unnest(coalesce(r.disabled_connection_ids, '{}')) AS disabled(id)"
+        " LEFT JOIN channel_connections c ON c.tenant_id = r.tenant_id AND c.id = disabled.id"
+        " WHERE c.id IS NULL"
+        " OR NOT EXISTS (SELECT 1 FROM audit_logs a WHERE a.tenant_id = r.tenant_id"
+        f" AND a.target_id = disabled.id AND a.action IN {_DISABLED}"
+        " AND a.metadata ->> 'reduction_id' = r.id::text)"
+        " OR EXISTS (SELECT 1 FROM audit_logs a WHERE a.tenant_id = r.tenant_id"
+        f" AND a.target_id = disabled.id AND a.action IN {_RELEASED}"
+        " AND a.metadata ? 'reduction_id')",
+    ),
+    # E11 - one open reduction per workspace; a partial unique index too.
+    Check(
+        "e11_more_than_one_open_reduction",
+        "SELECT count(*) FROM (SELECT tenant_id FROM channel_capacity_reductions"
+        " WHERE status = 'pending_selection' GROUP BY tenant_id HAVING count(*) > 1) s",
+    ),
+    # E12 - the retired key on nothing written since ADR-131 (ENT-05): no
+    # version or plan that states channel types, no product at all, and no
+    # purchase typed like a channel slot.
+    Check(
+        "e12_retired_whatsapp_numbers_key_in_use",
+        "SELECT (SELECT count(*) FROM plan_versions WHERE allowed_channel_types IS NOT NULL"
+        " AND limits ? 'whatsapp_numbers')"
+        " + (SELECT count(*) FROM plans WHERE allowed_channel_types IS NOT NULL"
+        " AND limits ? 'whatsapp_numbers')"
+        " + (SELECT count(*) FROM topup_products WHERE entitlement_key::text = 'whatsapp_numbers')"
+        " + (SELECT count(*) FROM topup_purchases WHERE entitlement_key::text = 'whatsapp_numbers'"
+        " AND channel_type IS NOT NULL)",
+    ),
+    # E13 - every marketing opt-out names its channel and who decided (ENT-19).
+    Check(
+        "e13_opt_out_without_channel_or_source",
+        "SELECT count(*) FROM contact_channel_consents WHERE channel IS NULL"
+        " OR (marketing_opt_out_at IS NOT NULL AND opt_out_source IS NULL)",
+    ),
+    # E14 - no campaign copy sent to somebody already opted out on the
+    # campaign's channel (ENT-19).
+    Check(
+        "e14_campaign_copy_sent_after_an_opt_out_on_its_channel",
+        "SELECT count(*) FROM campaign_recipients r"
+        " JOIN campaigns k ON k.tenant_id = r.tenant_id AND k.id = r.campaign_id"
+        " JOIN channel_connections cc ON cc.tenant_id = k.tenant_id AND cc.id = k.account_id"
+        " JOIN messages m ON m.tenant_id = r.tenant_id AND m.id = r.message_id"
+        " JOIN contact_channel_consents ct ON ct.tenant_id = r.tenant_id"
+        " AND ct.contact_id = r.contact_id AND ct.channel = cc.channel"
+        " WHERE r.status = 'sent' AND ct.marketing_opt_out_at IS NOT NULL"
+        " AND m.created_at > ct.marketing_opt_out_at",
+    ),
+    # E15 - every plan version a workspace is pinned to, or scheduled onto,
+    # resolves its channel types (ENT-09): unstated (WhatsApp alone) or a set
+    # of distinct labels of the channel vocabulary. A trigger refuses anything
+    # else on insert; this says so of every version actually in use.
+    Check(
+        "e15_pinned_version_with_unreadable_channel_types",
+        "SELECT count(DISTINCT v.id) FROM subscriptions s JOIN plan_versions v"
+        " ON v.id IN (s.plan_version_id, s.scheduled_plan_version_id)"
+        " WHERE v.allowed_channel_types IS NOT NULL"
+        " AND (array_position(v.allowed_channel_types, NULL) IS NOT NULL"
+        " OR NOT v.allowed_channel_types::text[] <@ enum_range(NULL::channel_kind)::text[]"
+        " OR cardinality(v.allowed_channel_types)"
+        " <> (SELECT count(DISTINCT label) FROM unnest(v.allowed_channel_types) label))",
+    ),
+)
+
+
 async def _counts(
-    connection: AsyncConnection, checks: Sequence[Check], *, read_only: bool
+    connection: AsyncConnection,
+    checks: Sequence[Check],
+    *,
+    read_only: bool,
+    bindings: Bindings | None = None,
 ) -> dict[str, int]:
     if read_only:
         # Before the first statement, so the run can do nothing else.
         await connection.execute(text("SET TRANSACTION READ ONLY"))
+    values = (bindings or Bindings()).values()
     found: dict[str, int] = {}
     for check in checks:
-        found[check.name] = int((await connection.execute(text(check.query))).scalar_one())
+        statement = text(check.query)
+        result = await (
+            connection.execute(statement, values) if check.bound else connection.execute(statement)
+        )
+        found[check.name] = int(result.scalar_one())
     return found
 
 
@@ -435,9 +674,20 @@ async def census(connection: AsyncConnection, *, read_only: bool = True) -> dict
     return await _counts(connection, CENSUS, read_only=read_only)
 
 
-async def violations(connection: AsyncConnection, *, read_only: bool = True) -> dict[str, int]:
+async def violations(
+    connection: AsyncConnection, *, read_only: bool = True, bindings: Bindings | None = None
+) -> dict[str, int]:
     """Every invariant's violation count. All zero on a healthy database."""
-    return await _counts(connection, INVARIANTS, read_only=read_only)
+    return await _counts(
+        connection, INVARIANTS + ENTITLEMENT_INVARIANTS, read_only=read_only, bindings=bindings
+    )
+
+
+async def entitlement_violations(
+    connection: AsyncConnection, *, read_only: bool = True, bindings: Bindings | None = None
+) -> dict[str, int]:
+    """The entitlement ledger alone (E01-E15). All zero on a healthy database."""
+    return await _counts(connection, ENTITLEMENT_INVARIANTS, read_only=read_only, bindings=bindings)
 
 
 async def _run(command: str, url: str) -> int:
