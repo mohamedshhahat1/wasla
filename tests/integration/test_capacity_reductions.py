@@ -601,6 +601,57 @@ async def test_a_withdrawn_refund_review_opens_a_reduction(db_session: AsyncSess
     assert await _active(db_session, tenant) == set(ids)
 
 
+async def test_slots_still_under_refund_review_at_the_term_end_open_the_same_flow(
+    db_session: AsyncSession,
+) -> None:
+    """A slot in review stops counting at its expiry like any other (ENT-15).
+
+    The sweep records only its end - the operator's decision is still owed - and
+    judges the workspace's boundary once: a second pass opens nothing more.
+    """
+    tenant, owner, paymob = await _paid_channel_slots(
+        db_session, quantity=2, transaction=940_000_301
+    )
+    ids = [await _connect(db_session, tenant, owner, channel) for channel in (WA, IG, MS)]
+    purchase = (
+        await db_session.execute(select(TopupPurchase).where(TopupPurchase.tenant_id == tenant.id))
+    ).scalar_one()
+    payment = await db_session.get(Payment, purchase.payment_id)
+    assert payment is not None
+    refund = callback(payment, transaction=940_000_301, refunded_cents=15_000)
+    await apply(db_session, tenant.id, paymob.provider(), refund, now=base_now())
+    await db_session.refresh(purchase)
+    assert purchase.status is TopupStatus.REFUND_REVIEW
+
+    at = await _boundary(db_session, tenant)
+
+    await db_session.refresh(purchase)
+    assert purchase.status is TopupStatus.REFUND_REVIEW, "the operator still decides"
+    assert purchase.ended_at == purchase.expires_at
+    reduction = await _reduction(db_session, tenant)
+    assert reduction is not None
+    assert (reduction.cause, reduction.status) == (CapacityReductionCause.TOPUP_EXPIRED, PENDING)
+    assert reduction.grace_ends_at == at + GRACE
+    assert await _active(db_session, tenant) == set(ids)
+
+    await _worker(db_session).run_once(now=at + timedelta(minutes=10))
+    reductions = await db_session.scalar(
+        select(func.count())
+        .select_from(ChannelCapacityReduction)
+        .where(ChannelCapacityReduction.tenant_id == tenant.id)
+    )
+    assert reductions == 1
+    # Recorded once: a row claimed on every pass would re-judge the boundary
+    # each time, and each boundary discards an owner's pre-selection.
+    expiries = await db_session.scalar(
+        select(func.count())
+        .select_from(AuditLog)
+        .where(AuditLog.target_id == purchase.id)
+        .where(AuditLog.action == AuditAction.BILLING_TOPUP_EXPIRED)
+    )
+    assert expiries == 1
+
+
 # ------------------------------------------------- ENT-16: never for suspension
 
 

@@ -478,12 +478,17 @@ class BillingWorker:
         is that worker's to record. Deletes nothing - a capacity the workspace
         still uses beyond its plan simply leaves it over its limit. Also counts
         paid-but-ungranted purchases older than an hour, for the stuck alert.
+
+        A channel slot under refund review keeps its status - the operator's
+        decision is still owed - and only its end is recorded, so its
+        workspace's capacity boundary is judged like any other's (ENT-15).
         """
         async with self._database.session() as session:
             purchases = PlatformTopupPurchaseRepository(session)
             expired = await purchases.claim_expired(now=now, limit=self._claim_limit)
             for purchase in expired:
-                move_topup(purchase, TopupStatus.EXPIRED)
+                if purchase.status is not TopupStatus.REFUND_REVIEW:
+                    move_topup(purchase, TopupStatus.EXPIRED)
                 purchase.ended_at = purchase.expires_at
                 AuditTrail(session, tenant_id=purchase.tenant_id).record(
                     AuditAction.BILLING_TOPUP_EXPIRED,
@@ -497,6 +502,7 @@ class BillingWorker:
                         "quantity": purchase.quantity,
                         "source": purchase.source.value,
                         "expires_at": purchase.expires_at.isoformat(),
+                        "status": purchase.status.value,
                     },
                 )
             keys = [purchase.entitlement_key.value for purchase in expired]

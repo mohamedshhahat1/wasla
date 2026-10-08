@@ -127,6 +127,12 @@ SELLABLE_TOPUP_ENTITLEMENTS: Final[tuple[TopupEntitlement, ...]] = tuple(
     member for member in TopupEntitlement if not member.is_retired
 )
 
+#: The keys whose quantity is channel slots: the current one and the retired
+#: number key a purchase written before ADR-131 may still carry.
+CHANNEL_SLOT_ENTITLEMENTS: Final[tuple[TopupEntitlement, ...]] = tuple(
+    member for member in TopupEntitlement if member.limit_key is LimitKey.CHANNEL_CONNECTIONS
+)
+
 # The two sets are one fact written twice; saying so at import is cheaper than
 # finding out from a top-up that raises nothing.
 if {member.limit_key for member in SELLABLE_TOPUP_ENTITLEMENTS} != set(
@@ -600,6 +606,7 @@ event.listen(TopupProduct.__table__, "after_create", DDL(TOPUP_PRODUCTS_RETIRED_
 
 __all__ = [
     "ACTIVE_TOPUP_STATUSES",
+    "CHANNEL_SLOT_ENTITLEMENTS",
     "PLATFORM_GRANT_NAME",
     "SELLABLE_TOPUP_ENTITLEMENTS",
     "TOPUP_TRANSITIONS",

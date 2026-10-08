@@ -20,6 +20,7 @@ from app.db.models.billing import Plan
 from app.db.models.channel import Channel
 from app.db.models.topup import (
     ACTIVE_TOPUP_STATUSES,
+    CHANNEL_SLOT_ENTITLEMENTS,
     TopupEntitlement,
     TopupProduct,
     TopupProductPlan,
@@ -275,7 +276,13 @@ class PlatformTopupPurchaseRepository(BaseRepository[TopupPurchase]):
         return purchase
 
     async def claim_expired(self, *, now: datetime, limit: int) -> list[TopupPurchase]:
-        """Granted top-ups past their expiry, each to exactly one worker.
+        """Top-ups past their expiry whose end is not recorded yet, each to one worker.
+
+        Granted ones, which the sweep moves to expired. And channel slots still
+        under refund review (ENT-15): they stopped counting at `expires_at` like
+        any other, so their workspace's capacity fell then, but they stay in
+        review for an operator's decision - only their `ended_at` is recorded,
+        once, which is what keeps them from being claimed again.
 
         Recording expiry is bookkeeping - the limit arithmetic already ignores
         them - so `SKIP LOCKED` rather than waiting: a row somebody else holds
@@ -283,7 +290,16 @@ class PlatformTopupPurchaseRepository(BaseRepository[TopupPurchase]):
         """
         return await self._all(
             self._select()
-            .where(TopupPurchase.status == TopupStatus.GRANTED)
+            .where(
+                or_(
+                    TopupPurchase.status == TopupStatus.GRANTED,
+                    and_(
+                        TopupPurchase.status == TopupStatus.REFUND_REVIEW,
+                        TopupPurchase.entitlement_key.in_(CHANNEL_SLOT_ENTITLEMENTS),
+                        TopupPurchase.ended_at.is_(None),
+                    ),
+                )
+            )
             .where(TopupPurchase.expires_at <= now)
             .order_by(TopupPurchase.expires_at, TopupPurchase.id)
             .limit(limit)
