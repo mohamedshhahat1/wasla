@@ -94,12 +94,35 @@ def _assert_present(url: str, names: tuple[str, ...]) -> None:
     assert _validity(url, names) == dict.fromkeys(names, True)
 
 
+INDEX_0100 = "ix_audit_logs_target_type_target_id_occurred_at"
+COLUMNS_0099 = (
+    ("topup_purchases", "withdrawn_at"),
+    ("topup_purchases", "withdrawn_by"),
+    ("topup_purchases", "withdrawal_reason"),
+    ("channel_capacity_reductions", "topup_purchase_id"),
+)
+
+
+def _columns_0099(url: str) -> int:
+    return int(
+        _one(
+            url,
+            "SELECT count(*) FROM information_schema.columns"  # noqa: S608 - module constants
+            " WHERE (table_name, column_name) IN ("
+            + ", ".join(f"('{table}', '{column}')" for table, column in COLUMNS_0099)
+            + ")",
+        )
+    )
+
+
 def _assert_whole_head(url: str) -> None:
-    """Stamped at head, and every object 0075..0098 added still there and valid."""
+    """Stamped at head, and every object 0075..0100 added still there and valid."""
     assert _one(url, "SELECT version_num FROM alembic_version") == HEAD
     for names in (INDEXES_0075, INDEXES_0078, INDEXES_0079, INDEXES_0081, (INDEX_0091,)):
         _assert_present(url, names)
     _assert_present(url, INDEXES_0094)
+    _assert_present(url, (INDEX_0100,))
+    assert _columns_0099(url) == len(COLUMNS_0099)
     assert _one(url, "SELECT to_regclass('channel_capacity_reductions') IS NOT NULL")
     assert _one(url, "SELECT to_regclass('contact_channel_consents') IS NOT NULL")
     assert _one(
@@ -209,6 +232,52 @@ def test_a_successful_downgrade_through_0091_and_back_restores_the_index(fresh: 
     _alembic(fresh, "downgrade", "0090")
     assert _one(fresh, "SELECT version_num FROM alembic_version") == "0090"
     assert _validity(fresh, (INDEX_0091,)) == {}
+
+    _alembic(fresh, "upgrade", "head")
+    _assert_whole_head(fresh)
+
+
+def test_0099_refuses_while_a_grant_is_withdrawn_and_the_round_trip_is_lossless(
+    fresh: str,
+) -> None:
+    """0100 and 0099 come off in one transaction, and 0099 refuses what it cannot explain."""
+    tenant, grant = uuid.uuid4(), uuid.uuid4()
+    asyncio.run(
+        _execute(
+            fresh,
+            [
+                _tenant(tenant),
+                (
+                    "INSERT INTO topup_purchases (id, tenant_id, source, product_name,"
+                    " entitlement_key, quantity, unit_price, total_amount, currency,"
+                    " billing_period_start, billing_period_end, expires_at, status, granted_at,"
+                    " reason, withdrawn_at, withdrawal_reason, ended_at) VALUES (:id, :t,"
+                    " 'platform_grant', 'Platform grant', 'channel_connections', 1, 0, 0, 'EGP',"
+                    " now() - interval '2 days', now() + interval '28 days',"
+                    " now() + interval '28 days', 'withdrawn', now() - interval '2 days',"
+                    " 'Goodwill.', now(), 'Granted in error.', now())",
+                    {"id": grant, "t": tenant},
+                ),
+            ],
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="topup_purchases withdrawn by staff: 1"):
+        _alembic(fresh, "downgrade", "0098")
+    # 0100's index drop was in the same transaction: it is back too.
+    _assert_whole_head(fresh)
+
+    asyncio.run(_execute(fresh, [("DELETE FROM topup_purchases WHERE id = :id", {"id": grant})]))
+    _alembic(fresh, "downgrade", "0098")
+    assert _one(fresh, "SELECT version_num FROM alembic_version") == "0098"
+    assert _columns_0099(fresh) == 0
+    assert _validity(fresh, (INDEX_0100,)) == {}
+    # The labels stay: PostgreSQL cannot drop one.
+    assert _one(
+        fresh,
+        "SELECT count(*) FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid"
+        " WHERE t.typname = 'topup_status' AND e.enumlabel = 'withdrawn'",
+    )
 
     _alembic(fresh, "upgrade", "head")
     _assert_whole_head(fresh)
