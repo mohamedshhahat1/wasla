@@ -352,6 +352,42 @@ async def test_an_invalid_plan_is_refused(
     assert response.status_code == 422, response.text
 
 
+async def test_the_retired_number_key_is_refused_by_name_on_a_plan_and_a_version(
+    db_session: AsyncSession, app: FastAPI, http: AsyncClient
+) -> None:
+    """ENT-05: `whatsapp_numbers` is retired, and the API says what replaced it.
+
+    M-E30's killer. Refused by the schema with a 422 naming `channel_connections`
+    - not as an unknown key, and not left for the database trigger to turn into
+    a conflict - and nothing reaches the catalogue: no plan, no version.
+    """
+    _act_as(app, await _user(db_session, role=PlatformRole.PLATFORM_ADMIN))
+    code = f"retired-{uuid.uuid4().hex[:6]}"
+    refused = await http.post(
+        f"{BASE}/plans", json=_plan_body(code=code, limits={"whatsapp_numbers": 2})
+    )
+    assert refused.status_code == 422, refused.text
+    assert "channel_connections" in refused.text
+    listed = await http.get(f"{BASE}/plans", params={"code": code, "limit": 10})
+    assert listed.json()["total"] == 0
+
+    created = (await http.post(f"{BASE}/plans", json=_plan_body())).json()
+    version = {
+        "price": "149.00",
+        "currency": "EGP",
+        "interval": "monthly",
+        "limits": {"whatsapp_numbers": 3},
+        "allowed_channel_types": ["whatsapp"],
+        "expected_version": 1,
+        "reason": "Numbers again.",
+    }
+    published = await http.post(f"{BASE}/plans/{created['id']}/versions", json=version)
+    assert published.status_code == 422, published.text
+    assert "channel_connections" in published.text
+    versions = (await http.get(f"{BASE}/plans/{created['id']}/versions")).json()
+    assert [item["version"] for item in versions] == [1]
+
+
 async def test_a_duplicate_plan_code_is_a_conflict(
     db_session: AsyncSession, app: FastAPI, http: AsyncClient
 ) -> None:
