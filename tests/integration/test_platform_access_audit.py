@@ -294,6 +294,8 @@ async def test_every_platform_read_route_records_one_entry(
         if path.startswith(f"{PATH}/") and "get" in operations
     )
     billing_lists = [
+        f"{PATH}/billing/capacity-reductions",
+        f"{PATH}/billing/channel-types",
         f"{PATH}/billing/features",
         f"{PATH}/billing/incidents",
         f"{PATH}/billing/invoices",
@@ -308,6 +310,7 @@ async def test_every_platform_read_route_records_one_entry(
     # same `billing_read` call as the lists, proved in
     # test_platform_billing_api.py. Listed here so a new one still fails.
     billing_rows = [
+        f"{PATH}/billing/capacity-reductions/{{reduction_id}}",
         f"{PATH}/billing/invoices/{{invoice_id}}",
         f"{PATH}/billing/payments/{{payment_id}}",
         f"{PATH}/billing/plan-versions/{{version_id}}",
@@ -317,6 +320,9 @@ async def test_every_platform_read_route_records_one_entry(
         f"{PATH}/billing/prices/{{price_id}}",
         f"{PATH}/billing/subscriptions/{{subscription_id}}",
         f"{PATH}/billing/subscriptions/{{subscription_id}}/timeline",
+        f"{PATH}/billing/tenants/{{tenant_id}}/capacity-reductions",
+        f"{PATH}/billing/tenants/{{tenant_id}}/channel-capacity",
+        f"{PATH}/billing/tenants/{{tenant_id}}/channel-connections",
         f"{PATH}/billing/tenants/{{tenant_id}}/custom-offers",
         f"{PATH}/billing/tenants/{{tenant_id}}/summary",
         f"{PATH}/billing/topup-purchases/{{purchase_id}}",

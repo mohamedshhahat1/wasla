@@ -585,6 +585,9 @@ class FeatureRead(BaseModel):
     concurrency_safe: bool
     unlimited: str = "null"
     replaced_by: str | None = None
+    # Whether a top-up product, a grant or a custom plan's top-up can raise
+    # this key (PLAT-G5): the seven sellable top-up keys, never the retired one.
+    topup_eligible: bool = False
 
 
 class LimitChange(BaseModel):

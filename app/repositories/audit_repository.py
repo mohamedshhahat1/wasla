@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import ColumnElement, Select
+from sqlalchemy import ColumnElement, Select, literal, tuple_
 
 from app.db.models.audit import AuditAction, AuditLog
 from app.repositories.base import BaseRepository, TenantScopedRepository
@@ -92,12 +92,18 @@ class PlatformAuditLogRepository(BaseRepository[AuditLog]):
         since: datetime | None = None,
         until: datetime | None = None,
         limit: int = 50,
+        target_type: str | None = None,
+        target_id: uuid.UUID | None = None,
+        before: tuple[datetime, uuid.UUID] | None = None,
     ) -> list[AuditLog]:
-        """Newest first, optionally narrowed to one workspace.
+        """Newest first by `(occurred_at, id)`, optionally narrowed.
 
         `tenant_id` narrows; it does not scope. Omitting it returns platform
         actions alongside workspace ones, which is the view an investigation
-        actually needs.
+        actually needs. `target_type` / `target_id` narrow to one object's
+        history (PLAT-G6). `before` is a keyset cursor: entries strictly after
+        `(occurred_at, id)` in this order - the whole pair, so entries that
+        share a timestamp are neither skipped nor repeated across pages.
         """
         statement = _filtered(
             self._select(),
@@ -108,6 +114,18 @@ class PlatformAuditLogRepository(BaseRepository[AuditLog]):
         )
         if tenant_id is not None:
             statement = statement.where(AuditLog.tenant_id == tenant_id)
+        if target_type is not None:
+            statement = statement.where(AuditLog.target_type == target_type)
+        if target_id is not None:
+            statement = statement.where(AuditLog.target_id == target_id)
+        if before is not None:
+            statement = statement.where(
+                tuple_(AuditLog.occurred_at, AuditLog.id)
+                < tuple_(
+                    literal(before[0], AuditLog.occurred_at.type),
+                    literal(before[1], AuditLog.id.type),
+                )
+            )
         return await self._all(
             statement.order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc()).limit(limit)
         )

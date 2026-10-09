@@ -507,6 +507,14 @@ PLATFORM_ROUTE_POLICY = {
     ("GET", "/platform/billing/topup-purchases"): "staff",
     ("GET", "/platform/billing/topup-purchases/{purchase_id}"): "staff",
     ("POST", "/platform/billing/topup-purchases/{purchase_id}/refund-review"): "staff",
+    ("POST", "/platform/billing/topup-purchases/{purchase_id}/withdraw"): "staff",
+    # The capacity-reduction queue, a workspace's channels, the vocabulary (ADR-132).
+    ("GET", "/platform/billing/capacity-reductions"): "staff",
+    ("GET", "/platform/billing/capacity-reductions/{reduction_id}"): "staff",
+    ("GET", "/platform/billing/tenants/{tenant_id}/capacity-reductions"): "staff",
+    ("GET", "/platform/billing/tenants/{tenant_id}/channel-capacity"): "staff",
+    ("GET", "/platform/billing/tenants/{tenant_id}/channel-connections"): "staff",
+    ("GET", "/platform/billing/channel-types"): "staff",
     # Custom plan offers (ADR-114).
     ("GET", "/platform/billing/tenants/{tenant_id}/custom-offers"): "staff",
     ("POST", "/platform/billing/tenants/{tenant_id}/custom-offers"): "staff",

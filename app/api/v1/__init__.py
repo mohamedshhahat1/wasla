@@ -48,6 +48,7 @@ from app.api.v1 import (
     platform,
     platform_billing,
     platform_commercial,
+    platform_entitlements,
     templates,
     usage,
     webhooks,
@@ -130,6 +131,9 @@ UNLIMITED_ROUTERS = (
     platform_billing.router,
     # Custom plans and top-ups: the same prefix and authority (ADR-113).
     platform_commercial.router,
+    # The reduction queue, a workspace's channels and the channel vocabulary:
+    # the same prefix and authority (ADR-132).
+    platform_entitlements.router,
     webhooks.router,
     email_webhooks.router,
     # A payment provider cannot hold a credential of ours and retries anything

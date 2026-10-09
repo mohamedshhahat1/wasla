@@ -43,11 +43,15 @@ def test_the_topup_keys_are_exactly_the_seven() -> None:
     assert LimitKey.OWNED_WORKSPACES not in TOPUP_LIMITS
 
 
-def test_a_granted_topup_can_only_expire_or_go_to_review() -> None:
+def test_a_granted_topup_can_only_expire_go_to_review_or_be_withdrawn() -> None:
     assert TOPUP_TRANSITIONS[TopupStatus.GRANTED] == {
         TopupStatus.EXPIRED,
         TopupStatus.REFUND_REVIEW,
+        # Staff taking a platform grant back (PLAT-G1); terminal, like expiry.
+        TopupStatus.WITHDRAWN,
     }
+    assert TOPUP_TRANSITIONS[TopupStatus.WITHDRAWN] == frozenset()
+    assert TopupStatus.WITHDRAWN not in ACTIVE_TOPUP_STATUSES
     assert not topup_may_move(TopupStatus.GRANTED, TopupStatus.GRANTED)
     assert not topup_may_move(TopupStatus.EXPIRED, TopupStatus.GRANTED)
     assert not topup_may_move(TopupStatus.CANCELLED, TopupStatus.GRANTED)

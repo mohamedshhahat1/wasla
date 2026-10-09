@@ -1637,7 +1637,8 @@ ADR-130). Every migration is additive and online:
 **Downgrades refuse rather than lose data**: 0085, 0086, 0088 and 0090 while any
 row holds what they added; 0087 and 0089 while a row carries the new label -
 **an enum label cannot be dropped**, so those two downgrades leave the label in
-the type. 0091's downgrade drops the index concurrently.
+the type. 0091's downgrade drops the index in the run's transaction (MIG-0091,
+below), so a refusal further down rolls it back.
 
 **After deploying:**
 
@@ -1803,7 +1804,7 @@ python -m scripts.db_preflight verify
 python -m scripts.omnichannel_invariants verify
 ```
 
-`verify` runs the entitlement ledger E01-E15 with the omnichannel invariants;
+`verify` runs the entitlement ledger E01-E18 with the omnichannel invariants;
 every one must read 0. It reads the clock, `DEFAULT_PLAN_CODE` and
 `AI_TURN_HOLD_TTL_SECONDS` from the environment it runs in, so run it with the
 deployment's values. E01 and E02 (connections over capacity, or of a type the
@@ -1816,31 +1817,44 @@ them until staff set a price and activate them (`docs/BILLING_OPERATIONS.md`,
 *Channel slots*). The placeholder plan values are staff's to confirm or replace
 through the platform API.
 
-#### A downgrade that crosses 0091 is not all-or-nothing
+#### A refused downgrade leaves the database where it started (MIG-0091)
 
-0091 (the omnichannel inbox index, before this release) drops its index
-`CONCURRENTLY` in an autocommit block, which commits every downgrade above it.
-So a downgrade from head to below 0091 that an older migration then refuses -
-0090 with a connection carrying its own sending allowance, 0081 with a price it
-cannot keep - stops with the database **stamped `0091`, without 0091's index**,
-0092-0098 already downgraded, and the refusal still saying "Nothing has been
-changed" about its own step. A plain `alembic upgrade head` from there reaches
-head *without* the index, and `db_preflight verify` does not notice; the inbox's
-channel filter is then correct but slow. Measured on a migration-built database
-(2026-10-08):
+Alembic runs a whole `downgrade` in one transaction, and every refusal is
+raised before its migration changes anything. Until MIG-0091 was fixed, five
+downgrades - 0075, 0078, 0079, 0081 and 0091 - dropped their indexes
+`CONCURRENTLY` in an autocommit block, which **commits every step above them**.
+A downgrade from head that a lower migration then refused stopped stamped at
+the last of those revisions it had passed, without that revision's indexes, and
+a plain `alembic upgrade head` never rebuilt them. Measured on migration-built
+databases (2026-10-08, before the fix):
 
-| After the refused downgrade | `alembic_version` | `ix_conversations_tenant_id_channel_last_message_at` |
+| Refused at | `alembic_version` after | Lost |
 | --- | --- | --- |
-| as it stops | 0091 | absent |
-| then `alembic upgrade head` | 0098 | **absent** |
-| instead `alembic stamp 0090`, then `alembic upgrade head` | 0098 | present |
+| 0090 (a connection with its own sending allowance) | 0091 | `ix_conversations_tenant_id_channel_last_message_at` |
+| 0081 (a price its version never published) | 0091 | the same index |
+| 0069 (a stored card) | 0075 | 0075's four purge indexes; 0078's, 0079's and 0081's dropped with the run |
 
-Either remove what the refusal names and run the same downgrade again (0091's
-drop is `IF EXISTS`), or go back up with `alembic stamp 0090` followed by
-`alembic upgrade head` - the schema at "0091 without its index" is exactly
-0090's. If `upgrade head` already ran, build the index by hand with the
-statement in `20261002_0091_channel_inbox_index.py` (`CREATE INDEX CONCURRENTLY
-IF NOT EXISTS ...`).
+All five now drop their indexes in the run's transaction (`SET LOCAL
+lock_timeout = '15s'`, as 0094's has since 9695ec0). A refusal anywhere below
+rolls the whole run back: the stamp stays at the starting head and every index
+is present and valid (`tests/integration/test_migration_downgrade_atomicity.py`).
+The drops take a brief ACCESS EXCLUSIVE lock on their tables, which is why a
+downgrade runs with the application stopped. Only the downgrades changed; a
+database at head is unaffected.
+
+**Finding a database damaged before the fix.** Any database that was ever
+downgraded across one of those revisions and refused below it may be missing
+indexes. `python -m scripts.db_preflight verify` now compares the database with
+every table, index and named constraint the models declare and names each one
+missing (`index missing: conversations.ix_conversations_tenant_id_channel_last_message_at`),
+exiting 1. Run it on every such database.
+
+**Repairing one.** Build each index it names with the statement in its
+migration (each is `CREATE INDEX CONCURRENTLY IF NOT EXISTS ...`; 0078's are
+unique - check for duplicates first, as that migration does), then run `verify`
+again until it prints `ok`. If the damage is found before `upgrade head` ran -
+the stamp still names the revision whose indexes are gone - `alembic stamp
+<the revision below it>` followed by `alembic upgrade head` rebuilds them too.
 
 #### AI turn holds are not being released
 
@@ -1891,6 +1905,10 @@ fallback disabled channel types the plan no longer allows first, then the
 newest. Many at once is usually one cause applied to many companies - a plan
 migration, a withdrawn product, an expiring grant:
 
+`GET /api/v1/platform/billing/capacity-reductions?status=resolved_automatically`
+lists them with their companies and causes (`cause=grant_withdrawn` when staff
+withdrew a grant). By hand:
+
 ```sql
 SELECT cause, status, count(*), min(effective_at), max(resolved_at)
   FROM channel_capacity_reductions
@@ -1910,10 +1928,15 @@ were not.
 
 #### Reading a company's channel capacity
 
-`GET /api/v1/platform/billing/tenants/{tenant_id}/summary` gives the slots in
-force (general and typed, with what each came from), the active connections by
-channel, the AI turns used, held and by channel, and the latest capacity
-reduction with its cause, status and grace end. By hand:
+`GET /api/v1/platform/billing/tenants/{tenant_id}/channel-capacity` is exactly
+the company's own capacity page - slots in force by kind, active connections by
+channel, the scheduled plan's capacity, the open reduction and what the
+fallback would keep and disable - and `.../channel-connections` its list of
+connections (ADR-132). `.../capacity-reductions` is its history, and
+`GET /api/v1/platform/billing/capacity-reductions?status=pending_selection` every
+company in a grace, the soonest end first. The summary
+(`.../tenants/{tenant_id}/summary`) adds the AI turns used, held and by channel.
+No SQL is needed; by hand, for an investigation:
 
 ```sql
 SELECT channel, status, disabled_reason, ownership_started_at
@@ -1928,6 +1951,59 @@ SELECT cause, status, target_general, target_typed, target_allowed_types,
 
 What to tell a customer during a grace is in `docs/BILLING_OPERATIONS.md`
 (*Channel capacity reductions*).
+
+### Platform entitlement operations (0099-0100)
+
+ADR-132: staff withdraw a platform grant, read the capacity-reduction queue and
+a company's channels, and filter by plan version, product code, channel type
+and audit target - all through the platform API.
+
+| Migration | What it does | Locks |
+| --- | --- | --- |
+| 0099 | `topup_status` gains `withdrawn`, `channel_capacity_reduction_cause` gains `grant_withdrawn`, `audit_action` gains `billing_topup_grant_withdrawn` (autocommit, first); `topup_purchases.withdrawn_at/withdrawn_by/withdrawal_reason`; `channel_capacity_reductions.topup_purchase_id`; CHECKs that only a grant is withdrawn, that a withdrawal says when and why, and that exactly a `grant_withdrawn` reduction names a grant | Metadata-only `ADD COLUMN`s on two small tables; constraints `NOT VALID` then validated; 15 s `lock_timeout` |
+| 0100 | `ix_audit_logs_target_type_target_id_occurred_at`, `CONCURRENTLY`; an INVALID leftover is dropped and rebuilt | None blocking writes |
+
+The previous image runs on this schema - every change is additive and nothing
+it reads changes - so the ordinary rolling deploy applies. A process of the
+previous image that read a withdrawn grant's status would fail on the unknown
+label; there is none until staff withdraw one with the new image.
+
+**Downgrades.** 0100 → 0099 drops the index in the run's transaction; nothing
+is lost. 0099 → 0098 refuses, naming the counts, while any grant is withdrawn,
+any reduction names one or any audit entry records a withdrawal - the earlier
+schema cannot say why a grant stopped counting. Both run in the run's
+transaction, so a refusal anywhere below rolls back everything above it. The
+labels stay.
+
+**After deploying:** `python -m scripts.db_preflight verify` and
+`python -m scripts.omnichannel_invariants verify`, as above; E16-E18 read 0.
+
+#### Withdrawing a grant
+
+A grant given to the wrong company, or no longer due:
+
+1. `GET /api/v1/platform/billing/topup-purchases?tenant_id=…&source=platform_grant&status=granted`
+   and note the grant's `id` and `revision`.
+2. `POST /api/v1/platform/billing/topup-purchases/{id}/withdraw` with
+   `{"tenant_id": "…", "reason": "…", "expected_revision": …}`.
+3. Read the answer: `effective_limit_before` and `_after`, and `reduction` -
+   null if the company still fits, else the `grant_withdrawn` reduction with its
+   `grace_ends_at`. Tell the owner they have the grace to choose
+   (`docs/BILLING_OPERATIONS.md`, *Withdrawing a grant*).
+
+`409` means a paid purchase (refund it instead), a stale revision (reload), or
+a grant that already ended. Nothing is disabled by the withdrawal itself. There
+is no undo; if the withdrawal was the mistake, grant again, which closes the
+reduction with nothing disabled.
+
+#### Reading the reduction queue
+
+`GET /api/v1/platform/billing/capacity-reductions?status=pending_selection`
+lists every company in a grace, the soonest end first, with its active
+connections and how many the fallback would disable. Narrow with
+`grace_ends_before` to the ones ending this week; `GET
+.../capacity-reductions/{id}` shows what the fallback would keep. Staff cannot
+extend, shorten or resolve a reduction - reach the owner instead.
 
 ### Downgrading past the billing migrations
 
@@ -1973,7 +2049,8 @@ enum additions transactional, and nothing here pretends it does.
    `alembic stamp <revision>`, then `alembic upgrade head`, which reruns the
    rest.
 4. `python -m scripts.db_preflight verify` must then report no unvalidated
-   constraint, invalid index or disabled trigger.
+   constraint, invalid index or disabled trigger, and nothing the models
+   declare missing.
 
 If step 2 finds the DDL only partly present, the failure was before the block,
 the transaction rolled back, and nothing was committed: rerun normally.

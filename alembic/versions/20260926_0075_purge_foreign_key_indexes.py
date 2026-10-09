@@ -29,6 +29,11 @@ leaves an INVALID index behind, which `IF NOT EXISTS` would then silently
 accept; each build therefore drops an invalid index of its own name first, so
 re-running the migration after a failure finishes the job rather than
 skipping it.
+
+**Downgrade (MIG-0091 survey, ADR-132)** drops the four indexes in the run's transaction
+under a 15 s lock_timeout, no longer `CONCURRENTLY` in an autocommit block: a
+lower migration refusing used to leave the stamp at this revision without the four indexes,
+and `upgrade head` never rebuilt them. The upgrade is unchanged.
 """
 
 from __future__ import annotations
@@ -83,6 +88,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    with op.get_context().autocommit_block():
-        for name, _, _, _ in reversed(INDEXES):
-            op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+    # In the run's transaction, not `CONCURRENTLY` (MIG-0091): an autocommit
+    # block commits every downgrade step above this one, so a refusal further
+    # down would leave the stamp here without these indexes, and `upgrade head` would
+    # never rebuild them. Run with the application stopped (docs/RUNBOOK.md);
+    # the drop waits at most 15 s for its lock, then fails the whole run.
+    op.execute("SET LOCAL lock_timeout = '15s'")
+    for name, _, _, _ in reversed(INDEXES):
+        op.execute(f"DROP INDEX IF EXISTS {name}")

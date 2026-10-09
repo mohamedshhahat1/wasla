@@ -38,6 +38,7 @@ from app.db.models.topup import (
     TopupValidity,
 )
 from app.schemas.billing import EntitlementRead, SubscriptionRead
+from app.schemas.channel_capacity import CapacityReductionRead
 from app.schemas.custom_plan import CustomPlanOfferRead
 from app.schemas.text import StorableText
 
@@ -344,6 +345,10 @@ class PlatformTopupPurchaseRead(TopupPurchaseRead):
     reason: str | None
     actor_id: uuid.UUID | None
     revision: int
+    # A grant staff withdrew (PLAT-G1): when, by whom and why; null otherwise.
+    withdrawn_at: datetime | None = None
+    withdrawn_by: uuid.UUID | None = None
+    withdrawal_reason: str | None = None
 
     @classmethod
     def build(cls, purchase: TopupPurchase, *, payment_status: PaymentStatus | None = None) -> Self:
@@ -354,6 +359,9 @@ class PlatformTopupPurchaseRead(TopupPurchaseRead):
             reason=purchase.reason,
             actor_id=purchase.actor_id,
             revision=purchase.revision,
+            withdrawn_at=purchase.withdrawn_at,
+            withdrawn_by=purchase.withdrawn_by,
+            withdrawal_reason=purchase.withdrawal_reason,
         )
 
 
@@ -403,6 +411,37 @@ class TopupRefundReview(BaseModel):
     decision: Literal["keep", "withdraw"]
     reason: StorableText = Reason
     expected_revision: int = Field(ge=1)
+
+
+class TopupGrantWithdraw(BaseModel):
+    """Take a platform grant back before it ends (PLAT-G1, ADR-132).
+
+    `tenant_id` is the workspace the operator believes the grant belongs to:
+    a grant of any other workspace is 404, so an id pasted from the wrong
+    screen withdraws nothing. `expected_revision` is the grant's.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: uuid.UUID
+    reason: StorableText = Reason
+    expected_revision: int = Field(ge=1)
+
+
+class GrantWithdrawalResult(BaseModel):
+    """What a withdrawal did: the grant now, the limit before and after, and any reduction.
+
+    `reduction` is the capacity reduction the workspace is in after the
+    withdrawal - opened by it (`cause: grant_withdrawn`, with its grace), or
+    one already open whose target it adjusted - and null when everything still
+    fits or the key is not channel capacity. Nothing is ever disabled by the
+    withdrawal itself.
+    """
+
+    purchase: PlatformTopupPurchaseRead
+    effective_limit_before: int | None
+    effective_limit_after: int | None
+    reduction: CapacityReductionRead | None
 
 
 # ------------------------------------------------------------------ summary

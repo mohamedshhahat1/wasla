@@ -1,4 +1,4 @@
-"""Each entitlement invariant counts a violation when one exists (ADR-131, E01-E15).
+"""Each entitlement invariant counts a violation when one exists (ADR-131 E01-E15, ADR-132 E16-E18).
 
 `python -m scripts.omnichannel_invariants verify` runs the entitlement ledger
 beside the omnichannel invariants. An invariant that cannot fail proves
@@ -690,4 +690,84 @@ async def test_e15_a_pinned_version_naming_a_label_outside_the_vocabulary(
 
     assert await _added(db_session, before) == {
         "e15_pinned_version_with_unreadable_channel_types": 1
+    }
+
+
+# ------------------------------------------------- withdrawn grants (E16-E18)
+
+
+def _grant(tenant: Tenant, *, status: TopupStatus, withdrawn: bool) -> TopupPurchase:
+    """A channel-slot grant written straight to the table, past `TopupAdmin`."""
+    moment = datetime.now(UTC)
+    return TopupPurchase(
+        tenant_id=tenant.id,
+        source=TopupSource.PLATFORM_GRANT,
+        product_name="Platform grant",
+        entitlement_key=TopupEntitlement.CHANNEL_CONNECTIONS,
+        quantity=1,
+        unit_price=Decimal("0.00"),
+        total_amount=Decimal("0.00"),
+        currency="EGP",
+        billing_period_start=moment - timedelta(days=1),
+        billing_period_end=moment + timedelta(days=29),
+        expires_at=moment + timedelta(days=29),
+        status=status,
+        granted_at=moment - timedelta(days=1),
+        reason="Ledger fixture.",
+        withdrawn_at=moment if withdrawn else None,
+        withdrawal_reason="Granted to the wrong workspace." if withdrawn else None,
+        ended_at=moment if withdrawn else None,
+    )
+
+
+async def test_e16_a_withdrawn_grant_still_counting(db_session: AsyncSession) -> None:
+    tenant = await _tenant(db_session)
+    before = await _counts(db_session)
+    # The CHECK that a withdrawal is recorded only with the withdrawn status
+    # refuses this; lifted for this transaction.
+    await db_session.execute(
+        text("ALTER TABLE topup_purchases DROP CONSTRAINT ck_topup_purchases_withdrawal_recorded")
+    )
+
+    db_session.add(_grant(tenant, status=TopupStatus.GRANTED, withdrawn=True))
+
+    assert await _added(db_session, before) == {"e16_withdrawn_grant_still_counting": 1}
+
+
+async def test_e17_a_withdrawn_grant_without_its_audit(db_session: AsyncSession) -> None:
+    tenant = await _tenant(db_session)
+    before = await _counts(db_session)
+
+    grant = _grant(tenant, status=TopupStatus.WITHDRAWN, withdrawn=True)
+    db_session.add(grant)
+    await db_session.flush()
+    # The grant's creation was audited, its withdrawal was not: only an entry
+    # of the withdrawal itself explains a withdrawn grant.
+    AuditTrail(db_session, tenant_id=tenant.id).record(
+        AuditAction.BILLING_TOPUP_PLATFORM_GRANTED,
+        actor=None,
+        actor_kind=AuditActorKind.SYSTEM,
+        target_type="topup_purchase",
+        target_id=grant.id,
+    )
+
+    assert await _added(db_session, before) == {"e17_withdrawn_grant_without_its_audit": 1}
+
+
+async def test_e18_a_grant_withdrawn_reduction_naming_a_grant_still_in_force(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await _tenant(db_session)
+    grant = _grant(tenant, status=TopupStatus.GRANTED, withdrawn=False)
+    db_session.add(grant)
+    await db_session.flush()
+    before = await _counts(db_session)
+    reduction = _resolved(tenant, [])
+    reduction.cause = CapacityReductionCause.GRANT_WITHDRAWN
+    reduction.topup_purchase_id = grant.id
+
+    db_session.add(reduction)
+
+    assert await _added(db_session, before) == {
+        "e18_grant_withdrawn_reduction_without_its_grant": 1
     }

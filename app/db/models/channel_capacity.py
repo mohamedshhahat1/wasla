@@ -66,6 +66,9 @@ class CapacityReductionCause(StrEnum):
     TOPUP_WITHDRAWN = "topup_withdrawn"
     GRANT_EXPIRED = "grant_expired"
     MIGRATION = "migration"
+    # Staff withdrew a platform grant before it ended (PLAT-G1); the reduction
+    # names the grant in `topup_purchase_id`. Appended, as ADD VALUE appends.
+    GRANT_WITHDRAWN = "grant_withdrawn"
 
 
 class CapacityReductionStatus(StrEnum):
@@ -113,6 +116,12 @@ class ChannelCapacityReduction(
             name="resolved_when_closed",
         ),
         CheckConstraint("target_general >= 0", name="target_general_non_negative"),
+        # A reduction a withdrawn grant opened names that grant, and only that
+        # cause names one (PLAT-G1, E18).
+        CheckConstraint(
+            "(cause = 'grant_withdrawn') = (topup_purchase_id IS NOT NULL)",
+            name="withdrawn_grant_named",
+        ),
     )
 
     cause: Mapped[CapacityReductionCause] = mapped_column(
@@ -146,6 +155,19 @@ class ChannelCapacityReduction(
     )
     disabled_connection_ids: Mapped[list[uuid.UUID] | None] = mapped_column(
         ARRAY(UUID(as_uuid=True)), nullable=True
+    )
+    # The platform grant whose withdrawal opened this reduction (PLAT-G1).
+    # RESTRICT: a purchase is financial history and is never deleted, and a
+    # purge erases the reduction first.
+    topup_purchase_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "topup_purchases.id",
+            ondelete="RESTRICT",
+            # Named: the convention's name is one byte over PostgreSQL's limit.
+            name="fk_channel_capacity_reductions_topup_purchase",
+        ),
+        nullable=True,
     )
 
     @property

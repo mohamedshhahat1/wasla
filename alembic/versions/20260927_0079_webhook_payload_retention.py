@@ -22,6 +22,11 @@ its state and timestamps are what recovery reads.
 Downgrade refuses once any payload has been redacted: the NOT NULL it would
 restore cannot hold a redacted row, and inventing a payload for it would be
 worse.
+
+**Downgrade (MIG-0091 survey, ADR-132)** drops the index in the run's transaction
+under a 15 s lock_timeout, no longer `CONCURRENTLY` in an autocommit block: a
+lower migration refusing used to leave the stamp at this revision without the index,
+and `upgrade head` never rebuilt it. The upgrade is unchanged.
 """
 
 from __future__ import annotations
@@ -82,8 +87,13 @@ def downgrade() -> None:
             f"{redacted} webhook payload(s) have been redacted, and the schema before 0079"
             " requires one on every event. Refusing to downgrade; nothing has been changed."
         )
-    with op.get_context().autocommit_block():
-        op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {INDEX}")
+    # In the run's transaction, not `CONCURRENTLY` (MIG-0091): an autocommit
+    # block commits every downgrade step above this one, so a refusal further
+    # down would leave the stamp here without this index, and `upgrade head` would
+    # never rebuild it. Run with the application stopped (docs/RUNBOOK.md);
+    # the drop waits at most 15 s for its lock, then fails the whole run.
+    op.execute("SET LOCAL lock_timeout = '15s'")
+    op.execute(f"DROP INDEX IF EXISTS {INDEX}")
     op.drop_constraint(
         op.f("ck_whatsapp_events_payload_present_or_redacted"), "whatsapp_events", type_="check"
     )

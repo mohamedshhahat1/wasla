@@ -18,7 +18,7 @@ from app.api.route import CommittingRoute
 from app.core.dependencies import SessionDep, SettingsDep
 from app.db.models.channel import Channel
 from app.schemas.channel_connection import ChannelConnectionRead
-from app.services.channel_connection_service import ChannelConnectionService
+from app.services import channel_capacity_view
 
 router = APIRouter(
     route_class=CommittingRoute, prefix="/channel-connections", tags=["channel-connections"]
@@ -37,9 +37,6 @@ async def list_channel_connections(
     Open to any member, like the capacity it explains. Released connections are
     history and are not listed; their conversations stay readable in the inbox.
     """
-    connections = await ChannelConnectionService(
-        session,
-        tenant_id=workspace.tenant.id,
-        default_plan_code=settings.default_plan_code,
-    ).list_connections(channel=channel)
-    return [ChannelConnectionRead.from_model(row) for row in connections]
+    return await channel_capacity_view.list_channel_connections(
+        session, workspace.tenant.id, settings, channel=channel
+    )

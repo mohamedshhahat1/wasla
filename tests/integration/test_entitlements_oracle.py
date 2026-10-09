@@ -4,10 +4,11 @@ A generated population of workspaces - every serving and non-serving status
 and none at all, monthly and yearly prices, a base of zero, a few or
 unlimited, a version that never stated its channel types, an explicit "no
 channel" set; general and typed slots, purchased and granted, live, expired,
-not yet started, under refund review and cancelled, and a retired number
-top-up; active, disabled and released connections on every channel; AI turns
-charged on several channels, held, held long ago and released; open and
-resolved reductions - and a set of moments across each term.
+not yet started, under refund review, cancelled and withdrawn by staff, AI-turn
+grants in force and withdrawn, and a retired number top-up; active, disabled
+and released connections on every channel; AI turns charged on several
+channels, held, held long ago and released; open and resolved reductions - and
+a set of moments across each term.
 
 For every workspace and moment three formulations must agree:
 `EntitlementService` (the engine), `ChannelCapacityCensus` (the set-wise
@@ -99,7 +100,7 @@ TERMS: tuple[tuple[dict[str, int], list[str] | None], ...] = (
     ({"channel_connections": 3, "period_ai_turns": 100}, ["instagram", "telegram"]),
     ({"whatsapp_numbers": 1, "period_ai_turns": 20}, None),
 )
-TOPUP_STATES = ("live", "expired", "future", "review", "cancelled")
+TOPUP_STATES = ("live", "expired", "future", "review", "cancelled", "withdrawn")
 
 
 async def _versions(
@@ -259,6 +260,9 @@ class _Builder:
         for _ in range(rng.randint(2, 6)):
             state = rng.choice(TOPUP_STATES)
             source = rng.choice([TopupSource.PURCHASE, TopupSource.PLATFORM_GRANT])
+            if state == "withdrawn":
+                # Only a grant is withdrawn by staff (PLAT-G1).
+                source = TopupSource.PLATFORM_GRANT
             typed = rng.random() < 0.5
             channel = Channel(rng.choice(CHANNELS)) if typed else None
             granted = start + timedelta(days=rng.randint(0, 20))
@@ -281,9 +285,11 @@ class _Builder:
                     "future": TopupStatus.GRANTED,
                     "review": TopupStatus.REFUND_REVIEW,
                     "cancelled": TopupStatus.CANCELLED,
+                    "withdrawn": TopupStatus.WITHDRAWN,
                 }[state],
                 granted=granted if state != "cancelled" else None,
                 expires=expires,
+                withdrawn=granted + timedelta(days=1) if state == "withdrawn" else None,
             )
         if rng.random() < 0.4:
             # A number top-up bought before ADR-131: a typed WhatsApp slot now.
@@ -322,6 +328,7 @@ class _Builder:
         status: TopupStatus,
         granted: datetime | None,
         expires: datetime,
+        withdrawn: datetime | None = None,
     ) -> None:
         invoice_id = None
         sale: dict[str, Any] = {
@@ -371,10 +378,33 @@ class _Builder:
                 expires_at=expires,
                 status=status,
                 granted_at=granted,
+                withdrawn_at=withdrawn,
+                withdrawal_reason="Oracle population." if withdrawn is not None else None,
+                ended_at=withdrawn,
                 **sale,
             )
         )
         await self.session.flush()
+
+    async def turn_grants(
+        self, tenant: Tenant, subscription: Subscription | None, start: datetime
+    ) -> None:
+        """AI-turn grants of the cycle: some in force, some withdrawn by staff (PLAT-G1)."""
+        for _ in range(self.rng.randint(0, 3)):
+            granted = start + timedelta(days=self.rng.randint(0, 10))
+            withdrawn = self.rng.random() < 0.5
+            await self._slot(
+                tenant,
+                subscription,
+                source=TopupSource.PLATFORM_GRANT,
+                key=TopupEntitlement.PERIOD_AI_TURNS,
+                channel=None,
+                quantity=self.rng.randint(1, 50),
+                status=TopupStatus.WITHDRAWN if withdrawn else TopupStatus.GRANTED,
+                granted=granted,
+                expires=granted + timedelta(days=self.rng.randint(5, 25)),
+                withdrawn=granted + timedelta(hours=self.rng.randint(1, 48)) if withdrawn else None,
+            )
 
     async def turns(
         self, tenant: Tenant, number: WhatsAppAccount, start: datetime, end: datetime
@@ -511,6 +541,7 @@ async def _population(
         number = await builder.connections(tenant)
         await builder.slots(tenant, subscription, anchor, end)
         await builder.turns(tenant, number, anchor, end)
+        await builder.turn_grants(tenant, subscription, anchor)
         if index % 5 == 0:
             builder.reduction(tenant, open_=True)
         if index % 7 == 3:
@@ -554,6 +585,22 @@ async def test_capacity_and_the_ai_meter_agree_three_ways_for_every_workspace_an
 ) -> None:
     rng = random.Random(131)  # noqa: S311 - a reproducible population, not a secret
     cases = await _population(db_session, rng)
+    # Non-vacuous for PLAT-G1: grants staff withdrew are in the population, of
+    # both kinds - channel slots and AI turns.
+    withdrawn: dict[str, int] = {
+        row[0]: row[1]
+        for row in (
+            await db_session.execute(
+                text(
+                    "SELECT entitlement_key::text, count(*) FROM topup_purchases"
+                    " WHERE tenant_id = ANY(:t) AND status::text = 'withdrawn' GROUP BY 1"
+                ),
+                {"t": [tenant.id for tenant, _ in cases]},
+            )
+        ).all()
+    }
+    assert withdrawn.get("channel_connections", 0) > 0, withdrawn
+    assert withdrawn.get("period_ai_turns", 0) > 0, withdrawn
     census = ChannelCapacityCensus(db_session, default_plan_code="starter")
     comparisons = 0
     over_limit = Counter[bool]()

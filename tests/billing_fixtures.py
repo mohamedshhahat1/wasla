@@ -145,7 +145,11 @@ async def renewal_invoice(
 
 
 LEDGER_TEARDOWN = (
-    # First: a top-up purchase holds its invoice and payment by RESTRICT.
+    # Before the purchases: a reduction a withdrawn grant opened names that
+    # grant by RESTRICT (PLAT-G1). A real purge erases reductions and keeps
+    # purchases; a test erasing both goes in this order.
+    "DELETE FROM channel_capacity_reductions WHERE tenant_id = ANY(:ids)",
+    # Then: a top-up purchase holds its invoice and payment by RESTRICT.
     "DELETE FROM topup_purchases WHERE tenant_id = ANY(:ids)",
     "DELETE FROM billing_incidents WHERE tenant_id = ANY(:ids)",
     "DELETE FROM billing_adjustments WHERE tenant_id = ANY(:ids)",

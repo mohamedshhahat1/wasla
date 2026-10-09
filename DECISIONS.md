@@ -6631,3 +6631,99 @@ the adapter asks its provider anything, then `connect`.
 
 Decisions 1, 2 and 3 are superseded by ADR-131 (ENT-22, ENT-05, ENT-19).
 Decisions 4 (the workspace default agent) and 5 (separate threads) stand.
+
+## ADR-132 — A Refused Downgrade Changes Nothing; Staff Run Entitlements Without SQL
+
+**Context.** Two gaps remained after ADR-131. **MIG-0091**: 0091's downgrade
+dropped its index `CONCURRENTLY` in an autocommit block, which commits every
+step above it; a downgrade from head that 0090 then refused stopped stamped
+0091 without the index, `upgrade head` never rebuilt it, and `db_preflight
+verify` printed ok. A survey found the same pattern in 0075, 0078, 0079 and
+0081. **PLAT-G1..G8**: platform staff could create a grant but not take one
+back, could not see which workspaces were in a capacity grace, could not read a
+workspace's channel capacity or connections without its membership, and lacked
+a handful of filters a staff screen needs.
+
+**Decision.**
+
+1. **Downgrades drop indexes in the run's transaction** (PO-01). 0075, 0078,
+   0079, 0081 and 0091 now `DROP INDEX IF EXISTS` after `SET LOCAL
+   lock_timeout = '15s'`, as 0094's has since 9695ec0. A refusal anywhere below
+   rolls the whole run back. **This edits five existing migrations, downgrades
+   only** - an explicit exception to "never rewrite a migration": their
+   upgrades are byte-for-byte unchanged, so a database at head is unaffected.
+   0039 and 0040 keep their concurrent drops: no downgrade below them can
+   refuse. New migrations (0099, 0100) follow the rule from the start.
+2. **`db_preflight verify` sees what is missing** (PO-02). It compares the
+   database with every table, index, unique constraint, primary key, check
+   constraint and foreign key `Base.metadata` declares, by the name the naming
+   convention gives it, and exits 1 naming each one absent. The schema-parity
+   suite keeps the models and migrations name-for-name identical, so nothing
+   is allow-listed (`MIGRATION_ONLY_INDEXES` is empty; an entry must give a
+   reason, never a pattern). Columns are not compared: a missing column fails
+   the application at once, which is not the silent class this closes.
+3. **Withdrawing a grant** (PO-03, PLAT-G1). `POST
+   /platform/billing/topup-purchases/{id}/withdraw` (platform staff; `tenant_id`,
+   `reason`, `expected_revision`) moves a live platform grant to the terminal
+   `withdrawn` status and records when, by whom and why. It stops counting at
+   once. `tenant_id` must name the grant's workspace - otherwise 404 - so an id
+   pasted from the wrong screen withdraws nothing. Refused with 409: a paid
+   purchase (refunds have their own path), a stale revision, a grant that no
+   longer counts. Taken under the workspace's advisory lock for the grant's
+   key, then the row lock; status, audit entry and any reduction commit
+   together.
+4. **A withdrawal is a capacity boundary** (amends ADR-131 decision 7). Channel
+   slots it leaves short enter the reduction lifecycle through
+   `ChannelCapacityReductions.boundary(cause=grant_withdrawn)`, which names the
+   grant on the reduction: the same 7-day grace, owner choice, automatic
+   fallback and owner notices as a downgrade. Unlike a term boundary it
+   neither applies nor discards an owner's pre-selection (made for the term
+   end, not for this), so **nothing is disabled in the withdrawal request**.
+   A usage grant (AI turns) lowers the limit; recorded usage and open holds are
+   untouched, and the next turn over the new limit is handed to a person
+   (ENT-04). There is no "shorten to a date" operation.
+5. **The reduction queue** (PO-04, PLAT-G2). Staff list every workspace's
+   reductions (grace ending soonest first; status, cause, workspace and grace
+   window filters), read one with its kept / disabled sets and, while open,
+   the fallback preview the owner sees, and read a workspace's history.
+   **Reads only**: whether staff may extend, shorten, resolve or cancel a
+   reduction is a deferred product decision.
+6. **The same channel picture the customer sees** (PO-05, PLAT-G3). The tenant's
+   capacity and connection reads moved into `app/services/channel_capacity_view.py`;
+   the tenant routes and `GET /platform/billing/tenants/{id}/channel-capacity`
+   and `.../channel-connections` call the same functions and return the same
+   schemas. No credential is exposed; staff still cannot connect, enable,
+   disable or release.
+7. **Filters and vocabulary** (PO-06, PLAT-G4..G8): `plan_version_id` on
+   subscriptions; `code` and `search` on top-up products; `channel_type` on
+   purchases; `target_type`, `target_id` and a `(occurred_at, id)` keyset
+   cursor on the platform audit log (index built `CONCURRENTLY` by 0100);
+   `GET /platform/billing/channel-types` with `operable` from the running
+   registry; `topup_eligible` on `/features`. Plan versions and custom offers
+   per tenant stay unpaginated - the lists are small.
+8. **Nothing here charges, disables or bypasses** (PO-07): no platform operation
+   charges a card, disables, releases or deletes a connection by hand, or
+   bypasses `ChannelCapacityGuard`.
+
+**Consequences.** The ledger gains E16 (a withdrawn grant still counting), E17
+(a withdrawal without its audit entry) and E18 (a `grant_withdrawn` reduction
+not naming a withdrawn grant of its workspace). Migrations 0099 (labels,
+withdrawal columns, the reduction's grant reference) and 0100 (the audit-log
+target index). A future staff screen needs no SQL, script or CLI for any
+entitlement operation. Enum labels cannot be dropped; the downgrades leave
+them.
+
+## ADR-131 (amended 2026-10-08) — A Withdrawn Grant Is A Capacity Boundary
+
+**Context.** ADR-131 decision 7 named four causes that open the reduction
+lifecycle; staff withdrawing a platform grant (ADR-132) is a fifth.
+
+**Decision.** `grant_withdrawn` joins `downgrade`, `topup_expired`,
+`topup_withdrawn`, `grant_expired` and `migration`. It opens the same flow with
+the same grace, except that the owner's pre-selection is left for the term
+boundary it was made for (ADR-132 decision 4), and the reduction names the
+grant (`topup_purchase_id`).
+
+**Consequences.** E01 and E02 are explained by the open reduction from the
+moment the grant stops counting: the withdrawal opens it in its own
+transaction.

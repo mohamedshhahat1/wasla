@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **202 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **209 operations**, of which
 17 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -623,6 +623,13 @@ Open to every member, unlike usage: these are the numbers that tell the people s
 | POST | `/api/v1/platform/invoices/{invoice_id}/void` | Platform owner or admin |
 | GET | `/api/v1/platform/audit-logs` | Platform owner or admin |
 
+`GET /api/v1/platform/audit-logs` filters by `tenant_id`, `action` (repeatable),
+`actor_id`, `since`, `until`, and - for one object's history (ADR-132) -
+`target_type` (`topup_product`, `topup_purchase`, `plan`, ...) and `target_id`.
+Entries come newest first by `(occurred_at, id)`; the next page is
+`before_occurred_at` and `before_id` of the last entry, always together (`422`
+otherwise), and no entry is skipped or repeated however many share a timestamp.
+
 **Disabling or deleting an account is a platform action, not a workspace one.** An
 account is a global identity, so a tenant administrator able to suspend one could evict
 somebody from workspaces that administrator has nothing to do with. Removing a person
@@ -908,7 +915,8 @@ token or a raw provider payload.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/features` | The entitlement keys, their units and how each is enforced: `channel_connections` (enforced, concurrency-safe), `allowed_channel_types` (`kind: channel_policy`), and the retired `whatsapp_numbers` (`kind: retired`, `replaced_by: channel_connections`) |
+| GET | `/features` | The entitlement keys, their units and how each is enforced: `channel_connections` (enforced, concurrency-safe), `allowed_channel_types` (`kind: channel_policy`), and the retired `whatsapp_numbers` (`kind: retired`, `replaced_by: channel_connections`). `topup_eligible` marks the seven keys a top-up, grant or custom plan's top-up can raise |
+| GET | `/channel-types` | The channel vocabulary a plan, product or grant may name: `channel`, `operable` (this deployment registered an adapter) and `state` (`operational`, `paused`, `unavailable`) |
 | GET | `/plans` | The catalogue, with the current and latest version and subscriber counts; `?scope=tenant&tenant_id=` lists one company's custom plans |
 | POST | `/plans` | Create a plan and its version 1 |
 | GET | `/plans/{plan_id}` | One plan |
@@ -926,7 +934,7 @@ token or a raw provider payload.
 | GET | `/prices/{price_id}` | One price, with subscriber, scheduled-change, invoice and offer counts |
 | POST | `/prices/{price_id}/retire` | Stop selling it to new customers; its subscribers keep renewing at it. Never deletes |
 | PATCH | `/prices/{price_id}` | Always `409`: a price is immutable - retire it and create another |
-| GET | `/subscriptions` | Filter by workspace, plan, status, renewal window, `billing_interval`, `plan_price_id`; each row shows the billing term and the usage cycle apart |
+| GET | `/subscriptions` | Filter by workspace, plan, status, renewal window, `billing_interval`, `plan_price_id`, `plan_version_id` (exact: the subscribers on one version); each row shows the billing term and the usage cycle apart |
 | GET | `/subscriptions/{id}` | One subscription |
 | GET | `/subscriptions/{id}/timeline` | Its audit, invoices and payments in order |
 | POST | `/subscriptions/{id}/change-plan` | `next_renewal`, or `now` with a named financial basis, at `plan_price_id` (default: the version's monthly price) |
@@ -950,16 +958,22 @@ token or a raw provider payload.
 | POST | `/tenants/{tenant_id}/custom-offers` | Offer one **price** (`plan_price_id`, monthly or yearly) of the company's own custom plan; grants nothing. `plan_version_id` alone is accepted only for a version with one active price |
 | POST | `/custom-offers/{offer_id}/cancel` | Withdraw an open offer (`expected_revision`, `reason`) |
 | POST | `/tenants/{tenant_id}/topups/grant` | Complimentary allowance until the period ends; no invoice or payment. For `channel_connections`, an optional `channel_type`; `422` for a channel the company's plan does not include |
-| GET | `/topups` | Top-up products, filtered by scope, workspace, key, activity |
+| GET | `/topups` | Top-up products, filtered by scope, workspace, key, `channel_type`, activity, `code` (exact, any case) and `search` (code or name, any case, 1-50 characters, `%` and `_` literal) |
 | POST | `/topups` | Create a product (global or for one company). For `channel_connections`: `channel_type` (omit for a general slot) and `eligible_plan_codes` (omit or `[]` for every plan); `price` may be omitted, leaving the product inactive |
 | GET | `/topups/{topup_id}` | One product, with how many purchases name it |
 | PATCH | `/topups/{topup_id}` | Price, quantity, name, visibility, channel type, eligible plans - for new purchases |
 | POST | `/topups/{topup_id}/activate` | Offer it (again); `409` while it has no price |
 | POST | `/topups/{topup_id}/deactivate` | Stop new purchases; nobody's purchase changes |
 | DELETE | `/topups/{topup_id}` | Delete a product nobody bought (owner only) |
-| GET | `/topup-purchases` | Purchases and grants, filtered by workspace, status, source, key |
+| GET | `/topup-purchases` | Purchases and grants, filtered by workspace, status, source, key, `channel_type`. A withdrawn grant carries `withdrawn_at`, `withdrawn_by`, `withdrawal_reason` |
 | GET | `/topup-purchases/{purchase_id}` | One purchase or grant |
 | POST | `/topup-purchases/{purchase_id}/refund-review` | Keep or withdraw a refunded top-up; withdrawal deletes nothing |
+| POST | `/topup-purchases/{purchase_id}/withdraw` | Take a platform grant back now (ADR-132). Body: `tenant_id` (must be the grant's workspace, else `404`), `reason`, `expected_revision`. Answers the purchase, `effective_limit_before` / `_after` and the capacity `reduction` the workspace is now in, if any. `409` for a paid purchase, a stale revision, or a grant that no longer counts. Never disables a connection itself: slots left short open a `grant_withdrawn` reduction with the 7-day grace |
+| GET | `/capacity-reductions` | Every workspace's capacity reductions, the grace ending soonest first. Filters: `status` and `cause` (repeatable), `tenant_id`, `grace_ends_before` (exclusive), `grace_ends_after` (inclusive). Each row: workspace name, cause, status, dates, target, `active_now`, `would_be_disabled_count`, `topup_purchase_id` |
+| GET | `/capacity-reductions/{reduction_id}` | One reduction, plus `kept_connection_ids`, `disabled_connection_ids` and, while open, the owner's `preselected` and the `automatic_fallback` preview the owner's capacity page shows |
+| GET | `/tenants/{tenant_id}/capacity-reductions` | One workspace's reductions, newest first |
+| GET | `/tenants/{tenant_id}/channel-capacity` | Exactly the workspace's `GET /billing/channel-capacity`, computed by the same code |
+| GET | `/tenants/{tenant_id}/channel-connections` | Exactly the workspace's `GET /channel-connections` (`?channel=`); no credential |
 
 ### Plan prices (ADR-116)
 
