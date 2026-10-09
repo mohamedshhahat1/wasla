@@ -187,6 +187,8 @@ A result is only meaningful alongside the build that produced it. "The suite is 
 WASLA_TEST_SCHEMA=migrations pytest tests/integration
 ```
 
+**The kept-data sweep is CI's last migration-parity step**: every AI-harness suite with `WASLA_TEST_KEEP_AI_DATA=1`, then the AI and tool invariants over everything they kept. Run it with `python -m scripts.kept_data_sweep` against a disposable `TEST_DATABASE_URL` before pushing - `docs/RUNBOOK.md` says how, and what each failing rule means.
+
 The media suites want an object store the same way: they skip unless `TEST_S3_ENDPOINT_URL`, `TEST_S3_BUCKET`, `TEST_S3_ACCESS_KEY_ID` and `TEST_S3_SECRET_ACCESS_KEY` point at one, and `docker compose --profile objectstore up -d minio` is enough. Run them: what they prove is that the SigV4 signing in `app/core/object_store.py` satisfies a real store, and mocking an SDK call cannot establish that — a signature is either accepted or it is a 403. CI runs them against MinIO and fails if it finds them skipped.
 
 Those tests build the schema **once per session** and roll each test back afterwards, so the whole suite takes about a minute and a half rather than the forty it took when every test dropped and recreated the schema. `tests/integration/test_fixture_isolation.py` covers the isolation itself, including that a test which calls `commit()` still cannot leak into the next one.

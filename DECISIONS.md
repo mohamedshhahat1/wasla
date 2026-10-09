@@ -6727,3 +6727,88 @@ grant (`topup_purchase_id`).
 **Consequences.** E01 and E02 are explained by the open reduction from the
 moment the grant stops counting: the withdrawal opens it in its own
 transaction.
+
+## ADR-131 (amended 2026-10-09) — The AI Allowance's Invariants
+
+**Context.** The kept-data sweep (`test_ai_invariants.py`, run by CI's
+`migration-parity` job over every AI-harness suite's kept data) still checked
+the allowance as ADR-104 charged it: one `ai_turn` charge per engaged turn with
+an outcome, and no engaged turn older than 900 s. Under decision 2 both counted
+legal states - an uncharged empty answer, a released provider failure whose turn
+stays `engaged`, a late charge on a turn that never completed (F-1).
+
+**Decision.** Two checks state decision 2 as consistency between what the
+application wrote, never as a second charging decision:
+
+- **Charge consistency** ("customer turns whose charge disagrees with their
+  outcome or usage"). B1 a `charged` turn has exactly one `ai_turn` event; B2 a
+  turn not `charged` has none; B3 a `released` turn has a reason from the
+  closed set; B4 a `charged` turn has no release reason except `hold_expired`,
+  which a late charge keeps; B5 `replied` and `handed_off` are `charged`; B6
+  `escalated`, `empty_response`, `nothing_to_answer`, `quota_blocked`,
+  `channel_not_in_plan` - and a turn with no outcome, a provider failure - are
+  not; B7 every `ai_turn` event names a turn of its own workspace, unless that
+  turn went with its deleted conversation.
+- **Stranded holds** ("AI turn holds nothing settled, released or expired
+  within the TTL and a sweep"). A1 an open hold - or an engaged turn that wrote
+  none - A2 older than `AI_TURN_HOLD_TTL_SECONDS` + the billing sweep interval
+  + 60 s (1,560 s by default), A3 that no settle charged or released and no
+  sweep expired.
+
+The suppressions (`suppressed_*`) may be either: charged when reply text was
+composed before a re-read withheld it, released otherwise. B1/B2 still hold
+them to their own row.
+
+**Consequences.** A dead worker's turn stays `engaged` by design and is no
+longer an invariant violation once its hold has been expired; the AI-09
+stranded-turn gauge and its runbook entry still report it to a person. A
+worker that dies between the charge and the completion is counted under B6;
+that is rare, and a person should look at it.
+
+## ADR-133 — The Kept-Data Sweep Is A Gate Anybody Can Run (F-1)
+
+**Context.** CI's `migration-parity` job ends with a session of its own: the
+AI-harness suites with `WASLA_TEST_KEEP_AI_DATA=1`, then the AI and tool
+invariants over everything they kept. The entitlements and platform-operations
+stages each reported every lane green while that job failed three tests at
+their head (F-1): the two allowance invariants above were stale, and
+`test_an_expired_hold_and_its_late_charge_are_counted` asserted a global counter
+another workspace's expired hold also moved. Nobody had run the job outside
+GitHub.
+
+**Decision.**
+
+1. **KD-01 - update the invariants, exclude nothing.** Both invariant files and
+   every AI-harness suite stay in the sweep; the selection rule in `ci.yml` is
+   unchanged.
+2. **KD-02 / KD-03** - the two checks of ADR-131's 2026-10-09 amendment. Each
+   reports the rows it counts (`rule workspace row`, at most 20) in its failure
+   message, and each rule has an injection test that proves exactly that rule
+   counts one violation, plus negatives for the legal ENT-02 shapes.
+3. **KD-04 - a local runner.** `python -m scripts.kept_data_sweep` runs the job:
+   the same selection, `WASLA_TEST_KEEP_AI_DATA=1`, the migration-built schema,
+   an explicit `TEST_DATABASE_URL`, and the job's pass rule (exit 0, no skip).
+   `ci.yml` does not call it; `tests/unit/test_kept_data_sweep.py` parses the
+   job out of `ci.yml` and proves the two select the same files, so a change
+   on either side fails a unit test. Chosen over making `ci.yml` call the
+   script so the job the merge verification ran stays byte-for-byte the job
+   that lands.
+4. **KD-05 - a test measures its own work.** A test that reads a process-wide
+   counter asserts the increment its own action caused, read from the
+   database, never a total. The hold-expiry sweep is global by design; the
+   expired-hold test now writes a second workspace's dead hold so it proves
+   that on every run.
+5. **KD-06 - no application change.** Every counted row was classified (the
+   stage's report, section 5): legal ENT-02 states or test artefacts; none
+   was an application defect.
+6. **Test artefacts end legal.** A test that writes a dead worker's hold runs
+   the sweep's own release (`ExpiredHoldSweep.release_expired`) at the first
+   moment the billing sweep would; a test that drives a late settle completes
+   the turn as the worker does. Neither changes what the test asserts.
+7. **KD-07 - every CI job runs locally before a stage closes**, or is recorded
+   as GitHub-only with what proves it instead.
+
+**Consequences.** The sweep catches the application breaking ENT-02, not only
+hand-written rows: charging an empty answer, charging at engagement and a
+sweeper that never expires are each counted by it (M-K06..M-K08,
+`scripts/verification/run_kept_data_mutations.py`).

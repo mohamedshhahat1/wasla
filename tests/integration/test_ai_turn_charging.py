@@ -41,14 +41,19 @@ from sqlalchemy.exc import IntegrityError
 from app.agents.registry import HANDOFF_TOOL
 from app.channels.adapter import ChannelAdapter
 from app.channels.registry import ChannelRegistry
-from app.db.models.agent_turn import AgentTurn, AITurnChargeState, AITurnReleaseReason
+from app.db.models.agent_turn import (
+    AgentTurn,
+    AITurnChargeState,
+    AITurnReleaseReason,
+    TurnOutcome,
+)
 from app.db.models.billing import LimitKey
 from app.db.models.channel import Channel, ChannelConnection, ConnectionStatus
 from app.db.models.conversation import Conversation, ConversationMode, Message, MessageStatus
 from app.db.models.usage import UsageEvent, UsageEventType, UsageUnit
 from app.db.session import Database
 from app.integrations.whatsapp.adapter import WhatsAppAdapter
-from app.repositories.agent_turn_repository import AgentTurnRepository
+from app.repositories.agent_turn_repository import AgentTurnRepository, ExpiredHoldSweep
 from app.services.ai_turn_charge import AITurnCharge, SettleResult
 from app.services.channel_ingestion_service import ChannelIngestionService
 from app.services.entitlement_service import Entitlement, EntitlementService
@@ -945,6 +950,47 @@ async def _dead_hold(ai_turns: TurnRunner, workspace: Workspace, *, held_at: dat
     return turn_id
 
 
+async def _expire_like_the_sweep(ai_turns: TurnRunner, *, held_at: datetime) -> list[uuid.UUID]:
+    """Release a dead worker's hold the way the billing sweep would (F-1, row class R-OPEN).
+
+    A dead worker's hold is a state production reaches - and leaves within one
+    sweep interval of its TTL, because the billing sweep releases it. A test
+    that writes one and never runs the sweep leaves a hold open for ever, which
+    the kept-data sweep rightly counts as stranded (F-1a). So the test runs the
+    sweep's own release, at the first moment that sweep would act on `held_at`:
+    now, if the hold is already past its TTL, else the TTL's end. The release is
+    global, like the sweep's; anything older it releases is equally dead.
+    """
+    ttl = timedelta(seconds=ai_turns.settings.ai_turn_hold_ttl_seconds)
+    now = max(datetime.now(UTC), held_at + ttl)
+    async with ai_turns.database.session() as session:
+        released = await ExpiredHoldSweep(session).release_expired(held_before=now - ttl, now=now)
+    assert released, "the billing sweep's release released nothing"
+    return released
+
+
+async def _complete_like_the_worker(
+    ai_turns: TurnRunner, workspace: Workspace, turn_id: uuid.UUID
+) -> None:
+    """Finish a late-charged turn as its worker does (F-1, row class R-LATE).
+
+    The worker settles a usable outcome and then completes the turn with it
+    (`AgentWorker`: settle, commit, `_complete_turn`). A test that drives only
+    the settle leaves a charged turn with no outcome, which is what a charged
+    provider failure looks like to the kept-data sweep (B6).
+    """
+    async with ai_turns.database.session() as session:
+        trigger = await session.scalar(
+            select(AgentTurn.trigger_message_id).where(
+                AgentTurn.tenant_id == workspace.tenant_id, AgentTurn.id == turn_id
+            )
+        )
+        assert trigger is not None
+        assert await AgentTurnRepository(session, tenant_id=workspace.tenant_id).complete(
+            trigger_message_id=trigger, outcome=TurnOutcome.REPLIED
+        )
+
+
 async def test_an_expired_hold_stops_counting_and_is_released_by_the_sweep(
     ai_turns: TurnRunner, ai_providers: FakeProviders
 ) -> None:
@@ -1009,6 +1055,7 @@ async def test_an_expired_hold_stops_counting_and_is_released_by_the_sweep(
             default_plan_code=ai_turns.settings.default_plan_code,
         ).check(LimitKey.PERIOD_AI_TURNS, additional=0)
     assert (after.used, after.held, after.remaining, after.over_limit) == (2, 0, 0, True)
+    await _complete_like_the_worker(ai_turns, workspace, dead)
 
 
 async def test_a_hold_counts_only_in_the_usage_cycle_it_was_taken_in(
@@ -1032,3 +1079,6 @@ async def test_a_hold_counts_only_in_the_usage_cycle_it_was_taken_in(
     # Both moments are inside the TTL; only the cycle differs.
     assert await held_at(month - timedelta(minutes=1)) == 1
     assert await held_at(month + timedelta(minutes=3)) == 0
+    # The dead hold is the test's device, not its subject: release it as the
+    # billing sweep would have long ago (F-1, row class R-OPEN).
+    await _expire_like_the_sweep(ai_turns, held_at=month - timedelta(minutes=2))

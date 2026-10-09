@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from redis.asyncio import Redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.metrics import MetricsRegistry
@@ -25,6 +26,7 @@ from app.core.telemetry import (
     record_entitlement_refusal,
     set_counter_sink,
 )
+from app.db.models.agent_turn import AgentTurn, AITurnReleaseReason
 from app.db.models.billing import LimitKey, SubscriptionStatus
 from app.db.models.channel import Channel
 from app.repositories.billing_repository import SubscriptionRepository
@@ -44,7 +46,12 @@ from tests.integration.ai_harness import (
     scripted,
     text_response,
 )
-from tests.integration.test_ai_turn_charging import _dead_hold, _failing
+from tests.integration.test_ai_turn_charging import (
+    _complete_like_the_worker,
+    _dead_hold,
+    _expire_like_the_sweep,
+    _failing,
+)
 from tests.integration.test_capacity_reductions import (
     _boundary,
     _reductions,
@@ -170,25 +177,46 @@ async def test_ai_turns_count_holds_charges_releases_and_the_quota(
 async def test_an_expired_hold_and_its_late_charge_are_counted(
     ai_turns: TurnRunner, ai_providers: FakeProviders, sink: Redis
 ) -> None:
+    """The sweep counts every hold it expired; the late settle counts once (F-1c, KD-05).
+
+    The billing sweep is global, in production as here: one pass expires every
+    dead hold of every workspace, and `hold_expired` counts them all. So the
+    assertion is the increment this test's own pass caused - the holds that pass
+    released, read from the database - never a process total another
+    workspace's expired hold would also move. A second workspace's dead hold is
+    written on purpose, so the test proves that on every run, kept data or not.
+    """
     await ai_turns.plan({TURNS: 5})
     workspace_ = await ai_turns.workspace()
+    elsewhere = await ai_turns.workspace()
     ttl = timedelta(seconds=ai_turns.settings.ai_turn_hold_ttl_seconds)
     now = datetime.now(UTC)
     held_at = now - ttl - timedelta(minutes=1)
     if held_at.month != now.month:  # pragma: no cover - the first minutes of a month
         pytest.skip("an expired hold in the previous month is the cycle rule's test")
     dead = await _dead_hold(ai_turns, workspace_, held_at=held_at)
+    theirs = await _dead_hold(ai_turns, elsewhere, held_at=held_at)
 
     await BillingWorker(database=ai_turns.database, settings=ai_turns.settings).run_once(now=now)
     async with ai_turns.database.session() as session:
+        swept = set(
+            await session.scalars(
+                select(AgentTurn.id).where(
+                    AgentTurn.released_at == now,
+                    AgentTurn.charge_release_reason == AITurnReleaseReason.HOLD_EXPIRED,
+                )
+            )
+        )
         late = await AITurnCharge(session, tenant_id=workspace_.tenant_id).settle(
             agent_turn_id=dead, chargeable=True
         )
     await record_settlement(late)
+    await _complete_like_the_worker(ai_turns, workspace_, dead)
 
+    assert {dead, theirs} <= swept
     assert late is SettleResult.LATE_CHARGE
     assert await _series(sink, "wasla_ai_turn_charge_total") == {
-        _labels(outcome="hold_expired"): 1.0,
+        _labels(outcome="hold_expired"): float(len(swept)),
         _labels(outcome="late_charge"): 1.0,
     }
 
@@ -246,6 +274,9 @@ async def test_the_gauges_render_holds_capacity_and_reductions(
     for line in body.splitlines():
         if line.startswith(("wasla_ai_turn_holds", "wasla_channel_capacity_")):
             assert "{" not in line.split(" ")[0], f"an entitlement gauge carries a label: {line}"
+    # Both dead holds are the test's devices: release them as the billing sweep
+    # would once each outlives its TTL (F-1, row class R-OPEN).
+    await _expire_like_the_sweep(ai_turns, held_at=now - timedelta(seconds=30))
 
 
 async def test_the_over_limit_gauge_counts_a_suspended_workspace_over_its_fallback(

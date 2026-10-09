@@ -89,6 +89,8 @@ customers.
 | `wasla_media_purge_deletes_oldest_age_seconds` | gauge | — | Whether the owed deletes are a key in its in-flight grace or a store refusing. |
 | `wasla_media_purge_objects_total` | counter | `outcome` | Purge object deletes, `deleted` or `failed`. |
 
+**`hold_expired` is the deployment's, not a workspace's.** The billing sweep that expires dead holds is global: one pass releases every expired hold of every workspace and adds that many to `wasla_ai_turn_charge_total{outcome="hold_expired"}`. Read its rate as "dead workers across the platform"; which workspaces they were in is the runbook's query on `charge_release_reason = 'hold_expired'`. A test that asserts on it measures the increment its own sweep caused - the holds that pass released, read from the database - never the process total (ADR-133, KD-05).
+
 `wasla_orphaned_workspaces` is worth singling out, and the two messaging
 gauges beside it are the same shape. Every other metric here counts an *event* —
 a path somebody instrumented was taken. These run a query and count a *state*,
